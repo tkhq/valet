@@ -1,5 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "autoupdate": false,
+  "experimental": {
+    "openTelemetry": false
+  },
   "instructions": [
     ".valet/persona/*.md",
     "You are running inside a Valet sandbox with a full dev environment.",
