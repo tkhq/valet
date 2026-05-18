@@ -116,3 +116,15 @@ export function useReactivateThread(sessionId: string) {
     },
   });
 }
+
+export function useRenameThread(sessionId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ threadId, title }: { threadId: string; title: string }) => {
+      return api.patch<{ thread: any }>(`/sessions/${sessionId}/threads/${threadId}`, { title });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: threadKeys.list(sessionId) });
+    },
+  });
+}

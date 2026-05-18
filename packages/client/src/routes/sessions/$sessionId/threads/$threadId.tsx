@@ -1,5 +1,6 @@
+import { useState, useRef, useCallback } from 'react';
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
-import { useThread, useContinueThread } from '@/api/threads';
+import { useThread, useContinueThread, useRenameThread } from '@/api/threads';
 import { MessageList } from '@/components/chat/message-list';
 import { setPendingContinuation } from '@/components/chat/chat-container';
 import { formatRelativeTime } from '@/lib/format';
@@ -111,6 +112,25 @@ function ThreadDetailPage() {
   const thread = data?.thread;
   const messages = data?.messages ?? [];
 
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitleValue, setEditTitleValue] = useState('');
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const renameThread = useRenameThread(sessionId);
+
+  const startEditingTitle = useCallback(() => {
+    setEditTitleValue(thread?.title || thread?.firstMessagePreview || '');
+    setIsEditingTitle(true);
+    setTimeout(() => titleInputRef.current?.select(), 0);
+  }, [thread?.title, thread?.firstMessagePreview]);
+
+  const saveTitle = useCallback(() => {
+    const trimmed = editTitleValue.trim();
+    if (thread && trimmed !== (thread.title || '')) {
+      renameThread.mutate({ threadId: thread.id, title: trimmed });
+    }
+    setIsEditingTitle(false);
+  }, [editTitleValue, thread, renameThread]);
+
   const handleContinue = () => {
     continueThread.mutate(threadId, {
       onSuccess: (data) => {
@@ -140,9 +160,27 @@ function ThreadDetailPage() {
             &larr; Threads
           </Link>
           <div className="min-w-0">
-            <h1 className="truncate font-mono text-sm font-semibold text-neutral-800 dark:text-neutral-100">
-              {thread?.title || thread?.firstMessagePreview || 'Untitled thread'}
-            </h1>
+            {isEditingTitle ? (
+              <input
+                ref={titleInputRef}
+                value={editTitleValue}
+                onChange={(e) => setEditTitleValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') saveTitle();
+                  if (e.key === 'Escape') setIsEditingTitle(false);
+                }}
+                onBlur={saveTitle}
+                className="w-full rounded border border-violet-300 bg-white px-1 font-mono text-sm font-semibold text-neutral-900 outline-none focus:ring-1 focus:ring-violet-400 dark:border-violet-600 dark:bg-neutral-900 dark:text-neutral-100"
+                autoFocus
+              />
+            ) : (
+              <button type="button" onClick={startEditingTitle} className="group flex items-center gap-1.5 text-left">
+                <h1 className="truncate font-mono text-sm font-semibold text-neutral-800 dark:text-neutral-100">
+                  {thread?.title || thread?.firstMessagePreview || 'Untitled thread'}
+                </h1>
+                <PencilIcon className="h-3 w-3 shrink-0 text-neutral-300 opacity-0 transition-opacity group-hover:opacity-100 dark:text-neutral-600" />
+              </button>
+            )}
             {thread && (
               <div className="flex items-center gap-2 font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
                 <span>{messages.length} {messages.length === 1 ? 'message' : 'messages'}</span>
@@ -226,5 +264,13 @@ function ThreadDetailPage() {
         </>
       )}
     </div>
+  );
+}
+
+function PencilIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" />
+    </svg>
   );
 }
