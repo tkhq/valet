@@ -6,27 +6,35 @@
 
 ## Summary
 
-Add a separate `telegram_user` integration that exposes Telegram user-account actions from the Cloudflare Worker. This integration is distinct from the existing `telegram` bot channel plugin. Users connect it by pasting a reusable Telegram MTProto session string plus their Telegram API ID and API hash; Valet does not implement phone-code or 2FA login in the MVP.
+Add a separate `telegram_user` integration that exposes Telegram user-account actions from the Cloudflare Worker. This integration is distinct from the existing `telegram` bot channel plugin. Users connect through a Valet-controlled session generator: they enter their phone number, Telegram code, and 2FA password if needed; the Worker uses a Valet-owned global Telegram application API ID/hash to create a reusable MTProto session string, then stores that session string in the normal encrypted credential store.
 
-All action execution must run inside the Worker. There is no Python service, Node sidecar, Modal process, hosted MCP server, or sandbox dependency. The plugin can use a Worker-compatible MTProto library if one proves reliable, but the design does not depend on GramJS specifically. If no library fits the Worker runtime, the plugin owns a minimal MTProto implementation for the action surface Valet needs.
+All action execution must run inside the Worker. There is no Python service, Node sidecar, Modal process, hosted MCP server, or sandbox dependency. The implementation should use `@mtcute/core` as the MTProto client and provide Valet-owned Cloudflare Worker adapters for platform, crypto, storage, and transport. GramJS, Telethon, TDLib, and Python MCP code are references only.
 
 ## Goals
 
 - Add a first-party action plugin for Telegram user accounts with service id `telegram_user`.
 - Keep the existing Telegram bot channel integration unchanged.
 - Execute all Telegram account actions inside the Cloudflare Worker.
-- Use pasted session strings for MVP setup; avoid Telegram login handshake, phone-code, QR, and 2FA flows.
+- Use a Valet-controlled session generator for MVP setup.
+- Do not support user-imported or externally generated session strings.
+- Use a Valet-owned global Telegram app API ID/hash for session generation and action execution.
+- Avoid exposing the global Telegram API hash to the browser, users, sandboxes, logs, or local helper scripts.
 - Keep protocol, action, schema, and Telegram-specific credential handling self-contained in `packages/plugin-telegram-user/` where possible.
-- Support stable egress through a configured external proxy when required.
+- Use `@mtcute/core` for MTProto behavior, while keeping all Cloudflare Worker runtime bindings inside the plugin.
+- Require stable egress through a configured external proxy in production.
 - Start with a small, policy-friendly tool set: read chats/messages, search messages, send/reply, and mark read.
 
 ## Non-Goals
 
 - Replacing the existing `telegram` channel plugin.
-- Implementing interactive Telegram login in MVP.
+- Requiring users to create Telegram developer applications.
+- Accepting externally generated Telegram session strings.
+- Publishing or distributing Valet's Telegram API hash.
 - Running any Telegram code in Valet sandboxes.
 - Hosting a separate MCP or Node service for Telegram.
 - Full Telethon parity in the first version.
+- Using `@mtcute/node`, `@mtcute/deno`, `@mtcute/bun`, TDLib, Telethon, or GramJS as production runtime dependencies.
+- Building a full native MTProto client unless the mtcute Worker adapter path fails verification.
 - Secret chats, calls, bot management, profile/privacy mutation, group admin tooling, or media upload/download in MVP.
 - Long-lived global Worker sockets shared across requests.
 
@@ -44,9 +52,9 @@ That normalization is fine for bearer-token services but loses the multi-field s
 
 ```ts
 {
-  api_id: string;
-  api_hash: string;
   session_string: string;
+  session_format: 'mtcute';
+  created_by: 'valet_session_generator';
 }
 ```
 
@@ -57,6 +65,20 @@ Cloudflare Workers support outbound TCP sockets through `connect()` from `cloudf
 Cloudflare documentation also states that outbound TCP socket connections are sourced from a prefix that is not part of Cloudflare's published IP ranges. Therefore, if Telegram sessions need stable egress identity, the Worker must connect to an external proxy with stable egress rather than connecting directly to Telegram from arbitrary Worker egress.
 
 Telegram's MTProto transport documentation defines multiple transports, including TCP, WebSocket, HTTP, and HTTPS. This design should prefer the simplest reliable Worker-compatible transport and hide that choice behind a plugin-owned engine interface.
+
+### mtcute Fit
+
+`mtcute` is a good fit if Valet uses its core package instead of a runtime-specific package.
+
+Relevant properties:
+
+- `@mtcute/core` exposes `TelegramClient` and `BaseTelegramClient` constructors that accept injected `storage`, `crypto`, `transport`, and `platform` implementations.
+- `@mtcute/core` includes `MemoryStorage`, which is enough for per-action execution when the Worker hydrates the Valet-generated session string at the start of each action.
+- `TelegramClient.importSession()` and `TelegramClient.exportSession()` support session-string hydration and finalization, including after a login flow.
+- `@mtcute/convert` can convert Telethon, GramJS, Pyrogram, MTKruto, and Telegram Desktop sessions to mtcute's session format, but Valet should not include it in the MVP because user-imported sessions are out of scope.
+- `@mtcute/web` proves the browser primitives exist, but its default client depends on IndexedDB and WebSocket transport. The Worker plugin should not use the `@mtcute/web` client directly.
+
+Decision: implement the production engine with `@mtcute/core` plus Valet-owned Worker adapters. Do not implement raw MTProto in the first pass unless the compatibility spike shows `@mtcute/core` cannot bundle or run inside the Worker.
 
 ## Design
 
@@ -78,12 +100,14 @@ packages/plugin-telegram-user/
   src/actions/errors.ts
   src/actions/engine/index.ts
   src/actions/engine/types.ts
-  src/actions/engine/library-engine.ts
-  src/actions/engine/native-mtproto-engine.ts
+  src/actions/engine/mtcute-engine.ts
   src/actions/engine/transport.ts
   src/actions/engine/session.ts
-  src/actions/engine/tl.ts
   src/actions/engine/crypto.ts
+  src/actions/engine/platform.ts
+  src/setup/index.ts
+  src/setup/login-flow.ts
+  src/setup/pending-login.ts
 ```
 
 `plugin.yaml`:
@@ -97,6 +121,22 @@ icon: "TG"
 
 The package exports `./actions` and is registered like other action plugins by `make generate-registries`.
 
+Package dependencies:
+
+```json
+{
+  "dependencies": {
+    "@valet/sdk": "workspace:*",
+    "@mtcute/core": "^0.29.7",
+    "@mtcute/wasm": "^0.29.0",
+    "@fuman/net": "0.0.19",
+    "zod": "^3.22.4"
+  }
+}
+```
+
+Do not depend on `@mtcute/node`, `@mtcute/web`, `@mtcute/deno`, or `@mtcute/bun` from the Worker plugin. Copy or adapt small platform-binding ideas from those packages only when their licenses permit it and the code remains Worker-native.
+
 ### Service Identity
 
 Use service id `telegram_user`.
@@ -109,7 +149,7 @@ Rationale:
 
 ### Provider
 
-The provider is a native API-key-style integration, not OAuth and not MCP.
+The provider is a native session-style integration, not OAuth, MCP, bot-token, or user-supplied API-key auth.
 
 ```ts
 export const telegramUserProvider: IntegrationProvider = {
@@ -124,50 +164,105 @@ export const telegramUserProvider: IntegrationProvider = {
 
 `validateCredentials()` checks the local shape only:
 
-- `api_id` exists and parses as a positive integer.
-- `api_hash` is a non-empty string.
 - `session_string` is a non-empty string.
-- Optional proxy config has a supported type and valid public hostname/port.
+- `session_format` is `mtcute`.
+- `created_by` is `valet_session_generator`.
+- No credential-level proxy, API ID, or API hash fields are accepted.
 
 `testConnection()` creates an engine session and calls `get_me`. It must redact credentials from all errors.
 
 ### Credential Schema
 
-MVP credentials:
+Credentials generated by Valet:
 
 ```ts
 export interface TelegramUserCredentials {
-  api_id: string;
-  api_hash: string;
   session_string: string;
+  session_format: 'mtcute';
+  created_by: 'valet_session_generator';
 }
 ```
 
-Optional per-user proxy override:
+The engine always reads Telegram application credentials from Worker secrets:
+
+- `TELEGRAM_USER_API_ID`
+- `TELEGRAM_USER_API_HASH`
+
+The encrypted credential payload must not include `api_id` or `api_hash`. Valet does not accept externally generated sessions because doing so would require either user-owned Telegram developer credentials or disclosing Valet's global API hash.
+
+### Session Generator
+
+The setup flow is a Valet-controlled login wizard backed by Worker routes. It uses mtcute authorization methods directly rather than `TelegramClient.start()` so state transitions are explicit.
+
+Routes:
+
+| Route | Purpose |
+|-------|---------|
+| `POST /integrations/telegram_user/login/start` | Accept phone number, call `sendCode`, create encrypted pending-login state. |
+| `POST /integrations/telegram_user/login/verify-code` | Accept pending login id and Telegram code, call `signIn`. |
+| `POST /integrations/telegram_user/login/verify-password` | Accept pending login id and 2FA password, call `checkPassword`. |
+| `POST /integrations/telegram_user/login/resend-code` | Resend a code for a valid pending login when Telegram allows it. |
+| `DELETE /integrations/telegram_user/login/:id` | Cancel and delete pending-login state. |
+
+Pending-login D1 table:
+
+```sql
+CREATE TABLE telegram_user_pending_logins (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  encrypted_state TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('code_sent', 'password_required')),
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX telegram_user_pending_logins_user
+  ON telegram_user_pending_logins(user_id, expires_at);
+```
+
+Encrypted pending state:
 
 ```ts
-export interface TelegramProxyConfig {
-  type: 'socks5' | 'mtproxy';
-  host: string;
-  port: string;
-  username?: string;
-  password?: string;
-  secret?: string;
+export interface TelegramPendingLoginState {
+  phone_number: string;
+  phone_code_hash: string;
+  mtcute_session_string: string;
+  code_type: string;
+  next_type?: string;
+  attempts: number;
 }
 ```
 
-Recommended MVP proxy source:
+Generator flow:
 
-- Prefer org/environment-level proxy config for all Telegram user traffic:
-  - `TELEGRAM_USER_PROXY_TYPE`
+1. `login/start` creates an mtcute client with `MemoryStorage`, Valet Worker API credentials, Worker crypto, and the configured proxy transport.
+2. The Worker calls `sendCode({ phone })`.
+3. The Worker calls `exportSession()` and stores the pending mtcute session string with `phone_code_hash` in `telegram_user_pending_logins`.
+4. `login/verify-code` loads the pending state, imports the pending session into a fresh mtcute client, and calls `signIn({ phone, phoneCodeHash, phoneCode })`.
+5. If Telegram returns `SESSION_PASSWORD_NEEDED`, the Worker exports the still-pending session, updates the pending row to `password_required`, and asks the UI for the password.
+6. `login/verify-password` imports the pending session and calls `checkPassword(password)`.
+7. On successful authorization, the Worker calls `exportSession()` and stores the final `TelegramUserCredentials` in the encrypted `credentials` table with provider `telegram_user`.
+8. The Worker upserts the `integrations` row as active and deletes the pending-login row.
+
+Pending-login constraints:
+
+- TTL is 10 minutes from the latest successful state transition.
+- At most one active pending login per user; starting a new login deletes the previous pending row.
+- Limit code/password attempts to reduce accidental lockouts.
+- Delete pending state on success, cancellation, expiry, and definitive Telegram auth failure.
+- Do not send `mtcute_session_string`, `phone_code_hash`, API hash, auth keys, or proxy credentials to the browser.
+
+MVP proxy source:
+
+- Use environment-level proxy config for all Telegram user traffic:
+  - `TELEGRAM_USER_PROXY_TYPE=socks5`
   - `TELEGRAM_USER_PROXY_HOST`
   - `TELEGRAM_USER_PROXY_PORT`
   - `TELEGRAM_USER_PROXY_USERNAME`
   - `TELEGRAM_USER_PROXY_PASSWORD`
-  - `TELEGRAM_USER_PROXY_SECRET`
-- Support per-user proxy fields later only if there is a real customer need.
 
-Per-user proxy credentials create extra setup and support burden. A single managed proxy is simpler and matches the "all workers through one external proxy" operating model.
+Do not store per-user proxy credentials. A single managed proxy is simpler and matches the "all workers through one external proxy" operating model.
 
 ### Raw Credential Resolution
 
@@ -212,6 +307,17 @@ Option B: add a service-specific credential resolver for `telegram_user` that re
 
 Recommendation: implement Option A because it is generally useful for native integrations that need structured secrets. Keep the default behavior unchanged for existing providers by only setting `raw` when a provider opts in.
 
+Also add a credential update hook to `ActionContext` so session-backed plugins can persist rotated session metadata without direct DB access:
+
+```ts
+export interface ActionContext {
+  // existing fields...
+  updateCredentials?(next: IntegrationCredentials): Promise<void>;
+}
+```
+
+The Worker action runner supplies `updateCredentials()` for built-in providers by calling `storeCredential()` with the same owner, provider, credential type, scopes, and metadata. `telegram_user` uses this only after a successful mtcute call and only when `exportSession()` differs from the stored `session_string`.
+
 ### Credential Storage Type
 
 The generic integration configure path currently stores credentials with `credentialType: 'oauth2'`. For `telegram_user`, store `credentialType: 'api_key'` or a new `credentialType: 'session'`.
@@ -229,46 +335,50 @@ metadata: {
 
 ### Connect UI
 
-The current token dialog only collects one secret string. Add generic multi-field credential form support driven by provider metadata.
+Do not use the current token dialog for `telegram_user`. Add a custom connection flow for providers that declare an interactive setup route.
 
 SDK addition:
 
 ```ts
-export interface CredentialFieldDefinition {
-  key: string;
-  label: string;
-  type: 'text' | 'password' | 'number';
-  required: boolean;
-  placeholder?: string;
-  helpText?: string;
+export interface IntegrationSetupFlow {
+  type: 'builtin_route';
+  route: string;
 }
 
 export interface IntegrationProvider {
   // existing fields...
-  readonly credentialFields?: CredentialFieldDefinition[];
+  readonly setupFlow?: IntegrationSetupFlow;
 }
 ```
 
 `telegram_user` declares:
 
 ```ts
-credentialFields: [
-  { key: 'api_id', label: 'API ID', type: 'number', required: true },
-  { key: 'api_hash', label: 'API Hash', type: 'password', required: true },
-  { key: 'session_string', label: 'Session String', type: 'password', required: true },
-]
+setupFlow: {
+  type: 'builtin_route',
+  route: '/integrations/telegram_user/login',
+}
 ```
 
-No phone-code flow is implemented. The UI help text should tell users to generate a session string outside Valet and paste it here.
+UI states:
+
+- Phone number input.
+- Code delivery confirmation and Telegram code input.
+- Optional 2FA password input when the Worker returns `password_required`.
+- Success state that marks the integration active.
+- Error states for expired code, invalid code, invalid password, flood wait, proxy failure, and missing server configuration.
+
+The UI must never request API ID, API hash, or a session string from the user.
 
 ### Engine Interface
 
-The actions depend only on a local engine interface.
+The actions depend only on a local engine interface. The production implementation is `MtcuteTelegramEngine`.
 
 ```ts
 export interface TelegramEngine {
   withSession<T>(
     credentials: TelegramUserCredentials,
+    persistence: TelegramSessionPersistence,
     fn: (session: TelegramSession) => Promise<T>,
   ): Promise<T>;
 
@@ -280,28 +390,66 @@ export interface TelegramEngine {
   sendMessage(session: TelegramSession, params: SendMessageParams): Promise<TelegramSendResult>;
   markAsRead(session: TelegramSession, params: MarkAsReadParams): Promise<TelegramMutationResult>;
 }
-```
 
-Engine selection:
-
-```ts
-export function createTelegramEngine(): TelegramEngine {
-  if (isWorkerCompatibleLibraryEnabled()) return new LibraryTelegramEngine();
-  return new NativeMtprotoEngine();
+export interface TelegramSessionPersistence {
+  update(next: TelegramUserCredentials): Promise<void>;
 }
 ```
 
-The library engine is allowed only if it runs inside Cloudflare Workers without Node-only socket, crypto, filesystem, or Buffer assumptions that cannot be polyfilled safely. The native engine remains the fallback and is the architectural owner of behavior.
+Engine construction:
+
+```ts
+export function createTelegramEngine(env: Env): TelegramEngine {
+  return new MtcuteTelegramEngine({
+    apiId: env.TELEGRAM_USER_API_ID,
+    apiHash: env.TELEGRAM_USER_API_HASH,
+    proxy: readTelegramProxyConfig(env),
+  });
+}
+```
+
+`MtcuteTelegramEngine.withSession()`:
+
+1. Creates `MemoryStorage`.
+2. Creates `WorkerCryptoProvider`.
+3. Creates `WorkerPlatform`.
+4. Creates `CloudflareTelegramTransport` or `CloudflareSocks5TelegramTransport` depending on proxy config.
+5. Creates an mtcute `TelegramClient` from `@mtcute/core/client.js`.
+6. Imports `credentials.session_string` with `force: true`.
+7. Executes the requested operation.
+8. Exports the session string after successful calls and calls `persistence.update()` if mtcute changed DC/session metadata.
+9. Destroys the client in `finally`.
+
+`MtcuteTelegramEngine` should use mtcute high-level methods where they match the action shape:
+
+- `getMe` for `telegram_user.get_me`.
+- `iterDialogs` or `getPeerDialogs` for `telegram_user.list_chats`.
+- `getChat` or `getPeer` for `telegram_user.get_chat`.
+- `getHistory` for `telegram_user.get_messages`.
+- `searchMessages` for `telegram_user.search_messages`.
+- `sendText` for `telegram_user.send_message`.
+- `replyText` for `telegram_user.reply_to_message`.
+- `readHistory` for `telegram_user.mark_as_read`.
+
+If a high-level method lacks a needed option, call `client.call()` with the typed raw TL method from mtcute rather than adding native TL serialization to the plugin.
 
 ### Transport Strategy
 
-Preferred order:
+Implement mtcute's `TelegramTransport` interface inside the plugin.
 
-1. Library transport if a dependency works in Workers and supports the required proxy path.
-2. Native TCP transport using `cloudflare:sockets`.
-3. Native HTTPS/HTTP MTProto transport only if it proves simpler and reliable for the required API calls.
+Production transport:
 
-For stable egress, the Worker should connect to the managed proxy hostname. The proxy then connects to Telegram. The plugin must fail closed if proxy env vars are configured but invalid; it must not silently bypass the proxy.
+- `CloudflareSocks5TelegramTransport` opens a TCP socket to `TELEGRAM_USER_PROXY_HOST:TELEGRAM_USER_PROXY_PORT` using `connect()` from `cloudflare:sockets`.
+- It performs the SOCKS5 handshake inside the Worker.
+- It asks the proxy to connect to the Telegram DC address selected by mtcute.
+- It uses mtcute's `IntermediatePacketCodec`.
+
+Development/test transport:
+
+- `CloudflareDirectTelegramTransport` can connect directly to Telegram DCs with `cloudflare:sockets`.
+- This mode is allowed only when `TELEGRAM_USER_ALLOW_DIRECT_EGRESS=true`.
+
+For stable egress, production must connect to the managed proxy hostname. The proxy then connects to Telegram. The plugin must fail closed if the proxy env vars are missing or invalid in production; it must not silently bypass the proxy.
 
 Supported proxy MVP:
 
@@ -310,37 +458,46 @@ Supported proxy MVP:
 Deferred:
 
 - MTProxy.
-- Per-account proxy overrides.
+- HTTP CONNECT proxy.
 - Proxy rotation.
 - Regional DC pinning.
 
-### Native MTProto Scope
+### Worker Platform Adapters
 
-If a manual implementation is required, implement only the protocol pieces needed by the MVP actions.
+Implement these adapters in `packages/plugin-telegram-user/src/actions/engine/`.
 
-Core responsibilities:
+`WorkerPlatform`:
 
-- Session string parsing and serialization for the chosen session format.
-- DC selection and migration handling.
-- TCP/proxy transport framing.
-- MTProto 2.0 encrypted request/response handling.
-- Message id generation and server time offset correction.
-- Sequence number and salt handling.
-- Basic acks and result dispatch.
-- TL serialization/deserialization for the constructors and methods used by the MVP.
-- Error normalization for RPC errors, flood waits, auth failures, and DC migration.
+- Implements mtcute's `ICorePlatform`.
+- Returns a stable device model such as `Valet Worker`.
+- Reports online status as true inside request handlers.
+- Does not read `navigator`, `localStorage`, IndexedDB, filesystem, or Node globals.
 
-Manual engine MVP methods:
+`WorkerCryptoProvider`:
 
-- `users.getFullUser` or equivalent account lookup for `get_me`.
-- Dialog listing for `list_chats`.
-- Entity resolution by id, username, or peer reference.
-- Message history retrieval.
-- Message search.
-- Message send.
-- Mark read.
+- Prefer adapting mtcute's web crypto provider code with `globalThis.crypto.subtle`.
+- Bundle the mtcute WASM AES/SHA/gzip module as a Worker-compatible asset or inline module.
+- Expose `initialize()` and require the engine to await it before creating the client.
+- Do not use Node `crypto`, filesystem, or dynamic remote WASM fetches in production.
 
-Do not build a generic Telegram TL compiler in the first pass unless it is clearly less work than hand-maintaining the small constructor set. Keep TL coverage explicit and tested.
+`CloudflareSocks5TelegramTransport`:
+
+- Implements mtcute's `TelegramTransport`.
+- Wraps Cloudflare TCP sockets in the `@fuman/net` connection shape mtcute expects.
+- Handles close/error propagation and abort signals.
+- Unit tests use fake readable/writable streams and do not open real sockets.
+
+Fallback:
+
+- If `@mtcute/core` cannot be bundled or executed in the Worker after the compatibility spike, create a follow-up design for a plugin-owned native MTProto implementation. Do not implement raw MTProto in this spec's first milestone.
+
+Compatibility acceptance criteria:
+
+- The Worker bundle contains no Node `net`, `tls`, `fs`, `crypto`, `readline`, SQLite, IndexedDB, `localStorage`, or `navigator` runtime dependency.
+- WASM initialization works from a bundled Worker asset or inline module without fetching code from a remote URL.
+- A local Worker-runtime test can instantiate the mtcute client, import a known generated session string into `MemoryStorage`, call `getMe` with direct egress enabled, and destroy the client cleanly.
+- A separate fake-stream test covers SOCKS5 handshake success and failure without live network access.
+- Production configuration without SOCKS5 proxy env vars fails before opening any Telegram connection.
 
 ### Session Lifecycle
 
@@ -353,8 +510,9 @@ MVP action flow:
 3. Create a fresh engine session.
 4. Open a transport connection.
 5. Execute one logical action.
-6. Close the connection in `finally`.
-7. Return normalized JSON.
+6. Persist an updated mtcute session string through `ActionContext.updateCredentials()` if it changed.
+7. Close the connection in `finally`.
+8. Return normalized JSON.
 
 Future optimization:
 
@@ -419,7 +577,7 @@ Normalize Telegram and transport errors into stable action errors:
 | Category | Behavior |
 |----------|----------|
 | Invalid session | Return reconnect/setup guidance, do not retry. |
-| API ID/hash invalid | Return setup guidance, do not retry. |
+| API ID/hash missing or invalid | Return admin setup guidance, do not retry. |
 | Flood wait | Return retry-after seconds and mark action failed. |
 | DC migration | Retry once against the requested DC, then persist updated session metadata if needed. |
 | Proxy misconfigured | Fail closed; do not bypass proxy. |
@@ -443,17 +601,21 @@ No errors may include `api_hash`, `session_string`, auth keys, proxy credentials
 Unit tests:
 
 - Provider credential validation.
-- Multi-field credential form metadata.
+- Setup flow metadata.
+- Pending-login create, load, update, expiry, cancellation, and deletion.
+- Login route state transitions for start, code verification, password verification, resend, and cancel using a fake mtcute client.
 - Raw credential resolver behavior.
+- `ActionContext.updateCredentials()` behavior and preservation of existing credential metadata.
 - Action definitions and risk levels.
 - Parameter validation.
 - Error redaction.
 - SOCKS5 handshake and proxy failure behavior with fake streams.
-- TL serialization/deserialization for every native constructor used.
 - Engine action mapping using a fake `TelegramEngine`.
+- Worker adapter behavior for platform, crypto initialization, storage hydration, transport selection, and cleanup.
 
 Integration tests behind explicit env flags:
 
+- Session generator against a test Telegram account.
 - `get_me` against a test Telegram account.
 - `list_chats`.
 - `get_messages` from Saved Messages or a test chat.
@@ -464,21 +626,20 @@ No live Telegram tests run in normal CI.
 
 ### Rollout
 
-1. Add provider, actions, credential schema, and fake-engine tests.
+1. Add provider, actions, credential schema, setup metadata, and fake-engine tests.
 2. Add raw credential passing support in the Worker action execution path.
-3. Add multi-field credential UI support.
-4. Add a Worker runtime compatibility spike for the preferred library engine.
-5. If the library engine fails, implement the native MTProto engine behind the same interface.
-6. Ship with the plugin disabled by default until a real test account passes the live integration suite.
-7. Enable for internal/admin users first.
+3. Add `telegram_user_pending_logins` migration and Worker login routes.
+4. Add custom connect UI for the Telegram user login wizard.
+5. Add mtcute Worker compatibility spike for bundling, WASM initialization, session import/export, and direct development transport.
+6. Add SOCKS5 proxy transport and require it for production.
+7. Ship with the plugin disabled by default until a real test account passes the live integration suite.
+8. Enable for internal/admin users first.
 
 ### Open Questions
 
-- Which session string format should Valet accept if multiple libraries use incompatible encodings?
-- Should Valet publish a small local helper script for users to generate session strings, or only document third-party generation?
-- Is a single org-level proxy enough, or do any expected users need per-account proxy configuration?
 - Should `telegram_user` credentials use existing `api_key` credential type or add a new `session` type for clarity?
 - If connection setup latency is high, should the first optimization be a per-user Durable Object session cache or a narrower action batching API?
+- Should the session generator support QR login later, or keep phone-code login as the only first-party setup flow?
 
 ## References
 
@@ -486,10 +647,15 @@ No live Telegram tests run in normal CI.
 - Cloudflare Workers limits: `https://developers.cloudflare.com/workers/platform/limits/`
 - Telegram MTProto 2.0: `https://core.telegram.org/mtproto`
 - Telegram MTProto transports: `https://core.telegram.org/mtproto/mtproto-transports`
-- GramJS repository, as one possible implementation reference: `https://github.com/gram-js/gramjs`
+- Telegram API ID/hash setup: `https://core.telegram.org/api/obtaining_api_id`
+- Telegram authorization method shape: `https://core.telegram.org/method/auth.sendCode`
+- mtcute repository: `https://github.com/mtcute/mtcute`
+- mtcute storage and session strings: `https://mtcute.dev/guide/topics/storage.html`
+- mtcute transport customization: `https://mtcute.dev/guide/topics/transport.html`
+- mtcute manual sign-in: `https://mtcute.dev/guide/intro/sign-in.html`
 
 ## Recommendation
 
-Proceed with a Worker-native `telegram_user` plugin using pasted session strings and a small MVP action set. Design the actions around a `TelegramEngine` interface so implementation can start with a Worker-compatible library if one works, but keep the architecture ready for a native MTProto engine owned by the plugin.
+Proceed with a Worker-native `telegram_user` plugin using a Valet-controlled session generator, Valet-owned Telegram application credentials, `@mtcute/core`, and plugin-owned Cloudflare Worker adapters. Do not accept user-imported sessions.
 
-The only platform changes needed for MVP are generic and reusable: raw multi-field credential passing for native plugins and multi-field credential UI metadata. All Telegram-specific protocol and action code should live in `packages/plugin-telegram-user/`.
+The platform changes needed for MVP are generic raw credential passing for native plugins, a custom setup-flow hook for integrations, and the Telegram pending-login routes/table. All Telegram-specific protocol, setup, adapter, and action code should live in `packages/plugin-telegram-user/` where possible.
