@@ -126,6 +126,7 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
     loadThreadMessages,
     pendingFollowup,
     agentStatusThreadId,
+    threadStatuses,
     queueWithdraw,
     queuePromote,
     queueReplace,
@@ -180,7 +181,19 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
   // Scope pending followup & thinking indicator to the active thread
   const pendingIsForOtherThread = !!pendingFollowup?.threadId && pendingFollowup.threadId !== activeThreadId;
   const pendingIsForThisThread = !!pendingFollowup && !pendingIsForOtherThread;
-  const isAgentThinkingInThread = isAgentThinking && (!agentStatusThreadId || agentStatusThreadId === activeThreadId);
+  // Prefer per-thread status (tracks every in-flight thread independently);
+  // fall back to the legacy global status when no thread-scoped entry exists
+  // yet (e.g. very first agent event of the session, or non-thread channels).
+  const activeThreadStatusEntry = activeThreadId ? threadStatuses[activeThreadId] : undefined;
+  const activeThreadStatus = activeThreadStatusEntry?.status
+    ?? (!agentStatusThreadId || agentStatusThreadId === activeThreadId ? agentStatus : 'idle');
+  const activeThreadStatusDetail = activeThreadStatusEntry?.detail
+    ?? (!agentStatusThreadId || agentStatusThreadId === activeThreadId ? agentStatusDetail : undefined);
+  const isAgentThinkingInThread =
+    activeThreadStatus === 'thinking'
+    || activeThreadStatus === 'tool_calling'
+    || activeThreadStatus === 'streaming'
+    || activeThreadStatus === 'queued';
 
   const selectThread = useCallback(
     (threadId: string) => {
@@ -340,7 +353,13 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
   });
   const isTerminated = isFinalSessionStatus(sessionStatus);
   const isDisabled = !isConnected || isTerminated;
-  const isAgentActive = (isAgentThinking && agentStatus !== 'queued') || agentStatus === 'thinking' || agentStatus === 'tool_calling' || agentStatus === 'streaming';
+  // Stop button + Escape handler key off the ACTIVE thread's status — not
+  // the session-wide latest — so concurrent cross-thread turns each render
+  // their own stop control independently.
+  const isAgentActive =
+    activeThreadStatus === 'thinking'
+    || activeThreadStatus === 'tool_calling'
+    || activeThreadStatus === 'streaming';
   const displaySessionStatus = getDisplaySessionStatus({
     sessionStatus,
     connectionStatus,
@@ -533,8 +552,8 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
             <MessageList
               messages={filteredMessages}
               isAgentThinking={isAgentThinkingInThread}
-              agentStatus={agentStatus}
-              agentStatusDetail={agentStatusDetail}
+              agentStatus={activeThreadStatus}
+              agentStatusDetail={activeThreadStatusDetail}
               onRevert={revertMessage}
               childSessionEvents={filteredChildSessionEvents}
               childSessions={childSessions}

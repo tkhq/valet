@@ -127,6 +127,13 @@ interface ChatState {
   agentStatusChannelType?: string;
   agentStatusChannelId?: string;
   agentStatusThreadId?: string;
+  // Per-thread agent status. With cross-thread concurrent dispatch
+  // (TKAI-65) the single agentStatus field above only reflects the most
+  // recent runner message — switching to a thread whose latest event is
+  // not the freshest would lose its busy indicator. This map tracks the
+  // current status for every thread that has emitted an agentStatus event
+  // during this session.
+  threadStatuses: Record<string, { status: AgentStatus; detail?: string }>;
   integrationAuthErrors: IntegrationAuthError[];
   pendingFollowup: { messageId: string; content: string; attachments?: unknown; threadId?: string } | null;
 }
@@ -426,6 +433,7 @@ function createInitialState(): ChatState {
     reviewError: null,
     reviewLoading: false,
     reviewDiffFiles: null,
+    threadStatuses: {},
     integrationAuthErrors: [],
     pendingFollowup: null,
   };
@@ -911,6 +919,17 @@ export function useChat(sessionId: string) {
           if (isTerminalSessionStatus(prev.status) && statusMsg.status !== 'error') {
             return prev;
           }
+          // Record per-thread state so the UI can render a stop button for
+          // each in-flight thread independently. Without this map, cross-
+          // thread concurrent turns get clobbered by whichever thread last
+          // emitted an agentStatus event.
+          let nextThreadStatuses = prev.threadStatuses;
+          if (statusMsg.threadId) {
+            nextThreadStatuses = {
+              ...prev.threadStatuses,
+              [statusMsg.threadId]: { status: statusMsg.status, detail: statusMsg.detail },
+            };
+          }
           return {
             ...prev,
             agentStatus: statusMsg.status,
@@ -918,6 +937,7 @@ export function useChat(sessionId: string) {
             agentStatusChannelType: statusMsg.channelType,
             agentStatusChannelId: statusMsg.channelId,
             agentStatusThreadId: statusMsg.threadId,
+            threadStatuses: nextThreadStatuses,
             // Also update isAgentThinking for backward compatibility
             isAgentThinking: statusMsg.status !== 'idle' && !isTerminalSessionStatus(prev.status),
           };
@@ -1246,13 +1266,28 @@ export function useChat(sessionId: string) {
       ...(channelType ? { channelType } : {}),
       ...(channelId ? { channelId } : {}),
     });
-    // Optimistically clear streaming state
-    setState((prev) => ({
-      ...prev,
-      isAgentThinking: false,
-      agentStatus: 'idle' as const,
-      agentStatusDetail: undefined,
-    }));
+    // Optimistically clear streaming state. A thread-scoped abort only
+    // touches that thread's slot in `threadStatuses` so concurrent turns
+    // on other threads keep their busy indicators (and stop buttons).
+    setState((prev) => {
+      const isThreadScoped = channelType === 'thread' && !!channelId;
+      const nextThreadStatuses = isThreadScoped
+        ? { ...prev.threadStatuses, [channelId!]: { status: 'idle' as AgentStatus, detail: undefined } }
+        : prev.threadStatuses;
+      // Only clear the session-wide indicator when the abort wasn't thread
+      // scoped — otherwise the runner's per-channel `agentStatus: idle`
+      // (or the next status from a still-running thread) will drive it.
+      if (isThreadScoped) {
+        return { ...prev, threadStatuses: nextThreadStatuses };
+      }
+      return {
+        ...prev,
+        isAgentThinking: false,
+        agentStatus: 'idle' as const,
+        agentStatusDetail: undefined,
+        threadStatuses: nextThreadStatuses,
+      };
+    });
   }, [isConnected, send]);
 
   const revertMessage = useCallback(
@@ -1548,6 +1583,7 @@ export function useChat(sessionId: string) {
     agentStatusChannelType: state.agentStatusChannelType,
     agentStatusChannelId: state.agentStatusChannelId,
     agentStatusThreadId: state.agentStatusThreadId,
+    threadStatuses: state.threadStatuses,
     availableModels: state.availableModels,
     selectedModel,
     setSelectedModel: handleModelChange,
