@@ -6,25 +6,27 @@ const SLACK_AUTHORIZE = 'https://slack.com/oauth/v2/authorize';
 /**
  * Full user-scope bundle for the `slack-user` integration.
  *
- * Phase 1 (read/search):  read history across the user's full visible surface
- *                         (public + private channels, DMs, group DMs), plus
- *                         search.messages, user/team metadata.
- * Phase 2 (write/act-as): post on behalf of the user, set status / DND,
- *                         reactions, files, pins, bookmarks, stars, reminders,
- *                         usergroups, emoji.
+ * A single scope set covering both read/search and write/act-as on behalf of
+ * the user:
+ *   - read / search:  read history across the user's full visible surface
+ *                     (public + private channels, DMs, group DMs), plus
+ *                     search.messages, user/team metadata.
+ *   - write / act-as: post on behalf of the user, set status / DND,
+ *                     reactions, files, pins, bookmarks, stars, reminders,
+ *                     usergroups, emoji.
  *
  * EXCLUDED on purpose:
  *   - bot-only scopes (e.g. chat:write.customize)
  *   - search:read.enterprise
  *   - admin.* scopes
  *
- * Requested in a single consent at connect time so both phases work without
- * a re-consent round trip. The Slack app workspace install MUST be refreshed
- * for these to take effect — see slack-user-app-manifest.json and the matching
- * update to plugin-slack/slack-app-manifest.json.
+ * Requested in a single consent at connect time so the full surface is
+ * available without a re-consent round trip. The Slack app workspace install
+ * MUST be refreshed for these to take effect — see slack-user-app-manifest.json
+ * and the matching update to plugin-slack/slack-app-manifest.json.
  */
 export const SLACK_USER_SCOPES: readonly string[] = [
-  // ── Phase 1 — read / search ──
+  // ── read / search ──
   'search:read',
   'channels:history',
   'groups:history',
@@ -38,7 +40,7 @@ export const SLACK_USER_SCOPES: readonly string[] = [
   'users.profile:read',
   'team:read',
 
-  // ── Phase 2 — write / act-as ──
+  // ── write / act-as ──
   'chat:write',
   'users.profile:write',
   'reactions:write',

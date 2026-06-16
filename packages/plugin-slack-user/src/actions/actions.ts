@@ -63,7 +63,7 @@ export function resolveToSlackTimestamp(input: string): string {
   return (date.getTime() / 1000).toFixed(6);
 }
 
-// ─── Phase 1 read action definitions ────────────────────────────────────────
+// ─── Read action definitions ────────────────────────────────────────────────
 
 const searchMessages: ActionDefinition = {
   id: 'slack_user.search_messages',
@@ -128,12 +128,12 @@ const readThread: ActionDefinition = {
   }),
 };
 
-// ─── Phase 2 write action definitions ──────────────────────────────────────
+// ─── Write / act-as action definitions ──────────────────────────────────────
 //
-// All Phase 2 actions are framed "on behalf of the user" and use riskLevel
-// 'high' so the existing action-policy / per-user / per-session approval
-// overrides gate them automatically. Switching them to require_approval at
-// org level is one policy edit away.
+// All write/act-as actions are framed "on behalf of the user" and use
+// riskLevel 'high' so the existing action-policy / per-user / per-session
+// approval overrides gate them automatically. Switching them to
+// require_approval at org level is one policy edit away.
 
 const setStatus: ActionDefinition = {
   id: 'slack_user.set_status',
@@ -262,12 +262,12 @@ const addReminder: ActionDefinition = {
 };
 
 const allActions: ActionDefinition[] = [
-  // Phase 1
+  // read / search
   searchMessages,
   listChannels,
   readHistory,
   readThread,
-  // Phase 2
+  // write / act-as
   setStatus,
   setDnd,
   endDnd,
@@ -339,7 +339,7 @@ async function executeAction(
 
   try {
     switch (actionId) {
-      // ── Phase 1 ─────────────────────────────────────────────────────────
+      // ── read / search ───────────────────────────────────────────────────
       case 'slack_user.search_messages': {
         const p = searchMessages.params.parse(params);
         const query: Record<string, unknown> = {
@@ -487,7 +487,7 @@ async function executeAction(
         };
       }
 
-      // ── Phase 2 ─────────────────────────────────────────────────────────
+      // ── write / act-as ──────────────────────────────────────────────────
       case 'slack_user.set_status': {
         const p = setStatus.params.parse(params);
         const profile: Record<string, unknown> = {

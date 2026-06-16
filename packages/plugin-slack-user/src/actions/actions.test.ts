@@ -54,7 +54,7 @@ describe('connection guard', () => {
   });
 });
 
-// ─── Phase 1: search_messages ──────────────────────────────────────────────
+// ─── search_messages ───────────────────────────────────────────────────────
 
 describe('slack_user.search_messages', () => {
   it('calls search.messages with the user xoxp token and slims results', async () => {
@@ -140,7 +140,7 @@ describe('slack_user.search_messages', () => {
   });
 });
 
-// ─── Phase 1: read_history (operates on user's full visible surface) ─────
+// ─── read_history (operates on user's full visible surface) ──────────────
 
 describe('slack_user.read_history', () => {
   it('uses the xoxp token against conversations.history and returns slim messages', async () => {
@@ -175,7 +175,7 @@ describe('slack_user.read_history', () => {
   });
 });
 
-// ─── Phase 2: set_status ──────────────────────────────────────────────────
+// ─── set_status ───────────────────────────────────────────────────────────
 
 describe('slack_user.set_status', () => {
   it('POSTs users.profile.set with status_text/emoji as the user', async () => {
@@ -211,7 +211,7 @@ describe('slack_user.set_status', () => {
   });
 });
 
-// ─── Phase 2: send_dm ─────────────────────────────────────────────────────
+// ─── send_dm ──────────────────────────────────────────────────────────────
 
 describe('slack_user.send_dm', () => {
   it('opens a DM channel and posts using the user xoxp token', async () => {
@@ -255,7 +255,7 @@ describe('action surface metadata', () => {
     for (const a of actions) expect(a.id.startsWith('slack_user.')).toBe(true);
   });
 
-  it('marks every Phase 2 (write/act-as) action high-risk so policy can gate it', () => {
+  it('marks every write/act-as action high-risk so policy can gate it', () => {
     const writeIds = [
       'slack_user.set_status',
       'slack_user.set_dnd',
@@ -276,7 +276,7 @@ describe('action surface metadata', () => {
     }
   });
 
-  it('marks Phase 1 read actions low-risk', () => {
+  it('marks read actions low-risk', () => {
     const readIds = [
       'slack_user.search_messages',
       'slack_user.list_channels',

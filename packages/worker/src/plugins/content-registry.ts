@@ -1939,7 +1939,7 @@ namespace.
 
 ## Search
 
-\`slack_user.search_messages\` is the headline Phase-1 action. It uses
+\`slack_user.search_messages\` is the headline search action. It uses
 \`search.messages\` with the user's xoxp token, so results include private
 channels and DMs they can see. Operators work as in the Slack UI
 (\`in:#channel\`, \`from:@user\`, \`before:\`, \`after:\`, \`has:link\`).
@@ -1957,7 +1957,7 @@ plus \`next_cursor\` for pagination.
 \`slack_user.list_channels\` mirror the bot equivalents but operate on the user's
 full visible surface (public + private channels, DMs, group DMs).
 
-## Write / act-as (Phase 2)
+## Write / act-as
 
 \`set_status\`, \`set_dnd\`, \`end_dnd\`, \`send_dm\`, \`post_message\`, \`add_reaction\`,
 \`upload_file\`, \`add_pin\`, \`add_bookmark\`, \`add_reminder\` all act AS the user
@@ -1967,7 +1967,7 @@ action-policy overrides gate them — by default these will require approval
 or be denied unless explicitly allowed for the session.
 
 Default rules:
-- Only call Phase 2 actions when the user explicitly delegated the task.
+- Only call write/act-as actions when the user explicitly delegated the task.
 - The agent's OWN routine outbound (DMs to the owner, channel updates) should
   continue to use the bot \`slack.*\` actions, not \`slack_user.*\`.
 
