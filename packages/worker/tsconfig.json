@@ -29,6 +29,7 @@
     { "path": "../plugin-sentry" },
     { "path": "../plugin-socket" },
     { "path": "../plugin-slack" },
+    { "path": "../plugin-slack-user" },
     { "path": "../plugin-stripe" },
     { "path": "../plugin-telegram" }
   ]

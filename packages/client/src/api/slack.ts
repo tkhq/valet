@@ -9,6 +9,7 @@ export const slackKeys = {
   adminInstall: () => [...slackKeys.all, 'admin-install'] as const,
   userStatus: () => [...slackKeys.all, 'user-status'] as const,
   workspaceUsers: () => [...slackKeys.all, 'workspace-users'] as const,
+  userOAuthStatus: () => [...slackKeys.all, 'user-oauth-status'] as const,
 };
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -118,6 +119,55 @@ export function useUnlinkSlack() {
     mutationFn: () => api.delete<{ success: boolean }>('/me/slack/link'),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: slackKeys.userStatus() });
+    },
+  });
+}
+
+// ─── Slack (personal) — per-user OAuth (xoxp) ───────────────────────────
+//
+// This is a SEPARATE integration from the org Slack bot above. It acts AS the
+// user (search their messages, post as them, set their status, etc.). The bot
+// integration is unchanged. See packages/plugin-slack-user.
+
+export interface SlackUserOAuthStatus {
+  /** True when SLACK_CLIENT_ID/SLACK_CLIENT_SECRET are configured server-side. */
+  oauthAvailable: boolean;
+  connected: boolean;
+  slackUserId: string | null;
+  teamId: string | null;
+  teamName: string | null;
+}
+
+export function useSlackUserOAuthStatus() {
+  return useQuery({
+    queryKey: slackKeys.userOAuthStatus(),
+    queryFn: () => api.get<SlackUserOAuthStatus>('/me/slack-user'),
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Kick off the Slack (personal) OAuth flow. The server returns a Slack
+ * authorize URL with a signed state token; we redirect the browser to it.
+ * Slack then redirects back to `/api/me/slack-user/oauth/callback`, which
+ * exchanges the code and finally redirects to `/integrations?slack_user=…`.
+ */
+export function useStartSlackUserOAuth() {
+  return useMutation({
+    mutationFn: async () => {
+      const res = await api.post<{ authorizeUrl: string }>('/me/slack-user/oauth/start', {});
+      window.location.href = res.authorizeUrl;
+      return res;
+    },
+  });
+}
+
+export function useDisconnectSlackUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.delete<{ success: boolean }>('/me/slack-user/oauth'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: slackKeys.userOAuthStatus() });
     },
   });
 }

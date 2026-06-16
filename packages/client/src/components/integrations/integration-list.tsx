@@ -8,6 +8,9 @@ import {
   useInitiateSlackLink,
   useVerifySlackLink,
   useUnlinkSlack,
+  useSlackUserOAuthStatus,
+  useStartSlackUserOAuth,
+  useDisconnectSlackUser,
 } from '@/api/slack';
 import { useGitHubStatus } from '@/api/github';
 import { usePlugins } from '@/api/plugins';
@@ -42,18 +45,26 @@ export function IntegrationList({ onAddIntegration, addIntegrationLabel = 'Conne
   const { data: credentials, isLoading: credentialsLoading } = useUserCredentials();
   const { data: telegramConfig, isLoading: telegramLoading } = useTelegramConfig();
   const { data: slackStatus, isLoading: slackLoading } = useSlackUserStatus();
+  const { data: slackUserOAuth, isLoading: slackUserOAuthLoading } = useSlackUserOAuthStatus();
   const { data: githubStatus, isLoading: githubLoading } = useGitHubStatus();
   const { data: plugins } = usePlugins();
 
   const hasOnePassword = credentials?.some((c) => c.provider === '1password');
   const hasTelegram = !!telegramConfig;
   const hasSlackInstalled = slackStatus?.installed;
+  const slackUserVisible = slackUserOAuth?.oauthAvailable || slackUserOAuth?.connected;
 
-  const isLoading = integrationsLoading || credentialsLoading || telegramLoading || slackLoading || githubLoading;
+  const isLoading =
+    integrationsLoading
+    || credentialsLoading
+    || telegramLoading
+    || slackLoading
+    || slackUserOAuthLoading
+    || githubLoading;
 
   // Build a unified list of items to render
   const allItems = React.useMemo(() => {
-    const items: { key: string; type: '1password' | 'telegram' | 'slack' | 'github' | 'api' | 'auto'; service: string; status: 'active' | 'pending' | 'error' | 'disconnected'; integration?: IntegrationListItem; icon?: string; description?: string; displayName?: string; }[] = [];
+    const items: { key: string; type: '1password' | 'telegram' | 'slack' | 'slack-user' | 'github' | 'api' | 'auto'; service: string; status: 'active' | 'pending' | 'error' | 'disconnected'; integration?: IntegrationListItem; icon?: string; description?: string; displayName?: string; }[] = [];
 
     if (hasOnePassword) {
       items.push({ key: '1password', type: '1password', service: '1password', status: 'active' });
@@ -67,6 +78,14 @@ export function IntegrationList({ onAddIntegration, addIntegrationLabel = 'Conne
         type: 'slack',
         service: 'slack',
         status: slackStatus?.linked ? 'active' : 'pending',
+      });
+    }
+    if (slackUserVisible) {
+      items.push({
+        key: 'slack-user',
+        type: 'slack-user',
+        service: 'slack-user',
+        status: slackUserOAuth?.connected ? 'active' : 'disconnected',
       });
     }
     // Always show GitHub card if the GitHub App is configured
@@ -115,7 +134,18 @@ export function IntegrationList({ onAddIntegration, addIntegrationLabel = 'Conne
     }
 
     return items;
-  }, [hasOnePassword, hasTelegram, hasSlackInstalled, slackStatus?.linked, githubStatus?.configured, githubStatus?.personal.linked, data?.integrations, plugins]);
+  }, [
+    hasOnePassword,
+    hasTelegram,
+    hasSlackInstalled,
+    slackStatus?.linked,
+    slackUserVisible,
+    slackUserOAuth?.connected,
+    githubStatus?.configured,
+    githubStatus?.personal.linked,
+    data?.integrations,
+    plugins,
+  ]);
 
   const filteredItems = React.useMemo(() => {
     return allItems.filter((item) => {
@@ -198,6 +228,9 @@ export function IntegrationList({ onAddIntegration, addIntegrationLabel = 'Conne
             }
             if (item.type === 'slack') {
               return <SlackCard key={item.key} />;
+            }
+            if (item.type === 'slack-user') {
+              return <SlackUserOAuthCard key={item.key} />;
             }
             if (item.type === 'github') {
               return <GitHubCard key={item.key} />;
@@ -577,6 +610,107 @@ function SlackLinkFlow({ onClose }: { onClose: () => void }) {
         </p>
       )}
     </div>
+  );
+}
+
+// ─── Slack (personal) per-user OAuth Card ──────────────────────────────
+
+function SlackUserOAuthCard() {
+  const { data: status } = useSlackUserOAuthStatus();
+  const startOAuth = useStartSlackUserOAuth();
+  const disconnect = useDisconnectSlackUser();
+
+  if (!status) return null;
+
+  if (status.connected) {
+    return (
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-neutral-100 text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">
+              <SlackIcon className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Slack (personal)</CardTitle>
+              <p className="text-xs text-green-600 dark:text-green-400">
+                Connected{status.teamName ? ` — ${status.teamName}` : ''}
+              </p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              Acts as you on Slack (search, read DMs / private channels, post on your behalf)
+            </p>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => disconnect.mutate()}
+              disabled={disconnect.isPending}
+            >
+              {disconnect.isPending ? 'Disconnecting...' : 'Disconnect'}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!status.oauthAvailable) {
+    return (
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-neutral-100 text-neutral-400 dark:bg-neutral-700 dark:text-neutral-500">
+              <SlackIcon className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Slack (personal)</CardTitle>
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                OAuth not configured by admin
+              </p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+            Ask your admin to set SLACK_CLIENT_ID / SLACK_CLIENT_SECRET to enable personal Slack OAuth.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-neutral-100 text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">
+            <SlackIcon className="h-5 w-5" />
+          </div>
+          <div>
+            <CardTitle className="text-base">Slack (personal)</CardTitle>
+            <p className="text-xs text-amber-600 dark:text-amber-400">Not connected</p>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+            Connect your personal Slack to let Valet search, read and act on your behalf
+          </p>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => startOAuth.mutate()}
+            disabled={startOAuth.isPending}
+          >
+            {startOAuth.isPending ? 'Redirecting...' : 'Connect'}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

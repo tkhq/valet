@@ -42,6 +42,7 @@
     "@valet/plugin-pylon": "workspace:*",
     "@valet/plugin-sentry": "workspace:*",
     "@valet/plugin-slack": "workspace:*",
+    "@valet/plugin-slack-user": "workspace:*",
     "@valet/plugin-socket": "workspace:*",
     "@valet/plugin-stripe": "workspace:*",
     "@valet/plugin-telegram": "workspace:*",
