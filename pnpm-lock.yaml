@@ -456,6 +456,25 @@ importers:
         specifier: ^4.1.8
         version: 4.1.8(@opentelemetry/api@1.9.1)(@types/node@25.0.9)(vite@6.4.3(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
 
+  packages/plugin-slack-user:
+    dependencies:
+      '@valet/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.22.4
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.8
+        version: 4.1.8(@opentelemetry/api@1.9.1)(@types/node@25.0.9)(vite@6.4.3(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
+
   packages/plugin-socket:
     dependencies:
       '@valet/sdk':
@@ -691,6 +710,9 @@ importers:
       '@valet/plugin-slack':
         specifier: workspace:*
         version: link:../plugin-slack
+      '@valet/plugin-slack-user':
+        specifier: workspace:*
+        version: link:../plugin-slack-user
       '@valet/plugin-socket':
         specifier: workspace:*
         version: link:../plugin-socket
