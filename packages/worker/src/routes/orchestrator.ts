@@ -36,16 +36,20 @@ const writeMemorySchema = z.object({
   content: z.string().min(1).max(50000),
 });
 
-const importMemorySchema = z.object({
+// Import is a lossless round-trip of system-produced memory, so the envelope is
+// validated loosely: no per-file content cap (files grow past 50k via append)
+// and no hard path-length cap. importMemoryFiles validates each file and skips
+// invalid/empty ones with a reason instead of failing the whole bundle.
+export const importMemorySchema = z.object({
   files: z
     .array(
       z.object({
-        path: z.string().min(1).max(256),
-        content: z.string().max(50000),
+        path: z.string().min(1),
+        content: z.string(),
       }),
     )
     .min(1)
-    .max(500),
+    .max(2000),
 });
 
 const patchMemorySchema = z.object({
