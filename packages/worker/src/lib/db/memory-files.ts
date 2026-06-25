@@ -112,9 +112,9 @@ export async function writeMemoryFile(
 
   // Check if file exists to determine if this is an update
   const existing = await rawDb
-    .prepare('SELECT id, version, rowid, created_at, relevance, org_id FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
+    .prepare('SELECT id, version, created_at, relevance, org_id FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
     .bind(userId, normalized)
-    .first<{ id: string; version: number; rowid: number; created_at: string; relevance: number; org_id: string }>();
+    .first<{ id: string; version: number; created_at: string; relevance: number; org_id: string }>();
 
   if (existing) {
     // Update existing file
@@ -124,13 +124,7 @@ export async function writeMemoryFile(
       )
       .bind(content, title, pinned, existing.id)
       .run();
-
-    // Resync FTS index
-    await rawDb.prepare('DELETE FROM orchestrator_memory_files_fts WHERE rowid = ?').bind(existing.rowid).run();
-    await rawDb
-      .prepare('INSERT INTO orchestrator_memory_files_fts(rowid, path, title, content) VALUES (?, ?, ?, ?)')
-      .bind(existing.rowid, normalized, title, content)
-      .run();
+    // FTS is resynced by the AFTER UPDATE trigger (migration 0020).
 
     return {
       id: existing.id,
@@ -155,18 +149,7 @@ export async function writeMemoryFile(
     )
     .bind(id, userId, normalized, title, content, pinned)
     .run();
-
-  // Sync FTS index
-  const inserted = await rawDb
-    .prepare('SELECT rowid FROM orchestrator_memory_files WHERE id = ?')
-    .bind(id)
-    .first<{ rowid: number }>();
-  if (inserted) {
-    await rawDb
-      .prepare('INSERT INTO orchestrator_memory_files_fts(rowid, path, title, content) VALUES (?, ?, ?, ?)')
-      .bind(inserted.rowid, normalized, title, content)
-      .run();
-  }
+  // FTS is synced by the AFTER INSERT trigger (migration 0020).
 
   // Auto-prune if over cap (non-pinned files only)
   if (enforceCap) await enforceMemoryCap(rawDb, userId);
@@ -201,9 +184,9 @@ export async function patchMemoryFile(
 
   // Read current content
   const existing = await rawDb
-    .prepare('SELECT id, content, version, rowid FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
+    .prepare('SELECT id, content, version FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
     .bind(userId, normalized)
-    .first<{ id: string; content: string; version: number; rowid: number }>();
+    .first<{ id: string; content: string; version: number }>();
 
   let content = existing?.content ?? '';
   let applied = 0;
@@ -324,13 +307,7 @@ export async function patchMemoryFile(
       .prepare(`UPDATE orchestrator_memory_files SET content = ?, title = ?, version = ?, updated_at = datetime('now') WHERE id = ?`)
       .bind(content, title, newVersion, existing!.id)
       .run();
-
-    // Resync FTS
-    await rawDb.prepare('DELETE FROM orchestrator_memory_files_fts WHERE rowid = ?').bind(existing!.rowid).run();
-    await rawDb
-      .prepare('INSERT INTO orchestrator_memory_files_fts(rowid, path, title, content) VALUES (?, ?, ?, ?)')
-      .bind(existing!.rowid, normalized, title, content)
-      .run();
+    // FTS is resynced by the AFTER UPDATE trigger (migration 0020).
 
     return { content, version: newVersion, applied, skipped };
   } else {
@@ -345,48 +322,26 @@ export async function patchMemoryFile(
 export async function deleteMemoryFile(rawDb: D1Database, userId: string, path: string): Promise<number> {
   const normalized = normalizePath(path);
 
-  // Get rowid before deleting for FTS cleanup
-  const row = await rawDb
-    .prepare('SELECT rowid FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
-    .bind(userId, normalized)
-    .first<{ rowid: number }>();
-
+  // FTS is cleaned up by the AFTER DELETE trigger (migration 0020).
   const result = await rawDb
     .prepare('DELETE FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
     .bind(userId, normalized)
     .run();
 
-  const changes = result.meta?.changes ?? 0;
-  if (row && changes > 0) {
-    await rawDb.prepare('DELETE FROM orchestrator_memory_files_fts WHERE rowid = ?').bind(row.rowid).run();
-  }
-
-  return changes;
+  return result.meta?.changes ?? 0;
 }
 
 export async function deleteMemoryFilesUnderPath(rawDb: D1Database, userId: string, pathPrefix: string): Promise<number> {
   const normalized = normalizePath(pathPrefix);
   const prefix = normalized.endsWith('/') ? normalized : normalized + '/';
 
-  // Get rowids before deleting for FTS cleanup
-  const rows = await rawDb
-    .prepare('SELECT rowid FROM orchestrator_memory_files WHERE user_id = ? AND path LIKE ?')
-    .bind(userId, prefix + '%')
-    .all<{ rowid: number }>();
-
+  // FTS is cleaned up by the AFTER DELETE trigger (migration 0020), which fires per row.
   const result = await rawDb
     .prepare('DELETE FROM orchestrator_memory_files WHERE user_id = ? AND path LIKE ?')
     .bind(userId, prefix + '%')
     .run();
 
-  const changes = result.meta?.changes ?? 0;
-  if (changes > 0) {
-    for (const row of rows.results || []) {
-      await rawDb.prepare('DELETE FROM orchestrator_memory_files_fts WHERE rowid = ?').bind(row.rowid).run();
-    }
-  }
-
-  return changes;
+  return result.meta?.changes ?? 0;
 }
 
 // ─── Search Operations ──────────────────────────────────────────────────────
@@ -477,47 +432,104 @@ export async function exportMemoryFiles(db: AppDb, userId: string): Promise<Memo
   }));
 }
 
+/** Files written per D1 batch. Each upsert binds 6 params (well under the
+ * 100-param/statement limit); the cap bounds total chunk size. */
+const IMPORT_CHUNK = 50;
+
 /**
  * Writes a batch of memory files for a user (merge semantics — same-path files
- * are overwritten, others are left untouched). Reuses `writeMemoryFile` so path
- * normalization, FTS indexing, pinning, and cap enforcement stay consistent.
+ * are overwritten, others untouched).
  *
- * One bad file never fails the whole import: empties and invalid paths are
- * collected in `skipped` with a reason. The `pinned` flag is intentionally not
- * honored on import — pinning is derived from the path (see `writeMemoryFile`).
+ * Speed: each file is a single `INSERT … ON CONFLICT … DO UPDATE` and FTS is
+ * kept in sync by triggers (migration 0020), so a chunk of files ships in ONE
+ * `db.batch()` round-trip instead of ~4 serial round-trips per file. D1
+ * serializes queries on a binding, so cutting round-trips — not concurrency —
+ * is what actually speeds this up.
+ *
+ * Robustness: a D1 batch is all-or-nothing, so files are validated/deduped in
+ * JS first (empty content and invalid paths are skipped with a reason before
+ * the batch), and a chunk that still fails is replayed per-statement so good
+ * files land and only the bad ones are skipped. The `pinned` flag is derived
+ * from the path, not honored from the input.
  */
 export async function importMemoryFiles(
   rawDb: D1Database,
   userId: string,
   files: { path: string; content: string }[],
 ): Promise<MemoryImportResult> {
-  let imported = 0;
   const skipped: { path: string; reason: string }[] = [];
 
+  // Validate + dedup in JS so the batch contains only known-good rows. Dedup by
+  // normalized path keeping the last occurrence (sequential last-write-wins),
+  // so two rows in one batch never collide on the (user_id, path) unique index.
+  const byPath = new Map<string, { id: string; path: string; title: string; content: string; pinned: number }>();
   for (const file of files) {
     if (file.content.length === 0) {
       skipped.push({ path: file.path, reason: 'empty content' });
       continue;
     }
+    const normalized = normalizePath(file.path);
+    const err = validatePath(normalized);
+    if (err) {
+      skipped.push({ path: file.path, reason: err });
+      continue;
+    }
+    byPath.set(normalized, {
+      id: crypto.randomUUID(),
+      path: normalized,
+      title: extractTitle(file.content, normalized),
+      content: file.content,
+      pinned: normalized.startsWith('preferences/') ? 1 : 0,
+    });
+  }
+  const toWrite = [...byPath.values()];
+
+  const upsert = (f: { id: string; path: string; title: string; content: string; pinned: number }) =>
+    rawDb
+      .prepare(
+        `INSERT INTO orchestrator_memory_files (id, user_id, path, title, content, pinned)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, path) DO UPDATE SET
+           content = excluded.content,
+           title = excluded.title,
+           pinned = excluded.pinned,
+           version = version + 1,
+           updated_at = datetime('now')`,
+      )
+      .bind(f.id, userId, f.path, f.title, f.content, f.pinned);
+
+  let imported = 0;
+  for (let i = 0; i < toWrite.length; i += IMPORT_CHUNK) {
+    const chunk = toWrite.slice(i, i + IMPORT_CHUNK);
     try {
-      // Defer the 200-file cap so files aren't pruned mid-batch (which would
-      // evict files written earlier in this same import); enforce once below.
-      await writeMemoryFile(rawDb, userId, file.path, file.content, false);
-      imported++;
-    } catch (err) {
-      skipped.push({ path: file.path, reason: err instanceof Error ? err.message : 'write failed' });
+      await rawDb.batch(chunk.map(upsert));
+      imported += chunk.length;
+    } catch (batchErr) {
+      // The whole chunk rolled back; replay per-statement so a single bad file
+      // (e.g. a row exceeding D1's 2MB limit) doesn't sink its chunk-mates. Log
+      // once so a systemic batch failure is visible, not hidden behind N skips.
+      console.warn(
+        `importMemoryFiles: batch of ${chunk.length} failed, replaying per-statement:`,
+        batchErr instanceof Error ? batchErr.message : batchErr,
+      );
+      for (const f of chunk) {
+        try {
+          await upsert(f).run();
+          imported++;
+        } catch (err) {
+          skipped.push({ path: f.path, reason: err instanceof Error ? err.message : 'write failed' });
+        }
+      }
     }
   }
 
-  // Enforce the cap once for the whole batch and report how many non-pinned
-  // files it pruned, so the response is honest when an import pushes the
-  // account past the 200-file cap (imported counts writes; pruned counts what
-  // the cap then removed).
+  // Enforce the 200-file cap once for the whole import; report what it pruned so
+  // the response is honest when an import pushes the account past the cap.
   let pruned = 0;
   try {
     pruned = await enforceMemoryCap(rawDb, userId);
   } catch {
-    // A prune failure must not lose the import tally; the cap self-heals on the next write.
+    // A prune failure must not lose the import tally; the cap self-heals later.
   }
 
   return { imported, skipped, pruned };
@@ -567,14 +579,14 @@ export async function pruneEmptyJournals(rawDb: D1Database): Promise<number> {
   // Find empty journal stubs: path starts with "journal/", not today's, content is just the header
   const toDelete = await rawDb
     .prepare(
-      `SELECT id, rowid, path, content FROM orchestrator_memory_files
+      `SELECT id, path, content FROM orchestrator_memory_files
        WHERE path LIKE 'journal/%.md'
          AND path != ?
          AND pinned = 0
          AND LENGTH(TRIM(content)) <= 14`
     )
     .bind(todayPath)
-    .all<{ id: string; rowid: number; path: string; content: string }>();
+    .all<{ id: string; path: string; content: string }>();
 
   let pruned = 0;
   for (const row of toDelete.results || []) {
@@ -582,8 +594,8 @@ export async function pruneEmptyJournals(rawDb: D1Database): Promise<number> {
     const trimmed = row.content.trim();
     if (!/^#\s+\d{4}-\d{2}-\d{2}\s*$/.test(trimmed)) continue;
 
+    // FTS is cleaned up by the AFTER DELETE trigger (migration 0020).
     await rawDb.prepare('DELETE FROM orchestrator_memory_files WHERE id = ?').bind(row.id).run();
-    await rawDb.prepare('DELETE FROM orchestrator_memory_files_fts WHERE rowid = ?').bind(row.rowid).run();
     pruned++;
   }
 
@@ -602,18 +614,10 @@ async function enforceMemoryCap(rawDb: D1Database, userId: string): Promise<numb
 
   const excess = countResult.cnt - MEMORY_CAP;
 
-  // Get rowids before deleting for FTS cleanup
-  const toDelete = await rawDb
-    .prepare(
-      `SELECT rowid FROM orchestrator_memory_files WHERE id IN (
-        SELECT id FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 0
-        ORDER BY relevance ASC, last_accessed_at ASC LIMIT ?
-      )`
-    )
-    .bind(userId, excess)
-    .all<{ rowid: number }>();
-
-  await rawDb
+  // Delete the lowest-relevance / least-recently-accessed non-pinned files.
+  // FTS is cleaned up by the AFTER DELETE trigger (migration 0020), so the
+  // prune count comes straight from the delete's reported changes.
+  const result = await rawDb
     .prepare(
       `DELETE FROM orchestrator_memory_files WHERE id IN (
         SELECT id FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 0
@@ -623,10 +627,5 @@ async function enforceMemoryCap(rawDb: D1Database, userId: string): Promise<numb
     .bind(userId, excess)
     .run();
 
-  const prunedRows = toDelete.results || [];
-  for (const row of prunedRows) {
-    await rawDb.prepare('DELETE FROM orchestrator_memory_files_fts WHERE rowid = ?').bind(row.rowid).run();
-  }
-
-  return prunedRows.length;
+  return result.meta?.changes ?? 0;
 }

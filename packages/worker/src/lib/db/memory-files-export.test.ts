@@ -4,18 +4,29 @@ import { writeMemoryFile, exportMemoryFiles, importMemoryFiles, searchMemoryFile
 
 // Thin adapter: wraps better-sqlite3 sync API to match the D1Database async interface.
 function makeD1Adapter(sqlite: any) {
+  const toResult = (info: any) => ({
+    success: true,
+    meta: { changes: info?.changes ?? 0, last_row_id: Number(info?.lastInsertRowid ?? 0) },
+  });
   return {
     prepare(sql: string) {
       return {
         bind(...args: any[]) {
-          const stmt = sqlite.prepare(sql);
           return {
-            async run() { return stmt.run(...args); },
-            async all() { return { results: stmt.all(...args) }; },
-            async first() { return stmt.get(...args) ?? null; },
+            __sql: sql,
+            __args: args,
+            async run() { return toResult(sqlite.prepare(sql).run(...args)); },
+            async all() { return { success: true, results: sqlite.prepare(sql).all(...args) }; },
+            async first() { return sqlite.prepare(sql).get(...args) ?? null; },
           };
         },
       };
+    },
+    // Mirrors D1's batch(): runs the prepared statements in one atomic transaction.
+    async batch(stmts: any[]) {
+      const txn = sqlite.transaction((items: any[]) =>
+        items.map((it: any) => toResult(sqlite.prepare(it.__sql).run(...it.__args))));
+      return txn(stmts);
     },
   } as any;
 }
@@ -231,18 +242,43 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
     expect(getRow(USER_B, 'notes/my-note.md')?.content).toBe(content);
   });
 
-  it('a duplicate path within one bundle collapses to one row with the last content', async () => {
+  it('a duplicate path within one bundle collapses to one write with the last content', async () => {
     const result = await importMemoryFiles(rawDb, USER_B, [
       { path: 'notes/dup.md', content: '# first' },
       { path: 'notes/dup.md', content: '# second' },
     ]);
 
-    // imported counts write attempts (2), but the path is unique so one row remains.
-    expect(result.imported).toBe(2);
+    // Same-path entries are deduped (last wins) before the batch, so it's one
+    // write and one row — a batch can't contain two rows for the same key.
+    expect(result.imported).toBe(1);
     const rows = sqlite
       .prepare("SELECT content FROM orchestrator_memory_files WHERE user_id = ? AND path = 'notes/dup.md'")
       .all(USER_B) as { content: string }[];
     expect(rows).toHaveLength(1);
     expect(rows[0].content).toBe('# second');
+  });
+
+  it('replays per-statement when a batch fails, so good files still import', async () => {
+    // Force the first batch() to reject (D1 batches are all-or-nothing — e.g. a
+    // row over D1's 2MB limit), exercising the per-statement replay fallback.
+    let thrown = false;
+    const flaky: any = {
+      prepare: rawDb.prepare.bind(rawDb),
+      async batch(stmts: any[]) {
+        if (!thrown) { thrown = true; throw new Error('simulated batch failure'); }
+        return rawDb.batch(stmts);
+      },
+    };
+
+    const result = await importMemoryFiles(flaky, USER_B, [
+      { path: 'notes/a.md', content: '# A' },
+      { path: 'notes/b.md', content: '# B' },
+    ]);
+
+    expect(thrown).toBe(true); // the batch path was hit and failed
+    expect(result.imported).toBe(2); // both replayed successfully per-statement
+    expect(result.skipped).toEqual([]);
+    expect(getRow(USER_B, 'notes/a.md')?.content).toBe('# A');
+    expect(getRow(USER_B, 'notes/b.md')?.content).toBe('# B');
   });
 });
