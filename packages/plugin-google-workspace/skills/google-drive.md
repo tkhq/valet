@@ -11,11 +11,11 @@ You have full access to Google Drive through the Google Workspace integration. D
 
 ### Discovery (Finding Files)
 
-- **`drive.list_files`** — List files with optional folder, MIME type, ownership, and date filtering. Supports sorting and pagination. Use MIME type shortcuts: "document", "spreadsheet", "folder", etc. Defaults to personal Drive; use `corpora` to widen scope.
-- **`drive.search_files`** — Full-text search across all file types by name, content, or both. The fastest way to find any file. Defaults to personal Drive; use `corpora` to widen scope.
-- **`drive.list_documents`** — List Google Documents only, optionally filtered by name/content. Defaults to personal Drive; use `corpora` to widen scope.
-- **`drive.search_documents`** — Search specifically within Google Documents by name, content, or both. Defaults to personal Drive; use `corpora` to widen scope.
-- **`drive.list_folder_contents`** — List files and subfolders within a specific folder. Results are sorted with folders first. Defaults to personal Drive; use `corpora` to widen scope.
+- **`drive.list_files`** — List files with optional folder, MIME type, ownership, and date filtering. Supports sorting and pagination. Use MIME type shortcuts: "document", "spreadsheet", "folder", etc. Searches only your personal My Drive by default, which excludes Shared Drives (Team Drives); pass `corpora: "allDrives"` to include team/shared-drive files.
+- **`drive.search_files`** — Full-text search across all file types by name, content, or both. The fastest way to find any file. Searches only your personal My Drive by default, which excludes Shared Drives (Team Drives); pass `corpora: "allDrives"` to include team/shared-drive files.
+- **`drive.list_documents`** — List Google Documents only, optionally filtered by name/content. Searches only your personal My Drive by default, which excludes Shared Drives (Team Drives); pass `corpora: "allDrives"` to include team/shared-drive files.
+- **`drive.search_documents`** — Search specifically within Google Documents by name, content, or both. Searches only your personal My Drive by default, which excludes Shared Drives (Team Drives); pass `corpora: "allDrives"` to include team/shared-drive files.
+- **`drive.list_folder_contents`** — List files and subfolders within a specific folder. Results are sorted with folders first. Searches only your personal My Drive by default, which excludes Shared Drives (Team Drives); pass `corpora: "allDrives"` to include team/shared-drive files.
 - **`drive.get_document_info`** — Get metadata for a file: name, type, owner, sharing status, dates, links.
 - **`drive.get_folder_info`** — Get metadata for a folder including child count.
 
@@ -36,15 +36,16 @@ All five discovery tools (`list_files`, `search_files`, `list_documents`, `searc
 
 | Value | Scope | When to use |
 |---|---|---|
-| `user` (default) | Files in the authenticated user's My Drive — files they own plus files shared directly with them. | Default for most queries. Use when the user asks about "my files" or you don't need org-wide results. |
-| `domain` | Files shared to the user's Google Workspace domain (visible to anyone in the org). | Use when looking for company-wide or org-shared resources the user may not have in their personal Drive. |
-| `drive` | Files within a specific shared drive. Requires also passing a `driveId` param. | Use when the user asks about a specific shared drive by name or ID. |
-| `allDrives` | Searches across My Drive and all shared drives the user can access. | Use when you want the broadest possible search. **Warning:** on large workspaces, results may be incomplete — check for `incompleteSearch` in the response. |
+| `user` (default) | **My Drive only** — files the user owns or that are shared directly with them. **Does NOT include files that live in a Shared Drive (Team Drive).** | Use only when the user explicitly asks about "my files" / personal Drive. |
+| `domain` | Files shared to the user's Google Workspace domain (visible to anyone in the org). | Use for company-wide or org-shared resources the user may not have in their personal Drive. |
+| `allDrives` | My Drive **plus every Shared Drive** the user can access. | **Use this whenever the search involves team, project, or company docs** — Shared Drives are invisible under the default `user` corpus. On very large workspaces results may be slightly incomplete; narrow with a more specific query if needed. |
+
+> ⚠️ **Important:** The default `user` corpus silently omits everything stored in a Shared Drive (Team Drive). Most team/engineering/company docs live in Shared Drives, so a default search can come back empty even though the doc exists and the user can open it. When in doubt, search with `corpora: "allDrives"`.
 
 **Tips:**
-- Start with the default (`user`). Only widen to `domain` or `allDrives` if the user asks for org-wide results or the initial search comes up empty.
-- If using `allDrives` and results seem truncated, try narrowing with a more specific query or switching to `domain` or a specific `drive`.
-- The org admin may also set a default corpora via guard configuration, which overrides `user` unless you pass an explicit value.
+- Reach for `corpora: "allDrives"` when the user is looking for team/shared/company docs, or whenever a default (`user`) search returns nothing for a doc you expect to exist.
+- Use `domain` to target only org-shared files; use the default `user` only for explicitly-personal queries.
+- The org admin may set a default corpora via configuration, which overrides `user` unless you pass an explicit value.
 
 ## Common Patterns
 

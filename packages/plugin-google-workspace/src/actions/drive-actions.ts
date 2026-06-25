@@ -101,11 +101,20 @@ function getLabelFilter(params: unknown): string | undefined {
   return (params as Record<string, unknown> | null)?.__labelFilter as string | undefined;
 }
 
-const VALID_CORPORA = new Set(['user', 'domain', 'drive', 'allDrives']);
+// NOTE: 'drive' (a single shared drive) is intentionally omitted. The Drive API
+// requires a companion `driveId` for corpora='drive', which no action accepts, so
+// it always 400s. It is also not storable as an org setting (OrgSettings.driveCorpora
+// is 'user' | 'domain' | 'allDrives'). To reach files in shared drives, use 'allDrives'.
+const VALID_CORPORA = new Set(['user', 'domain', 'allDrives']);
 
 /**
  * Return the corpora value for a Drive API request.
  * Priority: per-request override > org-configured value > 'user' default.
+ *
+ * The 'user' corpus is My Drive only (files owned by or shared directly with the
+ * user) and EXCLUDES files that live in a Shared Drive (Team Drive). Callers that
+ * need team/shared-drive results must pass corpora 'allDrives' (or 'domain' for
+ * org-shared files), or the org must configure driveCorpora accordingly.
  */
 function resolveCorpora(ctx: ActionContext, override?: string): string {
   if (typeof override === 'string' && VALID_CORPORA.has(override)) return override;
@@ -149,8 +158,8 @@ const listFiles: ActionDefinition = {
   name: 'List Files',
   description:
     'Lists files in Google Drive with optional filtering by type, folder, and ownership. ' +
-    'By default searches the user\'s personal Drive (corpora: "user"). Set corpora to "domain" for org-wide files, ' +
-    '"drive" for a specific shared drive, or "allDrives" to search everywhere. ' +
+    'By default lists ONLY your personal My Drive (corpora: "user"), which excludes files stored in a Shared Drive (Team Drive). ' +
+    'Set corpora to "allDrives" to include team/shared-drive files, or "domain" for org-shared files. ' +
     'Use mimeType shortcuts: "document", "spreadsheet", "presentation", "folder", "form", "pdf", "zip" ' +
     'or pass any full MIME type string.',
   riskLevel: 'low',
@@ -165,7 +174,7 @@ const listFiles: ActionDefinition = {
     ownedByMe: z.boolean().optional().describe('Only return files owned by the authenticated user'),
     sharedWithMe: z.boolean().optional().describe('Only return files shared with the authenticated user'),
     modifiedAfter: z.string().optional().describe('Only return files modified after this date (ISO 8601)'),
-    corpora: z.enum(['user', 'domain', 'drive', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): files in My Drive (owned + shared with me). "domain": files shared to the Google Workspace org. "drive": a specific shared drive (requires driveId). "allDrives": My Drive + all shared drives (may return incomplete results on large workspaces).'),
+    corpora: z.enum(['user', 'domain', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): ONLY My Drive — files you own or that are shared directly with you. This does NOT include files that live in a Shared Drive (Team Drive). "domain": files shared across your Google Workspace organization. "allDrives": My Drive plus every Shared Drive you can access — use this to find team or shared-drive docs (may return slightly incomplete results on very large workspaces). If a doc you expect is missing from the results, retry with corpora:"allDrives".'),
   }),
 };
 
@@ -174,7 +183,8 @@ const searchFiles: ActionDefinition = {
   name: 'Search Files',
   description:
     'Searches across all file types in Google Drive by name or content. ' +
-    'By default searches the user\'s personal Drive (corpora: "user"). Set corpora to "domain", "drive", or "allDrives" to widen scope. ' +
+    'By default searches ONLY your personal My Drive (corpora: "user"), which excludes files stored in a Shared Drive (Team Drive); ' +
+    'set corpora to "allDrives" to include team/shared-drive files, or "domain" for org-shared files. ' +
     'Supports filtering by MIME type, scoping to a folder subtree, and pagination.',
   riskLevel: 'low',
   params: z.object({
@@ -187,7 +197,7 @@ const searchFiles: ActionDefinition = {
     maxResults: z.number().int().min(1).max(100).optional(),
     modifiedAfter: z.string().optional().describe('Only return files modified after this date (ISO 8601)'),
     pageToken: z.string().optional(),
-    corpora: z.enum(['user', 'domain', 'drive', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): files in My Drive (owned + shared with me). "domain": files shared to the Google Workspace org. "drive": a specific shared drive (requires driveId). "allDrives": My Drive + all shared drives (may return incomplete results on large workspaces).'),
+    corpora: z.enum(['user', 'domain', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): ONLY My Drive — files you own or that are shared directly with you. This does NOT include files that live in a Shared Drive (Team Drive). "domain": files shared across your Google Workspace organization. "allDrives": My Drive plus every Shared Drive you can access — use this to find team or shared-drive docs (may return slightly incomplete results on very large workspaces). If a doc you expect is missing from the results, retry with corpora:"allDrives".'),
   }),
 };
 
@@ -196,7 +206,7 @@ const listDocuments: ActionDefinition = {
   name: 'List Google Docs',
   description:
     'Lists Google Documents, optionally filtered by name or content. ' +
-    'By default searches the user\'s personal Drive (corpora: "user"). Set corpora to "domain", "drive", or "allDrives" to widen scope.',
+    'By default this covers ONLY your personal My Drive (corpora: "user"), which excludes files stored in a Shared Drive (Team Drive); set corpora to "allDrives" to include team/shared-drive files, or "domain" for org-shared files.',
   riskLevel: 'low',
   params: z.object({
     query: z.string().optional().describe('Search query to filter documents by name or content'),
@@ -204,7 +214,7 @@ const listDocuments: ActionDefinition = {
     pageToken: z.string().optional(),
     orderBy: z.enum(['name', 'modifiedTime', 'createdTime']).optional(),
     modifiedAfter: z.string().optional().describe('Only return documents modified after this date (ISO 8601)'),
-    corpora: z.enum(['user', 'domain', 'drive', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): files in My Drive (owned + shared with me). "domain": files shared to the Google Workspace org. "drive": a specific shared drive (requires driveId). "allDrives": My Drive + all shared drives (may return incomplete results on large workspaces).'),
+    corpora: z.enum(['user', 'domain', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): ONLY My Drive — files you own or that are shared directly with you. This does NOT include files that live in a Shared Drive (Team Drive). "domain": files shared across your Google Workspace organization. "allDrives": My Drive plus every Shared Drive you can access — use this to find team or shared-drive docs (may return slightly incomplete results on very large workspaces). If a doc you expect is missing from the results, retry with corpora:"allDrives".'),
   }),
 };
 
@@ -213,7 +223,7 @@ const searchDocuments: ActionDefinition = {
   name: 'Search Google Docs',
   description:
     'Searches for Google Documents by name, content, or both. ' +
-    'By default searches the user\'s personal Drive (corpora: "user"). Set corpora to "domain", "drive", or "allDrives" to widen scope.',
+    'By default this covers ONLY your personal My Drive (corpora: "user"), which excludes files stored in a Shared Drive (Team Drive); set corpora to "allDrives" to include team/shared-drive files, or "domain" for org-shared files.',
   riskLevel: 'low',
   params: z.object({
     query: z.string().describe('Search term to find in document names or content'),
@@ -221,7 +231,7 @@ const searchDocuments: ActionDefinition = {
     maxResults: z.number().int().min(1).max(100).optional(),
     pageToken: z.string().optional(),
     modifiedAfter: z.string().optional().describe('Only return documents modified after this date (ISO 8601)'),
-    corpora: z.enum(['user', 'domain', 'drive', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): files in My Drive (owned + shared with me). "domain": files shared to the Google Workspace org. "drive": a specific shared drive (requires driveId). "allDrives": My Drive + all shared drives (may return incomplete results on large workspaces).'),
+    corpora: z.enum(['user', 'domain', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): ONLY My Drive — files you own or that are shared directly with you. This does NOT include files that live in a Shared Drive (Team Drive). "domain": files shared across your Google Workspace organization. "allDrives": My Drive plus every Shared Drive you can access — use this to find team or shared-drive docs (may return slightly incomplete results on very large workspaces). If a doc you expect is missing from the results, retry with corpora:"allDrives".'),
   }),
 };
 
@@ -230,13 +240,13 @@ const listFolderContents: ActionDefinition = {
   name: 'List Folder Contents',
   description:
     'Lists files and subfolders within a Drive folder. Use folderId="root" for the top-level. ' +
-    'By default searches the user\'s personal Drive (corpora: "user"). Set corpora to "domain", "drive", or "allDrives" to widen scope.',
+    'By default this covers ONLY your personal My Drive (corpora: "user"), which excludes files stored in a Shared Drive (Team Drive); set corpora to "allDrives" to include team/shared-drive files, or "domain" for org-shared files.',
   riskLevel: 'low',
   params: z.object({
     folderId: z.string().describe('Folder ID (use "root" for the root Drive folder)'),
     maxResults: z.number().int().min(1).max(100).optional(),
     pageToken: z.string().optional(),
-    corpora: z.enum(['user', 'domain', 'drive', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): files in My Drive (owned + shared with me). "domain": files shared to the Google Workspace org. "drive": a specific shared drive (requires driveId). "allDrives": My Drive + all shared drives (may return incomplete results on large workspaces).'),
+    corpora: z.enum(['user', 'domain', 'allDrives']).optional().describe('Which Drive corpus to search. "user" (default): ONLY My Drive — files you own or that are shared directly with you. This does NOT include files that live in a Shared Drive (Team Drive). "domain": files shared across your Google Workspace organization. "allDrives": My Drive plus every Shared Drive you can access — use this to find team or shared-drive docs (may return slightly incomplete results on very large workspaces). If a doc you expect is missing from the results, retry with corpora:"allDrives".'),
   }),
 };
 

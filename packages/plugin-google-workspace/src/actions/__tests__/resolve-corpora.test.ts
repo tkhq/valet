@@ -42,8 +42,8 @@ describe('resolveCorpora', () => {
     expect(resolveCorpora(makeCtx({ driveCorpora: 'allDrives' }))).toBe('allDrives');
   });
 
-  it('returns "drive" when set to "drive"', () => {
-    expect(resolveCorpora(makeCtx({ driveCorpora: 'drive' }))).toBe('drive');
+  it('falls back to "user" for the removed "drive" value (now invalid)', () => {
+    expect(resolveCorpora(makeCtx({ driveCorpora: 'drive' }))).toBe('user');
   });
 
   // Per-request override tests
@@ -52,7 +52,6 @@ describe('resolveCorpora', () => {
       expect(resolveCorpora(makeCtx({ driveCorpora: 'domain' }), 'user')).toBe('user');
       expect(resolveCorpora(makeCtx({ driveCorpora: 'user' }), 'domain')).toBe('domain');
       expect(resolveCorpora(makeCtx({ driveCorpora: 'user' }), 'allDrives')).toBe('allDrives');
-      expect(resolveCorpora(makeCtx({ driveCorpora: 'user' }), 'drive')).toBe('drive');
     });
 
     it('falls back to guardConfig when override is undefined', () => {
@@ -62,6 +61,8 @@ describe('resolveCorpora', () => {
     it('falls back to guardConfig when override is invalid', () => {
       expect(resolveCorpora(makeCtx({ driveCorpora: 'domain' }), 'invalid')).toBe('domain');
       expect(resolveCorpora(makeCtx({ driveCorpora: 'domain' }), '')).toBe('domain');
+      // 'drive' was removed from the valid set; treated as invalid and ignored.
+      expect(resolveCorpora(makeCtx({ driveCorpora: 'allDrives' }), 'drive')).toBe('allDrives');
     });
 
     it('falls back to "user" when both override and guardConfig are invalid', () => {
@@ -71,7 +72,6 @@ describe('resolveCorpora', () => {
 
     it('override works when guardConfig is missing', () => {
       expect(resolveCorpora(makeCtx(), 'domain')).toBe('domain');
-      expect(resolveCorpora(makeCtx(), 'drive')).toBe('drive');
       expect(resolveCorpora(makeCtx(), 'allDrives')).toBe('allDrives');
     });
   });
