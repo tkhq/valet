@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { groupModelsByUser, formatModelLabel, type UserModelRow } from './user-breakdown';
 
 interface UserBreakdown {
   userId: string;
@@ -10,15 +11,6 @@ interface UserBreakdown {
   sessionCount: number;
   sandboxCost: number;
   sandboxActiveSeconds: number;
-}
-
-interface UserModelRow {
-  userId: string;
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-  cost: number | null;
-  callCount: number;
 }
 
 interface UserBreakdownTableProps {
@@ -48,25 +40,13 @@ function formatDuration(seconds: number): string {
   return `${Math.round(hours)}h`;
 }
 
-function formatModelName(model: string): string {
-  const parts = model.split('/');
-  return parts.length >= 2 ? parts.slice(1).join('/') : model;
-}
-
 export function UserBreakdownTable({ data, byUserModel = [] }: UserBreakdownTableProps) {
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
 
   // Group the per-model rows by user so each expanded row can render its own
   // model breakdown without re-filtering on every render.
-  const modelsByUser = React.useMemo(() => {
-    const map = new Map<string, UserModelRow[]>();
-    for (const row of byUserModel) {
-      const list = map.get(row.userId);
-      if (list) list.push(row);
-      else map.set(row.userId, [row]);
-    }
-    return map;
-  }, [byUserModel]);
+  const modelsByUser = React.useMemo(() => groupModelsByUser(byUserModel), [byUserModel]);
+  const hasModelData = byUserModel.length > 0;
 
   const toggle = (userId: string) => {
     setExpanded((prev) => {
@@ -90,7 +70,9 @@ export function UserBreakdownTable({ data, byUserModel = [] }: UserBreakdownTabl
     <div className="animate-stagger-in rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none" style={{ animationDelay: '350ms' }}>
       <div className="mb-4 flex items-baseline justify-between gap-2">
         <h3 className="label-mono text-neutral-400">By User</h3>
-        <span className="font-mono text-2xs text-neutral-300 dark:text-neutral-600">tap a row for models</span>
+        {hasModelData && (
+          <span className="font-mono text-2xs text-neutral-300 dark:text-neutral-600">tap a row for models</span>
+        )}
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -174,7 +156,7 @@ export function UserBreakdownTable({ data, byUserModel = [] }: UserBreakdownTabl
                                 <tr key={m.model} className="border-b border-neutral-50 last:border-0 dark:border-neutral-800/50">
                                   <td className="max-w-[160px] truncate px-2 py-1.5">
                                     <span className="font-mono text-2xs text-neutral-700 dark:text-neutral-300">
-                                      {formatModelName(m.model)}
+                                      {formatModelLabel(m.model)}
                                     </span>
                                   </td>
                                   <td className="px-2 py-1.5 text-right font-mono text-2xs tabular-nums text-neutral-500 dark:text-neutral-400">
