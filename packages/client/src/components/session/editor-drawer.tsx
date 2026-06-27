@@ -36,13 +36,13 @@ export function EditorDrawer({ sessionId, activeTab }: EditorDrawerProps) {
     <div className="flex h-full flex-col">
       {/* Status banners */}
       {tokenError && session?.status === 'initializing' && (
-        <div className="flex items-center gap-2 border-b border-blue-200 bg-blue-50 px-3 py-1.5 font-mono text-[11px] text-blue-800 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-300">
+        <div className="flex items-center gap-2 border-b border-blue-200 bg-blue-50 px-3 py-1.5 font-mono text-[0.6875rem] text-blue-800 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-300">
           <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
           Sandbox starting up...
         </div>
       )}
       {tokenError && session && session.status !== 'initializing' && session.status !== 'terminated' && session.status !== 'archived' && (
-        <div className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-1.5 font-mono text-[11px] text-red-800 dark:border-red-800 dark:bg-red-950/50 dark:text-red-300">
+        <div className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-1.5 font-mono text-[0.6875rem] text-red-800 dark:border-red-800 dark:bg-red-950/50 dark:text-red-300">
           <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" />
           Connection lost. Retrying...
         </div>
@@ -50,13 +50,13 @@ export function EditorDrawer({ sessionId, activeTab }: EditorDrawerProps) {
 
       {/* Header */}
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-neutral-200 bg-surface-1 px-2 dark:border-neutral-800 dark:bg-surface-1">
-        <span className="px-2.5 font-mono text-[11px] font-medium text-neutral-900 dark:text-neutral-100">
+        <span className="px-2.5 font-mono text-[0.6875rem] font-medium text-neutral-900 dark:text-neutral-100">
           {tabLabels[activeTab]}
         </span>
         <button
           type="button"
           onClick={closeDrawer}
-          className="flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
+          className="flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[0.6875rem] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
         >
           <PanelCloseIcon className="h-3.5 w-3.5" />
           Close

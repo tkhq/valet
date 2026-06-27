@@ -89,7 +89,7 @@ export function CostChart({ data }: CostChartProps) {
     return (
       <div className="rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none">
         <h3 className="label-mono text-neutral-400 mb-4">Daily Cost</h3>
-        <div className="flex h-[240px] items-center justify-center text-[13px] text-neutral-300">
+        <div className="flex h-[240px] items-center justify-center text-[0.8125rem] text-neutral-300">
           No usage data for this period
         </div>
       </div>
@@ -119,7 +119,7 @@ export function CostChart({ data }: CostChartProps) {
           <XAxis
             dataKey="date"
             tickFormatter={formatDateLabel}
-            tick={{ fontSize: 10, fill: '#a3a3a3', fontFamily: '"JetBrains Mono", monospace' }}
+            tick={{ fontSize: '0.625rem', fill: '#a3a3a3', fontFamily: '"JetBrains Mono", monospace' }}
             axisLine={false}
             tickLine={false}
             interval="preserveStartEnd"
@@ -127,7 +127,7 @@ export function CostChart({ data }: CostChartProps) {
           <YAxis
             yAxisId="cost"
             orientation="left"
-            tick={{ fontSize: 10, fill: '#a3a3a3', fontFamily: '"JetBrains Mono", monospace' }}
+            tick={{ fontSize: '0.625rem', fill: '#a3a3a3', fontFamily: '"JetBrains Mono", monospace' }}
             axisLine={false}
             tickLine={false}
             tickFormatter={(v: number) => v > 0 ? `$${v < 1 ? v.toFixed(2) : v.toFixed(0)}` : '$0'}
@@ -136,7 +136,7 @@ export function CostChart({ data }: CostChartProps) {
           <YAxis
             yAxisId="tokens"
             orientation="right"
-            tick={{ fontSize: 10, fill: '#a3a3a3', fontFamily: '"JetBrains Mono", monospace' }}
+            tick={{ fontSize: '0.625rem', fill: '#a3a3a3', fontFamily: '"JetBrains Mono", monospace' }}
             axisLine={false}
             tickLine={false}
             tickFormatter={(v: number) => formatTokens(v)}

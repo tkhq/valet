@@ -27,7 +27,7 @@ export function ReviewDiffViewer({ diffFile, findings, onApplyFinding }: ReviewD
   if (!diffFile || !diffFile.diff) {
     return (
       <div className="flex flex-1 items-center justify-center">
-        <span className="font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
+        <span className="font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">
           No diff available for this file
         </span>
       </div>
@@ -61,7 +61,7 @@ export function ReviewDiffViewer({ diffFile, findings, onApplyFinding }: ReviewD
     return (
       <button
         onClick={() => toggleFinding(finding.id)}
-        style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 6px', fontSize: '11px', cursor: 'pointer', background: 'none', border: 'none', color: 'inherit' }}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 6px', fontSize: '0.6875rem', cursor: 'pointer', background: 'none', border: 'none', color: 'inherit' }}
       >
         <SeverityDot severity={finding.severity} />
         <span>{finding.title}</span>

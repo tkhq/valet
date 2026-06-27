@@ -10,6 +10,7 @@ import type { QueueMode } from '@valet/shared';
 import { Button } from '@/components/ui/button';
 import { APIKeyList } from '@/components/settings/api-key-list';
 import { useTheme } from '@/hooks/use-theme';
+import { useFontScale } from '@/hooks/use-font-scale';
 import { ActionPolicyOverridesSection } from '@/components/settings/action-policy-overrides-section';
 import {
   ModelSelector,
@@ -91,6 +92,27 @@ function GeneralTab() {
   const user = useAuthStore((s) => s.user);
   const logoutMutation = useLogout();
   const { theme, setTheme } = useTheme();
+  const { fontScale, setFontScale, MIN_SCALE, MAX_SCALE } = useFontScale();
+  const updateProfile = useUpdateProfile();
+  const [pendingScale, setPendingScale] = React.useState(fontScale);
+
+  // Keep pending in sync if the committed value changes externally (e.g. server reconciliation)
+  React.useEffect(() => {
+    setPendingScale(fontScale);
+  }, [fontScale]);
+
+  const isDirty = pendingScale !== fontScale;
+
+  function handleApply() {
+    setFontScale(pendingScale);
+    updateProfile.mutate({ fontScale: pendingScale });
+  }
+
+  function handleReset() {
+    setPendingScale(1.0);
+    setFontScale(1.0);
+    updateProfile.mutate({ fontScale: 1.0 });
+  }
 
   return (
     <div className="space-y-6">
@@ -150,7 +172,7 @@ function GeneralTab() {
       </SettingsSection>
 
       <SettingsSection title="Appearance">
-        <div className="space-y-4">
+        <div className="space-y-6">
           <div>
             <label className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
               Theme
@@ -160,6 +182,56 @@ function GeneralTab() {
               <ThemeButton label="Dark" active={theme === 'dark'} onClick={() => setTheme('dark')} />
               <ThemeButton label="System" active={theme === 'system'} onClick={() => setTheme('system')} />
             </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                Font size
+              </label>
+              <span className="text-sm tabular-nums text-neutral-500 dark:text-neutral-400">
+                {Math.round(pendingScale * 100)}%
+              </span>
+            </div>
+            <div className="mt-3 flex items-center gap-3">
+              <span className="text-xs text-neutral-400 dark:text-neutral-500">
+                {Math.round(MIN_SCALE * 100)}%
+              </span>
+              <input
+                type="range"
+                min={MIN_SCALE}
+                max={MAX_SCALE}
+                step={0.1}
+                value={pendingScale}
+                onChange={(e) => setPendingScale(parseFloat(e.target.value))}
+                className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-neutral-200 accent-neutral-900 dark:bg-neutral-700 dark:accent-neutral-100"
+              />
+              <span className="text-xs text-neutral-400 dark:text-neutral-500">
+                {Math.round(MAX_SCALE * 100)}%
+              </span>
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleApply}
+                disabled={!isDirty}
+                className="rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 bg-neutral-900 text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300 disabled:cursor-not-allowed"
+              >
+                Apply
+              </button>
+              {fontScale !== 1.0 && (
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  className="text-xs text-neutral-400 underline-offset-2 hover:text-neutral-600 hover:underline dark:text-neutral-500 dark:hover:text-neutral-300"
+                >
+                  Reset to default
+                </button>
+              )}
+            </div>
+            <p className="mt-2 text-xs text-neutral-400 dark:text-neutral-500">
+              Scales text across the entire interface.
+            </p>
           </div>
         </div>
       </SettingsSection>
@@ -1207,7 +1279,7 @@ function ModelPreferencesSection() {
                       : 'border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800'
                   } cursor-grab active:cursor-grabbing`}
                 >
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-neutral-100 font-mono text-[10px] font-semibold text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-neutral-100 font-mono text-[0.625rem] font-semibold text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400">
                     {index + 1}
                   </span>
                   <div className="min-w-0 flex-1">

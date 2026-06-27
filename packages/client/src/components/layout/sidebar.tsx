@@ -90,7 +90,7 @@ export function Sidebar() {
                 <Link
                   to={item.href}
                   className={cn(
-                    'group flex items-center gap-3 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors',
+                    'group flex items-center gap-3 rounded-md px-2.5 py-1.5 text-[0.8125rem] font-medium transition-colors',
                     item.indent && !sidebarCollapsed && 'pl-7',
                     isActive
                       ? 'bg-accent/10 text-accent dark:bg-accent/10 dark:text-accent'
@@ -103,7 +103,7 @@ export function Sidebar() {
                       isActive ? 'text-accent' : 'text-neutral-400 group-hover:text-neutral-600 dark:text-neutral-600 dark:group-hover:text-neutral-400'
                     )} />
                     {sidebarCollapsed && badgeCount != null && badgeCount > 0 && (
-                      <span className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-accent text-[8px] font-bold text-white">
+                      <span className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-accent text-[0.5rem] font-bold text-white">
                         {badgeCount > 9 ? '9+' : badgeCount}
                       </span>
                     )}
@@ -112,7 +112,7 @@ export function Sidebar() {
                     <>
                       <span className="flex-1">{item.label}</span>
                       {badgeCount != null && badgeCount > 0 && (
-                        <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold text-white">
+                        <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1.5 text-[0.625rem] font-semibold text-white">
                           {badgeCount > 99 ? '99+' : badgeCount}
                         </span>
                       )}

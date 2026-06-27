@@ -34,7 +34,7 @@ export function SendMessageCard({ tool }: { tool: ToolCallData }) {
     >
       {message && (
         <ToolCardSection label="message">
-          <p className="font-mono text-[11px] leading-[1.6] text-neutral-600 dark:text-neutral-400">
+          <p className="font-mono text-[0.6875rem] leading-[1.6] text-neutral-600 dark:text-neutral-400">
             {message.length > 300 ? message.slice(0, 300) + '...' : message}
           </p>
         </ToolCardSection>
@@ -70,8 +70,8 @@ export function ReadMessagesCard({ tool }: { tool: ToolCallData }) {
           <div className="max-h-[240px] space-y-2 overflow-auto">
             {messages.map((msg, i) => (
               <div key={msg.id || i} className="rounded border border-neutral-100 px-2 py-1.5 dark:border-neutral-800">
-                <div className="mb-1 flex items-start gap-2 font-mono text-[11px]">
-                  <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold uppercase ${
+                <div className="mb-1 flex items-start gap-2 font-mono text-[0.6875rem]">
+                  <span className={`shrink-0 rounded px-1 py-0.5 text-[0.5625rem] font-semibold uppercase ${
                     msg.role === 'assistant'
                       ? 'bg-accent/10 text-accent'
                       : msg.role === 'user'
@@ -85,7 +85,7 @@ export function ReadMessagesCard({ tool }: { tool: ToolCallData }) {
                   </span>
                 </div>
                 {msg.parts !== undefined && (
-                  <ToolCodeBlock maxHeight="160px" className="border-t border-neutral-100 pt-1 text-[10px] dark:border-neutral-800">
+                  <ToolCodeBlock maxHeight="160px" className="border-t border-neutral-100 pt-1 text-[0.625rem] dark:border-neutral-800">
                     {JSON.stringify(msg.parts, null, 2)}
                   </ToolCodeBlock>
                 )}
@@ -97,7 +97,7 @@ export function ReadMessagesCard({ tool }: { tool: ToolCallData }) {
 
       {messages && messages.length === 0 && (
         <ToolCardSection>
-          <p className="font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
+          <p className="font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">
             No messages found
           </p>
         </ToolCardSection>

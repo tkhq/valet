@@ -42,17 +42,17 @@ export function FindingCard({ finding, compact, onApply, onNavigate, onClose }: 
         <div className="flex flex-wrap items-center gap-1.5">
           <span
             className={cn(
-              'inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[10px] font-bold',
+              'inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[0.625rem] font-bold',
               severityConfig.bg
             )}
           >
             {severityConfig.label}
           </span>
-          <span className="inline-flex items-center rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
+          <span className="inline-flex items-center rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[0.625rem] text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
             {finding.category}
           </span>
           {finding.applied && (
-            <span className="inline-flex items-center gap-0.5 rounded bg-green-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-green-700 dark:bg-green-900/40 dark:text-green-400">
+            <span className="inline-flex items-center gap-0.5 rounded bg-green-100 px-1.5 py-0.5 font-mono text-[0.625rem] font-medium text-green-700 dark:bg-green-900/40 dark:text-green-400">
               <CheckIcon className="h-2.5 w-2.5" />
               Applied
             </span>
@@ -72,24 +72,24 @@ export function FindingCard({ finding, compact, onApply, onNavigate, onClose }: 
         </div>
       </div>
 
-      <p className={cn('mt-1.5 font-sans text-[12px] font-medium text-neutral-900 dark:text-neutral-100', compact && 'text-[11px]')}>
+      <p className={cn('mt-1.5 font-sans text-[0.75rem] font-medium text-neutral-900 dark:text-neutral-100', compact && 'text-[0.6875rem]')}>
         {finding.title}
       </p>
 
       {!compact && (
-        <p className="mt-1 break-words font-sans text-[11px] leading-relaxed text-neutral-600 dark:text-neutral-400">
+        <p className="mt-1 break-words font-sans text-[0.6875rem] leading-relaxed text-neutral-600 dark:text-neutral-400">
           {finding.description}
         </p>
       )}
 
       {!compact && finding.suggestedFix && (
-        <pre className="mt-2 max-w-full overflow-x-auto rounded bg-neutral-100 p-2 font-mono text-[10px] text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
+        <pre className="mt-2 max-w-full overflow-x-auto rounded bg-neutral-100 p-2 font-mono text-[0.625rem] text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
           {finding.suggestedFix}
         </pre>
       )}
 
       {!compact && (
-        <div className="mt-1 truncate font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+        <div className="mt-1 truncate font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
           {finding.file}:{finding.lineStart}
           {finding.lineEnd !== finding.lineStart && `-${finding.lineEnd}`}
         </div>
@@ -101,7 +101,7 @@ export function FindingCard({ finding, compact, onApply, onNavigate, onClose }: 
             variant="secondary"
             size="sm"
             onClick={onApply}
-            className="h-5 px-2 text-[10px]"
+            className="h-5 px-2 text-[0.625rem]"
           >
             Apply Fix
           </Button>
@@ -111,7 +111,7 @@ export function FindingCard({ finding, compact, onApply, onNavigate, onClose }: 
             variant="ghost"
             size="sm"
             onClick={onNavigate}
-            className="h-5 px-2 text-[10px] text-neutral-500"
+            className="h-5 px-2 text-[0.625rem] text-neutral-500"
           >
             Go to line
           </Button>

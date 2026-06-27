@@ -55,10 +55,10 @@ export function SpawnSessionCard({ tool }: { tool: ToolCallData }) {
         {/* Task description */}
         {args.task && (
           <div className="mb-2">
-            <div className="mb-0.5 font-mono text-[9px] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+            <div className="mb-0.5 font-mono text-[0.5625rem] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
               task
             </div>
-            <p className="font-mono text-[11px] leading-[1.6] text-neutral-600 dark:text-neutral-400">
+            <p className="font-mono text-[0.6875rem] leading-[1.6] text-neutral-600 dark:text-neutral-400">
               {args.task.length > 200 ? args.task.slice(0, 200) + '...' : args.task}
             </p>
           </div>
@@ -69,7 +69,7 @@ export function SpawnSessionCard({ tool }: { tool: ToolCallData }) {
 
         {/* Show child session ID as fallback if not yet resolved */}
         {!childSessionId && tool.status === 'completed' && (
-          <p className="font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
+          <p className="font-mono text-[0.6875rem] text-neutral-500 dark:text-neutral-400">
             {typeof tool.result === 'string' ? tool.result : 'Session spawned'}
           </p>
         )}
@@ -87,7 +87,7 @@ function ChildSessionDetail({ sessionId }: { sessionId: string }) {
   const totalDeletions = filesChanged?.reduce((sum, f) => sum + (f.deletions ?? 0), 0) ?? 0;
 
   return (
-    <div className="space-y-1.5 font-mono text-[11px]">
+    <div className="space-y-1.5 font-mono text-[0.6875rem]">
       {/* Status */}
       <div className="flex items-center gap-2">
         <span className="w-16 shrink-0 text-neutral-400 dark:text-neutral-500">Status</span>
@@ -106,7 +106,7 @@ function ChildSessionDetail({ sessionId }: { sessionId: string }) {
           className="text-accent hover:underline"
         >
           {sessionId.slice(0, 8)}...
-          <span className="ml-1 text-[10px]">&rarr;</span>
+          <span className="ml-1 text-[0.625rem]">&rarr;</span>
         </Link>
       </div>
 
@@ -164,7 +164,7 @@ function ChildSessionDetail({ sessionId }: { sessionId: string }) {
               `#${gitState.prNumber}`
             )}
             {gitState.prState && (
-              <span className={`ml-1.5 rounded px-1 py-0.5 text-[9px] font-medium uppercase ${
+              <span className={`ml-1.5 rounded px-1 py-0.5 text-[0.5625rem] font-medium uppercase ${
                 gitState.prState === 'merged'
                   ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
                   : gitState.prState === 'closed'

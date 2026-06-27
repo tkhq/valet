@@ -111,7 +111,7 @@
   .markdown-body h3 { @apply text-sm font-semibold; }
   .markdown-body h4,
   .markdown-body h5,
-  .markdown-body h6 { @apply text-[13px] font-semibold; }
+  .markdown-body h6 { @apply text-[0.8125rem] font-semibold; }
 
   .markdown-body p {
     @apply my-2 text-pretty;
@@ -185,7 +185,7 @@
   }
 
   .markdown-body table {
-    @apply my-2 w-full border-collapse text-[12px];
+    @apply my-2 w-full border-collapse text-[0.75rem];
   }
 
   .markdown-body th,

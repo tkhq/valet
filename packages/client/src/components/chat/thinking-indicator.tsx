@@ -25,7 +25,7 @@ export function ThinkingIndicator({ status = 'thinking', detail }: ThinkingIndic
 
       <div className="min-w-0 flex-1">
         <div className="mb-1.5 flex items-baseline gap-2">
-          <span className="font-mono text-[11px] font-semibold tracking-tight text-neutral-800 dark:text-neutral-200">
+          <span className="font-mono text-[0.6875rem] font-semibold tracking-tight text-neutral-800 dark:text-neutral-200">
             Agent
           </span>
         </div>
@@ -37,7 +37,7 @@ export function ThinkingIndicator({ status = 'thinking', detail }: ThinkingIndic
               <span className="h-1 w-1 animate-bounce rounded-full bg-accent/50 [animation-delay:-0.15s]" />
               <span className="h-1 w-1 animate-bounce rounded-full bg-accent/50" />
             </div>
-            <span className="font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+            <span className="font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
               {label}
             </span>
           </div>

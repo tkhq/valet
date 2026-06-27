@@ -32,7 +32,7 @@ export function QuestionCard({ tool }: { tool: ToolCallData }) {
       {hasContent ? (
         <ToolCardSection>
           {isWaiting && (
-            <p className="mb-2 text-[11px] text-neutral-500 dark:text-neutral-400">
+            <p className="mb-2 text-[0.6875rem] text-neutral-500 dark:text-neutral-400">
               Waiting for user response.
             </p>
           )}
@@ -53,11 +53,11 @@ export function QuestionCard({ tool }: { tool: ToolCallData }) {
             return (
               <div key={i} className={i > 0 ? 'mt-3 border-t border-neutral-100 pt-3 dark:border-neutral-800' : ''}>
                 {question.header && (
-                  <div className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+                  <div className="mb-1.5 font-mono text-[0.625rem] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
                     {question.header}
                   </div>
                 )}
-                <p className="mb-2 text-[12px] leading-relaxed text-neutral-700 dark:text-neutral-300">
+                <p className="mb-2 text-[0.75rem] leading-relaxed text-neutral-700 dark:text-neutral-300">
                   {question.question}
                 </p>
                 {hasOptions && (
@@ -91,13 +91,13 @@ export function QuestionCard({ tool }: { tool: ToolCallData }) {
                           <div className="min-w-0">
                             <span className={
                               isSelected
-                                ? 'font-mono text-[11px] font-medium text-accent'
-                                : 'font-mono text-[11px] text-neutral-600 dark:text-neutral-400'
+                                ? 'font-mono text-[0.6875rem] font-medium text-accent'
+                                : 'font-mono text-[0.6875rem] text-neutral-600 dark:text-neutral-400'
                             }>
                               {label}
                             </span>
                             {opt.description && (
-                              <p className="mt-0.5 text-[10px] leading-snug text-neutral-400 dark:text-neutral-500">
+                              <p className="mt-0.5 text-[0.625rem] leading-snug text-neutral-400 dark:text-neutral-500">
                                 {opt.description}
                               </p>
                             )}
@@ -109,16 +109,16 @@ export function QuestionCard({ tool }: { tool: ToolCallData }) {
                 )}
                 {(answerList.length > 0 && (!hasOptions || unmatchedAnswers.length > 0)) && (
                   <div className="mt-2 rounded-md border border-accent/20 bg-accent/5 px-2 py-1.5">
-                    <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+                    <span className="font-mono text-[0.625rem] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
                       {answerList.length > 1 ? 'Answers' : 'Answer'}
                     </span>
-                    <p className="mt-0.5 font-mono text-[11px] text-neutral-700 dark:text-neutral-300">
+                    <p className="mt-0.5 font-mono text-[0.6875rem] text-neutral-700 dark:text-neutral-300">
                       {answerList.join(', ')}
                     </p>
                   </div>
                 )}
                 {question.multiple && (
-                  <p className="mt-2 text-[10px] text-neutral-400 dark:text-neutral-500">
+                  <p className="mt-2 text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                     Multiple selections were allowed for this question.
                   </p>
                 )}
@@ -126,7 +126,7 @@ export function QuestionCard({ tool }: { tool: ToolCallData }) {
             );
           })}
           {questions.length === 0 && (resultOutput || resultStr) && (
-            <p className="text-[12px] leading-relaxed text-neutral-700 dark:text-neutral-300">
+            <p className="text-[0.75rem] leading-relaxed text-neutral-700 dark:text-neutral-300">
               {resultOutput || resultStr}
             </p>
           )}

@@ -316,7 +316,7 @@ function MemberSuggestionRow({
     >
       <Avatar className="h-5 w-5">
         {user.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.name || ''} />}
-        <AvatarFallback className="text-[8px]">{initials}</AvatarFallback>
+        <AvatarFallback className="text-[0.5rem]">{initials}</AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1">
         <span className="block truncate text-sm text-neutral-900 dark:text-neutral-100">
@@ -366,7 +366,7 @@ function ParticipantRow({
           {participant.userAvatarUrl && (
             <AvatarImage src={participant.userAvatarUrl} alt={participant.userName || ''} />
           )}
-          <AvatarFallback className="text-[9px]">{initials}</AvatarFallback>
+          <AvatarFallback className="text-[0.5625rem]">{initials}</AvatarFallback>
         </Avatar>
         <div className="min-w-0">
           <span className="block truncate text-sm text-neutral-900 dark:text-neutral-100">

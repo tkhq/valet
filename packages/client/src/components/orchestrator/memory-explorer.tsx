@@ -688,7 +688,7 @@ function FileContentPreview({ path }: { path: string }) {
           Failed to load file content
         </div>
       ) : file ? (
-        <pre className="max-h-48 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed text-neutral-600 dark:text-neutral-400">
+        <pre className="max-h-48 overflow-auto px-3 py-2 font-mono text-[0.6875rem] leading-relaxed text-neutral-600 dark:text-neutral-400">
           {file.content || <span className="italic text-neutral-300 dark:text-neutral-600">(empty)</span>}
         </pre>
       ) : (

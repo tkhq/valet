@@ -54,10 +54,10 @@ export function IframePanel({ src, token, title, isLoading, statusMessage, class
       <div className={cn('flex items-center justify-center bg-surface-0 text-neutral-500 dark:bg-surface-0 dark:text-neutral-400', className)}>
         <div className="text-center">
           <div className="mx-auto mb-3 h-5 w-5 rounded-full border-2 border-red-300 dark:border-red-600 flex items-center justify-center">
-            <span className="text-red-500 text-[10px] font-bold">!</span>
+            <span className="text-red-500 text-[0.625rem] font-bold">!</span>
           </div>
-          <p className="font-mono text-[11px] text-red-600 dark:text-red-400">Sandbox token unavailable</p>
-          <p className="font-mono text-[10px] mt-1 text-neutral-400 dark:text-neutral-500">The sandbox may still be starting up. Token will retry automatically.</p>
+          <p className="font-mono text-[0.6875rem] text-red-600 dark:text-red-400">Sandbox token unavailable</p>
+          <p className="font-mono text-[0.625rem] mt-1 text-neutral-400 dark:text-neutral-500">The sandbox may still be starting up. Token will retry automatically.</p>
         </div>
       </div>
     );
@@ -70,7 +70,7 @@ export function IframePanel({ src, token, title, isLoading, statusMessage, class
           {!statusMessage && (
             <div className="mx-auto mb-3 h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-accent dark:border-neutral-600 dark:border-t-accent" />
           )}
-          <p className="font-mono text-[11px]">
+          <p className="font-mono text-[0.6875rem]">
             {statusMessage ?? (isLoading ? `Loading ${title}...` : 'Waiting for sandbox...')}
           </p>
         </div>
@@ -84,7 +84,7 @@ export function IframePanel({ src, token, title, isLoading, statusMessage, class
         <div className="absolute inset-0 flex items-center justify-center bg-surface-0 text-neutral-500 dark:bg-surface-0 dark:text-neutral-400">
           <div className="text-center">
             <div className="mx-auto mb-3 h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-accent dark:border-neutral-600 dark:border-t-accent" />
-            <p className="font-mono text-[11px]">Connecting to {title}...</p>
+            <p className="font-mono text-[0.6875rem]">Connecting to {title}...</p>
           </div>
         </div>
       )}

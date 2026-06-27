@@ -17,7 +17,7 @@ type ToolbarGroup = ToolbarItem[];
 
 const toolbarGroups: ToolbarGroup[] = [
   [
-    { format: 'heading', label: 'Heading', icon: <span className="text-[11px] font-semibold">H2</span> },
+    { format: 'heading', label: 'Heading', icon: <span className="text-[0.6875rem] font-semibold">H2</span> },
   ],
   [
     { format: 'bulletList', label: 'Bulleted list', icon: <ListIcon ordered={false} /> },

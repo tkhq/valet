@@ -58,7 +58,7 @@ export function LogsPanel({ entries, className }: LogsPanelProps) {
     <div
       ref={scrollRef}
       className={cn(
-        'overflow-y-auto bg-neutral-950 p-3 font-mono text-[12px] leading-5',
+        'overflow-y-auto bg-neutral-950 p-3 font-mono text-[0.75rem] leading-5',
         className
       )}
     >

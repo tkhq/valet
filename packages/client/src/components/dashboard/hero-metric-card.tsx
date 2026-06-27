@@ -24,18 +24,18 @@ export function HeroMetricCard({ icon, label, value, userValue, delta, tooltip, 
         <span className="label-mono text-neutral-400">{label}</span>
       </div>
       <div className="mt-3 flex items-baseline gap-2.5">
-        <span className="text-[28px] font-semibold leading-none tabular-nums tracking-tight text-neutral-900 dark:text-neutral-100 animate-number-in" style={{ animationDelay: `${index * 60 + 120}ms` }}>
+        <span className="text-[1.75rem] font-semibold leading-none tabular-nums tracking-tight text-neutral-900 dark:text-neutral-100 animate-number-in" style={{ animationDelay: `${index * 60 + 120}ms` }}>
           {value}
         </span>
         {userValue !== undefined && (
-          <span className="font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
+          <span className="font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">
             You: {userValue}
           </span>
         )}
         {delta !== undefined && delta !== 0 && (
           <span
             className={cn(
-              'inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] font-medium tabular-nums leading-none',
+              'inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 font-mono text-[0.625rem] font-medium tabular-nums leading-none',
               delta > 0
                 ? 'bg-emerald-500/8 text-emerald-600'
                 : 'bg-red-500/8 text-red-600'

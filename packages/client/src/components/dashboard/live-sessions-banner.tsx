@@ -15,7 +15,7 @@ export function LiveSessionsBanner({ sessions }: LiveSessionsBannerProps) {
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
           <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
         </span>
-        <span className="text-[13px] font-medium text-emerald-700 dark:text-emerald-400">
+        <span className="text-[0.8125rem] font-medium text-emerald-700 dark:text-emerald-400">
           {sessions.length} active {sessions.length === 1 ? 'session' : 'sessions'}
         </span>
         <div className="ml-auto flex items-center gap-1.5">

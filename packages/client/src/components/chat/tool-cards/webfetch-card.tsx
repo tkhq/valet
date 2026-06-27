@@ -43,12 +43,12 @@ export function WebFetchCard({ tool }: { tool: ToolCallData }) {
                 href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="break-all font-mono text-[11px] text-accent hover:underline"
+                className="break-all font-mono text-[0.6875rem] text-accent hover:underline"
               >
                 {url}
               </a>
               {prompt && (
-                <p className="mt-1 font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
+                <p className="mt-1 font-mono text-[0.6875rem] text-neutral-500 dark:text-neutral-400">
                   {prompt}
                 </p>
               )}

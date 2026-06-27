@@ -286,6 +286,7 @@ export interface User {
   modelPreferences?: string[];
   uiQueueMode?: QueueMode;
   timezone?: string;
+  fontScale?: number;
   role: UserRole;
   createdAt: Date;
   updatedAt: Date;

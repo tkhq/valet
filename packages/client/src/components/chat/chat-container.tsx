@@ -433,13 +433,13 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
                   if (e.key === 'Enter') saveTitle();
                   if (e.key === 'Escape') setIsEditingTitle(false);
                 }}
-                className="min-w-[120px] max-w-[300px] rounded-sm border border-accent/30 bg-transparent px-1.5 py-0.5 font-sans text-[13px] font-semibold text-neutral-900 outline-none selection:bg-accent/20 dark:text-neutral-100"
+                className="min-w-[120px] max-w-[300px] rounded-sm border border-accent/30 bg-transparent px-1.5 py-0.5 font-sans text-[0.8125rem] font-semibold text-neutral-900 outline-none selection:bg-accent/20 dark:text-neutral-100"
                 placeholder="Session title..."
               />
             ) : (
               <button
                 onClick={startEditingTitle}
-                className="group flex items-center gap-1.5 truncate rounded-sm px-1 py-0.5 text-[13px] font-semibold text-neutral-900 transition-colors hover:bg-surface-1 dark:text-neutral-100 dark:hover:bg-surface-2"
+                className="group flex items-center gap-1.5 truncate rounded-sm px-1 py-0.5 text-[0.8125rem] font-semibold text-neutral-900 transition-colors hover:bg-surface-1 dark:text-neutral-100 dark:hover:bg-surface-2"
                 title="Click to edit title"
               >
                 <span className="truncate">{displayTitle}</span>
@@ -489,33 +489,33 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
       {/* Desktop action toolbar */}
       {!isMobile && (
         <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-neutral-100 bg-surface-0 px-2 dark:border-neutral-800/50 dark:bg-surface-0">
-          <Button variant="ghost" size="sm" onClick={drawer.toggleVscode} className="h-6 gap-1 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
+          <Button variant="ghost" size="sm" onClick={drawer.toggleVscode} className="h-6 gap-1 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
             <EditorIcon className="h-3 w-3" />
             VS Code
           </Button>
-          <Button variant="ghost" size="sm" onClick={drawer.toggleDesktop} className="h-6 gap-1 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
+          <Button variant="ghost" size="sm" onClick={drawer.toggleDesktop} className="h-6 gap-1 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
             <DesktopIcon className="h-3 w-3" />
             Desktop
           </Button>
-          <Button variant="ghost" size="sm" onClick={drawer.toggleTerminal} className="h-6 gap-1 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
+          <Button variant="ghost" size="sm" onClick={drawer.toggleTerminal} className="h-6 gap-1 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
             <TerminalIcon className="h-3 w-3" />
             Terminal
           </Button>
-          <Button variant="ghost" size="sm" onClick={drawer.toggleFiles} className="h-6 gap-1 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
+          <Button variant="ghost" size="sm" onClick={drawer.toggleFiles} className="h-6 gap-1 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
             <FilesIcon className="h-3 w-3" />
             Files
           </Button>
-          <Button variant="ghost" size="sm" onClick={drawer.toggleReview} className="h-6 gap-1 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
+          <Button variant="ghost" size="sm" onClick={drawer.toggleReview} className="h-6 gap-1 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
             <ReviewIcon className="h-3 w-3" />
             Review
           </Button>
-          <Button variant="ghost" size="sm" onClick={drawer.toggleLogs} className="h-6 gap-1 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
+          <Button variant="ghost" size="sm" onClick={drawer.toggleLogs} className="h-6 gap-1 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
             <LogsIcon className="h-3 w-3" />
             Logs
           </Button>
           {gitState?.prUrl && (
             <a href={gitState.prUrl} target="_blank" rel="noopener noreferrer">
-              <Button variant="ghost" size="sm" className="h-6 gap-1 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
+              <Button variant="ghost" size="sm" className="h-6 gap-1 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200">
                 <PRIcon className="h-3 w-3" />
                 PR
                 {gitState.prState && (
@@ -618,27 +618,27 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
           {pendingIsForThisThread && pendingFollowup && (
             <div className="border-t border-neutral-100 bg-surface-0 px-3 py-2 dark:border-neutral-800/50 dark:bg-surface-0">
               <div className="mb-1 flex items-center justify-between">
-                <span className="font-mono text-[10px] text-amber-700 dark:text-amber-300">
+                <span className="font-mono text-[0.625rem] text-amber-700 dark:text-amber-300">
                   1 queued — Enter to dispatch now
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={handleEditPending}
-                    className="rounded px-1.5 py-0.5 font-mono text-[10px] text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/30"
+                    className="rounded px-1.5 py-0.5 font-mono text-[0.625rem] text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/30"
                   >
                     edit
                   </button>
                   <button
                     type="button"
                     onClick={handleCancelPending}
-                    className="rounded px-1.5 py-0.5 font-mono text-[10px] text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+                    className="rounded px-1.5 py-0.5 font-mono text-[0.625rem] text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
                   >
                     cancel
                   </button>
                 </div>
               </div>
-              <div className="rounded-md border border-amber-200 bg-amber-50/70 px-2 py-1 font-mono text-[11px] text-amber-900 dark:border-amber-800/50 dark:bg-amber-900/20 dark:text-amber-100">
+              <div className="rounded-md border border-amber-200 bg-amber-50/70 px-2 py-1 font-mono text-[0.6875rem] text-amber-900 dark:border-amber-800/50 dark:bg-amber-900/20 dark:text-amber-100">
                 <div className="truncate">
                   {pendingFollowup.content || '[attachment]'}
                 </div>
@@ -843,7 +843,7 @@ function StuckWakingRestart({ sessionId }: { sessionId: string }) {
       size="sm"
       onClick={handleRestart}
       disabled={isPending}
-      className="h-5 px-1.5 text-[10px] font-medium text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+      className="h-5 px-1.5 text-[0.625rem] font-medium text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
     >
       {isPending ? 'Restarting...' : 'Restart'}
     </Button>
@@ -969,7 +969,7 @@ function IntegrationReauthBanner({
       <div className="flex items-start gap-2">
         <WarningIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0 flex-1">
-          <p className="font-mono text-[11px] font-medium text-amber-800 dark:text-amber-200">
+          <p className="font-mono text-[0.6875rem] font-medium text-amber-800 dark:text-amber-200">
             {hasDiscoveryFailure ? 'Integration tool discovery failed' : 'Integration authorization expired'}
           </p>
           <div className="mt-1 space-y-1">
@@ -977,10 +977,10 @@ function IntegrationReauthBanner({
               <div key={err.service} className="flex items-start gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-[11px] text-amber-700 dark:text-amber-300">
+                    <span className="font-mono text-[0.6875rem] text-amber-700 dark:text-amber-300">
                       {err.displayName}
                     </span>
-                    <span className="font-mono text-[10px] text-amber-600/80 dark:text-amber-400/80">
+                    <span className="font-mono text-[0.625rem] text-amber-600/80 dark:text-amber-400/80">
                       {err.reason}
                     </span>
                     {isIntegrationAuthReason(err.reason) ? (
@@ -988,21 +988,21 @@ function IntegrationReauthBanner({
                         variant="ghost"
                         size="sm"
                         onClick={() => handleReauthorize(err.service)}
-                        className="h-5 px-1.5 font-mono text-[10px] font-semibold text-amber-700 hover:bg-amber-200/60 hover:text-amber-900 dark:text-amber-300 dark:hover:bg-amber-800/40 dark:hover:text-amber-100"
+                        className="h-5 px-1.5 font-mono text-[0.625rem] font-semibold text-amber-700 hover:bg-amber-200/60 hover:text-amber-900 dark:text-amber-300 dark:hover:bg-amber-800/40 dark:hover:text-amber-100"
                       >
                         Reauthorize
                       </Button>
                     ) : (
                       <a
                         href="/integrations"
-                        className="rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-700 hover:bg-amber-200/60 hover:text-amber-900 dark:text-amber-300 dark:hover:bg-amber-800/40 dark:hover:text-amber-100"
+                        className="rounded px-1.5 py-0.5 font-mono text-[0.625rem] font-semibold text-amber-700 hover:bg-amber-200/60 hover:text-amber-900 dark:text-amber-300 dark:hover:bg-amber-800/40 dark:hover:text-amber-100"
                       >
                         Settings
                       </a>
                     )}
                   </div>
                   {err.message && (
-                    <p className="mt-0.5 break-words font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80">
+                    <p className="mt-0.5 break-words font-mono text-[0.625rem] text-amber-700/80 dark:text-amber-300/80">
                       {err.message}
                     </p>
                   )}

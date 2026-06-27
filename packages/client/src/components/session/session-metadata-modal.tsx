@@ -54,7 +54,7 @@ export function SessionMetadataModal({
         >
           {/* Header */}
           <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/50 px-4">
-            <Dialog.Title className="flex items-center gap-2.5 font-mono text-[13px] font-semibold text-neutral-900 dark:text-neutral-100">
+            <Dialog.Title className="flex items-center gap-2.5 font-mono text-[0.8125rem] font-semibold text-neutral-900 dark:text-neutral-100">
               <div className="flex h-6 w-6 items-center justify-center rounded-md bg-neutral-100 dark:bg-neutral-800">
                 <InfoIcon className="h-3.5 w-3.5 text-neutral-500 dark:text-neutral-400" />
               </div>

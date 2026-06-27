@@ -35,7 +35,7 @@ export function DiffDialog({ open, onOpenChange, files, loading }: DiffDialogPro
 
           {!loading && (!files || files.length === 0) && (
             <div className="flex flex-col items-center justify-center py-10 text-center">
-              <p className="text-[13px] text-neutral-500 dark:text-neutral-400">
+              <p className="text-[0.8125rem] text-neutral-500 dark:text-neutral-400">
                 No file changes detected.
               </p>
             </div>
@@ -68,7 +68,7 @@ function DiffFileEntry({ file }: { file: DiffFile }) {
         disabled={!hasDiff}
       >
         <StatusBadge status={file.status} />
-        <span className="flex-1 truncate font-mono text-[12px] text-neutral-800 dark:text-neutral-200">
+        <span className="flex-1 truncate font-mono text-[0.75rem] text-neutral-800 dark:text-neutral-200">
           {file.path}
         </span>
         {hasDiff && (
@@ -114,7 +114,7 @@ function StatusBadge({ status }: { status: DiffFile['status'] }) {
   }[status];
 
   return (
-    <span className={cn('inline-flex h-5 w-5 items-center justify-center rounded font-mono text-[10px] font-bold', config.bg)}>
+    <span className={cn('inline-flex h-5 w-5 items-center justify-center rounded font-mono text-[0.625rem] font-bold', config.bg)}>
       {config.label}
     </span>
   );

@@ -73,10 +73,10 @@ export function MobileNavMenu({ className }: MobileNavMenuProps) {
                 V
               </div>
               <div className="flex flex-col">
-                <span className="font-mono text-[13px] font-semibold tracking-tight text-neutral-900 dark:text-neutral-100">
+                <span className="font-mono text-[0.8125rem] font-semibold tracking-tight text-neutral-900 dark:text-neutral-100">
                   valet
                 </span>
-                <span className="font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+                <span className="font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                   v1.0
                 </span>
               </div>
@@ -126,7 +126,7 @@ export function MobileNavMenu({ className }: MobileNavMenuProps) {
                       className={cn(
                         // 44px minimum height for touch
                         'group flex items-center gap-3.5 rounded-lg px-3.5 py-3 min-h-[44px]',
-                        'text-[14px] font-medium',
+                        'text-[0.875rem] font-medium',
                         'transition-all duration-150',
                         'active:scale-[0.98]',
                         isActive
@@ -165,7 +165,7 @@ export function MobileNavMenu({ className }: MobileNavMenuProps) {
           <div className="absolute bottom-0 left-0 right-0 border-t border-border/30 p-4">
             <div className="flex items-center gap-2 text-neutral-400 dark:text-neutral-500">
               <div className="h-px flex-1 bg-gradient-to-r from-border/50 to-transparent" />
-              <span className="font-mono text-[9px] uppercase tracking-[0.15em]">
+              <span className="font-mono text-[0.5625rem] uppercase tracking-[0.15em]">
                 Background Agents
               </span>
               <div className="h-px flex-1 bg-gradient-to-l from-border/50 to-transparent" />

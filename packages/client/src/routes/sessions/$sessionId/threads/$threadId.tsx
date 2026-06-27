@@ -71,7 +71,7 @@ function ThreadDetailPage() {
             to="/sessions/$sessionId/threads"
             params={{ sessionId }}
             search={{ page: undefined }}
-            className="font-mono text-[11px] text-neutral-400 transition-colors hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200"
+            className="font-mono text-[0.6875rem] text-neutral-400 transition-colors hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200"
           >
             &larr; Threads
           </Link>
@@ -105,7 +105,7 @@ function ThreadDetailPage() {
               </h1>
             )}
             {thread && (
-              <div className="flex items-center gap-2 font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+              <div className="flex items-center gap-2 font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                 <span>{messages.length} {messages.length === 1 ? 'message' : 'messages'}</span>
                 <span>&middot;</span>
                 <span>{formatRelativeTime(thread.lastActiveAt)}</span>
@@ -133,7 +133,7 @@ function ThreadDetailPage() {
                 const ids = { sessionId, threadId };
                 copyTextToClipboard(exportTranscript(title, messages, ids));
               }}
-              className="rounded-md px-2.5 py-1.5 font-mono text-[10px] text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+              className="rounded-md px-2.5 py-1.5 font-mono text-[0.625rem] text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
               title="Copy full thread to clipboard"
             >
               Copy
@@ -145,7 +145,7 @@ function ThreadDetailPage() {
                 const ids = { sessionId, threadId };
                 downloadTranscript(title, messages, ids);
               }}
-              className="rounded-md px-2.5 py-1.5 font-mono text-[10px] text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+              className="rounded-md px-2.5 py-1.5 font-mono text-[0.625rem] text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
               title="Download full thread as text file"
             >
               Download
@@ -159,14 +159,14 @@ function ThreadDetailPage() {
         <div className="flex flex-1 items-center justify-center">
           <div className="flex items-center gap-2">
             <div className="h-3 w-3 animate-spin rounded-full border border-neutral-300 border-t-transparent dark:border-neutral-600 dark:border-t-transparent" />
-            <span className="font-mono text-[11px] text-neutral-400">Loading thread...</span>
+            <span className="font-mono text-[0.6875rem] text-neutral-400">Loading thread...</span>
           </div>
         </div>
       )}
 
       {isError && (
         <div className="flex flex-1 items-center justify-center">
-          <span className="font-mono text-[11px] text-red-500">Failed to load thread.</span>
+          <span className="font-mono text-[0.6875rem] text-red-500">Failed to load thread.</span>
         </div>
       )}
 
@@ -180,7 +180,7 @@ function ThreadDetailPage() {
               type="button"
               onClick={handleContinue}
               disabled={continueThread.isPending}
-              className="rounded-md bg-accent px-4 py-2 font-mono text-[12px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+              className="rounded-md bg-accent px-4 py-2 font-mono text-[0.75rem] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
             >
               {continueThread.isPending ? 'Continuing...' : 'Continue Thread'}
             </button>

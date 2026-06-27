@@ -44,7 +44,7 @@ export function GlobCard({ tool }: { tool: ToolCallData }) {
                 return (
                   <div
                     key={i}
-                    className="flex items-center gap-1.5 rounded px-1 py-0.5 font-mono text-[11px] hover:bg-neutral-50 dark:hover:bg-white/[0.02]"
+                    className="flex items-center gap-1.5 rounded px-1 py-0.5 font-mono text-[0.6875rem] hover:bg-neutral-50 dark:hover:bg-white/[0.02]"
                   >
                     {isDir ? (
                       <FolderIcon className="h-3 w-3 shrink-0 text-amber-500/70 dark:text-amber-400/60" />

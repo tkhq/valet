@@ -38,7 +38,7 @@ export function EditCard({ tool }: { tool: ToolCallData }) {
           <span className="text-neutral-500 dark:text-neutral-400">{dirPath}</span>
           <span className="font-semibold text-neutral-700 dark:text-neutral-200">{fileName}</span>
           {replaceAll && (
-            <span className="rounded bg-amber-100 px-1 py-px text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+            <span className="rounded bg-amber-100 px-1 py-px text-[0.5625rem] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
               all
             </span>
           )}
@@ -55,7 +55,7 @@ export function EditCard({ tool }: { tool: ToolCallData }) {
             />
           </PierreWrapper>
           {resultStr && (
-            <p className="mt-1.5 font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+            <p className="mt-1.5 font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
               {resultStr}
             </p>
           )}
@@ -63,12 +63,12 @@ export function EditCard({ tool }: { tool: ToolCallData }) {
       ) : (tool.args != null || resultStr) ? (
         <ToolCardSection>
           {tool.args != null && (
-            <pre className="overflow-auto font-mono text-[11px] leading-[1.6] text-neutral-500 dark:text-neutral-400" style={{ maxHeight: '200px' }}>
+            <pre className="overflow-auto font-mono text-[0.6875rem] leading-[1.6] text-neutral-500 dark:text-neutral-400" style={{ maxHeight: '200px' }}>
               {typeof tool.args === 'string' ? tool.args : JSON.stringify(tool.args, null, 2)}
             </pre>
           )}
           {resultStr && (
-            <p className="mt-1.5 border-t border-neutral-100 pt-1.5 font-mono text-[10px] text-neutral-400 dark:border-neutral-800 dark:text-neutral-500">
+            <p className="mt-1.5 border-t border-neutral-100 pt-1.5 font-mono text-[0.625rem] text-neutral-400 dark:border-neutral-800 dark:text-neutral-500">
               {resultStr}
             </p>
           )}

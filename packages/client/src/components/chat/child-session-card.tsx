@@ -38,7 +38,7 @@ export function ChildSessionCard({ event, summary }: ChildSessionCardProps) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate font-mono text-[11px] font-semibold text-neutral-800 dark:text-neutral-200">
+            <span className="truncate font-mono text-[0.6875rem] font-semibold text-neutral-800 dark:text-neutral-200">
               {title}
             </span>
             <Badge variant={statusVariant[status] ?? 'default'} className="shrink-0 text-2xs">
@@ -58,7 +58,7 @@ export function ChildSessionCard({ event, summary }: ChildSessionCardProps) {
             )}
           </div>
           {workspace && (
-            <span className="mt-0.5 block truncate font-mono text-[9px] text-neutral-400 dark:text-neutral-500">
+            <span className="mt-0.5 block truncate font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-500">
               {workspace}
             </span>
           )}
@@ -124,7 +124,7 @@ function CompletedSessionsToggle({
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-1 font-mono text-[10px] text-neutral-400 transition-colors hover:text-neutral-600 dark:bg-neutral-800 dark:hover:text-neutral-300"
+        className="flex items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-1 font-mono text-[0.625rem] text-neutral-400 transition-colors hover:text-neutral-600 dark:bg-neutral-800 dark:hover:text-neutral-300"
       >
         <ChevronIcon expanded={expanded} />
         {events.length} completed session{events.length !== 1 ? 's' : ''}
@@ -142,7 +142,7 @@ function CompletedSessionsToggle({
             <button
               type="button"
               onClick={() => setVisibleCount((v) => v + PAGE_SIZE)}
-              className="mx-auto block font-mono text-[10px] text-neutral-400 transition-colors hover:text-neutral-600 dark:hover:text-neutral-300"
+              className="mx-auto block font-mono text-[0.625rem] text-neutral-400 transition-colors hover:text-neutral-600 dark:hover:text-neutral-300"
             >
               Show {Math.min(remaining, PAGE_SIZE)} more
             </button>

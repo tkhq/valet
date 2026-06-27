@@ -221,7 +221,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
       {!embedded && (
         <>
           <div className={`flex h-10 shrink-0 items-center border-b border-border ${compact ? 'px-2' : 'px-3'}`}>
-            <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.1em] text-neutral-400 dark:text-neutral-500">
+            <span className="font-mono text-[0.5625rem] font-semibold uppercase tracking-[0.1em] text-neutral-400 dark:text-neutral-500">
               Session Info
             </span>
           </div>
@@ -237,7 +237,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
               {connectedUsers.map((user) => (
                 <span
                   key={user.id}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-neutral-100 bg-surface-1/50 px-2 py-px font-mono text-[10px] text-neutral-500 dark:border-neutral-800 dark:bg-surface-2/50 dark:text-neutral-400"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-neutral-100 bg-surface-1/50 px-2 py-px font-mono text-[0.625rem] text-neutral-500 dark:border-neutral-800 dark:bg-surface-2/50 dark:text-neutral-400"
                 >
                   <span className="h-1 w-1 rounded-full bg-emerald-500" />
                   {user.name || user.email || user.id.slice(0, 8)}
@@ -252,25 +252,25 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
           <div className="space-y-1">
             <div className="flex items-center gap-1.5">
               <StatusDot status={lifecycleStatusRaw} />
-              <span className="font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+              <span className="font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
                 Lifecycle: {lifecycleStatusLabel}
               </span>
             </div>
             <div className="flex items-center gap-1.5">
               <StatusDot status={agentStatusRaw} />
-              <span className="font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+              <span className="font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
                 Agent: {agentStatusLabel}
               </span>
             </div>
             <div className="flex items-center gap-1.5">
               <StatusDot status={sandboxStatusRaw} />
-              <span className="font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+              <span className="font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
                 Sandbox: {sandboxStatusLabel}
               </span>
             </div>
             {sandboxId && (
               <div className="flex items-center gap-1.5">
-                <span className="shrink-0 font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+                <span className="shrink-0 font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
                   Sandbox ID:
                 </span>
                 <CopyableText text={sandboxId} />
@@ -281,7 +281,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
 
         {/* Duration */}
         <SidebarSection label="Duration">
-          <span className="font-mono text-[11px] font-medium text-neutral-600 dark:text-neutral-300 tabular-nums">
+          <span className="font-mono text-[0.6875rem] font-medium text-neutral-600 dark:text-neutral-300 tabular-nums">
             {formatDuration(elapsed)}
           </span>
         </SidebarSection>
@@ -289,7 +289,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
         {/* Model */}
         {selectedModel && (
           <SidebarSection label="Model">
-            <span className="inline-flex rounded-sm bg-surface-2/60 px-1.5 py-px font-mono text-[10px] font-medium text-neutral-600 dark:bg-surface-2 dark:text-neutral-400">
+            <span className="inline-flex rounded-sm bg-surface-2/60 px-1.5 py-px font-mono text-[0.625rem] font-medium text-neutral-600 dark:bg-surface-2 dark:text-neutral-400">
               {selectedModel}
             </span>
           </SidebarSection>
@@ -305,7 +305,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
                   className="min-w-0 overflow-hidden rounded-md border border-border/60 bg-surface-1/40 px-2 py-1.5 dark:bg-surface-2/40"
                 >
                   <div className="flex items-center gap-2">
-                    <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-neutral-400 dark:text-neutral-500">
+                    <span className="font-mono text-[0.5625rem] uppercase tracking-[0.1em] text-neutral-400 dark:text-neutral-500">
                       {tunnel.name}
                     </span>
                     <div className="ml-auto flex items-center gap-1.5">
@@ -314,7 +314,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
                           href={tunnel.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="rounded-sm border border-border/70 bg-surface-1 px-2 py-[2px] font-mono text-[9px] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"
+                          className="rounded-sm border border-border/70 bg-surface-1 px-2 py-[2px] font-mono text-[0.5625rem] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"
                         >
                           Open
                         </a>
@@ -322,7 +322,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
                       <button
                         type="button"
                         onClick={() => deleteTunnel.mutate(tunnel.name)}
-                        className="rounded-sm border border-border/70 bg-surface-1 px-2 py-[2px] font-mono text-[9px] text-neutral-600 transition-colors hover:text-red-500 dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-red-400"
+                        className="rounded-sm border border-border/70 bg-surface-1 px-2 py-[2px] font-mono text-[0.5625rem] text-neutral-600 transition-colors hover:text-red-500 dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-red-400"
                         disabled={deleteTunnel.isPending}
                       >
                         Off
@@ -346,13 +346,13 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
                 href={gitState.sourceRepoUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="group/repo flex items-center gap-1.5 font-mono text-[11px] text-neutral-600 transition-colors hover:text-accent dark:text-neutral-400 dark:hover:text-accent"
+                className="group/repo flex items-center gap-1.5 font-mono text-[0.6875rem] text-neutral-600 transition-colors hover:text-accent dark:text-neutral-400 dark:hover:text-accent"
               >
                 <GitHubIcon className="h-3 w-3 shrink-0 text-neutral-400 transition-colors group-hover/repo:text-accent dark:text-neutral-500" />
                 <span className="truncate">{gitState.sourceRepoFullName || session?.workspace}</span>
               </a>
             ) : (
-              <span className="font-mono text-[11px] text-neutral-600 dark:text-neutral-400">
+              <span className="font-mono text-[0.6875rem] text-neutral-600 dark:text-neutral-400">
                 {gitState?.sourceRepoFullName || session?.workspace}
               </span>
             )}
@@ -369,12 +369,12 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
                   href={gitState.prUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="font-mono text-[11px] text-neutral-600 transition-colors hover:text-accent truncate dark:text-neutral-400 dark:hover:text-accent"
+                  className="font-mono text-[0.6875rem] text-neutral-600 transition-colors hover:text-accent truncate dark:text-neutral-400 dark:hover:text-accent"
                 >
                   #{gitState.prNumber} {gitState.prTitle}
                 </a>
               ) : (
-                <span className="font-mono text-[11px] text-neutral-600 dark:text-neutral-400 truncate">
+                <span className="font-mono text-[0.6875rem] text-neutral-600 dark:text-neutral-400 truncate">
                   #{gitState.prNumber} {gitState.prTitle}
                 </span>
               )}
@@ -390,7 +390,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
               <CopyableText text={gitState.branch} />
             </div>
             {gitState.baseBranch && (
-              <span className="mt-0.5 ml-4 block font-mono text-[9px] text-neutral-400 dark:text-neutral-600">
+              <span className="mt-0.5 ml-4 block font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-600">
                 from {gitState.baseBranch}
               </span>
             )}
@@ -406,7 +406,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
               className="group/parent flex items-center gap-1.5 rounded-sm px-1.5 py-1 transition-colors hover:bg-surface-1 dark:hover:bg-surface-2"
             >
               <ArrowUpIcon className="h-2.5 w-2.5 shrink-0 text-neutral-400 dark:text-neutral-500" />
-              <span className="truncate font-mono text-[10px] text-neutral-600 transition-colors group-hover/parent:text-neutral-900 dark:text-neutral-400 dark:group-hover/parent:text-neutral-200">
+              <span className="truncate font-mono text-[0.625rem] text-neutral-600 transition-colors group-hover/parent:text-neutral-900 dark:text-neutral-400 dark:group-hover/parent:text-neutral-200">
                 {parentSession?.title || parentSession?.workspace || session.parentSessionId.slice(0, 8)}
               </span>
             </Link>
@@ -425,7 +425,7 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
                   className="group/child flex items-center gap-1.5 rounded-sm px-1.5 py-1 transition-colors hover:bg-surface-1 dark:hover:bg-surface-2"
                 >
                   <StatusDot status={child.status} />
-                  <span className="truncate font-mono text-[10px] text-neutral-600 transition-colors group-hover/child:text-neutral-900 dark:text-neutral-400 dark:group-hover/child:text-neutral-200">
+                  <span className="truncate font-mono text-[0.625rem] text-neutral-600 transition-colors group-hover/child:text-neutral-900 dark:text-neutral-400 dark:group-hover/child:text-neutral-200">
                     {child.title || child.workspace}
                   </span>
                 </Link>
@@ -448,14 +448,14 @@ export function SessionMetadataSidebar({ sessionId, connectedUsers, selectedMode
         {/* Source context */}
         {gitState?.sourceType === 'issue' && gitState.sourceIssueNumber && (
           <SidebarSection label="Source">
-            <span className="font-mono text-[10px] text-neutral-500 dark:text-neutral-500">
+            <span className="font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-500">
               Issue #{gitState.sourceIssueNumber}
             </span>
           </SidebarSection>
         )}
         {gitState?.sourceType === 'pr' && gitState.sourcePrNumber && (
           <SidebarSection label="Source">
-            <span className="font-mono text-[10px] text-neutral-500 dark:text-neutral-500">
+            <span className="font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-500">
               PR #{gitState.sourcePrNumber}
             </span>
           </SidebarSection>
@@ -492,14 +492,14 @@ function FileChangedItem({ file }: { file: SessionFileChanged }) {
       className="group/file flex w-full items-center gap-1.5 rounded-sm px-1 py-[3px] text-left transition-colors hover:bg-surface-1 dark:hover:bg-surface-2 cursor-pointer"
       title={file.filePath}
     >
-      <span className={`shrink-0 font-mono text-[9px] font-bold leading-none ${statusColors[file.status] ?? 'text-neutral-400'}`}>
+      <span className={`shrink-0 font-mono text-[0.5625rem] font-bold leading-none ${statusColors[file.status] ?? 'text-neutral-400'}`}>
         {file.status[0].toUpperCase()}
       </span>
-      <span className="truncate font-mono text-[10px] text-neutral-600 dark:text-neutral-400">
+      <span className="truncate font-mono text-[0.625rem] text-neutral-600 dark:text-neutral-400">
         {fileName}
       </span>
       {(file.additions > 0 || file.deletions > 0) && (
-        <span className="ml-auto shrink-0 font-mono text-[9px] tabular-nums opacity-60 group-hover/file:opacity-100 transition-opacity">
+        <span className="ml-auto shrink-0 font-mono text-[0.5625rem] tabular-nums opacity-60 group-hover/file:opacity-100 transition-opacity">
           {file.additions > 0 && <span className="text-emerald-600 dark:text-emerald-400">+{file.additions}</span>}
           {file.additions > 0 && file.deletions > 0 && ' '}
           {file.deletions > 0 && <span className="text-red-500 dark:text-red-400">-{file.deletions}</span>}
@@ -531,7 +531,7 @@ export function StatusDot({ status }: { status: string }) {
 export function SidebarSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <span className="metadata-section-label mb-1 block font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+      <span className="metadata-section-label mb-1 block font-mono text-[0.5625rem] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
         {label}
       </span>
       {children}
@@ -542,8 +542,8 @@ export function SidebarSection({ label, children }: { label: string; children: R
 export function StatItem({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="flex items-baseline justify-between">
-      <span className="font-mono text-[10px] text-neutral-400 dark:text-neutral-500">{label}</span>
-      <span className="font-mono text-[11px] font-semibold text-neutral-700 dark:text-neutral-300 tabular-nums">
+      <span className="font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">{label}</span>
+      <span className="font-mono text-[0.6875rem] font-semibold text-neutral-700 dark:text-neutral-300 tabular-nums">
         {value}
       </span>
     </div>
@@ -563,7 +563,7 @@ export function CopyableText({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="group/copy flex w-full min-w-0 items-center gap-1 overflow-hidden font-mono text-[11px] text-neutral-600 transition-colors hover:text-accent dark:text-neutral-400 dark:hover:text-accent"
+      className="group/copy flex w-full min-w-0 items-center gap-1 overflow-hidden font-mono text-[0.6875rem] text-neutral-600 transition-colors hover:text-accent dark:text-neutral-400 dark:hover:text-accent"
       title="Click to copy"
     >
       <span className="min-w-0 flex-1 truncate">{text}</span>

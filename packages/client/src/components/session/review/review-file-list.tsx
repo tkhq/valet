@@ -28,17 +28,17 @@ export function ReviewFileList({ files, selectedFile, onSelectFile }: ReviewFile
                 : 'hover:bg-neutral-50 dark:hover:bg-neutral-800/30'
             )}
           >
-            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded bg-neutral-100 font-mono text-[9px] font-bold text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded bg-neutral-100 font-mono text-[0.5625rem] font-bold text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
               {i + 1}
             </span>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
                 <FileStatusBadge file={file} />
-                <span className="truncate font-mono text-[11px] text-neutral-800 dark:text-neutral-200">
+                <span className="truncate font-mono text-[0.6875rem] text-neutral-800 dark:text-neutral-200">
                   {file.path.split('/').pop()}
                 </span>
               </div>
-              <span className="mt-0.5 block truncate font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+              <span className="mt-0.5 block truncate font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                 {file.path}
               </span>
               {file.findings.length > 0 && (
@@ -77,7 +77,7 @@ function FileStatusBadge({ file }: { file: ReviewFileSummary }) {
   }[status];
 
   return (
-    <span className={cn('inline-flex h-4 w-4 items-center justify-center rounded font-mono text-[9px] font-bold', config.bg)}>
+    <span className={cn('inline-flex h-4 w-4 items-center justify-center rounded font-mono text-[0.5625rem] font-bold', config.bg)}>
       {config.label}
     </span>
   );
@@ -92,7 +92,7 @@ function SeverityPill({ count, severity }: { count: number; severity: ReviewFind
   }[severity];
 
   return (
-    <span className={cn('inline-flex h-4 items-center rounded px-1 font-mono text-[9px] font-medium', colors)}>
+    <span className={cn('inline-flex h-4 items-center rounded px-1 font-mono text-[0.5625rem] font-medium', colors)}>
       {count}
     </span>
   );

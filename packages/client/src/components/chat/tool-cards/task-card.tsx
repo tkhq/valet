@@ -51,7 +51,7 @@ export function TaskCard({ tool }: { tool: ToolCallData }) {
       {/* Prompt (collapsed) */}
       {args.prompt && (
         <ToolCardSection label="prompt" className="border-b border-neutral-100 dark:border-neutral-800">
-          <p className="font-mono text-[11px] leading-[1.6] text-neutral-600 dark:text-neutral-400">
+          <p className="font-mono text-[0.6875rem] leading-[1.6] text-neutral-600 dark:text-neutral-400">
             {args.prompt.length > 300 ? args.prompt.slice(0, 300) + '...' : args.prompt}
           </p>
         </ToolCardSection>
@@ -60,7 +60,7 @@ export function TaskCard({ tool }: { tool: ToolCallData }) {
       {/* Agent type + task_id metadata */}
       {(args.subagent_type || taskId) && (
         <ToolCardSection className="border-b border-neutral-100 dark:border-neutral-800">
-          <div className="space-y-0.5 font-mono text-[11px]">
+          <div className="space-y-0.5 font-mono text-[0.6875rem]">
             {args.subagent_type && (
               <div className="flex gap-3">
                 <span className="w-16 shrink-0 text-neutral-400 dark:text-neutral-500">agent</span>
@@ -80,7 +80,7 @@ export function TaskCard({ tool }: { tool: ToolCallData }) {
       {/* Result rendered as markdown */}
       {content && (
         <ToolCardSection label="result">
-          <div className="prose-tool-result max-h-[400px] overflow-auto text-[12px] leading-[1.6]">
+          <div className="prose-tool-result max-h-[400px] overflow-auto text-[0.75rem] leading-[1.6]">
             <MarkdownContent content={content} />
           </div>
         </ToolCardSection>

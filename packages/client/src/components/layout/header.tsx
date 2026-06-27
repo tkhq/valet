@@ -110,7 +110,7 @@ export function Header() {
             >
               <BellIcon />
               {unreadCount > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[9px] font-semibold text-white">
+                <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[0.5625rem] font-semibold text-white">
                   {unreadCount > 99 ? '99+' : unreadCount}
                 </span>
               )}
@@ -119,14 +119,14 @@ export function Header() {
           <DropdownMenuContent align="end" className="w-[360px] max-w-[90vw] p-0">
             <div className="border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
               <div className="flex items-center justify-between">
-                <p className="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Notifications</p>
+                <p className="text-[0.8125rem] font-medium text-neutral-900 dark:text-neutral-100">Notifications</p>
                 {unreadCount > 0 && (
-                  <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                  <span className="text-[0.6875rem] text-neutral-500 dark:text-neutral-400">
                     {unreadCount} unread
                   </span>
                 )}
               </div>
-              <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+              <p className="text-[0.6875rem] text-neutral-500 dark:text-neutral-400">
                 Non-actionable items clear on open
               </p>
             </div>
@@ -163,19 +163,19 @@ export function Header() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="mb-0.5 flex items-center justify-between gap-2">
-                          <span className="truncate text-[12px] font-medium text-neutral-900 dark:text-neutral-100">
+                          <span className="truncate text-[0.75rem] font-medium text-neutral-900 dark:text-neutral-100">
                             {sender}
                           </span>
-                          <span className="shrink-0 text-[10px] text-neutral-400 dark:text-neutral-500">
+                          <span className="shrink-0 text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                             {formatRelativeTime(item.lastActivityAt || item.createdAt)}
                           </span>
                         </div>
-                        <p className="line-clamp-2 text-[11px] text-neutral-600 dark:text-neutral-400">
+                        <p className="line-clamp-2 text-[0.6875rem] text-neutral-600 dark:text-neutral-400">
                           {item.content}
                         </p>
                         <div className="mt-1">
                           <span
-                            className={`inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                            className={`inline-flex rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium ${
                               actionRequired
                                 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
                                 : 'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400'
@@ -193,7 +193,7 @@ export function Header() {
 
             <div className="border-t border-neutral-200 p-1 dark:border-neutral-700">
               <DropdownMenuItem
-                className="justify-center text-[12px] font-medium text-accent"
+                className="justify-center text-[0.75rem] font-medium text-accent"
                 onSelect={() => navigate({ to: '/inbox' })}
               >
                 View all notifications
@@ -213,13 +213,13 @@ export function Header() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
             <div className="px-2 py-1.5">
-              <p className="text-[13px] font-medium text-neutral-900 text-pretty dark:text-neutral-100">
+              <p className="text-[0.8125rem] font-medium text-neutral-900 text-pretty dark:text-neutral-100">
                 {user?.name ?? 'User'}
               </p>
-              <p className="font-mono text-[11px] text-neutral-500 truncate dark:text-neutral-400">{user?.email}</p>
+              <p className="font-mono text-[0.6875rem] text-neutral-500 truncate dark:text-neutral-400">{user?.email}</p>
             </div>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={handleSignOut} className="text-[13px]">
+            <DropdownMenuItem onSelect={handleSignOut} className="text-[0.8125rem]">
               Sign out
             </DropdownMenuItem>
           </DropdownMenuContent>

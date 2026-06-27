@@ -53,7 +53,7 @@ function scopeLabel(
           {entry ? (
             <>
               <span className="text-neutral-900 dark:text-neutral-100">{entry.serviceDisplayName} &rsaquo; {entry.name}</span>
-              <span className="font-mono text-[11px] text-neutral-400 dark:text-neutral-500">{override.actionId}</span>
+              <span className="font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">{override.actionId}</span>
             </>
           ) : (
             <span className="font-mono">{override.service}:{override.actionId}</span>
@@ -71,7 +71,7 @@ function scopeLabel(
         <span className="flex items-baseline gap-1.5">
           <span className="text-neutral-900 dark:text-neutral-100">{displayName}</span>
           {displayName !== override.service && (
-            <span className="font-mono text-[11px] text-neutral-400 dark:text-neutral-500">{override.service}</span>
+            <span className="font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">{override.service}</span>
           )}
         </span>
       ),

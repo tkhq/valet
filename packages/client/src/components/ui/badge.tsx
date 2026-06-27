@@ -9,7 +9,7 @@ function Badge({ className, variant = 'default', ...props }: BadgeProps) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider',
+        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 font-mono text-[0.625rem] font-medium uppercase tracking-wider',
         {
           'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400': variant === 'default',
           'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400': variant === 'success',

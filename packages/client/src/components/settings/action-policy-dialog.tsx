@@ -344,7 +344,7 @@ function TypeaheadCombobox({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate text-neutral-900 dark:text-neutral-100">{item.label}</span>
-                    <span className="shrink-0 font-mono text-[11px] text-neutral-400 dark:text-neutral-500">{item.id}</span>
+                    <span className="shrink-0 font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">{item.id}</span>
                   </div>
                   {item.description && (
                     <div className="truncate text-xs text-neutral-500 dark:text-neutral-400">{item.description}</div>
@@ -353,7 +353,7 @@ function TypeaheadCombobox({
               )}
               {item.badge && (
                 <span className={cn(
-                  'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
+                  'shrink-0 rounded px-1.5 py-0.5 text-[0.625rem] font-medium',
                   item.badgeColor || 'bg-neutral-100 text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400',
                 )}>
                   {item.badge}
@@ -470,7 +470,7 @@ function PolicyJsonView({
   obj.mode = mode;
 
   return (
-    <pre className="overflow-auto rounded-lg border border-neutral-200 bg-neutral-950 p-4 text-[13px] leading-relaxed text-neutral-300 dark:border-neutral-700">
+    <pre className="overflow-auto rounded-lg border border-neutral-200 bg-neutral-950 p-4 text-[0.8125rem] leading-relaxed text-neutral-300 dark:border-neutral-700">
       {JSON.stringify(obj, null, 2)}
     </pre>
   );

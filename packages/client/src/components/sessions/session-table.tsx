@@ -351,7 +351,7 @@ function SessionRow({
           )}
           <span>{displayName}</span>
           {isChild && (
-            <span className="text-[11px] font-normal text-neutral-400 dark:text-neutral-500">
+            <span className="text-[0.6875rem] font-normal text-neutral-400 dark:text-neutral-500">
               sub-session
             </span>
           )}
@@ -363,7 +363,7 @@ function SessionRow({
             {session.ownerAvatarUrl && (
               <AvatarImage src={session.ownerAvatarUrl} alt={ownerDisplayName} />
             )}
-            <AvatarFallback className="text-[10px]">{ownerInitials}</AvatarFallback>
+            <AvatarFallback className="text-[0.625rem]">{ownerInitials}</AvatarFallback>
           </Avatar>
           <span className="text-sm text-neutral-600 dark:text-neutral-400 truncate max-w-[120px]">
             {session.isOwner ? 'You' : ownerDisplayName}
@@ -381,13 +381,13 @@ function SessionRow({
                       {participants.slice(0, 3).map((p) => (
                         <Avatar key={p.userId} className="h-5 w-5 ring-2 ring-white dark:ring-neutral-900">
                           {p.avatarUrl && <AvatarImage src={p.avatarUrl} alt={p.name || p.email} />}
-                          <AvatarFallback className="text-[8px]">
+                          <AvatarFallback className="text-[0.5rem]">
                             {getInitials(p.name, p.email)}
                           </AvatarFallback>
                         </Avatar>
                       ))}
                       {participantCount > 3 && (
-                        <div className="flex h-5 w-5 items-center justify-center rounded-full bg-neutral-200 text-[9px] font-medium text-neutral-600 ring-2 ring-white dark:bg-neutral-700 dark:text-neutral-300 dark:ring-neutral-900">
+                        <div className="flex h-5 w-5 items-center justify-center rounded-full bg-neutral-200 text-[0.5625rem] font-medium text-neutral-600 ring-2 ring-white dark:bg-neutral-700 dark:text-neutral-300 dark:ring-neutral-900">
                           +{participantCount - 3}
                         </div>
                       )}
@@ -404,20 +404,20 @@ function SessionRow({
             {participantCount > 0 && (
               <TooltipContent side="bottom" className="max-w-xs">
                 <div className="space-y-1.5 py-1">
-                  <div className="text-[11px] font-medium text-neutral-400 uppercase tracking-wide">
+                  <div className="text-[0.6875rem] font-medium text-neutral-400 uppercase tracking-wide">
                     Participants ({participantCount})
                   </div>
                   {participants.map((p) => (
                     <div key={p.userId} className="flex items-center gap-2">
                       <Avatar className="h-5 w-5">
                         {p.avatarUrl && <AvatarImage src={p.avatarUrl} alt={p.name || p.email} />}
-                        <AvatarFallback className="text-[8px]">
+                        <AvatarFallback className="text-[0.5rem]">
                           {getInitials(p.name, p.email)}
                         </AvatarFallback>
                       </Avatar>
                       <div className="flex flex-col">
                         <span className="text-xs font-medium">{p.name || p.email}</span>
-                        <span className="text-[10px] text-neutral-400">{p.role}</span>
+                        <span className="text-[0.625rem] text-neutral-400">{p.role}</span>
                       </div>
                     </div>
                   ))}

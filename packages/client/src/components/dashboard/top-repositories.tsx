@@ -13,7 +13,7 @@ export function TopRepositories({ repos }: TopRepositoriesProps) {
         <h3 className="label-mono text-neutral-400">Top Repositories</h3>
       </div>
       {repos.length === 0 ? (
-        <div className="px-5 py-10 text-center text-[13px] text-neutral-300">
+        <div className="px-5 py-10 text-center text-[0.8125rem] text-neutral-300">
           No repository data
         </div>
       ) : (
@@ -23,7 +23,7 @@ export function TopRepositories({ repos }: TopRepositoriesProps) {
             return (
               <div key={repo.workspace} className="px-5 py-3">
                 <div className="flex items-baseline justify-between gap-3 mb-2">
-                  <span className="truncate text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
+                  <span className="truncate text-[0.8125rem] font-medium text-neutral-900 dark:text-neutral-100">
                     <span className="font-mono text-2xs text-neutral-300 mr-1.5 tabular-nums">{i + 1}</span>
                     {repo.workspace}
                   </span>

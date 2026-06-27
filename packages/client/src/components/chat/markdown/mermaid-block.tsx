@@ -127,12 +127,12 @@ export const MermaidBlock = memo(function MermaidBlock({ children }: MermaidBloc
     return (
       <div className="overflow-hidden rounded-md border border-red-200 dark:border-red-800">
         <div className="flex items-center justify-between bg-red-50 px-3 py-1 dark:bg-red-900/30">
-          <span className="font-mono text-[10px] font-medium uppercase tracking-wide text-red-500">
+          <span className="font-mono text-[0.625rem] font-medium uppercase tracking-wide text-red-500">
             mermaid (error)
           </span>
         </div>
         <pre className="overflow-x-auto p-3">
-          <code className="font-mono text-[12px] leading-relaxed text-neutral-800 dark:text-neutral-200">
+          <code className="font-mono text-[0.75rem] leading-relaxed text-neutral-800 dark:text-neutral-200">
             {children}
           </code>
         </pre>
@@ -143,20 +143,20 @@ export const MermaidBlock = memo(function MermaidBlock({ children }: MermaidBloc
   return (
     <div className="overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-700">
       <div className="flex items-center justify-between bg-neutral-100 px-3 py-1 dark:bg-neutral-800">
-        <span className="font-mono text-[10px] font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+        <span className="font-mono text-[0.625rem] font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
           mermaid
         </span>
         <div className="flex items-center gap-1.5">
           {svg && !showSource && (
             <>
-              <span className="font-mono text-[10px] tabular-nums text-neutral-400 dark:text-neutral-500">
+              <span className="font-mono text-[0.625rem] tabular-nums text-neutral-400 dark:text-neutral-500">
                 {zoomPercent}%
               </span>
               {isTransformed && (
                 <button
                   type="button"
                   onClick={resetView}
-                  className="rounded px-1.5 py-0.5 text-[11px] text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+                  className="rounded px-1.5 py-0.5 text-[0.6875rem] text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
                 >
                   Reset
                 </button>
@@ -166,7 +166,7 @@ export const MermaidBlock = memo(function MermaidBlock({ children }: MermaidBloc
           <button
             type="button"
             onClick={toggleSource}
-            className="rounded px-1.5 py-0.5 text-[11px] text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+            className="rounded px-1.5 py-0.5 text-[0.6875rem] text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
           >
             {showSource ? 'Diagram' : 'Source'}
           </button>
@@ -174,7 +174,7 @@ export const MermaidBlock = memo(function MermaidBlock({ children }: MermaidBloc
       </div>
       {showSource ? (
         <pre className="overflow-x-auto p-3">
-          <code className="font-mono text-[12px] leading-relaxed text-neutral-800 dark:text-neutral-200">
+          <code className="font-mono text-[0.75rem] leading-relaxed text-neutral-800 dark:text-neutral-200">
             {children}
           </code>
         </pre>
@@ -198,7 +198,7 @@ export const MermaidBlock = memo(function MermaidBlock({ children }: MermaidBloc
           />
         </div>
       ) : (
-        <div className="flex items-center justify-center p-6 text-[12px] text-neutral-400">
+        <div className="flex items-center justify-center p-6 text-[0.75rem] text-neutral-400">
           Rendering diagram...
         </div>
       )}

@@ -23,13 +23,13 @@ export function FilesDrawer({ sessionId }: FilesDrawerProps) {
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-neutral-50 dark:bg-neutral-900">
       {/* Header */}
       <div className={`shrink-0 border-b border-neutral-200 bg-surface-1 dark:border-neutral-800 dark:bg-surface-1 ${isMobile ? 'flex h-12 items-center justify-between px-3' : 'flex h-10 items-center justify-between px-2'}`}>
-        <span className="px-2.5 font-mono text-[11px] font-medium text-neutral-900 dark:text-neutral-100">
+        <span className="px-2.5 font-mono text-[0.6875rem] font-medium text-neutral-900 dark:text-neutral-100">
           Files
         </span>
         <button
           type="button"
           onClick={closeDrawer}
-          className={`flex items-center gap-1.5 rounded font-mono font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300 ${isMobile ? 'px-2.5 py-1.5 text-[12px]' : 'px-2.5 py-1 text-[11px]'}`}
+          className={`flex items-center gap-1.5 rounded font-mono font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300 ${isMobile ? 'px-2.5 py-1.5 text-[0.75rem]' : 'px-2.5 py-1 text-[0.6875rem]'}`}
         >
           <PanelCloseIcon className="h-3.5 w-3.5" />
           Close Files
@@ -40,7 +40,7 @@ export function FilesDrawer({ sessionId }: FilesDrawerProps) {
       {/* File browser or status message */}
       {showPlaceholder ? (
         <div className="flex flex-1 items-center justify-center">
-          <p className="font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
+          <p className="font-mono text-[0.6875rem] text-neutral-500 dark:text-neutral-400">
             {placeholderText}
           </p>
         </div>

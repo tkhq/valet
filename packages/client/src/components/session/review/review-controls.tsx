@@ -18,7 +18,7 @@ export function ReviewControls({
 
   return (
     <div className="flex h-8 shrink-0 items-center gap-2 border-b border-neutral-200 bg-surface-0 px-3 dark:border-neutral-800 dark:bg-surface-0">
-      <span className="font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
+      <span className="font-mono text-[0.6875rem] text-neutral-500 dark:text-neutral-400">
         All changes
       </span>
       <div className="flex-1" />
@@ -27,7 +27,7 @@ export function ReviewControls({
           variant="ghost"
           size="sm"
           onClick={onClearReview}
-          className="h-6 px-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200"
+          className="h-6 px-2 text-[0.6875rem] font-medium text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200"
         >
           Clear
         </Button>
@@ -37,7 +37,7 @@ export function ReviewControls({
         size="sm"
         onClick={onStartReview}
         disabled={!isConnected || isRunning}
-        className="h-6 px-3 text-[11px]"
+        className="h-6 px-3 text-[0.6875rem]"
       >
         {isRunning ? 'Reviewing...' : state === 'complete' ? 'Re-run' : 'Run Review'}
       </Button>

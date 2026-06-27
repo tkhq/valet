@@ -22,6 +22,7 @@ export const users = sqliteTable('users', {
   identityProvider: text(),
   sandboxCpuCores: real(),
   sandboxMemoryMib: integer(),
+  fontScale: real().default(1.0),
   createdAt: text().default(sql`(datetime('now'))`),
   updatedAt: text().default(sql`(datetime('now'))`),
 }, (table) => [

@@ -38,7 +38,7 @@ export function LspCard({ tool }: { tool: ToolCallData }) {
       summary={
         <span className="flex items-center gap-1.5">
           {opLabel && (
-            <span className="rounded bg-violet-100 px-1 py-px text-[9px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">
+            <span className="rounded bg-violet-100 px-1 py-px text-[0.5625rem] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">
               {opLabel}
             </span>
           )}

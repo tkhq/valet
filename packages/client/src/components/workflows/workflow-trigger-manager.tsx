@@ -320,7 +320,7 @@ export function WorkflowTriggerManager({ workflowId, triggers }: WorkflowTrigger
                           Prompt: {schedulePrompt}
                         </p>
                       )}
-                      <p className="mt-1 text-[11px] text-neutral-400 dark:text-neutral-500">
+                      <p className="mt-1 text-[0.6875rem] text-neutral-400 dark:text-neutral-500">
                         Updated {formatRelativeTime(trigger.updatedAt)}
                       </p>
                     </div>

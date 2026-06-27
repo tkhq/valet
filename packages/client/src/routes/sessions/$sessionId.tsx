@@ -342,7 +342,7 @@ function SessionLayout() {
           <div className="absolute inset-0 z-50 flex items-center justify-center bg-surface-0/70 dark:bg-surface-0/80 backdrop-blur-[2px]">
             <div className="flex items-center gap-2.5 rounded-lg border border-neutral-200 bg-surface-0 px-4 py-2.5 shadow-sm dark:border-neutral-700 dark:bg-surface-1">
               <LoaderIcon className="h-4 w-4 animate-spin text-neutral-500" />
-              <span className="font-mono text-[12px] text-neutral-600 dark:text-neutral-400">
+              <span className="font-mono text-[0.75rem] text-neutral-600 dark:text-neutral-400">
                 {overlay.message}
               </span>
             </div>
@@ -357,13 +357,13 @@ function LogsDrawerWrapper({ logEntries, onClose }: { logEntries: LogEntry[]; on
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-neutral-200 bg-surface-1 px-2 dark:border-neutral-800 dark:bg-surface-1">
-        <span className="px-2.5 font-mono text-[11px] font-medium text-neutral-900 dark:text-neutral-100">
+        <span className="px-2.5 font-mono text-[0.6875rem] font-medium text-neutral-900 dark:text-neutral-100">
           Logs
         </span>
         <button
           type="button"
           onClick={onClose}
-          className="flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
+          className="flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[0.6875rem] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
         >
           Close
         </button>

@@ -39,19 +39,19 @@ export const CodeBlock = memo(function CodeBlock({ language, children }: CodeBlo
   return (
     <div className="group/code overflow-hidden rounded-md border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-900">
       <div className="flex items-center justify-between bg-neutral-100 px-3 py-1 dark:bg-neutral-800">
-        <span className="font-mono text-[10px] font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+        <span className="font-mono text-[0.625rem] font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
           {language || 'text'}
         </span>
         <CopyButton text={children} />
       </div>
       {html ? (
         <div
-          className="shiki-wrapper p-3 text-neutral-800 dark:text-neutral-200 [&_pre]:!m-0 [&_pre]:!bg-transparent [&_pre]:!p-0 [&_pre]:!whitespace-pre-wrap [&_pre]:!break-words [&_code]:font-mono [&_code]:text-[12px] [&_code]:leading-relaxed"
+          className="shiki-wrapper p-3 text-neutral-800 dark:text-neutral-200 [&_pre]:!m-0 [&_pre]:!bg-transparent [&_pre]:!p-0 [&_pre]:!whitespace-pre-wrap [&_pre]:!break-words [&_code]:font-mono [&_code]:text-[0.75rem] [&_code]:leading-relaxed"
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
         <pre className="whitespace-pre-wrap break-words p-3">
-          <code className="font-mono text-[12px] leading-relaxed text-neutral-800 dark:text-neutral-200">
+          <code className="font-mono text-[0.75rem] leading-relaxed text-neutral-800 dark:text-neutral-200">
             {children}
           </code>
         </pre>
@@ -77,7 +77,7 @@ function CopyButton({ text }: { text: string }) {
     <button
       type="button"
       onClick={handleCopy}
-      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-neutral-500 opacity-0 transition-opacity hover:text-neutral-700 group-hover/code:opacity-100 dark:text-neutral-400 dark:hover:text-neutral-200"
+      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[0.6875rem] text-neutral-500 opacity-0 transition-opacity hover:text-neutral-700 group-hover/code:opacity-100 dark:text-neutral-400 dark:hover:text-neutral-200"
     >
       {copied ? (
         <>

@@ -40,7 +40,7 @@ class PierreErrorBoundary extends Component<
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: '8px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace' }}>
+        <div style={{ padding: '8px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '4px', fontSize: '0.6875rem', fontFamily: 'monospace' }}>
           <strong style={{ color: '#dc2626' }}>Pierre render error ({this.props.label}):</strong>
           <pre style={{ marginTop: '4px', whiteSpace: 'pre-wrap', color: '#991b1b' }}>
             {this.state.error.message}

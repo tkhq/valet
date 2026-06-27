@@ -167,7 +167,7 @@ export function EventsTab({ period }: { period: number }) {
                       </td>
                       <td className="py-3 px-4 whitespace-nowrap">
                         <span className="inline-flex items-center gap-2">
-                          <span className={`inline-flex rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase leading-none ${getCategoryColor(category)}`}>
+                          <span className={`inline-flex rounded px-1.5 py-0.5 font-mono text-[0.625rem] font-semibold uppercase leading-none ${getCategoryColor(category)}`}>
                             {category}
                           </span>
                           <span className="font-mono text-xs text-neutral-700 dark:text-neutral-300">

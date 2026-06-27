@@ -148,7 +148,7 @@ function PersonaCard({
           )}
         </span>
         {persona.defaultModel && (
-          <span className="rounded-full border border-neutral-200 px-2 py-0.5 text-[10px] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+          <span className="rounded-full border border-neutral-200 px-2 py-0.5 text-[0.625rem] text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
             {persona.defaultModel}
           </span>
         )}

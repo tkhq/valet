@@ -239,7 +239,7 @@ export function OrchestratorMetadataSidebar({
       {!embedded && (
         <>
           <div className={`flex h-10 shrink-0 items-center border-b border-border ${compact ? 'px-2' : 'px-3'}`}>
-            <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.1em] text-neutral-400 dark:text-neutral-500">
+            <span className="font-mono text-[0.5625rem] font-semibold uppercase tracking-[0.1em] text-neutral-400 dark:text-neutral-500">
               Orchestrator
             </span>
           </div>
@@ -254,16 +254,16 @@ export function OrchestratorMetadataSidebar({
             {identity?.avatar ? (
               <img src={identity.avatar} alt="" className="h-7 w-7 shrink-0 rounded-full object-cover" />
             ) : (
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent/10 font-mono text-[11px] font-bold text-accent">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent/10 font-mono text-[0.6875rem] font-bold text-accent">
                 {identity?.name?.[0]?.toUpperCase() ?? '?'}
               </div>
             )}
             <div className="min-w-0 flex-1">
-              <div className="truncate font-mono text-[11px] font-medium text-neutral-700 dark:text-neutral-200">
+              <div className="truncate font-mono text-[0.6875rem] font-medium text-neutral-700 dark:text-neutral-200">
                 {identity?.name ?? 'Orchestrator'}
               </div>
               {identity?.handle && (
-                <div className="truncate font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+                <div className="truncate font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                   @{identity.handle}
                 </div>
               )}
@@ -272,19 +272,19 @@ export function OrchestratorMetadataSidebar({
           <div className="mt-1.5 space-y-1">
             <div className="flex items-center gap-1.5">
               <StatusDot status={agentStatusRaw} />
-              <span className="font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+              <span className="font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
                 Agent: {agentStatusLabel}
               </span>
             </div>
             <div className="flex items-center gap-1.5">
               <StatusDot status={sandboxStatusRaw} />
-              <span className="font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+              <span className="font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
                 Sandbox: {sandboxStatusLabel}
               </span>
             </div>
             {sandboxId && (
               <div className="flex items-center gap-1.5">
-                <span className="shrink-0 font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+                <span className="shrink-0 font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
                   Sandbox ID:
                 </span>
                 <CopyableText text={sandboxId} />
@@ -300,7 +300,7 @@ export function OrchestratorMetadataSidebar({
               {connectedUsers.map((user) => (
                 <span
                   key={user.id}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-neutral-100 bg-surface-1/50 px-2 py-px font-mono text-[10px] text-neutral-500 dark:border-neutral-800 dark:bg-surface-2/50 dark:text-neutral-400"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-neutral-100 bg-surface-1/50 px-2 py-px font-mono text-[0.625rem] text-neutral-500 dark:border-neutral-800 dark:bg-surface-2/50 dark:text-neutral-400"
                 >
                   <span className="h-1 w-1 rounded-full bg-emerald-500" />
                   {user.name || user.email || user.id.slice(0, 8)}
@@ -312,7 +312,7 @@ export function OrchestratorMetadataSidebar({
 
         {/* Sandbox Uptime */}
         <SidebarSection label="Sandbox Uptime">
-          <span className="font-mono text-[11px] font-medium text-neutral-600 dark:text-neutral-300 tabular-nums">
+          <span className="font-mono text-[0.6875rem] font-medium text-neutral-600 dark:text-neutral-300 tabular-nums">
             {elapsed > 0 ? formatDuration(elapsed) : '\u2014'}
           </span>
         </SidebarSection>
@@ -323,7 +323,7 @@ export function OrchestratorMetadataSidebar({
             to="/sessions/$sessionId/threads"
             params={{ sessionId }}
             search={{ page: undefined }}
-            className="inline-flex items-center gap-1.5 rounded-sm border border-border/60 bg-surface-1/40 px-2 py-1 font-mono text-[10px] text-neutral-600 transition-colors hover:bg-surface-1 hover:text-accent dark:bg-surface-2/40 dark:text-neutral-400 dark:hover:bg-surface-2 dark:hover:text-accent"
+            className="inline-flex items-center gap-1.5 rounded-sm border border-border/60 bg-surface-1/40 px-2 py-1 font-mono text-[0.625rem] text-neutral-600 transition-colors hover:bg-surface-1 hover:text-accent dark:bg-surface-2/40 dark:text-neutral-400 dark:hover:bg-surface-2 dark:hover:text-accent"
           >
             Thread History
           </Link>
@@ -343,16 +343,16 @@ export function OrchestratorMetadataSidebar({
                   className="group/child flex items-center gap-1.5 rounded-sm border border-border/60 bg-surface-1/40 px-1.5 py-1 transition-colors hover:bg-surface-1 dark:bg-surface-2/40 dark:hover:bg-surface-2"
                 >
                   <StatusDot status={child.status} />
-                  <span className="truncate font-mono text-[10px] text-neutral-600 transition-colors group-hover/child:text-neutral-900 dark:text-neutral-300 dark:group-hover/child:text-neutral-100">
+                  <span className="truncate font-mono text-[0.625rem] text-neutral-600 transition-colors group-hover/child:text-neutral-900 dark:text-neutral-300 dark:group-hover/child:text-neutral-100">
                     {child.title || child.workspace}
                   </span>
-                  <span className="ml-auto shrink-0 font-mono text-[8px] uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+                  <span className="ml-auto shrink-0 font-mono text-[0.5rem] uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                     {child.status === 'hibernated' ? 'hibernated' : 'active'}
                   </span>
                 </Link>
               ))}
               {nonTerminalChildren.length > MAX_CHILDREN_SHOWN && (
-                <span className="block px-1.5 font-mono text-[9px] text-neutral-400 dark:text-neutral-500">
+                <span className="block px-1.5 font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-500">
                   +{nonTerminalChildren.length - MAX_CHILDREN_SHOWN} more
                 </span>
               )}
@@ -375,14 +375,14 @@ export function OrchestratorMetadataSidebar({
                   >
                     <div className="flex items-center gap-1.5">
                       <ChildPRStateBadge state={child.prState ?? null} />
-                      <span className="font-mono text-[9px] text-neutral-500 dark:text-neutral-400">
+                      <span className="font-mono text-[0.5625rem] text-neutral-500 dark:text-neutral-400">
                         #{child.prNumber}
                       </span>
                       {prUrl && (
                         <button
                           type="button"
                           onClick={() => void copyPrLink(prKey, prUrl)}
-                          className="ml-auto rounded-sm border border-border/70 bg-surface-1 px-1.5 py-[1px] font-mono text-[8px] uppercase tracking-[0.06em] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"
+                          className="ml-auto rounded-sm border border-border/70 bg-surface-1 px-1.5 py-[1px] font-mono text-[0.5rem] uppercase tracking-[0.06em] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"
                           title="Copy PR link"
                         >
                           {copied ? 'Copied' : 'Copy'}
@@ -394,19 +394,19 @@ export function OrchestratorMetadataSidebar({
                         href={prUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="mt-0.5 block truncate font-mono text-[10px] text-neutral-600 transition-colors hover:text-accent dark:text-neutral-300 dark:hover:text-accent"
+                        className="mt-0.5 block truncate font-mono text-[0.625rem] text-neutral-600 transition-colors hover:text-accent dark:text-neutral-300 dark:hover:text-accent"
                       >
                         {child.prTitle || `Pull request #${child.prNumber}`}
                       </a>
                     ) : (
-                      <span className="mt-0.5 block truncate font-mono text-[10px] text-neutral-600 dark:text-neutral-300">
+                      <span className="mt-0.5 block truncate font-mono text-[0.625rem] text-neutral-600 dark:text-neutral-300">
                         {child.prTitle || `Pull request #${child.prNumber}`}
                       </span>
                     )}
                     <Link
                       to="/sessions/$sessionId"
                       params={{ sessionId: child.id }}
-                      className="mt-0.5 block truncate font-mono text-[8px] uppercase tracking-[0.06em] text-neutral-400 transition-colors hover:text-accent dark:text-neutral-500 dark:hover:text-accent"
+                      className="mt-0.5 block truncate font-mono text-[0.5rem] uppercase tracking-[0.06em] text-neutral-400 transition-colors hover:text-accent dark:text-neutral-500 dark:hover:text-accent"
                     >
                       Session: {child.title || child.workspace}
                     </Link>
@@ -414,7 +414,7 @@ export function OrchestratorMetadataSidebar({
                 );
               })}
               {openPRChildren.length > MAX_OPEN_PRS_SHOWN && (
-                <span className="block px-1.5 font-mono text-[9px] text-neutral-400 dark:text-neutral-500">
+                <span className="block px-1.5 font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-500">
                   +{openPRChildren.length - MAX_OPEN_PRS_SHOWN} more
                 </span>
               )}
@@ -435,7 +435,7 @@ export function OrchestratorMetadataSidebar({
                     className="rounded-sm border border-border/60 bg-surface-1/40 px-1.5 py-1 dark:bg-surface-2/40"
                   >
                     <div className="flex items-center gap-1.5">
-                      <span className="truncate font-mono text-[9px] uppercase tracking-[0.08em] text-neutral-500 dark:text-neutral-400">
+                      <span className="truncate font-mono text-[0.5625rem] uppercase tracking-[0.08em] text-neutral-500 dark:text-neutral-400">
                         {tunnel.name}
                       </span>
                       {tunnel.url && (
@@ -443,7 +443,7 @@ export function OrchestratorMetadataSidebar({
                           href={tunnel.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="ml-auto rounded-sm border border-border/70 bg-surface-1 px-1.5 py-[1px] font-mono text-[8px] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"
+                          className="ml-auto rounded-sm border border-border/70 bg-surface-1 px-1.5 py-[1px] font-mono text-[0.5rem] text-neutral-600 transition-colors hover:text-accent dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-accent"
                         >
                           Open
                         </a>
@@ -458,7 +458,7 @@ export function OrchestratorMetadataSidebar({
                           );
                         }}
                         disabled={isPending}
-                        className="rounded-sm border border-border/70 bg-surface-1 px-1.5 py-[1px] font-mono text-[8px] text-neutral-600 transition-colors hover:text-red-500 disabled:opacity-50 dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-red-400"
+                        className="rounded-sm border border-border/70 bg-surface-1 px-1.5 py-[1px] font-mono text-[0.5rem] text-neutral-600 transition-colors hover:text-red-500 disabled:opacity-50 dark:bg-surface-2 dark:text-neutral-400 dark:hover:text-red-400"
                       >
                         {isPending ? '...' : 'Off'}
                       </button>
@@ -466,18 +466,18 @@ export function OrchestratorMetadataSidebar({
                     <Link
                       to="/sessions/$sessionId"
                       params={{ sessionId: tunnel.childId }}
-                      className="mt-0.5 block truncate font-mono text-[9px] text-neutral-500 transition-colors hover:text-accent dark:text-neutral-400 dark:hover:text-accent"
+                      className="mt-0.5 block truncate font-mono text-[0.5625rem] text-neutral-500 transition-colors hover:text-accent dark:text-neutral-400 dark:hover:text-accent"
                     >
                       {tunnel.childTitle}
                     </Link>
-                    <div className="mt-0.5 truncate font-mono text-[9px] text-neutral-400 dark:text-neutral-500">
+                    <div className="mt-0.5 truncate font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-500">
                       {tunnel.url || tunnel.path || 'tunnel'}
                     </div>
                   </div>
                 );
               })}
               {childTunnels.length > MAX_CHILD_TUNNELS_SHOWN && (
-                <span className="block px-1.5 font-mono text-[9px] text-neutral-400 dark:text-neutral-500">
+                <span className="block px-1.5 font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-500">
                   +{childTunnels.length - MAX_CHILD_TUNNELS_SHOWN} more
                 </span>
               )}
@@ -510,11 +510,11 @@ function MemoryFileTooltip({ file }: { file: { path: string; pinned: boolean } }
       <TooltipTrigger asChild>
         <div className="flex cursor-default items-start gap-1.5 rounded-sm px-1 py-0.5 transition-colors hover:bg-surface-1 dark:hover:bg-surface-2">
           {file.pinned && (
-            <Badge className="mt-px shrink-0 !px-1 !py-0 !text-[8px] !tracking-normal bg-violet-500/10 text-violet-600 dark:bg-violet-500/10 dark:text-violet-400">
+            <Badge className="mt-px shrink-0 !px-1 !py-0 !text-[0.5rem] !tracking-normal bg-violet-500/10 text-violet-600 dark:bg-violet-500/10 dark:text-violet-400">
               pin
             </Badge>
           )}
-          <span className="line-clamp-1 font-mono text-[10px] text-neutral-500 dark:text-neutral-400">
+          <span className="line-clamp-1 font-mono text-[0.625rem] text-neutral-500 dark:text-neutral-400">
             {file.path}
           </span>
         </div>
@@ -539,10 +539,10 @@ function MemoryFilePreview({ path }: { path: string }) {
   return (
     <div className="flex flex-col">
       <div className="border-b border-border px-3 py-1.5">
-        <span className="font-mono text-[10px] font-medium text-neutral-600 dark:text-neutral-300">
+        <span className="font-mono text-[0.625rem] font-medium text-neutral-600 dark:text-neutral-300">
           {fileName}
         </span>
-        <span className="ml-1.5 font-mono text-[9px] text-neutral-400 dark:text-neutral-500">
+        <span className="ml-1.5 font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-500">
           {path}
         </span>
       </div>
@@ -550,19 +550,19 @@ function MemoryFilePreview({ path }: { path: string }) {
         {isLoading && (
           <div className="flex items-center gap-2 py-2">
             <div className="h-3 w-3 animate-spin rounded-full border border-neutral-300 border-t-transparent dark:border-neutral-600 dark:border-t-transparent" />
-            <span className="font-mono text-[10px] text-neutral-400">Loading...</span>
+            <span className="font-mono text-[0.625rem] text-neutral-400">Loading...</span>
           </div>
         )}
         {isError && (
-          <span className="font-mono text-[10px] text-red-500">Failed to load</span>
+          <span className="font-mono text-[0.625rem] text-red-500">Failed to load</span>
         )}
         {!isLoading && !isError && data && data.content.length > 0 && (
-          <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-neutral-600 dark:text-neutral-300">
+          <pre className="whitespace-pre-wrap break-words font-mono text-[0.625rem] leading-relaxed text-neutral-600 dark:text-neutral-300">
             {data.content.length > 1500 ? data.content.slice(0, 1500) + '\n...' : data.content}
           </pre>
         )}
         {!isLoading && !isError && (!data || data.content.length === 0) && (
-          <span className="font-mono text-[10px] text-neutral-400">Empty file</span>
+          <span className="font-mono text-[0.625rem] text-neutral-400">Empty file</span>
         )}
       </div>
     </div>

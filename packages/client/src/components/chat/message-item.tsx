@@ -45,7 +45,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
     return (
       <div className="flex justify-center py-2 animate-fade-in">
         <div className="rounded-full bg-blue-500/[0.08] px-3 py-1.5 dark:bg-blue-500/[0.12]">
-          <p className="font-mono text-[10px] text-blue-700 dark:text-blue-300">
+          <p className="font-mono text-[0.625rem] text-blue-700 dark:text-blue-300">
             Workflow run dispatched
             {workflowDispatchMeta.executionId ? ` (${workflowDispatchMeta.executionId.slice(0, 8)}...)` : ''}
           </p>
@@ -78,7 +78,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
             <div className="mb-1 flex items-center justify-end gap-1.5 px-1">
               {isScheduled && <ScheduledBadge />}
               {authorName && !isScheduled && (
-                <span className="font-mono text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
+                <span className="font-mono text-[0.625rem] font-medium text-neutral-400 dark:text-neutral-500">
                   {message.authorName || message.authorEmail}
                 </span>
               )}
@@ -118,7 +118,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
             </div>
           )}
           <div className="mt-1 flex items-center justify-end gap-2 px-1">
-            <span className="font-mono text-[9px] tabular-nums text-neutral-300 dark:text-neutral-600">
+            <span className="font-mono text-[0.5625rem] tabular-nums text-neutral-300 dark:text-neutral-600">
               {formatTime(message.createdAt)}
             </span>
             {(message.content || '').trim().length > 0 && (
@@ -128,7 +128,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
               <button
                 type="button"
                 onClick={() => onRevert(message.id)}
-                className="rounded-sm px-1.5 py-0.5 font-mono text-[9px] font-medium text-neutral-300 opacity-0 transition-all hover:bg-neutral-100 hover:text-neutral-600 group-hover:opacity-100 dark:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
+                className="rounded-sm px-1.5 py-0.5 font-mono text-[0.5625rem] font-medium text-neutral-300 opacity-0 transition-all hover:bg-neutral-100 hover:text-neutral-600 group-hover:opacity-100 dark:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
               >
                 undo
               </button>
@@ -137,7 +137,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
         </div>
         <Avatar className="mt-1 h-5 w-5 shrink-0">
           {avatarUrl && <AvatarImage src={avatarUrl} alt={authorName || ''} />}
-          <AvatarFallback className="text-[8px]">{initials}</AvatarFallback>
+          <AvatarFallback className="text-[0.5rem]">{initials}</AvatarFallback>
         </Avatar>
       </div>
     );
@@ -157,7 +157,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
               className="max-h-[500px] max-w-full rounded-lg border border-neutral-200 object-contain shadow-sm dark:border-neutral-700"
             />
           ))}
-          <p className="text-center font-mono text-[9px] text-neutral-400 dark:text-neutral-500">
+          <p className="text-center font-mono text-[0.5625rem] text-neutral-400 dark:text-neutral-500">
             {message.content}
           </p>
         </div>
@@ -170,7 +170,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
     return (
       <div className="flex items-center gap-3 py-4">
         <div className="h-px flex-1 bg-neutral-200 dark:bg-neutral-700" />
-        <span className="shrink-0 font-mono text-[10px] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+        <span className="shrink-0 font-mono text-[0.625rem] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
           New session
         </span>
         <div className="h-px flex-1 bg-neutral-200 dark:bg-neutral-700" />
@@ -184,7 +184,7 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
       <div className="flex justify-center py-2">
         <div className="flex items-center gap-1.5 rounded-full bg-blue-500/[0.06] px-3 py-1 dark:bg-blue-500/[0.08]">
           <SwitchIcon className="h-2.5 w-2.5 text-blue-500/70 dark:text-blue-400/60" />
-          <p className="text-center font-mono text-[10px] text-blue-600 dark:text-blue-400/80">
+          <p className="text-center font-mono text-[0.625rem] text-blue-600 dark:text-blue-400/80">
             {message.content}
           </p>
         </div>
@@ -207,14 +207,14 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
       <div className="group relative flex gap-2 py-2.5 animate-fade-in">
         <Avatar className="mt-1 h-5 w-5 shrink-0">
           {systemAvatarUrl && <AvatarImage src={systemAvatarUrl} alt={systemTitle} />}
-          <AvatarFallback className="text-[8px]">{systemInitials || 'SYS'}</AvatarFallback>
+          <AvatarFallback className="text-[0.5rem]">{systemInitials || 'SYS'}</AvatarFallback>
         </Avatar>
         <div className={compact ? 'max-w-[90%]' : 'max-w-[75%]'}>
           <div className="mb-1 flex items-center gap-1.5 px-1">
-            <span className="font-mono text-[10px] font-medium text-neutral-500 dark:text-neutral-400">
+            <span className="font-mono text-[0.625rem] font-medium text-neutral-500 dark:text-neutral-400">
               {systemTitle}
             </span>
-            <span className="font-mono text-[9px] tabular-nums text-neutral-300 dark:text-neutral-600">
+            <span className="font-mono text-[0.5625rem] tabular-nums text-neutral-300 dark:text-neutral-600">
               {formatTime(message.createdAt)}
             </span>
             {(message.content || '').trim().length > 0 && (
@@ -246,14 +246,14 @@ export function MessageItem({ message, onRevert, connectedUsers }: MessageItemPr
       </div>
       <div className="min-w-0 flex-1">
         <div className="mb-1.5 flex items-baseline gap-2">
-          <span className="font-mono text-[11px] font-semibold tracking-tight text-neutral-800 dark:text-neutral-200">
+          <span className="font-mono text-[0.6875rem] font-semibold tracking-tight text-neutral-800 dark:text-neutral-200">
             {isTool ? 'Tool' : 'Agent'}
           </span>
-          <span className="font-mono text-[10px] tabular-nums text-neutral-300 dark:text-neutral-600">
+          <span className="font-mono text-[0.625rem] tabular-nums text-neutral-300 dark:text-neutral-600">
             {formatTime(message.createdAt)}
           </span>
           {(message.content || '').trim().length > 0 && (
-            <MessageCopyButton text={message.content} className="text-[10px]" />
+            <MessageCopyButton text={message.content} className="text-[0.625rem]" />
           )}
         </div>
         <div className="border-l-[1.5px] border-accent/15 pl-3 dark:border-accent/10">
@@ -457,26 +457,26 @@ function AudioPlayer({ src, filename, transcript }: { src: string; filename?: st
           </div>
         </div>
         <div className="flex items-center justify-between px-0.5">
-          <span className="font-mono text-[9px] tabular-nums text-white/50 dark:text-neutral-500">
+          <span className="font-mono text-[0.5625rem] tabular-nums text-white/50 dark:text-neutral-500">
             {formatDuration(currentTime)}
           </span>
-          <span className="font-mono text-[9px] tabular-nums text-white/50 dark:text-neutral-500">
+          <span className="font-mono text-[0.5625rem] tabular-nums text-white/50 dark:text-neutral-500">
             {formatDuration(duration)}
           </span>
         </div>
       </div>
       {filename && !transcript && (
-        <span className="hidden max-w-[80px] truncate font-mono text-[9px] text-white/30 dark:text-neutral-400 sm:block">
+        <span className="hidden max-w-[80px] truncate font-mono text-[0.5625rem] text-white/30 dark:text-neutral-400 sm:block">
           {filename}
         </span>
       )}
     </div>
     {transcript && (
       <div className="mt-1 rounded-2xl rounded-tr-md bg-neutral-900/80 px-4 py-2 dark:bg-neutral-200/80">
-        <p className="font-mono text-[10px] font-medium uppercase tracking-wider text-white/40 dark:text-neutral-500">
+        <p className="font-mono text-[0.625rem] font-medium uppercase tracking-wider text-white/40 dark:text-neutral-500">
           Transcript
         </p>
-        <p className="mt-0.5 text-[13px] leading-relaxed text-white/90 dark:text-neutral-800">
+        <p className="mt-0.5 text-[0.8125rem] leading-relaxed text-white/90 dark:text-neutral-800">
           {transcript}
         </p>
       </div>
@@ -565,7 +565,7 @@ function SwitchIcon({ className }: { className?: string }) {
 
 function ScheduledBadge() {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-1.5 py-0.5 font-mono text-[9px] font-medium text-amber-600 dark:bg-amber-500/15 dark:text-amber-400">
+    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-1.5 py-0.5 font-mono text-[0.5625rem] font-medium text-amber-600 dark:bg-amber-500/15 dark:text-amber-400">
       <ClockIcon className="h-2.5 w-2.5" />
       scheduled
     </span>

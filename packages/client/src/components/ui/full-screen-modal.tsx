@@ -50,7 +50,7 @@ export function FullScreenModal({
             'px-4'
           )}>
             <Dialog.Title className={cn(
-              'font-mono text-[13px] font-semibold tracking-tight',
+              'font-mono text-[0.8125rem] font-semibold tracking-tight',
               'text-neutral-900 dark:text-neutral-100',
               'flex items-center gap-2.5'
             )}>

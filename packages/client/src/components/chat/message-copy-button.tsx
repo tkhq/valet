@@ -38,7 +38,7 @@ export function MessageCopyButton({ text, className }: MessageCopyButtonProps) {
       type="button"
       onClick={() => void handleCopy()}
       className={cn(
-        'rounded-sm px-1.5 py-0.5 font-mono text-[9px] font-medium text-neutral-300 opacity-0 transition-all hover:bg-neutral-100 hover:text-neutral-600 group-hover:opacity-100 dark:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300',
+        'rounded-sm px-1.5 py-0.5 font-mono text-[0.5625rem] font-medium text-neutral-300 opacity-0 transition-all hover:bg-neutral-100 hover:text-neutral-600 group-hover:opacity-100 dark:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300',
         className
       )}
       title="Copy message"

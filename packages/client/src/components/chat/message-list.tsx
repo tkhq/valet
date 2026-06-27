@@ -125,7 +125,7 @@ export function MessageList({ messages, isAgentThinking, agentStatus, agentStatu
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               </div>
-              <p className="font-mono text-[11px] tracking-wide text-neutral-400 dark:text-neutral-500">
+              <p className="font-mono text-[0.6875rem] tracking-wide text-neutral-400 dark:text-neutral-500">
                 Ask or build anything
               </p>
             </div>
@@ -162,7 +162,7 @@ export function MessageList({ messages, isAgentThinking, agentStatus, agentStatu
         <button
           type="button"
           onClick={scrollToBottom}
-          className={`absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1 rounded-full border border-neutral-200 bg-white/90 px-2.5 py-1 font-mono text-[10px] font-medium text-neutral-500 shadow-sm backdrop-blur transition-all hover:bg-white hover:text-neutral-700 dark:border-neutral-700 dark:bg-neutral-800/90 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200 ${isAtBottom ? 'pointer-events-none translate-y-2 opacity-0' : 'translate-y-0 opacity-100'}`}
+          className={`absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1 rounded-full border border-neutral-200 bg-white/90 px-2.5 py-1 font-mono text-[0.625rem] font-medium text-neutral-500 shadow-sm backdrop-blur transition-all hover:bg-white hover:text-neutral-700 dark:border-neutral-700 dark:bg-neutral-800/90 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200 ${isAtBottom ? 'pointer-events-none translate-y-2 opacity-0' : 'translate-y-0 opacity-100'}`}
         >
           <ChevronDownIcon className="h-3 w-3" />
           Bottom
@@ -189,14 +189,14 @@ function AssistantTurn({ message }: { message: Message }) {
 
       <div className="min-w-0 flex-1">
         <div className="mb-1.5 flex items-baseline gap-2">
-          <span className="font-mono text-[11px] font-semibold tracking-tight text-neutral-800 dark:text-neutral-200">
+          <span className="font-mono text-[0.6875rem] font-semibold tracking-tight text-neutral-800 dark:text-neutral-200">
             Agent
           </span>
-          <span className="font-mono text-[10px] tabular-nums text-neutral-300 dark:text-neutral-600">
+          <span className="font-mono text-[0.625rem] tabular-nums text-neutral-300 dark:text-neutral-600">
             {formatTime(message.createdAt)}
           </span>
           {copyText.length > 0 && (
-            <MessageCopyButton text={copyText} className="text-[10px]" />
+            <MessageCopyButton text={copyText} className="text-[0.625rem]" />
           )}
         </div>
 
@@ -235,7 +235,7 @@ function V2PartRenderer({ part }: { part: MessagePart }) {
     }
     case 'error':
       return (
-        <div className="rounded-md border border-red-200/60 bg-red-50/50 px-3 py-2 font-mono text-[12px] text-red-600 dark:border-red-800/40 dark:bg-red-900/20 dark:text-red-400">
+        <div className="rounded-md border border-red-200/60 bg-red-50/50 px-3 py-2 font-mono text-[0.75rem] text-red-600 dark:border-red-800/40 dark:bg-red-900/20 dark:text-red-400">
           {part.message}
         </div>
       );

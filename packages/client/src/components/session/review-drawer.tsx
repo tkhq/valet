@@ -64,7 +64,7 @@ export function ReviewDrawer({ sessionId }: ReviewDrawerProps) {
       {/* Header */}
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-neutral-200 bg-surface-1 px-2 dark:border-neutral-800 dark:bg-surface-1">
         <div className="flex items-center gap-2">
-          <span className="px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-900 dark:text-neutral-100">
+          <span className="px-2.5 py-1 font-mono text-[0.6875rem] font-medium text-neutral-900 dark:text-neutral-100">
             Review
           </span>
           {state === 'complete' && review && (
@@ -74,7 +74,7 @@ export function ReviewDrawer({ sessionId }: ReviewDrawerProps) {
         <button
           type="button"
           onClick={closeDrawer}
-          className="flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[11px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
+          className="flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[0.6875rem] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
         >
           <PanelCloseIcon className="h-3.5 w-3.5" />
           Close Review
@@ -93,10 +93,10 @@ export function ReviewDrawer({ sessionId }: ReviewDrawerProps) {
       {state === 'idle' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
           <ReviewIcon className="h-8 w-8 text-neutral-300 dark:text-neutral-600" />
-          <p className="text-center font-mono text-[12px] text-neutral-500 dark:text-neutral-400">
+          <p className="text-center font-mono text-[0.75rem] text-neutral-500 dark:text-neutral-400">
             Run a review to analyze session changes
           </p>
-          <p className="text-center font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+          <p className="text-center font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
             The agent will analyze diffs and produce findings with severity levels
           </p>
         </div>
@@ -108,7 +108,7 @@ export function ReviewDrawer({ sessionId }: ReviewDrawerProps) {
 
       {state === 'error' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-          <p className="font-mono text-[12px] text-red-500 dark:text-red-400">
+          <p className="font-mono text-[0.75rem] text-red-500 dark:text-red-400">
             {error || 'Review failed'}
           </p>
         </div>
@@ -172,7 +172,7 @@ function ReviewStatsBadge({ stats }: { stats: { critical: number; warning: numbe
   const total = stats.critical + stats.warning + stats.suggestion + stats.nitpick;
   if (total === 0) {
     return (
-      <span className="rounded bg-green-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-green-700 dark:bg-green-900/40 dark:text-green-400">
+      <span className="rounded bg-green-100 px-1.5 py-0.5 font-mono text-[0.625rem] font-medium text-green-700 dark:bg-green-900/40 dark:text-green-400">
         Clean
       </span>
     );
@@ -180,17 +180,17 @@ function ReviewStatsBadge({ stats }: { stats: { critical: number; warning: numbe
   return (
     <div className="flex items-center gap-1">
       {stats.critical > 0 && (
-        <span className="rounded bg-red-100 px-1 py-0.5 font-mono text-[10px] font-bold text-red-700 dark:bg-red-900/40 dark:text-red-400">
+        <span className="rounded bg-red-100 px-1 py-0.5 font-mono text-[0.625rem] font-bold text-red-700 dark:bg-red-900/40 dark:text-red-400">
           {stats.critical}C
         </span>
       )}
       {stats.warning > 0 && (
-        <span className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[10px] font-bold text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+        <span className="rounded bg-amber-100 px-1 py-0.5 font-mono text-[0.625rem] font-bold text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
           {stats.warning}W
         </span>
       )}
       {stats.suggestion > 0 && (
-        <span className="rounded bg-blue-100 px-1 py-0.5 font-mono text-[10px] font-bold text-blue-700 dark:bg-blue-900/40 dark:text-blue-400">
+        <span className="rounded bg-blue-100 px-1 py-0.5 font-mono text-[0.625rem] font-bold text-blue-700 dark:bg-blue-900/40 dark:text-blue-400">
           {stats.suggestion}S
         </span>
       )}
@@ -212,7 +212,7 @@ function TabButton({
       type="button"
       onClick={onClick}
       className={cn(
-        'flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[11px] font-medium transition-colors',
+        'flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[0.6875rem] font-medium transition-colors',
         active
           ? 'bg-surface-0 text-neutral-900 shadow-sm dark:bg-surface-2 dark:text-neutral-100'
           : 'text-neutral-500 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-300'

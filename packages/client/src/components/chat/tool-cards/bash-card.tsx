@@ -31,21 +31,21 @@ export function BashCard({ tool }: { tool: ToolCallData }) {
         <div className="overflow-auto rounded bg-neutral-900 dark:bg-neutral-950" style={{ maxHeight: '320px' }}>
           {/* Command line */}
           <div className="flex items-start gap-0 border-b border-neutral-800 px-3 py-2">
-            <span className="shrink-0 select-none font-mono text-[11px] text-emerald-500">$</span>
-            <pre className="ml-2 flex-1 whitespace-pre-wrap break-all font-mono text-[11px] leading-[1.6] text-neutral-200">
+            <span className="shrink-0 select-none font-mono text-[0.6875rem] text-emerald-500">$</span>
+            <pre className="ml-2 flex-1 whitespace-pre-wrap break-all font-mono text-[0.6875rem] leading-[1.6] text-neutral-200">
               {command}
             </pre>
           </div>
           {/* Output */}
           {output && (
-            <pre className="px-3 py-2 font-mono text-[11px] leading-[1.6] text-neutral-400">
+            <pre className="px-3 py-2 font-mono text-[0.6875rem] leading-[1.6] text-neutral-400">
               {output.length > 3000 ? output.slice(0, 3000) + '\n... (truncated)' : output}
             </pre>
           )}
         </div>
         {/* Exit code */}
         {exitCode !== null && exitCode !== 0 && (
-          <p className="mt-1.5 font-mono text-[10px] text-red-400">
+          <p className="mt-1.5 font-mono text-[0.625rem] text-red-400">
             exit {exitCode}
           </p>
         )}

@@ -25,7 +25,7 @@ export function ActivityFeed({ sessions }: ActivityFeedProps) {
         <h3 className="label-mono text-neutral-400">Recent Sessions</h3>
       </div>
       {sessions.length === 0 ? (
-        <div className="px-5 py-10 text-center text-[13px] text-neutral-300">
+        <div className="px-5 py-10 text-center text-[0.8125rem] text-neutral-300">
           No sessions yet
         </div>
       ) : (
@@ -38,7 +38,7 @@ export function ActivityFeed({ sessions }: ActivityFeedProps) {
               className="group flex items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-1"
             >
               <div className="min-w-0 flex-1">
-                <p className="truncate text-[13px] font-medium text-neutral-900 dark:text-neutral-100 group-hover:text-accent transition-colors">
+                <p className="truncate text-[0.8125rem] font-medium text-neutral-900 dark:text-neutral-100 group-hover:text-accent transition-colors">
                   {s.workspace || 'Untitled Session'}
                 </p>
                 <p className="mt-0.5 font-mono text-2xs text-neutral-400">

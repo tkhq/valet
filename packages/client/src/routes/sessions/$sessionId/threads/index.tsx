@@ -32,7 +32,7 @@ function ThreadHistoryPage() {
           <Link
             to="/sessions/$sessionId"
             params={{ sessionId }}
-            className="font-mono text-[11px] text-neutral-400 transition-colors hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200"
+            className="font-mono text-[0.6875rem] text-neutral-400 transition-colors hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200"
           >
             &larr; Back
           </Link>
@@ -47,18 +47,18 @@ function ThreadHistoryPage() {
         {isLoading && (
           <div className="flex items-center gap-2 py-8">
             <div className="h-3 w-3 animate-spin rounded-full border border-neutral-300 border-t-transparent dark:border-neutral-600 dark:border-t-transparent" />
-            <span className="font-mono text-[11px] text-neutral-400">Loading threads...</span>
+            <span className="font-mono text-[0.6875rem] text-neutral-400">Loading threads...</span>
           </div>
         )}
 
         {isError && (
-          <div className="py-8 text-center font-mono text-[11px] text-red-500">
+          <div className="py-8 text-center font-mono text-[0.6875rem] text-red-500">
             Failed to load threads.
           </div>
         )}
 
         {!isLoading && !isError && threads.length === 0 && (
-          <div className="py-8 text-center font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
+          <div className="py-8 text-center font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">
             No threads yet.
           </div>
         )}
@@ -74,26 +74,26 @@ function ThreadHistoryPage() {
                   className="group block rounded-md border border-border/60 bg-surface-1/40 px-4 py-3 transition-colors hover:bg-surface-1 dark:bg-surface-2/40 dark:hover:bg-surface-2"
                 >
                   <div className="flex items-baseline justify-between gap-3">
-                    <span className="truncate font-mono text-[12px] font-medium text-neutral-800 transition-colors group-hover:text-accent dark:text-neutral-200 dark:group-hover:text-accent">
+                    <span className="truncate font-mono text-[0.75rem] font-medium text-neutral-800 transition-colors group-hover:text-accent dark:text-neutral-200 dark:group-hover:text-accent">
                       {thread.title || thread.firstMessagePreview || 'Untitled thread'}
                     </span>
-                    <span className="shrink-0 font-mono text-[10px] tabular-nums text-neutral-400 dark:text-neutral-500">
+                    <span className="shrink-0 font-mono text-[0.625rem] tabular-nums text-neutral-400 dark:text-neutral-500">
                       {formatRelativeTime(thread.lastActiveAt)}
                     </span>
                   </div>
 
                   {thread.title && thread.firstMessagePreview && (
-                    <p className="mt-1 line-clamp-2 font-mono text-[11px] leading-relaxed text-neutral-500 dark:text-neutral-400">
+                    <p className="mt-1 line-clamp-2 font-mono text-[0.6875rem] leading-relaxed text-neutral-500 dark:text-neutral-400">
                       {thread.firstMessagePreview}
                     </p>
                   )}
 
                   <div className="mt-2 flex items-center gap-3">
-                    <span className="font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+                    <span className="font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                       {thread.messageCount} {thread.messageCount === 1 ? 'message' : 'messages'}
                     </span>
                     {thread.summaryFiles > 0 && (
-                      <span className="font-mono text-[10px] tabular-nums text-neutral-400 dark:text-neutral-500">
+                      <span className="font-mono text-[0.625rem] tabular-nums text-neutral-400 dark:text-neutral-500">
                         <span className="text-emerald-600 dark:text-emerald-400">+{thread.summaryAdditions}</span>
                         {' '}
                         <span className="text-red-500 dark:text-red-400">-{thread.summaryDeletions}</span>
@@ -107,7 +107,7 @@ function ThreadHistoryPage() {
 
             {totalPages > 1 && (
               <div className="mt-4 flex items-center gap-2">
-                <span className="font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+                <span className="font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
                   {data?.totalCount ?? threads.length} threads
                 </span>
                 <div className="flex items-center gap-1">
@@ -118,7 +118,7 @@ function ThreadHistoryPage() {
                       params={{ sessionId }}
                       search={{ page: nextPage }}
                       className={[
-                        'rounded border px-2 py-1 font-mono text-[10px] transition-colors',
+                        'rounded border px-2 py-1 font-mono text-[0.625rem] transition-colors',
                         nextPage === safePage
                           ? 'border-accent bg-accent text-white'
                           : 'border-border text-neutral-500 hover:bg-surface-1 dark:text-neutral-400 dark:hover:bg-surface-2',

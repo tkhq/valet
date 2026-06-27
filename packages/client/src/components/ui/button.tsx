@@ -17,7 +17,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     return (
       <Comp
         className={cn(
-          'inline-flex items-center justify-center whitespace-nowrap rounded-md text-[13px] font-medium transition-colors',
+          'inline-flex items-center justify-center whitespace-nowrap rounded-md text-[0.8125rem] font-medium transition-colors',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-0',
           'disabled:pointer-events-none disabled:opacity-40',
           {

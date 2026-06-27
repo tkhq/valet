@@ -198,7 +198,7 @@ function ThreadItem({
             if (e.key === 'Escape') { savedRef.current = true; setIsEditing(false); }
           }}
           onBlur={saveTitle}
-          className="w-full rounded border border-violet-300 bg-white px-1 py-0.5 text-[11px] text-neutral-900 outline-none focus:ring-1 focus:ring-violet-400 dark:border-violet-600 dark:bg-neutral-900 dark:text-neutral-100"
+          className="w-full rounded border border-violet-300 bg-white px-1 py-0.5 text-[0.6875rem] text-neutral-900 outline-none focus:ring-1 focus:ring-violet-400 dark:border-violet-600 dark:bg-neutral-900 dark:text-neutral-100"
           autoFocus
           maxLength={200}
         />
@@ -211,7 +211,7 @@ function ThreadItem({
       type="button"
       onClick={onSelect}
       className={cn(
-        'group flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[11px] transition-colors',
+        'group flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[0.6875rem] transition-colors',
         isActive
           ? 'bg-surface-2 text-neutral-900 dark:bg-surface-3 dark:text-neutral-100'
           : 'text-neutral-500 hover:bg-surface-1 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-surface-2 dark:hover:text-neutral-200'
@@ -260,7 +260,7 @@ function ThreadItem({
 function ThreadGroupHeader({ group }: { group: ThreadGroup }) {
   const Icon = getChannelIcon(group.channelType);
   return (
-    <div className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-[9px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+    <div className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
       <Icon className="h-2.5 w-2.5" />
       <span className="truncate">{group.label}</span>
     </div>
@@ -349,7 +349,7 @@ export function ThreadSidebar({
   return (
     <div className="flex w-[210px] shrink-0 flex-col border-r border-neutral-200 bg-surface-0 dark:border-neutral-800 dark:bg-surface-0">
       <div className="flex items-center justify-between border-b border-neutral-100 px-3 py-2 dark:border-neutral-800/50">
-        <span className="text-[11px] font-semibold text-neutral-500 dark:text-neutral-400">
+        <span className="text-[0.6875rem] font-semibold text-neutral-500 dark:text-neutral-400">
           Threads
         </span>
         <div className="flex items-center gap-1">
@@ -390,7 +390,7 @@ export function ThreadSidebar({
           </div>
         ))}
         {activeThreads.length === 0 && (
-          <div className="px-2 py-4 text-center text-[11px] text-neutral-400 dark:text-neutral-500">
+          <div className="px-2 py-4 text-center text-[0.6875rem] text-neutral-400 dark:text-neutral-500">
             No active threads
           </div>
         )}
@@ -401,7 +401,7 @@ export function ThreadSidebar({
           <button
             type="button"
             onClick={() => setShowDismissed(!showDismissed)}
-            className="flex w-full items-center justify-between px-3 py-1.5 text-[10px] text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
+            className="flex w-full items-center justify-between px-3 py-1.5 text-[0.625rem] text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
           >
             <span>Dismissed</span>
             <span className="tabular-nums">{dismissedThreads.length}</span>

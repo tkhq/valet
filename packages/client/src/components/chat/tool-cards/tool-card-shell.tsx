@@ -103,13 +103,13 @@ export function ToolCardShell({
         </span>
 
         {/* Tool name */}
-        <span className="shrink-0 font-mono text-[11px] font-semibold text-neutral-700 dark:text-neutral-300">
+        <span className="shrink-0 font-mono text-[0.6875rem] font-semibold text-neutral-700 dark:text-neutral-300">
           {label}
         </span>
 
         {/* Summary */}
         {summary && (
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
+          <span className="min-w-0 flex-1 truncate font-mono text-[0.6875rem] text-neutral-400 dark:text-neutral-500">
             {summary}
           </span>
         )}
@@ -117,7 +117,7 @@ export function ToolCardShell({
         {/* Status label */}
         <span
           className={cn(
-            'ml-auto shrink-0 font-mono text-[10px] tabular-nums',
+            'ml-auto shrink-0 font-mono text-[0.625rem] tabular-nums',
             STATUS_COLORS[status],
           )}
         >
@@ -194,7 +194,7 @@ export function ToolCardSection({
   return (
     <div className={cn('px-2.5 py-2', className)}>
       {label && (
-        <div className="mb-1 font-mono text-[9px] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+        <div className="mb-1 font-mono text-[0.5625rem] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
           {label}
         </div>
       )}
@@ -216,7 +216,7 @@ export function ToolCodeBlock({
   return (
     <pre
       className={cn(
-        'overflow-auto font-mono text-[11px] leading-[1.6] text-neutral-600 dark:text-neutral-400',
+        'overflow-auto font-mono text-[0.6875rem] leading-[1.6] text-neutral-600 dark:text-neutral-400',
         className,
       )}
       style={{ maxHeight }}

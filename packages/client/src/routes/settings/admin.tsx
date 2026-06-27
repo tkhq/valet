@@ -291,7 +291,7 @@ function OrgModelPreferencesSection() {
                       : 'border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800'
                   } cursor-grab active:cursor-grabbing`}
                 >
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-neutral-100 font-mono text-[10px] font-semibold text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-neutral-100 font-mono text-[0.625rem] font-semibold text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400">
                     {index + 1}
                   </span>
                   <div className="min-w-0 flex-1">
@@ -703,7 +703,7 @@ function ChannelsSummary({
         <TooltipContent side="bottom" className="max-w-xs">
           <div className="flex flex-wrap gap-1">
             {channels.map((ch, i) => (
-              <span key={i} className="text-[11px]">
+              <span key={i} className="text-[0.6875rem]">
                 {channelLabel(ch)}{i < channels.length - 1 ? ',' : ''}
               </span>
             ))}
@@ -809,7 +809,7 @@ function OrchestratorsSection() {
                         title="Click to copy"
                       >
                         <span className="select-all">{orch.sandboxId}</span>
-                        <span className="text-[10px]">
+                        <span className="text-[0.625rem]">
                           {copiedSandboxId === orch.sandboxId ? '✓' : '⎘'}
                         </span>
                       </button>
@@ -2587,7 +2587,7 @@ function PluginExpandedDetail({
                     </svg>
                   </button>
                   {previewFile === artifact.id && (
-                    <pre className="mt-1 mb-2 ml-2 max-h-64 overflow-auto rounded border border-neutral-200 bg-white p-3 font-mono text-[11px] leading-relaxed text-neutral-700 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
+                    <pre className="mt-1 mb-2 ml-2 max-h-64 overflow-auto rounded border border-neutral-200 bg-white p-3 font-mono text-[0.6875rem] leading-relaxed text-neutral-700 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
                       {artifact.content}
                     </pre>
                   )}

@@ -762,7 +762,7 @@ export function CreateSessionDialog({ trigger }: CreateSessionDialogProps) {
                         {selectedIssue.labels.length > 0 && (
                           <div className="mt-1 flex flex-wrap gap-1">
                             {selectedIssue.labels.map((l) => (
-                              <span key={l.name} className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium" style={{ backgroundColor: `#${l.color}20`, color: `#${l.color}` }}>
+                              <span key={l.name} className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium" style={{ backgroundColor: `#${l.color}20`, color: `#${l.color}` }}>
                                 {l.name}
                               </span>
                             ))}
@@ -801,7 +801,7 @@ export function CreateSessionDialog({ trigger }: CreateSessionDialogProps) {
                                   </div>
                                   <div className="mt-0.5 flex items-center gap-2">
                                     {issue.labels.slice(0, 3).map((l) => (
-                                      <span key={l.name} className="inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-medium" style={{ backgroundColor: `#${l.color}20`, color: `#${l.color}` }}>
+                                      <span key={l.name} className="inline-flex rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium" style={{ backgroundColor: `#${l.color}20`, color: `#${l.color}` }}>
                                         {l.name}
                                       </span>
                                     ))}

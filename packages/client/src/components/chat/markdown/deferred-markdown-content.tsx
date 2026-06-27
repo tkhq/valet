@@ -11,7 +11,7 @@ interface DeferredMarkdownContentProps {
 
 function PlainMarkdownFallback({ content }: { content: string }) {
   return (
-    <div className="mt-1 max-w-full overflow-hidden whitespace-pre-wrap break-words text-[13px] leading-relaxed text-inherit">
+    <div className="mt-1 max-w-full overflow-hidden whitespace-pre-wrap break-words text-[0.8125rem] leading-relaxed text-inherit">
       {content}
     </div>
   );

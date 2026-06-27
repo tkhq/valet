@@ -791,7 +791,7 @@ export function ChatInput({
       />
       {isDragOver && (
         <div className="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-xl border-2 border-dashed border-accent/50 bg-accent/8">
-          <span className="rounded-full bg-surface-0/90 px-3 py-1 font-mono text-[11px] font-medium text-accent shadow-sm dark:bg-surface-2/90">
+          <span className="rounded-full bg-surface-0/90 px-3 py-1 font-mono text-[0.6875rem] font-medium text-accent shadow-sm dark:bg-surface-2/90">
             Drop file to attach
           </span>
         </div>
@@ -806,7 +806,7 @@ export function ChatInput({
               {attachment.mime.startsWith('audio/') ? (
                 <div className="flex h-full w-28 items-center gap-1.5 px-2">
                   <MicIcon className="h-4 w-4 shrink-0 text-accent" />
-                  <span className="truncate font-mono text-[10px] text-neutral-500">
+                  <span className="truncate font-mono text-[0.625rem] text-neutral-500">
                     {attachment.filename || 'voice'}
                   </span>
                 </div>
@@ -822,7 +822,7 @@ export function ChatInput({
                     <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
                     <polyline points="14 2 14 8 20 8" />
                   </svg>
-                  <span className="truncate font-mono text-[10px] text-neutral-500">
+                  <span className="truncate font-mono text-[0.625rem] text-neutral-500">
                     {attachment.filename || 'file'}
                   </span>
                 </div>
@@ -847,7 +847,7 @@ export function ChatInput({
           >
             {groupedCommands.map(([category, commands]) => (
               <div key={category}>
-                <div className="sticky top-0 bg-surface-1/80 px-3 py-1 font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-neutral-400 backdrop-blur-sm dark:bg-surface-2/80 dark:text-neutral-500">
+                <div className="sticky top-0 bg-surface-1/80 px-3 py-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-[0.08em] text-neutral-400 backdrop-blur-sm dark:bg-surface-2/80 dark:text-neutral-500">
                   {category}
                 </div>
                 {commands.map((cmd) => {
@@ -858,7 +858,7 @@ export function ChatInput({
                       key={cmd.name}
                       type="button"
                       data-highlighted={isHighlighted}
-                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[11px] transition-colors ${
+                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[0.6875rem] transition-colors ${
                         isHighlighted
                           ? 'bg-accent/8 text-accent dark:bg-accent/15'
                           : 'text-neutral-600 hover:bg-surface-1 dark:text-neutral-400 dark:hover:bg-surface-2'
@@ -885,13 +885,13 @@ export function ChatInput({
             className="absolute bottom-full left-0 right-10 mb-1.5 max-h-60 overflow-y-auto rounded-lg border border-neutral-200 bg-surface-0 shadow-panel dark:border-neutral-700 dark:bg-surface-1"
           >
             {filteredModels.length === 0 ? (
-              <div className="px-3 py-2.5 font-mono text-[10px] text-neutral-400">
+              <div className="px-3 py-2.5 font-mono text-[0.625rem] text-neutral-400">
                 No matching models
               </div>
             ) : (
               groupedFiltered.map(([provider, models]) => (
                 <div key={provider}>
-                  <div className="sticky top-0 bg-surface-1/80 px-3 py-1 font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-neutral-400 backdrop-blur-sm dark:bg-surface-2/80 dark:text-neutral-500">
+                  <div className="sticky top-0 bg-surface-1/80 px-3 py-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-[0.08em] text-neutral-400 backdrop-blur-sm dark:bg-surface-2/80 dark:text-neutral-500">
                     {provider}
                   </div>
                   {models.map((m) => {
@@ -903,7 +903,7 @@ export function ChatInput({
                         key={m.id}
                         type="button"
                         data-highlighted={isHighlighted}
-                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[11px] transition-colors ${
+                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[0.6875rem] transition-colors ${
                           isHighlighted
                             ? 'bg-accent/8 text-accent dark:bg-accent/15'
                             : 'text-neutral-600 hover:bg-surface-1 dark:text-neutral-400 dark:hover:bg-surface-2'
@@ -916,7 +916,7 @@ export function ChatInput({
                       >
                         <span className="flex-1">{m.name}</span>
                         {isSelected && (
-                          <span className="text-[9px] font-medium text-accent/70">current</span>
+                          <span className="text-[0.5625rem] font-medium text-accent/70">current</span>
                         )}
                       </button>
                     );
@@ -932,11 +932,11 @@ export function ChatInput({
             className="absolute bottom-full left-0 right-10 mb-1.5 max-h-60 overflow-y-auto rounded-lg border border-neutral-200 bg-surface-0 shadow-panel dark:border-neutral-700 dark:bg-surface-1"
           >
             {fileFinderLoading ? (
-              <div className="px-3 py-2.5 font-mono text-[10px] text-neutral-400">
+              <div className="px-3 py-2.5 font-mono text-[0.625rem] text-neutral-400">
                 Searching...
               </div>
             ) : filePaths.length === 0 ? (
-              <div className="px-3 py-2.5 font-mono text-[10px] text-neutral-400">
+              <div className="px-3 py-2.5 font-mono text-[0.625rem] text-neutral-400">
                 {atQuery ? 'No files found' : 'Type to search files...'}
               </div>
             ) : (
@@ -947,7 +947,7 @@ export function ChatInput({
                     key={filePath}
                     type="button"
                     data-highlighted={isHighlighted}
-                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[11px] transition-colors ${
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[0.6875rem] transition-colors ${
                       isHighlighted
                         ? 'bg-accent/8 text-accent dark:bg-accent/15'
                         : 'text-neutral-600 hover:bg-surface-1 dark:text-neutral-400 dark:hover:bg-surface-2'
@@ -996,7 +996,7 @@ export function ChatInput({
             placeholder={placeholder}
             disabled={disabled}
             rows={1}
-            className="w-full resize-none bg-transparent px-3.5 pt-2.5 pb-1 text-base leading-5 text-neutral-900 placeholder:text-neutral-400 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-100 dark:placeholder:text-neutral-500 md:text-[13px] md:leading-normal"
+            className="w-full resize-none bg-transparent px-3.5 pt-2.5 pb-1 text-base leading-5 text-neutral-900 placeholder:text-neutral-400 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-100 dark:placeholder:text-neutral-500 md:text-[0.8125rem] md:leading-normal"
           />
           <div className="flex items-center gap-0.5 px-1.5 pb-1.5">
             <button
@@ -1019,7 +1019,7 @@ export function ChatInput({
                 >
                   <CloseIcon className="h-3.5 w-3.5" />
                 </button>
-                <span className="flex items-center gap-1 font-mono text-[10px] text-red-500">
+                <span className="flex items-center gap-1 font-mono text-[0.625rem] text-red-500">
                   <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" />
                   {formatRecordingDuration(recordingDuration)}
                 </span>
@@ -1045,7 +1045,7 @@ export function ChatInput({
               </button>
             )}
             {micError && (
-              <span className="font-mono text-[10px] text-red-400">{micError}</span>
+              <span className="font-mono text-[0.625rem] text-red-400">{micError}</span>
             )}
             <div className="flex-1" />
             {hasModels && (
@@ -1158,7 +1158,7 @@ export function ChatInput({
         </div>
       </div>
       {!compact && (
-        <p className="mt-1 hidden font-mono text-[9px] tracking-wide text-neutral-400/70 dark:text-neutral-500 md:block">
+        <p className="mt-1 hidden font-mono text-[0.5625rem] tracking-wide text-neutral-400/70 dark:text-neutral-500 md:block">
           {sessionStatus === 'restoring'
             ? 'restoring session...'
             : sessionStatus === 'hibernated'

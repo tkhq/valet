@@ -38,7 +38,7 @@ export function GrepCard({ tool }: { tool: ToolCallData }) {
       {lines.length > 0 && (
         <ToolCardSection>
           <div className="overflow-auto rounded bg-neutral-50 dark:bg-neutral-900/50" style={{ maxHeight: '260px' }}>
-            <div className="font-mono text-[11px] leading-[1.6]">
+            <div className="font-mono text-[0.6875rem] leading-[1.6]">
               {lines.map((line, i) => {
                 // Try to parse grep output: "file:line:content" or "file:content"
                 const parsed = parseGrepLine(line);

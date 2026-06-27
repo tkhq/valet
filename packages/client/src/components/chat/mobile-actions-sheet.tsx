@@ -38,7 +38,7 @@ export function MobileActionsSheet({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-[60] bg-black/45 backdrop-blur-[1px]" />
         <Dialog.Content className="fixed inset-x-0 bottom-0 z-[61] rounded-t-2xl border-t border-neutral-200 bg-surface-0 p-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] shadow-2xl dark:border-neutral-800 dark:bg-surface-1">
-          <Dialog.Title className="mb-2 px-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-neutral-500 dark:text-neutral-400">
+          <Dialog.Title className="mb-2 px-1 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-neutral-500 dark:text-neutral-400">
             Actions
           </Dialog.Title>
           <div className="grid grid-cols-2 gap-2">
@@ -57,7 +57,7 @@ export function MobileActionsSheet({
                 href={prUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="col-span-2 flex h-11 items-center justify-center gap-2 rounded-xl border border-neutral-200 bg-surface-1 px-3 text-[13px] font-medium text-neutral-700 dark:border-neutral-700 dark:bg-surface-2 dark:text-neutral-300"
+                className="col-span-2 flex h-11 items-center justify-center gap-2 rounded-xl border border-neutral-200 bg-surface-1 px-3 text-[0.8125rem] font-medium text-neutral-700 dark:border-neutral-700 dark:bg-surface-2 dark:text-neutral-300"
                 onClick={() => onOpenChange(false)}
               >
                 <PRIcon className="h-4 w-4" />
@@ -84,7 +84,7 @@ function MobileActionButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex h-11 items-center justify-center gap-2 rounded-xl border border-neutral-200 bg-surface-1 px-3 text-[13px] font-medium text-neutral-700 active:scale-[0.98] dark:border-neutral-700 dark:bg-surface-2 dark:text-neutral-300"
+      className="flex h-11 items-center justify-center gap-2 rounded-xl border border-neutral-200 bg-surface-1 px-3 text-[0.8125rem] font-medium text-neutral-700 active:scale-[0.98] dark:border-neutral-700 dark:bg-surface-2 dark:text-neutral-300"
     >
       {icon}
       {label}

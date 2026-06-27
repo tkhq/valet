@@ -177,7 +177,7 @@ function ValueTooltip({ value, children }: { value: unknown; children: React.Rea
         <TooltipContent
           side="bottom"
           align="start"
-          className="max-h-[300px] max-w-[480px] overflow-auto whitespace-pre-wrap break-all rounded-md bg-neutral-900 px-3 py-2 font-mono text-[11px] leading-relaxed text-neutral-100 shadow-lg dark:bg-neutral-800 dark:text-neutral-200"
+          className="max-h-[300px] max-w-[480px] overflow-auto whitespace-pre-wrap break-all rounded-md bg-neutral-900 px-3 py-2 font-mono text-[0.6875rem] leading-relaxed text-neutral-100 shadow-lg dark:bg-neutral-800 dark:text-neutral-200"
         >
           {full}
         </TooltipContent>
@@ -202,19 +202,19 @@ function TableRenderer({ data }: { data: Record<string, unknown>[] }) {
   return (
     <div>
       <div className="overflow-x-auto" style={{ maxHeight: '280px' }}>
-        <table className="w-full border-collapse font-mono text-[11px]">
+        <table className="w-full border-collapse font-mono text-[0.6875rem]">
           <thead>
             <tr className="border-b border-neutral-150 dark:border-neutral-700/60">
               {visible.map((col) => (
                 <th
                   key={col}
-                  className="whitespace-nowrap px-2 py-1 text-left font-mono text-[9px] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500"
+                  className="whitespace-nowrap px-2 py-1 text-left font-mono text-[0.5625rem] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500"
                 >
                   {col}
                 </th>
               ))}
               {hidden.length > 0 && (
-                <th className="whitespace-nowrap px-2 py-1 text-left font-mono text-[9px] font-medium uppercase tracking-wider text-neutral-300 dark:text-neutral-600">
+                <th className="whitespace-nowrap px-2 py-1 text-left font-mono text-[0.5625rem] font-medium uppercase tracking-wider text-neutral-300 dark:text-neutral-600">
                   +{hidden.length} more
                 </th>
               )}
@@ -251,7 +251,7 @@ function TableRenderer({ data }: { data: Record<string, unknown>[] }) {
         </table>
       </div>
       {data.length > maxRows && (
-        <div className="border-t border-neutral-100 px-2 py-1 font-mono text-[9px] text-neutral-400 dark:border-neutral-800 dark:text-neutral-500">
+        <div className="border-t border-neutral-100 px-2 py-1 font-mono text-[0.5625rem] text-neutral-400 dark:border-neutral-800 dark:text-neutral-500">
           +{data.length - maxRows} more rows
         </div>
       )}
@@ -264,7 +264,7 @@ function KvRenderer({ data }: { data: Record<string, unknown> }) {
   if (entries.length === 0) return null;
 
   return (
-    <div className="overflow-auto font-mono text-[11px]" style={{ maxHeight: '280px' }}>
+    <div className="overflow-auto font-mono text-[0.6875rem]" style={{ maxHeight: '280px' }}>
       <div className="space-y-0">
         {entries.map(([key, value]) => (
           <div key={key} className="flex gap-3 px-0 py-0.5">
@@ -335,7 +335,7 @@ function ResultRenderer({ result }: { result: unknown }) {
         return <ToolCodeBlock maxHeight="280px">{str}</ToolCodeBlock>;
       }
       return (
-        <div className="font-mono text-[11px] text-neutral-600 dark:text-neutral-400">
+        <div className="font-mono text-[0.6875rem] text-neutral-600 dark:text-neutral-400">
           <CellValue value={parsed} />
         </div>
       );

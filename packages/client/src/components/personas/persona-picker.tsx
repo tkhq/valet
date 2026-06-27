@@ -70,7 +70,7 @@ export function PersonaPicker({ value, onChange }: PersonaPickerProps) {
               {selected.icon && <span>{selected.icon}</span>}
               <span>{selected.name}</span>
               {selected.isDefault && (
-                <span className="rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+                <span className="rounded-full bg-neutral-100 px-1.5 py-0.5 text-[0.625rem] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
                   default
                 </span>
               )}
@@ -135,7 +135,7 @@ function PersonaGroup({
 }) {
   return (
     <div>
-      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+      <div className="px-3 py-1 text-[0.625rem] font-semibold uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
         {label}
       </div>
       {personas.map((p) => (
@@ -153,7 +153,7 @@ function PersonaGroup({
           <div className="min-w-0 flex-1">
             <span className="font-medium text-neutral-900 dark:text-neutral-100">{p.name}</span>
             {p.isDefault && (
-              <span className="ml-1.5 rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+              <span className="ml-1.5 rounded-full bg-neutral-100 px-1.5 py-0.5 text-[0.625rem] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
                 default
               </span>
             )}

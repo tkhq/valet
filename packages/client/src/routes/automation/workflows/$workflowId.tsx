@@ -743,12 +743,12 @@ function StepTraceRow({
             {displayName}
           </span>
           {stepType !== 'unknown' && (
-            <Badge variant="secondary" className="shrink-0 text-[9px]">
+            <Badge variant="secondary" className="shrink-0 text-[0.5625rem]">
               {stepType === 'agent_message' ? 'message' : stepType}
             </Badge>
           )}
           {showStepId && (
-            <span className="hidden shrink-0 font-mono text-[9px] text-neutral-400 sm:inline">
+            <span className="hidden shrink-0 font-mono text-[0.5625rem] text-neutral-400 sm:inline">
               {step.stepId}
             </span>
           )}
@@ -891,7 +891,7 @@ function ApprovalStepContent({ output }: { output: unknown }) {
         <div className="flex items-center gap-2 px-3 py-1.5">
           <span className="text-2xs text-neutral-500 dark:text-neutral-400">Decision:</span>
           <span className={cn(
-            'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
+            'inline-flex items-center rounded-full px-2 py-0.5 text-[0.625rem] font-medium',
             decision === 'approve'
               ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
               : 'bg-red-500/10 text-red-700 dark:text-red-400',
@@ -899,7 +899,7 @@ function ApprovalStepContent({ output }: { output: unknown }) {
             {decision === 'approve' ? 'Approved' : 'Denied'}
           </span>
           {replayed && (
-            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[9px] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[0.5625rem] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
               replayed
             </span>
           )}
@@ -948,13 +948,13 @@ function AgentStepContent({ output, input, type }: { output: unknown; input?: un
       )}
       {goal && (
         <div className="border-b border-neutral-100 px-3 py-2 dark:border-neutral-800">
-          <p className="mb-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Goal</p>
+          <p className="mb-0.5 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Goal</p>
           <p className="text-xs text-neutral-700 dark:text-neutral-300">{goal}</p>
         </div>
       )}
       {context && (
         <div className="px-3 py-2">
-          <p className="mb-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Context</p>
+          <p className="mb-0.5 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Context</p>
           <p className="text-xs text-neutral-500 dark:text-neutral-400">{context}</p>
         </div>
       )}
@@ -976,7 +976,7 @@ function ConditionalStepContent({ output }: { output: unknown }) {
     <div className="flex items-center gap-3 px-3 py-2 text-2xs">
       <span className="text-neutral-500 dark:text-neutral-400">Condition:</span>
       <span className={cn(
-        'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
+        'inline-flex items-center rounded-full px-2 py-0.5 text-[0.625rem] font-medium',
         condition ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'bg-neutral-200/50 text-neutral-600 dark:bg-neutral-700/50 dark:text-neutral-400',
       )}>
         {condition ? 'true' : 'false'}
@@ -1177,21 +1177,21 @@ function CompactStepRow({
             <span className="truncate text-xs font-medium text-neutral-900 dark:text-neutral-100">
               {step.name}
             </span>
-            <Badge variant="secondary" className="text-[9px]">
+            <Badge variant="secondary" className="text-[0.5625rem]">
               {step.type}
             </Badge>
             {step.tool && (
-              <code className="hidden rounded bg-neutral-100 px-1 py-px font-mono text-[9px] text-neutral-500 dark:bg-neutral-800 sm:inline">
+              <code className="hidden rounded bg-neutral-100 px-1 py-px font-mono text-[0.5625rem] text-neutral-500 dark:bg-neutral-800 sm:inline">
                 {step.tool}
               </code>
             )}
             {step.outputVariable && (
-              <span className="hidden rounded bg-cyan-500/10 px-1 py-px font-mono text-[9px] text-cyan-600 dark:text-cyan-400 sm:inline">
+              <span className="hidden rounded bg-cyan-500/10 px-1 py-px font-mono text-[0.5625rem] text-cyan-600 dark:text-cyan-400 sm:inline">
                 ${step.outputVariable}
               </span>
             )}
             {childSteps > 0 && (
-              <span className="text-[9px] text-amber-600 dark:text-amber-400">{childSteps} nested</span>
+              <span className="text-[0.5625rem] text-amber-600 dark:text-amber-400">{childSteps} nested</span>
             )}
           </div>
           {step.goal && (
@@ -1290,7 +1290,7 @@ function BashStepDetailPanel({ step }: { step: WorkflowStep }) {
       )}
       {hasOtherArgs && (
         <div className="border-t border-neutral-200 bg-neutral-50/50 px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900/30">
-          <p className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Arguments</p>
+          <p className="mb-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Arguments</p>
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-neutral-950 px-2.5 py-2 font-mono text-2xs leading-5 text-emerald-300">
             {JSON.stringify(otherArgs, null, 2)}
           </pre>
@@ -1326,13 +1326,13 @@ function AgentStepDetailPanel({ step }: { step: WorkflowStep }) {
     <div className="ml-[2.65rem] mr-3 mb-2 overflow-hidden rounded border border-neutral-200 dark:border-neutral-700">
       {step.goal && (
         <div className="border-b border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
-          <p className="mb-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Goal</p>
+          <p className="mb-0.5 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Goal</p>
           <p className="text-xs leading-relaxed text-neutral-700 dark:text-neutral-300">{step.goal}</p>
         </div>
       )}
       {step.context && (
         <div className="bg-neutral-50/50 px-3 py-2.5 dark:bg-neutral-900/30">
-          <p className="mb-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Context</p>
+          <p className="mb-0.5 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Context</p>
           <p className="text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">{step.context}</p>
         </div>
       )}
@@ -1353,7 +1353,7 @@ function ConditionalStepDetailPanel({ step }: { step: WorkflowStep }) {
     <div className="ml-[2.65rem] mr-3 mb-2 overflow-hidden rounded border border-neutral-200 dark:border-neutral-700">
       {step.condition !== undefined && step.condition !== null && (
         <div className="border-b border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
-          <p className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Condition</p>
+          <p className="mb-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Condition</p>
           <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded bg-neutral-950 px-2.5 py-2 font-mono text-2xs leading-5 text-amber-300">
             {typeof step.condition === 'string' ? step.condition : JSON.stringify(step.condition, null, 2)}
           </pre>
@@ -1361,13 +1361,13 @@ function ConditionalStepDetailPanel({ step }: { step: WorkflowStep }) {
       )}
       {step.then && step.then.length > 0 && (
         <div className="border-b border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
-          <p className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-emerald-500">Then ({step.then.length} steps)</p>
+          <p className="mb-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-emerald-500">Then ({step.then.length} steps)</p>
           <NestedStepList steps={step.then} />
         </div>
       )}
       {step.else && step.else.length > 0 && (
         <div className="px-3 py-2.5">
-          <p className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-red-400">Else ({step.else.length} steps)</p>
+          <p className="mb-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-red-400">Else ({step.else.length} steps)</p>
           <NestedStepList steps={step.else} />
         </div>
       )}
@@ -1391,7 +1391,7 @@ function ToolStepDetailPanel({ step }: { step: WorkflowStep }) {
       )}
       {step.arguments && Object.keys(step.arguments).length > 0 && (
         <div className="px-3 py-2.5">
-          <p className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Arguments</p>
+          <p className="mb-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Arguments</p>
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-neutral-950 px-2.5 py-2 font-mono text-2xs leading-5 text-emerald-300">
             {JSON.stringify(step.arguments, null, 2)}
           </pre>
@@ -1478,7 +1478,7 @@ function StepDetailFooter({ step, borderClass }: { step: WorkflowStep; borderCla
     <div className={cn('divide-y', borderClass || 'divide-neutral-200 dark:divide-neutral-700/50')}>
       {step.outputVariable && (
         <div className={cn('flex items-center gap-2 px-3 py-1.5', borderClass ? `border-t ${borderClass}` : 'border-t border-neutral-200 dark:border-neutral-700')}>
-          <span className="font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Output</span>
+          <span className="font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Output</span>
           <code className="rounded bg-cyan-500/10 px-1.5 py-0.5 font-mono text-2xs text-cyan-700 dark:text-cyan-300">
             {step.outputVariable}
           </code>
@@ -1486,7 +1486,7 @@ function StepDetailFooter({ step, borderClass }: { step: WorkflowStep; borderCla
       )}
       {step.steps && step.steps.length > 0 && (
         <div className={cn('px-3 py-2.5', borderClass ? `border-t ${borderClass}` : 'border-t border-neutral-200 dark:border-neutral-700')}>
-          <p className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">Nested Steps ({step.steps.length})</p>
+          <p className="mb-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">Nested Steps ({step.steps.length})</p>
           <NestedStepList steps={step.steps} />
         </div>
       )}
@@ -1497,7 +1497,7 @@ function StepDetailFooter({ step, borderClass }: { step: WorkflowStep; borderCla
 function StepDetailField({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="px-3 py-2">
-      <p className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-neutral-400">
+      <p className="mb-1 font-mono text-[0.5625rem] font-semibold uppercase tracking-wider text-neutral-400">
         {label}
       </p>
       {children}
@@ -1510,7 +1510,7 @@ function NestedStepList({ steps }: { steps: WorkflowStep[] }) {
     <div className="space-y-1">
       {steps.map((nested, i) => (
         <div key={nested.id || i} className="flex items-center gap-2 rounded bg-neutral-100 px-2 py-1.5 dark:bg-neutral-800/50">
-          <span className="inline-flex size-4 shrink-0 items-center justify-center rounded bg-neutral-200 font-mono text-[8px] font-semibold text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400">
+          <span className="inline-flex size-4 shrink-0 items-center justify-center rounded bg-neutral-200 font-mono text-[0.5rem] font-semibold text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400">
             {i + 1}
           </span>
           <span className="inline-flex size-4 shrink-0 items-center justify-center rounded bg-neutral-200 text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400">
@@ -1519,9 +1519,9 @@ function NestedStepList({ steps }: { steps: WorkflowStep[] }) {
           <span className="min-w-0 flex-1 truncate text-2xs font-medium text-neutral-700 dark:text-neutral-300">
             {nested.name}
           </span>
-          <Badge variant="secondary" className="text-[8px]">{nested.type}</Badge>
+          <Badge variant="secondary" className="text-[0.5rem]">{nested.type}</Badge>
           {nested.tool && (
-            <code className="font-mono text-[8px] text-neutral-400">{nested.tool}</code>
+            <code className="font-mono text-[0.5rem] text-neutral-400">{nested.tool}</code>
           )}
         </div>
       ))}
@@ -1676,11 +1676,11 @@ function HistoryPanel({
                   {entry.workflowHash.slice(0, 16)}
                 </code>
                 {isCurrent && (
-                  <span className="rounded bg-emerald-500/10 px-1.5 py-px text-[9px] font-medium text-emerald-600 dark:text-emerald-400">
+                  <span className="rounded bg-emerald-500/10 px-1.5 py-px text-[0.5625rem] font-medium text-emerald-600 dark:text-emerald-400">
                     current
                   </span>
                 )}
-                <Badge variant="secondary" className="text-[9px]">{entry.source}</Badge>
+                <Badge variant="secondary" className="text-[0.5625rem]">{entry.source}</Badge>
               </div>
               <p className="mt-0.5 text-2xs text-neutral-400">
                 {formatRelativeTime(entry.createdAt)}
@@ -1808,7 +1808,7 @@ function ExecStatusBadge({ status }: { status: string }) {
     cancelled: 'secondary',
     failed: 'error',
   };
-  return <Badge variant={variants[status] ?? 'secondary'} className="text-[9px]">{status.replace('_', ' ')}</Badge>;
+  return <Badge variant={variants[status] ?? 'secondary'} className="text-[0.5625rem]">{status.replace('_', ' ')}</Badge>;
 }
 
 function StepStatusDot({ status }: { status: string }) {
@@ -1835,12 +1835,12 @@ function ProposalStatusBadge({ status }: { status: string }) {
     applied: 'success',
     failed: 'error',
   };
-  return <Badge variant={variants[status] ?? 'secondary'} className="text-[9px]">{status}</Badge>;
+  return <Badge variant={variants[status] ?? 'secondary'} className="text-[0.5625rem]">{status}</Badge>;
 }
 
 function TriggerTypePill({ type }: { type: string }) {
   return (
-    <span className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[9px] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+    <span className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[0.5625rem] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
       {type}
     </span>
   );

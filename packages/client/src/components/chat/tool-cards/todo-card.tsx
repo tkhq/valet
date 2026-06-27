@@ -124,21 +124,21 @@ function TodoRow({ todo }: { todo: TodoItem }) {
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <span className={cn('font-mono text-[11px] leading-snug', style.text)}>
+        <span className={cn('font-mono text-[0.6875rem] leading-snug', style.text)}>
           {todo.content ?? '(no content)'}
         </span>
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         {todo.priority && todo.priority !== 'normal' && (
           <span className={cn(
-            'rounded px-1 py-px font-mono text-[9px] font-medium',
+            'rounded px-1 py-px font-mono text-[0.5625rem] font-medium',
             PRIORITY_COLORS[todo.priority] ?? PRIORITY_COLORS.normal,
           )}>
             {todo.priority}
           </span>
         )}
         {todo.id && (
-          <span className="font-mono text-[9px] tabular-nums text-neutral-400 dark:text-neutral-600">
+          <span className="font-mono text-[0.5625rem] tabular-nums text-neutral-400 dark:text-neutral-600">
             #{todo.id}
           </span>
         )}

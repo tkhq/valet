@@ -90,12 +90,12 @@ export function FileBrowser({ sessionId, initialFilePath, onFileConsumed }: File
                   <button
                     type="button"
                     onClick={() => setSelectedFile(null)}
-                    className="flex h-8 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-neutral-600 transition-colors hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                    className="flex h-8 items-center gap-1.5 rounded-lg px-2 text-[0.8125rem] font-medium text-neutral-600 transition-colors hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
                   >
                     <BackIcon className="h-4 w-4" />
                     Files
                   </button>
-                  <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-500 dark:text-neutral-400">
+                  <span className="min-w-0 flex-1 truncate text-[0.75rem] text-neutral-500 dark:text-neutral-400">
                     {selectedFile.path}
                   </span>
                 </div>
@@ -138,7 +138,7 @@ export function FileBrowser({ sessionId, initialFilePath, onFileConsumed }: File
             <div className="w-64 flex-shrink-0 overflow-auto border-r border-neutral-200 dark:border-neutral-700">
               {!showingSearch && currentPath !== '/' && (
                 <div className="border-b border-neutral-100 px-3 py-1.5 dark:border-neutral-700/50">
-                  <span className="block truncate font-mono text-[10px] text-neutral-400 dark:text-neutral-500" title={currentPath}>
+                  <span className="block truncate font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500" title={currentPath}>
                     {currentPath}
                   </span>
                 </div>
@@ -220,7 +220,7 @@ function SearchResults({ results, isLoading, onSelect, mobile = false }: SearchR
         <button
           key={`${result.path}-${result.line}-${index}`}
           onClick={() => onSelect(result.path)}
-          className={`w-full rounded-md text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700 ${mobile ? 'min-h-11 p-2.5 text-[14px]' : 'p-2 text-sm'}`}
+          className={`w-full rounded-md text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700 ${mobile ? 'min-h-11 p-2.5 text-[0.875rem]' : 'p-2 text-sm'}`}
         >
           <p className="truncate font-medium text-neutral-900 dark:text-neutral-100">
             {result.path}

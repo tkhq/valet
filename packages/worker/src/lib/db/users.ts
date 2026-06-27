@@ -18,6 +18,7 @@ function rowToUser(row: typeof users.$inferSelect): User {
     idleTimeoutSeconds: row.idleTimeoutSeconds ?? 900,
     sandboxCpuCores: row.sandboxCpuCores ?? undefined,
     sandboxMemoryMib: row.sandboxMemoryMib ?? undefined,
+    fontScale: row.fontScale ?? 1.0,
     modelPreferences: row.modelPreferences || undefined,
     uiQueueMode: (row.uiQueueMode as QueueMode) || 'followup',
     timezone: row.timezone || undefined,
@@ -101,6 +102,7 @@ export async function updateUserProfile(
     modelPreferences?: string[];
     uiQueueMode?: QueueMode;
     timezone?: string;
+    fontScale?: number;
   },
 ): Promise<User | null> {
   const setValues: Record<string, unknown> = { updatedAt: sql`datetime('now')` };
@@ -115,6 +117,7 @@ export async function updateUserProfile(
   if (data.modelPreferences !== undefined) setValues.modelPreferences = sql`COALESCE(${JSON.stringify(data.modelPreferences)}, ${users.modelPreferences})`;
   if (data.uiQueueMode !== undefined) setValues.uiQueueMode = sql`COALESCE(${data.uiQueueMode}, ${users.uiQueueMode})`;
   if (data.timezone !== undefined) setValues.timezone = data.timezone || null;
+  if (data.fontScale !== undefined) setValues.fontScale = data.fontScale;
 
   await db
     .update(users)

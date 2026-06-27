@@ -57,7 +57,7 @@ export function CollaboratorsBar({ connectedUsers, className }: CollaboratorsBar
           ) : (
             <div
               className={cn(
-                'flex h-6 w-6 items-center justify-center rounded-full border-2 border-surface-0 font-mono text-[9px] font-semibold text-white dark:border-surface-0',
+                'flex h-6 w-6 items-center justify-center rounded-full border-2 border-surface-0 font-mono text-[0.5625rem] font-semibold text-white dark:border-surface-0',
                 getColorForUser(user.id)
               )}
             >
@@ -65,7 +65,7 @@ export function CollaboratorsBar({ connectedUsers, className }: CollaboratorsBar
             </div>
           )}
           {/* Tooltip */}
-          <div className="pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 whitespace-nowrap rounded bg-neutral-900 px-2 py-1 font-mono text-[10px] text-white opacity-0 shadow-panel transition-opacity group-hover:opacity-100 dark:bg-neutral-700">
+          <div className="pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 whitespace-nowrap rounded bg-neutral-900 px-2 py-1 font-mono text-[0.625rem] text-white opacity-0 shadow-panel transition-opacity group-hover:opacity-100 dark:bg-neutral-700">
             {user.name || `User ${user.id.slice(0, 8)}`}
           </div>
         </div>

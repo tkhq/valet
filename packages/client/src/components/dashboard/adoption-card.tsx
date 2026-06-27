@@ -104,14 +104,14 @@ function AdoptionRow({
     <div className="flex items-center justify-between">
       <div className="flex items-center gap-2">
         <span className="text-neutral-400">{icon}</span>
-        <span className="font-mono text-[12px] text-neutral-500">{label}</span>
+        <span className="font-mono text-[0.75rem] text-neutral-500">{label}</span>
       </div>
       <div className="flex items-baseline gap-1.5">
-        <span className="font-mono text-[14px] font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
+        <span className="font-mono text-[0.875rem] font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">
           {value.toLocaleString()}
         </span>
         {suffix && (
-          <span className="font-mono text-[10px] text-neutral-400">{suffix}</span>
+          <span className="font-mono text-[0.625rem] text-neutral-400">{suffix}</span>
         )}
       </div>
     </div>

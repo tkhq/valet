@@ -450,7 +450,7 @@ export function InteractivePromptCard({
                 onChange={(e) => setFreeformValue(e.target.value)}
                 disabled={isSubmitted}
                 placeholder="Or type your own answer..."
-                className="flex-1 rounded-md border border-neutral-300 bg-surface-0 px-2.5 py-1.5 text-[13px] text-neutral-900 focus:outline-none focus:ring-2 focus:ring-amber-400/40 dark:border-neutral-600 dark:bg-surface-1 dark:text-neutral-100"
+                className="flex-1 rounded-md border border-neutral-300 bg-surface-0 px-2.5 py-1.5 text-[0.8125rem] text-neutral-900 focus:outline-none focus:ring-2 focus:ring-amber-400/40 dark:border-neutral-600 dark:bg-surface-1 dark:text-neutral-100"
               />
               <Button type="submit" size="sm" variant="outline" disabled={isSubmitted || !freeformValue.trim()}>
                 Answer
@@ -465,7 +465,7 @@ export function InteractivePromptCard({
             value={freeformValue}
             onChange={(e) => setFreeformValue(e.target.value)}
             placeholder="Type your answer..."
-            className="flex-1 rounded-md border border-neutral-300 bg-surface-0 px-2.5 py-1.5 text-[13px] text-neutral-900 focus:outline-none focus:ring-2 focus:ring-amber-400/40 dark:border-neutral-600 dark:bg-surface-1 dark:text-neutral-100"
+            className="flex-1 rounded-md border border-neutral-300 bg-surface-0 px-2.5 py-1.5 text-[0.8125rem] text-neutral-900 focus:outline-none focus:ring-2 focus:ring-amber-400/40 dark:border-neutral-600 dark:bg-surface-1 dark:text-neutral-100"
             autoFocus
           />
           <Button type="submit" size="sm" disabled={!freeformValue.trim()}>

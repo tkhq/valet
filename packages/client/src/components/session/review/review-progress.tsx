@@ -13,7 +13,7 @@ export function ReviewProgress({ state }: ReviewProgressProps) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3">
       <SpinnerIcon className="h-5 w-5 animate-spin text-neutral-400" />
-      <span className="font-mono text-[12px] text-neutral-500 dark:text-neutral-400">
+      <span className="font-mono text-[0.75rem] text-neutral-500 dark:text-neutral-400">
         {message}
       </span>
     </div>

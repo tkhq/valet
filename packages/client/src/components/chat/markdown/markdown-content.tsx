@@ -32,10 +32,10 @@ function MermaidOrPlaceholder({ code }: { code: string }) {
     return (
       <div className="overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-700">
         <div className="flex items-center gap-2 bg-neutral-100 px-3 py-1.5 dark:bg-neutral-800">
-          <span className="font-mono text-[10px] font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+          <span className="font-mono text-[0.625rem] font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
             mermaid
           </span>
-          <span className="font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+          <span className="font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
             Rendering when complete...
           </span>
         </div>
@@ -64,7 +64,7 @@ const components: Components = {
 
     return (
       <code
-        className="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200"
+        className="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[0.75rem] text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200"
         {...rest}
       >
         {children}
@@ -139,7 +139,7 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isStream
     () => (
       <StreamingContext.Provider value={isStreaming}>
         <div
-          className="markdown-body mt-1 max-w-full overflow-hidden text-[13px] leading-relaxed text-neutral-700 dark:text-neutral-300"
+          className="markdown-body mt-1 max-w-full overflow-hidden text-[0.8125rem] leading-relaxed text-neutral-700 dark:text-neutral-300"
           onCopy={handleCopy}
         >
           <ReactMarkdown

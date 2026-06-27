@@ -174,7 +174,7 @@ export function PatchCard({ tool }: { tool: ToolCallData }) {
             />
           </PierreWrapper>
           {resultStr && (
-            <p className="mt-1.5 font-mono text-[10px] text-neutral-400 dark:text-neutral-500">
+            <p className="mt-1.5 font-mono text-[0.625rem] text-neutral-400 dark:text-neutral-500">
               {resultStr}
             </p>
           )}
