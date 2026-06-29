@@ -41,14 +41,17 @@ Valet is already a GitHub App with `pull_requests:write` + `contents:write`, ins
 - Wire `pull_request` events (`opened`, `synchronize`, `reopened`, `ready_for_review`) into a review-session launch (dispatch path firms up once workflows #43 lands — see §6).
 - Wire an **`@valet` mention re-review trigger**: an `issue_comment` on a PR mentioning `@valet` re-reviews the current head. The triggers plugin already lists `issue_comment` among its event types (`triggers.ts:3-16`), so the ingress hook exists.
 - A "code reviewer" persona/skill and the review prompt contract.
-- A **deterministic pre-scan** that primes the model with high-signal pattern hits, plus an **input-side large-diff cap** so huge PRs stay in budget (§10).
-- A **verification/self-critique pass** gating any `REQUEST_CHANGES` finding before it posts (§10).
-- A **GitHub-422 fallback**: findings that can't be anchored inline degrade into the review body rather than being dropped (§5).
+- A **GitHub-422 fallback** (§5): findings that can't be anchored inline degrade into the review body rather than being dropped — failure-mode handling for the new `create_review` (lands in M1).
+- A **dumb large-diff cap** (§10): truncate to the first N changed files and note the rest in the review body, so a huge PR stays in budget.
 - Per-repo opt-in toggle; idempotency by `X-GitHub-Delivery` + per-head-SHA dedup; OTEL tracing.
 - A new `review_runs` table for run tracking / dedup / audit.
 
 ### Out of scope (v1, deferred)
 - **The autonomous fix loop (v2).** v1 posts review comments only. The fix session is specified in §9 but ships behind a flag in a later milestone.
+- **Review-quality tuning, deferred per the 29 Jun sync (v2).** These push *above* the "Replete/sloppy.codes parity" bar and are exactly the quality fine-tuning the sync said to defer until the base rails prove out:
+  - a **verification/self-critique pass** before `REQUEST_CHANGES` (§10) — the per-finding confidence floor is the v1 false-positive control;
+  - **deterministic pre-scan priming** (§10) — the agent reasoning over the diff is the v1 detection path;
+  - **risk-ranked large-diff prioritization** (§10) — v1 ships the *dumb* truncation cap; ranking the truncated files by pre-scan hits waits for the pre-scan.
 - Reacting *automatically* to every human reply on review threads (`pull_request_review` / `pull_request_review_comment` events) — **not** in the App's default events (`admin-github.ts:146`) and only needed for v2. (The explicit `@valet` re-review mention, via `issue_comment`, **is** in scope above — it's a deliberate mention, not passive thread-watching.)
 - A scheduled cron sweep over open PRs (crons exist at `wrangler.toml:69`; event-driven is the v1 path — cron is an open question, §13).
 - Migrating already-installed Apps automatically (runbook step only — see Risks).
@@ -289,7 +292,9 @@ The reviewer is an OpenCode agent session with a **"code reviewer" persona** (co
 - PR metadata + existing reviews/comments via `github.inspect_pull_request` (to avoid re-posting and to respect prior human verdicts).
 - Surrounding context: it may `read_repo_file` / open files in the working tree to understand callers and types — but findings are restricted to changed lines.
 
-### Deterministic pre-scan (priming)
+### Deterministic pre-scan (priming) — deferred to v2
+> **Deferred to v2** (§2): above the v1 parity bar. Kept here as the design for when it lands; v1's detection path is the agent reasoning over the diff.
+
 Before the model call, a cheap regex pass over the **added lines only** (lines starting with `+`, tracking absolute line numbers from the `@@` hunk headers) flags the obvious high-signal classes — hardcoded secrets, SQL/command injection, SSRF, path traversal, missing-auth — plus a check for whether the PR touches files that carry **prior known findings**. These are injected into the prompt as **hints, not auto-posted findings** (the model still decides and must still cite/anchor). Cheap, deterministic, and raises recall on the obvious classes at no extra model cost. (Lifted from Slopless's `_scan_for_patterns` / `_check_known_vulnerabilities`, which seed its prompt the same way.)
 
 ### Severity rubric (mirrors the Slopless model)
@@ -315,11 +320,13 @@ Every finding cites the exact `path:line` it anchors to — no findings without 
 - **Confidence threshold:** the agent emits a `confidence ∈ [0,1]` per finding; suppress below the per-repo floor (default 0.6). Blockers post regardless above a lower floor.
 - **Dedup vs. existing:** skip a finding if an existing review comment already covers the same `path:line` (from `inspect_pull_request`).
 - **Cap (output):** `max_comments` per review (default 20) — if exceeded, post the top-N by severity/confidence and summarize the rest in the review body.
-- **Large-diff cap (input, cost bound):** cap the diff fed to the model — review at most N changed files / M hunks per pass (e.g. 30 files); when a PR exceeds that, review the highest-risk files first (pre-scan hits + change size) and note in the review body which files were not deep-reviewed. This is the *input* analogue of `max_comments`: without it a 200-file PR blows context/cost or silently under-reviews. (Slopless caps at 20 files × 3000 chars for exactly this reason.)
+- **Large-diff cap (input, cost bound — v1 = dumb truncation):** truncate the diff fed to the model to the first N changed files / M hunks (e.g. 30 files) and note in the review body which files were not deep-reviewed. Dumb-but-sufficient — it bounds context/cost on a 200-file PR (the *input* analogue of `max_comments`). *Risk-ranking* the truncated set by pre-scan hits is **deferred to v2** with the pre-scan. (Slopless caps at 20 files × 3000 chars for the same reason.)
 - **Batched:** all findings posted in **one** `github.create_review` call (single notification).
 - **Attribution:** the review body clearly states it's an automated Valet review (the bot-token attribution suffix at `actions.ts:20-23` already appends "on behalf of"; ensure the persona/body makes the AI authorship unambiguous so it isn't mistaken for a human reviewer).
 
-### Verification pass before `REQUEST_CHANGES`
+### Verification pass before `REQUEST_CHANGES` — deferred to v2
+> **Deferred to v2** (§2): above the v1 parity bar; the per-finding confidence floor (above) is the v1 false-positive control. Kept here as the design for when it lands.
+
 This spec's verdict is **load-bearing** — `REQUEST_CHANGES` can gate a merge, unlike Slopless's cosmetic verdict — so a false Blocker costs more here than anywhere in Slopless, which ships single-pass with **no verification** on its PR path (its own paper flags false positives as the top unmeasured risk). Before emitting any merge-gating finding, run a **lightweight second-pass self-critique**: re-prompt (the same or a cheaper model) to adversarially confirm each Blocker / confident-Major against the diff — *"is this real, on a changed line, and not a false positive?"* — and demote or drop findings that don't survive. Scope it to the gating findings only (cheap); Minor/Nit comments post without it. This is the single highest-trust safeguard and the main thing Slopless lacks on its PR path; it directly protects reviewer trust in the bot.
 
 ---
@@ -354,18 +361,22 @@ This spec's verdict is **load-bearing** — `REQUEST_CHANGES` can gate a merge, 
 
 **M1 — Posting primitive**
 - Add `github.create_review`; extend `inspect_pull_request` with `includePatch`; register + `make generate-registries`.
-- *Acceptance:* a manual session can post a batched inline review to a test PR; permission hint correct; typecheck + `make test` green.
+- **422 fallback** (§5): un-anchorable findings degrade into the review `body`.
+- *Acceptance:* a manual session can post a batched inline review to a test PR; a finding whose line is outside the diff lands in the review body (not dropped, no 422 surfaced); permission hint correct; typecheck + `make test` green.
 
 **M2 — Review dispatch (event-driven, opt-in)**
 - Add `pull_request` → `dispatchReviewSession` branch; `review_runs` table; per-repo opt-in toggle; idempotency + per-head-SHA dedup.
+- **`@valet` mention re-review** (`issue_comment`) as a *second* ingress path into the same dispatch, with its own dedup/loop-guard (its trigger semantics differ from `synchronize`).
 - Code-reviewer persona/skill + review prompt.
-- *Acceptance:* opening a PR on an opted-in test repo produces one Valet review with line-anchored inline comments within N minutes; a `synchronize` redelivery does not double-review.
+- *Acceptance:* opening a PR on an opted-in test repo produces one Valet review with line-anchored inline comments within N minutes; a `synchronize` redelivery does not double-review; an `@valet` comment re-reviews the current head exactly once.
 
 **M3 — Hardening / observability**
 - OTEL span attributes, concurrency cap sizing, debounce, attribution polish, `max_comments` / confidence-floor config.
+- **Dumb large-diff truncation cap** (§10) — truncate to first N changed files, note the rest in the body.
 
-**M4 (v2, flagged) — Fix loop**
+**M4 (v2, flagged) — Fix loop + quality**
 - Fix session + approval gate + bot-author loop guard. Add `pull_request_review` events only if reacting to human thread replies. Ships behind a per-repo flag, default off.
+- **Quality hardening deferred from v1** (§2/§10): verification/self-critique pass before `REQUEST_CHANGES`, deterministic pre-scan priming, and risk-ranked large-diff prioritization. Each lands with its own acceptance criteria once the v1 rails prove out.
 
 ---
 
