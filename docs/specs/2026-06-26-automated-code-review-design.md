@@ -27,11 +27,19 @@ The work is feasible on existing rails. It requires exactly three substantive ch
 ### Motivation
 Valet is already a GitHub App with `pull_requests:write` + `contents:write`, installation-token minting, a sandbox that gets `GITHUB_TOKEN` + `REPO_URL` injected, and a workflow executor with idempotency and concurrency control. Everything needed to read a PR, reason about it, and post a review already exists — except the ability to post *inline* comments and a trigger that *starts* a review. This is a small, high-leverage addition that turns Valet from "agent you ask to look at a PR" into "agent that reviews every PR automatically."
 
+### Direction (per 2026-06-29 sync)
+- **Bar for v1 = feature parity with Replete / sloppy.codes PR review**, ported onto Valet's rails. Match the table-stakes behavior first; don't gold-plate.
+- **Push model + `@valet` re-review.** GitHub webhooks push PRs to Valet for review; additionally a user can **`@valet` in a PR thread to re-review** the current head mid-conversation.
+- **Vanilla session, not an orchestrated thread.** A single PR review isn't compute-heavy enough to warrant the orchestrator — it runs as a plain session (see §6, dispatch).
+- **Defer quality tuning.** Review-*quality* fine-tuning is the known rabbit hole; get the base rails (trigger → session → `create_review`) working first, tune later.
+- **Sequencing — gated on workflows (#43).** This is **blocked on the workflows interpreter landing first**; its session/dispatch interfaces will shift when it does. Target start: week of 6 July.
+
 ### In scope (v1)
 - Fix the manifest webhook URL so GitHub deliveries reach the signature-verifying handler (`/webhooks/github`).
 - Add `github.create_review` (batched inline comments + verdict event).
 - Extend `github.inspect_pull_request` to optionally return per-file `patch` hunks for line/position anchoring.
-- Wire `pull_request` events (`opened`, `synchronize`, `reopened`, `ready_for_review`) into a review-session launch via the workflow-execution path.
+- Wire `pull_request` events (`opened`, `synchronize`, `reopened`, `ready_for_review`) into a review-session launch (dispatch path firms up once workflows #43 lands — see §6).
+- Wire an **`@valet` mention re-review trigger**: an `issue_comment` on a PR mentioning `@valet` re-reviews the current head. The triggers plugin already lists `issue_comment` among its event types (`triggers.ts:3-16`), so the ingress hook exists.
 - A "code reviewer" persona/skill and the review prompt contract.
 - A **deterministic pre-scan** that primes the model with high-signal pattern hits, plus an **input-side large-diff cap** so huge PRs stay in budget (§10).
 - A **verification/self-critique pass** gating any `REQUEST_CHANGES` finding before it posts (§10).
@@ -41,7 +49,7 @@ Valet is already a GitHub App with `pull_requests:write` + `contents:write`, ins
 
 ### Out of scope (v1, deferred)
 - **The autonomous fix loop (v2).** v1 posts review comments only. The fix session is specified in §9 but ships behind a flag in a later milestone.
-- Reacting to human replies on review threads (`pull_request_review` / `pull_request_review_comment` events) — these are **not** in the App's default events (`admin-github.ts:146`) and are only needed for v2.
+- Reacting *automatically* to every human reply on review threads (`pull_request_review` / `pull_request_review_comment` events) — **not** in the App's default events (`admin-github.ts:146`) and only needed for v2. (The explicit `@valet` re-review mention, via `issue_comment`, **is** in scope above — it's a deliberate mention, not passive thread-watching.)
 - A scheduled cron sweep over open PRs (crons exist at `wrangler.toml:69`; event-driven is the v1 path — cron is an open question, §13).
 - Migrating already-installed Apps automatically (runbook step only — see Risks).
 - Language-specific linters / SAST integration (the agent reasons from the diff; deterministic tools are a future workflow step).
@@ -200,7 +208,7 @@ GitHub: PR opened / synchronize / reopened / ready_for_review
 | Approval gate (v2) | workflow `waiting_approval` + `resumeToken` | `workflows.md:199-201, 319-331` |
 
 ### Dispatch identity decision
-Use the **workflow-execution path** (path a), not free-form orchestrator dispatch (path b, `orchestrator.ts:375`). Path a already wires `GITHUB_TOKEN` + `REPO_URL/BRANCH/REF`, delivery-id idempotency, and concurrency limits — exactly the review workload's needs. The review runs as a **workflow session** owned by the repo's configured initiator (org-orchestrator user for org installs; see Open Questions on identity). `REPO_BRANCH`/`REPO_REF` are set to the **PR head** so the sandbox clones the PR branch.
+Per the 2026-06-29 sync, the review runs as a **plain ("vanilla") session — not an orchestrated/orchestrator thread** (a single PR review isn't compute-heavy enough to justify orchestration). It still needs the sandbox env-wiring the workflow-execution path provides today — `GITHUB_TOKEN` + `REPO_URL/BRANCH/REF` via `buildSandboxEnvVars`, delivery-id idempotency, concurrency caps — with `REPO_BRANCH`/`REPO_REF` pinned to the **PR head** so the sandbox clones the PR branch. **The exact session-launch interface is gated on the workflows interpreter (#43):** when it lands, the dispatch path may simplify, so **don't lock this until then.** (An earlier draft recommended the workflow-execution path outright; the sync narrowed it to "vanilla session, dispatch interface TBD post-workflows.") The remaining identity question is the *initiator* for org installs — see Open Questions.
 
 ---
 
@@ -387,7 +395,7 @@ This spec's verdict is **load-bearing** — `REQUEST_CHANGES` can gate a merge, 
 1. **Branch parity:** This was verified on `feat/usage-user-model-breakdown` (current checkout), not the expected `perf/memory-import-d1-batch-nomig`. Confirm the manifest-URL bug and route mount are identical on the intended target branch before M0 lands.
 2. **Reproduction of the 401:** Confirm the observed failure body is `Missing or invalid authentication` (path/auth, this diagnosis) vs `Invalid signature` (secret/HMAC) — an already-created App could have a manually-corrected URL and a different (secret) failure.
 3. **Batched vs threaded:** Single batched review (`create_review` alone) for v1, or also `create_review_comment` for individual threaded replies? Affects v1 scope.
-4. **Review session identity:** Per-user workflow session, the user orchestrator, or the **org orchestrator** (`orchestrator:org:{orgId}`, the documented home for "unattributed events + automation rules")? Recommend org orchestrator user as initiator for org installs.
+4. **Review session identity:** Sync decided a **vanilla session (not an orchestrator thread)**; the open part is the *initiator* identity for org installs — the org orchestrator user (`orchestrator:org:{orgId}`, the documented home for "unattributed events + automation rules") vs a dedicated review-bot user. The exact session-launch path is pending the workflows interpreter (#43).
 5. **Spec-driven gate (v2):** GitHub PR approval event, Valet workflow approval gate (`resumeToken`), or action-policy override (`docs/specs/2026-05-19-approval-policy-overrides-design.md`)? Different UX + audit trails — pick one.
 6. **Event-driven vs cron sweep:** v1 is event-driven per PR webhook. Do we also want a scheduled cron sweep over open PRs (crons already configured, `wrangler.toml:69`) as a backstop for missed deliveries?
 7. **Debounce window:** Beyond per-head-SHA dedup, do we want a short per-PR debounce on rapid `synchronize` bursts, or is head-SHA uniqueness sufficient?
