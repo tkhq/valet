@@ -4,7 +4,7 @@
 **Status:** Draft — spec-driven flow (this spec PR must be approved before implementation begins)
 **Owner:** xiangan9
 **Subsystems:** GitHub App (`integrations`), `workflows`, `sessions`, `orchestrator`
-**Prior art:** Author's AI-reviewer pipeline for **Slopless** (verdict + `file:line` citations, batched review) — ported onto Valet's existing GitHub App rails.
+**Prior art:** Author's AI-reviewer pipeline for **Slopless**. Honest scope note: Slopless posts a *single issue-level comment* with `path:line` citations and a **cosmetic** verdict (it never calls GitHub's `/reviews` API, so it can't gate a merge), reviews the **diff only** (no clone), and runs **single-pass with no verification** on its PR path. This spec ports Slopless's proven pieces — single batched review, verdict taxonomy, per-head-SHA dedup, "no hand-wavy findings" — and deliberately **improves** on them: real merge-gating verdict events, durable dedup (D1 vs. Slopless's ephemeral Redis set), changed-lines filtering, a confidence floor, and cloned-tree context. The **inline, line-anchored `create_review`** is **net-new** (more than Slopless ever shipped), so its anchoring + failure modes (§5) are budgeted as real work, not a port. Three things Slopless's experience tells us to add up front — a deterministic pre-scan, an input-side large-diff cap, and a verification pass before `REQUEST_CHANGES` — are folded into §10.
 
 ---
 
@@ -33,6 +33,9 @@ Valet is already a GitHub App with `pull_requests:write` + `contents:write`, ins
 - Extend `github.inspect_pull_request` to optionally return per-file `patch` hunks for line/position anchoring.
 - Wire `pull_request` events (`opened`, `synchronize`, `reopened`, `ready_for_review`) into a review-session launch via the workflow-execution path.
 - A "code reviewer" persona/skill and the review prompt contract.
+- A **deterministic pre-scan** that primes the model with high-signal pattern hits, plus an **input-side large-diff cap** so huge PRs stay in budget (§10).
+- A **verification/self-critique pass** gating any `REQUEST_CHANGES` finding before it posts (§10).
+- A **GitHub-422 fallback**: findings that can't be anchored inline degrade into the review body rather than being dropped (§5).
 - Per-repo opt-in toggle; idempotency by `X-GitHub-Delivery` + per-head-SHA dedup; OTEL tracing.
 - A new `review_runs` table for run tracking / dedup / audit.
 
@@ -138,6 +141,8 @@ Batching all findings into **one review** (vs N `create_review_comment` calls) a
 **Optional companion:** `github.create_review_comment` → `POST .../pulls/{n}/comments` for single threaded replies (needed for v2 thread replies; defer unless the reviewer needs to reply to a specific human comment).
 
 **Diff/anchoring support — extend `inspect_pull_request`:** Inline comments require precise line/position anchors, but `inspect_pull_request` returns file names without patch text (`actions.ts:708-713`). Add an opt-in `includePatch?: boolean` param that includes per-file `patch` (from `GET .../pulls/{n}/files`, which already returns `patch`). Alternative for large diffs: the review session computes anchors from the cloned working tree + `git diff` (the sandbox already has the PR branch checked out). v1 default: agent anchors from the cloned tree; `includePatch` is the fallback for small diffs / when no clone is available.
+
+**Un-anchorable findings — GitHub 422 fallback (don't drop them):** GitHub returns `422` for a review comment whose `line`/`side` doesn't fall on the PR's diff (also for deleted-file or binary paths). The reviewer must **not** silently drop such findings: any finding that can't be placed inline is **appended to the review `body`** as a `path:line — <finding>` list. Submit inline comments + body in the single `create_review`; on a partial `422`, retry once with the offending comment(s) demoted to the body. (This degraded "everything in one comment body" mode is, notably, the *only* thing Slopless ever did — so it's a safe floor, not a regression.)
 
 **Wiring (per CLAUDE.md "Adding a plugin action"):** add `createReview` to `allActions` (`actions.ts:461`), add a `PERMISSION_HINTS` entry (`actions.ts:497`) → `'github.create_review': 'pull_requests:write'` (already granted), define the Zod params schema, implement the `case`, then run `make generate-registries`.
 
@@ -276,6 +281,9 @@ The reviewer is an OpenCode agent session with a **"code reviewer" persona** (co
 - PR metadata + existing reviews/comments via `github.inspect_pull_request` (to avoid re-posting and to respect prior human verdicts).
 - Surrounding context: it may `read_repo_file` / open files in the working tree to understand callers and types — but findings are restricted to changed lines.
 
+### Deterministic pre-scan (priming)
+Before the model call, a cheap regex pass over the **added lines only** (lines starting with `+`, tracking absolute line numbers from the `@@` hunk headers) flags the obvious high-signal classes — hardcoded secrets, SQL/command injection, SSRF, path traversal, missing-auth — plus a check for whether the PR touches files that carry **prior known findings**. These are injected into the prompt as **hints, not auto-posted findings** (the model still decides and must still cite/anchor). Cheap, deterministic, and raises recall on the obvious classes at no extra model cost. (Lifted from Slopless's `_scan_for_patterns` / `_check_known_vulnerabilities`, which seed its prompt the same way.)
+
 ### Severity rubric (mirrors the Slopless model)
 | Severity | Definition | Maps to |
 |---|---|---|
@@ -298,9 +306,13 @@ Every finding cites the exact `path:line` it anchors to — no findings without 
 - **Only changed lines:** drop any finding whose anchor isn't in the diff hunks.
 - **Confidence threshold:** the agent emits a `confidence ∈ [0,1]` per finding; suppress below the per-repo floor (default 0.6). Blockers post regardless above a lower floor.
 - **Dedup vs. existing:** skip a finding if an existing review comment already covers the same `path:line` (from `inspect_pull_request`).
-- **Cap:** `max_comments` per review (default 20) — if exceeded, post the top-N by severity/confidence and summarize the rest in the review body.
+- **Cap (output):** `max_comments` per review (default 20) — if exceeded, post the top-N by severity/confidence and summarize the rest in the review body.
+- **Large-diff cap (input, cost bound):** cap the diff fed to the model — review at most N changed files / M hunks per pass (e.g. 30 files); when a PR exceeds that, review the highest-risk files first (pre-scan hits + change size) and note in the review body which files were not deep-reviewed. This is the *input* analogue of `max_comments`: without it a 200-file PR blows context/cost or silently under-reviews. (Slopless caps at 20 files × 3000 chars for exactly this reason.)
 - **Batched:** all findings posted in **one** `github.create_review` call (single notification).
 - **Attribution:** the review body clearly states it's an automated Valet review (the bot-token attribution suffix at `actions.ts:20-23` already appends "on behalf of"; ensure the persona/body makes the AI authorship unambiguous so it isn't mistaken for a human reviewer).
+
+### Verification pass before `REQUEST_CHANGES`
+This spec's verdict is **load-bearing** — `REQUEST_CHANGES` can gate a merge, unlike Slopless's cosmetic verdict — so a false Blocker costs more here than anywhere in Slopless, which ships single-pass with **no verification** on its PR path (its own paper flags false positives as the top unmeasured risk). Before emitting any merge-gating finding, run a **lightweight second-pass self-critique**: re-prompt (the same or a cheaper model) to adversarially confirm each Blocker / confident-Major against the diff — *"is this real, on a changed line, and not a false positive?"* — and demote or drop findings that don't survive. Scope it to the gating findings only (cheap); Minor/Nit comments post without it. This is the single highest-trust safeguard and the main thing Slopless lacks on its PR path; it directly protects reviewer trust in the bot.
 
 ---
 
