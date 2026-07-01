@@ -17,6 +17,8 @@ templatesRouter.get('/', (c) => {
     description: t.description,
     category: t.category,
     icon: t.icon,
+    apps: t.apps,
+    steps: t.steps,
     inputs: t.inputs,
     hasWebhook: Boolean(t.trigger),
   }));

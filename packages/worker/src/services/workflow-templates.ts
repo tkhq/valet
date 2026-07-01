@@ -39,6 +39,10 @@ export interface WorkflowTemplate {
   description: string;
   category: string;
   icon: string | null;
+  /** Ordered service ids for the app-logo chain (trigger → … → action). */
+  apps: string[];
+  /** Human-readable trigger → action steps, shown in the setup dialog. */
+  steps: string[];
   /** Inputs the "Run now" dialog collects (become trigger.data via a manual run). */
   inputs: WorkflowTemplateInput[];
   definition: WorkflowDefinition;
@@ -58,11 +62,17 @@ const DEFAULT_REVIEW_MODEL = 'anthropic/claude-sonnet-4-6';
  */
 const codeReviewTemplate: WorkflowTemplate = {
   id: 'code-review',
-  name: 'PR code review',
+  name: 'Review pull requests and post a comment',
   description:
-    'Reviews a pull request and posts a concise, actionable review comment. Fetches the diff, reviews the changed lines with an LLM, then comments back on the PR.',
+    'When a pull request is opened, Claude reviews the changed lines and posts a concise, actionable review comment back on the PR.',
   category: 'Developer',
   icon: '🔍',
+  apps: ['github', 'claude', 'github'],
+  steps: [
+    'A pull request is opened or updated on GitHub',
+    'Claude reviews the diff — correctness, security, edge cases',
+    'Post the review as a comment on the pull request',
+  ],
   inputs: [
     { name: 'owner', label: 'Repo owner', type: 'string', required: true, placeholder: 'tkhq' },
     { name: 'repo', label: 'Repo name', type: 'string', required: true, placeholder: 'valet' },

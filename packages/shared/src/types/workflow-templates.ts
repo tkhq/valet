@@ -15,14 +15,23 @@ export interface WorkflowTemplateInput {
   description?: string;
 }
 
-/** A single card in the template gallery. */
+/** A single card in the template gallery (Zapier-style). */
 export interface WorkflowTemplateSummary {
   id: string;
+  /** Plain-language, action-verb-first title, e.g. "Review pull requests and post a comment". */
   name: string;
   description: string;
   category: string;
   /** Short icon key/emoji for the card; null when unset. */
   icon: string | null;
+  /**
+   * Ordered service ids for the app-logo chain shown at the top of the card
+   * (trigger → … → action), e.g. ['github', 'claude', 'github']. The client
+   * resolves each to a brand logo.
+   */
+  apps: string[];
+  /** Human-readable trigger → action steps, shown in the setup dialog. */
+  steps: string[];
   /** Inputs the "Run now" dialog collects (become trigger.data via a manual run). */
   inputs: WorkflowTemplateInput[];
   /** Whether installing also provisions a webhook trigger for external events. */

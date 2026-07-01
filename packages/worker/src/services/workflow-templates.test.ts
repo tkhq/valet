@@ -21,10 +21,19 @@ describe('workflow templates', () => {
     for (const t of templates) {
       expect(t.id).toMatch(/^[a-z0-9-]+$/);
       expect(t.name).toBeTruthy();
+      // Each card renders an app-logo chain + human-readable steps.
+      expect(t.apps.length).toBeGreaterThan(0);
+      expect(t.steps.length).toBeGreaterThan(0);
       for (const input of t.inputs) {
         expect(['string', 'number']).toContain(input.type);
       }
     }
+  });
+
+  it('code-review card shows the github → claude → github app chain', () => {
+    const t = getWorkflowTemplate('code-review');
+    expect(t?.apps).toEqual(['github', 'claude', 'github']);
+    expect(t?.steps).toHaveLength(3);
   });
 
   it('code-review template wires the expected PR-review pipeline', () => {
