@@ -196,6 +196,10 @@ const githubPullRequestInspectionSchema = {
           status: { type: 'string' },
           additions: { type: 'number' },
           deletions: { type: 'number' },
+          // Unified-diff hunks for this file. Only present when the caller
+          // passes includePatch: true; omitted otherwise (and omitted by
+          // GitHub for binary/oversized files).
+          patch: { type: ['string', 'null'] },
         },
       },
     },
@@ -543,6 +547,7 @@ const inspectPullRequest: ActionDefinition = {
     pullNumber: z.number().int().describe('Pull request number'),
     filesLimit: z.number().int().min(1).max(300).optional().describe('Max files to return (default: 100)'),
     commentsLimit: z.number().int().min(1).max(300).optional().describe('Max review comments (default: 100)'),
+    includePatch: z.boolean().optional().describe('Include the per-file unified-diff patch text (default: false). Needed for code review.'),
   }),
   outputSchema: githubPullRequestInspectionSchema,
 };
@@ -1190,6 +1195,10 @@ async function executeAction(
                 status: f.status,
                 additions: f.additions,
                 deletions: f.deletions,
+                // Only surface the diff hunks when explicitly requested — the
+                // default output stays lean/backward-compatible. GitHub omits
+                // `patch` for binary or oversized files, so it may be null.
+                ...(p.includePatch ? { patch: f.patch ?? null } : {}),
               })),
               reviews: reviews.filter((r: any) => r.state !== 'DISMISSED').map((r: any) => ({
                 user: r.user?.login,
