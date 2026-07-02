@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Analytics } from '../analytics/index.js';
+import type { WorkflowDefinition, WorkflowTemplateInput } from '@valet/shared';
 
 // ─── Credentials ─────────────────────────────────────────────────────────────
 
@@ -115,6 +116,42 @@ export interface IntegrationProvider {
   refreshOAuthTokens?(oauth: OAuthConfig, refreshToken: string): Promise<IntegrationCredentials>;
 }
 
+// ─── Workflow Templates ──────────────────────────────────────────────────────
+
+/**
+ * A webhook trigger to provision when a template is installed. `variableMapping`
+ * maps the incoming webhook JSON payload onto `trigger.data` via `$.`-prefixed
+ * dotted paths.
+ */
+export interface TemplateWebhookTrigger {
+  name: string;
+  /** Base webhook path; install appends a unique suffix to keep it globally unique. */
+  path: string;
+  variableMapping: Record<string, string>;
+}
+
+/**
+ * A pre-built, publishable workflow a plugin contributes to the Templates
+ * gallery. Co-located with the plugin whose actions it uses (e.g. the GitHub
+ * code-review template ships in the github plugin), so enabling/disabling the
+ * plugin adds/removes its templates.
+ */
+export interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  icon: string | null;
+  /** Ordered service ids for the app-logo chain (trigger → … → action). */
+  apps: string[];
+  /** Human-readable trigger → action steps, shown in the setup dialog. */
+  steps: string[];
+  /** Inputs the "Run now" dialog collects (become trigger.data via a manual run). */
+  inputs: WorkflowTemplateInput[];
+  definition: WorkflowDefinition;
+  trigger?: TemplateWebhookTrigger;
+}
+
 // ─── Integration Package Manifest ────────────────────────────────────────────
 
 /** Complete integration package manifest — the unit of registration. */
@@ -125,4 +162,6 @@ export interface IntegrationPackage {
   provider: IntegrationProvider;
   actions?: ActionSource;
   triggers?: TriggerSource;
+  /** Workflow templates this plugin contributes to the Templates gallery. */
+  templates?: WorkflowTemplate[];
 }
