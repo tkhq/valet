@@ -5,6 +5,7 @@ import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getU
 import { getModelPricing } from '../services/model-catalog.js';
 import { computeSandboxCost, DEFAULT_CPU_CORES, DEFAULT_MEMORY_GIB } from '../services/sandbox-pricing.js';
 import { getDb } from '../lib/drizzle.js';
+import { log } from '../lib/log.js';
 
 export const usageRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -23,6 +24,25 @@ function computeCost(
   return (inputTokens * pricing.inputCostPerMillion + outputTokens * pricing.outputCostPerMillion) / 1_000_000;
 }
 
+// Empty fallbacks for the non-array queries.
+const EMPTY_HERO = { totalInputTokens: 0, totalOutputTokens: 0, totalSessions: 0, totalUsers: 0 };
+const EMPTY_SANDBOX_HERO = { totalActiveSeconds: 0 };
+
+/**
+ * Run one analytics sub-query, degrading to a fallback (and logging which one
+ * failed) if it throws — so a single breakdown query can't turn the whole
+ * /usage/stats endpoint into a 500 that blanks the Analytics page.
+ */
+export function safe<T>(query: string, p: Promise<T>, fallback: T): Promise<T> {
+  return p.catch((err) => {
+    log.warn('usage stats sub-query failed; degrading to empty', {
+      query,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return fallback;
+  });
+}
+
 // GET /api/usage/stats?period=24
 usageRouter.get('/stats', async (c) => {
   const user = c.get('user');
@@ -37,19 +57,21 @@ usageRouter.get('/stats', async (c) => {
   const db = c.env.DB;
   const appDb = getDb(db);
 
-  // Fetch all data + pricing in parallel (including sandbox stats)
+  // Fetch all data + pricing in parallel. Each sub-query degrades to an empty
+  // fallback on error (see safe()), so one breakdown failing — e.g. a schema /
+  // migration gap on a single table — can't blank the entire Analytics page.
   const [heroStats, byDayRaw, byUserRaw, byModelRaw, byUserModelRaw, pricingMap, sandboxHero, sandboxByDay, sandboxByUser, byPurposeModelRaw, byWorkflowRaw] = await Promise.all([
-    getUsageHeroStats(db, periodStart),
-    getUsageByDay(db, periodStart),
-    getUsageByUser(db, periodStart),
-    getUsageByModel(db, periodStart),
-    getUsageByUserModel(db, periodStart),
-    getModelPricing(appDb, c.env),
-    getSandboxHeroStats(db, periodStart),
-    getSandboxByDay(db, periodStart),
-    getSandboxByUser(db, periodStart),
-    getUsageByPurposeModel(db, periodStart),
-    getUsageByWorkflowModel(db, periodStart),
+    safe('hero', getUsageHeroStats(db, periodStart), EMPTY_HERO),
+    safe('byDay', getUsageByDay(db, periodStart), []),
+    safe('byUser', getUsageByUser(db, periodStart), []),
+    safe('byModel', getUsageByModel(db, periodStart), []),
+    safe('byUserModel', getUsageByUserModel(db, periodStart), []),
+    safe('pricing', getModelPricing(appDb, c.env), new Map()),
+    safe('sandboxHero', getSandboxHeroStats(db, periodStart), EMPTY_SANDBOX_HERO),
+    safe('sandboxByDay', getSandboxByDay(db, periodStart), []),
+    safe('sandboxByUser', getSandboxByUser(db, periodStart), []),
+    safe('byPurpose', getUsageByPurposeModel(db, periodStart), []),
+    safe('byWorkflow', getUsageByWorkflowModel(db, periodStart), []),
   ]);
 
   // Compute hero LLM total cost
