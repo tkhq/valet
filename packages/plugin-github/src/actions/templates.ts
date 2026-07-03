@@ -58,9 +58,10 @@ const codeReviewTemplate: WorkflowTemplate = {
         },
       },
       {
-        // Only review on events that introduce or change code. A native GitHub
-        // `pull_request` webhook fires for many actions (closed, labeled,
-        // assigned, …); reviewing those would waste an LLM call and post noise.
+        // Review only on events that start a review: opened / reopened /
+        // draft→ready. Deliberately NOT 'synchronize' (a push) — like the
+        // App-path policy (decideReview), we review once and re-review only on
+        // an explicit @-mention, so a raw-webhook install behaves the same way.
         // `action isEmpty` is the manual-run arm — "Run now" sends no action.
         id: 'gate',
         type: 'if',
@@ -68,7 +69,6 @@ const codeReviewTemplate: WorkflowTemplate = {
         conditions: [
           { left: 'trigger.data.action', dataType: 'string', operation: 'equals', right: 'opened' },
           { left: 'trigger.data.action', dataType: 'string', operation: 'equals', right: 'reopened' },
-          { left: 'trigger.data.action', dataType: 'string', operation: 'equals', right: 'synchronize' },
           { left: 'trigger.data.action', dataType: 'string', operation: 'equals', right: 'ready_for_review' },
           { left: 'trigger.data.action', dataType: 'string', operation: 'isEmpty' },
         ],
@@ -91,23 +91,29 @@ const codeReviewTemplate: WorkflowTemplate = {
         type: 'llm',
         model: DEFAULT_REVIEW_MODEL,
         system:
-          'You are a meticulous senior software engineer reviewing a pull request. You are given the ' +
-          "PR title and body (the author's stated intent), the base/head branches, and every changed " +
-          "file's unified-diff `patch` (the changed lines plus surrounding context). Judge on three axes:\n" +
-          '1. INTENT vs. CHANGESET — does the diff actually accomplish what the title/body claim? Flag ' +
-          'scope creep, missing pieces, and anything the description promises but the code does not do (or vice versa).\n' +
-          '2. CONVENTIONS — is the change consistent with the patterns visible in the surrounding context and ' +
-          'the other changed files (naming, error handling, structure, imports, test style)? Call out deviations.\n' +
-          '3. CORRECTNESS — bugs, security issues, edge cases, clear regressions, and missing test coverage.\n' +
-          'Skip pure style nits unless they cause bugs. Be concise, specific, and actionable; cite file paths. ' +
-          'If the change is solid, say so briefly.',
+          'You are a senior engineer giving a PR review that a busy teammate will actually read. You are ' +
+          "given the PR title and body (the author's stated intent), the base/head branches, and every " +
+          "changed file's unified-diff `patch` (changed lines + surrounding context). Assess three things: " +
+          "does the diff do what the title/body claim (intent); is it consistent with the patterns visible " +
+          'in the surrounding code and sibling files (conventions); and is it correct (bugs, security, edge ' +
+          'cases, clear regressions, missing tests).\n\n' +
+          'Be ruthless about signal. Report ONLY issues that would matter in a real review — a genuine bug, ' +
+          'a security or correctness risk, a real deviation from a convention visible in the diff, or a ' +
+          'missing piece the description promises. Do NOT manufacture findings, list style nits, or restate ' +
+          'what the code obviously does. Root every point in something concrete in the diff and cite the ' +
+          'file path. If the PR is solid, SAY SO in a sentence or two and stop — a clean PR does not need a ' +
+          'padded list. Prefer fewer, higher-quality comments over completeness.\n\n' +
+          'CRITICAL: you see only the diff, not the whole repository. Do NOT claim something is missing — ' +
+          'auth middleware, a validation, a guard, a test, an import — merely because it is absent from the ' +
+          'diff; it very likely exists elsewhere (e.g. global middleware, a shared helper). Only flag a ' +
+          'missing piece when the diff itself is the place it should appear, or the diff removes it. When ' +
+          "you can't verify a concern from the diff alone, either omit it or phrase it as a one-line " +
+          'question, not a confident defect.',
         prompt:
-          'Write a single GitHub-flavored markdown review comment for this pull request. Structure it as:\n' +
-          '- A one-line verdict.\n' +
-          '- **Intent check**: does the change do what it says? (one or two sentences)\n' +
-          '- **Findings**: bullet the most important issues (conventions, correctness, edge cases), each with a file reference.\n' +
-          'Keep it focused on the diff; omit a section if you have nothing substantive for it.\n\n' +
-          'Pull request:\n{{ nodes.fetch_pr.data }}',
+          'Write a single, concise GitHub-flavored markdown review comment. Lead with a one-line verdict. ' +
+          'If the change is solid, add a sentence on why and stop. Otherwise add a short bulleted list of ' +
+          'only the findings worth acting on, each with a file reference and a one-line fix. Keep it tight ' +
+          'and rooted in the diff.\n\nPull request:\n{{ nodes.fetch_pr.data }}',
         maxOutputTokens: 2000,
       },
       {

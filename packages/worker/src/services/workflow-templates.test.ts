@@ -87,7 +87,7 @@ describe('workflow templates', () => {
     expect(byId.gate.type).toBe('if');
     expect(byId.gate.combinator).toBe('or');
     const gateActions = byId.gate.conditions.filter((c: { operation: string }) => c.operation === 'equals').map((c: { right: string }) => c.right);
-    expect(gateActions).toEqual(['opened', 'reopened', 'synchronize', 'ready_for_review']);
+    expect(gateActions).toEqual(['opened', 'reopened', 'ready_for_review']);
     expect(byId.gate.conditions.some((c: { operation: string }) => c.operation === 'isEmpty')).toBe(true);
 
     // Fetch the PR *with* its diff — the whole point of a code review.
