@@ -59,7 +59,10 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   // re-reading D1 or re-listing integration actions.
   const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, async () => {
     if (await isActionDisabled(db, node.service, node.action)) {
-      throw new Error(`tool node "${node.id}": action ${node.service}.${node.action} is disabled`);
+      // node.action is already service-prefixed ("github.create_comment");
+      // only re-prefix hand-typed custom actions that lack it.
+      const actionLabel = node.action.startsWith(`${node.service}.`) ? node.action : `${node.service}.${node.action}`;
+      throw new Error(`tool node "${node.id}": action "${actionLabel}" is disabled`);
     }
     const customCtx = await loadCustomMcpConnectorContext(env, db);
     const source = integrationRegistry.getActions(node.service, customCtx);

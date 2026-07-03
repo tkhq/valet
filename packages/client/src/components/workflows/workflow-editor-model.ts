@@ -821,7 +821,11 @@ function summarizeNode(node: WorkflowNode): string {
     case 'trigger':
       return 'Where the workflow starts and what data it receives';
     case 'tool':
-      return trimSummary(node.service && node.action ? `${node.service}.${node.action}` : 'No action configured');
+      return trimSummary(
+        node.service && node.action
+          ? (node.action.startsWith(`${node.service}.`) ? node.action : `${node.service}.${node.action}`)
+          : 'No action configured',
+      );
     case 'if':
       return `${node.conditions.length} condition${node.conditions.length === 1 ? '' : 's'}`;
     case 'foreach':

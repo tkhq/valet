@@ -45,7 +45,7 @@ export function TraceNodeCard({
     () => findDefNodeById(definition, node.nodeId),
     [definition, node.nodeId],
   );
-  const toolCall = defNode?.type === 'tool' ? `${defNode.service}.${defNode.action}` : null;
+  const toolCall = defNode?.type === 'tool' ? toolCallName(defNode) : null;
   const summary = describeNodeOutcome(node, output, defNode);
   const isError = status === 'failed' || !!node.error;
 
@@ -359,7 +359,7 @@ function ToolBody({
 }) {
   const o = asObject(output);
   const isTool = defNode?.type === 'tool';
-  const callName = isTool ? `${defNode.service}.${defNode.action}` : null;
+  const callName = isTool ? toolCallName(defNode) : null;
   const params = isTool && defNode.params && Object.keys(defNode.params).length > 0 ? defNode.params : null;
   const hasIterations = Array.isArray(iterations) && iterations.length > 0;
 
@@ -972,6 +972,14 @@ function findDefNodeById(
   return null;
 }
 
+/** dag/v1 stores node.action as the full service-prefixed id
+ *  ("github.inspect_pull_request"), so composing service + action
+ *  double-prefixes. Keep the compose only as a fallback for hand-typed
+ *  custom actions that may be unprefixed. */
+function toolCallName(n: { service: string; action: string }): string {
+  return n.action.startsWith(`${n.service}.`) ? n.action : `${n.service}.${n.action}`;
+}
+
 function asObject(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -1047,7 +1055,7 @@ function describeNodeOutcome(node: ExecutionNode, output: unknown, defNode: Work
       return 'Generated response';
     }
     case 'tool': {
-      const callName = defNode && defNode.type === 'tool' ? `${defNode.service}.${defNode.action}` : null;
+      const callName = defNode && defNode.type === 'tool' ? toolCallName(defNode) : null;
       if (o) {
         // Sheets append/clear: summarize updates.
         const u = asObject(o.updates);
