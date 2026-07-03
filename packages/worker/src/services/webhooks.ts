@@ -447,26 +447,65 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
 
 // ─── GitHub App → Workflow Dispatch ─────────────────────────────────────────
 
-/** Resolve a `$.a.b.c` JSONPath against a parsed object (undefined on any miss). */
-function extractPath(scope: unknown, pathExpr: string): unknown {
-  if (!pathExpr.startsWith('$.')) return undefined;
-  let value: unknown = scope;
-  for (const part of pathExpr.slice(2).split('.')) {
-    if (value && typeof value === 'object' && part in (value as Record<string, unknown>)) {
-      value = (value as Record<string, unknown>)[part];
-    } else {
-      return undefined;
+/** What warrants a review for a delivered GitHub App event, or null to skip. */
+export interface ReviewDecision {
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  /** 'initial' = first review on open/ready; 'mention' = re-review on @Valet. */
+  reason: 'initial' | 'mention';
+}
+
+/**
+ * Greptile-style review policy. Decides whether a delivered GitHub App event
+ * should trigger a PR review:
+ *   • pull_request opened/reopened/ready_for_review, NOT draft → initial review.
+ *   • pull_request synchronize (a push) and drafts → SKIP (no auto re-review).
+ *   • issue_comment on a PR that @-mentions "@Valet" (not from a bot) → re-review.
+ * Everything else is skipped. Returned null means "do nothing".
+ */
+export function decideReview(event: string, payload: Record<string, unknown>): ReviewDecision | null {
+  const repository = payload.repository as { name?: string; owner?: { login?: string } } | undefined;
+  const owner = repository?.owner?.login;
+  const repo = repository?.name;
+  if (!owner || !repo) return null;
+
+  if (event === 'pull_request') {
+    const pr = payload.pull_request as { number?: number; draft?: boolean } | undefined;
+    if (!pr?.number) return null;
+    // Never review a draft PR.
+    if (pr.draft === true) return null;
+    // Review once — on open, reopen, or the draft→ready transition. Deliberately
+    // NOT on 'synchronize' (a push): like Greptile, re-review only on @-mention.
+    const action = payload.action;
+    if (action === 'opened' || action === 'reopened' || action === 'ready_for_review') {
+      return { owner, repo, pullNumber: pr.number, reason: 'initial' };
     }
+    return null;
   }
-  return value;
+
+  if (event === 'issue_comment') {
+    if (payload.action !== 'created') return null;
+    // issue_comment fires for issues AND PRs; only PRs carry issue.pull_request.
+    const issue = payload.issue as { number?: number; pull_request?: unknown } | undefined;
+    if (!issue?.number || !issue.pull_request) return null;
+    const comment = payload.comment as { body?: string; user?: { type?: string } } | undefined;
+    // Loop guard: never react to a bot's own comment (incl. our own reviews).
+    if (comment?.user?.type === 'Bot') return null;
+    if (!/@valet\b/i.test(String(comment?.body ?? ''))) return null;
+    return { owner, repo, pullNumber: issue.number, reason: 'mention' };
+  }
+
+  return null;
 }
 
 /**
  * Dispatch a GitHub App event to every `github-app` trigger scoped to the
- * event's repo — the App-driven alternative to a per-workflow webhook. Each
- * matching workflow runs once per delivery (idempotency-keyed on the delivery
- * id) with trigger.data built from the trigger's variableMapping. Best-effort:
- * a failure to dispatch one trigger never blocks the others or the 200 ACK.
+ * event's repo — the App-driven alternative to a per-workflow webhook. The
+ * Greptile-style policy (decideReview) gates it: drafts and pushes are skipped,
+ * the initial review fires on open/ready, and re-reviews happen only on an
+ * @Valet mention. Each matching workflow runs once per delivery (idempotency-
+ * keyed on the delivery id). Best-effort: one failure never blocks the 200 ACK.
  */
 export async function dispatchGithubAppReviews(
   env: Env,
@@ -474,10 +513,9 @@ export async function dispatchGithubAppReviews(
   payload: Record<string, unknown>,
   deliveryId: string,
 ): Promise<void> {
-  const repository = payload.repository as { name?: string; owner?: { login?: string } } | undefined;
-  const owner = repository?.owner?.login;
-  const repo = repository?.name;
-  if (!owner || !repo) return;
+  const decision = decideReview(event, payload);
+  if (!decision) return;
+  const { owner, repo, pullNumber, reason } = decision;
 
   const triggers = await db.findGithubAppTriggersForRepo(env.DB, owner, repo);
   if (triggers.length === 0) return;
@@ -485,17 +523,8 @@ export async function dispatchGithubAppReviews(
   for (const trigger of triggers) {
     try {
       const config = JSON.parse(trigger.config) as { events?: string[] };
-      // Only fire triggers subscribed to this GitHub event (e.g. 'pull_request').
+      // Only fire triggers subscribed to this GitHub event.
       if (config.events && !config.events.includes(event)) continue;
-
-      const mapping = trigger.variable_mapping
-        ? (JSON.parse(trigger.variable_mapping) as Record<string, string>)
-        : {};
-      const data: Record<string, unknown> = {};
-      for (const [name, pathExpr] of Object.entries(mapping)) {
-        const value = extractPath(payload, pathExpr);
-        if (value !== undefined) data[name] = value;
-      }
 
       await dispatchWorkflowExecution(env, {
         workflowId: trigger.workflow_id,
@@ -504,8 +533,10 @@ export async function dispatchGithubAppReviews(
           type: 'webhook',
           triggerId: trigger.id,
           timestamp: new Date().toISOString(),
-          data,
-          metadata: { source: 'github-app', event, deliveryId },
+          // No `action` → the template's gate passes via its isEmpty arm; the
+          // review-vs-skip decision has already been made above.
+          data: { owner, repo, pullNumber },
+          metadata: { source: 'github-app', event, deliveryId, reason },
         },
         // One execution per delivery per trigger — GitHub retries redeliver the
         // same X-GitHub-Delivery, so this dedupes at the executions unique index.

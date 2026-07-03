@@ -110,6 +110,15 @@ webhooksRouter.post('/github', async (c) => {
     }
   }
 
+  // Issue-comment events — App-driven re-review on an @Valet mention.
+  if (event === 'issue_comment') {
+    try {
+      await webhookService.dispatchGithubAppReviews(c.env, event, payload, deliveryId);
+    } catch (error) {
+      console.error('[github webhook] issue_comment dispatch error:', error);
+    }
+  }
+
   // Push events — session state management
   if (event === 'push') {
     try {
@@ -120,7 +129,7 @@ webhooksRouter.post('/github', async (c) => {
   }
 
   // TODO: route unhandled events to org orchestrator for automation rules
-  const handled = new Set(['installation', 'pull_request', 'push']);
+  const handled = new Set(['installation', 'pull_request', 'push', 'issue_comment']);
   if (!handled.has(event)) {
     console.log(`[github webhook] unhandled event: ${event}.${payload.action ?? ''}`);
   }

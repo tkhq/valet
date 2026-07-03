@@ -210,7 +210,7 @@ describe('enableTemplateGithubApp', () => {
     const appTriggers = db.select().from(triggers).all().filter((t) => t.type === 'github-app');
     expect(appTriggers).toHaveLength(1);
     const config = JSON.parse(appTriggers[0].config as string);
-    expect(config).toMatchObject({ type: 'github-app', owner: 'tkhq', repo: 'valet', events: ['pull_request'] });
+    expect(config).toMatchObject({ type: 'github-app', owner: 'tkhq', repo: 'valet', events: ['pull_request', 'issue_comment'] });
     // Reuses the template's webhook mapping so App events map into trigger.data.
     expect(JSON.parse(appTriggers[0].variableMapping as string)).toHaveProperty('pullNumber', '$.pull_request.number');
   });

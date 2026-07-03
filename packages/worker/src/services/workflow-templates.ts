@@ -119,7 +119,8 @@ export async function enableTemplateGithubApp(
     name,
     enabled: true,
     type: 'github-app',
-    config: JSON.stringify({ type: 'github-app', owner, repo, events: ['pull_request'] }),
+    // pull_request drives the initial review; issue_comment drives @Valet re-review.
+    config: JSON.stringify({ type: 'github-app', owner, repo, events: ['pull_request', 'issue_comment'] }),
     variableMapping: JSON.stringify(template.trigger.variableMapping),
     now,
   });
