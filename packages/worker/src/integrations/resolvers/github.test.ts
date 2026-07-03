@@ -213,28 +213,27 @@ describe('githubCredentialResolver', () => {
     expect(getCredential as Mock).not.toHaveBeenCalled();
   });
 
-  it("credentialMode='app' falls back to the user's token when no App installation exists", async () => {
+  it("credentialMode='app' FAILS (no user fallback) when no App installation exists", async () => {
     seedUser();
-    // App path: anon allowed but NO installation → fails → falls back to user.
+    // App path: anon allowed but NO installation → strict failure. The user's
+    // own token must never be used — a bot action must not post as a person.
     (getServiceMetadata as Mock).mockResolvedValueOnce({ allowAnonymousGitHubAccess: true });
-    (getCredential as Mock).mockResolvedValueOnce({
-      ok: true,
-      credential: { accessToken: 'ghp_user_token', credentialType: 'oauth2', refreshed: false },
-    });
 
     const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
       params: {}, credentialMode: 'app',
     });
 
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.credential.accessToken).toBe('ghp_user_token');
-      expect(result.credential.credentialType).toBe('oauth2');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/GitHub App credential unavailable/i);
+      expect(result.error.message).toMatch(/ask an admin/i);
     }
+    // The personal-token path was never consulted.
+    expect(getCredential as Mock).not.toHaveBeenCalled();
   });
 
-  it("credentialMode='app' falls back to the user's token when minting the bot token THROWS (misconfigured App)", async () => {
-    seedUser({ name: 'Fallback User', email: 'fb@example.com' });
+  it("credentialMode='app' FAILS (no user fallback) when minting the bot token THROWS (misconfigured App)", async () => {
+    seedUser({ name: 'Strict User', email: 'strict@example.com' });
     (getServiceMetadata as Mock).mockResolvedValueOnce({ allowAnonymousGitHubAccess: true });
     await upsertGithubInstallation(db as any, {
       githubInstallationId: '42', accountLogin: 'my-org', accountId: 'acct-1',
@@ -243,21 +242,16 @@ describe('githubCredentialResolver', () => {
     (loadGitHubApp as Mock).mockResolvedValueOnce({ appId: '99' });
     // The App is present but broken — minting throws (e.g. bad private key / JWT).
     (getOrMintInstallationToken as Mock).mockRejectedValueOnce(new Error('A JSON web token could not be decoded'));
-    // The user's own token is available as the fallback.
-    (getCredential as Mock).mockResolvedValueOnce({
-      ok: true,
-      credential: { accessToken: 'ghp_user_token', credentialType: 'oauth2', refreshed: false },
-    });
 
     const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
       params: { owner: 'my-org' }, credentialMode: 'app',
     });
 
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.credential.accessToken).toBe('ghp_user_token');
-      expect(result.credential.credentialType).toBe('oauth2');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/JSON web token could not be decoded/i);
     }
+    expect(getCredential as Mock).not.toHaveBeenCalled();
   });
 
   // ── 4. Owner specified, NO matching installation (strict) ──────────────

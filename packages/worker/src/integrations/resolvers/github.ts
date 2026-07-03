@@ -90,20 +90,21 @@ export const githubCredentialResolver: CredentialResolver = async (
     }
   };
 
-  // credentialMode='app' → prefer the bot, fall back to the owner's own token
-  // (so the option degrades gracefully where no App is installed). Default →
-  // the owner's token, falling back to the org install (the pre-existing chain).
+  // credentialMode='app' → the App installation (bot) token ONLY. No fallback
+  // to the caller's personal token: an automation that says it posts as the
+  // bot must never silently post as a person. If the App isn't installed or
+  // the token can't be minted, the action fails with an actionable message.
+  // Default mode → the owner's token, falling back to the org install (the
+  // pre-existing "anonymous" chain).
   if (credentialMode === 'app') {
     const appResult = await tryApp();
     if (appResult.ok) return appResult;
-    const userResult = await tryUser();
-    if (userResult.ok) return userResult;
     return {
       ok: false as const,
       error: {
         service,
-        reason: 'not_found' as const,
-        message: 'No GitHub App installation available and no personal GitHub credential to fall back to.',
+        reason: appResult.error.reason,
+        message: `GitHub App credential unavailable (${appResult.error.message}). This action posts as the Valet App only — ask an admin to install the GitHub App on the repo owner and enable app access.`,
       },
     };
   }
