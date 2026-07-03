@@ -21,6 +21,7 @@ import { useWorkflowTemplates, useInstallTemplate, useGithubAppInstallations, us
 import { useRunWorkflow } from '@/api/workflows';
 import { useTriggers } from '@/api/triggers';
 import { useRepos, useRepoPulls } from '@/api/repos';
+import { useGitHubStatus } from '@/api/github';
 import type { WorkflowTemplateSummary, InstalledTemplateTrigger } from '@valet/shared';
 
 export const Route = createFileRoute('/automation/templates/')({
@@ -369,6 +370,8 @@ function GithubAppInstallSection({
   const { data: installationsData } = useGithubAppInstallations();
   const installations = installationsData?.installations ?? [];
   const { data: triggersData } = useTriggers();
+  const { data: ghStatus } = useGitHubStatus();
+  const appSlug = ghStatus?.appSlug ?? null;
   const enableApp = useEnableTemplateApp();
 
   const [owner, setOwner] = React.useState('');
@@ -454,10 +457,24 @@ function GithubAppInstallSection({
         <Button size="sm" onClick={handleEnable} disabled={enableApp.isPending}>
           {enableApp.isPending ? 'Enabling…' : 'Enable via GitHub App'}
         </Button>
+      ) : appSlug ? (
+        <div className="flex flex-col items-start gap-2">
+          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+            The Valet GitHub App isn’t installed on <span className="font-medium">{owner}</span> yet.
+          </p>
+          <Button size="sm" asChild>
+            <a
+              href={`https://github.com/apps/${appSlug}/installations/new`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Install the Valet App on {owner}
+            </a>
+          </Button>
+        </div>
       ) : (
         <p className="text-xs text-neutral-500 dark:text-neutral-400">
-          The Valet GitHub App isn’t installed on {owner}. Ask an admin to install it — or use the
-          manual webhook below.
+          The Valet GitHub App isn’t installed on {owner}.
         </p>
       )}
 
