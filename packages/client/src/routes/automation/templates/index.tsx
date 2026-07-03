@@ -4,6 +4,8 @@ import { Card, CardHeader, CardTitle, CardDescription, CardFooter } from '@/comp
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { SearchInput } from '@/components/ui/search-input';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Dialog,
   DialogContent,
@@ -14,7 +16,9 @@ import {
 } from '@/components/ui/dialog';
 import { toastSuccess, toastError } from '@/hooks/use-toast';
 import { getServiceIcon } from '@/components/integrations/service-icons';
-import { useWorkflowTemplates, useInstallTemplate, useRunWorkflowNow } from '@/api/templates';
+import { cn } from '@/lib/cn';
+import { useWorkflowTemplates, useInstallTemplate } from '@/api/templates';
+import { useRunWorkflow } from '@/api/workflows';
 import type { WorkflowTemplateSummary, InstalledTemplateTrigger } from '@valet/shared';
 
 export const Route = createFileRoute('/automation/templates/')({
@@ -22,7 +26,7 @@ export const Route = createFileRoute('/automation/templates/')({
 });
 
 function TemplatesPage() {
-  const { data, isLoading } = useWorkflowTemplates();
+  const { data, isLoading, error } = useWorkflowTemplates();
   const [query, setQuery] = React.useState('');
   const [category, setCategory] = React.useState('All');
 
@@ -47,14 +51,8 @@ function TemplatesPage() {
 
       {/* Search + category filters (Zapier-style) */}
       <div className="flex flex-col gap-3">
-        <div className="relative max-w-md">
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
-          <Input
-            className="pl-9"
-            placeholder="Search templates"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+        <div className="max-w-md">
+          <SearchInput placeholder="Search templates" value={query} onChange={setQuery} debounceMs={0} />
         </div>
         <div className="flex flex-wrap gap-2">
           {categories.map((c) => {
@@ -63,11 +61,12 @@ function TemplatesPage() {
               <button
                 key={c}
                 onClick={() => setCategory(c)}
-                className={`rounded-full border px-3 py-1 text-sm transition-colors ${
+                className={cn(
+                  'rounded-full border px-3 py-1 text-sm transition-colors',
                   active
                     ? 'border-accent bg-accent/10 text-accent'
-                    : 'border-neutral-200 text-neutral-600 hover:border-neutral-300 hover:text-neutral-900 dark:border-neutral-700 dark:text-neutral-300 dark:hover:text-neutral-100'
-                }`}
+                    : 'border-neutral-200 text-neutral-600 hover:border-neutral-300 hover:text-neutral-900 dark:border-neutral-700 dark:text-neutral-300 dark:hover:text-neutral-100',
+                )}
               >
                 {c}
               </button>
@@ -79,11 +78,14 @@ function TemplatesPage() {
       {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => (
-            <div
-              key={i}
-              className="h-44 animate-pulse rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-surface-1"
-            />
+            <Skeleton key={i} className="h-44 rounded-xl" />
           ))}
+        </div>
+      ) : error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950">
+          <p className="text-sm text-pretty text-red-600 dark:text-red-400">
+            Failed to load templates. Please try again.
+          </p>
         </div>
       ) : filtered.length === 0 ? (
         <div className="flex h-44 flex-col items-center justify-center gap-1 text-center">
@@ -147,7 +149,7 @@ function AppTile({ service, size = 'md' }: { service: string; size?: 'md' | 'lg'
   const glyph = size === 'lg' ? 'h-5 w-5' : 'h-4 w-4';
   return (
     <span
-      className={`flex ${box} items-center justify-center rounded-lg border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-900`}
+      className={cn('flex items-center justify-center rounded-lg border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-900', box)}
     >
       <AppGlyph service={service} className={glyph} />
     </span>
@@ -157,10 +159,10 @@ function AppTile({ service, size = 'md' }: { service: string; size?: 'md' | 'lg'
 /** Reuses the app's brand logos; the LLM review step gets a Claude spark mark. */
 function AppGlyph({ service, className }: { service: string; className?: string }) {
   if (service === 'claude' || service === 'anthropic') {
-    return <ClaudeMark className={`${className ?? ''} text-[#C15F3C]`} />;
+    return <ClaudeMark className={cn(className, 'text-[#C15F3C]')} />;
   }
   const Icon = getServiceIcon(service);
-  return <Icon className={`${className ?? ''} text-neutral-800 dark:text-neutral-100`} />;
+  return <Icon className={cn(className, 'text-neutral-800 dark:text-neutral-100')} />;
 }
 
 /** A guided setup, in the spirit of Zapier's "Try it": shows the steps, then installs + runs. */
@@ -175,7 +177,7 @@ function TemplateSetupDialog({
 }) {
   const navigate = useNavigate();
   const install = useInstallTemplate();
-  const run = useRunWorkflowNow();
+  const run = useRunWorkflow();
   const [installedWorkflowId, setInstalledWorkflowId] = React.useState<string | null>(null);
   const [webhook, setWebhook] = React.useState<InstalledTemplateTrigger | null>(null);
   const [values, setValues] = React.useState<Record<string, string>>({});
@@ -309,9 +311,14 @@ function TemplateSetupDialog({
 
 /** One-time reveal of the webhook URL + token (the token is never shown again). */
 function WebhookSecret({ trigger }: { trigger: InstalledTemplateTrigger }) {
-  const copy = (label: string, value: string) => {
-    void navigator.clipboard?.writeText(value);
-    toastSuccess(`${label} copied`);
+  const copy = async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toastSuccess(`${label} copied`);
+    } catch {
+      // Clipboard API can fail on insecure origins / sandboxed iframes.
+      toastSuccess('Copy unavailable', `Select and copy the ${label.toLowerCase()} manually.`);
+    }
   };
   return (
     <div className="flex flex-col gap-2 rounded-lg bg-neutral-50 p-3 dark:bg-neutral-900/50">
@@ -340,7 +347,7 @@ function SecretRow({
     <div className="flex items-center gap-2">
       <span className="w-10 shrink-0 font-mono text-2xs uppercase text-neutral-400">{label}</span>
       <code
-        className={`flex-1 truncate rounded border border-neutral-200 bg-white px-2 py-1 text-xs dark:border-neutral-800 dark:bg-neutral-900 ${mono ? 'font-mono' : ''}`}
+        className={cn('flex-1 truncate rounded border border-neutral-200 bg-white px-2 py-1 text-xs dark:border-neutral-800 dark:bg-neutral-900', mono && 'font-mono')}
       >
         {value}
       </code>
@@ -348,15 +355,6 @@ function SecretRow({
         Copy
       </Button>
     </div>
-  );
-}
-
-function SearchIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="11" cy="11" r="8" />
-      <path d="m21 21-4.3-4.3" />
-    </svg>
   );
 }
 

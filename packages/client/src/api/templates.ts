@@ -1,18 +1,18 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
 import { workflowKeys } from './workflows';
-import { executionKeys } from './executions';
 import type { WorkflowTemplateListResponse, InstallTemplateResponse } from '@valet/shared';
 
 export const templateKeys = {
   all: ['templates'] as const,
   lists: () => [...templateKeys.all, 'list'] as const,
+  list: (filters?: Record<string, unknown>) => [...templateKeys.lists(), filters] as const,
 };
 
 /** GET /api/templates — the template gallery catalog. */
 export function useWorkflowTemplates() {
   return useQuery({
-    queryKey: templateKeys.lists(),
+    queryKey: templateKeys.list(),
     queryFn: () => api.get<WorkflowTemplateListResponse>('/templates'),
   });
 }
@@ -25,30 +25,6 @@ export function useInstallTemplate() {
       api.post<InstallTemplateResponse>(`/templates/${templateId}/install`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() });
-    },
-  });
-}
-
-export interface RunWorkflowNowInput {
-  workflowId: string;
-  variables: Record<string, unknown>;
-}
-
-interface ManualRunResponse {
-  executionId: string;
-  workflowId: string;
-  status: string;
-}
-
-/** POST /api/triggers/manual/run — run a published workflow now with input variables. */
-export function useRunWorkflowNow() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ workflowId, variables }: RunWorkflowNowInput) =>
-      api.post<ManualRunResponse>('/triggers/manual/run', { workflowId, variables }),
-    onSuccess: (_data, vars) => {
-      queryClient.invalidateQueries({ queryKey: workflowKeys.executions(vars.workflowId) });
-      queryClient.invalidateQueries({ queryKey: executionKeys.byWorkflow(vars.workflowId) });
     },
   });
 }
