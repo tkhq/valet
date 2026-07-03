@@ -143,7 +143,9 @@ adminGitHubRouter.post('/app/manifest', async (c) => {
     actions: 'write',
     checks: 'read',
   };
-  const defaultEvents = ['push', 'pull_request'];
+  // issue_comment is required for the code-review template's @-mention
+  // re-review (a comment mentioning the bot re-runs the review).
+  const defaultEvents = ['push', 'pull_request', 'issue_comment'];
 
   // Merge caller-provided permissions/events with defaults
   const permissions = body.permissions
