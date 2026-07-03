@@ -18,6 +18,8 @@ export const users = sqliteTable('users', {
   maxActiveSessions: integer(),
   uiQueueMode: text().default('followup'),
   timezone: text(),
+  codeReviewEnabled: integer({ mode: 'boolean' }).notNull().default(true),
+  codeReviewMentionOnly: integer({ mode: 'boolean' }).notNull().default(false),
   passwordHash: text(),
   identityProvider: text(),
   sandboxCpuCores: real(),

@@ -55,6 +55,9 @@ adminGitHubRouter.get('/', async (c) => {
       settings: {
         allowPersonalInstallations: true,
         allowAnonymousGitHubAccess: true,
+        codeReviewEnabled: true,
+        codeReviewEnforced: false,
+        codeReviewMentionOnly: false,
       },
       installations: {
         organizations: [],
@@ -79,6 +82,9 @@ adminGitHubRouter.get('/', async (c) => {
     settings: {
       allowPersonalInstallations: svc.metadata.allowPersonalInstallations ?? true,
       allowAnonymousGitHubAccess: svc.metadata.allowAnonymousGitHubAccess ?? true,
+      codeReviewEnabled: svc.metadata.codeReviewEnabled ?? true,
+      codeReviewEnforced: svc.metadata.codeReviewEnforced ?? false,
+      codeReviewMentionOnly: svc.metadata.codeReviewMentionOnly ?? false,
     },
     installations: {
       organizations: orgs,
@@ -209,11 +215,20 @@ adminGitHubRouter.post('/app/refresh', async (c) => {
  * PUT /api/admin/github/settings — Update GitHub App settings
  */
 adminGitHubRouter.put('/settings', async (c) => {
-  const body = await c.req.json<{ allowPersonalInstallations?: boolean; allowAnonymousGitHubAccess?: boolean }>();
+  const body = await c.req.json<{
+    allowPersonalInstallations?: boolean;
+    allowAnonymousGitHubAccess?: boolean;
+    codeReviewEnabled?: boolean;
+    codeReviewEnforced?: boolean;
+    codeReviewMentionOnly?: boolean;
+  }>();
   const meta = await getGitHubMetadata(c.get('db')) ?? {};
   const updated = { ...meta };
   if (body.allowPersonalInstallations !== undefined) updated.allowPersonalInstallations = body.allowPersonalInstallations;
   if (body.allowAnonymousGitHubAccess !== undefined) updated.allowAnonymousGitHubAccess = body.allowAnonymousGitHubAccess;
+  if (body.codeReviewEnabled !== undefined) updated.codeReviewEnabled = body.codeReviewEnabled;
+  if (body.codeReviewEnforced !== undefined) updated.codeReviewEnforced = body.codeReviewEnforced;
+  if (body.codeReviewMentionOnly !== undefined) updated.codeReviewMentionOnly = body.codeReviewMentionOnly;
   await updateServiceMetadata(c.get('db'), 'github', updated);
   return c.json({ success: true, settings: updated });
 });

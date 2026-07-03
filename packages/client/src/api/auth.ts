@@ -49,7 +49,7 @@ export function useUpdateProfile() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (data: { name?: string; gitName?: string; gitEmail?: string; onboardingCompleted?: boolean; idleTimeoutSeconds?: number; sandboxCpuCores?: number; sandboxMemoryMib?: number; modelPreferences?: string[]; uiQueueMode?: QueueMode; timezone?: string }) => {
+    mutationFn: async (data: { name?: string; gitName?: string; gitEmail?: string; onboardingCompleted?: boolean; idleTimeoutSeconds?: number; sandboxCpuCores?: number; sandboxMemoryMib?: number; modelPreferences?: string[]; uiQueueMode?: QueueMode; timezone?: string; codeReviewEnabled?: boolean; codeReviewMentionOnly?: boolean }) => {
       return api.patch<{ user: User }>('/auth/me', data);
     },
     onSuccess: (res) => {

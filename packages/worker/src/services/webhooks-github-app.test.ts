@@ -15,10 +15,26 @@ vi.mock('./workflow-dispatch.js', () => ({ dispatchWorkflowExecution: dispatchMo
 const { getServiceConfigMock } = vi.hoisted(() => ({ getServiceConfigMock: vi.fn() }));
 vi.mock('../lib/db/service-configs.js', () => ({ getServiceConfig: getServiceConfigMock }));
 
+// The org code-review policy (GitHubServiceMetadata) and the per-owner prefs
+// (getUserById) are drizzle reads the minimal shim can't serve — stub both, the
+// same way getServiceConfig is stubbed. Real findGithubAppTriggersForRepo is kept.
+const { getGitHubMetadataMock, getUserByIdMock } = vi.hoisted(() => ({
+  getGitHubMetadataMock: vi.fn(),
+  getUserByIdMock: vi.fn(),
+}));
+vi.mock('./github-config.js', async (orig) => ({
+  ...(await orig<typeof import('./github-config.js')>()),
+  getGitHubMetadata: getGitHubMetadataMock,
+}));
+vi.mock('../lib/db.js', async (orig) => ({
+  ...(await orig<typeof import('../lib/db.js')>()),
+  getUserById: getUserByIdMock,
+}));
+
 import { createTestDb } from '../test-utils/db.js';
 import { users } from '../lib/schema/users.js';
 import { workflows, triggers } from '../lib/schema/workflows.js';
-import { decideReview, dispatchGithubAppReviews } from './webhooks.js';
+import { decideReview, dispatchGithubAppReviews, resolveCodeReviewGate } from './webhooks.js';
 import type { DispatchWorkflowInput } from './workflow-dispatch.js';
 import type { Env } from '../env.js';
 
@@ -112,6 +128,11 @@ describe('dispatchGithubAppReviews', () => {
 
   beforeEach(() => {
     dispatchMock.mockClear();
+    getGitHubMetadataMock.mockReset();
+    getUserByIdMock.mockReset();
+    // Default: org code review enabled+overridable, owner allows full review.
+    getGitHubMetadataMock.mockResolvedValue({});
+    getUserByIdMock.mockResolvedValue({ id: 'u1', codeReviewEnabled: true, codeReviewMentionOnly: false });
     // App config resolves the bot slug for @-mention matching.
     getServiceConfigMock.mockResolvedValue({ config: { appSlug: 'valet-turnkey' }, metadata: {}, configuredBy: null, updatedAt: '' });
     const t = createTestDb();
@@ -168,5 +189,91 @@ describe('dispatchGithubAppReviews', () => {
     db.update(triggers).set({ enabled: false }).run();
     await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened'), 'd4');
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  // ── org + owner settings gates ──────────────────────────────────────────
+
+  it('org master switch OFF short-circuits before any trigger read', async () => {
+    getGitHubMetadataMock.mockResolvedValue({ codeReviewEnabled: false });
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened'), 'd-orgoff');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    // Absolute OFF: we never even look up the owner's prefs.
+    expect(getUserByIdMock).not.toHaveBeenCalled();
+  });
+
+  it('owner opt-out (org overridable) suppresses review on their repos', async () => {
+    getUserByIdMock.mockResolvedValue({ id: 'u1', codeReviewEnabled: false, codeReviewMentionOnly: false });
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened'), 'd-optout');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('org ENFORCED ignores the owner opt-out (and skips the owner read)', async () => {
+    getGitHubMetadataMock.mockResolvedValue({ codeReviewEnabled: true, codeReviewEnforced: true });
+    getUserByIdMock.mockResolvedValue({ id: 'u1', codeReviewEnabled: false, codeReviewMentionOnly: false });
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened'), 'd-enforced');
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(getUserByIdMock).not.toHaveBeenCalled();
+  });
+
+  it('owner mention-only skips the initial review but still honors an @mention', async () => {
+    getUserByIdMock.mockResolvedValue({ id: 'u1', codeReviewEnabled: true, codeReviewMentionOnly: true });
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened'), 'd-initial');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    await dispatchGithubAppReviews(env, 'issue_comment', commentEvent('@valet-turnkey re-review'), 'd-ment');
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    const arg = dispatchMock.mock.calls[0][1] as DispatchWorkflowInput;
+    expect(arg.trigger.metadata).toMatchObject({ reason: 'mention' });
+  });
+
+  it('org-wide mention-only skips the initial review for everyone', async () => {
+    getGitHubMetadataMock.mockResolvedValue({ codeReviewEnabled: true, codeReviewMentionOnly: true });
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened'), 'd-orgquiet');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveCodeReviewGate — org-ceiling + user-may-only-loosen', () => {
+  const OFF = { enabled: false, enforced: false, mentionOnly: false };
+  const ON = { enabled: true, enforced: false, mentionOnly: false };
+  const ON_ENFORCED = { enabled: true, enforced: true, mentionOnly: false };
+  const ON_QUIET = { enabled: true, enforced: false, mentionOnly: true };
+  const ON_QUIET_ENFORCED = { enabled: true, enforced: true, mentionOnly: true };
+
+  const ownerOn = { enabled: true, mentionOnly: false };
+  const ownerQuiet = { enabled: true, mentionOnly: true };
+  const ownerOff = { enabled: false, mentionOnly: false };
+
+  it('org OFF is absolute — no owner value turns it on', () => {
+    for (const owner of [null, ownerOn, ownerQuiet, ownerOff]) {
+      expect(resolveCodeReviewGate(OFF, owner, 'initial')).toBe(false);
+      expect(resolveCodeReviewGate(OFF, owner, 'mention')).toBe(false);
+    }
+  });
+
+  it('org ON overridable: owner may loosen (opt out / go quiet), never past org', () => {
+    expect(resolveCodeReviewGate(ON, null, 'initial')).toBe(true);       // default full review
+    expect(resolveCodeReviewGate(ON, ownerOn, 'initial')).toBe(true);
+    expect(resolveCodeReviewGate(ON, ownerOff, 'initial')).toBe(false);  // owner opted out
+    expect(resolveCodeReviewGate(ON, ownerQuiet, 'initial')).toBe(false); // owner quiet → skip initial
+    expect(resolveCodeReviewGate(ON, ownerQuiet, 'mention')).toBe(true);  // ...but honor @mention
+  });
+
+  it('org ENFORCED ignores every owner knob', () => {
+    for (const owner of [ownerOn, ownerQuiet, ownerOff]) {
+      expect(resolveCodeReviewGate(ON_ENFORCED, owner, 'initial')).toBe(true);
+      expect(resolveCodeReviewGate(ON_ENFORCED, owner, 'mention')).toBe(true);
+    }
+  });
+
+  it('org quiet (overridable): owner cannot loosen back to a full initial review', () => {
+    expect(resolveCodeReviewGate(ON_QUIET, ownerOn, 'initial')).toBe(false); // user false can't override org quiet
+    expect(resolveCodeReviewGate(ON_QUIET, ownerOn, 'mention')).toBe(true);
+    expect(resolveCodeReviewGate(ON_QUIET, ownerOff, 'initial')).toBe(false); // owner opt-out still wins downward
+    expect(resolveCodeReviewGate(ON_QUIET, ownerOff, 'mention')).toBe(false);
+  });
+
+  it('org quiet + enforced: org value is final, mention only', () => {
+    expect(resolveCodeReviewGate(ON_QUIET_ENFORCED, ownerOn, 'initial')).toBe(false);
+    expect(resolveCodeReviewGate(ON_QUIET_ENFORCED, ownerOn, 'mention')).toBe(true);
   });
 });

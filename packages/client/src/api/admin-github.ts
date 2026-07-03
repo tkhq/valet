@@ -36,6 +36,9 @@ export interface AdminGitHubConfig {
   settings: {
     allowPersonalInstallations: boolean;
     allowAnonymousGitHubAccess: boolean;
+    codeReviewEnabled: boolean;
+    codeReviewEnforced: boolean;
+    codeReviewMentionOnly: boolean;
   };
   installations: {
     organizations: GithubInstallation[];
@@ -83,7 +86,13 @@ export function useRefreshGitHubApp() {
 export function useUpdateGitHubSettings() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (settings: { allowPersonalInstallations?: boolean; allowAnonymousGitHubAccess?: boolean }) =>
+    mutationFn: (settings: {
+      allowPersonalInstallations?: boolean;
+      allowAnonymousGitHubAccess?: boolean;
+      codeReviewEnabled?: boolean;
+      codeReviewEnforced?: boolean;
+      codeReviewMentionOnly?: boolean;
+    }) =>
       api.put<{ success: boolean }>('/admin/github/settings', settings),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: adminGitHubKeys.config() });

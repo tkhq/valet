@@ -204,6 +204,7 @@ function AgentTab() {
 
       <ModelPreferencesSection />
       <ActionPolicyOverridesSection />
+      <CodeReviewSection />
       <RuntimeGrantsSection />
       <TimezoneSection />
       <IdleTimeoutSection />
@@ -676,6 +677,66 @@ function SandboxResourcesSection() {
           {saved && (
             <span className="text-sm text-green-600 dark:text-green-400">Saved</span>
           )}
+          {updateProfile.isError && (
+            <span className="text-sm text-red-600 dark:text-red-400">Failed to save.</span>
+          )}
+        </div>
+      </div>
+    </SettingsSection>
+  );
+}
+
+function CodeReviewSection() {
+  const user = useAuthStore((s) => s.user);
+  const updateProfile = useUpdateProfile();
+  const [saved, setSaved] = React.useState(false);
+  const enabled = user?.codeReviewEnabled ?? true;
+  const mentionOnly = user?.codeReviewMentionOnly ?? false;
+
+  function save(patch: { codeReviewEnabled?: boolean; codeReviewMentionOnly?: boolean }) {
+    updateProfile.mutate(patch, {
+      onSuccess: () => {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+      },
+    });
+  }
+
+  return (
+    <SettingsSection title="Code review">
+      <div className="space-y-4">
+        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          Controls how Valet reviews pull requests on repos where you&apos;ve armed the automation.
+          Your organization&apos;s admins may enforce these settings, in which case your choices here are ignored.
+        </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">Review my pull requests</p>
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              Turn off to opt your own repos out of automated review entirely.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={enabled}
+            disabled={updateProfile.isPending}
+            onChange={(value) => save({ codeReviewEnabled: value })}
+          />
+        </div>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">Only when I @mention the bot</p>
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              Skip the automatic review when a PR opens; review only when you @mention the bot.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={mentionOnly}
+            disabled={updateProfile.isPending || !enabled}
+            onChange={(value) => save({ codeReviewMentionOnly: value })}
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          {saved && <span className="text-sm text-green-600 dark:text-green-400">Saved</span>}
           {updateProfile.isError && (
             <span className="text-sm text-red-600 dark:text-red-400">Failed to save.</span>
           )}

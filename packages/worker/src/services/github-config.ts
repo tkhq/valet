@@ -17,6 +17,18 @@ export interface GitHubServiceMetadata {
   appName?: string;
   allowPersonalInstallations?: boolean;
   allowAnonymousGitHubAccess?: boolean;
+  // AI code review — ORG-scoped policy knobs. Precedence over the per-user
+  // (users.code_review_*) settings is org-ceiling + user-may-only-loosen,
+  // mirroring resolveEffectiveActionPolicy. See resolveCodeReviewGate.
+  //   codeReviewEnabled    — master switch (default true). OFF is absolute:
+  //                          no user setting can turn review back on.
+  //   codeReviewEnforced   — lock the per-user knobs (default false). The
+  //                          `userGrantBehavior:'blocked'` analog.
+  //   codeReviewMentionOnly— org-wide quiet mode (default false): skip the
+  //                          on-open review; only review on an @bot mention.
+  codeReviewEnabled?: boolean;
+  codeReviewEnforced?: boolean;
+  codeReviewMentionOnly?: boolean;
 }
 
 export interface GitHubConfig {

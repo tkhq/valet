@@ -7,6 +7,7 @@ import { sha256Hex } from '../lib/hash.js';
 import { constantTimeEqual } from '../lib/crypto.js';
 import { WEBHOOK_RATE_LIMIT_DEFAULT, bumpWebhookRateCount } from '../lib/db.js';
 import { getServiceConfig } from '../lib/db/service-configs.js';
+import { getGitHubMetadata } from './github-config.js';
 
 // Row shape shared by the id-based lookup (getWebhookTriggerById, used
 // by /api/triggers/:id/webhook with token auth) and the path-based
@@ -526,18 +527,71 @@ export function mentionsBot(body: string, botSlug: string): boolean {
  * @Valet mention. Each matching workflow runs once per delivery (idempotency-
  * keyed on the delivery id). Best-effort: one failure never blocks the 200 ACK.
  */
+/** ORG-scoped code-review policy (from GitHubServiceMetadata.codeReview*). */
+export interface CodeReviewOrgPolicy {
+  enabled: boolean;
+  enforced: boolean;
+  mentionOnly: boolean;
+}
+/** Per-owner code-review prefs (from users.code_review_*). */
+export interface CodeReviewOwnerPrefs {
+  enabled: boolean;
+  mentionOnly: boolean;
+}
+
+/**
+ * Decide whether a code-review dispatch should proceed for one armed trigger,
+ * given the ORG policy, the repo OWNER's preferences, and why review fired
+ * (`initial` = PR opened/reopened/ready; `mention` = @bot re-review request).
+ *
+ * Precedence mirrors `resolveEffectiveActionPolicy`: the org value is a hard
+ * ceiling and the owner may only LOOSEN (make it quieter) within it — never
+ * tighten past the org, never override an org OFF.
+ *  - Org disabled  → absolute OFF          (analog: admin `deny` short-circuit)
+ *  - Org enforced  → owner prefs ignored    (analog: userGrantBehavior 'blocked')
+ *  - Owner opt-out → OFF for their repos    (a loosening: they want none)
+ *  - Mention-only  → skip `initial`, keep `mention`; org OR owner may set it
+ */
+export function resolveCodeReviewGate(
+  org: CodeReviewOrgPolicy,
+  owner: CodeReviewOwnerPrefs | null,
+  reason: 'initial' | 'mention',
+): boolean {
+  if (!org.enabled) return false;
+  if (org.enforced) {
+    return !(org.mentionOnly && reason === 'initial');
+  }
+  if (owner?.enabled === false) return false;
+  const mentionOnly = org.mentionOnly || owner?.mentionOnly === true;
+  if (mentionOnly && reason === 'initial') return false;
+  return true;
+}
+
 export async function dispatchGithubAppReviews(
   env: Env,
   event: string,
   payload: Record<string, unknown>,
   deliveryId: string,
 ): Promise<void> {
+  const appDb = getDb(env.DB);
+
+  // ORG CEILING — read once, up front. An org master-switch OFF is absolute:
+  // no per-owner setting can turn review back on, so short-circuit before any
+  // further work (analog: an admin `deny` in resolveEffectiveActionPolicy).
+  const meta = await getGitHubMetadata(appDb) ?? {};
+  const orgPolicy: CodeReviewOrgPolicy = {
+    enabled: meta.codeReviewEnabled !== false, // default true
+    enforced: meta.codeReviewEnforced === true, // default false
+    mentionOnly: meta.codeReviewMentionOnly === true, // default false
+  };
+  if (!orgPolicy.enabled) return;
+
   // Resolve the App's own slug so an @-mention re-review matches THIS bot's
   // handle (`@<slug>` / `@<slug>[bot]`), not the generic word "valet". Only
   // needed for issue_comment; skip the config read for pull_request events.
   let botSlug: string | null = null;
   if (event === 'issue_comment') {
-    const svc = await getServiceConfig<{ appSlug?: string }>(getDb(env.DB), env.ENCRYPTION_KEY, 'github').catch(() => null);
+    const svc = await getServiceConfig<{ appSlug?: string }>(appDb, env.ENCRYPTION_KEY, 'github').catch(() => null);
     botSlug = svc?.config.appSlug ?? null;
   }
 
@@ -553,6 +607,16 @@ export async function dispatchGithubAppReviews(
       const config = JSON.parse(trigger.config) as { events?: string[] };
       // Only fire triggers subscribed to this GitHub event.
       if (config.events && !config.events.includes(event)) continue;
+
+      // PER-OWNER LOOSENING PASS. trigger.user_id is the person who ARMED this
+      // automation on the repo (the owner), not the PR author. They may only
+      // make review quieter for their own repos, never override the org. When
+      // the org enforces, skip the read — owner prefs can't change the result.
+      const ownerRow = orgPolicy.enforced ? null : await db.getUserById(appDb, trigger.user_id);
+      const ownerPrefs: CodeReviewOwnerPrefs | null = ownerRow
+        ? { enabled: ownerRow.codeReviewEnabled ?? true, mentionOnly: ownerRow.codeReviewMentionOnly ?? false }
+        : null;
+      if (!resolveCodeReviewGate(orgPolicy, ownerPrefs, reason)) continue;
 
       await dispatchWorkflowExecution(env, {
         workflowId: trigger.workflow_id,
