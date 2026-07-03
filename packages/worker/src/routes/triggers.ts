@@ -22,6 +22,7 @@ import {
 } from '../lib/db.js';
 import * as triggerService from '../services/triggers.js';
 import * as webhookService from '../services/webhooks.js';
+import { getGithubInstallationByLogin } from '../lib/db/github-installations.js';
 
 export const triggersRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -53,10 +54,18 @@ const manualConfigSchema = z.object({
   type: z.literal('manual'),
 });
 
+const githubAppConfigSchema = z.object({
+  type: z.literal('github-app'),
+  owner: z.string().min(1),
+  repo: z.string().min(1),
+  events: z.array(z.string().min(1)).min(1),
+});
+
 const triggerConfigSchema = z.discriminatedUnion('type', [
   webhookConfigSchema,
   scheduleConfigSchema,
   manualConfigSchema,
+  githubAppConfigSchema,
 ]);
 
 const createTriggerSchema = z.object({
@@ -353,6 +362,17 @@ triggersRouter.post('/', zValidator('json', createTriggerSchema), async (c) => {
 
     if (existing) {
       throw new ValidationError('Webhook path already in use');
+    }
+  }
+
+  // A github-app trigger only fires if the org's GitHub App is installed on the
+  // repo owner — reject up front so we never create a dead trigger.
+  if (body.config.type === 'github-app') {
+    const installation = await getGithubInstallationByLogin(c.get('db'), body.config.owner);
+    if (!installation) {
+      throw new ValidationError(
+        `The Valet GitHub App is not installed on "${body.config.owner}". Ask an admin to install it, then try again.`,
+      );
     }
   }
 

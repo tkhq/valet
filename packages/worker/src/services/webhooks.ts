@@ -445,6 +445,78 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
   }
 }
 
+// ─── GitHub App → Workflow Dispatch ─────────────────────────────────────────
+
+/** Resolve a `$.a.b.c` JSONPath against a parsed object (undefined on any miss). */
+function extractPath(scope: unknown, pathExpr: string): unknown {
+  if (!pathExpr.startsWith('$.')) return undefined;
+  let value: unknown = scope;
+  for (const part of pathExpr.slice(2).split('.')) {
+    if (value && typeof value === 'object' && part in (value as Record<string, unknown>)) {
+      value = (value as Record<string, unknown>)[part];
+    } else {
+      return undefined;
+    }
+  }
+  return value;
+}
+
+/**
+ * Dispatch a GitHub App event to every `github-app` trigger scoped to the
+ * event's repo — the App-driven alternative to a per-workflow webhook. Each
+ * matching workflow runs once per delivery (idempotency-keyed on the delivery
+ * id) with trigger.data built from the trigger's variableMapping. Best-effort:
+ * a failure to dispatch one trigger never blocks the others or the 200 ACK.
+ */
+export async function dispatchGithubAppReviews(
+  env: Env,
+  event: string,
+  payload: Record<string, unknown>,
+  deliveryId: string,
+): Promise<void> {
+  const repository = payload.repository as { name?: string; owner?: { login?: string } } | undefined;
+  const owner = repository?.owner?.login;
+  const repo = repository?.name;
+  if (!owner || !repo) return;
+
+  const triggers = await db.findGithubAppTriggersForRepo(env.DB, owner, repo);
+  if (triggers.length === 0) return;
+
+  for (const trigger of triggers) {
+    try {
+      const config = JSON.parse(trigger.config) as { events?: string[] };
+      // Only fire triggers subscribed to this GitHub event (e.g. 'pull_request').
+      if (config.events && !config.events.includes(event)) continue;
+
+      const mapping = trigger.variable_mapping
+        ? (JSON.parse(trigger.variable_mapping) as Record<string, string>)
+        : {};
+      const data: Record<string, unknown> = {};
+      for (const [name, pathExpr] of Object.entries(mapping)) {
+        const value = extractPath(payload, pathExpr);
+        if (value !== undefined) data[name] = value;
+      }
+
+      await dispatchWorkflowExecution(env, {
+        workflowId: trigger.workflow_id,
+        user: { id: trigger.user_id },
+        trigger: {
+          type: 'webhook',
+          triggerId: trigger.id,
+          timestamp: new Date().toISOString(),
+          data,
+          metadata: { source: 'github-app', event, deliveryId },
+        },
+        // One execution per delivery per trigger — GitHub retries redeliver the
+        // same X-GitHub-Delivery, so this dedupes at the executions unique index.
+        idempotencyKey: `github-app:${trigger.id}:${deliveryId}`,
+      });
+    } catch (err) {
+      console.error(`[github-app dispatch] trigger ${trigger.id} failed:`, err);
+    }
+  }
+}
+
 // ─── Push Webhook Handler ───────────────────────────────────────────────────
 
 export async function handlePushWebhook(env: Env, payload: any): Promise<void> {

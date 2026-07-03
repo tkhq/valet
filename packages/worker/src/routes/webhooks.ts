@@ -94,12 +94,19 @@ webhooksRouter.post('/github', async (c) => {
     }
   }
 
-  // Pull request events — session state management
+  // Pull request events — session state management + App-driven workflows
   if (event === 'pull_request') {
     try {
       await webhookService.handlePullRequestWebhook(c.env, payload);
     } catch (error) {
       console.error('[github webhook] pull_request handler error:', error);
+    }
+    // Fan the event out to any github-app triggers scoped to this repo (the
+    // "wire it up via the App" alternative to a per-workflow webhook).
+    try {
+      await webhookService.dispatchGithubAppReviews(c.env, event, payload, deliveryId);
+    } catch (error) {
+      console.error('[github webhook] github-app dispatch error:', error);
     }
   }
 

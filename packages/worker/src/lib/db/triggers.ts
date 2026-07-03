@@ -30,6 +30,15 @@ export type TriggerConfig =
       // against the workflow trigger node's dataSchema before execution.
       triggerData?: Record<string, unknown>;
     }
+  | {
+      // Fires from the org's GitHub App event stream (no per-repo webhook to
+      // configure). Scoped to one repo so App deliveries can be matched to it;
+      // `events` are the GitHub event names to react to (e.g. 'pull_request').
+      type: 'github-app';
+      owner: string;
+      repo: string;
+      events: string[];
+    }
   | { type: 'manual' };
 
 // Default webhook rate limit (requests per 60s window per trigger).
