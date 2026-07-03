@@ -2,7 +2,11 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 // Mock the dispatch sink so we assert intent without spinning up the interpreter.
 const { dispatchMock } = vi.hoisted(() => ({
-  dispatchMock: vi.fn(async () => ({ executionId: 'exec-1', status: 'pending' as const })),
+  // Typed with two params so `.mock.calls[0][1]` (the dispatch input) is a
+  // valid tuple index under the CI typecheck.
+  dispatchMock: vi.fn(
+    async (_env: unknown, _input: unknown) => ({ executionId: 'exec-1', status: 'pending' as const }),
+  ),
 }));
 vi.mock('./workflow-dispatch.js', () => ({ dispatchWorkflowExecution: dispatchMock }));
 
@@ -10,6 +14,7 @@ import { createTestDb } from '../test-utils/db.js';
 import { users } from '../lib/schema/users.js';
 import { workflows, triggers } from '../lib/schema/workflows.js';
 import { dispatchGithubAppReviews } from './webhooks.js';
+import type { DispatchWorkflowInput } from './workflow-dispatch.js';
 import type { Env } from '../env.js';
 
 const MAPPING = JSON.stringify({
@@ -61,7 +66,7 @@ describe('dispatchGithubAppReviews', () => {
     await dispatchGithubAppReviews(env, 'pull_request', prPayload('opened', 'tkhq', 'valet', 75), 'delivery-abc');
 
     expect(dispatchMock).toHaveBeenCalledTimes(1);
-    const arg = dispatchMock.mock.calls[0][1];
+    const arg = dispatchMock.mock.calls[0][1] as DispatchWorkflowInput;
     expect(arg.workflowId).toBe('wf1');
     expect(arg.user).toEqual({ id: 'u1' });
     expect(arg.trigger.data).toEqual({ action: 'opened', owner: 'tkhq', repo: 'valet', pullNumber: 75 });
