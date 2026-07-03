@@ -198,7 +198,6 @@ function TemplateSetupDialog({
       onSuccess: (res) => {
         setInstalledWorkflowId(res.workflowId);
         if (res.trigger) setWebhook(res.trigger);
-        toastSuccess('Template added', `"${res.workflowName}" is ready.`);
       },
       onError: (err) =>
         toastError('Couldn’t add template', err instanceof Error ? err.message : 'Something went wrong.'),
@@ -259,14 +258,14 @@ function TemplateSetupDialog({
 
           {installedWorkflowId && (
             <div className="flex flex-col gap-4 border-t border-neutral-100 pt-4 dark:border-neutral-800">
-              {/* Primary: the GitHub App is the recommended way to arm a repo — no webhook setup. */}
+              {/* Primary: the GitHub App is the recommended way to install for a repo — no webhook setup. */}
               {template.runForm === 'github-pr' ? (
-                <GithubAppArmSection templateId={template.id} workflowId={installedWorkflowId} webhook={webhook} />
+                <GithubAppInstallSection templateId={template.id} workflowId={installedWorkflowId} webhook={webhook} />
               ) : (
                 webhook && (
                   <div className="flex flex-col gap-2">
                     <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
-                      Arm it for a repository
+                      Install it for a repository
                     </p>
                     <p className="text-xs text-neutral-500 dark:text-neutral-400">
                       Add this webhook to a GitHub repo (Settings → Webhooks, content type{' '}
@@ -350,12 +349,12 @@ const selectClassName =
   'h-9 w-full rounded-md border border-neutral-300 bg-white px-3 text-sm text-neutral-900 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-50 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-neutral-400 dark:focus:ring-neutral-400';
 
 /**
- * "Arm it for a repository" for the code-review template — the recommended path.
+ * "Install it for a repository" for the code-review template — the recommended path.
  * Pick a connected repo; if the Valet GitHub App is installed on that owner, one
  * click enables reviews on every PR (posted as the bot, no webhook). Otherwise the
  * manual webhook below is the fallback.
  */
-function GithubAppArmSection({
+function GithubAppInstallSection({
   templateId,
   workflowId,
   webhook,
@@ -372,7 +371,7 @@ function GithubAppArmSection({
 
   const [owner, setOwner] = React.useState('');
   const [repo, setRepo] = React.useState('');
-  const [armed, setArmed] = React.useState(false);
+  const [installed, setInstalled] = React.useState(false);
 
   const covered =
     !!owner && installations.some((i) => i.accountLogin.toLowerCase() === owner.toLowerCase());
@@ -382,9 +381,9 @@ function GithubAppArmSection({
       { templateId, workflowId, owner, repo },
       {
         onSuccess: (res) => {
-          setArmed(true);
+          setInstalled(true);
           if (res.alreadyArmed) {
-            toastSuccess('Already armed', `${owner}/${repo} is already reviewed on every PR.`);
+            toastSuccess('Already installed', `${owner}/${repo} is already reviewed on every PR.`);
           } else {
             toastSuccess(
               'Enabled',
@@ -401,7 +400,7 @@ function GithubAppArmSection({
   return (
     <div className="flex flex-col gap-2">
       <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
-        Arm it for a repository
+        Install it for a repository
       </p>
       <p className="text-xs text-neutral-500 dark:text-neutral-400">
         Pick a connected repo. If the Valet GitHub App is installed on its owner, enable reviews on
@@ -415,8 +414,8 @@ function GithubAppArmSection({
           const [o, r] = e.target.value.split('/');
           setOwner(o ?? '');
           setRepo(r ?? '');
-          // New repo → drop any prior "armed" confirmation.
-          setArmed(false);
+          // New repo → drop any prior "installed" confirmation.
+          setInstalled(false);
         }}
       >
         <option value="">{reposLoading ? 'Loading repos…' : 'Select a repository'}</option>
@@ -431,9 +430,9 @@ function GithubAppArmSection({
         <p className="text-xs text-neutral-500 dark:text-neutral-400">
           Pick a repository to continue.
         </p>
-      ) : armed ? (
+      ) : installed ? (
         <p className="text-sm text-green-600 dark:text-green-400">
-          ✓ Armed for {owner}/{repo} via the GitHub App
+          ✓ Installed for {owner}/{repo} via the GitHub App
         </p>
       ) : covered ? (
         <Button size="sm" onClick={handleEnable} disabled={enableApp.isPending}>
