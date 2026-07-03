@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth';
 import { useCreateWorkflow, useWorkflows } from '@/api/workflows';
 import { useTriggers } from '@/api/triggers';
 import { useExecutions } from '@/api/executions';
+import { useWorkflowTemplates } from '@/api/templates';
 import { toastError } from '@/hooks/use-toast';
 
 export const Route = createFileRoute('/automation/')({
@@ -14,8 +15,8 @@ export const Route = createFileRoute('/automation/')({
  * Landing for the Automation section: a hero copilot prompt up top
  * (submitting creates a new workflow and jumps into the editor with
  * the copilot open, seeded with what the user typed), plus navigation
- * cards for Triggers / Workflows / Runs so people can drill into any
- * of the individual primitives.
+ * cards for Templates / Triggers / Workflows / Runs so people can
+ * drill into any of the individual primitives.
  */
 function AutomationLanding() {
   const user = useAuthStore((s) => s.user);
@@ -27,6 +28,7 @@ function AutomationLanding() {
   const triggersQuery = useTriggers();
   const workflowsQuery = useWorkflows();
   const executionsQuery = useExecutions();
+  const templatesQuery = useWorkflowTemplates();
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -115,9 +117,16 @@ function AutomationLanding() {
 
       <section>
         <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
-          Inspect
+          Explore
         </h2>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <NavCard
+            to="/automation/templates"
+            title="Templates"
+            description="Start from a pre-built automation"
+            count={templatesQuery.data?.templates.length}
+            icon={<TemplateIcon />}
+          />
           <NavCard
             to="/automation/triggers"
             title="Triggers"
@@ -152,7 +161,7 @@ function NavCard({
   count,
   icon,
 }: {
-  to: '/automation/triggers' | '/automation/workflows' | '/automation/executions';
+  to: '/automation/templates' | '/automation/triggers' | '/automation/workflows' | '/automation/executions';
   title: string;
   description: string;
   count?: number;
@@ -181,6 +190,16 @@ function NavCard({
   );
 }
 
+function TemplateIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+      <rect width="7" height="7" x="3" y="3" rx="1" />
+      <rect width="7" height="7" x="14" y="3" rx="1" />
+      <rect width="7" height="7" x="14" y="14" rx="1" />
+      <rect width="7" height="7" x="3" y="14" rx="1" />
+    </svg>
+  );
+}
 function TriggerIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
