@@ -36,6 +36,12 @@ export interface WorkflowTemplateSummary {
   inputs: WorkflowTemplateInput[];
   /** Whether installing also provisions a webhook trigger for external events. */
   hasWebhook: boolean;
+  /**
+   * Optional hint for a richer "test it now" form than the generic input list.
+   * 'github-pr' renders a connected-repo picker + open-PR picker (populating the
+   * owner/repo/pullNumber inputs) instead of free-text fields. Absent = generic.
+   */
+  runForm?: 'github-pr';
 }
 
 export interface WorkflowTemplateListResponse {

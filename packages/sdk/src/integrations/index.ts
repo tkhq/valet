@@ -152,6 +152,12 @@ export interface WorkflowTemplate {
   apps: string[];
   /** Human-readable trigger → action steps, shown in the setup dialog. */
   steps: string[];
+  /**
+   * Optional hint for a richer "test it now" form. 'github-pr' makes the setup
+   * dialog render a connected-repo + open-PR picker (populating owner/repo/
+   * pullNumber) instead of free-text fields. Absent = the generic input list.
+   */
+  runForm?: 'github-pr';
   definition: WorkflowDefinition;
   trigger?: TemplateWebhookTrigger;
 }
