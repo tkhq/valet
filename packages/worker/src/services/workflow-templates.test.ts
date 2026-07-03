@@ -205,7 +205,7 @@ describe('enableTemplateGithubApp', () => {
     });
 
     const result = await enableTemplateGithubApp(db as never, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
-    expect(result).toMatchObject({ owner: 'tkhq', repo: 'valet' });
+    expect(result).toMatchObject({ owner: 'tkhq', repo: 'valet', alreadyArmed: false });
 
     const appTriggers = db.select().from(triggers).all().filter((t) => t.type === 'github-app');
     expect(appTriggers).toHaveLength(1);
@@ -213,6 +213,23 @@ describe('enableTemplateGithubApp', () => {
     expect(config).toMatchObject({ type: 'github-app', owner: 'tkhq', repo: 'valet', events: ['pull_request'] });
     // Reuses the template's webhook mapping so App events map into trigger.data.
     expect(JSON.parse(appTriggers[0].variableMapping as string)).toHaveProperty('pullNumber', '$.pull_request.number');
+  });
+
+  it('is idempotent — re-arming the same repo returns the existing trigger, no duplicate/500', async () => {
+    const { db, workflowId } = await installed();
+    await upsertGithubInstallation(db as never, {
+      githubInstallationId: '1', accountLogin: 'tkhq', accountId: 'a1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+
+    const first = await enableTemplateGithubApp(db as never, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
+    const second = await enableTemplateGithubApp(db as never, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
+
+    expect(first.alreadyArmed).toBe(false);
+    expect(second.alreadyArmed).toBe(true);
+    expect(second.triggerId).toBe(first.triggerId);
+    // No duplicate row (the unique name index would otherwise throw).
+    expect(db.select().from(triggers).all().filter((t) => t.type === 'github-app')).toHaveLength(1);
   });
 
   it('rejects when the App is not installed on the owner (no dead trigger)', async () => {

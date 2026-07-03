@@ -11,9 +11,11 @@
 // so an installed template is a real, published, runnable workflow (the
 // executor reads the published version, never the draft/`data`).
 
+import { and, eq } from 'drizzle-orm';
 import { NotFoundError, ValidationError } from '@valet/shared';
 import type { WorkflowTemplateInput } from '@valet/shared';
 import type { WorkflowTemplate } from '@valet/sdk';
+import { triggers } from '../lib/schema/workflows.js';
 import type { AppDb } from '../lib/drizzle.js';
 import type { Env } from '../env.js';
 import { integrationRegistry } from '../integrations/registry.js';
@@ -74,7 +76,7 @@ export async function enableTemplateGithubApp(
   workflowId: string,
   owner: string,
   repo: string,
-): Promise<{ triggerId: string; owner: string; repo: string }> {
+): Promise<{ triggerId: string; owner: string; repo: string; alreadyArmed: boolean }> {
   const template = getWorkflowTemplate(templateId);
   if (!template) throw new NotFoundError('WorkflowTemplate', templateId);
   if (!template.trigger) {
@@ -94,20 +96,34 @@ export async function enableTemplateGithubApp(
     );
   }
 
+  // Idempotent: one github-app trigger per (user, repo). The name is unique per
+  // user (idx_triggers_user_name), so re-arming the same repo — or arming it on
+  // a second installed workflow — would collide. Return the existing trigger
+  // instead of throwing a raw constraint error (500).
+  const name = `GitHub App: ${owner}/${repo}`;
+  const existing = await db
+    .select({ id: triggers.id })
+    .from(triggers)
+    .where(and(eq(triggers.userId, userId), eq(triggers.type, 'github-app'), eq(triggers.name, name)))
+    .get();
+  if (existing) {
+    return { triggerId: existing.id, owner, repo, alreadyArmed: true };
+  }
+
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await createTrigger(db, {
     id,
     userId,
     workflowId: workflow.id,
-    name: `GitHub App: ${owner}/${repo}`,
+    name,
     enabled: true,
     type: 'github-app',
     config: JSON.stringify({ type: 'github-app', owner, repo, events: ['pull_request'] }),
     variableMapping: JSON.stringify(template.trigger.variableMapping),
     now,
   });
-  return { triggerId: id, owner, repo };
+  return { triggerId: id, owner, repo, alreadyArmed: false };
 }
 
 /**

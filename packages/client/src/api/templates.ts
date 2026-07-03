@@ -62,7 +62,7 @@ export function useEnableTemplateApp() {
       owner: string;
       repo: string;
     }) =>
-      api.post<{ triggerId: string; owner: string; repo: string }>(
+      api.post<{ triggerId: string; owner: string; repo: string; alreadyArmed: boolean }>(
         `/templates/${templateId}/enable-app`,
         { workflowId, owner, repo },
       ),

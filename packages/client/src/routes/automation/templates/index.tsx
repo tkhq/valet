@@ -381,12 +381,16 @@ function GithubAppArmSection({
     enableApp.mutate(
       { templateId, workflowId, owner, repo },
       {
-        onSuccess: () => {
+        onSuccess: (res) => {
           setArmed(true);
-          toastSuccess(
-            'Enabled',
-            `Reviews every PR on ${owner}/${repo}, posted as the bot. No webhook setup needed.`,
-          );
+          if (res.alreadyArmed) {
+            toastSuccess('Already armed', `${owner}/${repo} is already reviewed on every PR.`);
+          } else {
+            toastSuccess(
+              'Enabled',
+              `Reviews every PR on ${owner}/${repo}, posted as the bot. No webhook setup needed.`,
+            );
+          }
         },
         onError: (err) =>
           toastError('Couldn’t enable', err instanceof Error ? err.message : 'Something went wrong.'),
