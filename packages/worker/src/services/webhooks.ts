@@ -6,6 +6,7 @@ import { dispatchWorkflowExecution } from './workflow-dispatch.js';
 import { sha256Hex } from '../lib/hash.js';
 import { constantTimeEqual } from '../lib/crypto.js';
 import { WEBHOOK_RATE_LIMIT_DEFAULT, bumpWebhookRateCount } from '../lib/db.js';
+import { getServiceConfig } from '../lib/db/service-configs.js';
 
 // Row shape shared by the id-based lookup (getWebhookTriggerById, used
 // by /api/triggers/:id/webhook with token auth) and the path-based
@@ -464,7 +465,11 @@ export interface ReviewDecision {
  *   • issue_comment on a PR that @-mentions "@Valet" (not from a bot) → re-review.
  * Everything else is skipped. Returned null means "do nothing".
  */
-export function decideReview(event: string, payload: Record<string, unknown>): ReviewDecision | null {
+export function decideReview(
+  event: string,
+  payload: Record<string, unknown>,
+  botSlug: string | null,
+): ReviewDecision | null {
   const repository = payload.repository as { name?: string; owner?: { login?: string } } | undefined;
   const owner = repository?.owner?.login;
   const repo = repository?.name;
@@ -492,11 +497,25 @@ export function decideReview(event: string, payload: Record<string, unknown>): R
     const comment = payload.comment as { body?: string; user?: { type?: string } } | undefined;
     // Loop guard: never react to a bot's own comment (incl. our own reviews).
     if (comment?.user?.type === 'Bot') return null;
-    if (!/@valet\b/i.test(String(comment?.body ?? ''))) return null;
+    // Re-review only when the comment @-mentions THIS App's bot handle — the
+    // installed App's slug, e.g. `@valet-turnkey` or the bot login
+    // `@valet-turnkey[bot]`. Matching the generic word "valet" would ping an
+    // unrelated GitHub user (github.com/valet is a real account). Without a
+    // configured slug there's no bot to mention, so never match.
+    if (!botSlug) return null;
+    if (!mentionsBot(String(comment?.body ?? ''), botSlug)) return null;
     return { owner, repo, pullNumber: issue.number, reason: 'mention' };
   }
 
   return null;
+}
+
+/** True when the comment @-mentions the App by its slug or `<slug>[bot]` login. */
+export function mentionsBot(body: string, botSlug: string): boolean {
+  const slug = botSlug.replace(/\[bot\]$/i, '');
+  const esc = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // @<slug> or @<slug>[bot], case-insensitive, not part of a longer handle.
+  return new RegExp(`@${esc}(\\[bot\\])?(?![a-z0-9-])`, 'i').test(body);
 }
 
 /**
@@ -513,7 +532,16 @@ export async function dispatchGithubAppReviews(
   payload: Record<string, unknown>,
   deliveryId: string,
 ): Promise<void> {
-  const decision = decideReview(event, payload);
+  // Resolve the App's own slug so an @-mention re-review matches THIS bot's
+  // handle (`@<slug>` / `@<slug>[bot]`), not the generic word "valet". Only
+  // needed for issue_comment; skip the config read for pull_request events.
+  let botSlug: string | null = null;
+  if (event === 'issue_comment') {
+    const svc = await getServiceConfig<{ appSlug?: string }>(getDb(env.DB), env.ENCRYPTION_KEY, 'github').catch(() => null);
+    botSlug = svc?.config.appSlug ?? null;
+  }
+
+  const decision = decideReview(event, payload, botSlug);
   if (!decision) return;
   const { owner, repo, pullNumber, reason } = decision;
 

@@ -10,6 +10,11 @@ const { dispatchMock } = vi.hoisted(() => ({
 }));
 vi.mock('./workflow-dispatch.js', () => ({ dispatchWorkflowExecution: dispatchMock }));
 
+// The App's slug (for @-mention matching) is read from the encrypted service
+// config via drizzle — not exercisable over the minimal D1 test shim, so stub it.
+const { getServiceConfigMock } = vi.hoisted(() => ({ getServiceConfigMock: vi.fn() }));
+vi.mock('../lib/db/service-configs.js', () => ({ getServiceConfig: getServiceConfigMock }));
+
 import { createTestDb } from '../test-utils/db.js';
 import { users } from '../lib/schema/users.js';
 import { workflows, triggers } from '../lib/schema/workflows.js';
@@ -31,45 +36,58 @@ function commentEvent(body: string, opts: { action?: string; onPr?: boolean; bot
   };
 }
 
+const SLUG = 'valet-turnkey'; // the App's slug → bot handle @valet-turnkey / @valet-turnkey[bot]
+
 describe('decideReview — Greptile-style review policy', () => {
   it('reviews on a non-draft pull_request opened / reopened / ready_for_review', () => {
     for (const action of ['opened', 'reopened', 'ready_for_review']) {
-      expect(decideReview('pull_request', prEvent(action))).toMatchObject({
+      expect(decideReview('pull_request', prEvent(action), SLUG)).toMatchObject({
         owner: 'tkhq', repo: 'valet', pullNumber: 75, reason: 'initial',
       });
     }
   });
 
   it('does NOT review a draft PR', () => {
-    expect(decideReview('pull_request', prEvent('opened', { draft: true }))).toBeNull();
+    expect(decideReview('pull_request', prEvent('opened', { draft: true }), SLUG)).toBeNull();
   });
 
   it('does NOT re-review on a push (synchronize)', () => {
-    expect(decideReview('pull_request', prEvent('synchronize'))).toBeNull();
+    expect(decideReview('pull_request', prEvent('synchronize'), SLUG)).toBeNull();
   });
 
-  it('re-reviews when a PR comment @-mentions Valet', () => {
-    expect(decideReview('issue_comment', commentEvent('hey @Valet please re-review'))).toMatchObject({
+  it('re-reviews when a comment @-mentions the App bot handle (slug or [bot] login)', () => {
+    expect(decideReview('issue_comment', commentEvent('hey @valet-turnkey please re-review'), SLUG)).toMatchObject({
       pullNumber: 75, reason: 'mention',
     });
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey[bot] take another look'), SLUG)?.reason).toBe('mention');
     // Case-insensitive.
-    expect(decideReview('issue_comment', commentEvent('@valet take another look'))?.reason).toBe('mention');
+    expect(decideReview('issue_comment', commentEvent('@Valet-Turnkey re-review'), SLUG)?.reason).toBe('mention');
   });
 
-  it('ignores comments without an @Valet mention', () => {
-    expect(decideReview('issue_comment', commentEvent('looks good to me'))).toBeNull();
+  it('does NOT match the generic @valet (a real, unrelated GitHub user)', () => {
+    expect(decideReview('issue_comment', commentEvent('hey @valet re-review'), SLUG)).toBeNull();
+    // ...nor a longer handle that merely starts with the slug.
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey-staging look'), SLUG)).toBeNull();
   });
 
-  it('ignores @Valet on a plain issue (not a PR)', () => {
-    expect(decideReview('issue_comment', commentEvent('@valet', { onPr: false }))).toBeNull();
+  it('never matches a mention when no bot slug is configured', () => {
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey re-review'), null)).toBeNull();
+  });
+
+  it('ignores comments without a bot mention', () => {
+    expect(decideReview('issue_comment', commentEvent('looks good to me'), SLUG)).toBeNull();
+  });
+
+  it('ignores a mention on a plain issue (not a PR)', () => {
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey', { onPr: false }), SLUG)).toBeNull();
   });
 
   it('ignores a bot-authored comment (loop guard)', () => {
-    expect(decideReview('issue_comment', commentEvent('@valet', { botAuthor: true }))).toBeNull();
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey', { botAuthor: true }), SLUG)).toBeNull();
   });
 
   it('ignores edited/deleted comment actions', () => {
-    expect(decideReview('issue_comment', commentEvent('@valet', { action: 'edited' }))).toBeNull();
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey', { action: 'edited' }), SLUG)).toBeNull();
   });
 });
 
@@ -94,9 +112,11 @@ describe('dispatchGithubAppReviews', () => {
 
   beforeEach(() => {
     dispatchMock.mockClear();
+    // App config resolves the bot slug for @-mention matching.
+    getServiceConfigMock.mockResolvedValue({ config: { appSlug: 'valet-turnkey' }, metadata: {}, configuredBy: null, updatedAt: '' });
     const t = createTestDb();
     db = t.db;
-    env = { DB: asD1(t.sqlite) } as unknown as Env;
+    env = { DB: asD1(t.sqlite), ENCRYPTION_KEY: 'test-encryption-key' } as unknown as Env;
     db.insert(users).values({ id: 'u1', email: 'u@e.io' }).run();
     db.insert(workflows).values({ id: 'wf1', userId: 'u1', name: 'review', version: '0', data: '{}' }).run();
     db.insert(triggers).values({
@@ -125,12 +145,17 @@ describe('dispatchGithubAppReviews', () => {
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
-  it('dispatches an @Valet re-review from an issue_comment, PR number from issue.number', async () => {
-    await dispatchGithubAppReviews(env, 'issue_comment', commentEvent('@valet re-review please'), 'd-mention');
+  it('dispatches an @<bot> re-review from an issue_comment, PR number from issue.number', async () => {
+    await dispatchGithubAppReviews(env, 'issue_comment', commentEvent('@valet-turnkey re-review please'), 'd-mention');
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     const arg = dispatchMock.mock.calls[0][1] as DispatchWorkflowInput;
     expect(arg.trigger.data).toEqual({ owner: 'tkhq', repo: 'valet', pullNumber: 75 });
     expect(arg.trigger.metadata).toMatchObject({ reason: 'mention' });
+  });
+
+  it('does NOT dispatch on a generic @valet mention (unrelated GitHub user)', async () => {
+    await dispatchGithubAppReviews(env, 'issue_comment', commentEvent('@valet re-review please'), 'd-generic');
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   it('does NOT dispatch for a different repo', async () => {
