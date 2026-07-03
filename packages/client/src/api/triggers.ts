@@ -17,8 +17,8 @@ export interface Trigger {
   workflowName: string | null;
   name: string;
   enabled: boolean;
-  type: 'webhook' | 'schedule' | 'manual';
-  config: WebhookConfig | ScheduleConfig | ManualConfig;
+  type: 'webhook' | 'schedule' | 'manual' | 'github-app';
+  config: WebhookConfig | ScheduleConfig | ManualConfig | GithubAppConfig;
   variableMapping: Record<string, string> | null;
   webhookUrl?: string;
   lastRunAt: string | null;
@@ -55,7 +55,14 @@ export interface ManualConfig {
   type: 'manual';
 }
 
-export type TriggerConfig = WebhookConfig | ScheduleConfig | ManualConfig;
+export interface GithubAppConfig {
+  type: 'github-app';
+  owner: string;
+  repo: string;
+  events: string[];
+}
+
+export type TriggerConfig = WebhookConfig | ScheduleConfig | ManualConfig | GithubAppConfig;
 
 export interface CreateTriggerRequest {
   workflowId?: string;

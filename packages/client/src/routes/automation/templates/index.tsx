@@ -19,6 +19,7 @@ import { getServiceIcon } from '@/components/integrations/service-icons';
 import { cn } from '@/lib/cn';
 import { useWorkflowTemplates, useInstallTemplate, useGithubAppInstallations, useEnableTemplateApp } from '@/api/templates';
 import { useRunWorkflow } from '@/api/workflows';
+import { useTriggers } from '@/api/triggers';
 import { useRepos, useRepoPulls } from '@/api/repos';
 import type { WorkflowTemplateSummary, InstalledTemplateTrigger } from '@valet/shared';
 
@@ -367,21 +368,35 @@ function GithubAppInstallSection({
   const repos = reposData?.repos ?? [];
   const { data: installationsData } = useGithubAppInstallations();
   const installations = installationsData?.installations ?? [];
+  const { data: triggersData } = useTriggers();
   const enableApp = useEnableTemplateApp();
 
   const [owner, setOwner] = React.useState('');
   const [repo, setRepo] = React.useState('');
-  const [installed, setInstalled] = React.useState(false);
+  const [justInstalled, setJustInstalled] = React.useState(false);
 
   const covered =
     !!owner && installations.some((i) => i.accountLogin.toLowerCase() === owner.toLowerCase());
+
+  // A github-app trigger already exists for this repo → it's installed. Show the
+  // confirmation instead of the button so the user can't double-install.
+  const alreadyInstalled =
+    !!owner && !!repo && (triggersData?.triggers ?? []).some(
+      (t) =>
+        t.type === 'github-app' &&
+        t.enabled &&
+        t.config.type === 'github-app' &&
+        t.config.owner.toLowerCase() === owner.toLowerCase() &&
+        t.config.repo.toLowerCase() === repo.toLowerCase(),
+    );
+  const installed = justInstalled || alreadyInstalled;
 
   const handleEnable = () => {
     enableApp.mutate(
       { templateId, workflowId, owner, repo },
       {
         onSuccess: (res) => {
-          setInstalled(true);
+          setJustInstalled(true);
           if (res.alreadyArmed) {
             toastSuccess('Already installed', `${owner}/${repo} is already reviewed on every PR.`);
           } else {
@@ -414,8 +429,9 @@ function GithubAppInstallSection({
           const [o, r] = e.target.value.split('/');
           setOwner(o ?? '');
           setRepo(r ?? '');
-          // New repo → drop any prior "installed" confirmation.
-          setInstalled(false);
+          // New repo → drop any just-installed confirmation (alreadyInstalled
+          // re-derives from the triggers list for the newly-picked repo).
+          setJustInstalled(false);
         }}
       >
         <option value="">{reposLoading ? 'Loading repos…' : 'Select a repository'}</option>
