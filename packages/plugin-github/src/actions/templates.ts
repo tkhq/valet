@@ -18,10 +18,10 @@ const DEFAULT_REVIEW_MODEL = 'anthropic:claude-sonnet-4-6';
  *
  * Repo-scoped: point the webhook at a repository once and it reviews every PR
  * there. The `gate` if-node only lets through the events that actually mean
- * "there's new code to review" (opened / reopened / synchronize /
- * ready_for_review), so noise events (closed, labeled, assigned, …) short-
- * circuit before the LLM call. A manual run carries no `action`, so the gate's
- * `isEmpty` arm lets "Run now" through for one specific { owner, repo, pullNumber }.
+ * "there's new code to review" (opened / reopened / ready_for_review), so noise
+ * events (closed, labeled, assigned, …) short-circuit before the LLM call. A
+ * manual run carries no `action`, so the gate's `isEmpty` arm lets "Run now"
+ * through for one specific { owner, repo, pullNumber }.
  */
 const codeReviewTemplate: WorkflowTemplate = {
   id: 'code-review',
@@ -124,8 +124,8 @@ const codeReviewTemplate: WorkflowTemplate = {
         summary: 'Post the review as a PR comment',
         onPolicyDeny: 'fail',
         // Post as the org's GitHub App bot (when installed + app access is on),
-        // not the workflow owner's personal identity. Falls back to the owner's
-        // credential is NOT done here — 'app' is explicit; see the resolver.
+        // not the workflow owner's identity — 'app' never falls back to a
+        // person; it fails instead. See the github credential resolver.
         credential: 'app',
         params: {
           owner: '{{ trigger.data.owner }}',

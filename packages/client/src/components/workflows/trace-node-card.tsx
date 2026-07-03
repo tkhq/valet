@@ -6,6 +6,7 @@ import { MarkdownContent } from '@/components/chat/markdown/markdown-content';
 import { formatRelativeTime } from '@/lib/format';
 import { cn } from '@/lib/cn';
 import { correctNodeStatusForFinishedExecution } from './workflow-execution-viewer-model';
+import { toolCallName } from './workflow-editor-model';
 import { ToolPayload } from '@/components/payload/tool-payload';
 
 // ─── Public ──────────────────────────────────────────────────────────────────
@@ -970,14 +971,6 @@ function findDefNodeById(
     if (node.type === 'foreach' && node.body && node.body.id === id) return node.body;
   }
   return null;
-}
-
-/** dag/v1 stores node.action as the full service-prefixed id
- *  ("github.inspect_pull_request"), so composing service + action
- *  double-prefixes. Keep the compose only as a fallback for hand-typed
- *  custom actions that may be unprefixed. */
-function toolCallName(n: { service: string; action: string }): string {
-  return n.action.startsWith(`${n.service}.`) ? n.action : `${n.service}.${n.action}`;
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {

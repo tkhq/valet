@@ -25,7 +25,6 @@ import { resolveAvailableModels } from './model-catalog.js';
 import { assembleLlmProviderEnv } from '../lib/llm/provider-env.js';
 import { createTrigger, generateWebhookToken, getWorkflowForTrigger } from '../lib/db/triggers.js';
 import { getGithubInstallationByLogin } from '../lib/db/github-installations.js';
-import { validateDefinition } from '../lib/workflow-dag/validator.js';
 
 /** Every template contributed by a registered plugin (flattened). */
 export function listWorkflowTemplates(): readonly WorkflowTemplate[] {
@@ -52,7 +51,6 @@ export function templateRunInputs(t: WorkflowTemplate): WorkflowTemplateInput[] 
       type: s.type as 'string' | 'number',
       required: s.required,
       placeholder: s.placeholder,
-      description: s.description,
     }));
 }
 
@@ -129,8 +127,8 @@ export async function enableTemplateGithubApp(
 
 /**
  * Install a template as a real, published workflow (and its webhook trigger, if
- * any). Structural validation runs up front so a bad template fails before any
- * row is created; publishDraft enforces the env/model gate.
+ * any). publishDraft runs full structural + env/model validation; the surrounding
+ * try/catch rolls the created workflow back if it rejects.
  */
 export async function installWorkflowTemplate(
   db: AppDb,
@@ -141,17 +139,6 @@ export async function installWorkflowTemplate(
   const template = getWorkflowTemplate(templateId);
   if (!template) {
     throw new NotFoundError('WorkflowTemplate', templateId);
-  }
-
-  // Fail fast on a structurally-invalid template (before creating any rows).
-  // llm_maxoutput_warning is non-blocking and filtered by the publish gate too.
-  const structuralErrors = validateDefinition(template.definition).filter(
-    (e) => e.code !== 'llm_maxoutput_warning',
-  );
-  if (structuralErrors.length > 0) {
-    throw new ValidationError(
-      `Template "${template.id}" is invalid: ${structuralErrors.map((e) => e.code).join(', ')}`,
-    );
   }
 
   // 1. Create the workflow (blank draft). Everything after this is wrapped so a

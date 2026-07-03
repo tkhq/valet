@@ -23,6 +23,7 @@ import { renderJsonTemplates, renderTemplate } from '../../lib/workflow-dag/expr
 import { buildTemplateContext } from '../context.js';
 import { integrationRegistry } from '../../integrations/registry.js';
 import { isActionDisabled } from '../../lib/db/disabled-actions.js';
+import { qualifyActionId } from '../../lib/action-id.js';
 import { loadCustomMcpConnectorContext } from '../../services/custom-mcp-connectors.js';
 import { getDb } from '../../lib/drizzle.js';
 import { invokeWorkflowAction, markExecuted, markFailed } from '../../services/actions.js';
@@ -59,9 +60,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   // re-reading D1 or re-listing integration actions.
   const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, async () => {
     if (await isActionDisabled(db, node.service, node.action)) {
-      // node.action is already service-prefixed ("github.create_comment");
-      // only re-prefix hand-typed custom actions that lack it.
-      const actionLabel = node.action.startsWith(`${node.service}.`) ? node.action : `${node.service}.${node.action}`;
+      const actionLabel = qualifyActionId(node.service, node.action);
       throw new Error(`tool node "${node.id}": action "${actionLabel}" is disabled`);
     }
     const customCtx = await loadCustomMcpConnectorContext(env, db);

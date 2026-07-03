@@ -18,16 +18,15 @@ import type { GithubInstallation } from '../../lib/schema/github-installations.j
 /**
  * GitHub credential resolver — unified App model.
  *
- * Resolution chain:
- * 1. User has a linked GitHub account (stored oauth2 credential)? → return user token
- * 2. Anonymous access allowed (metadata flag)? → if NO, fail with "not connected"
- * 3. If repo `owner` is specified → strict match against `github_installations` by account_login.
- *    No match → FAIL (do NOT fall through to "any installation")
- * 4. If no repo owner specified → use any active org installation (prefer Organization over User)
- * 5. No installation → fail
+ * credentialMode='app' → App-installation (bot) token ONLY; never falls back to
+ *   the caller's personal token (an automation posting "as the bot" must not
+ *   silently post as a person). Fails with an actionable message if unavailable.
+ * default → the user's linked OAuth token, falling back to an org App install
+ *   (Organization preferred) when anonymous access is enabled.
  *
- * Steps 3-4 mint an installation bot token via getOrMintInstallationToken (D1-cached)
- * and attach user attribution (name + email from the users table).
+ * App-install paths mint a bot token via getOrMintInstallationToken (D1-cached)
+ * and attach user attribution (name + email from the users table). See the
+ * inline comments below for the exact per-mode resolution order.
  */
 export const githubCredentialResolver: CredentialResolver = async (
   service,
@@ -47,9 +46,10 @@ export const githubCredentialResolver: CredentialResolver = async (
   // (Organization preferred). Returns a not_found error result when no usable
   // installation exists so callers can fall back.
   const tryApp = async (): Promise<CredentialResult> => {
-    // Total function: any failure — including a mint/JWT error from a
-    // misconfigured App — returns ok:false so credentialMode='app' can fall
-    // back to the caller's own token instead of throwing and breaking the run.
+    // Total function: convert any failure (incl. a mint/JWT error from a
+    // misconfigured App) into an ok:false result — app mode wraps it into the
+    // 'ask an admin' message, and the default path's trailing `return tryApp()`
+    // stays a value, not a throw. app mode does NOT fall back to the user token.
     try {
       const meta = await getServiceMetadata<GitHubServiceMetadata>(db, 'github').catch(() => null);
       if (!meta?.allowAnonymousGitHubAccess) {

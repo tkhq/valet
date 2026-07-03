@@ -519,14 +519,6 @@ export function mentionsBot(body: string, botSlug: string): boolean {
   return new RegExp(`@${esc}(\\[bot\\])?(?![a-z0-9-])`, 'i').test(body);
 }
 
-/**
- * Dispatch a GitHub App event to every `github-app` trigger scoped to the
- * event's repo — the App-driven alternative to a per-workflow webhook. The
- * Greptile-style policy (decideReview) gates it: drafts and pushes are skipped,
- * the initial review fires on open/ready, and re-reviews happen only on an
- * @Valet mention. Each matching workflow runs once per delivery (idempotency-
- * keyed on the delivery id). Best-effort: one failure never blocks the 200 ACK.
- */
 /** ORG-scoped code-review policy (from GitHubServiceMetadata.codeReview*). */
 export interface CodeReviewOrgPolicy {
   enabled: boolean;
@@ -567,6 +559,11 @@ export function resolveCodeReviewGate(
   return true;
 }
 
+/**
+ * Fan a GitHub App event out to every matching `github-app` trigger, gated by
+ * decideReview + the org/owner code-review policy. Best-effort: one trigger
+ * failure never blocks the webhook 200.
+ */
 export async function dispatchGithubAppReviews(
   env: Env,
   event: string,

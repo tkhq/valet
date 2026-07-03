@@ -20,7 +20,7 @@ import { cn } from '@/lib/cn';
 import { useWorkflowTemplates, useInstallTemplate, useGithubAppInstallations, useEnableTemplateApp } from '@/api/templates';
 import { useRunWorkflow } from '@/api/workflows';
 import { useTriggers } from '@/api/triggers';
-import { useRepos, useRepoPulls } from '@/api/repos';
+import { useRepos, useRepoPulls, type Repo } from '@/api/repos';
 import { useGitHubStatus } from '@/api/github';
 import type { WorkflowTemplateSummary, InstalledTemplateTrigger } from '@valet/shared';
 
@@ -350,6 +350,39 @@ function TemplateSetupDialog({
 const selectClassName =
   'h-9 w-full rounded-md border border-neutral-300 bg-white px-3 text-sm text-neutral-900 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-50 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-neutral-400 dark:focus:ring-neutral-400';
 
+/** The connected-repo picker shared by the "arm a repo" and "Run now" forms. */
+function RepoSelect({
+  repos,
+  reposLoading,
+  owner,
+  repo,
+  onSelect,
+}: {
+  repos: Repo[];
+  reposLoading: boolean;
+  owner: string;
+  repo: string;
+  onSelect: (owner: string, repo: string) => void;
+}) {
+  return (
+    <select
+      className={selectClassName}
+      value={owner && repo ? `${owner}/${repo}` : ''}
+      onChange={(e) => {
+        const [o, r] = e.target.value.split('/');
+        onSelect(o ?? '', r ?? '');
+      }}
+    >
+      <option value="">{reposLoading ? 'Loading repos…' : 'Select a repository'}</option>
+      {repos.map((r) => (
+        <option key={r.id} value={r.fullName}>
+          {r.fullName}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 /**
  * "Install it for a repository" for the code-review template — the recommended path.
  * Pick a connected repo; if the Valet GitHub App is installed on that owner, one
@@ -425,25 +458,19 @@ function GithubAppInstallSection({
         every PR in one click — posted as the bot, no webhook setup.
       </p>
 
-      <select
-        className={selectClassName}
-        value={owner && repo ? `${owner}/${repo}` : ''}
-        onChange={(e) => {
-          const [o, r] = e.target.value.split('/');
-          setOwner(o ?? '');
-          setRepo(r ?? '');
+      <RepoSelect
+        repos={repos}
+        reposLoading={reposLoading}
+        owner={owner}
+        repo={repo}
+        onSelect={(o, r) => {
+          setOwner(o);
+          setRepo(r);
           // New repo → drop any just-installed confirmation (alreadyInstalled
           // re-derives from the triggers list for the newly-picked repo).
           setJustInstalled(false);
         }}
-      >
-        <option value="">{reposLoading ? 'Loading repos…' : 'Select a repository'}</option>
-        {repos.map((r) => (
-          <option key={r.id} value={r.fullName}>
-            {r.fullName}
-          </option>
-        ))}
-      </select>
+      />
 
       {!owner || !repo ? (
         <p className="text-xs text-neutral-500 dark:text-neutral-400">
@@ -550,22 +577,13 @@ function GithubPrRunFields({
 
   return (
     <div className="flex flex-col gap-2">
-      <select
-        className={selectClassName}
-        value={owner && repo ? `${owner}/${repo}` : ''}
-        onChange={(e) => {
-          const [o, r] = e.target.value.split('/');
-          // New repo → clear the previously-picked PR.
-          set({ owner: o ?? '', repo: r ?? '', pullNumber: '' });
-        }}
-      >
-        <option value="">{reposLoading ? 'Loading repos…' : 'Select a repository'}</option>
-        {repos.map((r) => (
-          <option key={r.id} value={r.fullName}>
-            {r.fullName}
-          </option>
-        ))}
-      </select>
+      <RepoSelect
+        repos={repos}
+        reposLoading={reposLoading}
+        owner={owner}
+        repo={repo}
+        onSelect={(o, r) => set({ owner: o, repo: r, pullNumber: '' })}
+      />
 
       <select
         className={selectClassName}

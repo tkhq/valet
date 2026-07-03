@@ -17,18 +17,11 @@ export interface GitHubServiceMetadata {
   appName?: string;
   allowPersonalInstallations?: boolean;
   allowAnonymousGitHubAccess?: boolean;
-  // AI code review — ORG-scoped policy knobs. Precedence over the per-user
-  // (users.code_review_*) settings is org-ceiling + user-may-only-loosen,
-  // mirroring resolveEffectiveActionPolicy. See resolveCodeReviewGate.
-  //   codeReviewEnabled    — master switch (default true). OFF is absolute:
-  //                          no user setting can turn review back on.
-  //   codeReviewEnforced   — lock the per-user knobs (default false). The
-  //                          `userGrantBehavior:'blocked'` analog.
-  //   codeReviewMentionOnly— org-wide quiet mode (default false): skip the
-  //                          on-open review; only review on an @bot mention.
-  codeReviewEnabled?: boolean;
-  codeReviewEnforced?: boolean;
-  codeReviewMentionOnly?: boolean;
+  // AI code review — ORG policy. Precedence (org ceiling; owner may only loosen)
+  // is defined + enforced in resolveCodeReviewGate (webhooks.ts).
+  codeReviewEnabled?: boolean;     // master switch (default true; OFF is absolute)
+  codeReviewEnforced?: boolean;    // lock the per-user knobs (default false)
+  codeReviewMentionOnly?: boolean; // org-wide mention-only (default false)
 }
 
 export interface GitHubConfig {

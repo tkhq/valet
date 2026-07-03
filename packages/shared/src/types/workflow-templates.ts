@@ -12,7 +12,6 @@ export interface WorkflowTemplateInput {
   type: 'string' | 'number';
   required?: boolean;
   placeholder?: string;
-  description?: string;
 }
 
 /** A single card in the template gallery (Zapier-style). */
