@@ -11,6 +11,7 @@ import { loadGitHubApp, getOrMintInstallationToken } from '../../services/github
 import { users } from '../../lib/schema/users.js';
 import type { Env } from '../../env.js';
 import type { CredentialResolver } from '../registry.js';
+import type { CredentialResult } from '../../services/credentials.js';
 import type { GitHubServiceMetadata } from '../../services/github-config.js';
 import type { GithubInstallation } from '../../lib/schema/github-installations.js';
 
@@ -34,66 +35,72 @@ export const githubCredentialResolver: CredentialResolver = async (
   userId,
   context,
 ) => {
-  const { forceRefresh, params } = context;
-
-  // ── Step 1: Try user's personal OAuth token ────────────────────────────
-  const userResult = await getCredential(env, 'user', userId, service, { forceRefresh });
-  if (userResult.ok) {
-    return userResult;
-  }
-
-  // ── Step 2: Check if anonymous (app-based) access is allowed ───────────
+  const { forceRefresh, params, credentialMode } = context;
   const db = getDb(env.DB);
-  const meta = await getServiceMetadata<GitHubServiceMetadata>(db, 'github').catch(() => null);
-  if (!meta?.allowAnonymousGitHubAccess) {
-    return {
-      ok: false as const,
-      error: {
-        service,
-        reason: 'not_found' as const,
-        message: 'GitHub not connected. Connect your GitHub account in Settings > Integrations.',
-      },
-    };
-  }
-
   const owner = params?.owner as string | undefined;
 
-  // ── Step 3: Owner specified → strict match ─────────────────────────────
-  if (owner) {
-    const installation = await getGithubInstallationByLogin(db, owner);
-    if (!installation) {
+  // The user's own linked OAuth token.
+  const tryUser = () => getCredential(env, 'user', userId, service, { forceRefresh });
+
+  // An org GitHub-App installation (bot) token. Gated by the anonymous-access
+  // flag; owner-strict when a repo owner is supplied, else any active install
+  // (Organization preferred). Returns a not_found error result when no usable
+  // installation exists so callers can fall back.
+  const tryApp = async (): Promise<CredentialResult> => {
+    const meta = await getServiceMetadata<GitHubServiceMetadata>(db, 'github').catch(() => null);
+    if (!meta?.allowAnonymousGitHubAccess) {
       return {
         ok: false as const,
         error: {
           service,
           reason: 'not_found' as const,
-          message: `No GitHub installation available for owner ${owner}`,
+          // For the default (user-first) path this reads as the user's real
+          // problem: they haven't linked their account. mode='app' rewrites it.
+          message: 'GitHub not connected. Connect your GitHub account in Settings > Integrations.',
         },
       };
     }
-    return mintBotCredential(env, db, userId, installation);
-  }
-
-  // ── Step 4: No owner → use any active installation (prefer Org) ────────
-  const orgInstalls = await listGithubInstallationsByAccountType(db, 'Organization');
-  if (orgInstalls.length > 0) {
-    return mintBotCredential(env, db, userId, orgInstalls[0]);
-  }
-
-  const userInstalls = await listGithubInstallationsByAccountType(db, 'User');
-  if (userInstalls.length > 0) {
-    return mintBotCredential(env, db, userId, userInstalls[0]);
-  }
-
-  // ── Step 5: No installation → fail ─────────────────────────────────────
-  return {
-    ok: false as const,
-    error: {
-      service,
-      reason: 'not_found' as const,
-      message: 'No GitHub installation available',
-    },
+    if (owner) {
+      const installation = await getGithubInstallationByLogin(db, owner);
+      if (!installation) {
+        return {
+          ok: false as const,
+          error: { service, reason: 'not_found' as const, message: `No GitHub installation available for owner ${owner}` },
+        };
+      }
+      return mintBotCredential(env, db, userId, installation);
+    }
+    const orgInstalls = await listGithubInstallationsByAccountType(db, 'Organization');
+    if (orgInstalls.length > 0) return mintBotCredential(env, db, userId, orgInstalls[0]);
+    const userInstalls = await listGithubInstallationsByAccountType(db, 'User');
+    if (userInstalls.length > 0) return mintBotCredential(env, db, userId, userInstalls[0]);
+    return {
+      ok: false as const,
+      error: { service, reason: 'not_found' as const, message: 'No GitHub installation available' },
+    };
   };
+
+  // credentialMode='app' → prefer the bot, fall back to the owner's own token
+  // (so the option degrades gracefully where no App is installed). Default →
+  // the owner's token, falling back to the org install (the pre-existing chain).
+  if (credentialMode === 'app') {
+    const appResult = await tryApp();
+    if (appResult.ok) return appResult;
+    const userResult = await tryUser();
+    if (userResult.ok) return userResult;
+    return {
+      ok: false as const,
+      error: {
+        service,
+        reason: 'not_found' as const,
+        message: 'No GitHub App installation available and no personal GitHub credential to fall back to.',
+      },
+    };
+  }
+
+  const userResult = await tryUser();
+  if (userResult.ok) return userResult;
+  return tryApp();
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

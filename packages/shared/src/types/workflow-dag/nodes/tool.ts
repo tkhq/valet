@@ -9,6 +9,12 @@ export interface ToolNode {
   summary?: string;
   onPolicyDeny?: 'fail' | 'skip';
   retries?: number;
+  /**
+   * Which identity to act as. 'app' resolves the org's app/bot credential
+   * instead of the workflow owner's personal one (GitHub only today — e.g. so
+   * a code-review workflow posts as the bot). Defaults to the owner's credential.
+   */
+  credential?: 'user' | 'app';
 }
 
 export function createDefaultToolNode(id: string): ToolNode {

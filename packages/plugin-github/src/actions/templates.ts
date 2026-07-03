@@ -36,6 +36,8 @@ const codeReviewTemplate: WorkflowTemplate = {
     'Claude reviews the diff — intent vs. changeset, conventions, correctness',
     'Post the review as a comment on the pull request',
   ],
+  // The "test it now" form is a connected-repo + open-PR picker, not free-text.
+  runForm: 'github-pr',
   definition: {
     version: 'dag/v1',
     nodes: [
@@ -115,6 +117,10 @@ const codeReviewTemplate: WorkflowTemplate = {
         action: 'github.create_comment',
         summary: 'Post the review as a PR comment',
         onPolicyDeny: 'fail',
+        // Post as the org's GitHub App bot (when installed + app access is on),
+        // not the workflow owner's personal identity. Falls back to the owner's
+        // credential is NOT done here — 'app' is explicit; see the resolver.
+        credential: 'app',
         params: {
           owner: '{{ trigger.data.owner }}',
           repo: '{{ trigger.data.repo }}',

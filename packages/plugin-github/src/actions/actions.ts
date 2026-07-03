@@ -1095,8 +1095,11 @@ async function executeAction(
       case 'github.create_comment': {
         const { owner, repo, issueNumber, body } = createComment.params.parse(params);
         try {
+          // Under a bot token, label the comment as app-authored so it's never
+          // mistaken for a human (mirrors the attribution on create_issue etc.).
+          const commentBody = isBotToken(ctx) ? `${body}${attributionSuffix(ctx)}` : body;
           const { data } = await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-            owner, repo, issue_number: issueNumber, body,
+            owner, repo, issue_number: issueNumber, body: commentBody,
           });
           return { success: true, data };
         } catch (err: any) {

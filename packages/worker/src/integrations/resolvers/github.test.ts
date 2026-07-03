@@ -185,6 +185,54 @@ describe('githubCredentialResolver', () => {
     }
   });
 
+  // ── 3b. credentialMode='app' — prefer the bot over the user's token ────
+
+  it("credentialMode='app' uses the bot token even when the user HAS a personal token", async () => {
+    seedUser({ name: 'Bot Runner', email: 'bot@example.com' });
+
+    // The user's personal token would resolve fine — but app mode must skip it.
+    // (No getCredential mock is consumed on the app-first path.)
+    (getServiceMetadata as Mock).mockResolvedValueOnce({ allowAnonymousGitHubAccess: true });
+    await upsertGithubInstallation(db as any, {
+      githubInstallationId: '42', accountLogin: 'my-org', accountId: 'acct-1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+    (loadGitHubApp as Mock).mockResolvedValueOnce({ appId: '99' });
+    (getOrMintInstallationToken as Mock).mockResolvedValueOnce({ token: 'ghs_bot_token', expiresAt: Date.now() + 3600_000 });
+
+    const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
+      params: { owner: 'my-org' }, credentialMode: 'app',
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.credential.accessToken).toBe('ghs_bot_token');
+      expect(result.credential.credentialType).toBe('app_install');
+    }
+    // The user token was never consulted.
+    expect(getCredential as Mock).not.toHaveBeenCalled();
+  });
+
+  it("credentialMode='app' falls back to the user's token when no App installation exists", async () => {
+    seedUser();
+    // App path: anon allowed but NO installation → fails → falls back to user.
+    (getServiceMetadata as Mock).mockResolvedValueOnce({ allowAnonymousGitHubAccess: true });
+    (getCredential as Mock).mockResolvedValueOnce({
+      ok: true,
+      credential: { accessToken: 'ghp_user_token', credentialType: 'oauth2', refreshed: false },
+    });
+
+    const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
+      params: {}, credentialMode: 'app',
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.credential.accessToken).toBe('ghp_user_token');
+      expect(result.credential.credentialType).toBe('oauth2');
+    }
+  });
+
   // ── 4. Owner specified, NO matching installation (strict) ──────────────
 
   it('fails with specific error when owner has no matching installation (strict, no fallthrough)', async () => {

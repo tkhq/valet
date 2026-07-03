@@ -237,6 +237,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       const credResult = await integrationRegistry.resolveCredentials(node.service, env, runParams.userId, {
         params: renderedParams,
         forceRefresh: false,
+        ...(node.credential ? { credentialMode: node.credential } : {}),
       });
       if (!credResult.ok) {
         // Allow-mode rows enter as 'pending' and are flipped to
@@ -294,6 +295,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       const refreshed = await integrationRegistry.resolveCredentials(node.service, env, runParams.userId, {
         params: renderedParams,
         forceRefresh: true,
+        ...(node.credential ? { credentialMode: node.credential } : {}),
       });
       if (!refreshed.ok) {
         return JSON.stringify({ ok: false, error: refreshed.error.message });
