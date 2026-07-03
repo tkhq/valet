@@ -75,6 +75,18 @@ describe('workflow templates', () => {
 
     expect(byId.trigger.type).toBe('trigger');
     expect(byId.trigger.dataSchema.pullNumber.type).toBe('number');
+    // `action` is in the invocation contract but hidden — so it's NOT a
+    // manual-run form field, yet trigger-data validation accepts it on webhooks.
+    expect(byId.trigger.dataSchema.action.hidden).toBe(true);
+    expect(templateRunInputs(t!).map((i) => i.name)).not.toContain('action');
+
+    // The gate short-circuits non-code events (closed/labeled/…) before the
+    // LLM call, and lets manual runs (no action) through via the isEmpty arm.
+    expect(byId.gate.type).toBe('if');
+    expect(byId.gate.combinator).toBe('or');
+    const gateActions = byId.gate.conditions.filter((c: { operation: string }) => c.operation === 'equals').map((c: { right: string }) => c.right);
+    expect(gateActions).toEqual(['opened', 'reopened', 'synchronize', 'ready_for_review']);
+    expect(byId.gate.conditions.some((c: { operation: string }) => c.operation === 'isEmpty')).toBe(true);
 
     // Fetch the PR *with* its diff — the whole point of a code review.
     expect(byId.fetch_pr.action).toBe('github.inspect_pull_request');
@@ -94,7 +106,8 @@ describe('workflow templates', () => {
     expect(byId.post.params.body).toBe('{{ nodes.review.data.response }}');
 
     expect(def.edges).toEqual([
-      { from: 'trigger', to: 'fetch_pr' },
+      { from: 'trigger', to: 'gate' },
+      { from: 'gate', to: 'fetch_pr', fromOutput: 'true' },
       { from: 'fetch_pr', to: 'review' },
       { from: 'review', to: 'post' },
     ]);
@@ -103,6 +116,7 @@ describe('workflow templates', () => {
   it('code-review webhook maps a native GitHub pull_request payload', () => {
     const t = getWorkflowTemplate('code-review');
     expect(t?.trigger?.variableMapping).toEqual({
+      action: '$.action',
       owner: '$.repository.owner.login',
       repo: '$.repository.name',
       pullNumber: '$.pull_request.number',

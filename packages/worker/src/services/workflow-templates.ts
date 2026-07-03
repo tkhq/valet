@@ -42,7 +42,7 @@ export function getWorkflowTemplate(id: string): WorkflowTemplate | undefined {
 export function templateRunInputs(t: WorkflowTemplate): WorkflowTemplateInput[] {
   const trigger = t.definition.nodes.find((n) => n.type === 'trigger');
   return Object.entries(trigger?.dataSchema ?? {})
-    .filter(([, s]) => s.type === 'string' || s.type === 'number')
+    .filter(([, s]) => !s.hidden && (s.type === 'string' || s.type === 'number'))
     .map(([name, s]) => ({
       name,
       label: s.label ?? name,
