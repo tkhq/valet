@@ -17,8 +17,9 @@ import {
 import { toastSuccess, toastError } from '@/hooks/use-toast';
 import { getServiceIcon } from '@/components/integrations/service-icons';
 import { cn } from '@/lib/cn';
-import { useWorkflowTemplates, useInstallTemplate } from '@/api/templates';
+import { useWorkflowTemplates, useInstallTemplate, useGithubAppInstallations, useEnableTemplateApp } from '@/api/templates';
 import { useRunWorkflow } from '@/api/workflows';
+import { useRepos, useRepoPulls } from '@/api/repos';
 import type { WorkflowTemplateSummary, InstalledTemplateTrigger } from '@valet/shared';
 
 export const Route = createFileRoute('/automation/templates/')({
@@ -182,6 +183,16 @@ function TemplateSetupDialog({
   const [webhook, setWebhook] = React.useState<InstalledTemplateTrigger | null>(null);
   const [values, setValues] = React.useState<Record<string, string>>({});
 
+  // Reset per-install state when the dialog closes, so reopening the same
+  // template starts fresh instead of showing a stale "already installed" form.
+  React.useEffect(() => {
+    if (!open) {
+      setInstalledWorkflowId(null);
+      setWebhook(null);
+      setValues({});
+    }
+  }, [open]);
+
   const handleInstall = () => {
     install.mutate(template.id, {
       onSuccess: (res) => {
@@ -247,26 +258,52 @@ function TemplateSetupDialog({
           </ol>
 
           {installedWorkflowId && (
-            <div className="flex flex-col gap-3 border-t border-neutral-100 pt-4 dark:border-neutral-800">
-              {webhook && <WebhookSecret trigger={webhook} />}
+            <div className="flex flex-col gap-4 border-t border-neutral-100 pt-4 dark:border-neutral-800">
+              {/* Primary: the GitHub App is the recommended way to arm a repo — no webhook setup. */}
+              {template.runForm === 'github-pr' ? (
+                <GithubAppArmSection templateId={template.id} workflowId={installedWorkflowId} webhook={webhook} />
+              ) : (
+                webhook && (
+                  <div className="flex flex-col gap-2">
+                    <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                      Arm it for a repository
+                    </p>
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                      Add this webhook to a GitHub repo (Settings → Webhooks, content type{' '}
+                      <code className="rounded bg-neutral-100 px-1 dark:bg-neutral-800">application/json</code>,
+                      event <em>Pull requests</em>). It then reviews every new or updated PR there — no per-PR setup.
+                    </p>
+                    <WebhookSecret trigger={webhook} />
+                  </div>
+                )
+              )}
+
+              {/* Secondary: an optional one-off test against a single PR. */}
               {template.inputs.length > 0 && (
-                <>
-                  <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">Run it now</p>
-                  {template.inputs.map((input) => (
-                    <div key={input.name} className="flex flex-col gap-1">
-                      <label className="text-sm text-neutral-600 dark:text-neutral-400">
-                        {input.label}
-                        {input.required && <span className="text-red-500"> *</span>}
-                      </label>
-                      <Input
-                        type={input.type === 'number' ? 'number' : 'text'}
-                        placeholder={input.placeholder}
-                        value={values[input.name] ?? ''}
-                        onChange={(e) => setValues((prev) => ({ ...prev, [input.name]: e.target.value }))}
-                      />
-                    </div>
-                  ))}
-                </>
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                    Test on one PR{' '}
+                    <span className="font-normal text-neutral-400 dark:text-neutral-500">(optional)</span>
+                  </p>
+                  {template.runForm === 'github-pr' ? (
+                    <GithubPrRunFields values={values} onChange={setValues} />
+                  ) : (
+                    template.inputs.map((input) => (
+                      <div key={input.name} className="flex flex-col gap-1">
+                        <label className="text-sm text-neutral-600 dark:text-neutral-400">
+                          {input.label}
+                          {input.required && <span className="text-red-500"> *</span>}
+                        </label>
+                        <Input
+                          type={input.type === 'number' ? 'number' : 'text'}
+                          placeholder={input.placeholder}
+                          value={values[input.name] ?? ''}
+                          onChange={(e) => setValues((prev) => ({ ...prev, [input.name]: e.target.value }))}
+                        />
+                      </div>
+                    ))
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -298,7 +335,7 @@ function TemplateSetupDialog({
               </Button>
               {template.inputs.length > 0 && (
                 <Button size="sm" onClick={runNow} disabled={run.isPending || missingRequired}>
-                  {run.isPending ? 'Starting…' : 'Run now'}
+                  {run.isPending ? 'Starting…' : 'Test now'}
                 </Button>
               )}
             </>
@@ -306,6 +343,220 @@ function TemplateSetupDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+const selectClassName =
+  'h-9 w-full rounded-md border border-neutral-300 bg-white px-3 text-sm text-neutral-900 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-50 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-neutral-400 dark:focus:ring-neutral-400';
+
+/**
+ * "Arm it for a repository" for the code-review template — the recommended path.
+ * Pick a connected repo; if the Valet GitHub App is installed on that owner, one
+ * click enables reviews on every PR (posted as the bot, no webhook). Otherwise the
+ * manual webhook below is the fallback.
+ */
+function GithubAppArmSection({
+  templateId,
+  workflowId,
+  webhook,
+}: {
+  templateId: string;
+  workflowId: string;
+  webhook: InstalledTemplateTrigger | null;
+}) {
+  const { data: reposData, isLoading: reposLoading } = useRepos();
+  const repos = reposData?.repos ?? [];
+  const { data: installationsData } = useGithubAppInstallations();
+  const installations = installationsData?.installations ?? [];
+  const enableApp = useEnableTemplateApp();
+
+  const [owner, setOwner] = React.useState('');
+  const [repo, setRepo] = React.useState('');
+  const [armed, setArmed] = React.useState(false);
+
+  const covered =
+    !!owner && installations.some((i) => i.accountLogin.toLowerCase() === owner.toLowerCase());
+
+  const handleEnable = () => {
+    enableApp.mutate(
+      { templateId, workflowId, owner, repo },
+      {
+        onSuccess: () => {
+          setArmed(true);
+          toastSuccess(
+            'Enabled',
+            `Reviews every PR on ${owner}/${repo}, posted as the bot. No webhook setup needed.`,
+          );
+        },
+        onError: (err) =>
+          toastError('Couldn’t enable', err instanceof Error ? err.message : 'Something went wrong.'),
+      },
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+        Arm it for a repository
+      </p>
+      <p className="text-xs text-neutral-500 dark:text-neutral-400">
+        Pick a connected repo. If the Valet GitHub App is installed on its owner, enable reviews on
+        every PR in one click — posted as the bot, no webhook setup.
+      </p>
+
+      <select
+        className={selectClassName}
+        value={owner && repo ? `${owner}/${repo}` : ''}
+        onChange={(e) => {
+          const [o, r] = e.target.value.split('/');
+          setOwner(o ?? '');
+          setRepo(r ?? '');
+          // New repo → drop any prior "armed" confirmation.
+          setArmed(false);
+        }}
+      >
+        <option value="">{reposLoading ? 'Loading repos…' : 'Select a repository'}</option>
+        {repos.map((r) => (
+          <option key={r.id} value={r.fullName}>
+            {r.fullName}
+          </option>
+        ))}
+      </select>
+
+      {!owner || !repo ? (
+        <p className="text-xs text-neutral-500 dark:text-neutral-400">
+          Pick a repository to continue.
+        </p>
+      ) : armed ? (
+        <p className="text-sm text-green-600 dark:text-green-400">
+          ✓ Armed for {owner}/{repo} via the GitHub App
+        </p>
+      ) : covered ? (
+        <Button size="sm" onClick={handleEnable} disabled={enableApp.isPending}>
+          {enableApp.isPending ? 'Enabling…' : 'Enable via GitHub App'}
+        </Button>
+      ) : (
+        <p className="text-xs text-neutral-500 dark:text-neutral-400">
+          The Valet GitHub App isn’t installed on {owner}. Ask an admin to install it — or use the
+          manual webhook below.
+        </p>
+      )}
+
+      {/* Secondary: the webhook is now the fallback path, visually demoted. */}
+      {webhook && (
+        <details className="mt-1 rounded-lg bg-neutral-50 p-3 dark:bg-neutral-900/50">
+          <summary className="cursor-pointer text-xs font-medium text-neutral-500 dark:text-neutral-400">
+            Or wire it up manually with a webhook
+          </summary>
+          <div className="mt-2 flex flex-col gap-2">
+            <p className="text-2xs text-neutral-500">
+              Add this webhook to a GitHub repo (Settings → Webhooks, content type{' '}
+              <code className="rounded bg-neutral-100 px-1 dark:bg-neutral-800">application/json</code>,
+              event <em>Pull requests</em>). It then reviews every new or updated PR there — no per-PR
+              setup.
+            </p>
+            <WebhookSecret trigger={webhook} />
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Test on one PR" fields for the code-review template — pick a connected repo
+ * and one of its open PRs instead of typing owner/repo/PR-number by hand. Falls
+ * back to manual entry (a repo you haven't connected won't be in the list).
+ * Populates the owner / repo / pullNumber trigger inputs.
+ */
+function GithubPrRunFields({
+  values,
+  onChange,
+}: {
+  values: Record<string, string>;
+  onChange: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+}) {
+  const [manual, setManual] = React.useState(false);
+  const { data: reposData, isLoading: reposLoading } = useRepos();
+  const repos = reposData?.repos ?? [];
+
+  const owner = values.owner ?? '';
+  const repo = values.repo ?? '';
+  const { data: pullsData, isLoading: pullsLoading } = useRepoPulls(owner, repo);
+  const pulls = pullsData ?? [];
+
+  const set = (patch: Record<string, string>) => onChange((prev) => ({ ...prev, ...patch }));
+
+  // No connected repos → nothing to pick from; use the free-text fields.
+  const effectiveManual = manual || (!reposLoading && repos.length === 0);
+
+  if (effectiveManual) {
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="grid grid-cols-2 gap-2">
+          <Input placeholder="Repo owner (e.g. tkhq)" value={owner} onChange={(e) => set({ owner: e.target.value })} />
+          <Input placeholder="Repo name (e.g. valet)" value={repo} onChange={(e) => set({ repo: e.target.value })} />
+        </div>
+        <Input
+          type="number"
+          placeholder="PR number"
+          value={values.pullNumber ?? ''}
+          onChange={(e) => set({ pullNumber: e.target.value })}
+        />
+        {repos.length > 0 && (
+          <button type="button" className="self-start text-xs text-accent hover:underline" onClick={() => setManual(false)}>
+            Pick from your repos instead
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <select
+        className={selectClassName}
+        value={owner && repo ? `${owner}/${repo}` : ''}
+        onChange={(e) => {
+          const [o, r] = e.target.value.split('/');
+          // New repo → clear the previously-picked PR.
+          set({ owner: o ?? '', repo: r ?? '', pullNumber: '' });
+        }}
+      >
+        <option value="">{reposLoading ? 'Loading repos…' : 'Select a repository'}</option>
+        {repos.map((r) => (
+          <option key={r.id} value={r.fullName}>
+            {r.fullName}
+          </option>
+        ))}
+      </select>
+
+      <select
+        className={selectClassName}
+        value={values.pullNumber ?? ''}
+        disabled={!owner || !repo}
+        onChange={(e) => set({ pullNumber: e.target.value })}
+      >
+        <option value="">
+          {!owner || !repo
+            ? 'Pick a repository first'
+            : pullsLoading
+              ? 'Loading open PRs…'
+              : pulls.length === 0
+                ? 'No open PRs'
+                : 'Select an open PR'}
+        </option>
+        {pulls.map((p) => (
+          <option key={p.number} value={String(p.number)}>
+            #{p.number} — {p.title}
+          </option>
+        ))}
+      </select>
+
+      <button type="button" className="self-start text-xs text-accent hover:underline" onClick={() => setManual(true)}>
+        Enter a repo manually
+      </button>
+    </div>
   );
 }
 

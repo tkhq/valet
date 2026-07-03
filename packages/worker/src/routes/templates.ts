@@ -1,14 +1,27 @@
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
 import type { Env, Variables } from '../env.js';
 import type {
   WorkflowTemplateListResponse,
   WorkflowTemplateSummary,
   InstallTemplateResponse,
 } from '@valet/shared';
-import { listWorkflowTemplates, installWorkflowTemplate, templateRunInputs } from '../services/workflow-templates.js';
+import {
+  listWorkflowTemplates,
+  installWorkflowTemplate,
+  templateRunInputs,
+  enableTemplateGithubApp,
+} from '../services/workflow-templates.js';
 import { WorkflowVersionError } from '../services/workflow-versions.js';
 import { getDisabledPluginServices } from '../lib/db/plugins.js';
 import { integrationRegistry } from '../integrations/registry.js';
+
+const enableAppSchema = z.object({
+  workflowId: z.string().min(1),
+  owner: z.string().min(1),
+  repo: z.string().min(1),
+});
 
 export const templatesRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -38,6 +51,7 @@ templatesRouter.get('/', async (c) => {
       steps: t.steps,
       inputs: templateRunInputs(t),
       hasWebhook: Boolean(t.trigger),
+      ...(t.runForm ? { runForm: t.runForm } : {}),
     }));
   const body: WorkflowTemplateListResponse = { templates };
   return c.json(body);
@@ -85,4 +99,17 @@ templatesRouter.post('/:id/install', async (c) => {
     trigger,
   };
   return c.json(body, 201);
+});
+
+/**
+ * POST /api/templates/:id/enable-app
+ * Arm an installed template workflow for a repo via the org GitHub App — the
+ * no-webhook-setup path. Creates a github-app trigger scoped to owner/repo.
+ */
+templatesRouter.post('/:id/enable-app', zValidator('json', enableAppSchema), async (c) => {
+  const user = c.get('user');
+  const { id } = c.req.param();
+  const { workflowId, owner, repo } = c.req.valid('json');
+  const result = await enableTemplateGithubApp(c.get('db'), user.id, id, workflowId, owner, repo);
+  return c.json(result, 201);
 });

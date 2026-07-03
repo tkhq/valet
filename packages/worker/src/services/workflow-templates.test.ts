@@ -10,7 +10,9 @@ import {
   getWorkflowTemplate,
   templateRunInputs,
   installWorkflowTemplate,
+  enableTemplateGithubApp,
 } from './workflow-templates.js';
+import { upsertGithubInstallation } from '../lib/db/github-installations.js';
 
 // llm_maxoutput_warning is a non-blocking advisory; the publish gate filters it too.
 function blockingErrors(errs: ReturnType<typeof validateDefinition>) {
@@ -180,5 +182,55 @@ describe('installWorkflowTemplate', () => {
     const { db, env } = setup();
     await expect(installWorkflowTemplate(db as never, env, 'u1', 'nope')).rejects.toThrow();
     expect(db.select().from(workflows).all()).toEqual([]);
+  });
+});
+
+describe('enableTemplateGithubApp', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function installed() {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    const { db } = createTestDb();
+    db.insert(users).values({ id: 'u1', email: 'u@e.io' }).run();
+    const env = { ENCRYPTION_KEY: 'k', ANTHROPIC_API_KEY: 'sk-test' } as unknown as Env;
+    const res = await installWorkflowTemplate(db as never, env, 'u1', 'code-review');
+    return { db, workflowId: res.workflowId };
+  }
+
+  it('creates a github-app trigger scoped to the repo when the App is installed', async () => {
+    const { db, workflowId } = await installed();
+    await upsertGithubInstallation(db as never, {
+      githubInstallationId: '1', accountLogin: 'tkhq', accountId: 'a1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+
+    const result = await enableTemplateGithubApp(db as never, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
+    expect(result).toMatchObject({ owner: 'tkhq', repo: 'valet' });
+
+    const appTriggers = db.select().from(triggers).all().filter((t) => t.type === 'github-app');
+    expect(appTriggers).toHaveLength(1);
+    const config = JSON.parse(appTriggers[0].config as string);
+    expect(config).toMatchObject({ type: 'github-app', owner: 'tkhq', repo: 'valet', events: ['pull_request'] });
+    // Reuses the template's webhook mapping so App events map into trigger.data.
+    expect(JSON.parse(appTriggers[0].variableMapping as string)).toHaveProperty('pullNumber', '$.pull_request.number');
+  });
+
+  it('rejects when the App is not installed on the owner (no dead trigger)', async () => {
+    const { db, workflowId } = await installed();
+    await expect(
+      enableTemplateGithubApp(db as never, 'u1', 'code-review', workflowId, 'not-installed', 'repo'),
+    ).rejects.toThrow(/not installed/i);
+    expect(db.select().from(triggers).all().filter((t) => t.type === 'github-app')).toEqual([]);
+  });
+
+  it('rejects when the caller does not own the workflow', async () => {
+    const { db, workflowId } = await installed();
+    await upsertGithubInstallation(db as never, {
+      githubInstallationId: '1', accountLogin: 'tkhq', accountId: 'a1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+    await expect(
+      enableTemplateGithubApp(db as never, 'someone-else', 'code-review', workflowId, 'tkhq', 'valet'),
+    ).rejects.toThrow();
   });
 });

@@ -21,7 +21,8 @@ import { createWorkflow, deleteWorkflow } from './workflows.js';
 import { saveDraft, publishDraft } from './workflow-versions.js';
 import { resolveAvailableModels } from './model-catalog.js';
 import { assembleLlmProviderEnv } from '../lib/llm/provider-env.js';
-import { createTrigger, generateWebhookToken } from '../lib/db/triggers.js';
+import { createTrigger, generateWebhookToken, getWorkflowForTrigger } from '../lib/db/triggers.js';
+import { getGithubInstallationByLogin } from '../lib/db/github-installations.js';
 import { validateDefinition } from '../lib/workflow-dag/validator.js';
 
 /** Every template contributed by a registered plugin (flattened). */
@@ -57,6 +58,56 @@ export interface InstallTemplateResult {
   workflowId: string;
   workflowName: string;
   trigger: { id: string; name: string; path: string; webhookToken: string } | null;
+}
+
+/**
+ * Arm an installed template workflow for a repo via the org's GitHub App — the
+ * no-webhook-setup alternative. Creates a `github-app` trigger scoped to
+ * owner/repo, reusing the template's webhook variableMapping so App-delivered
+ * events map into trigger.data exactly as a manual webhook would. Requires the
+ * caller to own the workflow and the App to be installed on the owner.
+ */
+export async function enableTemplateGithubApp(
+  db: AppDb,
+  userId: string,
+  templateId: string,
+  workflowId: string,
+  owner: string,
+  repo: string,
+): Promise<{ triggerId: string; owner: string; repo: string }> {
+  const template = getWorkflowTemplate(templateId);
+  if (!template) throw new NotFoundError('WorkflowTemplate', templateId);
+  if (!template.trigger) {
+    throw new ValidationError(`Template "${templateId}" has no event trigger to arm.`);
+  }
+
+  // Ownership: the workflow must belong to the caller.
+  const workflow = await getWorkflowForTrigger(db, userId, workflowId);
+  if (!workflow) throw new NotFoundError('Workflow', workflowId);
+
+  // Coverage: the App must be installed on the repo owner, else the trigger
+  // would never fire.
+  const installation = await getGithubInstallationByLogin(db, owner);
+  if (!installation) {
+    throw new ValidationError(
+      `The Valet GitHub App is not installed on "${owner}". Ask an admin to install it, then try again.`,
+    );
+  }
+
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await createTrigger(db, {
+    id,
+    userId,
+    workflowId: workflow.id,
+    name: `GitHub App: ${owner}/${repo}`,
+    enabled: true,
+    type: 'github-app',
+    config: JSON.stringify({ type: 'github-app', owner, repo, events: ['pull_request'] }),
+    variableMapping: JSON.stringify(template.trigger.variableMapping),
+    now,
+  });
+  return { triggerId: id, owner, repo };
 }
 
 /**
