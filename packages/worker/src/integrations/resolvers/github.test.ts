@@ -233,6 +233,33 @@ describe('githubCredentialResolver', () => {
     }
   });
 
+  it("credentialMode='app' falls back to the user's token when minting the bot token THROWS (misconfigured App)", async () => {
+    seedUser({ name: 'Fallback User', email: 'fb@example.com' });
+    (getServiceMetadata as Mock).mockResolvedValueOnce({ allowAnonymousGitHubAccess: true });
+    await upsertGithubInstallation(db as any, {
+      githubInstallationId: '42', accountLogin: 'my-org', accountId: 'acct-1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+    (loadGitHubApp as Mock).mockResolvedValueOnce({ appId: '99' });
+    // The App is present but broken — minting throws (e.g. bad private key / JWT).
+    (getOrMintInstallationToken as Mock).mockRejectedValueOnce(new Error('A JSON web token could not be decoded'));
+    // The user's own token is available as the fallback.
+    (getCredential as Mock).mockResolvedValueOnce({
+      ok: true,
+      credential: { accessToken: 'ghp_user_token', credentialType: 'oauth2', refreshed: false },
+    });
+
+    const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
+      params: { owner: 'my-org' }, credentialMode: 'app',
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.credential.accessToken).toBe('ghp_user_token');
+      expect(result.credential.credentialType).toBe('oauth2');
+    }
+  });
+
   // ── 4. Owner specified, NO matching installation (strict) ──────────────
 
   it('fails with specific error when owner has no matching installation (strict, no fallthrough)', async () => {
