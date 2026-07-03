@@ -30,21 +30,18 @@ const codeReviewTemplate: WorkflowTemplate = {
     'Claude reviews the diff — correctness, security, edge cases',
     'Post the review as a comment on the pull request',
   ],
-  inputs: [
-    { name: 'owner', label: 'Repo owner', type: 'string', required: true, placeholder: 'tkhq' },
-    { name: 'repo', label: 'Repo name', type: 'string', required: true, placeholder: 'valet' },
-    { name: 'pullNumber', label: 'PR number', type: 'number', required: true, placeholder: '74' },
-  ],
   definition: {
     version: 'dag/v1',
     nodes: [
       {
         id: 'trigger',
         type: 'trigger',
+        // Single source of truth for the "Run now" inputs too: the worker
+        // derives the gallery's input form from this schema (templateRunInputs).
         dataSchema: {
-          owner: { type: 'string', required: true, description: 'Repository owner' },
-          repo: { type: 'string', required: true, description: 'Repository name' },
-          pullNumber: { type: 'number', required: true, description: 'Pull request number' },
+          owner: { type: 'string', required: true, description: 'Repository owner', label: 'Repo owner', placeholder: 'tkhq' },
+          repo: { type: 'string', required: true, description: 'Repository name', label: 'Repo name', placeholder: 'valet' },
+          pullNumber: { type: 'number', required: true, description: 'Pull request number', label: 'PR number', placeholder: '74' },
         },
       },
       {

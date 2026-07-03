@@ -1,6 +1,16 @@
-import { describe, it, expect } from 'vitest';
-import { validateDefinition } from '../lib/workflow-dag/validator.js';
-import { listWorkflowTemplates, getWorkflowTemplate } from './workflow-templates.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { validateDefinition, validateAgainstEnvironment } from '../lib/workflow-dag/validator.js';
+import type { Env } from '../env.js';
+import { createTestDb } from '../test-utils/db.js';
+import { users } from '../lib/schema/users.js';
+import { workflows, triggers } from '../lib/schema/workflows.js';
+import { workflowDefinitionVersions } from '../lib/schema/workflow-definition-versions.js';
+import {
+  listWorkflowTemplates,
+  getWorkflowTemplate,
+  templateRunInputs,
+  installWorkflowTemplate,
+} from './workflow-templates.js';
 
 // llm_maxoutput_warning is a non-blocking advisory; the publish gate filters it too.
 function blockingErrors(errs: ReturnType<typeof validateDefinition>) {
@@ -15,6 +25,22 @@ describe('workflow templates', () => {
     }
   });
 
+  it('every template passes publish-time env validation once provider keys are configured', () => {
+    // Mirrors the install path (installWorkflowTemplate -> publishDraft ->
+    // validateAgainstEnvironment). With every provider key set, a clean template
+    // yields zero errors, so any llm_model_id_invalid / llm_provider_key_missing
+    // turns this red — the gate that would have caught the slash-form model id.
+    const env = {
+      ANTHROPIC_API_KEY: 'sk-ant-test',
+      OPENAI_API_KEY: 'sk-openai-test',
+      GOOGLE_API_KEY: 'test-key',
+    } as Env;
+    for (const t of listWorkflowTemplates()) {
+      const errs = validateAgainstEnvironment(t.definition, env);
+      expect(errs, `template "${t.id}": ${errs.map((e) => `${e.code}@${e.nodeId}`).join(', ')}`).toEqual([]);
+    }
+  });
+
   it('exposes a stable catalog with client-safe input metadata', () => {
     const templates = listWorkflowTemplates();
     expect(templates.length).toBeGreaterThan(0);
@@ -24,8 +50,12 @@ describe('workflow templates', () => {
       // Each card renders an app-logo chain + human-readable steps.
       expect(t.apps.length).toBeGreaterThan(0);
       expect(t.steps.length).toBeGreaterThan(0);
-      for (const input of t.inputs) {
+      // "Run now" inputs derive from the trigger dataSchema — single source of truth.
+      const inputs = templateRunInputs(t);
+      expect(inputs.length).toBeGreaterThan(0);
+      for (const input of inputs) {
         expect(['string', 'number']).toContain(input.type);
+        expect(input.label).toBeTruthy();
       }
     }
   });
@@ -77,5 +107,64 @@ describe('workflow templates', () => {
       repo: '$.repository.name',
       pullNumber: '$.pull_request.number',
     });
+  });
+});
+
+describe('installWorkflowTemplate', () => {
+  // Hermetic: resolveAvailableModels fetches a models.dev catalog — an offline
+  // fetch leaves the catalog empty, which is safe (model-availability checks
+  // no-op when the provider has no catalog models).
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function setup(envOverrides: Record<string, string> = {}) {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('offline');
+    }));
+    const { db } = createTestDb();
+    db.insert(users).values({ id: 'u1', email: 'u@e.io' }).run();
+    const env = { ENCRYPTION_KEY: 'k', ANTHROPIC_API_KEY: 'sk-test', ...envOverrides } as unknown as Env;
+    return { db, env };
+  }
+
+  it('installs a real published workflow with a suffixed webhook trigger', async () => {
+    const { db, env } = setup();
+    const result = await installWorkflowTemplate(db as never, env, 'u1', 'code-review');
+
+    const wf = db.select().from(workflows).all();
+    expect(wf).toHaveLength(1);
+    expect(wf[0].id).toBe(result.workflowId);
+    expect(wf[0].publishedVersionId).toBeTruthy();
+    expect(db.select().from(workflowDefinitionVersions).all()).toHaveLength(1);
+
+    expect(result.trigger).not.toBeNull();
+    expect(result.trigger!.path).toMatch(/-[0-9a-f]{8}$/);
+    expect(result.trigger!.name).toMatch(/\([0-9a-f]{8}\)$/);
+    expect(result.trigger!.webhookToken).toBeTruthy();
+  });
+
+  it('rolls the workflow back when the publish env/model gate rejects', async () => {
+    // No ANTHROPIC_API_KEY -> publishDraft fails with llm_provider_key_missing.
+    const { db, env } = setup();
+    delete (env as unknown as Record<string, unknown>).ANTHROPIC_API_KEY;
+
+    await expect(installWorkflowTemplate(db as never, env, 'u1', 'code-review')).rejects.toThrow();
+    expect(db.select().from(workflows).all()).toEqual([]);
+    expect(db.select().from(triggers).all()).toEqual([]);
+  });
+
+  it('repeat installs do not collide on trigger path or name', async () => {
+    const { db, env } = setup();
+    const a = await installWorkflowTemplate(db as never, env, 'u1', 'code-review');
+    const b = await installWorkflowTemplate(db as never, env, 'u1', 'code-review');
+    expect(a.trigger!.path).not.toBe(b.trigger!.path);
+    expect(a.trigger!.name).not.toBe(b.trigger!.name);
+  });
+
+  it('rejects an unknown template id without creating rows', async () => {
+    const { db, env } = setup();
+    await expect(installWorkflowTemplate(db as never, env, 'u1', 'nope')).rejects.toThrow();
+    expect(db.select().from(workflows).all()).toEqual([]);
   });
 });

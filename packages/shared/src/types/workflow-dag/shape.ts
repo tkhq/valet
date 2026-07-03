@@ -19,6 +19,10 @@ export interface WorkflowInputDefinition {
   default?: unknown;
   description?: string;
   enum?: unknown[];
+  /** Display label for input forms (falls back to the field name). Advisory, like the rest of the schema. */
+  label?: string;
+  /** Placeholder for input forms. Advisory. */
+  placeholder?: string;
 }
 
 export interface WorkflowPolicy {

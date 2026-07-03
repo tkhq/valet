@@ -12,6 +12,7 @@
 // executor reads the published version, never the draft/`data`).
 
 import { NotFoundError, ValidationError } from '@valet/shared';
+import type { WorkflowTemplateInput } from '@valet/shared';
 import type { WorkflowTemplate } from '@valet/sdk';
 import type { AppDb } from '../lib/drizzle.js';
 import type { Env } from '../env.js';
@@ -30,6 +31,26 @@ export function listWorkflowTemplates(): readonly WorkflowTemplate[] {
 
 export function getWorkflowTemplate(id: string): WorkflowTemplate | undefined {
   return integrationRegistry.listTemplates().find((t) => t.id === id);
+}
+
+/**
+ * The "Run now" input fields for a template, derived from its trigger node's
+ * dataSchema — the same single source of truth manual runs validate against.
+ * Templates declare each field once; `label`/`placeholder` are the optional
+ * presentation extras on `WorkflowInputDefinition`.
+ */
+export function templateRunInputs(t: WorkflowTemplate): WorkflowTemplateInput[] {
+  const trigger = t.definition.nodes.find((n) => n.type === 'trigger');
+  return Object.entries(trigger?.dataSchema ?? {})
+    .filter(([, s]) => s.type === 'string' || s.type === 'number')
+    .map(([name, s]) => ({
+      name,
+      label: s.label ?? name,
+      type: s.type as 'string' | 'number',
+      required: s.required,
+      placeholder: s.placeholder,
+      description: s.description,
+    }));
 }
 
 export interface InstallTemplateResult {
@@ -121,7 +142,12 @@ export async function installWorkflowTemplate(
   } catch (err) {
     // Roll back the workflow (cascades to its versions) so a failed install
     // leaves nothing behind.
-    await deleteWorkflow(db, userId, workflow.id).catch(() => {});
+    await deleteWorkflow(db, userId, workflow.id).catch((cleanupErr) => {
+      console.warn(
+        `[installWorkflowTemplate] rollback of workflow ${workflow.id} failed, orphaned row may remain:`,
+        cleanupErr,
+      );
+    });
     throw err;
   }
 }

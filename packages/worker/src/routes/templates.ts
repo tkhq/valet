@@ -5,15 +5,19 @@ import type {
   WorkflowTemplateSummary,
   InstallTemplateResponse,
 } from '@valet/shared';
-import { listWorkflowTemplates, installWorkflowTemplate } from '../services/workflow-templates.js';
+import { listWorkflowTemplates, installWorkflowTemplate, templateRunInputs } from '../services/workflow-templates.js';
+import { WorkflowVersionError } from '../services/workflow-versions.js';
 import { getDisabledPluginServices } from '../lib/db/plugins.js';
 import { integrationRegistry } from '../integrations/registry.js';
 
 export const templatesRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-// GET /api/templates — the template gallery catalog.
-// Templates are contributed by plugins and aggregated by the registry; a plugin
-// disabled org-wide (org_plugins) drops its templates from the gallery.
+/**
+ * GET /api/templates
+ * The template gallery catalog. Templates are contributed by plugins and
+ * aggregated by the registry; a plugin disabled org-wide (org_plugins)
+ * drops its templates from the gallery.
+ */
 templatesRouter.get('/', async (c) => {
   const disabled = await getDisabledPluginServices(c.env.DB);
   // A template belongs to a plugin via the services in its `apps` chain; hide it
@@ -32,19 +36,36 @@ templatesRouter.get('/', async (c) => {
       icon: t.icon,
       apps: t.apps,
       steps: t.steps,
-      inputs: t.inputs,
+      inputs: templateRunInputs(t),
       hasWebhook: Boolean(t.trigger),
     }));
   const body: WorkflowTemplateListResponse = { templates };
   return c.json(body);
 });
 
-// POST /api/templates/:id/install — install a template as a published workflow
-// (plus its webhook trigger, if any). The webhook token is returned exactly once.
+/**
+ * POST /api/templates/:id/install
+ * Install a template as a published workflow (plus its webhook trigger, if
+ * any). The webhook token is returned exactly once.
+ */
 templatesRouter.post('/:id/install', async (c) => {
   const user = c.get('user');
   const { id } = c.req.param();
-  const result = await installWorkflowTemplate(c.get('db'), c.env, user.id, id);
+  let result;
+  try {
+    result = await installWorkflowTemplate(c.get('db'), c.env, user.id, id);
+  } catch (err) {
+    // publishDraft's env/model gate rejects a template whose model/provider
+    // isn't configured here — a caller-fixable condition, not a server bug.
+    // Mirrors the /api/workflows publish route's translation.
+    if (err instanceof WorkflowVersionError) {
+      if (err.code === 'publish_contention') {
+        return c.json({ error: err.message, code: err.code }, 503, { 'Retry-After': '1' });
+      }
+      return c.json({ error: err.message, code: err.code, errors: err.errors }, 400);
+    }
+    throw err;
+  }
 
   let trigger: InstallTemplateResponse['trigger'] = null;
   if (result.trigger) {

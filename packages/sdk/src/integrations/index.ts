@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Analytics } from '../analytics/index.js';
-import type { WorkflowDefinition, WorkflowTemplateInput } from '@valet/shared';
+import type { WorkflowDefinition } from '@valet/shared';
 
 // ─── Credentials ─────────────────────────────────────────────────────────────
 
@@ -142,12 +142,16 @@ export interface WorkflowTemplate {
   description: string;
   category: string;
   icon: string | null;
-  /** Ordered service ids for the app-logo chain (trigger → … → action). */
+  /**
+   * Ordered ids for the app-logo chain (trigger → … → action). Usually
+   * registered service ids, but non-service brand tokens (e.g. 'claude' for
+   * an LLM step) are allowed — the gallery only plugin-gates entries that are
+   * actually registered services. The "Run now" inputs are NOT declared here:
+   * they derive from the trigger node's dataSchema (one source of truth).
+   */
   apps: string[];
   /** Human-readable trigger → action steps, shown in the setup dialog. */
   steps: string[];
-  /** Inputs the "Run now" dialog collects (become trigger.data via a manual run). */
-  inputs: WorkflowTemplateInput[];
   definition: WorkflowDefinition;
   trigger?: TemplateWebhookTrigger;
 }
