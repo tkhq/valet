@@ -9,7 +9,7 @@ import type { WorkflowTemplate } from '@valet/sdk';
 // Default model for the review step. Must be a catalog-available, vendor-prefixed
 // id whose provider key is configured in the worker env, or publishDraft rejects
 // the install (llm_model_*).
-const DEFAULT_REVIEW_MODEL = 'anthropic/claude-sonnet-4-6';
+const DEFAULT_REVIEW_MODEL = 'anthropic:claude-sonnet-4-6';
 
 /**
  * Flagship template: review a pull request.
