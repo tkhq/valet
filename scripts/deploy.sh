@@ -473,6 +473,27 @@ cmd_pr_destroy() {
     echo "Deleting Worker ${CF_WORKER_NAME}..."
     wrangler delete --name "$CF_WORKER_NAME" --force || echo -e "${YELLOW}Worker not found or already deleted${NC}"
 
+    # Deleting the worker orphans its account-scoped Workflow (verified live:
+    # `wrangler workflows list` still shows it). The pinned wrangler has no
+    # `workflows delete`, so use the REST API when a token is available (CI
+    # always has one). Orphans are inert and redeploys overwrite them — this
+    # is clutter removal, not correctness.
+    if [ "$WORKFLOW_NAME" = "valet-workflow-interpreter" ]; then
+        WORKFLOW_NAME="${PROJECT_NAME}-wfi"
+    fi
+    echo "Deleting Workflow ${WORKFLOW_NAME}..."
+    if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+        if curl -sf -X DELETE \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workflows/${WORKFLOW_NAME}" >/dev/null; then
+            echo -e "${GREEN}✓ Workflow deleted${NC}"
+        else
+            echo -e "${YELLOW}Workflow not found or already deleted${NC}"
+        fi
+    else
+        echo -e "${YELLOW}No CLOUDFLARE_API_TOKEN — orphaned workflow '${WORKFLOW_NAME}' left behind (inert; remove via dash → Workflows)${NC}"
+    fi
+
     echo "Deleting Pages project ${PAGES_PROJECT_NAME}..."
     wrangler pages project delete "$PAGES_PROJECT_NAME" -y || echo -e "${YELLOW}Pages project not found or already deleted${NC}"
 

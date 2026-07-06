@@ -164,6 +164,8 @@ ENVIRONMENT=pr make destroy-pr-env
 
 Every per-PR worker runs the **minutely cron** from `wrangler.toml` (reconcile + schedule dispatch), so an env is never idle — a leaked env keeps consuming Worker invocations and D1 reads forever. Teardown is therefore mandatory, and the destroy workflow fires on both `closed` and `unlabeled`. If a destroy run is lost (e.g. CI outage), tear down manually with `ENVIRONMENT=pr make destroy-pr-env`.
 
+Deleting the worker orphans its account-scoped Workflow entry; `pr-destroy` removes it via the REST API when `CLOUDFLARE_API_TOKEN` is set (always true in CI). Orphans are inert — no script, no instances — and a later redeploy of the same PR number reclaims the name.
+
 ## Forcing a Sandbox Image Rebuild
 
 Sandbox images are built and cached by Modal (defined in `backend/images/base.py`). To force a rebuild after changing `docker/` or `packages/runner/`:
