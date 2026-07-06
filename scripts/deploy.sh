@@ -423,7 +423,14 @@ cmd_pr_deploy() {
     echo ""
     echo "Step 6/8: Setting secrets..."
     # Fresh key per env — PR envs never share encrypted data with dev/prod.
-    put_worker_secret ENCRYPTION_KEY "$(openssl rand -base64 32)"
+    # Kept across redeploys (`synchronize`): the D1 data survives a redeploy,
+    # so rotating the key would invalidate JWT sessions and orphan credentials
+    # encrypted under the old key (it backs both jwt.ts and lib/crypto.ts).
+    if wrangler secret list --name "$CF_WORKER_NAME" 2>/dev/null | grep -q '"ENCRYPTION_KEY"'; then
+        echo -e "${GREEN}✓ Secret: ENCRYPTION_KEY (already set — kept)${NC}"
+    else
+        put_worker_secret ENCRYPTION_KEY "$(openssl rand -base64 32)"
+    fi
     put_worker_secret FRONTEND_URL "$(pages_deployment_url)"
     # Passthrough from the caller's env: PR envs share the dev OAuth apps.
     for secret_name in GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET; do
@@ -502,6 +509,17 @@ cmd_pr_destroy() {
 
     echo "Deleting R2 bucket ${R2_BUCKET_NAME}..."
     wrangler r2 bucket delete "$R2_BUCKET_NAME" || echo -e "${YELLOW}R2 bucket not found, not empty, or already deleted${NC}"
+
+    # Every delete above tolerates "already gone", which also swallows real
+    # API failures. The worker is the one resource that bills while it exists
+    # (minutely cron), so verify it is actually gone instead of trusting the
+    # delete: `deployments list` exits non-zero (code 10007) for a
+    # nonexistent worker.
+    if wrangler deployments list --name "$CF_WORKER_NAME" >/dev/null 2>&1; then
+        echo -e "${RED}Worker ${CF_WORKER_NAME} still exists after teardown — it keeps running the minutely cron.${NC}"
+        echo "Re-run: ENVIRONMENT=${ENVIRONMENT} make destroy-pr-env (or delete it in the Cloudflare dash)."
+        exit 1
+    fi
 
     echo ""
     echo -e "${GREEN}✓ PR env ${PROJECT_NAME} destroyed${NC}"

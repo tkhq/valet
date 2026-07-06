@@ -139,7 +139,7 @@ Beyond the frontend-only Pages preview every PR gets, you can stamp a **full-sta
 | R2 `valet-pr-N-storage` | GHCR OpenCode image |
 | Workflow `valet-pr-N-wfi` (account-scoped names — see `WORKFLOW_NAME` in `scripts/deploy.sh`) | |
 | Pages `valet-pr-N-client` | |
-| Fresh random `ENCRYPTION_KEY` | |
+| Fresh random `ENCRYPTION_KEY` (generated on first stamp, kept across redeploys) | |
 
 ### Auth
 
