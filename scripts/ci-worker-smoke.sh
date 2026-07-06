@@ -84,6 +84,7 @@ pnpm --filter @valet/sdk run build
 echo "── writing throwaway $SMOKE_CONFIG ──"
 sed -e 's/\${CF_WORKER_NAME}/valet-dev/g' -e 's/\${R2_BUCKET_NAME}/valet-storage/g' \
     -e 's/\${D1_DATABASE_NAME}/valet-db/g' -e 's/\${D1_DATABASE_ID}/00000000-0000-0000-0000-000000000000/g' \
+    -e 's/\${WORKFLOW_NAME}/valet-workflow-interpreter/g' \
     -e 's/\${[A-Z_]*}//g' "$WORKER/wrangler.toml" > "$WORKER/$SMOKE_CONFIG"
 
 echo "── applying D1 migrations (local) ──"
