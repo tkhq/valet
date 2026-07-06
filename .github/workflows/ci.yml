@@ -7,6 +7,41 @@ on:
     branches: [main]
 
 jobs:
+  # Boots the REAL worker (wrangler dev: real D1 + migrations + DOs +
+  # middleware/routing) and runs the direct API smoke suite against it.
+  # Everything is local — no secrets needed.
+  worker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: oven-sh/setup-bun@v2
+
+      # The smoke script pulls wrangler@4 via npx (repo pins 3.x; see the
+      # script header). Cache npx's unpack dir so a registry hiccup can't
+      # spuriously fail this gate; keyed on the script so version bumps
+      # invalidate it.
+      - name: Cache npx wrangler
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm/_npx
+          key: ${{ runner.os }}-npx-wrangler-${{ hashFiles('scripts/ci-worker-smoke.sh') }}
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Worker API smoke tests
+        run: bash scripts/ci-worker-smoke.sh
+
   ci:
     runs-on: ubuntu-latest
     steps:
