@@ -40,6 +40,9 @@ MODAL_LABEL_PREFIX="${MODAL_LABEL_PREFIX:-${ENVIRONMENT}-}"
 ALLOWED_EMAILS="${ALLOWED_EMAILS:-}"
 MODAL_DEPLOY_CMD="${MODAL_DEPLOY_CMD:-uv run --project backend modal deploy}"
 API_PUBLIC_URL="${API_PUBLIC_URL:-}"
+# Cloudflare Workflows names are account-scoped. The default preserves the
+# historical hard-coded name for dev/prod; per-PR envs get ${PROJECT_NAME}-wfi.
+WORKFLOW_NAME="${WORKFLOW_NAME:-valet-workflow-interpreter}"
 
 # ─── Shared Helpers ──────────────────────────────────────────────────────────
 
@@ -124,6 +127,7 @@ generate_wrangler_config() {
         -e "s|\${API_PUBLIC_URL}|${API_PUBLIC_URL}|g" \
         -e "s|\${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|g" \
         -e "s|\${MODAL_BACKEND_URL}|${MODAL_BACKEND_URL}|g" \
+        -e "s|\${WORKFLOW_NAME}|${WORKFLOW_NAME}|g" \
         packages/worker/wrangler.toml > packages/worker/wrangler.deploy.toml
 }
 
@@ -336,6 +340,152 @@ cmd_all() {
     echo -e "${YELLOW}Or run: ENVIRONMENT=${ENVIRONMENT} make bootstrap-secrets${NC}"
 }
 
+# ─── Per-PR ephemeral environments ───────────────────────────────────────────
+# Full-stack throwaway env for one PR: Worker + D1 + R2 + Workflows + Pages,
+# all named from PROJECT_NAME (e.g. valet-pr-123). Shares the dev Modal
+# backend and OAuth apps via passthrough env vars (MODAL_BACKEND_URL,
+# GOOGLE_CLIENT_ID/SECRET). Every env runs the minutely cron from
+# wrangler.toml, so pr-destroy is mandatory when the PR closes.
+
+# Guard: pr-deploy/pr-destroy create and DELETE resources without prompting.
+# Require a per-PR naming pattern so they can never touch dev/prod.
+require_pr_project_name() {
+    case "$PROJECT_NAME" in
+        *-pr-*) ;;
+        *)
+            echo -e "${RED}PROJECT_NAME='${PROJECT_NAME}' does not look like a per-PR env (expected e.g. valet-pr-123).${NC}"
+            echo "Refusing to run ${COMMAND} against non-PR resources."
+            exit 1
+            ;;
+    esac
+}
+
+# Non-interactive secret upload (reads value from stdin, never argv/logs).
+put_worker_secret() {
+    local name="$1" value="$2"
+    printf '%s' "$value" | wrangler secret put "$name" --name "$CF_WORKER_NAME" >/dev/null
+    echo -e "${GREEN}✓ Secret: ${name}${NC}"
+}
+
+cmd_pr_deploy() {
+    require_pr_project_name
+    # Cloudflare Workflows names are account-scoped — a per-PR worker reusing
+    # the dev/prod default would collide, so force a PROJECT_NAME-scoped name.
+    if [ "$WORKFLOW_NAME" = "valet-workflow-interpreter" ]; then
+        WORKFLOW_NAME="${PROJECT_NAME}-wfi"
+    fi
+
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}Deploying PR env ${PROJECT_NAME}${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+
+    preflight wrangler jq pnpm bun openssl
+    discover_modal_url false
+    resolve_worker_url
+
+    echo "Step 1/8: D1 database..."
+    ensure_d1
+
+    echo ""
+    echo "Step 2/8: R2 bucket..."
+    if ! wrangler r2 bucket list 2>/dev/null | grep -q "$R2_BUCKET_NAME"; then
+        echo "  Creating ${R2_BUCKET_NAME}..."
+        wrangler r2 bucket create "$R2_BUCKET_NAME" >/dev/null
+    fi
+    echo -e "${GREEN}✓ R2: ${R2_BUCKET_NAME}${NC}"
+
+    echo ""
+    echo "Step 3/8: Building packages..."
+    pnpm --filter '@valet/*' --filter '!@valet/worker' --filter '!@valet/client' run build
+    echo -e "${GREEN}✓ Packages built${NC}"
+
+    # Migrations run BEFORE the first worker deploy: the worker serves traffic
+    # (and fires its minutely cron) as soon as it exists, so the schema must
+    # already be in place.
+    echo ""
+    echo "Step 4/8: Applying D1 migrations..."
+    (cd packages/worker && bun scripts/generate-plugin-registry.ts)
+    generate_wrangler_config
+    (cd packages/worker && wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote -c wrangler.deploy.toml)
+    echo -e "${GREEN}✓ Migrations applied${NC}"
+
+    echo ""
+    echo "Step 5/8: Deploying Worker..."
+    DEPLOY_OUT=$(cd packages/worker && wrangler deploy -c wrangler.deploy.toml 2>&1) || {
+        echo -e "${RED}Worker deploy failed:${NC}"
+        echo "$DEPLOY_OUT"
+        exit 1
+    }
+    echo "$DEPLOY_OUT"
+    echo -e "${GREEN}✓ Worker: ${WORKER_URL}${NC}"
+
+    echo ""
+    echo "Step 6/8: Setting secrets..."
+    # Fresh key per env — PR envs never share encrypted data with dev/prod.
+    put_worker_secret ENCRYPTION_KEY "$(openssl rand -base64 32)"
+    put_worker_secret FRONTEND_URL "$(pages_deployment_url)"
+    # Passthrough from the caller's env: PR envs share the dev OAuth apps.
+    for secret_name in GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET; do
+        if [ -n "${!secret_name:-}" ]; then
+            put_worker_secret "$secret_name" "${!secret_name}"
+        fi
+    done
+
+    echo ""
+    echo "Step 7/8: Seeding test data (API token for smoke tests)..."
+    (cd packages/worker && wrangler d1 execute "$D1_DATABASE_NAME" --remote --file scripts/seed-test-data.sql -c wrangler.deploy.toml -y)
+    echo -e "${GREEN}✓ Test data seeded${NC}"
+
+    echo ""
+    echo "Step 8/8: Client (Pages)..."
+    if [ "${PR_ENV_SKIP_CLIENT:-}" = "1" ]; then
+        echo -e "${YELLOW}Skipping client deploy (PR_ENV_SKIP_CLIENT=1)${NC}"
+    else
+        if ! wrangler pages project list 2>/dev/null | grep -q "$PAGES_PROJECT_NAME"; then
+            echo "  Creating Pages project ${PAGES_PROJECT_NAME}..."
+            wrangler pages project create "$PAGES_PROJECT_NAME" --production-branch "$PAGES_DEPLOY_BRANCH" >/dev/null
+        fi
+        build_client "${WORKER_URL}"
+        deploy_client_pages
+        echo -e "${GREEN}✓ Client deployed: $(pages_deployment_url)${NC}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}PR env ${PROJECT_NAME} is live${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo "  Worker:  ${WORKER_URL}"
+    echo "  Client:  $(pages_deployment_url)"
+    echo "  Smoke:   WORKER_URL=${WORKER_URL} make smoke-test-api"
+    echo ""
+    echo -e "${YELLOW}This env runs the minutely cron — destroy it when done:${NC}"
+    echo "  ENVIRONMENT=${ENVIRONMENT} make destroy-pr-env"
+}
+
+cmd_pr_destroy() {
+    require_pr_project_name
+    echo -e "${RED}Destroying PR env ${PROJECT_NAME}...${NC}"
+    preflight wrangler jq
+    echo ""
+
+    echo "Deleting Worker ${CF_WORKER_NAME}..."
+    wrangler delete --name "$CF_WORKER_NAME" --force || echo -e "${YELLOW}Worker not found or already deleted${NC}"
+
+    echo "Deleting Pages project ${PAGES_PROJECT_NAME}..."
+    wrangler pages project delete "$PAGES_PROJECT_NAME" -y || echo -e "${YELLOW}Pages project not found or already deleted${NC}"
+
+    echo "Deleting D1 database ${D1_DATABASE_NAME}..."
+    wrangler d1 delete "$D1_DATABASE_NAME" -y || echo -e "${YELLOW}D1 database not found or already deleted${NC}"
+
+    echo "Deleting R2 bucket ${R2_BUCKET_NAME}..."
+    wrangler r2 bucket delete "$R2_BUCKET_NAME" || echo -e "${YELLOW}R2 bucket not found, not empty, or already deleted${NC}"
+
+    echo ""
+    echo -e "${GREEN}✓ PR env ${PROJECT_NAME} destroyed${NC}"
+}
+
 # ─── Dispatch ────────────────────────────────────────────────────────────────
 
 COMMAND="${1:-all}"
@@ -347,14 +497,18 @@ case "$COMMAND" in
     modal)    cmd_modal "$@" ;;
     client)   cmd_client "$@" ;;
     all)      cmd_all "$@" ;;
+    pr-deploy)  cmd_pr_deploy "$@" ;;
+    pr-destroy) cmd_pr_destroy "$@" ;;
     *)
-        echo "Usage: $0 {worker|migrate|modal|client|all}"
+        echo "Usage: $0 {worker|migrate|modal|client|all|pr-deploy|pr-destroy}"
         echo ""
         echo "  worker   - Deploy Cloudflare Worker (generates registries, discovers config)"
         echo "  migrate  - Apply D1 migrations to production"
         echo "  modal    - Deploy Modal backend"
         echo "  client   - Build and deploy client to Cloudflare Pages"
         echo "  all      - Full deploy (default): all of the above"
+        echo "  pr-deploy  - Stamp an ephemeral per-PR env (PROJECT_NAME must contain '-pr-')"
+        echo "  pr-destroy - Tear down a per-PR env (worker, Pages, D1, R2)"
         exit 1
         ;;
 esac

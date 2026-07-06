@@ -19,6 +19,7 @@
         trigger-create trigger-list trigger-run \
         bootstrap bootstrap-d1 bootstrap-r2 bootstrap-pages bootstrap-secrets \
         release deploy deploy-worker deploy-modal deploy-migrate deploy-client generate-registries \
+        deploy-pr-env destroy-pr-env \
         secrets-set secrets-list \
         image-build image-push \
         destroy destroy-worker destroy-d1 destroy-r2 destroy-pages destroy-modal
@@ -669,6 +670,12 @@ deploy-modal: _require-env ## Deploy Modal backend (ENVIRONMENT=dev|prod)
 
 deploy-client: _require-env ## Build and deploy client (ENVIRONMENT=dev|prod)
 	@ENVIRONMENT=$(ENVIRONMENT) ./scripts/deploy.sh client
+
+deploy-pr-env: _require-env ## Stamp an ephemeral per-PR env (ENVIRONMENT=pr, PROJECT_NAME=valet-pr-N)
+	@ENVIRONMENT=$(ENVIRONMENT) ./scripts/deploy.sh pr-deploy
+
+destroy-pr-env: _require-env ## Tear down a per-PR env — DESTRUCTIVE (PROJECT_NAME must contain '-pr-')
+	@ENVIRONMENT=$(ENVIRONMENT) ./scripts/deploy.sh pr-destroy
 
 dev-client: ## Start client dev server
 	@echo "$(GREEN)Starting client on http://localhost:5173...$(NC)"
