@@ -1,0 +1,166 @@
+# Label-gated full-stack ephemeral environment for a PR.
+#
+# Add the `preview-env` label to a PR to stamp a complete throwaway stack
+# (Worker + D1 + R2 + Workflows + Pages) named valet-pr-<N>. Pushes to a
+# labeled PR redeploy it. The env shares the dev Modal backend and dev
+# OAuth apps; everything else is isolated per PR.
+#
+# Every per-PR worker runs the minutely cron from wrangler.toml, so these
+# envs cost money while they exist — teardown is mandatory and happens
+# automatically via destroy-pr-env.yml when the PR closes or the label is
+# removed.
+name: Deploy PR Environment
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-env-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy full-stack PR environment
+    runs-on: ubuntu-latest
+    environment: dev
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'preview-env') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: pnpm install --frozen-lockfile
+
+      # wrangler is a devDependency of packages/worker — no separate install needed.
+      - run: echo "$GITHUB_WORKSPACE/packages/worker/node_modules/.bin" >> $GITHUB_PATH
+
+      # Resource names derive from PROJECT_NAME (worker == PROJECT_NAME), and
+      # the workers.dev host is derived from the dev API_PUBLIC_URL secret so
+      # the account subdomain is not hard-coded here.
+      - name: Derive PR env config
+        id: prenv
+        env:
+          DEV_API_PUBLIC_URL: ${{ secrets.API_PUBLIC_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "${DEV_API_PUBLIC_URL}" ]; then
+            echo "::error::API_PUBLIC_URL is not set on the dev environment."
+            echo "Set it to the public dev Worker origin, e.g. https://dev-valet-turnkey.<account>.workers.dev"
+            exit 1
+          fi
+          # https://dev-valet-turnkey.valet-turnkey.workers.dev -> valet-turnkey.workers.dev
+          WORKERS_DEV_HOST=$(echo "${DEV_API_PUBLIC_URL}" | sed -E 's|^https://[^.]+\.||; s|/.*$||')
+          case "${WORKERS_DEV_HOST}" in
+            *.workers.dev) ;;
+            *)
+              echo "::error::Cannot derive a workers.dev host from API_PUBLIC_URL (${WORKERS_DEV_HOST})."
+              exit 1
+              ;;
+          esac
+          PROJECT_NAME="valet-pr-${PR_NUMBER}"
+          echo "project_name=${PROJECT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "worker_url=https://${PROJECT_NAME}.${WORKERS_DEV_HOST}" >> "$GITHUB_OUTPUT"
+          echo "client_url=https://${PROJECT_NAME}-client.pages.dev" >> "$GITHUB_OUTPUT"
+
+      # PR envs share the dev Modal backend (MODAL_BACKEND_URL passthrough).
+      # D1_DATABASE_ID is intentionally absent — pr-deploy auto-creates the DB.
+      - name: Create deploy config
+        env:
+          ALLOWED_EMAILS: ${{ secrets.ALLOWED_EMAILS }}
+          MODAL_BACKEND_URL: ${{ secrets.MODAL_BACKEND_URL }}
+          PROJECT_NAME: ${{ steps.prenv.outputs.project_name }}
+          API_PUBLIC_URL: ${{ steps.prenv.outputs.worker_url }}
+        run: |
+          cat > .env.deploy.pr <<EOF
+          PROJECT_NAME=${PROJECT_NAME}
+          ALLOWED_EMAILS=${ALLOWED_EMAILS}
+          MODAL_BACKEND_URL=${MODAL_BACKEND_URL}
+          API_PUBLIC_URL=${API_PUBLIC_URL}
+          EOF
+
+      # GOOGLE_* pass through the environment (never written to disk) — the
+      # PR env reuses the dev OAuth app. deploy.sh generates a fresh
+      # ENCRYPTION_KEY per env and seeds the smoke-test API token.
+      - name: Deploy PR environment
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: ENVIRONMENT=pr make deploy-pr-env
+
+      - name: Smoke test (api.test.ts)
+        id: smoke
+        continue-on-error: true
+        env:
+          WORKER_URL: ${{ steps.prenv.outputs.worker_url }}
+          API_TOKEN: test-api-token-12345
+        run: pnpm vitest run --config tests/smoke/vitest.config.ts api.test.ts
+
+      - name: Comment PR environment URLs
+        if: always() && steps.prenv.outcome == 'success'
+        uses: actions/github-script@v7
+        env:
+          WORKER_URL: ${{ steps.prenv.outputs.worker_url }}
+          CLIENT_URL: ${{ steps.prenv.outputs.client_url }}
+          DEPLOY_RESULT: ${{ steps.deploy.outcome }}
+          SMOKE_RESULT: ${{ steps.smoke.outcome }}
+        with:
+          script: |
+            const marker = '<!-- pr-env -->';
+            const icon = { success: '✅', failure: '❌', cancelled: '🚫', skipped: '⏭️' };
+            const body = [
+              marker,
+              '**PR environment** (`preview-env` label)',
+              '',
+              `- Worker: ${process.env.WORKER_URL} — deploy ${icon[process.env.DEPLOY_RESULT] ?? process.env.DEPLOY_RESULT}`,
+              `- Client: ${process.env.CLIENT_URL}`,
+              `- Smoke (\`api.test.ts\`, seeded token): ${icon[process.env.SMOKE_RESULT] ?? process.env.SMOKE_RESULT}`,
+              '',
+              'This env runs a minutely cron while it exists. It is destroyed automatically when the PR closes or the `preview-env` label is removed.',
+            ].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((comment) => comment.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail job if smoke tests failed
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1
