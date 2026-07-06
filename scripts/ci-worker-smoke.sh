@@ -28,9 +28,20 @@ PORT="${PORT:-8794}"
 API_TOKEN="${API_TOKEN:-test-api-token-12345}"   # matches scripts/seed-test-data.sql
 WRANGLER_VERSION=4.107.0
 SMOKE_CONFIG=wrangler.smoke.toml                 # relative to $WORKER
+export WRANGLER_SEND_METRICS=false
+
+# Refuse to steal the port from someone else — we only ever kill processes we
+# started, so the port must be free before we begin. This check MUST run
+# before the EXIT trap is registered: cleanup() sweeps whatever is listening
+# on $PORT, and with the trap already armed, this refusal path would SIGKILL
+# the foreign port owner it just declined to steal from.
+if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
+  echo "ERROR: port $PORT is already in use; set PORT=<free port> and retry" >&2
+  exit 1
+fi
+
 STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/valet-worker-smoke.XXXXXX")"
 WLOG="$STATE_DIR/wrangler-dev.log"
-export WRANGLER_SEND_METRICS=false
 
 wrangler() { npx --yes "wrangler@$WRANGLER_VERSION" "$@"; }
 
@@ -49,8 +60,9 @@ cleanup() {
     wait "$WPID" 2>/dev/null || true
   fi
   # wrangler can leave a detached workerd bound to our port. Anything still
-  # listening there was started by us (we verified the port was free below),
-  # so a port-scoped kill only ever hits our own leftovers.
+  # listening there was started by us (we verified the port was free above,
+  # before this trap existed), so a port-scoped kill only ever hits our own
+  # leftovers.
   local leftover
   leftover=$(lsof -ti tcp:"$PORT" 2>/dev/null || true)
   if [ -n "$leftover" ]; then kill -9 $leftover 2>/dev/null || true; fi
@@ -58,13 +70,6 @@ cleanup() {
   rm -rf "$STATE_DIR"
 }
 trap cleanup EXIT
-
-# Refuse to steal the port from someone else — we only ever kill processes we
-# started, so the port must be free before we begin.
-if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
-  echo "ERROR: port $PORT is already in use; set PORT=<free port> and retry" >&2
-  exit 1
-fi
 
 echo "── generating plugin registries ──"
 (cd "$WORKER" && bun scripts/generate-plugin-registry.ts)
