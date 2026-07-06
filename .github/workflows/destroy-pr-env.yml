@@ -32,7 +32,14 @@ jobs:
        (github.event.action == 'unlabeled' && github.event.label.name == 'preview-env'))
 
     steps:
+      # Teardown needs nothing from the PR's code — and the default
+      # pull_request checkout ref (refs/pull/N/merge) does not exist for
+      # unmergeable PRs and can vanish right after close, which would abort
+      # the destroy and leak a cron-billing env. Pin to main so teardown
+      # always runs, with main's pr-destroy logic.
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - uses: pnpm/action-setup@v4
         with:
