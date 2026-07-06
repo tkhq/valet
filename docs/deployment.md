@@ -120,6 +120,50 @@ make deploy               # Full deploy (auto-discovers everything)
 
 There's also `make release`, which runs a more comprehensive pipeline: install, typecheck, build and push the OpenCode Docker image to GHCR, deploy Worker, run D1 migrations, and deploy Pages.
 
+## Per-PR Preview Environments
+
+Beyond the frontend-only Pages preview every PR gets, you can stamp a **full-stack ephemeral environment** for a PR — its own Worker, D1 database, R2 bucket, Cloudflare Workflow, and Pages project — so backend changes (API routes, migrations, Durable Objects, Workflows) can be exercised end-to-end before merge.
+
+### Label workflow
+
+1. Add the **`preview-env`** label to a PR. The `Deploy PR Environment` workflow stamps `valet-pr-<N>` and comments the URLs on the PR.
+2. Every push to the labeled PR redeploys the env (`synchronize`), cancelling any in-flight deploy for that PR.
+3. The env is destroyed automatically when the PR **closes** or the **label is removed** (`Destroy PR Environment` workflow).
+
+### What is stamped vs shared
+
+| Per-PR (isolated) | Shared with dev |
+|-------------------|-----------------|
+| Worker `valet-pr-N` | Modal backend (`MODAL_BACKEND_URL` passthrough) |
+| D1 `valet-pr-N-db` (migrated + seeded) | Google/GitHub OAuth apps (client ID/secret passthrough) |
+| R2 `valet-pr-N-storage` | GHCR OpenCode image |
+| Workflow `valet-pr-N-wfi` (account-scoped names — see `WORKFLOW_NAME` in `scripts/deploy.sh`) | |
+| Pages `valet-pr-N-client` | |
+| Fresh random `ENCRYPTION_KEY` | |
+
+### Auth
+
+Interactive OAuth login generally won't work on a per-PR origin (the OAuth apps don't list `https://valet-pr-N....workers.dev` as a redirect URI). Use the seeded API token instead — `pr-deploy` seeds `packages/worker/scripts/seed-test-data.sql`, so `Authorization: Bearer test-api-token-12345` works immediately, and the smoke suite runs against it:
+
+```bash
+WORKER_URL=https://valet-pr-N.<subdomain>.workers.dev make smoke-test-api
+```
+
+### Manual stamp / teardown
+
+```bash
+# .env.deploy.pr: PROJECT_NAME=valet-pr-N, API_PUBLIC_URL=https://valet-pr-N.<subdomain>.workers.dev,
+# MODAL_BACKEND_URL=<dev backend>; export GOOGLE_CLIENT_ID/SECRET in your shell.
+ENVIRONMENT=pr make deploy-pr-env
+ENVIRONMENT=pr make destroy-pr-env
+```
+
+`pr-deploy` orders migrations **before** the first worker deploy (the worker serves traffic and fires cron as soon as it exists). `pr-destroy` refuses to run unless `PROJECT_NAME` contains `-pr-`, so it can never touch dev/prod.
+
+### Teardown semantics and cost
+
+Every per-PR worker runs the **minutely cron** from `wrangler.toml` (reconcile + schedule dispatch), so an env is never idle — a leaked env keeps consuming Worker invocations and D1 reads forever. Teardown is therefore mandatory, and the destroy workflow fires on both `closed` and `unlabeled`. If a destroy run is lost (e.g. CI outage), tear down manually with `ENVIRONMENT=pr make destroy-pr-env`.
+
 ## Forcing a Sandbox Image Rebuild
 
 Sandbox images are built and cached by Modal (defined in `backend/images/base.py`). To force a rebuild after changing `docker/` or `packages/runner/`:
