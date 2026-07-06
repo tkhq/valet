@@ -100,6 +100,22 @@ jobs:
       # GOOGLE_* pass through the environment (never written to disk) — the
       # PR env reuses the dev OAuth app. deploy.sh generates a fresh
       # ENCRYPTION_KEY per env and seeds the smoke-test API token.
+      #
+      # These are NOT part of deploy-dev.yml's secret set (dev's worker
+      # secrets were bootstrapped once, not per-deploy), so they may be
+      # missing from the dev environment. deploy.sh silently skips empty
+      # passthrough values, so warn loudly instead of shipping an env whose
+      # Google integrations 500. GITHUB_CLIENT_ID/SECRET cannot be passed at
+      # all: Actions reserves the GITHUB_ secret-name prefix, so PR envs
+      # never get GitHub OAuth (its integration is skipped the same way).
+      - name: Check OAuth passthrough secrets
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+        run: |
+          if [ -z "${GOOGLE_CLIENT_ID}" ]; then
+            echo "::warning::GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET are not set on the dev environment — the PR env will have no Google OAuth secrets and Google integrations will fail. Add them under Settings → Environments → dev."
+          fi
+
       - name: Deploy PR environment
         id: deploy
         env:
