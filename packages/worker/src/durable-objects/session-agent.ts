@@ -2,6 +2,7 @@ import type { Env } from '../env.js';
 import type { AppDb } from '../lib/drizzle.js';
 import { getDb } from '../lib/drizzle.js';
 import { createDoTracer, parseTraceparent, type DoTracer } from '../lib/do-tracing.js';
+import { configureLogShipping, flushLogs } from '../lib/log.js';
 import { activeTraceparent } from '../lib/tracing.js';
 import type { Context } from '@opentelemetry/api';
 import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
@@ -435,6 +436,8 @@ export class SessionAgentDO {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
+    // The fetch middleware never runs inside a DO, so latch Loki log shipping here.
+    configureLogShipping(env);
 
     // Run schema migration on construction (blockConcurrencyWhile ensures it completes before any request)
     this.ctx.blockConcurrencyWhile(async () => {
@@ -6188,7 +6191,7 @@ export class SessionAgentDO {
     return (this.doTracerPromise ??= createDoTracer(this.env, this.ctx, 'valet-session-agent-do'));
   }
 
-  /** Drain buffered spans now (alarm / close / hibernate / fetch). Best-effort — never throws. */
+  /** Drain buffered spans + log lines now (alarm / close / hibernate / fetch). Best-effort — never throws. */
   private async flushTraces(): Promise<void> {
     this.traceFlushDeadline = null;
     try {
@@ -6196,6 +6199,9 @@ export class SessionAgentDO {
     } catch {
       // tracing is best-effort
     }
+    // Piggyback Loki log shipping on the trace-flush lifecycle (same drivers, no new
+    // waitUntil sites). flushLogs never throws.
+    await flushLogs(this.env, 'valet-session-agent-do');
   }
 
   /**

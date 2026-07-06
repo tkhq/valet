@@ -55,6 +55,11 @@ export interface Env {
   // is unset, so it is safe to ship dark.
   OTEL_EXPORTER_OTLP_ENDPOINT?: string; // OTLP/HTTP base, e.g. http://localhost:4318
   OTEL_EXPORTER_OTLP_HEADERS?: string; // "key=value,key2=value2" auth headers for the endpoint
+
+  // Loki log shipping. A no-op (zero network) when LOKI_PUSH_URL is unset, so it is
+  // safe to ship dark. Console output (wrangler tail) is unaffected either way.
+  LOKI_PUSH_URL?: string; // Loki base, e.g. http://localhost:3100 — logs POST to /loki/api/v1/push
+  LOKI_BASIC_AUTH?: string; // base64(user:token) for "Authorization: Basic". Set via wrangler secret put
 }
 
 /** Read a string-valued env var by dynamic key name. Returns undefined for missing or non-string values. */
