@@ -76,7 +76,7 @@ import { resolveAuthRedirectOrigin } from './lib/auth-redirect-origin.js';
 import { instrument, OTLPExporter } from '@microlabs/otel-cf-workers';
 import type { ResolveConfigFn } from '@microlabs/otel-cf-workers';
 import { buildTraceConfig, RedactingSpanExporter, setSessionAttributes } from './lib/tracing.js';
-import { log } from './lib/log.js';
+import { configureLogShipping, flushLogs, log } from './lib/log.js';
 
 const workerTraceConfig: ResolveConfigFn = (env: Env) => {
   const config = buildTraceConfig(env, 'valet-worker');
@@ -105,6 +105,20 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 // Global middleware
 app.use('*', requestId());
+// Ship buffered log lines to Loki after the response (lib/log.ts). Dark by default —
+// configureLogShipping is one boolean set and flushLogs no-ops unless LOKI_PUSH_URL is
+// configured. Registered first so its post-next() flush runs outermost, after every
+// inner handler has logged.
+app.use('*', async (c, next) => {
+  configureLogShipping(c.env);
+  try {
+    await next();
+  } finally {
+    // finally: an error thrown below rejects next() before onError runs, and the
+    // lines logged on that failing path are exactly the ones worth shipping.
+    c.executionCtx.waitUntil(flushLogs(c.env));
+  }
+});
 app.use('*', dbMiddleware);
 app.use('*', logger());
 app.use('*', async (c, next) => {
@@ -254,6 +268,9 @@ app.notFound((c) => {
 
 // Scheduled handler for cron triggers
 const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) => {
+  // No fetch middleware runs on the cron path, so latch log shipping here (and flush
+  // at the end of the tick — every sweep below is try/caught, so the tail is reached).
+  configureLogShipping(env);
   log.info('scheduled handler running', { cron: event.cron });
 
   try {
@@ -386,6 +403,8 @@ const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) 
       console.error('Credential refresh sweep error:', error);
     }
   }
+
+  ctx.waitUntil(flushLogs(env));
 };
 
 const MAX_GITHUB_RESOURCES_PER_RUN = 100;

@@ -70,6 +70,52 @@ Or run **`make otel-e2e`** for an automated smoke (no Grafana needed): it boots 
 worker against a throwaway local collector and asserts spans export, query-string
 secrets are redacted, and disabling the endpoint is a true no-op.
 
+## Log shipping to Loki
+
+The same trace-stamped JSON lines that `lib/log.ts` writes to the console (visible in
+`wrangler tail`) are also shipped to **Loki** when configured, so logs sit next to the
+Tempo traces in Grafana and pivot both ways on `trace_id`. Like tracing, this **ships
+dark**: with `LOKI_PUSH_URL` unset the only cost per line is one boolean check, and no
+network call is ever made. Console output is identical either way.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `LOKI_PUSH_URL` | unset (disabled) | Loki base URL, e.g. `http://localhost:3100`. Lines POST to `/loki/api/v1/push`. |
+| `LOKI_BASIC_AUTH` | unset | `base64(user:token)` sent as `Authorization: Basic …`. Set via `wrangler secret put`. |
+
+How it works (`lib/log.ts`): Workers have no cross-request timers, so `emit()` appends
+to a bounded in-memory buffer (500 lines; on overflow the oldest are dropped and a
+synthetic warn line reports `dropped` / `dropped_total` on the next flush) and
+`flushLogs` runs over `waitUntil` from the request/DO lifecycle: a Hono middleware on
+the worker fetch path, the end of the scheduled tick, and the DOs' existing
+`flushTraces` drivers (alarm / webSocketClose / pre-hibernate). Each batch is labeled
+`{service_name, level}` where `service_name` is the flushing runtime —
+`valet-worker`, `valet-session-agent-do`, or `valet-event-bus-do` (matching the trace
+service names). A failed push is dropped (one `console.warn`, no retry), mirroring the
+fire-and-forget trace exporter.
+
+**Grafana Cloud:** logs need their **own** credentials — a token with `logs:write`
+and the stack's **Loki instance ID** as the basic-auth user. The `traces:write` token and
+the Tempo push instance ID will NOT work; Loki is a separate tenant on the stack.
+`LOKI_PUSH_URL` is the stack's Loki host (e.g. `https://logs-prod-021.grafana.net`) and
+`LOKI_BASIC_AUTH` is `base64(<loki instance id>:<logs:write token>)`.
+
+Local test recipe (the same otel-lgtm image used for traces bundles Loki):
+
+```bash
+docker run -d --name valet-lgtm -p 4318:4318 -p 3001:3000 -p 3100:3100 grafana/otel-lgtm:latest
+curl http://localhost:3100/ready        # Loki can take 30-60s
+# add to packages/worker/.dev.vars:  LOKI_PUSH_URL = "http://localhost:3100"
+make dev-worker
+curl http://localhost:8787/health
+curl -G -s http://localhost:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={service_name="valet-worker"}'
+```
+
+Open Grafana at <http://localhost:3001> → **Explore** → **Loki** and query
+`{service_name="valet-worker"}`; with `OTEL_EXPORTER_OTLP_ENDPOINT` also set, the
+`trace_id` in each line links to the Tempo trace.
+
 ## Production
 
 Do **not** point the worker directly at the backend in production. The `otel-cf-workers`

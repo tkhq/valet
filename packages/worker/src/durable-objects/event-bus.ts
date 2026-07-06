@@ -1,6 +1,7 @@
 import type { Env } from '../env.js';
 import type { EventBusEvent, EventBusEventType } from '@valet/shared';
 import { createDoTracer, type DoTracer } from '../lib/do-tracing.js';
+import { configureLogShipping, flushLogs } from '../lib/log.js';
 
 /**
  * EventBusDO — centralized real-time event broadcasting hub.
@@ -21,19 +22,24 @@ export class EventBusDO {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
+    // The fetch middleware never runs inside a DO, so latch Loki log shipping here.
+    configureLogShipping(env);
   }
 
   private getTracer(): Promise<DoTracer> {
     return (this.doTracerPromise ??= createDoTracer(this.env, this.ctx, 'valet-event-bus-do'));
   }
 
-  /** Drain buffered spans now (webSocketClose). Best-effort — never throws. */
+  /** Drain buffered spans + log lines now (webSocketClose). Best-effort — never throws. */
   private async flushTraces(): Promise<void> {
     try {
       await (await this.getTracer()).forceFlush();
     } catch {
       // tracing is best-effort
     }
+    // Piggyback Loki log shipping on the trace-flush lifecycle (same drivers, no new
+    // waitUntil sites). flushLogs never throws.
+    await flushLogs(this.env, 'valet-event-bus-do');
   }
 
   // ─── Entry Point ─────────────────────────────────────────────────────────
