@@ -91,8 +91,8 @@ This automatically:
 
 1. Creates D1 database and R2 bucket if they don't exist
 2. Discovers your Modal workspace from the CLI
-3. Deploys the **Cloudflare Worker** (API + Durable Objects)
-4. Runs **D1 migrations**
+3. Runs **D1 migrations** (before the Worker deploy, so new code never runs against an old schema — migrations must stay additive/backward-compatible with the running Worker)
+4. Deploys the **Cloudflare Worker** (API + Durable Objects)
 5. Deploys the **Modal backend** (sandbox orchestration)
 6. Builds the **frontend** with the correct Worker URL and deploys to Cloudflare Pages
 
@@ -118,7 +118,7 @@ make deploy-client        # Frontend only (builds + deploys to Pages)
 make deploy               # Full deploy (auto-discovers everything)
 ```
 
-There's also `make release`, which runs a more comprehensive pipeline: install, typecheck, build and push the OpenCode Docker image to GHCR, deploy Worker, run D1 migrations, and deploy Pages.
+There's also `make release`, which runs a more comprehensive pipeline: install, typecheck, build and push the OpenCode Docker image to GHCR, run D1 migrations, deploy Worker, and deploy Pages.
 
 ## Forcing a Sandbox Image Rebuild
 
