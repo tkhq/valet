@@ -95,8 +95,8 @@ service names). A failed push is dropped (one `console.warn`, no retry), mirrori
 fire-and-forget trace exporter.
 
 **Grafana Cloud:** logs need their **own** credentials — a token with `logs:write`
-and the stack's **Loki instance ID** as the basic-auth user. The `traces:write` token /
-Tempo push instance (410780) will NOT work; Loki is a separate tenant on the stack.
+and the stack's **Loki instance ID** as the basic-auth user. The `traces:write` token and
+the Tempo push instance ID will NOT work; Loki is a separate tenant on the stack.
 `LOKI_PUSH_URL` is the stack's Loki host (e.g. `https://logs-prod-021.grafana.net`) and
 `LOKI_BASIC_AUTH` is `base64(<loki instance id>:<logs:write token>)`.
 

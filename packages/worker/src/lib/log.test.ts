@@ -112,7 +112,8 @@ describe('loki shipping', () => {
     await flushLogs(env);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // stubFetch's impl takes no params, so calls[] is typed `[]` — widen via unknown.
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('http://loki:3100/loki/api/v1/push');
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
@@ -183,6 +184,47 @@ describe('loki shipping', () => {
     const { streams } = sentBody(vi.mocked(fetch) as ReturnType<typeof vi.fn>);
     const warn = streams.find((s) => s.stream.level === 'warn')!;
     expect(parse(warn.values[0][1]).dropped_total).toBe(1);
+  });
+
+  it('ships a pending drop report even when no new lines were logged', async () => {
+    stubFetch(async () => {
+      throw new Error('connect refused');
+    });
+    spyConsole('log');
+    spyConsole('warn');
+    configureLogShipping(env);
+    log.info('doomed');
+    await flushLogs(env); // fails → 1 dropped, unreported
+
+    // No further log lines: the report must not wait for one.
+    const fetchMock = stubFetch();
+    await flushLogs(env);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const { streams } = sentBody(fetchMock);
+    expect(streams).toHaveLength(1);
+    expect(streams[0].stream.level).toBe('warn');
+    const report = parse(streams[0].values[0][1]);
+    expect(report.dropped).toBe(1);
+    expect(report.dropped_total).toBe(1);
+  });
+
+  it('does not count the synthetic report line on failure and re-reports lost drops', async () => {
+    stubFetch(async () => {
+      throw new Error('connect refused');
+    });
+    spyConsole('log');
+    spyConsole('warn');
+    configureLogShipping(env);
+    // 20 overflow drops + a 500-line batch (incl. the report line) that fails to ship.
+    for (let i = 0; i < 520; i++) log.info(`line-${i}`);
+    await flushLogs(env);
+
+    const fetchMock = stubFetch();
+    await flushLogs(env);
+    const report = parse(sentBody(fetchMock).streams[0].values[0][1]);
+    // 20 overflow + 500 real lines; the synthetic report line is not re-counted.
+    expect(report.dropped).toBe(520);
+    expect(report.dropped_total).toBe(520);
   });
 
   it('treats a non-2xx response as a failure without throwing', async () => {

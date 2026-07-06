@@ -105,23 +105,25 @@ function bufferLine(nowMs: number, level: LogLevel, line: string): void {
  */
 export async function flushLogs(env: LogShipEnv, serviceName = 'valet-worker'): Promise<void> {
   const base = env.LOKI_PUSH_URL?.trim();
-  if (!base || buffer.length === 0) return;
+  // Flush when there are lines OR unreported drops — a drop report must not wait
+  // for the next log line (there may never be one after a failed final push).
+  if (!base || (buffer.length === 0 && droppedSinceReport === 0)) return;
 
   const batch = buffer;
   buffer = [];
 
-  // Surface overflow drops as a synthetic warn line riding the flush that noticed them.
-  if (droppedSinceReport > 0) {
-    const dropped = droppedSinceReport;
+  // Surface drops (overflow or failed pushes) as a synthetic warn line riding this flush.
+  const reportedDrops = droppedSinceReport;
+  if (reportedDrops > 0) {
     droppedSinceReport = 0;
     batch.push({
       tsNs: `${Date.now()}000000`,
       level: 'warn',
       line: JSON.stringify({
         level: 'warn',
-        message: 'log shipping buffer overflow: dropped oldest lines',
+        message: 'log shipping dropped lines (buffer overflow or failed push)',
         time: new Date().toISOString(),
-        dropped,
+        dropped: reportedDrops,
         dropped_total: droppedTotal,
       }),
     });
@@ -151,12 +153,15 @@ export async function flushLogs(env: LogShipEnv, serviceName = 'valet-worker'): 
     });
     if (!res.ok) throw new Error(`Loki push failed: HTTP ${res.status}`);
   } catch (err) {
-    droppedTotal += batch.length;
-    droppedSinceReport += batch.length;
+    // Count only real lines as newly dropped (not the synthetic report line), and
+    // restore the drops whose report line was lost so the next flush re-reports them.
+    const realLines = reportedDrops > 0 ? batch.length - 1 : batch.length;
+    droppedTotal += realLines;
+    droppedSinceReport += realLines + reportedDrops;
     // Raw console.warn — routing this through log.warn would re-buffer and recurse.
     console.warn('[log-shipping] Loki push failed, dropped batch', {
       error: err instanceof Error ? err.message : String(err),
-      batch: batch.length,
+      batch: realLines,
       droppedTotal,
     });
   }
