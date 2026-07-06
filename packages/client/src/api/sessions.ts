@@ -2,6 +2,7 @@ import { useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query';
 import { api, ApiError } from './client';
 import { useAuthStore } from '@/stores/auth';
+import { trackEvent } from '@/lib/observability';
 import type {
   AgentSession,
   CreateSessionRequest,
@@ -161,7 +162,8 @@ export function useCreateSession() {
   return useMutation({
     mutationFn: (data: CreateSessionRequest) =>
       api.post<CreateSessionResponse>('/sessions', data),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      trackEvent('session_created', { 'valet.session.id': data.session.id });
       queryClient.invalidateQueries({ queryKey: sessionKeys.lists() });
       queryClient.invalidateQueries({ queryKey: sessionKeys.infinite() });
     },

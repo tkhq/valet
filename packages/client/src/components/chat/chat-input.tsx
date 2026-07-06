@@ -6,6 +6,7 @@ import type { PromptAttachment, ProviderModels } from '@/hooks/use-chat';
 import { useAudioRecorder } from '@/hooks/use-audio-recorder';
 import { SLASH_COMMANDS } from '@valet/shared';
 import { isImageFile, needsProcessing, needsCompression, processImage, perImageBudget } from '@/lib/image-compression';
+import { trackEvent } from '@/lib/observability';
 import { toastError } from '@/hooks/use-toast';
 import {
   ModelSelector,
@@ -596,6 +597,12 @@ export function ChatInput({
     }
 
     const messageText = value.trim();
+
+    // Counts and ids only — never the prompt text itself.
+    trackEvent('prompt_submitted', {
+      'valet.session.id': sessionId,
+      attachments: attachments.length,
+    });
 
     // Extract all @path tokens from the message
     const atMentionRegex = /@([\w./\-[\]()]+)/g;

@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { WorkflowDefinition, WorkflowValidationError } from '@valet/shared';
 import { api } from './client';
 import { executionKeys } from './executions';
+import { trackEvent } from '@/lib/observability';
 
 function createClientRequestId(): string {
   try {
@@ -200,7 +201,11 @@ export function useRunWorkflow() {
         variables,
         clientRequestId: createClientRequestId(),
       }),
-    onSuccess: (_, { workflowId }) => {
+    onSuccess: (data, { workflowId }) => {
+      trackEvent('workflow_run', {
+        'valet.workflow.id': workflowId,
+        'valet.execution.id': data.executionId,
+      });
       queryClient.invalidateQueries({ queryKey: workflowKeys.executions(workflowId) });
       queryClient.invalidateQueries({ queryKey: executionKeys.byWorkflow(workflowId) });
       queryClient.invalidateQueries({ queryKey: executionKeys.lists() });

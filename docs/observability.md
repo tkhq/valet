@@ -85,3 +85,45 @@ lossy hop.
 
 The full cross-layer design (runner + OpenCode layers, the spend/usage metrics, span
 links) lives in the tracing design doc / Linear issue.
+
+## Frontend observability (Faro)
+
+The client instruments with **Grafana Faro** (`@grafana/faro-web-sdk` +
+`@grafana/faro-web-tracing`) — the Grafana Cloud equivalent of Sentry/PostHog. Like the
+worker, it **ships dark**: everything in `packages/client/src/lib/observability.ts` is a
+hard no-op unless `VITE_FARO_URL` is set at build time, and the SDK is loaded dynamically
+so dark builds never even download it.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `VITE_FARO_URL` | unset (disabled) | Faro collector URL (Grafana Cloud Frontend Observability endpoint or Alloy `faro.receiver`). Build-time only. |
+| `FARO_URL` | unset | `scripts/deploy.sh` passes this through to the client build as `VITE_FARO_URL`. |
+
+**What's captured when enabled**
+
+- **Web vitals + page/navigation performance** (`getWebInstrumentations`, console capture
+  deliberately **off** — console logs can contain free text).
+- **Uncaught errors / unhandled rejections**, plus React error-boundary catches
+  (`trackError` in `components/error-boundary.tsx`).
+- **Route transitions**: a `route_change` event per TanStack Router `onResolved` with the
+  **pathname only** — search params never leave the browser.
+- **Frontend traces** via `TracingInstrumentation`; `traceparent` is propagated **only to
+  the API origin** (derived from `VITE_API_URL`, allowed by the worker's CORS
+  `allowHeaders`), so frontend spans correlate with worker traces in Tempo.
+- **Sanitized API failures** (`api_error`: status/code/path) and **WebSocket lifecycle**
+  (`ws_connected` / `ws_disconnected` / `ws_error` with the socket path).
+- **Product events** via `trackEvent(name, attrs)` — a safe no-op when dark:
+  `prompt_submitted`, `session_created`, `workflow_run`, `approval_resolved`, each carrying
+  ids/enums/counts only (`valet.session.id` where available).
+
+**Scrubbing guarantees** (`scrubBeforeSend`, applied to every beacon — events, errors,
+measurements, traces):
+
+- Query strings are stripped from **every** URL anywhere in a payload (page URL, stack
+  frames, fetch spans) — OAuth `?code=`, token, and path params are never exported.
+- Token-shaped values (`glc_…`, GitHub `gho_`/`ghp_`/…, `Bearer …`, `api-token=…`) are
+  replaced with `[REDACTED]`.
+- User identity is only ever the **opaque user id** (`faro.api.setUser({ id })` on login,
+  reset on logout) — no email, no name.
+- Prompts, messages, and any other free text are never sent: `trackEvent` attributes are
+  restricted to ids, enums, and numbers, and console capture is off.

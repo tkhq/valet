@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useAuthStore } from '@/stores/auth';
 import { getWebSocketUrl } from '@/api/client';
+import { trackEvent } from '@/lib/observability';
 
 type WebSocketStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
@@ -86,6 +87,7 @@ export function useWebSocket(url: string | null, options: UseWebSocketOptions = 
     ws.onopen = () => {
       setStatus('connected');
       reconnectAttemptsRef.current = 0;
+      trackEvent('ws_connected', { path: wsUrl.pathname });
       onConnectRef.current?.();
     };
 
@@ -100,6 +102,7 @@ export function useWebSocket(url: string | null, options: UseWebSocketOptions = 
 
     ws.onerror = (event) => {
       setStatus('error');
+      trackEvent('ws_error', { path: wsUrl.pathname });
       onErrorRef.current?.(event);
     };
 
@@ -111,6 +114,7 @@ export function useWebSocket(url: string | null, options: UseWebSocketOptions = 
 
       setStatus('disconnected');
       wsRef.current = null;
+      trackEvent('ws_disconnected', { path: wsUrl.pathname });
       onDisconnectRef.current?.();
 
       if (reconnect && reconnectAttemptsRef.current < maxReconnectAttempts) {

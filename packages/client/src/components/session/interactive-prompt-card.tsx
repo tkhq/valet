@@ -12,6 +12,7 @@ import {
   isApprovalCancelAction,
   isApprovalPromptExpired,
 } from '@/lib/approval-prompts';
+import { trackEvent } from '@/lib/observability';
 
 function useCountdown(expiresAt?: number) {
   const [remaining, setRemaining] = React.useState<string>('');
@@ -224,6 +225,10 @@ export function InteractivePromptCard({
     setSubmissionError(null);
 
     const message = buildApprovalResolutionSocketMessage(invocationId, actionId);
+    trackEvent('approval_resolved', {
+      decision: message.type === 'approve-action' ? 'approve' : 'deny',
+      risk: riskLevel,
+    });
     const sentViaUnifiedWs = onResolveApprovalWs?.(invocationId, actionId) ?? false;
     if (sentViaUnifiedWs) {
       setIsSubmitted(true);

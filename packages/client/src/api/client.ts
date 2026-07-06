@@ -1,5 +1,6 @@
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
+import { trackEvent } from '@/lib/observability';
 
 // In production, use the worker URL. In development, proxy through Vite.
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -74,6 +75,13 @@ export async function apiClient<T>(
       useAuthStore.getState().clearAuth();
       router.navigate({ to: '/login' });
     }
+
+    // Sanitized failure signal: status + error code + path (query stripped).
+    trackEvent('api_error', {
+      status: response.status,
+      code: errorData.code,
+      path: endpoint.split('?')[0],
+    });
 
     throw new ApiError(
       errorData.error || response.statusText,

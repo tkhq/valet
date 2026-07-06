@@ -1,13 +1,18 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './app';
+import { App, router } from './app';
 import { applyBuildChrome } from './lib/build-info';
+import { initFaro, observeRouter } from './lib/observability';
 import './styles/globals.css';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('Root element not found');
 
 applyBuildChrome();
+
+// Frontend observability — hard no-op unless VITE_FARO_URL is set.
+void initFaro();
+observeRouter(router);
 
 createRoot(rootElement).render(
   <StrictMode>

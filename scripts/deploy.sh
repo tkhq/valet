@@ -170,6 +170,7 @@ build_client() {
         VITE_DEPLOY_ENVIRONMENT="${ENVIRONMENT}" \
         VITE_BUILD_COMMIT_HASH="${build_commit_hash}" \
         VITE_BUILD_VERSION_TAG="${build_version_tag}" \
+        VITE_FARO_URL="${FARO_URL:-}" \
         pnpm run build "${build_args[@]}"
     )
 }
