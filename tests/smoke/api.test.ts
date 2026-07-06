@@ -169,14 +169,15 @@ describe('workflows', () => {
       name: 'Smoke Test WF',
       slug,
       description: 'smoke test',
-      // /sync validates data as a dag/v1 definition
+      // /sync validates data as a dag/v1 definition — minimal valid DAG
+      // (same shape as scripts/smoke-dag.sh).
       data: {
         version: 'dag/v1',
         nodes: [
-          { id: 'start', type: 'set', values: { hello: 'world' } },
-          { id: 'finish', type: 'stop' },
+          { id: 'noop', type: 'set', values: { ran: true } },
+          { id: 'done', type: 'stop', outcome: 'success' },
         ],
-        edges: [{ from: 'start', to: 'finish' }],
+        edges: [{ from: 'noop', to: 'done' }],
       },
     });
     workflowId = res.id ?? res.workflow?.id ?? wfId;
