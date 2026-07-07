@@ -223,17 +223,23 @@ async function main() {
     onMemRead: async (path) => {
       return await agentClient.requestMemRead(path);
     },
-    onMemWrite: async (path, content) => {
-      return await agentClient.requestMemWrite(path, content);
+    onMemWrite: async (path, content, meta, threadId) => {
+      return await agentClient.requestMemWrite(path, content, meta, threadId ?? promptHandler?.getActiveThreadId());
     },
-    onMemPatch: async (path, operations) => {
-      return await agentClient.requestMemPatch(path, operations);
+    onMemMove: async (from, to, threadId) => {
+      return await agentClient.requestMemMove(from, to, threadId ?? promptHandler?.getActiveThreadId());
+    },
+    onMemLinks: async (path, direction, depth, includeJournal) => {
+      return await agentClient.requestMemLinks(path, direction, depth, includeJournal);
+    },
+    onMemPatch: async (path, operations, threadId) => {
+      return await agentClient.requestMemPatch(path, operations, threadId ?? promptHandler?.getActiveThreadId());
     },
     onMemRm: async (path) => {
       return await agentClient.requestMemRm(path);
     },
-    onMemSearch: async (query, path, limit) => {
-      return await agentClient.requestMemSearch(query, path, limit);
+    onMemSearch: async (query, path, limit, includeExpired) => {
+      return await agentClient.requestMemSearch(query, path, limit, includeExpired);
     },
     onListPersonas: async () => {
       return await agentClient.requestListPersonas();

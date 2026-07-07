@@ -1,4 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
+import { ensureLinksIndexed } from './db/memory-link-backfill.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -7,11 +8,24 @@ interface SnapshotFile {
   content: string;
 }
 
+/** A pinned file's 1-hop neighbor — path + description + type only, never body. */
+export interface SnapshotNeighbor {
+  path: string;
+  type: string;
+  description: string;
+}
+
 export interface MemorySnapshot {
   files: SnapshotFile[];
+  neighbors: SnapshotNeighbor[];
   totalTokensEstimate: number;
   truncated: boolean;
 }
+
+/** Neighbor tier is capped at 20% of the total token budget. */
+const NEIGHBOR_BUDGET_FRACTION = 0.2;
+/** Non-expired predicate reused across every snapshot query. */
+const NOT_EXPIRED = `(expires IS NULL OR expires > datetime('now'))`;
 
 // ─── Load Snapshot ──────────────────────────────────────────────────────────
 
@@ -32,10 +46,16 @@ export async function loadMemorySnapshot(
   userId: string,
   tokenBudget = 8000,
 ): Promise<MemorySnapshot> {
-  // 1. Fetch all pinned files
+  const scope = { userId };
+  // Neighbor promotion reads memory_links — make sure it is backfilled first.
+  // ensureLinksIndexed never calls back into the snapshot builder (no recursion).
+  await ensureLinksIndexed(rawDb, scope);
+
+  // 1. Fetch all pinned files (expired ones never load)
   const pinnedRows = await rawDb
     .prepare(
-      'SELECT path, content, last_accessed_at FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 1 ORDER BY last_accessed_at DESC',
+      `SELECT path, content, last_accessed_at FROM orchestrator_memory_files
+       WHERE user_id = ? AND pinned = 1 AND ${NOT_EXPIRED} ORDER BY last_accessed_at DESC`,
     )
     .bind(userId)
     .all<{ path: string; content: string; last_accessed_at: string }>();
@@ -54,7 +74,8 @@ export async function loadMemorySnapshot(
 
   const journalRows = await rawDb
     .prepare(
-      'SELECT path, content FROM orchestrator_memory_files WHERE user_id = ? AND path IN (?, ?)',
+      `SELECT path, content FROM orchestrator_memory_files
+       WHERE user_id = ? AND path IN (?, ?) AND ${NOT_EXPIRED}`,
     )
     .bind(userId, journalPaths[0], journalPaths[1])
     .all<{ path: string; content: string }>();
@@ -66,6 +87,11 @@ export async function loadMemorySnapshot(
   // 3. Estimate tokens and fit within budget
   const estimateTokens = (s: string) => Math.ceil(s.length / 4);
 
+  // Neighbor tier is carved OUT of the total budget (not added on top), so the
+  // pinned+journal tiers must fit within the remainder.
+  const neighborBudget = Math.floor(tokenBudget * NEIGHBOR_BUDGET_FRACTION);
+  const mainBudget = tokenBudget - neighborBudget;
+
   let totalTokens = 0;
   let truncated = false;
   const result: SnapshotFile[] = [];
@@ -73,7 +99,7 @@ export async function loadMemorySnapshot(
   // Add pinned files first
   for (const f of pinnedFiles) {
     const tokens = estimateTokens(f.content);
-    if (totalTokens + tokens <= tokenBudget) {
+    if (totalTokens + tokens <= mainBudget) {
       result.push({ path: f.path, content: f.content });
       totalTokens += tokens;
     } else {
@@ -85,7 +111,7 @@ export async function loadMemorySnapshot(
   // Add journals (today first, then yesterday) — truncate content if needed
   for (const f of journalFiles) {
     const tokens = estimateTokens(f.content);
-    const remaining = tokenBudget - totalTokens;
+    const remaining = mainBudget - totalTokens;
 
     if (remaining <= 0) {
       truncated = true;
@@ -105,11 +131,70 @@ export async function loadMemorySnapshot(
     }
   }
 
+  // 4. Neighbor tier: pinned files' 1-hop neighbors (path + description + type
+  //    only, never bodies), under its own carved-out sub-budget.
+  const neighbors = await loadNeighborTier(
+    rawDb,
+    userId,
+    pinnedFiles.map((f) => f.path),
+    new Set(result.map((f) => f.path)),
+    neighborBudget,
+  );
+
   return {
     files: result,
+    neighbors,
     totalTokensEstimate: totalTokens,
     truncated,
   };
+}
+
+/**
+ * Load the neighbor tier: files linked from any pinned file (1 hop), excluding
+ * expired files and files already present in the pinned/journal tiers. Returns
+ * `- [type] path — description`-shaped entries whose combined estimate stays
+ * under `neighborBudget` tokens. Bodies are never loaded.
+ */
+async function loadNeighborTier(
+  rawDb: D1Database,
+  userId: string,
+  pinnedPaths: string[],
+  alreadyIncluded: Set<string>,
+  neighborBudget: number,
+): Promise<SnapshotNeighbor[]> {
+  if (pinnedPaths.length === 0 || neighborBudget <= 0) return [];
+
+  const placeholders = pinnedPaths.map(() => '?').join(',');
+  const rows = await rawDb
+    .prepare(
+      `SELECT DISTINCT m.path AS path, m.type AS type, m.description AS description
+       FROM memory_links l
+       JOIN orchestrator_memory_files m ON m.user_id = l.user_id AND m.path = l.to_path
+       WHERE l.user_id = ? AND l.from_path IN (${placeholders}) AND ${NOT_EXPIRED}
+       ORDER BY m.path`,
+    )
+    .bind(userId, ...pinnedPaths)
+    .all<{ path: string; type: string; description: string }>();
+
+  const estimateTokens = (s: string) => Math.ceil(s.length / 4);
+  const neighbors: SnapshotNeighbor[] = [];
+  let used = 0;
+  for (const r of rows.results ?? []) {
+    if (alreadyIncluded.has(r.path)) continue;
+    const line = formatNeighborLine(r);
+    const cost = estimateTokens(line);
+    if (used + cost > neighborBudget) break;
+    neighbors.push({ path: r.path, type: r.type, description: r.description });
+    used += cost;
+  }
+  return neighbors;
+}
+
+/** `- [type] path — description` (the ` — description` suffix omitted when empty). */
+function formatNeighborLine(n: SnapshotNeighbor): string {
+  const type = n.type || 'note';
+  const desc = n.description ? ` — ${n.description}` : '';
+  return `- [${type}] ${n.path}${desc}`;
 }
 
 // ─── Format Snapshot ────────────────────────────────────────────────────────
@@ -119,7 +204,7 @@ export async function loadMemorySnapshot(
  * persona files. Returns empty string if no files were loaded.
  */
 export function formatMemorySnapshot(snapshot: MemorySnapshot): string {
-  if (snapshot.files.length === 0) return '';
+  if (snapshot.files.length === 0 && snapshot.neighbors.length === 0) return '';
 
   const lines: string[] = [
     '## Memory Snapshot (auto-loaded)',
@@ -130,6 +215,19 @@ export function formatMemorySnapshot(snapshot: MemorySnapshot): string {
 
   for (const file of snapshot.files) {
     lines.push(`### ${file.path}`, '', file.content, '');
+  }
+
+  if (snapshot.neighbors.length > 0) {
+    lines.push(
+      '## Related (neighbor files)',
+      '',
+      'Linked from your pinned files (not loaded — use `mem_read` to open):',
+      '',
+    );
+    for (const n of snapshot.neighbors) {
+      lines.push(formatNeighborLine(n));
+    }
+    lines.push('');
   }
 
   if (snapshot.truncated) {

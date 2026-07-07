@@ -68,3 +68,6 @@ packages/client/*.js.map
 workspaces/*
 !workspaces/.gitkeep
 .worktrees/
+
+# Superpowers skill scratch (brainstorm artifacts, sdd reports)
+.superpowers/

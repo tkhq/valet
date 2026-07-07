@@ -1,7 +1,9 @@
 ---
-title: Memory and Larger Work
-description: Help Valet remember useful details and split larger requests into focused sessions.
+title: Memory and Larger Tasks
+description: Help Valet remember useful details, browse and edit its memory, and split larger requests into focused tasks.
 ---
+
+import { MascotNote } from '/snippets/mascot-note.mdx';
 
 Valet gets better when it remembers the right things. It can keep preferences, project notes, recurring procedures, and useful details so you do not have to repeat yourself every time.
 
@@ -28,11 +30,59 @@ Valet organizes what it remembers into a few areas. You do not need to manage th
 | Projects | Notes about specific projects — names, links, conventions, key decisions. |
 | Workflows | Recurring processes the team uses, such as how a release is cut or how a ticket is triaged. |
 | Journal | Day-to-day notes about what Valet did and what happened. The current and previous day's notes are surfaced automatically. |
+| People | One note per person Valet works with — their role, preferences, and how they connect to your projects. |
 | Notes | Anything else worth remembering that does not fit the categories above. |
+
+Each note also carries a few useful details Valet manages for you: a short description, tags, and — where relevant — a link to the thing it is about (a repo, a document, a customer). You do not set these by hand; they make memory easier to search and connect.
 
 **Preferences are pinned.** They are not pruned and they are always loaded into the next session, so they are the right home for anything Valet should never forget about you or your team.
 
 **Other notes can age out.** When memory gets large, less-used notes may be removed to make room. Anything that should be permanent — a team procedure, a hard rule, a strong preference — belongs in preferences or as a clearly named project note, not as a one-off scratch note.
+
+## Browse and edit memory in the app
+
+Open **Orchestrator → Memory** to see everything Valet has saved. The Orchestrator dashboard also shows a short memory summary with your pinned and most recent notes; **Open memory** takes you to the full view.
+
+The Memory page has two views:
+
+- **Files** — a folder list with search on the left, and the selected note on the right, shown the way it will read. Each note displays its area, tags, description, and a link to its source when it has one.
+- **Graph** — a map of how your notes connect (see [How memories connect](#how-memories-connect) below).
+
+<MascotNote
+  title="Reference"
+  heading="You can edit memory directly"
+  image="/images/characters/writing.png"
+  alt="Valet writing notes"
+>
+  Select a note and choose **Edit** to change its contents in the app, then **Save**. This is handy for fixing a stale detail or tidying a note yourself instead of asking in chat. To change how a note is classified — its area, whether it is shareable, or when it should expire — just ask Valet.
+</MascotNote>
+
+From a note you can also:
+
+- **Search** across everything by keyword or tag. Selecting a tag searches for other notes that share it.
+- **Follow links** — click a linked file, or a "Linked from" entry, to jump straight to that note.
+- **Open the source conversation** — "learned in session" opens the chat where the note was written.
+- **Delete** a note you no longer want.
+- **Import and export** memory as a file, to back it up or move it between environments.
+
+## How memories connect
+
+Valet's notes are not a flat list — they link to each other. A project note can point to the people involved, the workflows it uses, and the journal days it was touched. Those connections are what let Valet pull the right context together instead of reading everything.
+
+You can see this two ways:
+
+- On any note, **Linked from** lists the other notes that reference it, so you can trace how a detail is used.
+- The **Graph** view draws the whole picture: each note is a point, and lines are the links between them. Drag points around to untangle a cluster, zoom in, and use the filters to focus — for example, hide the daily journal to see just your durable notes. Click any point to open that note.
+
+<MascotNote
+  title="Tip from Valet"
+  heading="The graph is a map, not a to-do list"
+  tone="tip"
+  image="/images/characters/thinking.png"
+  alt="Valet thinking"
+>
+  Dashed and faded points are references to notes that do not exist yet, or notes that were only ever touched together in one session. They are hints about structure, not links you need to act on.
+</MascotNote>
 
 ## How to tell Valet to remember something
 
@@ -62,6 +112,32 @@ Remove my preference about avoiding emoji in summaries — I changed my mind.
 ```
 
 Valet confirms what it removed. If the same detail still lives somewhere else (such as a project note and a preference), say so and Valet will remove both.
+
+## Private and shareable memory
+
+By default, what Valet remembers is private to you. Some notes are meant to be shared — a team procedure, a customer follow-up process, an account fact the whole team should know. Valet can mark those as **shareable**.
+
+Ask Valet to make a note shareable, or to keep something private:
+
+```text
+Make the release checklist shareable so the team can reuse it.
+```
+
+```text
+Keep my personal writing preferences private.
+```
+
+When you export memory, you can choose to export **everything** or **shareable notes only** — so you can hand a teammate the shared processes without exposing your private notes. For instructions and processes the whole team should pick up automatically, [skills and personas](/product/skills-and-personas) are usually the better home.
+
+## Time-bound notes
+
+Some context is only true for a while — a launch window, a temporary access grant, a "until the migration finishes" note. Valet can give a note an expiration date so it drops off on its own instead of lingering as stale advice.
+
+```text
+Remember that the staging database is read-only until Friday, then forget it.
+```
+
+Notes with an expiration show how long they have left, and Valet stops relying on them once they lapse.
 
 ## Keep memory useful
 

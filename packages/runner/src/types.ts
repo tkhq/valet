@@ -16,6 +16,7 @@ export type {
   // Protocol message unions
   DOToRunnerMessage,
   RunnerToDOMessage,
+  MemoryWriteMeta,
 
   // Utility extraction types
   RunnerMessageOf,

@@ -12,6 +12,7 @@ import type {
   AvailableModels,
   DiffFile,
   DOToRunnerMessage,
+  MemoryWriteMeta,
   PromptAttachment,
   ReviewResultData,
   RunnerToDOMessage,
@@ -471,38 +472,65 @@ export class AgentClient {
     });
   }
 
-  requestMemRead(path: string): Promise<{ file?: unknown; files?: unknown[]; content?: string }> {
+  requestMemRead(path: string): Promise<{
+    file?: unknown;
+    files?: unknown[];
+    document?: string;
+    backlinks?: unknown[];
+    notices?: string[];
+    listing?: unknown[];
+    index?: string;
+  }> {
     const requestId = crypto.randomUUID();
     return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
       this.send({ type: "mem-read", requestId, path });
     });
   }
 
-  requestMemWrite(path: string, content: string): Promise<{ file: unknown }> {
+  requestMemWrite(path: string, content?: string, meta?: MemoryWriteMeta, threadId?: string): Promise<{ file: unknown; warnings: string[] }> {
     const requestId = crypto.randomUUID();
     return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
-      this.send({ type: "mem-write", requestId, path, content });
+      this.send({ type: "mem-write", requestId, path, content, meta, threadId });
     });
   }
 
-  requestMemPatch(path: string, operations: unknown[]): Promise<{ result: unknown }> {
+  requestMemMove(from: string, to: string, threadId?: string): Promise<{ result: unknown }> {
     const requestId = crypto.randomUUID();
     return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
-      this.send({ type: "mem-patch", requestId, path, operations });
+      this.send({ type: "mem-move", requestId, from, to, threadId });
     });
   }
 
-  requestMemRm(path: string): Promise<{ deleted: number }> {
+  requestMemLinks(
+    path: string,
+    direction?: "out" | "in" | "both",
+    depth?: 1 | 2 | 3,
+    includeJournal?: boolean,
+  ): Promise<{ neighbors: unknown[][]; truncated: boolean }> {
+    const requestId = crypto.randomUUID();
+    return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
+      this.send({ type: "mem-links", requestId, path, direction, depth, includeJournal });
+    });
+  }
+
+  requestMemPatch(path: string, operations: unknown[], threadId?: string): Promise<{ result: unknown }> {
+    const requestId = crypto.randomUUID();
+    return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
+      this.send({ type: "mem-patch", requestId, path, operations, threadId });
+    });
+  }
+
+  requestMemRm(path: string): Promise<{ deleted: number; inboundWarning: string | null }> {
     const requestId = crypto.randomUUID();
     return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
       this.send({ type: "mem-rm", requestId, path });
     });
   }
 
-  requestMemSearch(query: string, path?: string, limit?: number): Promise<{ results: unknown[] }> {
+  requestMemSearch(query: string, path?: string, limit?: number, includeExpired?: boolean): Promise<{ results: unknown[]; suppressedExpired: number }> {
     const requestId = crypto.randomUUID();
     return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
-      this.send({ type: "mem-search", requestId, query, path, limit });
+      this.send({ type: "mem-search", requestId, query, path, limit, includeExpired });
     });
   }
 
@@ -954,7 +982,15 @@ export class AgentClient {
           if (msg.error) {
             this.rejectPendingRequest(msg.requestId, msg.error);
           } else {
-            this.resolvePendingRequest(msg.requestId, { file: msg.file, files: msg.files });
+            this.resolvePendingRequest(msg.requestId, {
+              file: msg.file,
+              files: msg.files,
+              document: msg.document,
+              backlinks: msg.backlinks,
+              notices: msg.notices,
+              listing: msg.listing,
+              index: msg.index,
+            });
           }
           break;
 
@@ -962,7 +998,23 @@ export class AgentClient {
           if (msg.error) {
             this.rejectPendingRequest(msg.requestId, msg.error);
           } else {
-            this.resolvePendingRequest(msg.requestId, { file: msg.file });
+            this.resolvePendingRequest(msg.requestId, { file: msg.file, warnings: msg.warnings ?? [] });
+          }
+          break;
+
+        case "mem-move-result":
+          if (msg.error) {
+            this.rejectPendingRequest(msg.requestId, msg.error);
+          } else {
+            this.resolvePendingRequest(msg.requestId, { result: msg.result });
+          }
+          break;
+
+        case "mem-links-result":
+          if (msg.error) {
+            this.rejectPendingRequest(msg.requestId, msg.error);
+          } else {
+            this.resolvePendingRequest(msg.requestId, { neighbors: msg.neighbors ?? [], truncated: msg.truncated ?? false });
           }
           break;
 
@@ -978,7 +1030,7 @@ export class AgentClient {
           if (msg.error) {
             this.rejectPendingRequest(msg.requestId, msg.error);
           } else {
-            this.resolvePendingRequest(msg.requestId, { deleted: msg.deleted ?? 0 });
+            this.resolvePendingRequest(msg.requestId, { deleted: msg.deleted ?? 0, inboundWarning: msg.inboundWarning ?? null });
           }
           break;
 
@@ -986,7 +1038,7 @@ export class AgentClient {
           if (msg.error) {
             this.rejectPendingRequest(msg.requestId, msg.error);
           } else {
-            this.resolvePendingRequest(msg.requestId, { results: msg.results ?? [] });
+            this.resolvePendingRequest(msg.requestId, { results: msg.results ?? [], suppressedExpired: msg.suppressedExpired ?? 0 });
           }
           break;
 

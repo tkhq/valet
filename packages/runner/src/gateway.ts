@@ -17,6 +17,7 @@ import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { gitCredentials } from "./git-credentials.js";
 import { SANDBOX_GATEWAY_IDLE_TIMEOUT_MS } from "./timeouts.js";
+import type { MemoryWriteMeta } from "./types.js";
 
 const app = new Hono();
 
@@ -567,11 +568,27 @@ export interface GatewayCallbacks {
   onSendMessage?: (targetSessionId: string, content: string, interrupt: boolean) => Promise<void>;
   onReadMessages?: (targetSessionId: string, limit?: number, after?: string) => Promise<MessageEntry[]>;
   onReportGitState?: (params: GitStateParams) => void;
-  onMemRead?: (path: string) => Promise<{ file?: unknown; files?: unknown[]; content?: string }>;
-  onMemWrite?: (path: string, content: string) => Promise<{ file: unknown }>;
-  onMemPatch?: (path: string, operations: unknown[]) => Promise<{ result: unknown }>;
-  onMemRm?: (path: string) => Promise<{ deleted: number }>;
-  onMemSearch?: (query: string, path?: string, limit?: number) => Promise<{ results: unknown[] }>;
+  onMemRead?: (path: string) => Promise<{
+    file?: unknown;
+    files?: unknown[];
+    content?: string;
+    document?: string;
+    backlinks?: unknown[];
+    notices?: string[];
+    listing?: unknown[];
+    index?: string;
+  }>;
+  onMemWrite?: (path: string, content?: string, meta?: MemoryWriteMeta, threadId?: string) => Promise<{ file: unknown; warnings?: string[] }>;
+  onMemMove?: (from: string, to: string, threadId?: string) => Promise<{ result: unknown }>;
+  onMemLinks?: (
+    path: string,
+    direction?: "out" | "in" | "both",
+    depth?: 1 | 2 | 3,
+    includeJournal?: boolean,
+  ) => Promise<{ neighbors: unknown[][]; truncated: boolean }>;
+  onMemPatch?: (path: string, operations: unknown[], threadId?: string) => Promise<{ result: unknown }>;
+  onMemRm?: (path: string) => Promise<{ deleted: number; inboundWarning?: string | null }>;
+  onMemSearch?: (query: string, path?: string, limit?: number, includeExpired?: boolean) => Promise<{ results: unknown[]; suppressedExpired?: number }>;
   onListPersonas?: () => Promise<{ personas: unknown[] }>;
   onListChannels?: () => Promise<{ channels: unknown[] }>;
   onGetSessionStatus?: (targetSessionId: string) => Promise<{ sessionStatus: unknown }>;
@@ -851,14 +868,79 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
       return c.json({ error: "Memory write handler not configured" }, 500);
     }
     try {
-      const body = await c.req.json() as { path?: string; content?: string };
-      if (!body.path || !body.content) {
-        return c.json({ error: "Missing required fields: path, content" }, 400);
+      // Pass-through: only `path` is required. Content/metadata validation and
+      // remediation happen at the worker so messages stay consistent across
+      // channels (HTTP, WS, old-shape sandboxes) — see design spec, Rollout
+      // Compatibility. `threadId` comes from the runner's active-thread
+      // tracking via a header the tools send, never from the body.
+      const body = await c.req.json() as {
+        path?: string;
+        content?: string;
+        type?: string;
+        description?: string;
+        tags?: string[];
+        resource?: string;
+        sensitivity?: "private" | "shareable";
+        origin?: string;
+        expires?: string;
+      };
+      if (!body.path) {
+        return c.json({ error: "Missing required field: path" }, 400);
       }
-      const result = await callbacks.onMemWrite(body.path, body.content);
+      const meta: MemoryWriteMeta = {};
+      if (body.type !== undefined) meta.type = body.type;
+      if (body.description !== undefined) meta.description = body.description;
+      if (body.tags !== undefined) meta.tags = body.tags;
+      if (body.resource !== undefined) meta.resource = body.resource;
+      if (body.sensitivity !== undefined) meta.sensitivity = body.sensitivity;
+      if (body.origin !== undefined) meta.origin = body.origin;
+      if (body.expires !== undefined) meta.expires = body.expires;
+      const threadId = c.req.header("x-valet-thread-id") || undefined;
+      const result = await callbacks.onMemWrite(body.path, body.content, meta, threadId);
       return c.json(result);
     } catch (err) {
       console.error("[Gateway] Memory write error:", err);
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/memory/move", async (c) => {
+    if (!callbacks.onMemMove) {
+      return c.json({ error: "Memory move handler not configured" }, 500);
+    }
+    try {
+      const body = await c.req.json() as { from?: string; to?: string };
+      if (!body.from || !body.to) {
+        return c.json({ error: "Missing required fields: from, to" }, 400);
+      }
+      const threadId = c.req.header("x-valet-thread-id") || undefined;
+      const result = await callbacks.onMemMove(body.from, body.to, threadId);
+      return c.json(result);
+    } catch (err) {
+      console.error("[Gateway] Memory move error:", err);
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/memory/links", async (c) => {
+    if (!callbacks.onMemLinks) {
+      return c.json({ error: "Memory links handler not configured" }, 500);
+    }
+    try {
+      const path = c.req.query("path");
+      if (!path) {
+        return c.json({ error: "Missing required query param: path" }, 400);
+      }
+      const directionParam = c.req.query("direction");
+      const direction = directionParam === "out" || directionParam === "in" || directionParam === "both" ? directionParam : undefined;
+      const depthParam = c.req.query("depth");
+      const depthNum = depthParam ? parseInt(depthParam, 10) : undefined;
+      const depth = depthNum === 1 || depthNum === 2 || depthNum === 3 ? depthNum : undefined;
+      const includeJournal = c.req.query("includeJournal") === "true" ? true : undefined;
+      const result = await callbacks.onMemLinks(path, direction, depth, includeJournal);
+      return c.json(result);
+    } catch (err) {
+      console.error("[Gateway] Memory links error:", err);
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
@@ -872,7 +954,8 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
       if (!body.path || !body.operations) {
         return c.json({ error: "Missing required fields: path, operations" }, 400);
       }
-      const result = await callbacks.onMemPatch(body.path, body.operations);
+      const threadId = c.req.header("x-valet-thread-id") || undefined;
+      const result = await callbacks.onMemPatch(body.path, body.operations, threadId);
       return c.json(result);
     } catch (err) {
       console.error("[Gateway] Memory patch error:", err);
@@ -909,7 +992,8 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
       const path = c.req.query("path") || undefined;
       const limitParam = c.req.query("limit");
       const limit = limitParam ? Math.min(parseInt(limitParam, 10) || 20, 50) : 20;
-      const result = await callbacks.onMemSearch(query, path, limit);
+      const includeExpired = c.req.query("include_expired") === "true";
+      const result = await callbacks.onMemSearch(query, path, limit, includeExpired);
       return c.json(result);
     } catch (err) {
       console.error("[Gateway] Memory search error:", err);

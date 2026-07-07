@@ -27,7 +27,7 @@ export default tool({
         return `Failed to delete: ${errText}`
       }
 
-      const data = (await res.json()) as { deleted: number }
+      const data = (await res.json()) as { deleted: number; inboundWarning?: string | null }
       // The service returns the count of files deleted; HTTP 200 = call succeeded.
       // 0 deletions means the path didn't match anything (legitimate "not found").
       if (!data.deleted) {
@@ -37,7 +37,11 @@ export default tool({
       const label = args.path.endsWith("/")
         ? `${data.deleted} file${data.deleted !== 1 ? "s" : ""} removed`
         : "deleted"
-      return `Deleted: ${args.path} (${label})`
+      const lines = [`Deleted: ${args.path} (${label})`]
+      if (data.inboundWarning) {
+        lines.push(data.inboundWarning)
+      }
+      return lines.join("\n")
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return `Failed to delete memory: ${msg}`

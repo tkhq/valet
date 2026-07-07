@@ -556,12 +556,12 @@ function MemoryFilePreview({ path }: { path: string }) {
         {isError && (
           <span className="font-mono text-[10px] text-red-500">Failed to load</span>
         )}
-        {!isLoading && !isError && data && data.content.length > 0 && (
+        {!isLoading && !isError && data?.file && data.file.content.length > 0 && (
           <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-neutral-600 dark:text-neutral-300">
-            {data.content.length > 1500 ? data.content.slice(0, 1500) + '\n...' : data.content}
+            {data.file.content.length > 1500 ? data.file.content.slice(0, 1500) + '\n...' : data.file.content}
           </pre>
         )}
-        {!isLoading && !isError && (!data || data.content.length === 0) && (
+        {!isLoading && !isError && (!data?.file || data.file.content.length === 0) && (
           <span className="font-mono text-[10px] text-neutral-400">Empty file</span>
         )}
       </div>

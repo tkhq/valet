@@ -2,10 +2,12 @@ import { tool } from "@opencode-ai/plugin"
 
 export default tool({
   description:
-    "Surgically edit a memory file without reading it first. " +
+    "Surgically edit a memory file's body without reading it first. " +
     "Supports append, prepend, find-and-replace, insert_after, and delete_section. " +
     "Ideal for journal entries (append), fact updates (replace), and section management. " +
-    "If the file doesn't exist, append/prepend will create it; other ops are skipped.",
+    "If the file doesn't exist, append/prepend will create it; other ops are skipped. " +
+    "Patches apply to the body — edit metadata (type/description/tags/resource/sensitivity/" +
+    "origin/expires) via mem_write params, not by patching rendered frontmatter.",
   args: {
     path: tool.schema
       .string()
@@ -42,7 +44,7 @@ export default tool({
       .min(1)
       .describe("Operations to apply in order."),
   },
-  async execute(args) {
+  async execute(args, ctx) {
     try {
       // Transform operations to the backend format
       const operations = args.operations.map((op) => {
@@ -62,9 +64,13 @@ export default tool({
         }
       })
 
+      const headers: Record<string, string> = { "Content-Type": "application/json" }
+      if (ctx?.sessionID) {
+        headers["x-valet-thread-id"] = ctx.sessionID
+      }
       const res = await fetch("http://localhost:9000/api/memory", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           path: args.path,
           operations,
@@ -81,6 +87,7 @@ export default tool({
           version: number
           applied: number
           skipped: string[]
+          warnings: string[]
         }
       }
 
@@ -89,7 +96,11 @@ export default tool({
         parts.push(`, ${data.result.skipped.length} skipped: ${data.result.skipped.join("; ")}`)
       }
       parts.push(")")
-      return parts.join("")
+      const lines = [parts.join("")]
+      for (const w of data.result.warnings ?? []) {
+        lines.push(w)
+      }
+      return lines.join("\n")
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return `Failed to patch memory: ${msg}`

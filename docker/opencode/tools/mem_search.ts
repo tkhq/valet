@@ -19,7 +19,8 @@ export default tool({
     "Search memory files using full-text search with optional LLM re-ranking. " +
     "Returns the most relevant files for the query, with match-aware snippets. " +
     "Use this before responding to any new request that may involve known projects, " +
-    "preferences, workflows, or past decisions.",
+    "preferences, workflows, or past decisions. " +
+    "Expired files are excluded by default — pass include_expired to see them (ranked last).",
   args: {
     query: tool.schema
       .string()
@@ -37,12 +38,20 @@ export default tool({
       .number()
       .default(5)
       .describe("Max results to return after re-ranking (default 5)"),
+    include_expired: tool.schema
+      .boolean()
+      .default(false)
+      .describe(
+        "Include expired files in results, annotated [EXPIRED] and ranked last. " +
+        "Default false — silently omitting them would otherwise read as amnesia.",
+      ),
   },
   async execute(args) {
     try {
       // 1. Fetch top-20 candidates from FTS
       const params = new URLSearchParams({ query: args.query, limit: "20" })
       if (args.path) params.set("path", args.path)
+      if (args.include_expired) params.set("include_expired", "true")
 
       const res = await fetch(
         `http://localhost:9000/api/memory/search?${params.toString()}`,
@@ -53,7 +62,8 @@ export default tool({
       }
 
       const data = (await res.json()) as {
-        results: { path: string; snippet: string; relevance: number }[]
+        results: Candidate[]
+        suppressedExpired?: number
       }
 
       if (!data.results || data.results.length === 0) {
@@ -63,12 +73,16 @@ export default tool({
       const candidates = data.results
       const finalLimit = args.limit ?? 5
 
-      // 2. Re-rank if enabled and we have an LLM available
+      // 2. Re-rank if enabled and we have an LLM available. The reranker only
+      // ever reorders by relevance score — expired-last is re-applied after,
+      // since an LLM score has no notion of expiry and would otherwise
+      // resurrect expired results into the middle of the pack.
       let ranked = candidates
       if (args.rerank !== false && candidates.length > 1) {
         const reranked = await rerankWithLLM(args.query, candidates)
         if (reranked) ranked = reranked
       }
+      ranked = stableSortExpiredLast(ranked)
 
       // 3. Format output
       const top = ranked.slice(0, finalLimit)
@@ -78,9 +92,18 @@ export default tool({
       for (let i = 0; i < top.length; i++) {
         const r = top[i]
         const scoreStr = (r.relevance * 100).toFixed(0) + "%"
-        lines.push(`${i + 1}. ${r.path}  (score: ${scoreStr})`)
+        const expiredTag = r.expired ? "[EXPIRED] " : ""
+        lines.push(`${i + 1}. ${expiredTag}${r.path}  (score: ${scoreStr})`)
+        lines.push(`   ${metadataLine(r)}`)
+        const desc = descriptionLine(r)
+        if (desc) lines.push(`   ${desc}`)
         lines.push(`   ${r.snippet.replace(/\n/g, "\n   ")}`)
         lines.push("")
+      }
+      if (data.suppressedExpired && data.suppressedExpired > 0) {
+        lines.push(
+          `(${data.suppressedExpired} expired file${data.suppressedExpired !== 1 ? "s" : ""} matched — pass include_expired: true)`,
+        )
       }
       return lines.join("\n")
     } catch (e) {
@@ -90,13 +113,69 @@ export default tool({
   },
 })
 
-// ─── LLM Re-ranking ──────────────────────────────────────────────────────────
+// ─── Result formatting ───────────────────────────────────────────────────────
 
 interface Candidate {
   path: string
   snippet: string
   relevance: number
+  title: string
+  type: string
+  description: string
+  tags: string[]
+  resource: string
+  inboundLinks: number
+  expired: boolean
 }
+
+/** Compact metadata line: `[type] path · tags: a,b,+2 · resource: host/path · ←3` (omits empty parts). */
+function metadataLine(r: Candidate): string {
+  const parts: string[] = []
+  if (r.type) parts.push(`[${r.type}] ${r.path}`)
+  else parts.push(r.path)
+
+  if (r.tags && r.tags.length > 0) {
+    const shown = r.tags.slice(0, 4)
+    const extra = r.tags.length - shown.length
+    parts.push(`tags: ${shown.join(",")}${extra > 0 ? `,+${extra}` : ""}`)
+  }
+
+  if (r.resource) {
+    parts.push(`resource: ${formatResource(r.resource)}`)
+  }
+
+  if (r.inboundLinks > 0) {
+    parts.push(`←${r.inboundLinks}`)
+  }
+
+  return parts.join(" · ")
+}
+
+function formatResource(resource: string): string {
+  try {
+    const u = new URL(resource)
+    const path = u.pathname === "/" ? "" : u.pathname
+    return `${u.host}${path}`
+  } catch {
+    return resource
+  }
+}
+
+/** Description line, omitted when empty or when the snippet already starts with it. */
+function descriptionLine(r: Candidate): string | null {
+  if (!r.description) return null
+  if (r.snippet.startsWith(r.description)) return null
+  return r.description
+}
+
+/** Stable sort that moves expired results to the bottom without reordering within each group. */
+function stableSortExpiredLast(candidates: Candidate[]): Candidate[] {
+  const notExpired = candidates.filter((c) => !c.expired)
+  const expired = candidates.filter((c) => c.expired)
+  return [...notExpired, ...expired]
+}
+
+// ─── LLM Re-ranking ──────────────────────────────────────────────────────────
 
 async function rerankWithLLM(
   query: string,
@@ -107,7 +186,7 @@ async function rerankWithLLM(
   if (!provider) return null
 
   const docList = candidates
-    .map((c, i) => `[${i + 1}] ${c.path}\n${c.snippet}`)
+    .map((c, i) => `[${i + 1}] ${c.path} — ${c.title}\n${c.description}\n${c.snippet}`)
     .join("\n\n")
 
   const prompt = `You are a relevance judge. Score each document's relevance to the query.
@@ -132,7 +211,7 @@ Example for 3 docs: [0.9, 0.2, 0.7]`
 
     if (!scores || scores.length !== candidates.length) return null
 
-    // Re-sort candidates by LLM score, preserving path/snippet
+    // Re-sort candidates by LLM score, preserving all other fields.
     return candidates
       .map((c, i) => ({ ...c, relevance: scores![i] ?? c.relevance }))
       .sort((a, b) => b.relevance - a.relevance)
@@ -163,7 +242,7 @@ async function callAnthropic(model: string, prompt: string, apiKey: string): Pro
       }),
     })
     if (!res.ok) return null
-    const data = (await res.json()) as any
+    const data = (await res.json()) as { content?: { text?: string }[] }
     const text = data?.content?.[0]?.text ?? ""
     return parseScores(text)
   } finally {
@@ -189,7 +268,7 @@ async function callOpenAI(model: string, prompt: string, apiKey: string): Promis
       }),
     })
     if (!res.ok) return null
-    const data = (await res.json()) as any
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] }
     const text = data?.choices?.[0]?.message?.content ?? ""
     return parseScores(text)
   } finally {

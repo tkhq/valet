@@ -26,6 +26,7 @@ import { Route as SettingsSkillsRouteImport } from './routes/settings/skills'
 import { Route as SettingsPersonasRouteImport } from './routes/settings/personas'
 import { Route as SettingsAdminRouteImport } from './routes/settings/admin'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessionId'
+import { Route as OrchestratorMemoryRouteImport } from './routes/orchestrator.memory'
 import { Route as InviteCodeRouteImport } from './routes/invite/$code'
 import { Route as IntegrationsCallbackRouteImport } from './routes/integrations/callback'
 import { Route as AuthCallbackRouteImport } from './routes/auth/callback'
@@ -126,6 +127,11 @@ const SessionsSessionIdRoute = SessionsSessionIdRouteImport.update({
   path: '/sessions/$sessionId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OrchestratorMemoryRoute = OrchestratorMemoryRouteImport.update({
+  id: '/memory',
+  path: '/memory',
+  getParentRoute: () => OrchestratorRoute,
+} as any)
 const InviteCodeRoute = InviteCodeRouteImport.update({
   id: '/invite/$code',
   path: '/invite/$code',
@@ -209,10 +215,11 @@ export interface FileRoutesByFullPath {
   '/inbox': typeof InboxRoute
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
-  '/orchestrator': typeof OrchestratorRoute
+  '/orchestrator': typeof OrchestratorRouteWithChildren
   '/auth/callback': typeof AuthCallbackRoute
   '/integrations/callback': typeof IntegrationsCallbackRoute
   '/invite/$code': typeof InviteCodeRoute
+  '/orchestrator/memory': typeof OrchestratorMemoryRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRouteWithChildren
   '/settings/admin': typeof SettingsAdminRoute
   '/settings/personas': typeof SettingsPersonasRouteWithChildren
@@ -241,10 +248,11 @@ export interface FileRoutesByTo {
   '/inbox': typeof InboxRoute
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
-  '/orchestrator': typeof OrchestratorRoute
+  '/orchestrator': typeof OrchestratorRouteWithChildren
   '/auth/callback': typeof AuthCallbackRoute
   '/integrations/callback': typeof IntegrationsCallbackRoute
   '/invite/$code': typeof InviteCodeRoute
+  '/orchestrator/memory': typeof OrchestratorMemoryRoute
   '/settings/admin': typeof SettingsAdminRoute
   '/settings/personas': typeof SettingsPersonasRouteWithChildren
   '/settings/skills': typeof SettingsSkillsRouteWithChildren
@@ -274,10 +282,11 @@ export interface FileRoutesById {
   '/inbox': typeof InboxRoute
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
-  '/orchestrator': typeof OrchestratorRoute
+  '/orchestrator': typeof OrchestratorRouteWithChildren
   '/auth/callback': typeof AuthCallbackRoute
   '/integrations/callback': typeof IntegrationsCallbackRoute
   '/invite/$code': typeof InviteCodeRoute
+  '/orchestrator/memory': typeof OrchestratorMemoryRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRouteWithChildren
   '/settings/admin': typeof SettingsAdminRoute
   '/settings/personas': typeof SettingsPersonasRouteWithChildren
@@ -313,6 +322,7 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/integrations/callback'
     | '/invite/$code'
+    | '/orchestrator/memory'
     | '/sessions/$sessionId'
     | '/settings/admin'
     | '/settings/personas'
@@ -345,6 +355,7 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/integrations/callback'
     | '/invite/$code'
+    | '/orchestrator/memory'
     | '/settings/admin'
     | '/settings/personas'
     | '/settings/skills'
@@ -377,6 +388,7 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/integrations/callback'
     | '/invite/$code'
+    | '/orchestrator/memory'
     | '/sessions/$sessionId'
     | '/settings/admin'
     | '/settings/personas'
@@ -407,7 +419,7 @@ export interface RootRouteChildren {
   InboxRoute: typeof InboxRoute
   LoginRoute: typeof LoginRoute
   OnboardingRoute: typeof OnboardingRoute
-  OrchestratorRoute: typeof OrchestratorRoute
+  OrchestratorRoute: typeof OrchestratorRouteWithChildren
   AuthCallbackRoute: typeof AuthCallbackRoute
   IntegrationsCallbackRoute: typeof IntegrationsCallbackRoute
   InviteCodeRoute: typeof InviteCodeRoute
@@ -545,6 +557,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionsSessionIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/orchestrator/memory': {
+      id: '/orchestrator/memory'
+      path: '/memory'
+      fullPath: '/orchestrator/memory'
+      preLoaderRoute: typeof OrchestratorMemoryRouteImport
+      parentRoute: typeof OrchestratorRoute
+    }
     '/invite/$code': {
       id: '/invite/$code'
       path: '/invite/$code'
@@ -668,6 +687,18 @@ const AutomationRouteWithChildren = AutomationRoute._addFileChildren(
   AutomationRouteChildren,
 )
 
+interface OrchestratorRouteChildren {
+  OrchestratorMemoryRoute: typeof OrchestratorMemoryRoute
+}
+
+const OrchestratorRouteChildren: OrchestratorRouteChildren = {
+  OrchestratorMemoryRoute: OrchestratorMemoryRoute,
+}
+
+const OrchestratorRouteWithChildren = OrchestratorRoute._addFileChildren(
+  OrchestratorRouteChildren,
+)
+
 interface SessionsSessionIdRouteChildren {
   SessionsSessionIdIndexRoute: typeof SessionsSessionIdIndexRoute
   SessionsSessionIdThreadsThreadIdRoute: typeof SessionsSessionIdThreadsThreadIdRoute
@@ -712,7 +743,7 @@ const rootRouteChildren: RootRouteChildren = {
   InboxRoute: InboxRoute,
   LoginRoute: LoginRoute,
   OnboardingRoute: OnboardingRoute,
-  OrchestratorRoute: OrchestratorRoute,
+  OrchestratorRoute: OrchestratorRouteWithChildren,
   AuthCallbackRoute: AuthCallbackRoute,
   IntegrationsCallbackRoute: IntegrationsCallbackRoute,
   InviteCodeRoute: InviteCodeRoute,

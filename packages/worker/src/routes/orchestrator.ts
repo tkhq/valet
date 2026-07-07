@@ -1,10 +1,10 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
-import type { MemoryExportBundle } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import * as db from '../lib/db.js';
 import * as orchestratorService from '../services/orchestrator.js';
+import { buildMemoryReadEnvelope } from '../lib/memory-read-envelope.js';
 
 const createIdentityLinkSchema = z.object({
   provider: z.string().min(1).max(50),
@@ -31,9 +31,26 @@ const updateIdentitySchema = z.object({
   customInstructions: z.string().max(10000).optional(),
 });
 
+// `content` is optional (omission ⇒ metadata-only update; stickiness applies to
+// omitted metadata fields). `sourceSessionId` is intentionally NOT a field here:
+// HTTP writes have no thread in context, so the route always passes '' — any
+// `sourceSessionId` in the request body is silently stripped by zod's default
+// unknown-key handling and never reaches writeMemoryFile.
 const writeMemorySchema = z.object({
   path: z.string().min(1).max(256),
-  content: z.string().min(1).max(50000),
+  content: z.string().max(db.MAX_MEMORY_FILE_SIZE).optional(),
+  type: z.string().max(100).optional(),
+  description: z.string().max(2000).optional(),
+  tags: z.array(z.string()).optional(),
+  resource: z.string().max(2000).optional(),
+  sensitivity: z.enum(['private', 'shareable']).optional(),
+  origin: z.enum(['user-stated', 'inferred', 'imported']).optional(),
+  expires: z.string().optional(), // '' clears; ISO or D1 form sets
+});
+
+const moveMemorySchema = z.object({
+  from: z.string().min(1).max(256),
+  to: z.string().min(1).max(256),
 });
 
 // The import envelope is validated loosely so a full memory export round-trips
@@ -44,22 +61,32 @@ const writeMemorySchema = z.object({
 // 200-file non-pinned cap prunes the excess and reports it via
 // MemoryImportResult.pruned rather than silently dropping files.
 export const importMemorySchema = z.object({
-  files: z
-    .array(
-      z.object({
-        path: z.string().min(1).max(256),
-        // No content length cap: real memory files exceed 50k via the agent's
-        // uncapped PATCH/append writes. content is a D1 bound parameter (not
-        // subject to the 100KB SQL-text limit); the true ceiling is D1's 2MB
-        // row size, and an oversize file is skipped-and-reported per-file by
-        // importMemoryFiles — never a 400 that fails the entire import.
-        content: z.string(),
-      }),
-    )
-    // No max file count: exportMemoryFiles is uncapped and a real account can
-    // exceed any fixed cap (200 non-pinned soft cap + unbounded pinned
-    // preferences/*), so a fixed cap would re-create this same bug class.
-    .min(1),
+  files: z.union([
+    // Legacy array form (old JSON export bundles).
+    z
+      .array(
+        z.object({
+          path: z.string().min(1).max(256),
+          // No content length cap: real memory files exceed 50k via the agent's
+          // uncapped PATCH/append writes. content is a D1 bound parameter (not
+          // subject to the 100KB SQL-text limit); the true ceiling is D1's 2MB
+          // row size, and an oversize file is skipped-and-reported per-file by
+          // importMemoryFiles — never a 400 that fails the entire import.
+          content: z.string(),
+        }),
+      )
+      // No max file count: exportMemoryFiles is uncapped and a real account can
+      // exceed any fixed cap (200 non-pinned soft cap + unbounded pinned
+      // preferences/*), so a fixed cap would re-create this same bug class.
+      .min(1),
+    // Manifest map form: path → rendered OKF document.
+    z
+      .record(z.string().min(1).max(256), z.string())
+      .refine((r) => Object.keys(r).length > 0, 'files must not be empty'),
+  ]),
+  // Trust is user-asserted owner opt-in: trusted imports honor all OKF + valet
+  // keys; without the flag the bundle gets foreign-import semantics.
+  trusted: z.boolean().optional(),
 });
 
 const patchMemorySchema = z.object({
@@ -195,38 +222,111 @@ orchestratorRouter.get('/orchestrator/check-name', async (c) => {
 
 /**
  * GET /api/me/memory?path=...
- * If path ends with '/' or is empty → directory listing
- * If path is a file → read file content
+ * If path ends with '/' or is empty → directory listing: `{ listing, index }`,
+ * where `index` is the virtual OKF index.md text for that directory. Directory
+ * reads are one of the lazy link-backfill trigger surfaces.
+ * If path is a file → `{ file, document, backlinks, notices }`, where `document`
+ * is the rendered OKF concept (no fenced decorations — those are separate JSON
+ * fields; only the sandbox tool inlines fences).
  */
 orchestratorRouter.get('/memory', async (c) => {
   const user = c.get('user');
   const path = c.req.query('path') || '';
+  const scope = { userId: user.id };
 
-  if (!path || path.endsWith('/')) {
-    const files = await db.listMemoryFiles(c.get('db'), user.id, path);
-    return c.json({ files });
+  const envelope = await buildMemoryReadEnvelope(c.get('db'), c.env.DB, scope, path);
+  if (envelope.kind === 'dir') {
+    return c.json({ listing: envelope.listing, index: envelope.index });
   }
 
-  const file = await db.readMemoryFile(c.get('db'), user.id, path);
-  if (!file) {
-    return c.json({ file: null, content: '' });
+  // `sourceSessionId` stores the OpenCode thread id (see design spec,
+  // Provenance Capture) — useless as a session URL. Resolve it to the owning
+  // Valet session + thread row so the client can link the actual
+  // conversation; null when the thread is unknown (pruned, foreign import).
+  let sourceThread: { sessionId: string; threadId: string } | null = null;
+  if (envelope.file?.sourceSessionId) {
+    const thread = await db.getThreadByOpencodeSessionId(c.env.DB, envelope.file.sourceSessionId, user.id);
+    if (thread) sourceThread = { sessionId: thread.sessionId, threadId: thread.id };
   }
 
-  // Boost relevance on read
-  db.boostMemoryFileRelevance(c.get('db'), user.id, path).catch(() => {});
-
-  return c.json({ file });
+  return c.json({
+    file: envelope.file,
+    document: envelope.document,
+    backlinks: envelope.backlinks,
+    notices: envelope.notices,
+    sourceThread,
+  });
 });
 
 /**
- * PUT /api/me/memory — create or overwrite a file
+ * PUT /api/me/memory — create or overwrite a file's content and/or metadata.
+ * `sourceSessionId` is always hard-coded to '' — HTTP writes have no OpenCode
+ * thread in context (see design spec, Provenance Capture).
  */
 orchestratorRouter.put('/memory', zValidator('json', writeMemorySchema), async (c) => {
   const user = c.get('user');
   const body = c.req.valid('json');
 
-  const file = await db.writeMemoryFile(c.env.DB, user.id, body.path, body.content);
-  return c.json({ file }, 201);
+  const meta: db.MemoryWriteMeta = {};
+  if (body.type !== undefined) meta.type = body.type;
+  if (body.description !== undefined) meta.description = body.description;
+  if (body.tags !== undefined) meta.tags = body.tags;
+  if (body.resource !== undefined) meta.resource = body.resource;
+  if (body.sensitivity !== undefined) meta.sensitivity = body.sensitivity;
+  if (body.origin !== undefined) meta.origin = body.origin;
+  if (body.expires !== undefined) meta.expires = body.expires;
+
+  const { file, warnings } = await db.writeMemoryFile(c.env.DB, { userId: user.id }, body.path, body.content, meta, '');
+  return c.json({ file, warnings }, 201);
+});
+
+/**
+ * POST /api/me/memory/move — rename/reorganize a file, rewriting inbound links.
+ */
+orchestratorRouter.post('/memory/move', zValidator('json', moveMemorySchema), async (c) => {
+  const user = c.get('user');
+  const body = c.req.valid('json');
+
+  const result = await db.moveMemoryFile(c.env.DB, { userId: user.id }, body.from, body.to);
+  return c.json(result);
+});
+
+/**
+ * GET /api/me/memory/links?path=&direction=out|in|both&depth=1|2|3&includeJournal=true
+ */
+orchestratorRouter.get('/memory/links', async (c) => {
+  const user = c.get('user');
+  const path = c.req.query('path');
+  if (!path) {
+    return c.json({ error: 'path query param required' }, 400);
+  }
+
+  const directionParam = c.req.query('direction');
+  const direction: 'out' | 'in' | 'both' =
+    directionParam === 'out' || directionParam === 'in' ? directionParam : 'both';
+
+  const depthParam = c.req.query('depth');
+  const depthNum = depthParam ? parseInt(depthParam, 10) : 1;
+  const depth: 1 | 2 | 3 = depthNum === 2 || depthNum === 3 ? depthNum : 1;
+
+  const includeJournal = c.req.query('includeJournal') === 'true';
+
+  const result = await db.queryLinks(c.env.DB, { userId: user.id }, path, direction, depth, includeJournal);
+  return c.json(result);
+});
+
+/**
+ * GET /api/me/memory/graph?tags=true&containment=true
+ * `truncated` tells the client the graph was capped at MAX_GRAPH_NODES — the
+ * server-side cap is silent otherwise.
+ */
+orchestratorRouter.get('/memory/graph', async (c) => {
+  const user = c.get('user');
+  const tags = c.req.query('tags') === 'true';
+  const containment = c.req.query('containment') === 'true';
+
+  const graph = await db.buildMemoryGraph(c.env.DB, { userId: user.id }, { tags, containment });
+  return c.json({ ...graph, truncated: graph.nodes.length >= db.MAX_GRAPH_NODES });
 });
 
 /**
@@ -236,7 +336,7 @@ orchestratorRouter.patch('/memory', zValidator('json', patchMemorySchema), async
   const user = c.get('user');
   const body = c.req.valid('json');
 
-  const result = await db.patchMemoryFile(c.env.DB, user.id, body.path, body.operations);
+  const result = await db.patchMemoryFile(c.env.DB, { userId: user.id }, body.path, body.operations, '');
   return c.json({ result });
 });
 
@@ -253,58 +353,56 @@ orchestratorRouter.delete('/memory', async (c) => {
   }
 
   let deleted: number;
+  let inboundWarning: string | null = null;
   if (path.endsWith('/')) {
-    deleted = await db.deleteMemoryFilesUnderPath(c.env.DB, user.id, path);
+    deleted = await db.deleteMemoryFilesUnderPath(c.env.DB, { userId: user.id }, path);
   } else {
-    deleted = await db.deleteMemoryFile(c.env.DB, user.id, path);
+    ({ deleted, inboundWarning } = await db.deleteMemoryFile(c.env.DB, { userId: user.id }, path));
   }
 
-  return c.json({ success: deleted > 0, deleted });
+  return c.json({ success: deleted > 0, deleted, inboundWarning });
 });
 
 /**
- * GET /api/me/memory/search?query=...&path=...
+ * GET /api/me/memory/search?query=...&path=...&include_expired=true
  */
 orchestratorRouter.get('/memory/search', async (c) => {
   const user = c.get('user');
   const query = c.req.query('query');
   const path = c.req.query('path') || undefined;
+  const includeExpired = c.req.query('include_expired') === 'true';
 
   if (!query) {
     return c.json({ error: 'query param required' }, 400);
   }
 
-  const results = await db.searchMemoryFiles(c.env.DB, user.id, query, path);
-  return c.json({ results });
+  const { results, suppressedExpired } = await db.searchMemoryFiles(c.env.DB, { userId: user.id }, query, { pathPrefix: path, includeExpired });
+  return c.json({ results, suppressedExpired });
 });
 
 /**
- * GET /api/me/memory/export
- * Returns a portable bundle of all the user's memory files (path + content).
- * Lets users move memory between environments (e.g. dev → prod).
+ * GET /api/me/memory/export?include=all|shareable
+ * Returns a deterministic OKF manifest of the user's memory (rendered
+ * documents + hashes + valetState sidecar, generated index.md per directory).
  */
 orchestratorRouter.get('/memory/export', async (c) => {
   const user = c.get('user');
-  const files = await db.exportMemoryFiles(c.get('db'), user.id);
-  const bundle: MemoryExportBundle = {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    count: files.length,
-    files,
-  };
-  return c.json(bundle);
+  const include = c.req.query('include') === 'shareable' ? 'shareable' : 'all';
+  const manifest = await db.exportMemoryFiles(c.get('db'), { userId: user.id }, include);
+  return c.json(manifest);
 });
 
 /**
  * POST /api/me/memory/import
- * Writes a batch of memory files (merge — same-path files are overwritten).
- * Invalid/empty files are skipped and reported rather than failing the import.
+ * Imports a memory bundle (manifest map or legacy array form). Invalid/empty
+ * files are skipped and reported rather than failing the import. `trusted`
+ * (owner-asserted) selects trusted-import semantics; default is foreign.
  */
 orchestratorRouter.post('/memory/import', zValidator('json', importMemorySchema), async (c) => {
   const user = c.get('user');
   const body = c.req.valid('json');
 
-  const result = await db.importMemoryFiles(c.env.DB, user.id, body.files);
+  const result = await db.importMemoryFiles(c.env.DB, { userId: user.id }, body.files, body.trusted === true);
   return c.json(result);
 });
 

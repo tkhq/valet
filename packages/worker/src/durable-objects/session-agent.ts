@@ -6,7 +6,7 @@ import { activeTraceparent } from '../lib/tracing.js';
 import type { Context } from '@opentelemetry/api';
 import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
 import { getCredential, type CredentialResult } from '../services/credentials.js';
-import { memRead, memWrite, memPatch, memRm, memSearch } from '../services/session-memory.js';
+import { memRead, memWrite, memMove, memLinks, memPatch, memRm, memSearch, toPatchOperations } from '../services/session-memory.js';
 import { getSlackBotToken } from '../services/slack.js';
 import { buildOrchestratorPersonaFiles } from '../lib/orchestrator-persona.js';
 import { assembleCustomProviders, assembleBuiltInProviderModelConfigs, assembleRepoEnv } from '../lib/env-assembly.js';
@@ -3722,7 +3722,7 @@ export class SessionAgentDO {
       'mem-read': async (msg) => {
         const userId = this.sessionState.userId;
         try {
-          const result = await memRead(this.appDb, userId, msg.path);
+          const result = await memRead(this.appDb, this.env.DB, userId, msg.path);
           this.runnerLink.send({ type: 'mem-read-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-read-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
@@ -3732,17 +3732,41 @@ export class SessionAgentDO {
       'mem-write': async (msg) => {
         const userId = this.sessionState.userId;
         try {
-          const result = await memWrite(this.env.DB, userId, msg.path!, msg.content!);
+          const result = await memWrite(this.env.DB, userId, msg.path, msg.content, msg.meta ?? {}, msg.threadId ?? '');
           this.runnerLink.send({ type: 'mem-write-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-write-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
         }
       },
 
+      'mem-move': async (msg) => {
+        const userId = this.sessionState.userId;
+        try {
+          // msg.threadId is intentionally unused here: moves never touch
+          // provenance (sourceSessionId), so moveMemoryFile takes no session
+          // param. The field is forward-looking for future provenance-aware
+          // move semantics.
+          const result = await memMove(this.env.DB, userId, msg.from, msg.to);
+          this.runnerLink.send({ type: 'mem-move-result', requestId: msg.requestId!, ...result });
+        } catch (err) {
+          this.runnerLink.send({ type: 'mem-move-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) });
+        }
+      },
+
+      'mem-links': async (msg) => {
+        const userId = this.sessionState.userId;
+        try {
+          const result = await memLinks(this.env.DB, userId, msg.path, msg.direction ?? 'both', msg.depth ?? 1, msg.includeJournal ?? false);
+          this.runnerLink.send({ type: 'mem-links-result', requestId: msg.requestId!, ...result });
+        } catch (err) {
+          this.runnerLink.send({ type: 'mem-links-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) });
+        }
+      },
+
       'mem-patch': async (msg) => {
         const userId = this.sessionState.userId;
         try {
-          const result = await memPatch(this.env.DB, userId, msg.path!, msg.operations);
+          const result = await memPatch(this.env.DB, userId, msg.path, toPatchOperations(msg.operations), msg.threadId ?? '');
           this.runnerLink.send({ type: 'mem-patch-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-patch-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
@@ -3762,7 +3786,7 @@ export class SessionAgentDO {
       'mem-search': async (msg) => {
         const userId = this.sessionState.userId;
         try {
-          const result = await memSearch(this.env.DB, userId, msg.query!, msg.path, msg.limit);
+          const result = await memSearch(this.env.DB, userId, msg.query!, msg.path, msg.limit, msg.includeExpired);
           this.runnerLink.send({ type: 'mem-search-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-search-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);

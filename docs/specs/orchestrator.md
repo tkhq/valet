@@ -12,7 +12,7 @@ This spec covers:
 - Child session spawning and cascade management
 - Inter-session messaging (mailbox/notification queue)
 - Channel binding system and prompt routing
-- Memory system (FTS5, relevance scoring, auto-pruning)
+- Memory system (OKF-native file tree, FTS5, relevance scoring, auto-pruning, `mem_*` tool surface)
 - Task board (hierarchical tasks with dependencies)
 - Identity links (external platform accounts)
 - OpenCode tools available to the orchestrator
@@ -23,6 +23,7 @@ This spec covers:
 - This spec does NOT cover sandbox boot sequence, Runner internals, or auth gateway (see [sandbox-runtime.md](sandbox-runtime.md))
 - This spec does NOT cover WebSocket transport or event broadcasting (see [real-time.md](real-time.md))
 - This spec does NOT cover workflow execution logic (see [workflows.md](workflows.md))
+- This spec does NOT cover OKF serialization internals, sanitization/trust-boundary policy, or the cross-link graph design (see [`2026-07-02-okf-memory-design.md`](2026-07-02-okf-memory-design.md))
 
 ## Data Model
 
@@ -44,38 +45,61 @@ One identity per user per org.
 
 **Indexes:** unique on `(orgId, handle)`, unique on `(orgId, userId)`.
 
-### `orchestrator_memories` table
+### `orchestrator_memory_files` table
 
-User-global memories with FTS5 search and relevance scoring.
+The orchestrator's memory is a per-user tree of OKF (Open Knowledge Format v0.1) concept files, stored as DB rows with the OKF frontmatter fields promoted to columns — the `content` column holds only the plain markdown body. Frontmatter is never stored; it is a deterministic projection rendered at every boundary (`mem_read`, the HTTP API, export) from the columns below.
 
 | Column | Type | Default | Notes |
 |--------|------|---------|-------|
 | `id` | text PK | — | UUID |
 | `userId` | text NOT NULL | — | Owner |
-| `orgId` | text NOT NULL | `'default'` | Org scope |
-| `category` | text NOT NULL | — | See categories below |
-| `content` | text NOT NULL | — | Memory content |
-| `relevance` | real NOT NULL | `1.0` | Relevance score (0.0–2.0) |
-| `createdAt` | text | `datetime('now')` | ISO datetime |
-| `lastAccessedAt` | text | `datetime('now')` | Updated on search hit |
+| `orgId` | text NOT NULL | `'default'` | Reserved for future org-published shared libraries |
+| `path` | text NOT NULL | — | Bundle-relative path, e.g. `projects/valet/overview.md` |
+| `content` | text NOT NULL | — | Plain markdown body (no frontmatter) |
+| `title` | text NOT NULL | `''` | Body-derived (first H1) for agent writes; imports may set it |
+| `type` | text NOT NULL | `''` | OKF required `type`; free-form, directory-defaulted (see below) |
+| `description` | text NOT NULL | `''` | OKF `description` — authored only, never auto-populated |
+| `tags` | text NOT NULL | `'[]'` | OKF `tags`, JSON array |
+| `resource` | text NOT NULL | `''` | OKF `resource` URI, stored normalized (dedupe primitive) |
+| `extras` | text NOT NULL | `'{}'` | Unknown frontmatter keys, preserved verbatim (OKF round-trip rule) |
+| `sensitivity` | text NOT NULL | `'private'` | `private \| shareable` — gates export |
+| `origin` | text NOT NULL | `''` | `user-stated \| inferred \| imported` |
+| `sourceSessionId` | text NOT NULL | `''` | OpenCode thread ID that wrote the memory; system-captured only |
+| `expires` | text | NULL | Optional expiry (D1 datetime form) |
+| `relevance` | real NOT NULL | `1.0` | Boosts on read access; instance-local, never rendered in documents |
+| `pinned` | integer NOT NULL | `0` | Path-derived (e.g. all of `preferences/`); recomputed on import |
+| `version` | integer NOT NULL | `1` | Instance-local write counter |
 
-**Indexes:** on `userId`, on `(userId, category)`.
+**Indexes:** unique on `(userId, path)`, on `userId`, on `(userId, pinned)`, on `(userId, resource)`.
 
-**FTS5 companion table:** `orchestrator_memories_fts` (virtual table, not representable in Drizzle). Used for full-text search with BM25 ranking. Inserts/deletes are done alongside regular table operations via raw SQL.
+**FTS5 companion table:** `orchestrator_memory_files_fts` over `(path, title, description, tags, content)`, BM25-weighted (`path 5, title 10, description 8, tags 6, content 1`). The `description` field falls back to the first body paragraph at index time when unauthored, so search always has description-weight signal without storing derived text.
 
-**Memory categories:** `preference`, `workflow`, `context`, `project`, `decision`, `general`.
+**Directory-default types:** `preferences/` → `preference`, `projects/` → `project-note`, `workflows/` → `workflow`, `journal/` → `journal-entry`, `people/` → `person`, everything else → `note`.
 
-**Memory cap:** 200 per user. When creating a memory exceeds the cap, the lowest-relevance, least-recently-accessed memories are pruned automatically.
+**Memory cap:** 200 per user (pinned files exempt). Expired files prune first; inbound-link count is a keep signal.
 
-**Relevance boosting:** `boostMemoryRelevance()` adds 0.1 per access, capped at 2.0. The function exists but is not currently wired to any route or tool — relevance boosting on access is described in the system prompt but not implemented.
+**Frontmatter, trust boundaries, and determinism** — how OKF frontmatter is rendered/parsed, the per-channel (agent write / trusted import / foreign import) key-disposition policy, the stale-echo concurrency guard, and the churn table (what bumps `updated_at`/`version`/hash and what doesn't) are specified in full in [`2026-07-02-okf-memory-design.md`](2026-07-02-okf-memory-design.md) — this spec doesn't duplicate them.
 
-### `agent_memories` table (separate, older system)
+### `memory_links` table
 
+Extracted cross-links between memory files, rebuilt on every write/patch/import.
+
+```sql
+CREATE TABLE memory_links (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  from_path TEXT NOT NULL,
+  to_path TEXT NOT NULL,
+  context TEXT NOT NULL DEFAULT '',   -- containing line, ≤200 chars, first occurrence wins
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, from_path, to_path)
+);
 ```
-agent_memories: id, userId, sessionId, workspace, content, category
-```
 
-A separate, older table scoped to individual sessions and workspaces. Has a FK to users and includes `sessionId`/`workspace` columns. **Not connected to the orchestrator memory system.** The orchestrator exclusively uses `orchestrator_memories`.
+Deleting a file removes both its outgoing and inbound rows. Link rows whose target was never created render as phantom nodes in the graph. A per-user sentinel (`orchestrator_identities.links_indexed_at`) tracks whether the link table has been backfilled for pre-existing rows; backfill runs eagerly at orchestrator session start and lazily from every link-consuming path.
+
+### `agent_memories` table (dropped)
+
+The older, separate session/workspace-scoped memory table (`id, userId, sessionId, workspace, content, category`) was never connected to the orchestrator memory system and has been dropped in the OKF migration (verified empty in prod first).
 
 ### `mailbox_messages` table
 
@@ -373,36 +397,31 @@ Orchestrator-targeted manual and scheduled triggers create automation-origin thr
 
 ## Memory System
 
-### Read (`memory_read` tool)
+Orchestrator memory is an OKF-native file tree (see `orchestrator_memory_files` / `memory_links` above). Every mutation site — write, patch, move, delete, import, prune, expiry sweep — runs through one FTS/links-sync helper so the base table, the FTS5 index, and the link graph never drift independently. Full serialization, sanitization, determinism, and graph design lives in [`2026-07-02-okf-memory-design.md`](2026-07-02-okf-memory-design.md); this section covers the tool surface and retrieval behavior an orchestrator-spec reader needs.
 
-Gateway call → DO message → D1 query. Uses FTS5 full-text search with BM25 ranking when a search query is provided. Falls back to category-filtered listing. Returns up to 50 memories.
+### Tool surface
 
-### Write (`memory_write` tool)
+Seven `mem_*` tools (`docker/opencode/tools/mem_*.ts`) are available to every session (orchestrator and children alike):
 
-Gateway call → DO message → D1 insert. Checks the 200-memory cap. If exceeded, prunes lowest-relevance memories. Also inserts into the FTS5 index.
+| Tool | Behavior |
+|------|----------|
+| `mem_read(path)` | File → rendered OKF document + fenced backlinks block + fenced expiry notice when applicable. Directory → virtual `index.md` plus a fenced stats trailer (tool-response only). |
+| `mem_write(path, content?, type?, description?, tags?, resource?, sensitivity?, origin?, expires?)` | Create requires `content`; omitted `content` on an existing path is metadata-only. Embedded frontmatter goes through the trust/disposition policy, not a wholesale merge. |
+| `mem_patch(path, operations)` | Surgical body edits (append/prepend/replace/insert_after/delete_section). Re-runs link extraction. |
+| `mem_move(from, to)` | Renames/reorganizes; carries metadata and `source_session_id`; rewrites inbound links and referencing bodies. |
+| `mem_rm(path)` | Deletes a file; warns on inbound links; removes both outgoing and inbound link rows. |
+| `mem_search(query, pathPrefix?, resource?, include_expired?)` | FTS5 + BM25 search. Expired files excluded by default (suppressed-count note appended); `include_expired: true` annotates and rank-demotes them. |
+| `mem_links(path, direction?, depth?)` | Graph traversal — neighbors, session-sibling hubs, and phantom (never-created) targets. |
 
-### Delete (`memory_delete` tool)
+### Retrieval, snapshot, and pruning
 
-Gateway call → DO message → D1 delete. Also removes from FTS5 index.
+- **FTS5 search** (`orchestrator_memory_files_fts`) ranks with BM25 over `path, title, description, tags, content`.
+- **Startup snapshot**: pinned files load first (unconditionally), then today's/yesterday's journal, then — under a sub-budget — 1-hop neighbors of pinned files via the link graph (title + description only). Expired files never load.
+- **Prune**: the 200-file cap (pinned exempt) evicts expired-first, then by relevance/inbound-link count as a keep signal; a scheduled sweep additionally evicts expired files outside of prune. Reads and searches never mutate or evict — eviction only happens in write-path operations.
 
-### Prune (`memory_prune` tool)
+### Compatibility
 
-Bulk cleanup tool. Details of the prune logic beyond the cap-based auto-prune are handled by the gateway callback.
-
-### FTS5 Search
-
-The FTS5 virtual table enables full-text search with BM25 ranking. Queries use the `MATCH` operator:
-
-```sql
-SELECT om.* FROM orchestrator_memories om
-JOIN orchestrator_memories_fts fts ON om.id = fts.rowid
-WHERE om.user_id = ? AND fts.content MATCH ?
-ORDER BY bm25(orchestrator_memories_fts) LIMIT ?
-```
-
-### Sync Risk
-
-FTS inserts/deletes are separate SQL statements from the main table operations. If either fails, the FTS index and table can get out of sync.
+Old sandboxes running pre-OKF `mem_*` tool code continue to work indefinitely: the worker accepts old-shape (content-only) requests and applies create-defaults; metadata quality only improves fleet-wide as sandboxes recycle onto the new image.
 
 ## Task Board
 
@@ -445,15 +464,16 @@ Both orchestrators and children can create/list tasks on the same board.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/memory?path=` | List a directory (empty path or trailing `/`) or read a file |
-| PUT | `/memory` | Create or overwrite a file (`{ path, content }`) |
+| GET | `/memory?path=` | List a directory (virtual OKF `index.md` + stats) or read a file (rendered document + metadata + backlinks/notices) |
+| PUT | `/memory` | Create or overwrite a file; metadata fields (`type`, `description`, `tags`, `resource`, `sensitivity`, `origin`, `expires`) in the JSON body |
 | PATCH | `/memory` | Surgical edits (append/prepend/replace/insert_after/delete_section) |
 | DELETE | `/memory?path=` | Delete a file, or all files under a `/`-suffixed prefix |
-| GET | `/memory/search?query=` | FTS5 search (optional `path` prefix) |
-| GET | `/memory/export` | Export all of the user's memory files as a portable JSON bundle |
-| POST | `/memory/import` | Import a bundle (merge — overwrites same-path files; skips invalid/empty) |
+| GET | `/memory/search?query=` | FTS5 search (optional `path` prefix, `resource` filter, `include_expired`) |
+| GET | `/memory/graph` | Cross-link graph (concept/resource/phantom/session nodes) |
+| GET | `/memory/export?include=all\|shareable` | Export as an OKF v0.1 bundle — `{ path → { content, hash, valetState } }` plus generated `index.md` per directory level |
+| POST | `/memory/import` | Import an OKF bundle; `trusted: true` (owner-only) honors all OKF + `valet:` keys, absent ⇒ foreign-import trust boundary applies |
 
-Export/import let users move memory between environments (e.g. dev → prod). The bundle is `{ version, exportedAt, count, files: [{ path, content, pinned, updatedAt }] }`; import reuses the write path, so normalization, pinning, FTS indexing, and the memory cap all apply.
+Export/import let users move memory between environments (e.g. dev → prod), or exchange bundles with other OKF consumers. Full bundle shape, trust boundaries, and the export→import→export identity guarantee are specified in [`2026-07-02-okf-memory-design.md`](2026-07-02-okf-memory-design.md).
 
 ### Notification Routes (`/api/me`)
 
@@ -527,10 +547,13 @@ Tools available to the orchestrator inside the sandbox, communicating via `http:
 ### Memory
 | Tool | Description |
 |------|-------------|
-| `memory_read` | Search/list memories (FTS) |
-| `memory_write` | Store memory with category |
-| `memory_delete` | Delete memory by ID |
-| `memory_prune` | Bulk cleanup |
+| `mem_read` | Read a file (rendered OKF document + backlinks/notices) or list a directory |
+| `mem_write` | Create/update a file, with OKF metadata params |
+| `mem_patch` | Surgical body edits |
+| `mem_move` | Rename/reorganize, rewriting inbound links |
+| `mem_rm` | Delete a file |
+| `mem_search` | FTS5 + BM25 search |
+| `mem_links` | Cross-link graph traversal |
 
 ### Communication
 | Tool | Description |
@@ -577,9 +600,9 @@ Each restart gets a fresh session ID and DO, but the Modal workspace volume (`wo
 
 The `wait_for_event` tool polls every 2 seconds, which creates continuous HTTP traffic between the sandbox and the DO. For an orchestrator with many children, this can generate significant request volume. A true WebSocket push mechanism would be more efficient.
 
-### FTS Index Sync
+### FTS/Links Sync
 
-FTS inserts and deletes are separate SQL operations from the main `orchestrator_memories` table. A failure in one but not the other leaves the index out of sync with the data.
+Every mutation site (write, patch, move, delete, import, prune, expiry sweep) writes the base row, FTS index, and link rows in one atomic `db.batch()` through a single shared sync helper — this replaced an earlier design where FTS inserts/deletes were separate statements prone to drifting from the base table. D1 batches are atomic for writes but provide no read isolation, so `mem_move`/import link-rewrites (read-modify-write) use per-file version guards; losers are skipped and reported rather than silently overwritten.
 
 ### Concurrent Auto-Restart
 
@@ -597,15 +620,14 @@ Both the cron and the client hook can try to restart the orchestrator simultaneo
 - Inter-session messaging via DO prompt dispatch
 - Mailbox/notification queue (session inbox + user inbox with threads)
 - Channel binding system with scope key routing and orchestrator fallback
-- Memory system with FTS5 search, BM25 ranking, relevance scoring, 200-memory cap with auto-prune
+- OKF-native memory system: `orchestrator_memory_files` + `memory_links`, FTS5/BM25 search, relevance boosting on access, 200-file cap with expiry-first auto-prune, cross-link graph, export/import
 - Task board with hierarchical tasks and dependencies
 - Identity links for external platform accounts
 - Concurrency bypass for orchestrator-spawned children
-- 30+ OpenCode tools for orchestrator operations
+- 30+ OpenCode tools for orchestrator operations, including the seven `mem_*` memory tools
 
 ### Not Implemented / Gaps
 - **`org` type orchestrator:** supported in types but only `personal` is ever created.
-- **Relevance boosting on memory access:** function exists but no code path calls it.
-- **`agent_memories` table cleanup:** older table exists alongside `orchestrator_memories`, unused by the orchestrator.
 - **True event-driven monitoring:** `wait_for_event` uses 2-second polling, not WebSocket push.
 - **Orchestrator web channel binding:** not auto-created through the standard session creation path.
+- **`log.md` generation, GitHub sync, org-scoped memory, shared memory libraries:** deliberately out of scope for the OKF memory system — see the design spec's Follow-up section.
