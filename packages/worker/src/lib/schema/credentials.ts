@@ -1,5 +1,6 @@
 import { sqliteTable, text, uniqueIndex, index } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
+import { users } from './users.js';
 
 export const credentials = sqliteTable('credentials', {
   id: text().primaryKey(),
@@ -15,6 +16,10 @@ export const credentials = sqliteTable('credentials', {
   // transitions so getCredential can log edges instead of every attempt.
   lastFailureReason: text(),
   lastFailureAt: text(),
+  /** Zapier-style sourced connections: the member whose tokens back a team credential. */
+  sourcedFromUserId: text().references(() => users.id, { onDelete: 'set null' }),
+  /** 'active' | 'broken' — broken when the sourcing member revokes or leaves the team. */
+  status: text().notNull().default('active'),
   createdAt: text().notNull().default(sql`(datetime('now'))`),
   updatedAt: text().notNull().default(sql`(datetime('now'))`),
 }, (table) => [

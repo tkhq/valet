@@ -578,18 +578,15 @@ export interface GatewayCallbacks {
   onListChildSessions?: () => Promise<{ children: unknown[] }>;
   onForwardMessages?: (targetSessionId: string, limit?: number, after?: string) => Promise<{ count: number; sourceSessionId: string }>;
   onTunnelsUpdated?: (tunnels: TunnelDescriptor[]) => void;
-  // Phase C: Mailbox + Task Board
-  onMailboxSend?: (params: {
-    toSessionId?: string;
-    toUserId?: string;
-    toHandle?: string;
-    messageType?: string;
+  // Agent → owning-humans notification (attention router decides audience).
+  onEmitNotification?: (params: {
     content: string;
+    messageType?: string;
+    eventType?: string;
     contextSessionId?: string;
     contextTaskId?: string;
-    replyToId?: string;
-  }) => Promise<{ messageId: string }>;
-  onMailboxCheck?: (limit?: number, after?: string) => Promise<{ messages: unknown[] }>;
+  }) => Promise<{ ok: boolean }>;
+  // Phase C: Task Board (the agent mailbox was removed — teams design §5)
   onTaskCreate?: (params: {
     title: string;
     description?: string;
@@ -1161,58 +1158,35 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
   // gateway does not proxy them. Clients call the worker directly
   // (see docs/specs/workflows.md).
 
-  // ─── Phase C: Notification Queue API ───────────────────────────────
+  // ─── Notification emit (attention router) ─────────────────────────
+  // The agent notifies the humans who own this session; there is no
+  // addressing — the worker-side attention router resolves the audience.
 
   app.post("/api/notifications/emit", async (c) => {
-    if (!callbacks.onMailboxSend) {
+    if (!callbacks.onEmitNotification) {
       return c.json({ error: "Notification emit handler not configured" }, 500);
     }
     try {
       const body = await c.req.json() as {
-        to_session_id?: string;
-        to_user_id?: string;
-        to_handle?: string;
         message_type?: "notification" | "question" | "escalation" | "approval";
+        event_type?: string;
         content?: string;
         context_session_id?: string;
         context_task_id?: string;
-        reply_to_id?: string;
       };
       if (!body.content) {
         return c.json({ error: "Missing required field: content" }, 400);
       }
-      if (!body.to_session_id && !body.to_user_id && !body.to_handle) {
-        return c.json({ error: "Must specify to_session_id, to_user_id, or to_handle" }, 400);
-      }
-      const result = await callbacks.onMailboxSend({
-        toSessionId: body.to_session_id,
-        toUserId: body.to_user_id,
-        toHandle: body.to_handle,
-        messageType: body.message_type || "notification",
+      const result = await callbacks.onEmitNotification({
         content: body.content,
+        messageType: body.message_type || "notification",
+        eventType: body.event_type,
         contextSessionId: body.context_session_id,
         contextTaskId: body.context_task_id,
-        replyToId: body.reply_to_id,
       });
-      return c.json({ notificationId: result.messageId, messageId: result.messageId });
+      return c.json({ ok: result.ok });
     } catch (err) {
       console.error("[Gateway] Notification emit error:", err);
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-    }
-  });
-
-  app.get("/api/notifications", async (c) => {
-    if (!callbacks.onMailboxCheck) {
-      return c.json({ error: "Notification queue handler not configured" }, 500);
-    }
-    try {
-      const limitRaw = c.req.query("limit");
-      const limit = limitRaw ? parseInt(limitRaw, 10) : undefined;
-      const after = c.req.query("after") || undefined;
-      const result = await callbacks.onMailboxCheck(limit, after);
-      return c.json({ notifications: result.messages ?? [] });
-    } catch (err) {
-      console.error("[Gateway] Notification queue check error:", err);
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });

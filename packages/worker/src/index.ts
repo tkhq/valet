@@ -29,6 +29,7 @@ import { adminRouter } from './routes/admin.js';
 import { invitesRouter, invitesApiRouter } from './routes/invites.js';
 import { orgReposAdminRouter, orgReposReadRouter } from './routes/org-repos.js';
 import { personasRouter } from './routes/personas.js';
+import { teamsRouter } from './routes/teams.js';
 import { orchestratorRouter } from './routes/orchestrator.js';
 import { tasksRouter } from './routes/tasks.js';
 import { threadsRouter } from './routes/threads.js';
@@ -216,6 +217,7 @@ app.route('/api/admin', adminRouter);
 app.route('/api/admin/repos', orgReposAdminRouter);
 app.route('/api/repos/org', orgReposReadRouter);
 app.route('/api/personas', personasRouter);
+app.route('/api/teams', teamsRouter);
 app.route('/api/me', orchestratorRouter);
 app.route('/api/sessions', tasksRouter);
 app.route('/api/sessions', threadsRouter);
@@ -950,12 +952,14 @@ async function archiveTerminatedSessions(env: Env): Promise<void> {
  * This is a safety net — primary recovery is DO-internal and on-demand via ensureRunning.
  */
 async function reconcileOrchestrators(env: Env): Promise<void> {
-  // Find orchestrator sessions stuck in transient states for too long
+  // Find orchestrator sessions stuck in transient states for too long.
+  // Owner-join covers user AND team orchestrators; the canonical stable ID is
+  // 'orchestrator:{owner_type}:{owner_id}' (the teams migration, 0026).
   const stuckSessions = await env.DB.prepare(`
-    SELECT s.id, s.user_id, s.status, s.last_active_at
+    SELECT s.id, s.owner_type, s.owner_id, s.status, s.last_active_at
     FROM sessions s
-    JOIN orchestrator_identities oi ON oi.user_id = s.user_id
-    WHERE s.id = 'orchestrator:' || s.user_id
+    JOIN orchestrator_identities oi ON oi.owner_type = s.owner_type AND oi.owner_id = s.owner_id
+    WHERE s.id = 'orchestrator:' || s.owner_type || ':' || s.owner_id
       AND s.status IN ('initializing', 'recovering', 'waiting_runner', 'backoff')
       AND s.last_active_at < datetime('now', '-5 minutes')
   `).all();
@@ -975,16 +979,17 @@ async function reconcileOrchestrators(env: Env): Promise<void> {
 
   // Find orchestrators with identities but no session row (shouldn't happen post-migration)
   const orphanedIdentities = await env.DB.prepare(`
-    SELECT oi.user_id, oi.name
+    SELECT oi.owner_type, oi.owner_id, oi.name
     FROM orchestrator_identities oi
-    WHERE NOT EXISTS (
-      SELECT 1 FROM sessions s WHERE s.id = 'orchestrator:' || oi.user_id
-    )
+    WHERE oi.owner_id != ''
+      AND NOT EXISTS (
+        SELECT 1 FROM sessions s WHERE s.id = 'orchestrator:' || oi.owner_type || ':' || oi.owner_id
+      )
   `).all();
 
   if (orphanedIdentities.results && orphanedIdentities.results.length > 0) {
     for (const row of orphanedIdentities.results) {
-      console.error(`[OrchestratorReconcile] Orchestrator identity for user ${row.user_id} (${row.name}) has no session row`);
+      console.error(`[OrchestratorReconcile] Orchestrator identity for ${row.owner_type} ${row.owner_id} (${row.name}) has no session row`);
     }
   }
 }

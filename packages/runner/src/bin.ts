@@ -253,13 +253,10 @@ async function main() {
     onTunnelsUpdated: (tunnels) => {
       agentClient.sendTunnels(tunnels);
     },
-    // Phase C: Mailbox + Task Board
-    onMailboxSend: async (params) => {
-      return await agentClient.requestMailboxSend(params);
+    onEmitNotification: async (params) => {
+      return await agentClient.requestEmitNotification(params);
     },
-    onMailboxCheck: async (limit, after) => {
-      return await agentClient.requestMailboxCheck(limit, after);
-    },
+    // Phase C: Task Board
     onTaskCreate: async (params) => {
       return await agentClient.requestTaskCreate(params);
     },

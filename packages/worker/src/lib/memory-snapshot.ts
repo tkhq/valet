@@ -1,4 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
+import type { Principal } from '@valet/shared';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -29,15 +30,15 @@ export interface MemorySnapshot {
  */
 export async function loadMemorySnapshot(
   rawDb: D1Database,
-  userId: string,
+  owner: Principal,
   tokenBudget = 8000,
 ): Promise<MemorySnapshot> {
   // 1. Fetch all pinned files
   const pinnedRows = await rawDb
     .prepare(
-      'SELECT path, content, last_accessed_at FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 1 ORDER BY last_accessed_at DESC',
+      'SELECT path, content, last_accessed_at FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND pinned = 1 ORDER BY last_accessed_at DESC',
     )
-    .bind(userId)
+    .bind(owner.type, owner.id)
     .all<{ path: string; content: string; last_accessed_at: string }>();
   const pinnedFiles: (SnapshotFile & { lastAccessedAt: string })[] = (pinnedRows.results || []).map(
     (r) => ({
@@ -54,9 +55,9 @@ export async function loadMemorySnapshot(
 
   const journalRows = await rawDb
     .prepare(
-      'SELECT path, content FROM orchestrator_memory_files WHERE user_id = ? AND path IN (?, ?)',
+      'SELECT path, content FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path IN (?, ?)',
     )
-    .bind(userId, journalPaths[0], journalPaths[1])
+    .bind(owner.type, owner.id, journalPaths[0], journalPaths[1])
     .all<{ path: string; content: string }>();
   // Sort: today first, then yesterday
   const journalFiles: SnapshotFile[] = journalPaths

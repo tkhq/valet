@@ -4,9 +4,10 @@ import { getDb } from '../lib/drizzle.js';
 import { createDoTracer, parseTraceparent, type DoTracer } from '../lib/do-tracing.js';
 import { activeTraceparent } from '../lib/tracing.js';
 import type { Context } from '@opentelemetry/api';
-import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
+import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, canActOnSessionPrompt, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
 import { getCredential, type CredentialResult } from '../services/credentials.js';
-import { memRead, memWrite, memPatch, memRm, memSearch } from '../services/session-memory.js';
+import { memRead, memWrite, memPatch, memRm, memSearch, type SessionMemoryContext } from '../services/session-memory.js';
+import { routeAttentionEvent } from '../services/attention-router.js';
 import { getSlackBotToken } from '../services/slack.js';
 import { buildOrchestratorPersonaFiles } from '../lib/orchestrator-persona.js';
 import { assembleCustomProviders, assembleBuiltInProviderModelConfigs, assembleRepoEnv } from '../lib/env-assembly.js';
@@ -27,8 +28,7 @@ import { RunnerLink, type RunnerToDOMessage, type DOToRunnerMessage, type Prompt
 import { SessionState, type SessionStartParams } from './session-state.js';
 import { SessionLifecycle, SandboxAlreadyExitedError, SandboxSnapshotFailedError } from './session-lifecycle.js';
 import { SessionHealthMonitor, DISCONNECT_GRACE_MS, SANDBOX_WAKE_TIMEOUT_MS, type HealthSnapshot } from './session-health-monitor.js';
-import { resolveOrchestratorPersona } from '../services/persona.js';
-import { mailboxSend, mailboxCheck } from '../services/session-mailbox.js';
+import { resolveOrchestratorPersona, resolveTeamOrchestratorPersona } from '../services/persona.js';
 import { taskCreate, taskList, taskUpdate, taskMy } from '../services/session-tasks.js';
 import { handleIdentityAction } from '../services/session-identity.js';
 import { handleSkillAction } from '../services/session-skills.js';
@@ -48,7 +48,7 @@ import { deriveRuntimeStates } from '../lib/utils/runtime.js';
 import { ensureChannelBinding } from '../lib/db/channels.js';
 import { getOrgSlackInstallAny } from '../lib/db/slack.js';
 import { registerChannelThread } from '../lib/db/channel-threads.js';
-import { channelScopeKey } from '@valet/shared';
+import { channelScopeKey, isOrchestratorSessionId, parseOrchestratorSessionId, type PatchOperation, type Principal, userPrincipal } from '@valet/shared';
 
 // ─── WebSocket Message Types ───────────────────────────────────────────────
 
@@ -386,8 +386,15 @@ export class SessionAgentDO {
       const credResult = await getCredential(this.env, 'user', userId, channelType);
       return credResult.ok ? credResult.credential.accessToken : undefined;
     },
-    resolvePersona: (userId) =>
-      resolveOrchestratorPersona(this.appDb, userId).catch(() => undefined),
+    resolvePersona: (userId) => {
+      // Team-owned sessions post under the TEAM orchestrator's identity, not
+      // the acting member's personal bot.
+      const owner = this.sessionState.sessionId ? parseOrchestratorSessionId(this.sessionState.sessionId) : null;
+      if (owner && owner.type === 'team') {
+        return resolveTeamOrchestratorPersona(this.appDb, owner.id).catch(() => undefined);
+      }
+      return resolveOrchestratorPersona(this.appDb, userId).catch(() => undefined);
+    },
     onReplySent: async (channelType, channelId) => {
       this.resolveChannelFollowups(channelType, channelId);
     },
@@ -570,6 +577,8 @@ export class SessionAgentDO {
       }
       case '/status':
         return tracer.span('handleStatus', () => this.handleStatus());
+      case '/evict-user':
+        return tracer.span('handleEvictUser', () => this.handleEvictUser(request));
       case '/thread-status':
         return tracer.span('handleThreadStatus', () => this.handleThreadStatus(url));
       case '/wake':
@@ -649,7 +658,7 @@ export class SessionAgentDO {
         // user messages should interrupt that thread's running subtask, not queue
         // silently (TKAI-106). Cross-thread messages queue normally so they don't
         // abort unrelated work (e.g. an in-progress poem on another thread).
-        const isOrchestrator = this.sessionState.sessionId?.startsWith('orchestrator:') ?? false;
+        const isOrchestrator = isOrchestratorSessionId(this.sessionState.sessionId);
         const promptChannelType = body.threadId ? 'thread' : body.channelType;
         const promptChannelId = body.threadId ? body.threadId : body.channelId;
         const promptChannelKey = this.channelKeyFrom(promptChannelType, promptChannelId);
@@ -717,14 +726,32 @@ export class SessionAgentDO {
         if (!body.promptId) {
           return new Response(JSON.stringify({ error: 'Missing promptId' }), { status: 400 });
         }
-        const ownerUserId = this.sessionState.userId;
-        if (!body.resolvedBy || !ownerUserId || body.resolvedBy !== ownerUserId) {
-          return new Response(JSON.stringify({ error: 'Only the session owner can resolve this prompt' }), { status: 403 });
+        const resolvedBy = body.resolvedBy;
+        if (!resolvedBy) {
+          return new Response(JSON.stringify({ error: 'Not authorized to resolve this prompt' }), { status: 403 });
+        }
+        // Eligibility must run through canActOnSessionPrompt for team-owned
+        // sessions — the creator (sessionState.userId) is just a member there,
+        // and a removed member must be rejected even though they created it.
+        // Only fall back to the creator-identity shortcut when the session row
+        // is unavailable (fail toward the stricter check otherwise).
+        const session = this.sessionState.sessionId
+          ? await getSession(this.appDb, this.sessionState.sessionId)
+          : null;
+        let authorized: boolean;
+        if (session) {
+          authorized = await canActOnSessionPrompt(this.appDb, session, resolvedBy);
+        } else {
+          const ownerUserId = this.sessionState.userId;
+          authorized = !!ownerUserId && resolvedBy === ownerUserId;
+        }
+        if (!authorized) {
+          return new Response(JSON.stringify({ error: 'Not authorized to resolve this prompt' }), { status: 403 });
         }
         const result = await this.handlePromptResolved(body.promptId, {
           actionId: body.actionId,
           value: body.value,
-          resolvedBy: body.resolvedBy,
+          resolvedBy,
         });
         if (!result.ok) {
           return new Response(JSON.stringify({ error: result.error }), { status: result.status });
@@ -1660,7 +1687,7 @@ export class SessionAgentDO {
         const wsChannelId = (msg as any).channelId as string | undefined;
         const wsThreadId = msg.threadId;
         const wsContinuationContext = msg.continuationContext;
-        const wsIsOrchestrator = this.sessionState.sessionId?.startsWith('orchestrator:') ?? false;
+        const wsIsOrchestrator = isOrchestratorSessionId(this.sessionState.sessionId);
         const wsPromptChType = wsThreadId ? 'thread' : wsChannelType;
         const wsPromptChId = wsThreadId ? wsThreadId : wsChannelId;
         const wsSameChannelBusy = wsIsOrchestrator && this.promptQueue.isChannelBusy(this.channelKeyFrom(wsPromptChType, wsPromptChId));
@@ -3719,10 +3746,12 @@ export class SessionAgentDO {
       },
 
       // ─── Memory File Operations ────────────────────────────────────────
+      // Scoping: team orchestrators own their team's memory; personal
+      // orchestrators own theirs and read a query-time union over their teams
+      // (see services/session-memory.ts).
       'mem-read': async (msg) => {
-        const userId = this.sessionState.userId;
         try {
-          const result = await memRead(this.appDb, userId, msg.path);
+          const result = await memRead(this.appDb, this.sessionMemoryContext(), msg.path);
           this.runnerLink.send({ type: 'mem-read-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-read-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
@@ -3730,9 +3759,8 @@ export class SessionAgentDO {
       },
 
       'mem-write': async (msg) => {
-        const userId = this.sessionState.userId;
         try {
-          const result = await memWrite(this.env.DB, userId, msg.path!, msg.content!);
+          const result = await memWrite(this.env.DB, this.sessionMemoryContext(), msg.path!, msg.content!);
           this.runnerLink.send({ type: 'mem-write-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-write-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
@@ -3740,9 +3768,9 @@ export class SessionAgentDO {
       },
 
       'mem-patch': async (msg) => {
-        const userId = this.sessionState.userId;
         try {
-          const result = await memPatch(this.env.DB, userId, msg.path!, msg.operations);
+          // Runner protocol declares operations loosely; patchMemoryFile validates each op via its discriminated switch.
+          const result = await memPatch(this.env.DB, this.sessionMemoryContext(), msg.path!, msg.operations as PatchOperation[]);
           this.runnerLink.send({ type: 'mem-patch-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-patch-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
@@ -3750,9 +3778,8 @@ export class SessionAgentDO {
       },
 
       'mem-rm': async (msg) => {
-        const userId = this.sessionState.userId;
         try {
-          const result = await memRm(this.env.DB, userId, msg.path!);
+          const result = await memRm(this.env.DB, this.sessionMemoryContext(), msg.path!);
           this.runnerLink.send({ type: 'mem-rm-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-rm-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
@@ -3760,9 +3787,8 @@ export class SessionAgentDO {
       },
 
       'mem-search': async (msg) => {
-        const userId = this.sessionState.userId;
         try {
-          const result = await memSearch(this.env.DB, userId, msg.query!, msg.path, msg.limit);
+          const result = await memSearch(this.env.DB, this.appDb, this.sessionMemoryContext(), msg.query!, msg.path, msg.limit);
           this.runnerLink.send({ type: 'mem-search-result', requestId: msg.requestId!, ...result } as any);
         } catch (err) {
           this.runnerLink.send({ type: 'mem-search-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
@@ -3970,47 +3996,29 @@ export class SessionAgentDO {
         }
       },
 
-      // ─── Phase C: Mailbox + Task Board ──────────────────────────────
-      'mailbox-send': async (msg) => {
+      // ─── Notifications (attention router) ──────────────────────────
+      // The agent notifies the humans who own this session; the router
+      // resolves the audience (owner, or all team members + team channel).
+      'emit-notification': async (msg) => {
         try {
-          const result = await mailboxSend(
-            this.appDb,
-            this.env.DB,
-            this.sessionState.sessionId,
-            this.sessionState.userId,
-            {
-              toSessionId: msg.toSessionId,
-              toUserId: msg.toUserId,
-              toHandle: msg.toHandle,
-              messageType: msg.messageType,
-              content: msg.content!,
-              contextSessionId: msg.contextSessionId,
-              contextTaskId: msg.contextTaskId,
-              replyToId: msg.replyToId,
-            },
-          );
-          this.runnerLink.send({ type: 'mailbox-send-result', requestId: msg.requestId!, ...result } as any);
+          const kind = msg.messageType;
+          await this.enqueueOwnerNotification({
+            messageType:
+              kind === 'question' || kind === 'escalation' || kind === 'approval' ? kind : 'notification',
+            eventType: msg.eventType,
+            content: msg.content,
+            contextSessionId: msg.contextSessionId,
+            contextTaskId: msg.contextTaskId,
+          });
+          this.runnerLink.send({ type: 'emit-notification-result', requestId: msg.requestId!, ok: true } as any);
         } catch (err) {
-          this.runnerLink.send({ type: 'mailbox-send-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
+          this.runnerLink.send({ type: 'emit-notification-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
         }
       },
 
-      'mailbox-check': async (msg) => {
-        try {
-          const result = await mailboxCheck(
-            this.appDb,
-            this.env.DB,
-            this.sessionState.sessionId,
-            this.sessionState.userId,
-            msg.limit,
-            msg.after,
-          );
-          this.runnerLink.send({ type: 'mailbox-check-result', requestId: msg.requestId!, ...result } as any);
-        } catch (err) {
-          this.runnerLink.send({ type: 'mailbox-check-result', requestId: msg.requestId!, error: err instanceof Error ? err.message : String(err) } as any);
-        }
-      },
-
+      // ─── Phase C: Task Board ────────────────────────────────────────
+      // (The agent mailbox was removed — teams design §5. Human notifications
+      // flow through the attention router; agents don't message each other.)
       'task-create': async (msg) => {
         try {
           const result = await taskCreate(
@@ -4519,7 +4527,7 @@ export class SessionAgentDO {
     this.emitAuditEvent('session.started', `Session started for ${body.workspace}`, body.userId);
     // Skip lifecycle notifications for orchestrator sessions — they restart
     // frequently and the noise isn't useful since the user explicitly triggers refreshes.
-    if (!body.sessionId?.startsWith('orchestrator:')) {
+    if (!isOrchestratorSessionId(body.sessionId)) {
       await this.enqueueOwnerNotification({
         messageType: 'notification',
         eventType: 'session.lifecycle',
@@ -4745,7 +4753,7 @@ export class SessionAgentDO {
       data: { sandboxId: sandboxId || null, reason },
       timestamp: new Date().toISOString(),
     });
-    if (!sessionId?.startsWith('orchestrator:')) {
+    if (!isOrchestratorSessionId(sessionId)) {
       await this.enqueueOwnerNotification({
         messageType: 'notification',
         eventType: 'session.lifecycle',
@@ -5803,7 +5811,7 @@ export class SessionAgentDO {
     const CIRCUIT_BREAKER_MAX_ATTEMPTS = 3;
 
     if (attemptCount > CIRCUIT_BREAKER_MAX_ATTEMPTS) {
-      const isOrchestrator = sessionId?.startsWith('orchestrator:') ?? false;
+      const isOrchestrator = isOrchestratorSessionId(sessionId);
 
       if (isOrchestrator) {
         // Orchestrators get exponential backoff: 1min, 5min, 15min cap
@@ -6290,6 +6298,69 @@ export class SessionAgentDO {
     return this.getConnectedUserIds().includes(userId);
   }
 
+  /**
+   * Memory scope for this session: team orchestrators own their team's
+   * memory; everything else owns the acting user's. The actor is kept for
+   * write provenance and read-union resolution.
+   */
+  /** Owning principal from the session row (children aren't derivable from IDs). */
+  private async sessionOwnerPrincipal(): Promise<Principal> {
+    const sid = this.sessionState.sessionId;
+    if (sid) {
+      const session = await getSession(this.appDb, sid);
+      if (session?.ownerType === 'team' && session.ownerId) {
+        return { type: 'team', id: session.ownerId };
+      }
+    }
+    return userPrincipal(this.sessionState.userId);
+  }
+
+  private sessionMemoryContext(): SessionMemoryContext {
+    const actorUserId = this.sessionState.userId;
+    const sid = this.sessionState.sessionId;
+    const parsed = sid ? parseOrchestratorSessionId(sid) : null;
+    const owner: Principal = parsed && parsed.type !== 'user' ? parsed : userPrincipal(actorUserId);
+    return { owner, actorUserId };
+  }
+
+  /**
+   * Close a specific user's client WebSockets and drop them from presence.
+   * Used when team membership is revoked: access is checked at connect time,
+   * so an already-open connection must be evicted explicitly.
+   */
+  private async handleEvictUser(request: Request): Promise<Response> {
+    let userId: string | undefined;
+    try {
+      const body = (await request.json()) as { userId?: string };
+      userId = body?.userId;
+    } catch {
+      // fall through to 400
+    }
+    if (!userId) {
+      return new Response(JSON.stringify({ error: 'userId required' }), { status: 400 });
+    }
+
+    const sockets = this.ctx.getWebSockets(`client:${userId}`);
+    for (const ws of sockets) {
+      try {
+        // webSocketClose handles presence cleanup + user.left broadcast.
+        ws.close(1000, 'access revoked');
+      } catch {
+        // Socket may already be closed
+      }
+    }
+    if (sockets.length === 0) {
+      // No open sockets — clear any stale presence row directly.
+      try {
+        this.ctx.storage.sql.exec('DELETE FROM connected_users WHERE user_id = ?', userId);
+      } catch {
+        // Presence table may not exist yet on a fresh DO
+      }
+    }
+    console.log(`[SessionAgentDO] Evicted user ${userId} (${sockets.length} socket(s))`);
+    return new Response(JSON.stringify({ evicted: sockets.length }), { status: 200 });
+  }
+
   private sendToastToUser(userId: string, toast: {
     title: string;
     description?: string;
@@ -6380,6 +6451,12 @@ export class SessionAgentDO {
     }
   }
 
+  /**
+   * Notify the humans who own this session, via the attention router:
+   * user-owned sessions notify the owner (today's behavior); team-owned
+   * sessions fan out to every current member, with urgent kinds also posted
+   * into the team's bound channel.
+   */
   private async enqueueOwnerNotification(params: {
     messageType?: 'notification' | 'question' | 'escalation' | 'approval';
     eventType?: string;
@@ -6388,33 +6465,32 @@ export class SessionAgentDO {
     contextTaskId?: string;
     replyToId?: string;
   }): Promise<void> {
-    const toUserId = this.sessionState.userId;
-    if (!toUserId) return;
-
-    const normalizedContent = params.content.trim();
-    if (!normalizedContent) return;
+    const actorUserId = this.sessionState.userId;
+    const sessionId = this.sessionState.sessionId;
+    if (!actorUserId) return;
 
     try {
-      const messageType = params.messageType || 'notification';
-      const webEnabled = await isNotificationWebEnabled(
-        this.env.DB,
-        toUserId,
-        messageType,
-        params.eventType,
-      );
-      if (!webEnabled) return;
+      // Owner lives on the session row (not derivable from child session IDs).
+      let owner: Principal = userPrincipal(actorUserId);
+      if (sessionId) {
+        const session = await getSession(this.appDb, sessionId);
+        if (session?.ownerType === 'team' && session.ownerId) {
+          owner = { type: 'team', id: session.ownerId };
+        }
+      }
 
-      await createMailboxMessage(this.appDb, {
-        fromSessionId: this.sessionState.sessionId || undefined,
-        toUserId,
-        messageType,
-        content: normalizedContent.slice(0, 10_000),
+      await routeAttentionEvent(this.env, this.appDb, {
+        kind: params.messageType || 'notification',
+        eventType: params.eventType,
+        owner,
+        actorUserId,
+        fromSessionId: sessionId || undefined,
+        content: params.content,
         contextSessionId: params.contextSessionId,
         contextTaskId: params.contextTaskId,
-        replyToId: params.replyToId,
       });
     } catch (err) {
-      console.error('[SessionAgentDO] Failed to enqueue owner notification:', err);
+      console.error('[SessionAgentDO] Failed to route owner notification:', err);
     }
   }
 
@@ -6681,7 +6757,7 @@ export class SessionAgentDO {
               channelId: threadChannelId,
               userId,
               orgId: orgId ?? 'default',
-              scopeKey: channelScopeKey(userId, 'slack', threadChannelId),
+              scopeKey: channelScopeKey(userPrincipal(userId), 'slack', threadChannelId),
               queueMode: 'followup',
               slackChannelId,
               slackThreadTs: result.messageId,
@@ -7227,14 +7303,14 @@ export class SessionAgentDO {
                 await ensureChannelBinding(this.appDb, {
                   ...base,
                   channelId: dmChannelId,
-                  scopeKey: channelScopeKey(userId, 'slack', dmChannelId),
+                  scopeKey: channelScopeKey(userPrincipal(userId), 'slack', dmChannelId),
                 });
                 // 3-part: catches explicit "Reply in thread" (thread_ts = this message's ts)
                 if (threadChannelId) {
                   await ensureChannelBinding(this.appDb, {
                     ...base,
                     channelId: threadChannelId,
-                    scopeKey: channelScopeKey(userId, 'slack', threadChannelId),
+                    scopeKey: channelScopeKey(userPrincipal(userId), 'slack', threadChannelId),
                     slackThreadTs: slackTs,
                   });
                 }
@@ -7808,13 +7884,13 @@ export class SessionAgentDO {
                       await ensureChannelBinding(this.appDb, {
                         ...base,
                         channelId: dmChannelId,
-                        scopeKey: channelScopeKey(userId, 'slack', dmChannelId),
+                        scopeKey: channelScopeKey(userPrincipal(userId), 'slack', dmChannelId),
                       });
                       // 3-part: explicit "Reply in thread" on the approval message
                       await ensureChannelBinding(this.appDb, {
                         ...base,
                         channelId: threadChannelId,
-                        scopeKey: channelScopeKey(userId, 'slack', threadChannelId),
+                        scopeKey: channelScopeKey(userPrincipal(userId), 'slack', threadChannelId),
                         slackThreadTs: slackDmTs,
                       });
                       // Pre-register channel→thread so replies land in this
@@ -8066,7 +8142,7 @@ export class SessionAgentDO {
     const orgId = await this.resolveOrgId();
 
     try {
-      const repoEnv = await assembleRepoEnv(this.appDb, this.env, userId, orgId, {
+      const repoEnv = await assembleRepoEnv(this.appDb, this.env, await this.sessionOwnerPrincipal(), userId, orgId, {
         repoUrl,
         branch: gitState.branch ?? undefined,
         ref: gitState.ref ?? undefined,
@@ -8115,7 +8191,7 @@ export class SessionAgentDO {
     const orgId = await this.resolveOrgId();
 
     try {
-      const repoEnv = await assembleRepoEnv(this.appDb, this.env, userId, orgId, {
+      const repoEnv = await assembleRepoEnv(this.appDb, this.env, await this.sessionOwnerPrincipal(), userId, orgId, {
         repoUrl,
         branch: gitState.branch ?? undefined,
       });

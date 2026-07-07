@@ -1,4 +1,4 @@
-import { ForbiddenError, NotFoundError, ValidationError, webManualScopeKey } from '@valet/shared';
+import { ForbiddenError, isOrchestratorSessionId, NotFoundError, type Principal, type PrincipalType, ValidationError, userPrincipal, webManualScopeKey } from '@valet/shared';
 import type { SessionPurpose } from '@valet/shared';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
@@ -183,6 +183,10 @@ export interface CreateSessionParams {
   userId: string;
   userEmail: string;
   workspace: string;
+  /** Owning principal; defaults to the creating user. Team-owned sessions
+   *  resolve team credentials and membership-gated access. */
+  ownerType?: PrincipalType;
+  ownerId?: string;
   repoUrl?: string;
   branch?: string;
   ref?: string;
@@ -244,7 +248,7 @@ export async function createSession(
   await db.getOrCreateUser(appDb, { id: params.userId, email: params.userEmail });
 
   // Check concurrency limits (skip for orchestrator/workflow sessions)
-  const isOrchestratorSession = params.parentSessionId?.startsWith('orchestrator:');
+  const isOrchestratorSession = isOrchestratorSessionId(params.parentSessionId);
   if (!isOrchestratorSession) {
     const concurrency = await db.checkSessionConcurrency(appDb, params.userId);
     if (!concurrency.allowed) {
@@ -282,9 +286,16 @@ export async function createSession(
   }
 
   // Create session record
+  const sessionOwner: Principal =
+    params.ownerType === 'team' && params.ownerId
+      ? { type: 'team', id: params.ownerId }
+      : userPrincipal(params.userId);
+
   const session = await db.createSession(appDb, {
     id: sessionId,
     userId: params.userId,
+    ownerType: sessionOwner.type,
+    ownerId: sessionOwner.id,
     workspace: params.workspace,
     title: params.title,
     parentSessionId: params.parentSessionId,
@@ -323,7 +334,7 @@ export async function createSession(
 
   // Build environment variables for the sandbox
   const providerVars = await assembleProviderEnv(appDb, env);
-  const credentialVars = await assembleCredentialEnv(appDb, env, params.userId);
+  const credentialVars = await assembleCredentialEnv(appDb, env, sessionOwner);
   const envVars: Record<string, string> = { ...providerVars, ...credentialVars };
 
   // Custom LLM providers
@@ -339,7 +350,7 @@ export async function createSession(
   // If repo URL provided, resolve repo provider and assemble env vars
   let repoGitConfig: Record<string, string> = {};
   if (params.repoUrl) {
-    const repoEnv = await assembleRepoEnv(appDb, env, params.userId, orgId, {
+    const repoEnv = await assembleRepoEnv(appDb, env, sessionOwner, params.userId, orgId, {
       repoUrl: params.repoUrl,
       branch: params.branch,
       ref: params.ref,
@@ -420,7 +431,7 @@ export async function createSession(
         sessionId,
         channelType: 'web',
         channelId: sessionId,
-        scopeKey: webManualScopeKey(params.userId, sessionId),
+        scopeKey: webManualScopeKey(userPrincipal(params.userId), sessionId),
         userId: params.userId,
         orgId: orgSettings.id,
         queueMode: uiQueueMode,

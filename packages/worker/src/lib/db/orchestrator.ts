@@ -1,5 +1,6 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import type { OrchestratorIdentity, AgentSession } from '@valet/shared';
+import type { OrchestratorIdentity, AgentSession, Principal } from '@valet/shared';
+import { orchestratorSessionId, userPrincipal } from '@valet/shared';
 import { eq, and, sql } from 'drizzle-orm';
 import type { AppDb } from '../drizzle.js';
 import { orchestratorIdentities } from '../schema/index.js';
@@ -8,6 +9,8 @@ function mapSessionRow(row: any): AgentSession {
   return {
     id: row.id,
     userId: row.user_id,
+    ownerType: row.owner_type || 'user',
+    ownerId: row.owner_id || row.user_id,
     workspace: row.workspace,
     status: row.status,
     title: row.title || undefined,
@@ -30,6 +33,8 @@ function rowToIdentity(row: typeof orchestratorIdentities.$inferSelect): Orchest
   return {
     id: row.id,
     userId: row.userId || undefined,
+    ownerType: (row.ownerType as OrchestratorIdentity['ownerType']) || 'user',
+    ownerId: row.ownerId || row.userId || undefined,
     orgId: row.orgId,
     type: row.type as OrchestratorIdentity['type'],
     name: row.name,
@@ -73,15 +78,24 @@ export async function getOrchestratorIdentityByName(db: AppDb, name: string, org
 
 export async function createOrchestratorIdentity(
   db: AppDb,
-  data: { id: string; userId: string; name: string; handle: string; avatar?: string; customInstructions?: string; personaId?: string; orgId?: string }
+  data: {
+    id: string; userId?: string; owner?: Principal; name: string; handle: string;
+    avatar?: string; customInstructions?: string; personaId?: string; orgId?: string;
+  }
 ): Promise<OrchestratorIdentity> {
   const orgId = data.orgId || 'default';
+  const owner: Principal = data.owner ?? userPrincipal(data.userId ?? '');
+  if (!owner.id) throw new Error('createOrchestratorIdentity requires a userId or owner');
+  const type: OrchestratorIdentity['type'] = owner.type === 'user' ? 'personal' : owner.type;
+  const userId = owner.type === 'user' ? owner.id : null;
 
   await db.insert(orchestratorIdentities).values({
     id: data.id,
-    userId: data.userId,
+    userId,
     orgId,
-    type: 'personal',
+    ownerType: owner.type,
+    ownerId: owner.id,
+    type,
     name: data.name,
     handle: data.handle,
     avatar: data.avatar || null,
@@ -91,9 +105,11 @@ export async function createOrchestratorIdentity(
 
   return {
     id: data.id,
-    userId: data.userId,
+    userId: userId ?? undefined,
+    ownerType: owner.type,
+    ownerId: owner.id,
     orgId,
-    type: 'personal',
+    type,
     name: data.name,
     handle: data.handle,
     avatar: data.avatar,
@@ -102,6 +118,25 @@ export async function createOrchestratorIdentity(
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+}
+
+export async function getOrchestratorIdentityByOwner(
+  db: AppDb,
+  owner: Principal,
+  orgId: string = 'default'
+): Promise<OrchestratorIdentity | null> {
+  const row = await db
+    .select()
+    .from(orchestratorIdentities)
+    .where(
+      and(
+        eq(orchestratorIdentities.ownerType, owner.type),
+        eq(orchestratorIdentities.ownerId, owner.id),
+        eq(orchestratorIdentities.orgId, orgId)
+      )
+    )
+    .get();
+  return row ? rowToIdentity(row) : null;
 }
 
 export async function updateOrchestratorIdentity(
@@ -132,7 +167,7 @@ export async function updateOrchestratorIdentity(
 export async function getOrchestratorSession(db: D1Database, userId: string): Promise<AgentSession | null> {
   const result = await db.prepare(
     `SELECT * FROM sessions WHERE id = ? LIMIT 1`
-  ).bind(`orchestrator:${userId}`).first();
+  ).bind(orchestratorSessionId(userPrincipal(userId))).first();
   return result ? mapSessionRow(result) : null;
 }
 
@@ -159,6 +194,28 @@ export async function getNonTerminalOrchestratorSessions(db: D1Database, userId:
        AND status NOT IN ('terminated', 'archived', 'error')
      ORDER BY created_at DESC`
   ).bind(userId).all();
+  return (rows.results ?? []).map(mapSessionRow);
+}
+
+// ─── Owner-keyed session helpers (user and team orchestrators) ──────────────
+
+export async function getCurrentOrchestratorSessionByOwner(db: D1Database, owner: Principal): Promise<AgentSession | null> {
+  const row = await db.prepare(
+    `SELECT * FROM sessions
+     WHERE owner_type = ? AND owner_id = ? AND is_orchestrator = 1
+       AND status NOT IN ('terminated', 'archived', 'error')
+     ORDER BY created_at DESC LIMIT 1`
+  ).bind(owner.type, owner.id).first();
+  return row ? mapSessionRow(row) : null;
+}
+
+export async function getNonTerminalOrchestratorSessionsByOwner(db: D1Database, owner: Principal): Promise<AgentSession[]> {
+  const rows = await db.prepare(
+    `SELECT * FROM sessions
+     WHERE owner_type = ? AND owner_id = ? AND is_orchestrator = 1
+       AND status NOT IN ('terminated', 'archived', 'error')
+     ORDER BY created_at DESC`
+  ).bind(owner.type, owner.id).all();
   return (rows.results ?? []).map(mapSessionRow);
 }
 

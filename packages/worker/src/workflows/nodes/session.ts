@@ -17,6 +17,7 @@ import { renderJsonTemplates, renderTemplate } from '../../lib/workflow-dag/expr
 import { parseDurationMs } from '../../lib/workflow-dag/duration.js';
 import { getDb } from '../../lib/drizzle.js';
 import { getUserById } from '../../lib/db/users.js';
+import { getWorkflowOwner } from '../../lib/db/workflows.js';
 import { assertSessionAccess } from '../../lib/db/sessions.js';
 import { createThread } from '../../lib/db/threads.js';
 import { workflowSpawnedSessions } from '../../lib/schema/workflow-spawned-sessions.js';
@@ -247,9 +248,13 @@ async function executeStart(args: NodeExecutorArgs<StartSessionNode>): Promise<S
   const json = await args.step.do(`session-start:${args.node.id}${iSuffix}:create`, { retries: { ...NO_RETRY } }, async () => {
     const user = await getUserById(db, args.params.userId);
     if (!user) throw new Error(`session node "${args.node.id}": user ${args.params.userId} not found`);
+    // Team-owned workflows spawn team-owned sessions: the whole team can
+    // watch, and credentials resolve from the team's sourced connections.
+    const wfOwner = await getWorkflowOwner(db, args.params.workflowId);
     const result = await createSession(args.env, {
       userId: args.params.userId,
       userEmail: user.email,
+      ...(wfOwner?.ownerType === 'team' ? { ownerType: 'team' as const, ownerId: wfOwner.ownerId } : {}),
       workspace,
       presetSessionId: sessionId,
       workflowExecutionId: args.params.executionId,

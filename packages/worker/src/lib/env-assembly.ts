@@ -1,4 +1,5 @@
 import type { Env } from '../env.js';
+import type { Principal } from '@valet/shared';
 import type { RepoCredential } from '@valet/sdk/repos';
 import * as db from './db.js';
 import type { AppDb } from './drizzle.js';
@@ -29,12 +30,15 @@ export async function assembleProviderEnv(
 }
 
 /**
- * Assemble user-level credential env vars (1Password, etc.).
+ * Assemble owner-level credential env vars (1Password, etc.). Team-owned
+ * sessions resolve TEAM credentials only — never a member's personal ones
+ * (teams design §5: a team session never borrows a credential nobody chose
+ * to share).
  */
 export async function assembleCredentialEnv(
   database: AppDb,
   env: Env,
-  userId: string
+  owner: Principal
 ): Promise<Record<string, string>> {
   const envVars: Record<string, string> = {};
 
@@ -44,7 +48,7 @@ export async function assembleCredentialEnv(
 
   for (const { provider, envKey } of credentialEnvMap) {
     try {
-      const result = await getCredential(env, 'user', userId, provider);
+      const result = await getCredential(env, owner.type, owner.id, provider);
       if (result.ok) {
         envVars[envKey] = result.credential.accessToken;
       }
@@ -142,7 +146,10 @@ export async function assembleBuiltInProviderModelConfigs(
 export async function assembleRepoEnv(
   appDb: AppDb,
   env: Env,
-  userId: string,
+  /** Credential scope: team-owned sessions resolve team credentials only. */
+  credentialOwner: Principal,
+  /** Acting user — supplies the git author identity (display metadata). */
+  actorUserId: string,
   orgId: string | undefined,
   opts: { repoUrl?: string; branch?: string; ref?: string },
 ): Promise<{ envVars: Record<string, string>; gitConfig: Record<string, string>; token?: string; expiresAt?: string; error?: string }> {
@@ -174,7 +181,7 @@ export async function assembleRepoEnv(
   // Previously this path used a raw DB lookup (resolveRepoCredential) +
   // manual decryptStringPBKDF2, which skipped the refresh logic entirely.
   // That caused 403 push errors when the stored token was >8h old (TKAI-56).
-  const credResult = await getCredential(env, 'user', userId, credentialProvider);
+  const credResult = await getCredential(env, credentialOwner.type, credentialOwner.id, credentialProvider);
 
   if (credResult.ok) {
     // Track the resolved credential — may be updated by force-refresh below.
@@ -205,7 +212,7 @@ export async function assembleRepoEnv(
           // returned a stale token without expiresAt (legacy credentials stored
           // before TKAI-56 fix). Attempt a force refresh before giving up.
           if (checkRes.status === 401) {
-            const retryResult = await getCredential(env, 'user', userId, credentialProvider, { forceRefresh: true });
+            const retryResult = await getCredential(env, credentialOwner.type, credentialOwner.id, credentialProvider, { forceRefresh: true });
             if (retryResult.ok) {
               // Re-validate with the refreshed token
               const retryRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
@@ -259,7 +266,7 @@ export async function assembleRepoEnv(
       }
     }
 
-    const userRow = await db.getUserById(appDb, userId);
+    const userRow = await db.getUserById(appDb, actorUserId);
     const gitUser = {
       name: userRow?.gitName || userRow?.name || 'Valet User',
       email: userRow?.gitEmail || userRow?.email || '',
@@ -313,7 +320,7 @@ export async function assembleRepoEnv(
         const app = await loadGitHubApp(env, appDb);
         if (app) {
           const { token, expiresAt } = await mintInstallationToken(app, installation.githubInstallationId);
-          const userRow = await db.getUserById(appDb, userId);
+          const userRow = await db.getUserById(appDb, actorUserId);
           const gitUser = {
             name: userRow?.gitName || userRow?.name || 'Valet User',
             email: userRow?.gitEmail || userRow?.email || '',

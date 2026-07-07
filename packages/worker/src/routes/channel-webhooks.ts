@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
-import { channelScopeKey, SLASH_COMMANDS } from '@valet/shared';
+import { channelScopeKey, orchestratorSessionId, SLASH_COMMANDS, userPrincipal } from '@valet/shared';
 import type { ChannelTransport, ChannelTarget, ChannelContext, InboundMessage } from '@valet/sdk';
 import { channelRegistry } from '../channels/registry.js';
 import * as db from '../lib/db.js';
@@ -116,7 +116,7 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
                   const callbackChat = callbackMessage?.chat as Record<string, unknown> | undefined;
                   const callbackChatId = callbackChat?.id ? String(callbackChat.id) : '';
                   if (callbackChatId) {
-                    const scopeKey = channelScopeKey(userId, 'telegram', callbackChatId);
+                    const scopeKey = channelScopeKey(userPrincipal(userId), 'telegram', callbackChatId);
                     const binding = await db.getChannelBindingByScopeKey(c.get('db'), scopeKey);
                     targetSessionId = binding?.sessionId;
                   }
@@ -220,7 +220,7 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
 
   // Build scope key and look up channel binding
   const parts = transport.scopeKeyParts(message, userId);
-  const scopeKey = channelScopeKey(userId, parts.channelType, parts.channelId);
+  const scopeKey = channelScopeKey(userPrincipal(userId), parts.channelType, parts.channelId);
   let binding = await db.getChannelBindingByScopeKey(c.get('db'), scopeKey);
 
   // Evict stale bindings that point to terminated/archived/error sessions.
@@ -403,7 +403,7 @@ export async function handleChannelCommand(
   userId: string,
 ): Promise<void> {
   const command = message.command!;
-  const sessionId = `orchestrator:${userId}`;
+  const sessionId = orchestratorSessionId(userPrincipal(userId));
 
   // Check if user has an orchestrator configured
   const identity = await db.getOrchestratorIdentity(getDb(env.DB), userId);

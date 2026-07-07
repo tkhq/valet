@@ -14,6 +14,7 @@ import type {
   SessionParticipantSummary,
   SessionShareLink,
   SessionPurpose,
+  PrincipalType,
 } from '@valet/shared';
 import { eq, and, or, ne, lt, gt, desc, asc, sql, inArray, isNull, isNotNull, not } from 'drizzle-orm';
 import type { AppDb } from '../drizzle.js';
@@ -65,6 +66,8 @@ function rowToSession(row: typeof sessions.$inferSelect & { personaName?: string
   return {
     id: row.id,
     userId: row.userId,
+    ownerType: (row.ownerType as AgentSession['ownerType']) || 'user',
+    ownerId: row.ownerId || row.userId,
     workspace: row.workspace,
     status: row.status as AgentSession['status'],
     title: row.title || undefined,
@@ -127,7 +130,7 @@ function rowToShareLink(row: typeof sessionShareLinks.$inferSelect): SessionShar
 
 export async function createSession(
   db: AppDb,
-  data: { id: string; userId: string; workspace: string; title?: string; parentSessionId?: string; parentThreadId?: string; containerId?: string; metadata?: Record<string, unknown>; personaId?: string; isOrchestrator?: boolean; purpose?: SessionPurpose; workflowExecutionId?: string }
+  data: { id: string; userId: string; workspace: string; title?: string; parentSessionId?: string; parentThreadId?: string; containerId?: string; metadata?: Record<string, unknown>; personaId?: string; isOrchestrator?: boolean; purpose?: SessionPurpose; workflowExecutionId?: string; ownerType?: PrincipalType; ownerId?: string }
 ): Promise<AgentSession> {
   const purpose = data.purpose || (data.isOrchestrator ? 'orchestrator' : 'interactive');
 
@@ -151,6 +154,8 @@ export async function createSession(
     isOrchestrator: data.isOrchestrator ?? false,
     purpose,
     workflowExecutionId: data.workflowExecutionId || null,
+    ownerType: data.ownerType ?? 'user',
+    ownerId: data.ownerId ?? data.userId,
   }).onConflictDoNothing();
 
   return {
@@ -179,7 +184,11 @@ export async function createSession(
  */
 export async function upsertOrchestratorSession(
   db: AppDb,
-  data: { id: string; userId: string; workspace: string; title?: string; personaId?: string; isOrchestrator?: boolean; purpose?: SessionPurpose }
+  data: {
+    id: string; userId: string; workspace: string; title?: string; personaId?: string;
+    isOrchestrator?: boolean; purpose?: SessionPurpose;
+    ownerType?: PrincipalType; ownerId?: string;
+  }
 ): Promise<AgentSession> {
   const purpose = data.purpose || 'orchestrator';
 
@@ -193,6 +202,8 @@ export async function upsertOrchestratorSession(
     personaId: data.personaId || null,
     isOrchestrator: data.isOrchestrator ?? true,
     purpose,
+    ownerType: data.ownerType ?? 'user',
+    ownerId: data.ownerId ?? data.userId,
   }).onConflictDoNothing({ target: sessions.id });
 
   // UPDATE: reset status and last_active_at for the new lifecycle (covers restart case)
@@ -979,6 +990,21 @@ export async function assertSessionAccess(
     throw new NotFoundError('Session', sessionId);
   }
 
+  // Team-owned sessions: team membership is the ONLY path in. No creator
+  // shortcut (an actor who left the team loses access), no participant table,
+  // and never the org-visibility fallback — org_joinable must not pierce the
+  // team boundary. Members act as collaborator, team admins as owner.
+  if (session.ownerType === 'team' && session.ownerId) {
+    const { getTeamMembership } = await import('./teams.js');
+    const membership = await getTeamMembership(database, session.ownerId, userId);
+    if (membership) {
+      const granted: SessionParticipantRole = membership.role === 'admin' ? 'owner' : 'collaborator';
+      if (roleAtLeast(granted, requiredRole)) return session;
+    }
+    const { NotFoundError } = await import('@valet/shared');
+    throw new NotFoundError('Session', sessionId);
+  }
+
   // Owner always has access
   if (session.userId === userId) return session;
 
@@ -1006,8 +1032,28 @@ export async function assertSessionAccess(
   throw new NotFoundError('Session', sessionId);
 }
 
+/**
+ * Response-time eligibility for interactive prompts/approvals: team-owned
+ * sessions accept any CURRENT team member (a forwarded Slack card or a member
+ * removed after delivery must be rejected); user-owned sessions accept only
+ * the owner — today's behavior.
+ */
+export async function canActOnSessionPrompt(db: AppDb, session: AgentSession, userId: string): Promise<boolean> {
+  if (session.ownerType === 'team' && session.ownerId) {
+    const { getTeamMembership } = await import('./teams.js');
+    return !!(await getTeamMembership(db, session.ownerId, userId));
+  }
+  return session.userId === userId;
+}
+
 // ─── Bulk Operations ─────────────────────────────────────────────────────
 
+// Bulk delete authorizes by creator (sessions.userId) AND personal ownership.
+// Team-owned sessions are deliberately excluded: their access is governed by
+// team membership (single-session delete requires owner-level = team admin).
+// Filtering to owner_type='user' also closes an ex-member hole — removal never
+// rewrites userId, so a departed member would otherwise still match sessions
+// they created.
 export async function filterOwnedSessionIds(
   db: AppDb,
   sessionIds: string[],
@@ -1017,7 +1063,7 @@ export async function filterOwnedSessionIds(
   const rows = await db
     .select({ id: sessions.id })
     .from(sessions)
-    .where(and(inArray(sessions.id, sessionIds), eq(sessions.userId, userId)));
+    .where(and(inArray(sessions.id, sessionIds), eq(sessions.userId, userId), eq(sessions.ownerType, 'user')));
   return rows.map((r) => r.id);
 }
 
@@ -1029,7 +1075,7 @@ export async function bulkDeleteSessionRecords(
   if (sessionIds.length === 0) return;
   await db
     .delete(sessions)
-    .where(and(inArray(sessions.id, sessionIds), eq(sessions.userId, userId)));
+    .where(and(inArray(sessions.id, sessionIds), eq(sessions.userId, userId), eq(sessions.ownerType, 'user')));
 }
 
 export async function bulkDeleteSessionMessages(

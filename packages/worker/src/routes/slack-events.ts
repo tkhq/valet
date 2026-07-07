@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
-import { channelScopeKey } from '@valet/shared';
+import { channelScopeKey, userPrincipal } from '@valet/shared';
 import type { ChannelTarget, ChannelContext } from '@valet/sdk';
 import { verifySlackSignature } from '@valet/plugin-slack/channels';
 import type { SlackTransport } from '@valet/plugin-slack/channels';
@@ -8,6 +8,7 @@ import { checkPrivateChannelAccess } from '@valet/plugin-slack/actions';
 import { channelRegistry } from '../channels/registry.js';
 import * as db from '../lib/db.js';
 import { dispatchOrchestratorPrompt } from '../services/orchestrator.js';
+import { dispatchTeamOrchestratorPrompt } from '../services/team-orchestrator.js';
 import { handleChannelCommand } from './channel-webhooks.js';
 import { getSlackUserInfo, getSlackBotInfo } from '../services/slack.js';
 import { buildThreadContext, buildDmContext } from '../services/slack-threads.js';
@@ -179,12 +180,126 @@ slackEventsRouter.post('/slack/events', async (c) => {
   const isMention = slackEventType === 'app_mention';
 
   if (!isDm) {
-    // Shared Slack surfaces are out of bounds for personal orchestrators.
-    // FUTURE: org orchestrator routing can hook in here once shared-channel
-    // permissions are modeled explicitly.
-    console.log(
-      `[Slack] Ignoring shared-surface event for personal orchestrator: channel=${message.channelId} type=${slackChannelType || 'unknown'} event=${slackEventType || 'unknown'}`
-    );
+    // Shared Slack surfaces route through the channel binding: a channel bound
+    // to a team orchestrator is that orchestrator's channel (the binding is
+    // the router). Everything else is ignored — and every deny below is a
+    // silent 200 so the bot never posts authorization chatter into a busy
+    // channel. Personal orchestrators remain DM-only.
+    const teamBinding = await db.getChannelBindingByChannel(c.get('db'), 'slack', message.channelId);
+    if (!teamBinding || teamBinding.ownerType !== 'team' || !teamBinding.ownerId) {
+      console.log(
+        `[Slack] Ignoring shared-surface event (no team binding): channel=${message.channelId} type=${slackChannelType || 'unknown'} event=${slackEventType || 'unknown'}`
+      );
+      return c.json({ ok: true });
+    }
+    const teamId = teamBinding.ownerId;
+
+    // Slack delivers TWO events for one @mention in a channel: an `app_mention`
+    // AND a `message.*`. They aren't retries (distinct types, same ts), so
+    // neither the retry guard nor the DO can dedupe them. `message.*` already
+    // covers every channel message (mentions included), so we treat it as the
+    // canonical event and drop `app_mention` here — otherwise every mention in
+    // an 'all'-mode channel (or an active-thread mention in 'mention' mode)
+    // would dispatch twice.
+    if (slackEventType === 'app_mention') {
+      return c.json({ ok: true });
+    }
+    if (!threadId) {
+      // Channel messages always carry a ts; without one we cannot thread replies.
+      return c.json({ ok: true });
+    }
+
+    // Detect mention from the raw event text (the `app_mention` event was
+    // dropped above, so `isMention` derived from event type is always false
+    // here). The bot's user id is known from the org install.
+    const botUserId = botInfo?.userId || install.botUserId;
+    const rawText = typeof event?.text === 'string' ? event.text : '';
+    const mentionsBot = !!botUserId && rawText.includes(`<@${botUserId}>`);
+
+    // Unmapped Slack users and non-members are silently ignored.
+    const memberUserId = await db.resolveUserByExternalId(c.get('db'), 'slack', slackUserId!);
+    if (!memberUserId) {
+      console.log(`[Slack] Team channel: unmapped slack user=${slackUserId} channel=${message.channelId}`);
+      return c.json({ ok: true });
+    }
+    const membership = await db.getTeamMembership(c.get('db'), teamId, memberUserId);
+    if (!membership) {
+      console.log(`[Slack] Team channel: non-member user=${memberUserId} team=${teamId}`);
+      return c.json({ ok: true });
+    }
+
+    // Trigger mode answers WHETHER to respond; the binding answered WHICH
+    // orchestrator. 'mention' also covers replies in threads the orchestrator
+    // is already active in (an existing team thread mapping ⇒ active).
+    const teamThreadKey = `team:${teamId}`;
+    if ((teamBinding.triggerMode ?? 'mention') === 'mention' && !mentionsBot) {
+      const activeThread = threadTs
+        ? await db.getChannelThreadMapping(c.env.DB, 'slack', message.channelId, threadId, teamThreadKey)
+        : null;
+      if (!activeThread) {
+        return c.json({ ok: true });
+      }
+    }
+
+    // Map the Slack thread to one team-keyed session thread — every member's
+    // activity in a Slack thread lands in the same orchestrator thread.
+    let teamThreadId: string | undefined;
+    try {
+      teamThreadId = await db.getOrCreateChannelThread(c.env.DB, {
+        channelType: 'slack',
+        channelId: message.channelId,
+        externalThreadId: threadId,
+        sessionId: teamBinding.sessionId,
+        userId: teamThreadKey,
+      });
+    } catch (err) {
+      console.warn('[Slack] Team thread mapping failed, dispatching without thread:', err);
+    }
+
+    // Best-effort thread context: messages since the orchestrator's cursor.
+    let contextPrefix: string | undefined;
+    if (threadTs && messageId) {
+      try {
+        const mapping = await db.getChannelThreadMapping(c.env.DB, 'slack', message.channelId, threadId, teamThreadKey);
+        contextPrefix =
+          (await buildThreadContext(botToken, message.channelId, threadTs, mapping?.lastSeenTs ?? null, messageId)) ??
+          undefined;
+        await db.updateThreadCursor(c.env.DB, 'slack', message.channelId, threadId, teamThreadKey, messageId);
+      } catch (err) {
+        console.warn('[Slack] Team thread context failed:', err);
+      }
+    }
+
+    const dispatchChannelId = `${message.channelId}:${threadId}`;
+    const result = await dispatchTeamOrchestratorPrompt(c.env, teamId, {
+      content: message.text || '',
+      actor: { userId: memberUserId, email: '' },
+      contextPrefix,
+      channelType: 'slack',
+      channelId: dispatchChannelId,
+      threadId: teamThreadId,
+      attachments: (message.attachments ?? []).map((a) => ({
+        type: 'file' as const,
+        mime: a.mimeType,
+        url: a.url,
+        filename: a.fileName,
+      })),
+      authorName: message.senderName,
+      replyTo: { channelType: 'slack', channelId: dispatchChannelId },
+      queueMode: teamBinding.triggerMode === 'all' ? 'collect' : 'followup',
+    });
+    if (result.dispatched) {
+      const teamSlackTransport = transport as SlackTransport;
+      if (teamSlackTransport.setThreadStatus) {
+        const statusTarget: ChannelTarget = { channelType: 'slack', channelId: message.channelId, threadId };
+        const statusCtx: ChannelContext = { token: botToken, userId: memberUserId };
+        c.executionCtx.waitUntil(
+          Promise.resolve(teamSlackTransport.setThreadStatus(statusTarget, 'is thinking...', statusCtx)).catch(() => {})
+        );
+      }
+    } else {
+      console.log(`[Slack] Team dispatch not delivered: team=${teamId} reason=${result.reason}`);
+    }
     return c.json({ ok: true });
   }
 
@@ -226,7 +341,7 @@ slackEventsRouter.post('/slack/events', async (c) => {
   let bindingScopeKey: string | undefined;
   if (isDm) {
     const parts = transport.scopeKeyParts(message, userId);
-    bindingScopeKey = channelScopeKey(userId, parts.channelType, parts.channelId);
+    bindingScopeKey = channelScopeKey(userPrincipal(userId), parts.channelType, parts.channelId);
     binding = await db.getChannelBindingByScopeKey(c.get('db'), bindingScopeKey);
 
     // Evict stale bindings that point to terminated/archived/error sessions
@@ -610,15 +725,14 @@ slackEventsRouter.post('/slack/interactive', async (c) => {
     return slackError('Your Slack account is not linked to Valet, so this action cannot be completed.');
   }
 
-  // Resolve session ID: use encoded sessionId if available, otherwise fall back to D1 lookup
+  // Resolve session ID: use encoded sessionId if available, otherwise fall back
+  // to D1 lookup. Eligibility is NOT decided here — the session-level check
+  // below (canActOnSessionPrompt) is authoritative and team-aware, so this
+  // fallback must not reject a current team member with an owner-only test.
   if (!sessionId) {
     const inv = await db.getInvocation(c.get('db'), promptId);
     if (!inv || inv.status !== 'pending') {
       return slackError('This prompt is no longer pending.');
-    }
-    if (inv.userId !== userId) {
-      console.log(`[Slack Interactive] User ${userId} not authorized for invocation ${promptId}`);
-      return slackError('Only the session owner can respond to this prompt.');
     }
     sessionId = inv.sessionId;
   }
@@ -635,9 +749,11 @@ slackEventsRouter.post('/slack/interactive', async (c) => {
   if (['terminated', 'archived', 'error'].includes(session.status)) {
     return slackError('This session is no longer active. The prompt may have expired.');
   }
-  if (session.userId !== userId) {
+  // Response-time eligibility: team-owned sessions accept any current team
+  // member; user-owned sessions accept only the owner.
+  if (!(await db.canActOnSessionPrompt(c.get('db'), session, userId))) {
     console.log(`[Slack Interactive] User ${userId} not authorized for session ${targetSessionId}`);
-    return slackError('Only the session owner can respond to this prompt.');
+    return slackError("You're not authorized to respond to this prompt.");
   }
 
   // Strip the buttons immediately so the user sees their click landed and can't

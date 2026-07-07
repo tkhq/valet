@@ -1,5 +1,5 @@
 import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
-import type { MemoryExportFile, MemoryFile, MemoryFileListing, MemoryFileSearchResult, MemoryImportResult, PatchOperation, PatchResult } from '@valet/shared';
+import type { MemoryExportFile, MemoryFile, MemoryFileListing, MemoryFileSearchResult, MemoryImportResult, PatchOperation, PatchResult, Principal } from '@valet/shared';
 import { eq, and, sql } from 'drizzle-orm';
 import type { AppDb } from '../drizzle.js';
 import { orchestratorMemoryFiles } from '../schema/memory-files.js';
@@ -58,17 +58,17 @@ function rowToMemoryFile(row: typeof orchestratorMemoryFiles.$inferSelect): Memo
 
 // ─── Read Operations ────────────────────────────────────────────────────────
 
-export async function readMemoryFile(db: AppDb, userId: string, path: string): Promise<MemoryFile | null> {
+export async function readMemoryFile(db: AppDb, owner: Principal, path: string): Promise<MemoryFile | null> {
   const normalized = normalizePath(path);
   const row = await db
     .select()
     .from(orchestratorMemoryFiles)
-    .where(and(eq(orchestratorMemoryFiles.userId, userId), eq(orchestratorMemoryFiles.path, normalized)))
+    .where(and(eq(orchestratorMemoryFiles.ownerType, owner.type), eq(orchestratorMemoryFiles.ownerId, owner.id), eq(orchestratorMemoryFiles.path, normalized)))
     .get();
   return row ? rowToMemoryFile(row) : null;
 }
 
-export async function listMemoryFiles(db: AppDb, userId: string, pathPrefix: string): Promise<MemoryFileListing[]> {
+export async function listMemoryFiles(db: AppDb, owner: Principal, pathPrefix: string): Promise<MemoryFileListing[]> {
   const normalized = normalizePath(pathPrefix);
   const prefix = normalized.endsWith('/') ? normalized : (normalized ? normalized + '/' : '');
 
@@ -82,8 +82,8 @@ export async function listMemoryFiles(db: AppDb, userId: string, pathPrefix: str
     .from(orchestratorMemoryFiles)
     .where(
       prefix
-        ? and(eq(orchestratorMemoryFiles.userId, userId), sql`${orchestratorMemoryFiles.path} LIKE ${prefix + '%'}`)
-        : eq(orchestratorMemoryFiles.userId, userId)
+        ? and(eq(orchestratorMemoryFiles.ownerType, owner.type), eq(orchestratorMemoryFiles.ownerId, owner.id), sql`${orchestratorMemoryFiles.path} LIKE ${prefix + '%'}`)
+        : and(eq(orchestratorMemoryFiles.ownerType, owner.type), eq(orchestratorMemoryFiles.ownerId, owner.id))
     )
     .orderBy(orchestratorMemoryFiles.path);
 
@@ -97,16 +97,29 @@ export async function listMemoryFiles(db: AppDb, userId: string, pathPrefix: str
 
 // ─── Write Operations ───────────────────────────────────────────────────────
 
+/**
+ * user_id on memory rows is creator/actor provenance (NOT NULL FK); ownership
+ * lives in owner_type/owner_id. For user owners the actor defaults to the
+ * owner; team-owned writes must name the acting user.
+ */
+function resolveActor(owner: Principal, actorUserId?: string): string {
+  const actor = actorUserId ?? (owner.type === 'user' ? owner.id : undefined);
+  if (!actor) throw new Error('actorUserId is required for non-user-owned memory writes');
+  return actor;
+}
+
 export async function writeMemoryFile(
   rawDb: D1Database,
-  userId: string,
+  owner: Principal,
   path: string,
   content: string,
   // Bulk callers (importMemoryFiles) set this false to defer cap enforcement to
   // a single pass at the end, so files aren't pruned mid-batch and the prune
   // count can be reported. Single writes (PUT/PATCH) keep the default.
   enforceCap = true,
+  actorUserId?: string,
 ): Promise<MemoryFile> {
+  const actor = resolveActor(owner, actorUserId);
   const normalized = normalizePath(path);
   const error = validatePath(normalized);
   if (error) throw new Error(error);
@@ -117,8 +130,8 @@ export async function writeMemoryFile(
 
   // Check if file exists to determine if this is an update
   const existing = await rawDb
-    .prepare('SELECT id, version, rowid, created_at, relevance, org_id FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
-    .bind(userId, normalized)
+    .prepare('SELECT id, version, rowid, created_at, relevance, org_id FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path = ?')
+    .bind(owner.type, owner.id, normalized)
     .first<{ id: string; version: number; rowid: number; created_at: string; relevance: number; org_id: string }>();
 
   if (existing) {
@@ -139,7 +152,7 @@ export async function writeMemoryFile(
 
     return {
       id: existing.id,
-      userId,
+      userId: actor,
       orgId: existing.org_id,
       path: normalized,
       content,
@@ -156,9 +169,9 @@ export async function writeMemoryFile(
   // Insert new file
   await rawDb
     .prepare(
-      `INSERT INTO orchestrator_memory_files (id, user_id, path, title, content, pinned) VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO orchestrator_memory_files (id, user_id, owner_type, owner_id, path, title, content, pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .bind(id, userId, normalized, title, content, pinned)
+    .bind(id, actor, owner.type, owner.id, normalized, title, content, pinned)
     .run();
 
   // Sync FTS index
@@ -174,11 +187,11 @@ export async function writeMemoryFile(
   }
 
   // Auto-prune if over cap (non-pinned files only)
-  if (enforceCap) await enforceMemoryCap(rawDb, userId);
+  if (enforceCap) await enforceMemoryCap(rawDb, owner);
 
   return {
     id,
-    userId,
+    userId: actor,
     orgId: 'default',
     path: normalized,
     content,
@@ -196,9 +209,10 @@ export async function writeMemoryFile(
 
 export async function patchMemoryFile(
   rawDb: D1Database,
-  userId: string,
+  owner: Principal,
   path: string,
   operations: PatchOperation[],
+  actorUserId?: string,
 ): Promise<PatchResult> {
   const normalized = normalizePath(path);
   const error = validatePath(normalized);
@@ -206,8 +220,8 @@ export async function patchMemoryFile(
 
   // Read current content
   const existing = await rawDb
-    .prepare('SELECT id, content, version, rowid FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
-    .bind(userId, normalized)
+    .prepare('SELECT id, content, version, rowid FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path = ?')
+    .bind(owner.type, owner.id, normalized)
     .first<{ id: string; content: string; version: number; rowid: number }>();
 
   let content = existing?.content ?? '';
@@ -340,25 +354,25 @@ export async function patchMemoryFile(
     return { content, version: newVersion, applied, skipped };
   } else {
     // Create file (only valid for append/prepend)
-    const file = await writeMemoryFile(rawDb, userId, normalized, content);
+    const file = await writeMemoryFile(rawDb, owner, normalized, content, true, actorUserId);
     return { content, version: file.version, applied, skipped };
   }
 }
 
 // ─── Delete Operations ──────────────────────────────────────────────────────
 
-export async function deleteMemoryFile(rawDb: D1Database, userId: string, path: string): Promise<number> {
+export async function deleteMemoryFile(rawDb: D1Database, owner: Principal, path: string): Promise<number> {
   const normalized = normalizePath(path);
 
   // Get rowid before deleting for FTS cleanup
   const row = await rawDb
-    .prepare('SELECT rowid FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
-    .bind(userId, normalized)
+    .prepare('SELECT rowid FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path = ?')
+    .bind(owner.type, owner.id, normalized)
     .first<{ rowid: number }>();
 
   const result = await rawDb
-    .prepare('DELETE FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
-    .bind(userId, normalized)
+    .prepare('DELETE FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path = ?')
+    .bind(owner.type, owner.id, normalized)
     .run();
 
   const changes = result.meta?.changes ?? 0;
@@ -369,19 +383,19 @@ export async function deleteMemoryFile(rawDb: D1Database, userId: string, path: 
   return changes;
 }
 
-export async function deleteMemoryFilesUnderPath(rawDb: D1Database, userId: string, pathPrefix: string): Promise<number> {
+export async function deleteMemoryFilesUnderPath(rawDb: D1Database, owner: Principal, pathPrefix: string): Promise<number> {
   const normalized = normalizePath(pathPrefix);
   const prefix = normalized.endsWith('/') ? normalized : normalized + '/';
 
   // Get rowids before deleting for FTS cleanup
   const rows = await rawDb
-    .prepare('SELECT rowid FROM orchestrator_memory_files WHERE user_id = ? AND path LIKE ?')
-    .bind(userId, prefix + '%')
+    .prepare('SELECT rowid FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path LIKE ?')
+    .bind(owner.type, owner.id, prefix + '%')
     .all<{ rowid: number }>();
 
   const result = await rawDb
-    .prepare('DELETE FROM orchestrator_memory_files WHERE user_id = ? AND path LIKE ?')
-    .bind(userId, prefix + '%')
+    .prepare('DELETE FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path LIKE ?')
+    .bind(owner.type, owner.id, prefix + '%')
     .run();
 
   const changes = result.meta?.changes ?? 0;
@@ -398,7 +412,7 @@ export async function deleteMemoryFilesUnderPath(rawDb: D1Database, userId: stri
 
 export async function searchMemoryFiles(
   rawDb: D1Database,
-  userId: string,
+  owner: Principal,
   query: string,
   pathPrefix?: string,
   limit = 20,
@@ -418,8 +432,8 @@ export async function searchMemoryFiles(
              bm25(orchestrator_memory_files_fts, 5, 10, 1) as bm25_score
       FROM orchestrator_memory_files m
       JOIN orchestrator_memory_files_fts ON orchestrator_memory_files_fts.rowid = m.rowid
-      WHERE orchestrator_memory_files_fts MATCH ? AND m.user_id = ?`;
-    const params: (string | number)[] = [q, userId];
+      WHERE orchestrator_memory_files_fts MATCH ? AND m.owner_type = ? AND m.owner_id = ?`;
+    const params: (string | number)[] = [q, owner.type, owner.id];
 
     if (pathPrefix) {
       const normalized = normalizePath(pathPrefix);
@@ -456,13 +470,78 @@ export async function searchMemoryFiles(
   return scored;
 }
 
+export interface ScopedMemorySearchResult extends MemoryFileSearchResult {
+  ownerType: string;
+  ownerId: string;
+}
+
+/**
+ * Search across multiple owner scopes at once (the personal orchestrator's
+ * read-union over its own scope + every team the user belongs to). Results
+ * carry their owner so callers can tag them (e.g. a `team:{id}/` prefix).
+ * Membership is the caller's responsibility — resolve scopes at query time.
+ */
+export async function searchMemoryFilesUnion(
+  rawDb: D1Database,
+  scopes: Principal[],
+  query: string,
+  limit = 20,
+): Promise<ScopedMemorySearchResult[]> {
+  if (scopes.length === 0) return [];
+  const ftsQuery = buildFTS5Query(query);
+  if (!ftsQuery) return [];
+
+  const queryTerms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length >= 2)
+    .map((t) => t.replace(/[^\w]/g, ''));
+
+  const ownerClause = scopes.map(() => '(m.owner_type = ? AND m.owner_id = ?)').join(' OR ');
+  const ownerParams = scopes.flatMap((s) => [s.type, s.id]);
+
+  const runSearch = async (q: string): Promise<any[]> => {
+    const safeLimit = Math.max(1, Math.min(Math.floor(limit), 200));
+    const sqlStr = `
+      SELECT m.path, m.title, m.content, m.owner_type, m.owner_id,
+             bm25(orchestrator_memory_files_fts, 5, 10, 1) as bm25_score
+      FROM orchestrator_memory_files m
+      JOIN orchestrator_memory_files_fts ON orchestrator_memory_files_fts.rowid = m.rowid
+      WHERE orchestrator_memory_files_fts MATCH ? AND (${ownerClause})
+      ORDER BY bm25_score LIMIT ${safeLimit}`;
+    const result = await rawDb.prepare(sqlStr).bind(q, ...ownerParams).all();
+    return result.results || [];
+  };
+
+  let rows = await runSearch(ftsQuery);
+  if (rows.length === 0 && ftsQuery.includes(' AND ')) {
+    const orQuery = ftsQuery.replace(/ NOT (\([^)]+\)|"[^"]*"\*?)/, '').replace(/ AND /g, ' OR ');
+    rows = await runSearch(orQuery);
+  }
+
+  const scored = rows.map((row: any) => {
+    const bm25 = normalizeBM25(row.bm25_score as number);
+    const boost = pathBoost(row.path as string, queryTerms);
+    return {
+      path: row.path as string,
+      snippet: extractSnippet(row.content as string, queryTerms),
+      relevance: Math.min(bm25 + boost, 1.0),
+      ownerType: row.owner_type as string,
+      ownerId: row.owner_id as string,
+    };
+  });
+
+  scored.sort((a, b) => b.relevance - a.relevance);
+  return scored;
+}
+
 // ─── Import / Export ────────────────────────────────────────────────────────
 
 /**
  * Returns every memory file for a user as a portable list (path + full content).
  * Ordered by path so exports are stable and diff-friendly. Scoped to the user.
  */
-export async function exportMemoryFiles(db: AppDb, userId: string): Promise<MemoryExportFile[]> {
+export async function exportMemoryFiles(db: AppDb, owner: Principal): Promise<MemoryExportFile[]> {
   const rows = await db
     .select({
       path: orchestratorMemoryFiles.path,
@@ -471,7 +550,7 @@ export async function exportMemoryFiles(db: AppDb, userId: string): Promise<Memo
       updatedAt: orchestratorMemoryFiles.updatedAt,
     })
     .from(orchestratorMemoryFiles)
-    .where(eq(orchestratorMemoryFiles.userId, userId))
+    .where(and(eq(orchestratorMemoryFiles.ownerType, owner.type), eq(orchestratorMemoryFiles.ownerId, owner.id)))
     .orderBy(orchestratorMemoryFiles.path);
 
   return rows.map((r) => ({
@@ -499,17 +578,17 @@ type ImportRow = { path: string; title: string; content: string; pinned: number 
  * upserted base rows. Because a batch is one sequential transaction, the FTS
  * statements see the upserts — so no per-row rowid round-trip is needed.
  */
-function buildImportChunk(rawDb: D1Database, userId: string, chunk: ImportRow[]): D1PreparedStatement[] {
+function buildImportChunk(rawDb: D1Database, owner: Principal, actor: string, chunk: ImportRow[]): D1PreparedStatement[] {
   const stmts = chunk.map((r) =>
     rawDb
       .prepare(
-        `INSERT INTO orchestrator_memory_files (id, user_id, path, title, content, pinned)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(user_id, path) DO UPDATE SET
+        `INSERT INTO orchestrator_memory_files (id, user_id, owner_type, owner_id, path, title, content, pinned)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_type, owner_id, path) DO UPDATE SET
            content = excluded.content, title = excluded.title, pinned = excluded.pinned,
            version = version + 1, updated_at = datetime('now')`,
       )
-      .bind(crypto.randomUUID(), userId, r.path, r.title, r.content, r.pinned),
+      .bind(crypto.randomUUID(), actor, owner.type, owner.id, r.path, r.title, r.content, r.pinned),
   );
 
   const paths = chunk.map((r) => r.path);
@@ -518,17 +597,17 @@ function buildImportChunk(rawDb: D1Database, userId: string, chunk: ImportRow[])
     rawDb
       .prepare(
         `DELETE FROM orchestrator_memory_files_fts WHERE rowid IN (
-           SELECT rowid FROM orchestrator_memory_files WHERE user_id = ? AND path IN (${placeholders}))`,
+           SELECT rowid FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path IN (${placeholders}))`,
       )
-      .bind(userId, ...paths),
+      .bind(owner.type, owner.id, ...paths),
   );
   stmts.push(
     rawDb
       .prepare(
         `INSERT INTO orchestrator_memory_files_fts(rowid, path, title, content)
-         SELECT rowid, path, title, content FROM orchestrator_memory_files WHERE user_id = ? AND path IN (${placeholders})`,
+         SELECT rowid, path, title, content FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path IN (${placeholders})`,
       )
-      .bind(userId, ...paths),
+      .bind(owner.type, owner.id, ...paths),
   );
 
   return stmts;
@@ -536,9 +615,11 @@ function buildImportChunk(rawDb: D1Database, userId: string, chunk: ImportRow[])
 
 export async function importMemoryFiles(
   rawDb: D1Database,
-  userId: string,
+  owner: Principal,
   files: { path: string; content: string }[],
+  actorUserId?: string,
 ): Promise<MemoryImportResult> {
+  const actor = resolveActor(owner, actorUserId);
   const skipped: { path: string; reason: string }[] = [];
 
   // Validate + dedup up front so each atomic batch holds only known-good rows
@@ -571,7 +652,7 @@ export async function importMemoryFiles(
   for (let i = 0; i < rows.length; i += IMPORT_CHUNK) {
     const chunk = rows.slice(i, i + IMPORT_CHUNK);
     try {
-      await rawDb.batch(buildImportChunk(rawDb, userId, chunk));
+      await rawDb.batch(buildImportChunk(rawDb, owner, actor, chunk));
       imported += chunk.length;
     } catch (batchErr) {
       // The atomic batch rolled back; replay per-file so one bad row (e.g. a
@@ -582,7 +663,7 @@ export async function importMemoryFiles(
       );
       for (const r of chunk) {
         try {
-          await writeMemoryFile(rawDb, userId, r.path, r.content, false);
+          await writeMemoryFile(rawDb, owner, r.path, r.content, false, actor);
           imported++;
         } catch (err) {
           skipped.push({ path: r.path, reason: err instanceof Error ? err.message : 'write failed' });
@@ -595,7 +676,7 @@ export async function importMemoryFiles(
   // pruned counts what the cap then removed).
   let pruned = 0;
   try {
-    pruned = await enforceMemoryCap(rawDb, userId);
+    pruned = await enforceMemoryCap(rawDb, owner);
   } catch {
     // A prune failure must not lose the import tally; the cap self-heals on the next write.
   }
@@ -605,7 +686,7 @@ export async function importMemoryFiles(
 
 // ─── Relevance Boost ────────────────────────────────────────────────────────
 
-export async function boostMemoryFileRelevance(db: AppDb, userId: string, path: string): Promise<void> {
+export async function boostMemoryFileRelevance(db: AppDb, owner: Principal, path: string): Promise<void> {
   const normalized = normalizePath(path);
   await db
     .update(orchestratorMemoryFiles)
@@ -613,22 +694,22 @@ export async function boostMemoryFileRelevance(db: AppDb, userId: string, path: 
       relevance: sql`MIN(${orchestratorMemoryFiles.relevance} + 0.1, 2.0)`,
       lastAccessedAt: sql`datetime('now')`,
     })
-    .where(and(eq(orchestratorMemoryFiles.userId, userId), eq(orchestratorMemoryFiles.path, normalized)));
+    .where(and(eq(orchestratorMemoryFiles.ownerType, owner.type), eq(orchestratorMemoryFiles.ownerId, owner.id), eq(orchestratorMemoryFiles.path, normalized)));
 }
 
 // ─── Journal Auto-Creation ──────────────────────────────────────────────────
 
-export async function ensureTodayJournal(rawDb: D1Database, userId: string): Promise<void> {
+export async function ensureTodayJournal(rawDb: D1Database, owner: Principal, actorUserId?: string): Promise<void> {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const path = `journal/${today}.md`;
   const normalized = normalizePath(path);
   const existing = await rawDb
-    .prepare('SELECT id FROM orchestrator_memory_files WHERE user_id = ? AND path = ?')
-    .bind(userId, normalized)
+    .prepare('SELECT id FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND path = ?')
+    .bind(owner.type, owner.id, normalized)
     .first();
   if (existing) return;
   try {
-    await writeMemoryFile(rawDb, userId, path, `# ${today}\n\n`);
+    await writeMemoryFile(rawDb, owner, path, `# ${today}\n\n`, true, actorUserId);
   } catch {
     // Unique constraint race — another concurrent restart created it first. Safe to ignore.
   }
@@ -672,10 +753,10 @@ export async function pruneEmptyJournals(rawDb: D1Database): Promise<number> {
 
 // ─── Cap Enforcement ────────────────────────────────────────────────────────
 
-async function enforceMemoryCap(rawDb: D1Database, userId: string): Promise<number> {
+async function enforceMemoryCap(rawDb: D1Database, owner: Principal): Promise<number> {
   const countResult = await rawDb
-    .prepare('SELECT COUNT(*) as cnt FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 0')
-    .bind(userId)
+    .prepare('SELECT COUNT(*) as cnt FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND pinned = 0')
+    .bind(owner.type, owner.id)
     .first<{ cnt: number }>();
 
   if (!countResult || countResult.cnt <= MEMORY_CAP) return 0;
@@ -686,21 +767,21 @@ async function enforceMemoryCap(rawDb: D1Database, userId: string): Promise<numb
   const toDelete = await rawDb
     .prepare(
       `SELECT rowid FROM orchestrator_memory_files WHERE id IN (
-        SELECT id FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 0
+        SELECT id FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND pinned = 0
         ORDER BY relevance ASC, last_accessed_at ASC LIMIT ?
       )`
     )
-    .bind(userId, excess)
+    .bind(owner.type, owner.id, excess)
     .all<{ rowid: number }>();
 
   await rawDb
     .prepare(
       `DELETE FROM orchestrator_memory_files WHERE id IN (
-        SELECT id FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 0
+        SELECT id FROM orchestrator_memory_files WHERE owner_type = ? AND owner_id = ? AND pinned = 0
         ORDER BY relevance ASC, last_accessed_at ASC LIMIT ?
       )`
     )
-    .bind(userId, excess)
+    .bind(owner.type, owner.id, excess)
     .run();
 
   const prunedRows = toDelete.results || [];

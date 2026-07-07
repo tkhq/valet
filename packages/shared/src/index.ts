@@ -4,3 +4,4 @@ export * from './types/runner-protocol.js';
 export * from './types/workflow-dag/index.js';
 export * from './errors.js';
 export * from './scope-key.js';
+export * from './principal.js';

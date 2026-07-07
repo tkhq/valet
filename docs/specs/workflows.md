@@ -14,6 +14,7 @@ This spec covers:
 - Cancellation pipeline and recovery sweeps
 - Cron schedule evaluation and deduplication
 - Webhook handler with one-time-token auth
+- Team ownership (teams design phase 7): workflows carry `owner_type`/`owner_id`; the shared `workflowAccessibleBy` condition admits the owning user or any current member of the owning team across list/fetch/access (query-time membership). Ownership transfers via `PATCH /api/workflows/:id/owner { teamId | null }` (owner-only, must be a member of the target team). Team-owned runs spawn **team-owned sessions** (session-node executor threads the owner), so the whole team can watch and credentials resolve from the team's sourced connections; approval responses accept any current member via the session-prompt eligibility check
 
 ### Boundary Rules
 

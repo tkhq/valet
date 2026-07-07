@@ -50,10 +50,16 @@ This spec covers:
 | `personaId` | text | — | Linked agent persona |
 | `isOrchestrator` | boolean | `false` | Orchestrator session flag |
 | `purpose` | text NOT NULL | `'interactive'` | `'interactive'` / `'orchestrator'` / `'workflow'` |
+| `ownerType` | text NOT NULL | `'user'` | Owning principal type: `'user'` / `'team'` / `'org'` (migration 0024) |
+| `ownerId` | text NOT NULL | `''` | Owning principal ID (backfilled from `userId`) |
 | `createdAt` | text | `datetime('now')` | ISO datetime |
 | `lastActiveAt` | text | `datetime('now')` | ISO datetime |
 
-**Indexes:** user, status, parent, created_at, (user, created_at), (workspace, created_at), (status, lastActiveAt), (purpose, userId, status).
+**Indexes:** user, status, parent, created_at, (user, created_at), (workspace, created_at), (status, lastActiveAt), (purpose, userId, status), (ownerType, ownerId).
+
+**Ownership vs actor:** `ownerType`/`ownerId` say who *owns* the session (the principal whose resources, memory, and access rules apply); `userId` is the *creator/actor* — the user who spawned or triggered it. For personal sessions both point at the same user. Team-owned sessions (teams design, `docs/specs/2026-07-05-teams-design.md`) set owner = the team while `userId` remains the acting member; **children inherit the parent's owner** (spawnChild), so sessions a team orchestrator spawns are team-owned. Orchestrator session IDs embed the owner: `orchestrator:{ownerType}:{ownerId}` (helpers in `@valet/shared`).
+
+**Team access:** `assertSessionAccess` grants team-owned sessions by membership only — members act as `collaborator`, team admins as `owner`; no creator shortcut, no participant table, no org-visibility fallback. Removing a team member evicts their live client WebSockets from team-owned session DOs (`POST http://do/evict-user`).
 
 ### `messages` table
 

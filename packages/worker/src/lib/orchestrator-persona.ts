@@ -6,7 +6,7 @@ import type { OrchestratorIdentity } from '@valet/shared';
  * Phase A persona injection pipeline (personaFiles → PERSONA_FILES_JSON → start.sh).
  */
 export function buildOrchestratorPersonaFiles(
-  identity: OrchestratorIdentity
+  identity: Pick<OrchestratorIdentity, 'name' | 'handle' | 'customInstructions'>
 ): { filename: string; content: string; sortOrder: number }[] {
   const files: { filename: string; content: string; sortOrder: number }[] = [];
 

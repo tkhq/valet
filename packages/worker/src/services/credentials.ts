@@ -209,8 +209,15 @@ async function refreshGitHubToken(
       },
     };
   } catch (err) {
-    // Refresh failed — delete credential row so the user is forced to reconnect
+    // Refresh failed — delete the row so the user reconnects. Team credentials
+    // are references (they never reach this path directly), but a user row that
+    // dies here backs team connections: flip those to 'broken' so the team sees
+    // it and can re-source (never a silent vanish).
     await credentialDb.deleteCredential(db, ownerType, ownerId, provider, 'oauth2');
+    if (ownerType === 'user') {
+      const { breakTeamCredentialsSourcedFrom } = await import('./team-credentials.js');
+      await breakTeamCredentialsSourcedFrom(db, ownerId, { provider });
+    }
     return {
       ok: false,
       error: {
@@ -499,6 +506,24 @@ export async function getCredential(
   options?: { forceRefresh?: boolean },
 ): Promise<CredentialResult> {
   const db = getDb(env.DB);
+
+  // Team credentials are REFERENCES to the sourcing member's live credential
+  // (teams design §5: "the tokens remain the sourcing member's"), not copies —
+  // so refresh/rotation happens once, on the member's own row, and can't split
+  // the token lineage. Resolve by delegating to the sourcing user. A broken or
+  // absent reference (member left / disconnected) resolves to nothing, so the
+  // team session fails visibly rather than borrowing anyone else's tokens.
+  if (ownerType === 'team') {
+    const ref = await credentialDb.getCredentialRow(db, 'team', ownerId, provider);
+    if (!ref || !ref.sourcedFromUserId) {
+      return {
+        ok: false,
+        error: { service: provider, reason: 'not_found', message: `No team connection for ${provider}` },
+      };
+    }
+    return getCredential(env, 'user', ref.sourcedFromUserId, provider, options);
+  }
+
   // Default to 'oauth2' for GitHub as a safety net — only oauth2 rows exist now.
   const effectiveType = provider === 'github' ? 'oauth2' : undefined;
   const row = await credentialDb.getCredentialRow(db, ownerType, ownerId, provider, effectiveType);

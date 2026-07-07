@@ -6,7 +6,7 @@ import type { Env, Variables } from '../env.js';
 import * as db from '../lib/db.js';
 import * as sessionService from '../services/sessions.js';
 import { resolveAvailableModels } from '../services/model-catalog.js';
-import { NotFoundError, type AgentSession, type Message } from '@valet/shared';
+import { NotFoundError, resolveTeamOrchestratorAlias, type AgentSession, type Message } from '@valet/shared';
 import { buildPromptAttachmentBlobUrl, parseBase64DataUrl } from '../lib/utils/prompt-validation.js';
 
 export const sessionsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -19,6 +19,8 @@ function isOrchestratorSession(session: AgentSession): boolean {
 }
 
 async function resolveRequestedSessionId(dbConn: D1Database, userId: string, requestedId: string): Promise<string> {
+  const teamAlias = resolveTeamOrchestratorAlias(requestedId);
+  if (teamAlias) return teamAlias; // access enforced downstream by assertSessionAccess
   if (requestedId !== 'orchestrator') return requestedId;
 
   const session = await db.getCurrentOrchestratorSession(dbConn, userId);

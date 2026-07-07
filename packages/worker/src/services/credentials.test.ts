@@ -90,6 +90,43 @@ describe('getCredential', () => {
     }
   });
 
+  it('team credentials delegate to the sourcing member (reference, not copy)', async () => {
+    // The team reference row carries no token — resolution reads
+    // sourced_from_user_id and resolves the member's live credential.
+    mockDb.getCredentialRow.mockImplementation(async (_db, ownerType, ownerId) => {
+      if (ownerType === 'team') {
+        return {
+          id: 'team-ref', ownerType: 'team', ownerId, provider: 'github', credentialType: 'oauth2',
+          encryptedData: '', metadata: null, scopes: null, expiresAt: null,
+          sourcedFromUserId: 'user-sourcer', status: 'active',
+          createdAt: 'x', updatedAt: 'x',
+        };
+      }
+      if (ownerType === 'user' && ownerId === 'user-sourcer') {
+        return {
+          id: 'cred-src', ownerType: 'user', ownerId: 'user-sourcer', provider: 'github', credentialType: 'oauth2',
+          encryptedData: 'member-blob', metadata: null, scopes: 'repo', expiresAt: null,
+          sourcedFromUserId: null, status: 'active', createdAt: 'x', updatedAt: 'x',
+        };
+      }
+      return null;
+    });
+    mockDecrypt.mockResolvedValue(JSON.stringify({ access_token: 'ghp_member' }));
+
+    const result = await getCredential(fakeEnv, 'team', 'team-1', 'github');
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.credential.accessToken).toBe('ghp_member');
+    expect(mockDecrypt).toHaveBeenCalledWith('member-blob', 'test-key');
+  });
+
+  it('team credential resolves to not_found when the reference is absent/broken', async () => {
+    // getCredentialRow filters status='active', so a broken team ref returns null.
+    mockDb.getCredentialRow.mockResolvedValue(null);
+    const result = await getCredential(fakeEnv, 'team', 'team-1', 'github');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.reason).toBe('not_found');
+  });
+
   it('decrypts and returns credential (happy path)', async () => {
     mockDb.getCredentialRow.mockResolvedValue({
       id: 'cred-1',

@@ -1,7 +1,7 @@
 import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
-export const mailboxMessages = sqliteTable('mailbox_messages', {
+export const mailboxMessages = sqliteTable('notifications', {
   id: text().primaryKey(),
   fromSessionId: text(),
   fromUserId: text(),

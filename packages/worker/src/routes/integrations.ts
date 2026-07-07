@@ -17,6 +17,7 @@ import * as mcpOAuthDb from '../lib/db/mcp-oauth.js';
 import * as integrationService from '../services/integrations.js';
 import { integrationRegistry } from '../integrations/registry.js';
 import { revokeCredential } from '../services/credentials.js';
+import { breakTeamCredentialsSourcedFrom } from '../services/team-credentials.js';
 import { getDb } from '../lib/drizzle.js';
 import { listMcpToolCache } from '../lib/db/mcp-tool-cache.js';
 import { getDisabledPluginServices } from '../lib/db/plugins.js';
@@ -530,6 +531,14 @@ integrationsRouter.delete('/:id', async (c) => {
 
   // Revoke credentials in unified credentials table
   await revokeCredential(c.env, 'user', user.id, integration.service);
+
+  // Team connections sourced from this user's tokens are now dead — flip
+  // them to 'broken' so teams see it and can re-source (teams design §5).
+  try {
+    await breakTeamCredentialsSourcedFrom(c.get('db'), user.id, { provider: integration.service });
+  } catch (err) {
+    console.warn('[integrations] Failed to break sourced team credentials:', err);
+  }
 
   // Delete integration record
   await db.deleteIntegration(c.get('db'), id);

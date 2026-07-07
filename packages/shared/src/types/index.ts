@@ -1,4 +1,5 @@
 import type { MessagePart } from './message-parts.js';
+import type { PrincipalType } from '../principal.js';
 
 // Integration types
 export type IntegrationService =
@@ -171,7 +172,11 @@ export interface SessionParticipantSummary {
 
 export interface AgentSession {
   id: string;
+  /** Creator/actor — the user who spawned or triggered the session. */
   userId: string;
+  /** Owning principal (defaults to the creating user). */
+  ownerType?: PrincipalType;
+  ownerId?: string;
   workspace: string;
   status: SessionStatus;
   purpose?: SessionPurpose;
@@ -805,12 +810,45 @@ export interface AgentPersonaFile {
   updatedAt: string;
 }
 
+// Team types
+export type TeamRole = 'admin' | 'member';
+
+export interface Team {
+  id: string;
+  orgId: string;
+  name: string;
+  description?: string;
+  avatar?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Populated by list/get helpers. */
+  memberCount?: number;
+  /** The requesting user's role; absent for org-admin spectators who aren't members. */
+  myRole?: TeamRole;
+}
+
+export interface TeamMember {
+  teamId: string;
+  userId: string;
+  role: TeamRole;
+  addedBy?: string;
+  createdAt: string;
+  // Joined from users for display:
+  name?: string;
+  email?: string;
+  avatarUrl?: string;
+}
+
 // Orchestrator types
-export type OrchestratorType = 'personal' | 'org';
+export type OrchestratorType = 'personal' | 'team' | 'org';
 
 export interface OrchestratorIdentity {
   id: string;
   userId?: string;
+  /** Owning principal ('user' + userId for personal, 'team' + teamId for team orchestrators). */
+  ownerType?: PrincipalType;
+  ownerId?: string;
   orgId: string;
   type: OrchestratorType;
   name: string;
@@ -995,6 +1033,8 @@ export interface UserIdentityLink {
   createdAt: string;
 }
 
+export type ChannelTriggerMode = 'mention' | 'all';
+
 export interface ChannelBinding {
   id: string;
   sessionId: string;
@@ -1003,6 +1043,11 @@ export interface ChannelBinding {
   scopeKey: string;
   userId?: string;
   orgId: string;
+  ownerType?: PrincipalType;
+  ownerId?: string;
+  /** Shared-channel response policy; DM bindings ignore it. */
+  triggerMode?: ChannelTriggerMode;
+  createdBy?: string;
   queueMode: QueueMode;
   collectDebounceMs: number;
   slackChannelId?: string;

@@ -7,7 +7,7 @@
 
 import type { AppDb } from '../lib/drizzle.js';
 import { getUserSlackIdentityLink } from '../lib/db/channels.js';
-import { getOrchestratorIdentity } from '../lib/db/orchestrator.js';
+import { getOrchestratorIdentity, getOrchestratorIdentityByOwner } from '../lib/db/orchestrator.js';
 
 export interface Persona {
   name?: string;
@@ -52,5 +52,21 @@ export async function resolveOrchestratorPersona(
     console.warn('[persona] Failed to resolve orchestrator identity:', err);
   }
 
+  return persona;
+}
+/**
+ * Resolve the persona for a team orchestrator. Unlike the personal resolver,
+ * no Slack identity link is required — the team identity's name/avatar drive
+ * the outbound username/icon override, and per-message attribution of the
+ * acting member is a later refinement.
+ */
+export async function resolveTeamOrchestratorPersona(appDb: AppDb, teamId: string): Promise<Persona> {
+  const identity = await getOrchestratorIdentityByOwner(appDb, { type: 'team', id: teamId });
+  if (!identity) {
+    throw new Error(`Team ${teamId} has no orchestrator identity`);
+  }
+  const persona: Persona = {};
+  if (identity.name) persona.name = identity.name;
+  if (identity.avatar) persona.avatar = identity.avatar;
   return persona;
 }

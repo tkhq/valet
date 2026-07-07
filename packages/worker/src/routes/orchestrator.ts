@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import type { MemoryExportBundle } from '@valet/shared';
+import { userPrincipal } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import * as db from '../lib/db.js';
 import * as orchestratorService from '../services/orchestrator.js';
@@ -203,17 +204,17 @@ orchestratorRouter.get('/memory', async (c) => {
   const path = c.req.query('path') || '';
 
   if (!path || path.endsWith('/')) {
-    const files = await db.listMemoryFiles(c.get('db'), user.id, path);
+    const files = await db.listMemoryFiles(c.get('db'), userPrincipal(user.id), path);
     return c.json({ files });
   }
 
-  const file = await db.readMemoryFile(c.get('db'), user.id, path);
+  const file = await db.readMemoryFile(c.get('db'), userPrincipal(user.id), path);
   if (!file) {
     return c.json({ file: null, content: '' });
   }
 
   // Boost relevance on read
-  db.boostMemoryFileRelevance(c.get('db'), user.id, path).catch(() => {});
+  db.boostMemoryFileRelevance(c.get('db'), userPrincipal(user.id), path).catch(() => {});
 
   return c.json({ file });
 });
@@ -225,7 +226,7 @@ orchestratorRouter.put('/memory', zValidator('json', writeMemorySchema), async (
   const user = c.get('user');
   const body = c.req.valid('json');
 
-  const file = await db.writeMemoryFile(c.env.DB, user.id, body.path, body.content);
+  const file = await db.writeMemoryFile(c.env.DB, userPrincipal(user.id), body.path, body.content);
   return c.json({ file }, 201);
 });
 
@@ -236,7 +237,7 @@ orchestratorRouter.patch('/memory', zValidator('json', patchMemorySchema), async
   const user = c.get('user');
   const body = c.req.valid('json');
 
-  const result = await db.patchMemoryFile(c.env.DB, user.id, body.path, body.operations);
+  const result = await db.patchMemoryFile(c.env.DB, userPrincipal(user.id), body.path, body.operations);
   return c.json({ result });
 });
 
@@ -254,9 +255,9 @@ orchestratorRouter.delete('/memory', async (c) => {
 
   let deleted: number;
   if (path.endsWith('/')) {
-    deleted = await db.deleteMemoryFilesUnderPath(c.env.DB, user.id, path);
+    deleted = await db.deleteMemoryFilesUnderPath(c.env.DB, userPrincipal(user.id), path);
   } else {
-    deleted = await db.deleteMemoryFile(c.env.DB, user.id, path);
+    deleted = await db.deleteMemoryFile(c.env.DB, userPrincipal(user.id), path);
   }
 
   return c.json({ success: deleted > 0, deleted });
@@ -274,7 +275,7 @@ orchestratorRouter.get('/memory/search', async (c) => {
     return c.json({ error: 'query param required' }, 400);
   }
 
-  const results = await db.searchMemoryFiles(c.env.DB, user.id, query, path);
+  const results = await db.searchMemoryFiles(c.env.DB, userPrincipal(user.id), query, path);
   return c.json({ results });
 });
 
@@ -285,7 +286,7 @@ orchestratorRouter.get('/memory/search', async (c) => {
  */
 orchestratorRouter.get('/memory/export', async (c) => {
   const user = c.get('user');
-  const files = await db.exportMemoryFiles(c.get('db'), user.id);
+  const files = await db.exportMemoryFiles(c.get('db'), userPrincipal(user.id));
   const bundle: MemoryExportBundle = {
     version: 1,
     exportedAt: new Date().toISOString(),
@@ -304,7 +305,7 @@ orchestratorRouter.post('/memory/import', zValidator('json', importMemorySchema)
   const user = c.get('user');
   const body = c.req.valid('json');
 
-  const result = await db.importMemoryFiles(c.env.DB, user.id, body.files);
+  const result = await db.importMemoryFiles(c.env.DB, userPrincipal(user.id), body.files);
   return c.json(result);
 });
 

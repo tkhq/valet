@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { NotFoundError, ValidationError } from '@valet/shared';
+import { NotFoundError, resolveTeamOrchestratorAlias, ValidationError } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import * as db from '../lib/db.js';
 
@@ -15,6 +15,8 @@ async function proxyToSession(env: Env, sessionId: string, path: string): Promis
 }
 
 async function resolveRequestedSessionId(env: Env, userId: string, requestedId: string): Promise<string> {
+  const teamAlias = resolveTeamOrchestratorAlias(requestedId);
+  if (teamAlias) return teamAlias; // access enforced downstream by assertFileSessionAccess
   if (requestedId !== 'orchestrator') return requestedId;
 
   const session = await db.getCurrentOrchestratorSession(env.DB, userId);

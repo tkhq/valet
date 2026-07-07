@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { D1Database } from '@cloudflare/workers-types';
 import type { Env, Variables } from '../env.js';
-import { NotFoundError } from '@valet/shared';
+import { NotFoundError, resolveTeamOrchestratorAlias } from '@valet/shared';
 import type { AgentSession, SessionThread, SessionParticipantRole } from '@valet/shared';
 import type { AppDb } from '../lib/drizzle.js';
 import * as db from '../lib/db.js';
@@ -34,6 +34,8 @@ function isOrchestratorSession(session: AgentSession): boolean {
 }
 
 async function resolveRequestedSessionId(dbConn: D1Database, userId: string, requestedId: string): Promise<string> {
+  const teamAlias = resolveTeamOrchestratorAlias(requestedId);
+  if (teamAlias) return teamAlias; // access enforced downstream by assertSessionAccess
   if (requestedId !== 'orchestrator') return requestedId;
 
   const session = await db.getCurrentOrchestratorSession(dbConn, userId);

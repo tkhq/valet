@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
-import { webManualScopeKey } from '@valet/shared';
+import { userPrincipal, webManualScopeKey } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import * as db from '../lib/db.js';
 import { dispatchOrchestratorPrompt } from '../services/orchestrator.js';
@@ -43,7 +43,7 @@ channelsRouter.post('/prompt', zValidator('json', promptSchema), async (c) => {
   if (!scopeKey && body.channelType && body.channelId) {
     // For web channels, derive from user + channel ID
     if (body.channelType === 'web') {
-      scopeKey = webManualScopeKey(user.id, body.channelId);
+      scopeKey = webManualScopeKey(userPrincipal(user.id), body.channelId);
     } else {
       // Generic fallback: channelType:channelId
       scopeKey = `${body.channelType}:${body.channelId}`;

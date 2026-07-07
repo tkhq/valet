@@ -1,4 +1,4 @@
-import { type SessionThread, TERMINAL_SESSION_STATUSES } from '@valet/shared';
+import { orchestratorSessionId, type Principal, type SessionThread, TERMINAL_SESSION_STATUSES, userPrincipal } from '@valet/shared';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
 import type { ThreadOriginInput } from '../lib/db/threads.js';
@@ -49,6 +49,11 @@ async function stopOldOrchestratorSession(
 
 // ─── Restart Orchestrator Session ───────────────────────────────────────────
 
+export interface OrchestratorActor {
+  userId: string;
+  email: string;
+}
+
 export async function restartOrchestratorSession(
   env: Env,
   userId: string,
@@ -56,14 +61,30 @@ export async function restartOrchestratorSession(
   identity: { id: string; name: string; handle: string; customInstructions?: string | null; personaId?: string | null },
   requestUrl?: string
 ): Promise<{ sessionId: string }> {
+  return restartOrchestratorSessionForOwner(env, userPrincipal(userId), { userId, email: userEmail }, identity, requestUrl);
+}
+
+/**
+ * Core restart, generalized by owner principal. User-owned orchestrators keep
+ * the full personal treatment (memory snapshot, credential env, user prefs,
+ * steer queue). Team-owned orchestrators run without memory (phase 4) and
+ * credentials (phase 7), use org model preferences, and queue prompts instead
+ * of steering so one member's message never interrupts another's run.
+ */
+export async function restartOrchestratorSessionForOwner(
+  env: Env,
+  owner: Principal,
+  actor: OrchestratorActor,
+  identity: { id: string; name: string; handle: string; customInstructions?: string | null; personaId?: string | null },
+  requestUrl?: string
+): Promise<{ sessionId: string }> {
   const appDb = getDb(env.DB);
 
-  // ── Stop ALL non-terminal orchestrator sessions for this user ──
-  // Uses getNonTerminalOrchestratorSessions to find legacy UUID-based rows
-  // (from before the stable `orchestrator:{userId}` ID scheme) in addition
-  // to the current stable-ID row. Without this, old sessions linger as
+  // ── Stop ALL non-terminal orchestrator sessions for this owner ──
+  // Also catches legacy rows (pre-stable-ID scheme) whose owner columns were
+  // backfilled by the teams migration (0026). Without this, old sessions linger as
   // duplicates in D1 and the admin panel.
-  const staleSessions = await db.getNonTerminalOrchestratorSessions(env.DB, userId);
+  const staleSessions = await db.getNonTerminalOrchestratorSessionsByOwner(env.DB, owner);
   for (const old of staleSessions) {
     console.log(`[restartOrchestrator] Stopping old session ${old.id} (status=${old.status}) before restart`);
     await stopOldOrchestratorSession(env, appDb, old.id);
@@ -78,7 +99,7 @@ export async function restartOrchestratorSession(
         name: personaName,
         description: 'Auto-managed orchestrator persona',
         visibility: 'private',
-        createdBy: userId,
+        createdBy: actor.userId,
       }));
     } catch {
       // Concurrent restart may have created the persona between our read and write.
@@ -100,11 +121,16 @@ export async function restartOrchestratorSession(
     identity = { ...identity, personaId };
   }
 
-  const personaFiles = buildOrchestratorPersonaFiles(identity as any);
+  const personaFiles = buildOrchestratorPersonaFiles({
+    name: identity.name,
+    handle: identity.handle,
+    customInstructions: identity.customInstructions ?? undefined,
+  });
 
-  // Ensure today's journal exists and load memory snapshot
-  await ensureTodayJournal(env.DB, userId);
-  const snapshot = await loadMemorySnapshot(env.DB, userId);
+  // Memory snapshot, owner-scoped: personal orchestrators load their user's
+  // memory, team orchestrators their team's. Journal provenance is the actor.
+  await ensureTodayJournal(env.DB, owner, actor.userId);
+  const snapshot = await loadMemorySnapshot(env.DB, owner);
   if (snapshot.files.length > 0) {
     personaFiles.push({
       filename: '02-MEMORY-SNAPSHOT.md',
@@ -113,22 +139,26 @@ export async function restartOrchestratorSession(
     });
   }
 
-  const sessionId = `orchestrator:${userId}`;
+  const sessionId = orchestratorSessionId(owner);
   const runnerToken = generateRunnerToken();
 
   await db.upsertOrchestratorSession(appDb, {
     id: sessionId,
-    userId,
+    userId: actor.userId,
     workspace: 'orchestrator',
     title: `${identity.name} (Orchestrator)`,
     isOrchestrator: true,
     purpose: 'orchestrator',
     personaId: identity.personaId ?? undefined,
+    ownerType: owner.type,
+    ownerId: owner.id,
   });
 
-  // Build env vars (LLM keys + orchestrator flag)
+  // Build env vars (LLM keys + orchestrator flag). Credentials resolve by
+  // owner: personal orchestrators use the user's, team orchestrators the
+  // team's sourced connections (never a member's personal ones).
   const providerVars = await assembleProviderEnv(appDb, env);
-  const credentialVars = await assembleCredentialEnv(appDb, env, userId);
+  const credentialVars = await assembleCredentialEnv(appDb, env, owner);
   const envVars: Record<string, string> = {
     IS_ORCHESTRATOR: 'true',
     ...providerVars,
@@ -141,21 +171,21 @@ export async function restartOrchestratorSession(
     requestUrl,
   });
 
-  // Fetch user preferences (idle timeout, queue mode, model preferences)
-  const userRow = await db.getUserById(appDb, userId);
-  const idleTimeoutSeconds = userRow?.idleTimeoutSeconds ?? 900;
-  const idleTimeoutMs = idleTimeoutSeconds * 1000;
-
-  // Inject user timezone into sandbox env
-  if (userRow?.timezone) {
-    envVars['TZ'] = userRow.timezone;
-  }
-
-  // Resolve default model: user prefs first, then org prefs as fallback.
+  // Preferences: user-owned orchestrators use the owner's; team-owned use
+  // defaults + org model preferences.
+  let idleTimeoutSeconds = 900;
   let initialModel: string | undefined;
-  if (userRow?.modelPreferences && userRow.modelPreferences.length > 0) {
-    initialModel = userRow.modelPreferences[0];
-  } else {
+  if (owner.type === 'user') {
+    const userRow = await db.getUserById(appDb, owner.id);
+    idleTimeoutSeconds = userRow?.idleTimeoutSeconds ?? 900;
+    if (userRow?.timezone) {
+      envVars['TZ'] = userRow.timezone;
+    }
+    if (userRow?.modelPreferences && userRow.modelPreferences.length > 0) {
+      initialModel = userRow.modelPreferences[0];
+    }
+  }
+  if (!initialModel) {
     try {
       const orgSettings = await db.getOrgSettings(appDb);
       if (orgSettings.modelPreferences && orgSettings.modelPreferences.length > 0) {
@@ -165,10 +195,11 @@ export async function restartOrchestratorSession(
       // org settings unavailable — no default model
     }
   }
+  const idleTimeoutMs = idleTimeoutSeconds * 1000;
 
   const spawnRequest = {
     sessionId,
-    userId,
+    userId: actor.userId,
     workspace: 'orchestrator',
     imageType: 'base',
     doWsUrl,
@@ -189,7 +220,7 @@ export async function restartOrchestratorSession(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId,
-        userId,
+        userId: actor.userId,
         workspace: 'orchestrator',
         runnerToken,
         backendUrl: env.MODAL_BACKEND_URL.replace('{label}', 'create-session'),
@@ -197,7 +228,9 @@ export async function restartOrchestratorSession(
         hibernateUrl: env.MODAL_BACKEND_URL.replace('{label}', 'hibernate-session'),
         restoreUrl: env.MODAL_BACKEND_URL.replace('{label}', 'restore-session'),
         idleTimeoutMs,
-        queueMode: 'steer',
+        // Team orchestrators queue prompts (one member's message must not
+        // steer another's in-flight run); personal ones keep steer semantics.
+        queueMode: owner.type === 'team' ? 'followup' : 'steer',
         spawnRequest,
         initialModel,
       }),
@@ -314,7 +347,7 @@ export async function getOrchestratorInfo(env: Env, userId: string): Promise<Orc
   const database = getDb(env.DB);
   const identity = await db.getOrchestratorIdentity(database, userId);
   const session = await db.getCurrentOrchestratorSession(env.DB, userId);
-  const sessionId = session?.id ?? `orchestrator:${userId}`;
+  const sessionId = session?.id ?? orchestratorSessionId(userPrincipal(userId));
   const needsRestart = !!identity && (!session || TERMINAL_SESSION_STATUSES.has(session.status));
 
   return {
@@ -407,7 +440,7 @@ export async function dispatchOrchestratorPrompt(
     content = `[This is an automated task running in a fresh thread — you have no prior conversation context. Use mem_search and mem_read to recall any relevant context before proceeding, and mem_write to persist important findings or decisions.]\n\n${content}`;
   }
   if (!content && (!params.attachments || params.attachments.length === 0)) {
-    return { dispatched: false, sessionId: `orchestrator:${params.userId}`, reason: 'empty_prompt' };
+    return { dispatched: false, sessionId: orchestratorSessionId(userPrincipal(params.userId)), reason: 'empty_prompt' };
   }
 
   // Check if orchestrator identity exists
@@ -415,10 +448,10 @@ export async function dispatchOrchestratorPrompt(
   const identity = await db.getOrchestratorIdentity(appDb, params.userId);
   if (!identity) {
     console.log(`[OrchestratorDispatch] No orchestrator identity for userId=${params.userId}`);
-    return { dispatched: false, sessionId: `orchestrator:${params.userId}`, reason: 'orchestrator_not_configured' };
+    return { dispatched: false, sessionId: orchestratorSessionId(userPrincipal(params.userId)), reason: 'orchestrator_not_configured' };
   }
 
-  const sessionId = `orchestrator:${params.userId}`;
+  const sessionId = orchestratorSessionId(userPrincipal(params.userId));
 
   // Ensure the DO is running (wakes from hibernation, triggers recovery, etc.)
   const doId = env.SESSIONS.idFromName(sessionId);

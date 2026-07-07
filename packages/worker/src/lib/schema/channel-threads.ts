@@ -11,6 +11,8 @@ export const channelThreadMappings = sqliteTable('channel_thread_mappings', {
   channelId: text().notNull(),
   externalThreadId: text().notNull(),
   userId: text().notNull(),
+  ownerType: text().notNull().default('user'),
+  ownerId: text().notNull().default(''),
   lastSeenTs: text(),
   createdAt: text().notNull().default(sql`(datetime('now'))`),
 }, (table) => [

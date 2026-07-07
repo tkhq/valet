@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
 import { adminMiddleware } from '../middleware/admin.js';
-import { ValidationError } from '@valet/shared';
+import { orchestratorSessionId, userPrincipal, ValidationError } from '@valet/shared';
 import {
   getOrgSettings,
   updateOrgSettings,
@@ -440,7 +440,7 @@ adminRouter.post('/orchestrators/:sessionId/refresh', async (c) => {
   }
 
   // Call /refresh on the stable DO — it handles stop + restart internally.
-  const sessionId = `orchestrator:${session.user_id}`;
+  const sessionId = orchestratorSessionId(userPrincipal(session.user_id));
   const doId = c.env.SESSIONS.idFromName(sessionId);
   const sessionDO = c.env.SESSIONS.get(doId);
   const res = await sessionDO.fetch(new Request('http://do/refresh', { method: 'POST' }));

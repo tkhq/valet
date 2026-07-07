@@ -13,7 +13,7 @@ export type NotificationQueueType = MailboxMessage['messageType'];
 // ─── Row Conversion Helpers ─────────────────────────────────────────────────
 
 /**
- * Convert a raw row from the mailbox_messages table (with optional joined columns)
+ * Convert a raw row from the notifications table (with optional joined columns)
  * into a MailboxMessage. Used for raw SQL results that include joined aliases.
  */
 function rowToMailboxMessage(row: any): MailboxMessage {
@@ -132,7 +132,7 @@ export async function getSessionMailbox(
               fs.title AS from_session_title,
               fu.name AS from_user_name,
               fu.email AS from_user_email
-       FROM mailbox_messages m
+       FROM notifications m
        LEFT JOIN sessions fs ON m.from_session_id = fs.id
        LEFT JOIN users fu ON m.from_user_id = fu.id
        WHERE ${conditions.join(' AND ')}
@@ -158,7 +158,7 @@ export async function getUserInbox(
   if (opts?.unreadOnly) {
     // Thread has any unread message to user (root or replies)
     conditions.push(
-      `(m.read = 0 OR EXISTS (SELECT 1 FROM mailbox_messages r WHERE r.reply_to_id = m.id AND r.to_user_id = ? AND r.read = 0))`,
+      `(m.read = 0 OR EXISTS (SELECT 1 FROM notifications r WHERE r.reply_to_id = m.id AND r.to_user_id = ? AND r.read = 0))`,
     );
     whereParams.push(userId);
   }
@@ -182,14 +182,14 @@ export async function getUserInbox(
               fu.email AS from_user_email,
               COALESCE(ts.reply_count, 0) AS reply_count,
               COALESCE(ts.last_activity_at, m.created_at) AS last_activity_at
-       FROM mailbox_messages m
+       FROM notifications m
        LEFT JOIN sessions fs ON m.from_session_id = fs.id
        LEFT JOIN users fu ON m.from_user_id = fu.id
        LEFT JOIN (
          SELECT reply_to_id,
                 COUNT(*) AS reply_count,
                 MAX(created_at) AS last_activity_at
-         FROM mailbox_messages
+         FROM notifications
          WHERE reply_to_id IS NOT NULL AND to_user_id = ?
          GROUP BY reply_to_id
        ) ts ON ts.reply_to_id = m.id
@@ -250,7 +250,7 @@ export async function getMailboxMessage(db: D1Database, messageId: string): Prom
               fu.email AS from_user_email,
               ts.title AS to_session_title,
               tu.name AS to_user_name
-       FROM mailbox_messages m
+       FROM notifications m
        LEFT JOIN sessions fs ON m.from_session_id = fs.id
        LEFT JOIN users fu ON m.from_user_id = fu.id
        LEFT JOIN sessions ts ON m.to_session_id = ts.id
@@ -275,7 +275,7 @@ export async function getInboxThread(
               fu.email AS from_user_email,
               ts.title AS to_session_title,
               tu.name AS to_user_name
-       FROM mailbox_messages m
+       FROM notifications m
        LEFT JOIN sessions fs ON m.from_session_id = fs.id
        LEFT JOIN users fu ON m.from_user_id = fu.id
        LEFT JOIN sessions ts ON m.to_session_id = ts.id
@@ -305,7 +305,7 @@ export async function markInboxThreadRead(
 ): Promise<number> {
   const result = await db
     .prepare(
-      `UPDATE mailbox_messages SET read = 1, updated_at = datetime('now')
+      `UPDATE notifications SET read = 1, updated_at = datetime('now')
        WHERE to_user_id = ? AND read = 0 AND (id = ? OR reply_to_id = ?)`,
     )
     .bind(userId, threadId, threadId)
@@ -340,6 +340,75 @@ export async function isNotificationWebEnabled(
   return row ? !!row.web_enabled : true;
 }
 
+/**
+ * Batched web-preference filter for a set of users (one query instead of N).
+ * Returns the subset for whom web notifications are enabled — default enabled
+ * when no explicit row exists, and an exact event_type row beats the '*' row.
+ * Used by the attention router to fan out to a whole team without O(N)
+ * subrequests.
+ */
+export async function filterWebEnabledUsers(
+  db: D1Database,
+  userIds: string[],
+  messageType: string,
+  eventType?: string,
+): Promise<Set<string>> {
+  if (userIds.length === 0) return new Set();
+  const normalizedEventType = normalizeNotificationEventType(eventType);
+  const placeholders = userIds.map(() => '?').join(',');
+  const result = await db
+    .prepare(
+      `SELECT user_id, web_enabled,
+              CASE WHEN event_type = ? THEN 0 ELSE 1 END AS specificity
+       FROM user_notification_preferences
+       WHERE message_type = ?
+         AND event_type IN (?, '*')
+         AND user_id IN (${placeholders})`,
+    )
+    .bind(normalizedEventType, messageType, normalizedEventType, ...userIds)
+    .all<{ user_id: string; web_enabled: number; specificity: number }>();
+
+  // Most-specific row wins per user; default enabled when a user has no row.
+  const best = new Map<string, { specificity: number; enabled: boolean }>();
+  for (const row of result.results ?? []) {
+    const prev = best.get(row.user_id);
+    if (!prev || row.specificity < prev.specificity) {
+      best.set(row.user_id, { specificity: row.specificity, enabled: !!row.web_enabled });
+    }
+  }
+  return new Set(userIds.filter((id) => best.get(id)?.enabled ?? true));
+}
+
+/** Insert many notification-queue rows in a single statement (attention-router fan-out). */
+export async function enqueueNotificationsBatch(
+  db: AppDb,
+  rows: Array<{
+    fromSessionId?: string;
+    toUserId: string;
+    messageType: NotificationQueueType;
+    content: string;
+    contextSessionId?: string;
+    contextTaskId?: string;
+  }>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const now = new Date().toISOString();
+  await db.insert(mailboxMessages).values(
+    rows.map((r) => ({
+      id: crypto.randomUUID(),
+      fromSessionId: r.fromSessionId || null,
+      toUserId: r.toUserId,
+      messageType: r.messageType,
+      content: r.content,
+      contextSessionId: r.contextSessionId || null,
+      contextTaskId: r.contextTaskId || null,
+      read: false,
+      createdAt: now,
+      updatedAt: now,
+    })),
+  );
+}
+
 export async function enqueueNotification(
   db: AppDb,
   data: {
@@ -358,73 +427,6 @@ export async function enqueueNotification(
     ...data,
     messageType: data.messageType || 'notification',
   });
-}
-
-export async function enqueueWorkflowApprovalNotificationIfMissing(
-  db: D1Database,
-  data: {
-    toUserId: string;
-    executionId: string;
-    fromSessionId?: string;
-    contextSessionId?: string;
-    workflowName?: string | null;
-    approvalPrompt?: string | null;
-  },
-): Promise<boolean> {
-  const approvalEnabled = await isNotificationWebEnabled(db, data.toUserId, 'approval');
-  if (!approvalEnabled) {
-    return false;
-  }
-
-  const workflowName = data.workflowName?.trim();
-  const prompt = data.approvalPrompt?.trim();
-  const workflowLabel = workflowName ? `Workflow "${workflowName}"` : 'Workflow';
-  const content = prompt
-    ? `${workflowLabel} is waiting for approval: ${prompt}`
-    : `${workflowLabel} is waiting for approval.`;
-
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const result = await db.prepare(`
-    INSERT INTO mailbox_messages (
-      id,
-      from_session_id,
-      from_user_id,
-      to_session_id,
-      to_user_id,
-      message_type,
-      content,
-      context_session_id,
-      context_task_id,
-      reply_to_id,
-      read,
-      created_at,
-      updated_at
-    )
-    SELECT
-      ?, ?, NULL, NULL, ?, 'approval', ?, ?, ?, NULL, 0, ?, ?
-    WHERE NOT EXISTS (
-      SELECT 1
-      FROM mailbox_messages
-      WHERE to_user_id = ?
-        AND message_type = 'approval'
-        AND context_task_id = ?
-        AND read = 0
-    )
-  `).bind(
-    id,
-    data.fromSessionId || null,
-    data.toUserId,
-    content.slice(0, 10_000),
-    data.contextSessionId || null,
-    data.executionId,
-    now,
-    now,
-    data.toUserId,
-    data.executionId,
-  ).run();
-
-  return (result.meta.changes ?? 0) > 0;
 }
 
 export async function getSessionNotificationQueue(
@@ -501,28 +503,6 @@ export async function markAllNotificationsRead(
       updatedAt: sql`datetime('now')`,
     })
     .where(and(eq(mailboxMessages.toUserId, userId), eq(mailboxMessages.read, false)));
-  return (result as any).meta?.changes ?? 0;
-}
-
-export async function markWorkflowApprovalNotificationsRead(
-  db: AppDb,
-  userId: string,
-  executionId: string,
-): Promise<number> {
-  const result = await db
-    .update(mailboxMessages)
-    .set({
-      read: true,
-      updatedAt: sql`datetime('now')`,
-    })
-    .where(
-      and(
-        eq(mailboxMessages.toUserId, userId),
-        eq(mailboxMessages.read, false),
-        eq(mailboxMessages.messageType, 'approval'),
-        eq(mailboxMessages.contextTaskId, executionId),
-      ),
-    );
   return (result as any).meta?.changes ?? 0;
 }
 

@@ -163,8 +163,7 @@ export type DOToRunnerMessage =
       ref?: string;
       error?: string;
     }
-  | { type: 'mailbox-send-result'; requestId: string; messageId?: string; error?: string }
-  | { type: 'mailbox-check-result'; requestId: string; messages?: unknown[]; error?: string }
+  | { type: 'emit-notification-result'; requestId: string; ok?: boolean; error?: string }
   | { type: 'task-create-result'; requestId: string; task?: unknown; error?: string }
   | { type: 'task-list-result'; requestId: string; tasks?: unknown[]; error?: string }
   | { type: 'task-update-result'; requestId: string; task?: unknown; error?: string }
@@ -414,18 +413,16 @@ export type RunnerToDOMessage =
       }>;
     }
   | {
-      type: 'mailbox-send';
+      // Agent → humans-who-own-this-session notification (attention router).
+      // Deliberately has NO addressing: the router decides the audience.
+      type: 'emit-notification';
       requestId: string;
-      toSessionId?: string;
-      toUserId?: string;
-      toHandle?: string;
-      messageType?: string;
       content: string;
+      messageType?: string;
+      eventType?: string;
       contextSessionId?: string;
       contextTaskId?: string;
-      replyToId?: string;
     }
-  | { type: 'mailbox-check'; requestId: string; limit?: number; after?: string }
   | {
       type: 'task-create';
       requestId: string;

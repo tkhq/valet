@@ -1,3 +1,4 @@
+import { resolveTeamOrchestratorAlias } from '@valet/shared';
 import { useOrchestratorInfo } from '@/api/orchestrator';
 
 const ORCHESTRATOR_ALIAS = 'orchestrator';
@@ -19,6 +20,11 @@ const ORCHESTRATOR_ALIAS = 'orchestrator';
 export function useResolvedSessionId(sessionId: string): string | null {
   const isAlias = sessionId === ORCHESTRATOR_ALIAS;
   const { data: orchInfo } = useOrchestratorInfo();
+
+  // Team orchestrator alias resolves by pure transform — the canonical ID is
+  // stable, so no query is needed (keeps colons out of URLs).
+  const teamResolved = resolveTeamOrchestratorAlias(sessionId);
+  if (teamResolved) return teamResolved;
 
   if (!isAlias) return sessionId;
   return orchInfo?.sessionId ?? null;

@@ -24,6 +24,12 @@ vi.mock('../../lib/db/threads.js', () => ({
   createThread: (...args: unknown[]) => createThreadMock(...args),
 }));
 
+vi.mock('../../lib/db/workflows.js', () => ({
+  // Default: user-owned workflow — team threading is covered by
+  // workflow-access tests; here we just avoid touching a real db.
+  getWorkflowOwner: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock('../../services/session-cross.js', () => ({
   fetchMessagesFromDO: (...args: unknown[]) => fetchMessagesFromDOMock(...args),
 }));

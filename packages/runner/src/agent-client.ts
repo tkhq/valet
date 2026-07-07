@@ -543,26 +543,16 @@ export class AgentClient {
 
   // ─── Phase C: Mailbox + Task Board ────────────────────────────────
 
-  requestMailboxSend(params: {
-    toSessionId?: string;
-    toUserId?: string;
-    toHandle?: string;
-    messageType?: string;
+  requestEmitNotification(params: {
     content: string;
+    messageType?: string;
+    eventType?: string;
     contextSessionId?: string;
     contextTaskId?: string;
-    replyToId?: string;
-  }): Promise<{ messageId: string }> {
+  }): Promise<{ ok: boolean }> {
     const requestId = crypto.randomUUID();
     return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
-      this.send({ type: "mailbox-send", requestId, ...params });
-    });
-  }
-
-  requestMailboxCheck(limit?: number, after?: string): Promise<{ messages: unknown[] }> {
-    const requestId = crypto.randomUUID();
-    return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
-      this.send({ type: "mailbox-check", requestId, limit, after });
+      this.send({ type: "emit-notification", requestId, ...params });
     });
   }
 
@@ -1052,23 +1042,15 @@ export class AgentClient {
             this.resolvePendingRequest(msg.requestId, { data: msg.data ?? {} });
           }
           break;
-        // ─── Phase C: Mailbox + Task Board Results ──────────────────
-        case "mailbox-send-result":
+        case "emit-notification-result":
           if (msg.error) {
             this.rejectPendingRequest(msg.requestId, msg.error);
           } else {
-            this.resolvePendingRequest(msg.requestId, { messageId: msg.messageId });
+            this.resolvePendingRequest(msg.requestId, { ok: true });
           }
           break;
 
-        case "mailbox-check-result":
-          if (msg.error) {
-            this.rejectPendingRequest(msg.requestId, msg.error);
-          } else {
-            this.resolvePendingRequest(msg.requestId, { messages: msg.messages ?? [] });
-          }
-          break;
-
+        // ─── Phase C: Task Board Results ────────────────────────────
         case "task-create-result":
           if (msg.error) {
             this.rejectPendingRequest(msg.requestId, msg.error);

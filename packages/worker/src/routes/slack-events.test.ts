@@ -15,11 +15,19 @@ const {
   getOrchestratorSessionMock,
   getOrCreateChannelThreadMock,
   getChannelThreadMappingMock,
+  getChannelBindingByChannelMock,
+  getTeamMembershipMock,
+  updateThreadCursorDbMock,
+  dispatchTeamOrchestratorPromptMock,
   parseInboundMock,
   sendMessageMock,
   setThreadStatusMock,
   scopeKeyPartsMock,
 } = vi.hoisted(() => ({
+  getChannelBindingByChannelMock: vi.fn(),
+  getTeamMembershipMock: vi.fn(),
+  updateThreadCursorDbMock: vi.fn(),
+  dispatchTeamOrchestratorPromptMock: vi.fn(),
   getOrgSlackInstallMock: vi.fn(),
   resolveUserByExternalIdMock: vi.fn(),
   getInvocationMock: vi.fn(),
@@ -49,6 +57,21 @@ vi.mock('../lib/db.js', () => ({
   getOrchestratorSession: getOrchestratorSessionMock,
   getOrCreateChannelThread: getOrCreateChannelThreadMock,
   getChannelThreadMapping: getChannelThreadMappingMock,
+  getChannelBindingByChannel: getChannelBindingByChannelMock,
+  getTeamMembership: getTeamMembershipMock,
+  updateThreadCursor: updateThreadCursorDbMock,
+  // Real implementation, minus the dynamic teams import: mirrors
+  // lib/db/sessions.ts canActOnSessionPrompt for user-owned sessions.
+  canActOnSessionPrompt: vi.fn(async (_db: unknown, session: { userId: string; ownerType?: string; ownerId?: string }, userId: string) => {
+    if (session.ownerType === 'team' && session.ownerId) {
+      return !!(await getTeamMembershipMock({}, session.ownerId, userId));
+    }
+    return session.userId === userId;
+  }),
+}));
+
+vi.mock('../services/team-orchestrator.js', () => ({
+  dispatchTeamOrchestratorPrompt: dispatchTeamOrchestratorPromptMock,
 }));
 
 vi.mock('../lib/crypto.js', () => ({
@@ -211,7 +234,7 @@ describe('slackEventsRouter /slack/interactive', () => {
     expect(await res.json()).toEqual({
       response_type: 'ephemeral',
       replace_original: false,
-      text: 'Only the session owner can respond to this prompt.',
+      text: "You're not authorized to respond to this prompt.",
     });
     expect(waitUntil).not.toHaveBeenCalled();
   });
@@ -823,5 +846,165 @@ describe('bound-session dispatch failure handling', () => {
     expect(sessionFetchMock).toHaveBeenCalledOnce();
     expect(deleteChannelBindingMock).toHaveBeenCalledWith({}, 'binding-1');
     expect(dispatchOrchestratorPromptMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('team-bound shared channels', () => {
+  const TEAM_BINDING = {
+    id: 'binding-team',
+    sessionId: 'orchestrator:team:team-1',
+    channelType: 'slack',
+    channelId: 'C_TEAM',
+    scopeKey: 'team:team-1:slack:C_TEAM',
+    ownerType: 'team',
+    ownerId: 'team-1',
+    triggerMode: 'mention',
+    orgId: 'default',
+    queueMode: 'followup',
+    collectDebounceMs: 3000,
+    createdAt: 'x',
+  };
+
+  const teamMessage = (overrides: Record<string, unknown> = {}) => ({
+    channelType: 'slack',
+    channelId: 'C_TEAM',
+    senderId: 'USLACK',
+    senderName: 'Alice',
+    text: 'ship it',
+    attachments: [],
+    messageId: '1111.2222',
+    // Channel messages arrive as `message.*`; the bot's own @mention arrives as
+    // a separate `app_mention` that the team branch drops (dedup), so mention
+    // detection uses the raw text (see buildTeamRequest).
+    metadata: { teamId: 'T123', slackEventType: 'message', slackChannelType: 'channel' },
+    ...overrides,
+  });
+
+  // Raw payload with configurable text; `<@B123>` in the text is how the team
+  // branch detects a mention now that app_mention events are dropped.
+  const buildTeamRequest = (text: string, threadTs?: string) =>
+    new Request('http://localhost/slack/events', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-slack-signature': 'v0=test',
+        'x-slack-request-timestamp': String(Math.floor(Date.now() / 1000)),
+      },
+      body: JSON.stringify({
+        type: 'event_callback',
+        team_id: 'T123',
+        event: {
+          type: 'message',
+          user: 'USLACK',
+          text,
+          channel: 'C_TEAM',
+          channel_type: 'channel',
+          ts: '1111.2222',
+          ...(threadTs ? { thread_ts: threadTs } : {}),
+        },
+      }),
+    });
+
+  // Default fire: a member @mention (raw text carries the bot mention).
+  const fire = (text = '<@B123> ship it', threadTs?: string) =>
+    buildApp().fetch(
+      buildTeamRequest(text, threadTs),
+      { DB: {}, ENCRYPTION_KEY: 'k', SLACK_SIGNING_SECRET: 's' } as any,
+      { waitUntil: vi.fn() } as any,
+    );
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getOrgSlackInstallMock.mockResolvedValue({
+      signingSecret: 'decrypted-secret',
+      botToken: 'decrypted-bot',
+      teamId: 'T123',
+      botUserId: 'B123',
+      teamName: null,
+      appId: null,
+      configuredBy: 'user-1',
+    });
+    verifySlackSignatureMock.mockReturnValue(true);
+    getChannelBindingByChannelMock.mockResolvedValue(TEAM_BINDING);
+    parseInboundMock.mockResolvedValue(teamMessage());
+    resolveUserByExternalIdMock.mockResolvedValue('user-alice');
+    getTeamMembershipMock.mockResolvedValue({ teamId: 'team-1', userId: 'user-alice', role: 'member' });
+    getOrCreateChannelThreadMock.mockResolvedValue('thread-1');
+    getChannelThreadMappingMock.mockResolvedValue(null);
+    dispatchTeamOrchestratorPromptMock.mockResolvedValue({ dispatched: true, sessionId: TEAM_BINDING.sessionId });
+  });
+
+  it('routes a member mention to the team orchestrator with attribution', async () => {
+    const res = await fire();
+    expect(res.status).toBe(200);
+    expect(dispatchTeamOrchestratorPromptMock).toHaveBeenCalledOnce();
+    const [, teamId, params] = dispatchTeamOrchestratorPromptMock.mock.calls[0];
+    expect(teamId).toBe('team-1');
+    expect(params.actor.userId).toBe('user-alice');
+    expect(params.authorName).toBe('Alice');
+    expect(params.queueMode).toBe('followup');
+    expect(params.replyTo.channelType).toBe('slack');
+    expect(dispatchOrchestratorPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('drops the duplicate app_mention event (message.* is canonical)', async () => {
+    // Slack double-delivers a channel @mention: one app_mention + one message.
+    // The team branch must dispatch only once — for the message event.
+    parseInboundMock.mockResolvedValue(
+      teamMessage({ metadata: { teamId: 'T123', slackEventType: 'app_mention', slackChannelType: 'channel' } })
+    );
+    const res = await fire();
+    expect(res.status).toBe(200);
+    expect(dispatchTeamOrchestratorPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('silently ignores unmapped slack users', async () => {
+    resolveUserByExternalIdMock.mockResolvedValue(null);
+    const res = await fire();
+    expect(res.status).toBe(200);
+    expect(dispatchTeamOrchestratorPromptMock).not.toHaveBeenCalled();
+    expect(sendMessageMock).not.toHaveBeenCalled(); // no authorization chatter
+  });
+
+  it('silently ignores non-members', async () => {
+    getTeamMembershipMock.mockResolvedValue(null);
+    const res = await fire();
+    expect(res.status).toBe(200);
+    expect(dispatchTeamOrchestratorPromptMock).not.toHaveBeenCalled();
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('mention mode ignores plain messages outside active threads', async () => {
+    const res = await fire('just chatting, no mention');
+    expect(res.status).toBe(200);
+    expect(dispatchTeamOrchestratorPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('mention mode accepts replies in threads the orchestrator is active in', async () => {
+    parseInboundMock.mockResolvedValue(
+      teamMessage({
+        metadata: { teamId: 'T123', slackEventType: 'message', slackChannelType: 'channel', threadTs: '1111.0000' },
+      })
+    );
+    getChannelThreadMappingMock.mockResolvedValue({ lastSeenTs: '1111.0000' });
+    const res = await fire('reply without a mention', '1111.0000');
+    expect(res.status).toBe(200);
+    expect(dispatchTeamOrchestratorPromptMock).toHaveBeenCalledOnce();
+  });
+
+  it("'all' mode dispatches plain member messages via collect", async () => {
+    getChannelBindingByChannelMock.mockResolvedValue({ ...TEAM_BINDING, triggerMode: 'all' });
+    const res = await fire('hi team, no mention');
+    expect(res.status).toBe(200);
+    const [, , params] = dispatchTeamOrchestratorPromptMock.mock.calls[0];
+    expect(params.queueMode).toBe('collect');
+  });
+
+  it('user-owned bindings on shared channels do not route (personal stays DM-only)', async () => {
+    getChannelBindingByChannelMock.mockResolvedValue({ ...TEAM_BINDING, ownerType: 'user', ownerId: 'user-alice' });
+    const res = await fire();
+    expect(res.status).toBe(200);
+    expect(dispatchTeamOrchestratorPromptMock).not.toHaveBeenCalled();
+    expect(dispatchOrchestratorPromptMock).not.toHaveBeenCalled();
   });
 });

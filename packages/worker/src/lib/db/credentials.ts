@@ -14,6 +14,8 @@ export interface CredentialRow {
   expiresAt: string | null;
   lastFailureReason: string | null;
   lastFailureAt: string | null;
+  sourcedFromUserId: string | null;
+  status: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -29,6 +31,9 @@ export async function getCredentialRow(
     eq(credentials.ownerType, ownerType),
     eq(credentials.ownerId, ownerId),
     eq(credentials.provider, provider),
+    // Broken team credentials (sourcing member revoked or left) never resolve;
+    // personal rows are deleted on revoke, so this only bites team rows.
+    eq(credentials.status, 'active'),
   ];
   if (credentialType) {
     conditions.push(eq(credentials.credentialType, credentialType));
@@ -73,6 +78,7 @@ export async function upsertCredential(
     metadata?: string | null;
     scopes?: string | null;
     expiresAt?: string | null;
+    sourcedFromUserId?: string | null;
   },
 ): Promise<void> {
   await db
@@ -87,6 +93,8 @@ export async function upsertCredential(
       metadata: data.metadata ?? null,
       scopes: data.scopes ?? null,
       expiresAt: data.expiresAt ?? null,
+      sourcedFromUserId: data.sourcedFromUserId ?? null,
+      status: 'active',
     })
     .onConflictDoUpdate({
       target: [credentials.ownerType, credentials.ownerId, credentials.provider, credentials.credentialType],
@@ -100,6 +108,9 @@ export async function upsertCredential(
         // positives for integrations that are never resolved again.
         lastFailureReason: null,
         lastFailureAt: null,
+        sourcedFromUserId: sql`COALESCE(excluded.sourced_from_user_id, ${credentials.sourcedFromUserId})`,
+        // Re-sharing resets a broken credential.
+        status: sql`'active'`,
         updatedAt: sql`datetime('now')`,
       },
     });

@@ -28,23 +28,34 @@ export async function assertWorkflowAccess(
   db: AppDb,
   user: { id: string },
   workflowIdOrSlug: string,
-  // Role is accepted but not used in MVP — owner satisfies all three.
-  // Kept so call sites declare intent and post-MVP can add real role
-  // gating without changing them.
+  // Role is accepted but not fully used — the owner (or, for team-owned
+  // workflows, any current team member) satisfies all three. Kept so call
+  // sites declare intent and real role gating can land without changing them.
   _role: WorkflowRole = 'viewer',
 ): Promise<AccessedWorkflow> {
   const row = await db
-    .select({ id: workflows.id, userId: workflows.userId })
+    .select({ id: workflows.id, userId: workflows.userId, ownerType: workflows.ownerType, ownerId: workflows.ownerId })
     .from(workflows)
-    .where(and(
-      or(eq(workflows.id, workflowIdOrSlug), eq(workflows.slug, workflowIdOrSlug)),
-      eq(workflows.userId, user.id),
-    ))
+    .where(or(eq(workflows.id, workflowIdOrSlug), eq(workflows.slug, workflowIdOrSlug)))
     .get();
 
-  if (!row) {
+  const notFound = async (): Promise<never> => {
     const { NotFoundError } = await import('@valet/shared');
     throw new NotFoundError('Workflow', workflowIdOrSlug);
+  };
+
+  if (!row) return notFound();
+
+  // Team-owned workflows: membership is the path in (collaborative — the
+  // whole team can watch and edit, teams design §5). No existence disclosure
+  // to outsiders, mirroring assertSessionAccess.
+  if (row.ownerType === 'team' && row.ownerId) {
+    const { getTeamMembership } = await import('./db/teams.js');
+    const membership = await getTeamMembership(db, row.ownerId, user.id);
+    if (!membership) return notFound();
+    return { id: row.id, userId: row.userId };
   }
+
+  if (row.userId !== user.id) return notFound();
   return { id: row.id, userId: row.userId };
 }

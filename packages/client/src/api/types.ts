@@ -71,6 +71,9 @@ export type {
   SessionThread,
   ThreadStatus,
   ListThreadsResponse,
+  Team,
+  TeamMember,
+  TeamRole,
 } from '@valet/shared';
 
 export type { GitHub, Gmail, GoogleCalendar } from '@valet/shared';

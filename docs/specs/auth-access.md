@@ -148,6 +148,28 @@ Org-level LLM provider API keys (admin-managed).
 | `acceptedBy` | text | FK to users |
 | `expiresAt` | text NOT NULL | 7-day expiry |
 
+### `teams` and `team_members` tables
+
+Teams are named groups of users inside the org (design: `docs/specs/2026-07-05-teams-design.md`). Migration `0025`.
+
+| `teams` column | Type | Notes |
+|--------|------|-------|
+| `id` | text PK | UUID |
+| `orgId` | text NOT NULL | default `'default'`; `UNIQUE(org_id, name)` |
+| `name` | text NOT NULL | 1–100 chars; duplicate name in org → 409 |
+| `description`, `avatar` | text | optional |
+| `createdBy` | text | FK users, SET NULL on delete |
+
+| `team_members` column | Type | Notes |
+|--------|------|-------|
+| `teamId` + `userId` | composite PK | FKs, CASCADE on team/user delete |
+| `role` | text NOT NULL | `'admin'` \| `'member'` (extensible — the RBAC door) |
+| `addedBy` | text | FK users, SET NULL |
+
+**Rules (v1):** any user can create a team and becomes its first admin. Team admins manage membership, settings, and deletion; global org admins (`users.role='admin'`) can manage any team. The **last-admin guard** (cannot demote or remove a team's only admin) is enforced in the db layer. Team deletion is blocked (409) while team-owned workflows exist. Non-members receive 404s for team resources — existence is not disclosed (mirrors `assertSessionAccess`).
+
+**Routes (`/api/teams`):** `POST /` (create), `GET /` (own teams; `?all=true` org-admin only), `GET /directory` (minimal user directory for the member picker — available to all authed users; single-tenant org), `GET|PATCH|DELETE /:id` (member read / admin write), `GET|POST /:id/members`, `PATCH|DELETE /:id/members/:userId` (admin; DELETE also allows self-removal, and evicts the removed member's live WebSockets from team-owned session DOs), `GET /:id/orchestrator` (member), `POST /:id/orchestrator` (admin — onboard; 409 on handle/name clash), `POST /:id/orchestrator/restart` (member — restart is recovery, not configuration), `GET /:id/memory[?path=]` + `GET /:id/memory/search` (member), `PUT|DELETE /:id/memory` (team admin; writes record the acting user as provenance), `GET /:id/channels` (member), `POST|PATCH|DELETE /:id/channels[/:bindingId]` (team admin — Slack channel bindings with trigger modes), `GET|POST /:id/integrations` (member — sourced connections), `DELETE /:id/integrations/:provider` (team admin or sourcing member). Team-owned **workflows** admit current members at the db layer (`workflowAccessibleBy`); ownership transfers via `PATCH /api/workflows/:id/owner` (workflow owner only).
+
 ### `custom_providers` table
 
 Custom OpenAI-compatible LLM providers.

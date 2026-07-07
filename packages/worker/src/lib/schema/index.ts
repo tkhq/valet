@@ -3,6 +3,7 @@ export * from './sessions.js';
 export * from './org.js';
 export * from './personas.js';
 export * from './orchestrator.js';
+export * from './teams.js';
 export * from './workflows.js';
 export * from './workflow-definition-versions.js';
 export * from './workflow-execution-nodes.js';

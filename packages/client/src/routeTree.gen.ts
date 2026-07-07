@@ -16,11 +16,13 @@ import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as AutomationRouteImport } from './routes/automation'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as WorkflowsIndexRouteImport } from './routes/workflows/index'
+import { Route as TeamsIndexRouteImport } from './routes/teams/index'
 import { Route as SettingsIndexRouteImport } from './routes/settings/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as IntegrationsIndexRouteImport } from './routes/integrations/index'
 import { Route as AutomationIndexRouteImport } from './routes/automation/index'
 import { Route as WorkflowsWorkflowIdRouteImport } from './routes/workflows/$workflowId'
+import { Route as TeamsTeamIdRouteImport } from './routes/teams/$teamId'
 import { Route as SettingsUsageRouteImport } from './routes/settings/usage'
 import { Route as SettingsSkillsRouteImport } from './routes/settings/skills'
 import { Route as SettingsPersonasRouteImport } from './routes/settings/personas'
@@ -76,6 +78,11 @@ const WorkflowsIndexRoute = WorkflowsIndexRouteImport.update({
   path: '/workflows/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TeamsIndexRoute = TeamsIndexRouteImport.update({
+  id: '/teams/',
+  path: '/teams/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsIndexRoute = SettingsIndexRouteImport.update({
   id: '/settings/',
   path: '/settings/',
@@ -99,6 +106,11 @@ const AutomationIndexRoute = AutomationIndexRouteImport.update({
 const WorkflowsWorkflowIdRoute = WorkflowsWorkflowIdRouteImport.update({
   id: '/workflows/$workflowId',
   path: '/workflows/$workflowId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TeamsTeamIdRoute = TeamsTeamIdRouteImport.update({
+  id: '/teams/$teamId',
+  path: '/teams/$teamId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsUsageRoute = SettingsUsageRouteImport.update({
@@ -218,11 +230,13 @@ export interface FileRoutesByFullPath {
   '/settings/personas': typeof SettingsPersonasRouteWithChildren
   '/settings/skills': typeof SettingsSkillsRouteWithChildren
   '/settings/usage': typeof SettingsUsageRoute
+  '/teams/$teamId': typeof TeamsTeamIdRoute
   '/workflows/$workflowId': typeof WorkflowsWorkflowIdRoute
   '/automation/': typeof AutomationIndexRoute
   '/integrations/': typeof IntegrationsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/teams/': typeof TeamsIndexRoute
   '/workflows/': typeof WorkflowsIndexRoute
   '/automation/executions/$executionId': typeof AutomationExecutionsExecutionIdRoute
   '/automation/workflows/$workflowId': typeof AutomationWorkflowsWorkflowIdRoute
@@ -249,11 +263,13 @@ export interface FileRoutesByTo {
   '/settings/personas': typeof SettingsPersonasRouteWithChildren
   '/settings/skills': typeof SettingsSkillsRouteWithChildren
   '/settings/usage': typeof SettingsUsageRoute
+  '/teams/$teamId': typeof TeamsTeamIdRoute
   '/workflows/$workflowId': typeof WorkflowsWorkflowIdRoute
   '/automation': typeof AutomationIndexRoute
   '/integrations': typeof IntegrationsIndexRoute
   '/sessions': typeof SessionsIndexRoute
   '/settings': typeof SettingsIndexRoute
+  '/teams': typeof TeamsIndexRoute
   '/workflows': typeof WorkflowsIndexRoute
   '/automation/executions/$executionId': typeof AutomationExecutionsExecutionIdRoute
   '/automation/workflows/$workflowId': typeof AutomationWorkflowsWorkflowIdRoute
@@ -283,11 +299,13 @@ export interface FileRoutesById {
   '/settings/personas': typeof SettingsPersonasRouteWithChildren
   '/settings/skills': typeof SettingsSkillsRouteWithChildren
   '/settings/usage': typeof SettingsUsageRoute
+  '/teams/$teamId': typeof TeamsTeamIdRoute
   '/workflows/$workflowId': typeof WorkflowsWorkflowIdRoute
   '/automation/': typeof AutomationIndexRoute
   '/integrations/': typeof IntegrationsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/teams/': typeof TeamsIndexRoute
   '/workflows/': typeof WorkflowsIndexRoute
   '/automation/executions/$executionId': typeof AutomationExecutionsExecutionIdRoute
   '/automation/workflows/$workflowId': typeof AutomationWorkflowsWorkflowIdRoute
@@ -318,11 +336,13 @@ export interface FileRouteTypes {
     | '/settings/personas'
     | '/settings/skills'
     | '/settings/usage'
+    | '/teams/$teamId'
     | '/workflows/$workflowId'
     | '/automation/'
     | '/integrations/'
     | '/sessions/'
     | '/settings/'
+    | '/teams/'
     | '/workflows/'
     | '/automation/executions/$executionId'
     | '/automation/workflows/$workflowId'
@@ -349,11 +369,13 @@ export interface FileRouteTypes {
     | '/settings/personas'
     | '/settings/skills'
     | '/settings/usage'
+    | '/teams/$teamId'
     | '/workflows/$workflowId'
     | '/automation'
     | '/integrations'
     | '/sessions'
     | '/settings'
+    | '/teams'
     | '/workflows'
     | '/automation/executions/$executionId'
     | '/automation/workflows/$workflowId'
@@ -382,11 +404,13 @@ export interface FileRouteTypes {
     | '/settings/personas'
     | '/settings/skills'
     | '/settings/usage'
+    | '/teams/$teamId'
     | '/workflows/$workflowId'
     | '/automation/'
     | '/integrations/'
     | '/sessions/'
     | '/settings/'
+    | '/teams/'
     | '/workflows/'
     | '/automation/executions/$executionId'
     | '/automation/workflows/$workflowId'
@@ -416,10 +440,12 @@ export interface RootRouteChildren {
   SettingsPersonasRoute: typeof SettingsPersonasRouteWithChildren
   SettingsSkillsRoute: typeof SettingsSkillsRouteWithChildren
   SettingsUsageRoute: typeof SettingsUsageRoute
+  TeamsTeamIdRoute: typeof TeamsTeamIdRoute
   WorkflowsWorkflowIdRoute: typeof WorkflowsWorkflowIdRoute
   IntegrationsIndexRoute: typeof IntegrationsIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
   SettingsIndexRoute: typeof SettingsIndexRoute
+  TeamsIndexRoute: typeof TeamsIndexRoute
   WorkflowsIndexRoute: typeof WorkflowsIndexRoute
   SessionsJoinTokenRoute: typeof SessionsJoinTokenRoute
 }
@@ -475,6 +501,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkflowsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/teams/': {
+      id: '/teams/'
+      path: '/teams'
+      fullPath: '/teams/'
+      preLoaderRoute: typeof TeamsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings/': {
       id: '/settings/'
       path: '/settings'
@@ -508,6 +541,13 @@ declare module '@tanstack/react-router' {
       path: '/workflows/$workflowId'
       fullPath: '/workflows/$workflowId'
       preLoaderRoute: typeof WorkflowsWorkflowIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/teams/$teamId': {
+      id: '/teams/$teamId'
+      path: '/teams/$teamId'
+      fullPath: '/teams/$teamId'
+      preLoaderRoute: typeof TeamsTeamIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings/usage': {
@@ -721,10 +761,12 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsPersonasRoute: SettingsPersonasRouteWithChildren,
   SettingsSkillsRoute: SettingsSkillsRouteWithChildren,
   SettingsUsageRoute: SettingsUsageRoute,
+  TeamsTeamIdRoute: TeamsTeamIdRoute,
   WorkflowsWorkflowIdRoute: WorkflowsWorkflowIdRoute,
   IntegrationsIndexRoute: IntegrationsIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
   SettingsIndexRoute: SettingsIndexRoute,
+  TeamsIndexRoute: TeamsIndexRoute,
   WorkflowsIndexRoute: WorkflowsIndexRoute,
   SessionsJoinTokenRoute: SessionsJoinTokenRoute,
 }

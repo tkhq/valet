@@ -417,7 +417,15 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
         >
           <span className={cn('absolute inset-x-0 top-0 h-0.5', buildChrome.topBarClassName)} />
           <div className="flex min-w-0 items-center gap-2">
-            <Button variant="ghost" size="sm" className="h-6 px-1.5 text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200" onClick={() => session?.isOrchestrator ? navigate({ to: '/orchestrator' }) : router.history.back()}>
+            <Button variant="ghost" size="sm" className="h-6 px-1.5 text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200" onClick={() => {
+              if (session?.isOrchestrator && session.ownerType === 'team' && session.ownerId) {
+                void navigate({ to: '/teams/$teamId', params: { teamId: session.ownerId } });
+              } else if (session?.isOrchestrator) {
+                void navigate({ to: '/orchestrator' });
+              } else {
+                router.history.back();
+              }
+            }}>
               <BackIcon className="h-3.5 w-3.5" />
             </Button>
             <div className="h-3 w-px bg-neutral-200 dark:bg-neutral-800" />

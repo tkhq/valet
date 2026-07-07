@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createTestDb } from '../../test-utils/db.js';
 import { writeMemoryFile, exportMemoryFiles, importMemoryFiles, searchMemoryFiles } from './memory-files.js';
+import { userPrincipal } from '@valet/shared';
 
 // Thin adapter: wraps better-sqlite3 sync API to match the D1Database async interface.
 function makeD1Adapter(sqlite: any) {
@@ -45,13 +46,13 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
     seedUser(USER_A);
     seedUser(USER_B);
 
-    await writeMemoryFile(rawDb, USER_A, 'projects/valet/overview.md', '# Valet\n\nA hosted coding agent.');
-    await writeMemoryFile(rawDb, USER_A, 'preferences/coding-style.md', '# Style\n\nUse TypeScript strict mode.');
-    await writeMemoryFile(rawDb, USER_A, 'journal/2026-03-08.md', '# 2026-03-08\n\nShipped the import/export feature.');
+    await writeMemoryFile(rawDb, userPrincipal(USER_A), 'projects/valet/overview.md', '# Valet\n\nA hosted coding agent.');
+    await writeMemoryFile(rawDb, userPrincipal(USER_A), 'preferences/coding-style.md', '# Style\n\nUse TypeScript strict mode.');
+    await writeMemoryFile(rawDb, userPrincipal(USER_A), 'journal/2026-03-08.md', '# 2026-03-08\n\nShipped the import/export feature.');
   });
 
   it('exports every file with full content, ordered by path', async () => {
-    const files = await exportMemoryFiles(db, USER_A);
+    const files = await exportMemoryFiles(db, userPrincipal(USER_A));
 
     expect(files).toHaveLength(3);
     expect(files.map((f) => f.path)).toEqual([
@@ -64,25 +65,25 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
   });
 
   it('marks preferences files as pinned in the export', async () => {
-    const files = await exportMemoryFiles(db, USER_A);
+    const files = await exportMemoryFiles(db, userPrincipal(USER_A));
     expect(files.find((f) => f.path === 'preferences/coding-style.md')?.pinned).toBe(true);
     expect(files.find((f) => f.path === 'journal/2026-03-08.md')?.pinned).toBe(false);
   });
 
   it('scopes the export to a single user', async () => {
-    await writeMemoryFile(rawDb, USER_B, 'projects/other/notes.md', '# Other user');
-    const exportedA = await exportMemoryFiles(db, USER_A);
+    await writeMemoryFile(rawDb, userPrincipal(USER_B), 'projects/other/notes.md', '# Other user');
+    const exportedA = await exportMemoryFiles(db, userPrincipal(USER_A));
     expect(exportedA.every((f) => f.path !== 'projects/other/notes.md')).toBe(true);
   });
 
   it('round-trips: export from one user, import into another, contents match', async () => {
-    const bundle = await exportMemoryFiles(db, USER_A);
+    const bundle = await exportMemoryFiles(db, userPrincipal(USER_A));
 
-    const result = await importMemoryFiles(rawDb, USER_B, bundle);
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), bundle);
     expect(result.imported).toBe(3);
     expect(result.skipped).toEqual([]);
 
-    const exportedB = await exportMemoryFiles(db, USER_B);
+    const exportedB = await exportMemoryFiles(db, userPrincipal(USER_B));
     expect(exportedB.map((f) => f.path)).toEqual(bundle.map((f) => f.path));
     expect(exportedB.map((f) => f.content)).toEqual(bundle.map((f) => f.content));
   });
@@ -90,7 +91,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
   it('merges on import: same-path files are overwritten, others untouched', async () => {
     const before = getRow(USER_A, 'projects/valet/overview.md');
 
-    const result = await importMemoryFiles(rawDb, USER_A, [
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_A), [
       { path: 'projects/valet/overview.md', content: '# Valet\n\nUpdated overview.' },
       { path: 'projects/new/plan.md', content: '# Plan\n\nBrand new file.' },
     ]);
@@ -108,7 +109,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
   });
 
   it('skips empty-content files and reports them', async () => {
-    const result = await importMemoryFiles(rawDb, USER_B, [
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), [
       { path: 'notes/keep.md', content: '# Keep me' },
       { path: 'notes/empty.md', content: '' },
     ]);
@@ -119,7 +120,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
   });
 
   it('skips files with invalid paths without failing the whole import', async () => {
-    const result = await importMemoryFiles(rawDb, USER_B, [
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), [
       { path: 'valid/note.md', content: '# Valid' },
       { path: 'a/b/c/d/e/too-deep.md', content: '# Too deep' },
     ]);
@@ -132,7 +133,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
   });
 
   it('returns an empty bundle for a user with no memory', async () => {
-    expect(await exportMemoryFiles(db, 'user-with-nothing')).toEqual([]);
+    expect(await exportMemoryFiles(db, userPrincipal('user-with-nothing'))).toEqual([]);
   });
 
   // ── Large files (regression for the 50k import 400) ──────────────────────────
@@ -141,20 +142,20 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
 
   it('imports a file over 50k characters losslessly', async () => {
     const content = '# Big\n\n' + 'x'.repeat(60001);
-    const result = await importMemoryFiles(rawDb, USER_B, [{ path: 'big/note.md', content }]);
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), [{ path: 'big/note.md', content }]);
 
     expect(result.imported).toBe(1);
     expect(result.skipped).toEqual([]);
 
     // Round-trip via export and assert byte-for-byte (no truncation).
-    const exported = await exportMemoryFiles(db, USER_B);
+    const exported = await exportMemoryFiles(db, userPrincipal(USER_B));
     const big = exported.find((f) => f.path === 'big/note.md');
     expect(big?.content.length).toBe(content.length);
     expect(big?.content).toBe(content);
   });
 
   it('imports a large file alongside small ones in one bundle (no 400)', async () => {
-    const result = await importMemoryFiles(rawDb, USER_B, [
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), [
       { path: 'notes/a.md', content: '# A' },
       { path: 'notes/huge.md', content: '#\n' + 'y'.repeat(70000) },
       { path: 'notes/b.md', content: '# B' },
@@ -168,7 +169,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
     const overviewBefore = getRow(USER_A, 'projects/valet/overview.md');
     expect(overviewBefore?.version).toBe(1);
 
-    const result = await importMemoryFiles(rawDb, USER_A, [
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_A), [
       { path: 'preferences/big-pref.md', content: '# Pref\n\n' + 'p'.repeat(60000) },
       { path: 'notes/big-note.md', content: '# Note\n\n' + 'n'.repeat(60000) },
       // Overwrite an existing seeded file with a searchable token.
@@ -186,7 +187,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
     expect(getRow(USER_A, 'projects/valet/overview.md')?.version).toBe(2);
 
     // FTS index was re-synced on overwrite — the new token is searchable.
-    const hits = await searchMemoryFiles(rawDb, USER_A, 'reindexedtoken');
+    const hits = await searchMemoryFiles(rawDb, userPrincipal(USER_A), 'reindexedtoken');
     expect(hits.some((h) => h.path === 'projects/valet/overview.md')).toBe(true);
   });
 
@@ -203,7 +204,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
       ...Array.from({ length: 10 }, (_, i) => ({ path: `preferences/p-${i}.md`, content: `# pref ${i}` })),
     ];
 
-    const result = await importMemoryFiles(rawDb, USER_B, files);
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), files);
 
     // All 260 writes succeeded; the cap then pruned the non-pinned excess (250 - 200).
     expect(result.imported).toBe(260);
@@ -216,7 +217,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
   });
 
   it('does not prune a normal under-cap import', async () => {
-    const result = await importMemoryFiles(rawDb, USER_B, [
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), [
       { path: 'notes/a.md', content: '# A' },
       { path: 'notes/b.md', content: '# B' },
     ]);
@@ -226,7 +227,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
 
   it('normalizes paths on import while preserving content verbatim', async () => {
     const content = '# My Note\n\nVerbatim body — unchanged.';
-    const result = await importMemoryFiles(rawDb, USER_B, [{ path: 'Notes/My Note.md', content }]);
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), [{ path: 'Notes/My Note.md', content }]);
 
     expect(result.imported).toBe(1);
     // Path is normalized (lowercased, spaces → hyphens); content is byte-for-byte.
@@ -234,7 +235,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
   });
 
   it('a duplicate path within one bundle collapses to one write with the last content', async () => {
-    const result = await importMemoryFiles(rawDb, USER_B, [
+    const result = await importMemoryFiles(rawDb, userPrincipal(USER_B), [
       { path: 'notes/dup.md', content: '# first' },
       { path: 'notes/dup.md', content: '# second' },
     ]);
@@ -268,7 +269,7 @@ describe('exportMemoryFiles / importMemoryFiles', () => {
     };
 
     const files = Array.from({ length: 50 }, (_, i) => ({ path: `notes/n-${i}.md`, content: `# n${i}` }));
-    const result = await importMemoryFiles(counting, 'rt', files);
+    const result = await importMemoryFiles(counting, userPrincipal('rt'), files);
 
     expect(result.imported).toBe(50);
     // 1 batch (the 50-file chunk) + the single cap-enforcement COUNT pass.

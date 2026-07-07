@@ -1,23 +1,25 @@
-export function webManualScopeKey(userId: string, sessionId: string): string {
-  return `user:${userId}:manual:${sessionId}`;
+import { formatPrincipal, type Principal } from './principal.js';
+
+export function webManualScopeKey(owner: Principal, sessionId: string): string {
+  return `${formatPrincipal(owner)}:manual:${sessionId}`;
 }
 
-export function slackScopeKey(userId: string, teamId: string, channelId: string, threadTs: string): string {
-  return `user:${userId}:slack:${teamId}:${channelId}:${threadTs}`;
+export function slackScopeKey(owner: Principal, teamId: string, channelId: string, threadTs: string): string {
+  return `${formatPrincipal(owner)}:slack:${teamId}:${channelId}:${threadTs}`;
 }
 
-export function githubPrScopeKey(userId: string, repoFullName: string, prNumber: number): string {
-  return `user:${userId}:github:${repoFullName}:pr:${prNumber}`;
+export function githubPrScopeKey(owner: Principal, repoFullName: string, prNumber: number): string {
+  return `${formatPrincipal(owner)}:github:${repoFullName}:pr:${prNumber}`;
 }
 
-export function apiScopeKey(userId: string, idempotencyKey: string): string {
-  return `user:${userId}:api:${idempotencyKey}`;
+export function apiScopeKey(owner: Principal, idempotencyKey: string): string {
+  return `${formatPrincipal(owner)}:api:${idempotencyKey}`;
 }
 
-export function channelScopeKey(userId: string, channelType: string, channelId: string): string {
-  return `user:${userId}:${channelType}:${channelId}`;
+export function channelScopeKey(owner: Principal, channelType: string, channelId: string): string {
+  return `${formatPrincipal(owner)}:${channelType}:${channelId}`;
 }
 
-export function telegramScopeKey(userId: string, chatId: string): string {
-  return channelScopeKey(userId, 'telegram', chatId);
+export function telegramScopeKey(owner: Principal, chatId: string): string {
+  return channelScopeKey(owner, 'telegram', chatId);
 }

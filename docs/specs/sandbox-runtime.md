@@ -42,7 +42,7 @@ The sandbox runtime does not own any D1 tables. Its state is transient and lives
 | Whisper volume | `whisper-models` | Shared whisper.cpp models at `/models/whisper` |
 | Snapshot image | Modal-assigned `object_id` | Filesystem snapshot for hibernation |
 
-Orchestrator workspace volumes use a stable name across session ID rotations: `workspace-orchestrator-{userId}` (strips rotation suffix).
+Volume names are derived from the full session ID (`workspace-` + ID with `:` → `-`) with no special-casing. Orchestrator sessions have stable canonical IDs (`orchestrator:user:{userId}`), so their volumes (`workspace-orchestrator-user-{userId}`) persist across restarts.
 
 ### Configuration Constants
 

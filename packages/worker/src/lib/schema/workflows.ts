@@ -5,6 +5,8 @@ import { users } from './users.js';
 export const workflows = sqliteTable('workflows', {
   id: text().primaryKey(),
   userId: text().notNull().references(() => users.id, { onDelete: 'cascade' }),
+  ownerType: text().notNull().default('user'),
+  ownerId: text().notNull().default(''),
   slug: text(),
   name: text().notNull(),
   description: text(),

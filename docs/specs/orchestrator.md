@@ -7,10 +7,10 @@
 This spec covers:
 
 - Orchestrator identity model and session lifecycle
-- Session ID rotation and auto-restart (three layers)
+- Stable session IDs and auto-restart (three layers)
 - Orchestrator system prompt construction
 - Child session spawning and cascade management
-- Inter-session messaging (mailbox/notification queue)
+- Notification queue + attention routing (the agent-to-agent mailbox was removed — teams design §5)
 - Channel binding system and prompt routing
 - Memory system (FTS5, relevance scoring, auto-pruning)
 - Task board (hierarchical tasks with dependencies)
@@ -77,9 +77,13 @@ agent_memories: id, userId, sessionId, workspace, content, category
 
 A separate, older table scoped to individual sessions and workspaces. Has a FK to users and includes `sessionId`/`workspace` columns. **Not connected to the orchestrator memory system.** The orchestrator exclusively uses `orchestrator_memories`.
 
-### `mailbox_messages` table
+### `notifications` table (formerly `mailbox_messages`)
 
-Cross-session and cross-user messaging.
+The notification queue behind the attention router (`services/attention-router.ts`,
+teams design §6). The agent-to-agent mailbox role was removed (migration 0028
+renamed the table; `mailbox_send`/`mailbox_check` tools are gone — agents notify
+the humans who own their session and never message each other). Historic rows
+keep the old cross-session columns.
 
 | Column | Type | Default | Notes |
 |--------|------|---------|-------|
@@ -135,7 +139,7 @@ Shared Slack surfaces are explicitly out of scope for personal orchestrators:
 - Multi-person group chats
 - Threads attached to any of the above
 
-Inbound Slack events from shared surfaces must return `200 OK` without identity resolution, thread-context pull, memory-backed prompt dispatch, or explanatory reply. This is a temporary risk-reduction measure to prevent personal-scope data, including indirectly surfaced memory/context, from leaking into shared channels before org orchestrators and their permission model exist.
+Inbound Slack events from shared surfaces never reach a personal orchestrator. Since phase 5 of the teams design, shared channels route through the channel binding instead: a channel bound to a **team orchestrator** dispatches member messages per the binding's trigger mode (see [integrations.md](integrations.md)); everything else — unbound channels, unmapped users, non-members — returns a silent `200 OK` with no identity-derived reply, preserving the original leak-prevention guarantee for personal scope.
 
 ### `user_identity_links` table
 
@@ -175,17 +179,29 @@ Hierarchical task board scoped to an orchestrator session.
 
 **Primary key:** `(taskId, blockedByTaskId)`.
 
+## Team Orchestrators
+
+Teams (see `docs/specs/2026-07-05-teams-design.md`) have their own orchestrators, sharing this subsystem via owner-principal generalization:
+
+- **Identity:** `orchestrator_identities` row with `owner_type='team'`, `owner_id=teamId`, `type='team'`, `userId` NULL. Onboarded by a team admin via `POST /api/teams/:id/orchestrator` (name/handle/instructions; handle shares the org-unique namespace). CRUD reads go through `getOrchestratorIdentityByOwner`.
+- **Session:** `orchestrator:team:{teamId}`, owner = team, `userId` = the actor who triggered the (re)start. Restart core is `restartOrchestratorSessionForOwner`; any team member (or the reconcile cron) may restart — restart is recovery, not configuration.
+- **Team-owner differences at restart:** no credential env (team sourcing is a later phase), org model preferences, default idle timeout, and `queueMode: 'followup'` — prompts queue rather than steer so one member's message never interrupts another's run.
+- **Memory is owner-scoped** (phase 4): every memory helper takes an owner principal; `orchestrator_memory_files.user_id` is creator/actor provenance only (the `(user_id, path)` unique index was dropped in migration 0026 — `(owner_type, owner_id, path)` is the constraint). Team orchestrators read/write their team scope, including snapshot + journal at restart. Personal orchestrators write their own scope and **read a query-time union** over their teams (`services/session-memory.ts`): unified `mem_search` results and root listings tag team files with a virtual `team:{teamId}/…` prefix (never stored — path normalization strips colons), `mem_read` accepts the prefix with per-call membership verification, and writes to prefixed paths are rejected ("writes never cross scopes"). Membership resolves per query, so leaving a team revokes memory access instantly. Team members browse/edit team memory via `GET|PUT|DELETE /api/teams/:id/memory` (read = member, write = team admin).
+- **Web alias:** `team-orchestrator-{teamId}` resolves to the canonical ID by pure string transform (shared `resolveTeamOrchestratorAlias`), keeping colons out of URLs; supported by the sessions/threads/files resolvers and the client.
+- **Access:** team membership only (member → collaborator, team admin → owner) via `assertSessionAccess`; child sessions spawned by the team orchestrator inherit team ownership. Removing a member evicts their live WebSockets from team-owned session DOs (`POST /evict-user`).
+- **Reconcile:** the cron joins sessions↔identities on the owner columns (`'orchestrator:' || owner_type || ':' || owner_id`), covering user and team orchestrators alike.
+
 ## Orchestrator Session Lifecycle
 
 ### Session ID Format
 
 ```
-orchestrator:{userId}:{uuid}
+orchestrator:{ownerType}:{ownerId}     e.g. orchestrator:user:{userId}
 ```
 
-Each restart generates a fresh UUID suffix. This means each restart gets a **new Durable Object** (no stale state from previous incarnation).
+The ID is **stable across restarts** and canonical: the segment after the `orchestrator:` prefix is a principal (`user:{id}` today; `team:{id}` arrives with the teams work, `org:{id}` is reserved). Construction and parsing live in `@valet/shared` (`orchestratorSessionId`, `isOrchestratorSessionId`, `parseOrchestratorSessionId`) — no code builds or splits these strings by hand. Historical rows may carry retired formats (`orchestrator:{userId}` pre-migration-0024, `orchestrator:{userId}:{uuid}` from the old rotation scheme); migration 0024 rewrote live data to the canonical form.
 
-**Workspace volume naming:** Modal volumes use `workspace-orchestrator-{userId}` (strips the UUID suffix). This means the filesystem persists across restarts — the orchestrator keeps its cloned repos, installed deps, and generated files.
+**Workspace volume naming:** derived from the full session ID (`workspace-` + ID with `:` → `-`), so the current format yields `workspace-orchestrator-user-{userId}`. The filesystem persists across restarts because the ID is stable. (Migration 0024 was a hard cutover: pre-migration volumes under `workspace-orchestrator-{userId}` were orphaned.)
 
 ### Creation (`onboardOrchestrator`)
 
@@ -199,8 +215,8 @@ Each restart generates a fresh UUID suffix. This means each restart gets a **new
 ### Restart (`restartOrchestratorSession`)
 
 1. Build persona files via `buildOrchestratorPersonaFiles`.
-2. Generate new session ID: `orchestrator:{userId}:{uuid}`.
-3. Create session record in D1 with `isOrchestrator: true`, `purpose: 'orchestrator'`, workspace `'orchestrator'`.
+2. Use the stable session ID `orchestratorSessionId(userPrincipal(userId))` (= `orchestrator:user:{userId}`).
+3. Upsert session record in D1 with `isOrchestrator: true`, `purpose: 'orchestrator'`, workspace `'orchestrator'`, `owner_type: 'user'`, `owner_id: userId`.
 4. Assemble environment: provider API keys, user credential keys, `IS_ORCHESTRATOR: 'true'`.
 5. Build DO WebSocket URL.
 6. Fetch user preferences: idle timeout, queue mode, model preferences.
@@ -217,7 +233,7 @@ WHERE user_id = ? AND is_orchestrator = 1
 ORDER BY created_at DESC LIMIT 1
 ```
 
-Returns the most recent non-terminal orchestrator session. Supports ID rotation by always picking the newest.
+Returns the most recent non-terminal orchestrator session. Picking the newest also tolerates historical rows in retired ID formats.
 
 ### Canonical Web Chat Route
 
@@ -226,8 +242,8 @@ The authenticated user's own web UI canonicalizes orchestrator chat at `/session
 - This route is a stable alias for "the current orchestrator" for the authenticated user only.
 - The browser URL must remain `/sessions/orchestrator` and must not be rewritten to the rotated session ID.
 - Worker session/thread routes resolve the alias to the latest non-terminal orchestrator session before access checks, DO routing, and thread/history lookups.
-- Rotated IDs such as `orchestrator:{userId}:{uuid}` remain internal implementation details used for D1 rows, Durable Objects, and historical references.
-- Admin and cross-user views may continue to use concrete rotated session IDs where a specific persisted orchestrator session is being inspected.
+- Concrete IDs (`orchestrator:user:{userId}`, plus retired historical formats) remain internal implementation details used for D1 rows, Durable Objects, and historical references.
+- Admin and cross-user views may continue to use concrete session IDs where a specific persisted orchestrator session is being inspected.
 
 ### Concurrency Bypass
 
@@ -483,12 +499,12 @@ Export/import let users move memory between environments (e.g. dev → prod). Th
 | POST | `/identity-links` | Link external identity |
 | DELETE | `/identity-links/:id` | Unlink |
 
-### Mailbox Routes
+### Notification Routes
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/sessions/:sessionId/notifications` | Session-scoped mailbox |
-| POST | `/api/notifications/emit` | Emit notification (supports `toHandle` resolution) |
+| GET | `/api/sessions/:sessionId/notifications` | Session-scoped notification queue |
+| POST | `/api/notifications/emit` | Emit notification (web client; agent emits go through the sandbox gateway → attention router) |
 | PUT | `/api/sessions/:sessionId/notifications/read` | Mark all read for session |
 
 ### Channel Routes
@@ -537,8 +553,7 @@ Tools available to the orchestrator inside the sandbox, communicating via `http:
 |------|-------------|
 | `channel_reply` | Reply on external channel (Telegram, Slack) |
 | `list_channels` | List channel bindings for current session |
-| `mailbox_send` / `emit_notification` | Send notification to another session/user/handle |
-| `mailbox_check` | Check session's notification queue |
+| `emit_notification` | Notify the humans who own this session (no addressing — the attention router resolves the audience: the owner, or all team members + team channel for urgent kinds) |
 
 ### Task Management
 | Tool | Description |
@@ -567,11 +582,11 @@ Tools available to the orchestrator inside the sandbox, communicating via `http:
 
 ### Session ID Rotation vs. Volume Persistence
 
-Each restart gets a fresh session ID and DO, but the Modal workspace volume (`workspace-orchestrator-{userId}`) persists. The orchestrator retains its filesystem (repos, deps, generated files) but loses its in-DO state (messages, prompt queue, connected users) on restart.
+The session ID (`orchestrator:user:{userId}`) and its derived Modal workspace volume (`workspace-orchestrator-user-{userId}`) are stable across restarts. The orchestrator retains its filesystem (repos, deps, generated files) but loses its in-DO state (messages, prompt queue, connected users) on restart.
 
 ### Stale Session Detection
 
-`getOrchestratorSession()` queries by `user_id` and `is_orchestrator`, not by a fixed session ID. This means the cron and client auto-restart correctly find the newest orchestrator session regardless of ID rotation.
+`getOrchestratorSession()` queries by `user_id` and `is_orchestrator`, not by a fixed session ID. This means the cron and client auto-restart correctly find the newest orchestrator session even when historical rows in retired ID formats exist.
 
 ### Wait-for-Event Polling Overhead
 
@@ -589,13 +604,13 @@ Both the cron and the client hook can try to restart the orchestrator simultaneo
 
 ### Fully Implemented
 - Orchestrator identity CRUD (name, handle, avatar, custom instructions)
-- Session lifecycle with ID rotation and workspace volume persistence
+- Session lifecycle with stable canonical IDs (`orchestrator:user:{userId}`) and workspace volume persistence
 - Three-layer auto-restart (cron, client hook, manual)
 - Comprehensive system prompt with decision flows and tool usage patterns
 - Child session spawning with inherited env vars and credential injection
 - Recursive spawn prevention (children cannot spawn)
 - Inter-session messaging via DO prompt dispatch
-- Mailbox/notification queue (session inbox + user inbox with threads)
+- Notification queue (session inbox + user inbox with threads), routed by the attention router
 - Channel binding system with scope key routing and orchestrator fallback
 - Memory system with FTS5 search, BM25 ranking, relevance scoring, 200-memory cap with auto-prune
 - Task board with hierarchical tasks and dependencies

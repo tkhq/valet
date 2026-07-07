@@ -24,6 +24,10 @@ function rowToChannelBinding(row: typeof channelBindings.$inferSelect): ChannelB
     scopeKey: row.scopeKey,
     userId: row.userId || undefined,
     orgId: row.orgId,
+    ownerType: (row.ownerType as ChannelBinding['ownerType']) || 'user',
+    ownerId: row.ownerId || row.userId || undefined,
+    triggerMode: (row.triggerMode as ChannelBinding['triggerMode']) || 'mention',
+    createdBy: row.createdBy || undefined,
     queueMode: row.queueMode as QueueMode,
     collectDebounceMs: row.collectDebounceMs ?? 3000,
     slackChannelId: row.slackChannelId || undefined,
@@ -126,6 +130,10 @@ export async function createChannelBinding(
     slackThreadTs?: string;
     githubRepoFullName?: string;
     githubPrNumber?: number;
+    ownerType?: ChannelBinding['ownerType'];
+    ownerId?: string;
+    triggerMode?: ChannelBinding['triggerMode'];
+    createdBy?: string;
   },
 ): Promise<ChannelBinding> {
   const queueMode = data.queueMode || 'followup';
@@ -139,6 +147,10 @@ export async function createChannelBinding(
     scopeKey: data.scopeKey,
     userId: data.userId || null,
     orgId: data.orgId,
+    ownerType: data.ownerType ?? 'user',
+    ownerId: data.ownerId ?? data.userId ?? '',
+    triggerMode: data.triggerMode ?? 'mention',
+    createdBy: data.createdBy ?? null,
     queueMode,
     collectDebounceMs,
     slackChannelId: data.slackChannelId || null,
@@ -155,6 +167,10 @@ export async function createChannelBinding(
     scopeKey: data.scopeKey,
     userId: data.userId,
     orgId: data.orgId,
+    ownerType: data.ownerType ?? 'user',
+    ownerId: data.ownerId ?? data.userId,
+    triggerMode: data.triggerMode ?? 'mention',
+    createdBy: data.createdBy,
     queueMode,
     collectDebounceMs,
     slackChannelId: data.slackChannelId,
@@ -219,6 +235,45 @@ export async function getChannelBindingByScopeKey(db: AppDb, scopeKey: string): 
     .from(channelBindings)
     .where(eq(channelBindings.scopeKey, scopeKey))
     .get();
+  return row ? rowToChannelBinding(row) : null;
+}
+
+/** Direct lookup by external channel — the unique (channel_type, channel_id) index makes this the shared-channel router. */
+export async function getChannelBindingByChannel(
+  db: AppDb,
+  channelType: string,
+  channelId: string,
+): Promise<ChannelBinding | null> {
+  const row = await db
+    .select()
+    .from(channelBindings)
+    .where(and(eq(channelBindings.channelType, channelType), eq(channelBindings.channelId, channelId)))
+    .get();
+  return row ? rowToChannelBinding(row) : null;
+}
+
+export async function listChannelBindingsByOwner(
+  db: AppDb,
+  owner: { type: string; id: string },
+): Promise<ChannelBinding[]> {
+  const rows = await db
+    .select()
+    .from(channelBindings)
+    .where(and(eq(channelBindings.ownerType, owner.type), eq(channelBindings.ownerId, owner.id)))
+    .orderBy(channelBindings.createdAt);
+  return rows.map(rowToChannelBinding);
+}
+
+export async function updateChannelBindingTriggerMode(
+  db: AppDb,
+  bindingId: string,
+  triggerMode: 'mention' | 'all',
+): Promise<void> {
+  await db.update(channelBindings).set({ triggerMode }).where(eq(channelBindings.id, bindingId));
+}
+
+export async function getChannelBindingById(db: AppDb, bindingId: string): Promise<ChannelBinding | null> {
+  const row = await db.select().from(channelBindings).where(eq(channelBindings.id, bindingId)).get();
   return row ? rowToChannelBinding(row) : null;
 }
 

@@ -13,7 +13,7 @@ This spec covers:
 - Channel binding system (scope keys, prompt routing)
 - Custom LLM providers (admin CRUD)
 - Credential storage architecture
-- Slack status (schema-only)
+- Slack (org install, events handler, DM + team-channel routing, outbound identity)
 
 ### Boundary Rules
 
@@ -425,7 +425,24 @@ Dynamic client cache rows are connector-owned runtime state. They must be delete
 - **Discord webhook:** handles ping verification only.
 - **Notion, HubSpot, Xero webhooks:** log and return `{ received: true }`.
 
+### Slack (implemented)
+
+Slack is fully implemented (the earlier "schema-only" status was stale): org-level install (`org_service_configs`, bot token + signing secret + `botUserId`), the Events API handler at `routes/slack-events.ts`, DM routing to personal orchestrators, interactive approvals, and Agents/AI-Apps assistant threads.
+
+**Shared channels (teams design, `docs/specs/2026-07-05-teams-design.md` §4):** non-DM events route through the channel binding — a channel bound to a **team orchestrator** (binding `owner_type='team'`, unique per `(channel_type, channel_id)`) is that orchestrator's channel:
+
+1. No binding (or non-team binding) → silent `200`.
+2. Slack user not linked to a Valet account, or not a member of the owning team → silent `200` (never authorization chatter in a channel).
+3. `trigger_mode` decides *whether* to respond: `'mention'` (default) = bot @mention or a reply in a thread the orchestrator is already active in; `'all'` = every member message, dispatched with `queueMode: 'collect'` so bursts batch via the collect debounce.
+4. Thread mappings for team channels are keyed `team:{teamId}` — every member's activity in a Slack thread lands in one session thread.
+5. Replies post under the team orchestrator's name/avatar via `chat:write.customize` (`resolveTeamOrchestratorPersona` — no per-user Slack link required).
+
+Bindings are managed at `/api/teams/:id/channels` (member read, team-admin write; 409 when the channel is already bound or the team has no orchestrator). The bot must be invited to the channel — bindings to channels the bot isn't in never fire (not validated at bind time in v1).
+
+### Team sourced connections
+
+Teams share integrations Zapier-style (`docs/specs/2026-07-05-teams-design.md` §5): a member shares **their own** connection to the team, creating a `owner_type='team'` credential row that **references** the sourcing member (`sourced_from_user_id`, migration 0029) rather than copying the tokens. `getCredential('team', …)` delegates to the member's live credential, so refresh/rotation happens once on the member's own row and the token lineage never splits; the team row's `encrypted_data` is an unused placeholder. Team sessions act as the sourcing member; resolution is team-scoped only — never another member's personal credential. If the member disconnects the integration or leaves the team (or their credential dies on refresh), the reference flips to `status='broken'` (skipped by resolution, surfaced on the team's Integrations tab) until any member re-sources it. Routes: `GET|POST /api/teams/:id/integrations` (member), `DELETE …/:provider` (team admin or the sourcing member).
+
 ### Not Implemented
-- **Slack:** schema columns and env vars exist but no routes, service, or bot implementation. Planned for Phase 4.
 - **Notion, HubSpot, Ashby, Discord, Xero, Google Drive integrations:** listed in `IntegrationService` type but no `BaseIntegration` subclass exists. Would fail if configured through the framework.
 - **Linear:** mentioned in CLAUDE.md as planned but no code or schema exists.

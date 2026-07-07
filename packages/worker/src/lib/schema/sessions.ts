@@ -24,9 +24,12 @@ export const sessions = sqliteTable('sessions', {
   isOrchestrator: integer({ mode: 'boolean' }).notNull().default(false),
   purpose: text().notNull().default('interactive'),
   workflowExecutionId: text('workflow_execution_id'),
+  ownerType: text().notNull().default('user'),
+  ownerId: text().notNull().default(''),
   createdAt: text().default(sql`(datetime('now'))`),
   lastActiveAt: text().default(sql`(datetime('now'))`),
 }, (table) => [
+  index('idx_sessions_owner').on(table.ownerType, table.ownerId),
   index('idx_sessions_user').on(table.userId),
   index('idx_sessions_status').on(table.status),
   index('idx_sessions_parent').on(table.parentSessionId),

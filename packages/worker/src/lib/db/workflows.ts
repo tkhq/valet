@@ -1,7 +1,7 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { eq, and, or, sql, desc } from 'drizzle-orm';
+import { eq, and, or, sql, desc, inArray } from 'drizzle-orm';
 import type { AppDb } from '../drizzle.js';
-import { workflows, triggers, workflowExecutions } from '../schema/index.js';
+import { workflows, triggers, workflowExecutions, teamMembers } from '../schema/index.js';
 
 // ─── Pure Helpers ────────────────────────────────────────────────────────────
 
@@ -53,6 +53,24 @@ export interface WorkflowRow {
 
 // ─── Data Access ─────────────────────────────────────────────────────────────
 
+/**
+ * Access condition: the user owns the workflow, or it is team-owned by a team
+ * the user currently belongs to (teams design §5 — collaborative team
+ * workflows; membership resolves at query time).
+ */
+function workflowAccessibleBy(db: AppDb, userId: string) {
+  return or(
+    eq(workflows.userId, userId),
+    and(
+      eq(workflows.ownerType, 'team'),
+      inArray(
+        workflows.ownerId,
+        db.select({ teamId: teamMembers.teamId }).from(teamMembers).where(eq(teamMembers.userId, userId))
+      )
+    )
+  );
+}
+
 export async function listWorkflows(db: AppDb, userId: string) {
   return { results: await db
     .select({
@@ -69,7 +87,7 @@ export async function listWorkflows(db: AppDb, userId: string) {
       published_version_id: workflows.publishedVersionId,
     })
     .from(workflows)
-    .where(eq(workflows.userId, userId))
+    .where(workflowAccessibleBy(db, userId))
     .orderBy(desc(workflows.updatedAt)),
   };
 }
@@ -90,7 +108,7 @@ export async function getWorkflowByIdOrSlug(db: AppDb, userId: string, idOrSlug:
       published_version_id: workflows.publishedVersionId,
     })
     .from(workflows)
-    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), eq(workflows.userId, userId)))
+    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), workflowAccessibleBy(db, userId)))
     .get();
 }
 
@@ -109,7 +127,7 @@ export async function getWorkflowByIdOrSlugTyped<T>(db: AppDb, userId: string, i
       updated_at: workflows.updatedAt,
     })
     .from(workflows)
-    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), eq(workflows.userId, userId)))
+    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), workflowAccessibleBy(db, userId)))
     .get() as T | undefined;
 }
 
@@ -155,6 +173,29 @@ export async function upsertWorkflow(
   });
 }
 
+export async function getWorkflowOwner(
+  db: AppDb,
+  workflowId: string
+): Promise<{ ownerType: string; ownerId: string; userId: string } | null> {
+  const row = await db
+    .select({ ownerType: workflows.ownerType, ownerId: workflows.ownerId, userId: workflows.userId })
+    .from(workflows)
+    .where(eq(workflows.id, workflowId))
+    .get();
+  return row ?? null;
+}
+
+export async function setWorkflowOwner(
+  db: AppDb,
+  workflowId: string,
+  owner: { type: string; id: string }
+): Promise<void> {
+  await db
+    .update(workflows)
+    .set({ ownerType: owner.type, ownerId: owner.id, updatedAt: sql`datetime('now')` })
+    .where(eq(workflows.id, workflowId));
+}
+
 export async function getExistingWorkflowIds(db: AppDb, userId: string) {
   const rows = await db
     .select({ id: workflows.id })
@@ -166,7 +207,7 @@ export async function getExistingWorkflowIds(db: AppDb, userId: string) {
 export async function deleteWorkflowById(db: AppDb, workflowId: string, userId: string) {
   return db
     .delete(workflows)
-    .where(and(eq(workflows.id, workflowId), eq(workflows.userId, userId)));
+    .where(and(eq(workflows.id, workflowId), workflowAccessibleBy(db, userId)));
 }
 
 export async function updateWorkflow(
@@ -176,13 +217,18 @@ export async function updateWorkflow(
   setClauses: string[],
   values: unknown[],
 ) {
-  // Defense in depth: the route already user-scopes the workflow lookup,
-  // but appending `AND user_id = ?` here means a forgotten or mis-routed
-  // call site still can't cross tenants — silent no-op instead of a
-  // cross-tenant write.
+  // Defense in depth mirroring workflowAccessibleBy: the owner OR any current
+  // member of the owning team may write. A bare `AND user_id = ?` here would
+  // silently no-op a team member's edit (creator holds user_id) while DELETE —
+  // which uses workflowAccessibleBy — succeeds, an inconsistency that reads as
+  // a phantom success. Keeps the cross-tenant guard for mis-routed calls.
   await db.prepare(`
-    UPDATE workflows SET ${setClauses.join(', ')} WHERE id = ? AND user_id = ?
-  `).bind(...values, userId).run();
+    UPDATE workflows SET ${setClauses.join(', ')}
+    WHERE id = ?
+      AND (user_id = ?
+           OR (owner_type = 'team'
+               AND owner_id IN (SELECT team_id FROM team_members WHERE user_id = ?)))
+  `).bind(...values, userId, userId).run();
 }
 
 export async function getWorkflowById(db: AppDb, workflowId: string) {
@@ -214,10 +260,12 @@ export async function isWorkflowPublished(db: AppDb, workflowId: string): Promis
   return Boolean(row?.publishedVersionId);
 }
 
-export async function deleteWorkflowTriggers(db: AppDb, workflowId: string, userId: string) {
-  await db
-    .delete(triggers)
-    .where(and(eq(triggers.workflowId, workflowId), eq(triggers.userId, userId)));
+export async function deleteWorkflowTriggers(db: AppDb, workflowId: string, _userId: string) {
+  // Delete ALL triggers for the workflow, not just the caller's. Access is
+  // authorized upstream (assertWorkflowAccess), and the workflow row itself is
+  // being deleted — leaving another member's (or the creator's) triggers behind
+  // would orphan them pointing at a deleted workflow.
+  await db.delete(triggers).where(eq(triggers.workflowId, workflowId));
 }
 
 export async function deleteWorkflowByIdOrSlug(db: AppDb, idOrSlug: string, userId: string) {
@@ -225,7 +273,7 @@ export async function deleteWorkflowByIdOrSlug(db: AppDb, idOrSlug: string, user
   // better-sqlite3; the bare delete().where() return type drifts.
   return db
     .delete(workflows)
-    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), eq(workflows.userId, userId)))
+    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), workflowAccessibleBy(db, userId)))
     .run();
 }
 
@@ -233,7 +281,7 @@ export async function getWorkflowOwnerCheck(db: AppDb, userId: string, idOrSlug:
   return db
     .select({ id: workflows.id })
     .from(workflows)
-    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), eq(workflows.userId, userId)))
+    .where(and(or(eq(workflows.id, idOrSlug), eq(workflows.slug, idOrSlug)), workflowAccessibleBy(db, userId)))
     .get();
 }
 

@@ -1,3 +1,4 @@
+import { isOrchestratorSessionId } from '@valet/shared';
 import type { Env } from '../env.js';
 import type { AppDb } from '../lib/drizzle.js';
 import {
@@ -113,6 +114,12 @@ export async function spawnChild(
   // Query parent's git state to use as defaults for the child
   const parentGitState = await getSessionGitState(appDb, parentSessionId);
 
+  // Children inherit the parent's owner: sessions spawned by a team
+  // orchestrator are team-owned, so every member can open and join them.
+  const parentSession = await getSession(appDb, parentSessionId);
+  const ownerType = parentSession?.ownerType ?? 'user';
+  const ownerId = parentSession?.ownerId ?? userId;
+
   // Merge: explicit params override parent defaults
   const mergedRepoUrl = params.repoUrl || parentGitState?.sourceRepoUrl || undefined;
   const mergedBranch = params.branch || parentGitState?.branch || undefined;
@@ -137,6 +144,8 @@ export async function spawnChild(
     parentSessionId,
     parentThreadId,
     personaId: params.personaId,
+    ownerType,
+    ownerId,
   });
 
   // Create git state for child (always create if we have any git context)
@@ -191,10 +200,15 @@ export async function spawnChild(
       childSpawnRequest.envVars.REPO_REF = mergedRef;
     }
 
-    // Inject git credentials if the parent doesn't have them (e.g. orchestrator)
+    // Inject git credentials if the parent doesn't have them (e.g. orchestrator).
+    // Team-owned children use the TEAM's sourced connection only — never the
+    // acting member's personal token (teams design §5 resolution order).
     if (!childSpawnRequest.envVars.GITHUB_TOKEN) {
       try {
-        const ghResult = await getCredential(env, 'user', userId, 'github');
+        const ghResult =
+          ownerType === 'team'
+            ? await getCredential(env, 'team', ownerId, 'github')
+            : await getCredential(env, 'user', userId, 'github');
         if (ghResult.ok) {
           childSpawnRequest.envVars.GITHUB_TOKEN = ghResult.credential.accessToken;
         }
@@ -272,7 +286,7 @@ export async function sendSessionMessage(
   // Defense-in-depth: if the caller is an orchestrator session, verify it's the
   // *current* orchestrator — not an orphaned one from a previous restart. This
   // prevents stale sandboxes from sending duplicate steering messages.
-  if (callerSessionId?.startsWith('orchestrator:')) {
+  if (isOrchestratorSessionId(callerSessionId)) {
     const currentOrch = await getOrchestratorSession(env.DB, userId);
     if (currentOrch && currentOrch.id !== callerSessionId) {
       console.warn(`[sendSessionMessage] Rejecting message from stale orchestrator ${callerSessionId} (current: ${currentOrch.id})`);

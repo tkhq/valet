@@ -174,7 +174,7 @@ async function forwardSessionApprovalToDO(
     body: JSON.stringify({ promptId: invocationId, actionId, resolvedBy: userId }),
   }));
   if (response.status === 403) {
-    throw new ValidationError('only the session owner can resolve this approval');
+    throw new ValidationError('not authorized to resolve this approval');
   }
   if (response.status === 404) {
     // DO returns 404 when the prompt has already been resolved or expired.

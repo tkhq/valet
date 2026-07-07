@@ -33,7 +33,7 @@ describe('dispatchOrchestratorPrompt', () => {
     });
     createThreadMock.mockResolvedValue({
       id: 'thread-scheduled',
-      sessionId: 'orchestrator:user-1',
+      sessionId: 'orchestrator:user:user-1',
     });
   });
 
@@ -61,7 +61,7 @@ describe('dispatchOrchestratorPrompt', () => {
     expect(result.dispatched).toBe(true);
     expect(createThreadMock).toHaveBeenCalledWith(env.DB, {
       id: expect.any(String),
-      sessionId: 'orchestrator:user-1',
+      sessionId: 'orchestrator:user:user-1',
     });
 
     const promptRequest = doFetch.mock.calls[1]?.[0] as Request;

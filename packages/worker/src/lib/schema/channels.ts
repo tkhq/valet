@@ -25,6 +25,10 @@ export const channelBindings = sqliteTable('channel_bindings', {
   scopeKey: text().notNull(),
   userId: text(),
   orgId: text().notNull(),
+  ownerType: text().notNull().default('user'),
+  ownerId: text().notNull().default(''),
+  triggerMode: text().notNull().default('mention'),
+  createdBy: text().references(() => users.id, { onDelete: 'set null' }),
   queueMode: text().notNull().default('followup'),
   collectDebounceMs: integer().notNull().default(3000),
   slackChannelId: text(),
@@ -39,4 +43,5 @@ export const channelBindings = sqliteTable('channel_bindings', {
   index('idx_channel_bindings_session').on(table.sessionId),
   index('idx_channel_bindings_scope').on(table.scopeKey),
   index('idx_channel_bindings_user').on(table.userId),
+  index('idx_channel_bindings_owner').on(table.ownerType, table.ownerId),
 ]);

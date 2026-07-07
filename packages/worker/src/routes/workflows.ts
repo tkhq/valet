@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
-import { NotFoundError } from '@valet/shared';
+import { ForbiddenError, NotFoundError, ValidationError } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import {
   listWorkflows,
@@ -95,6 +95,37 @@ workflowsRouter.post('/', zValidator('json', createWorkflowSchema), async (c) =>
  * GET /api/workflows/:id
  * Get a single workflow by ID or slug
  */
+/**
+ * Transfer a workflow's ownership to a team (or back to personal with
+ * teamId: null). Caller must be the workflow's owning user and — when
+ * transferring to a team — a current member of it.
+ */
+workflowsRouter.patch('/:id/owner', async (c) => {
+  const { id: idOrSlug } = c.req.param();
+  const user = c.get('user');
+  const body = await c.req.json<{ teamId?: string | null }>().catch(() => ({ teamId: undefined }));
+  if (body.teamId === undefined) {
+    throw new ValidationError('teamId is required (string to transfer to a team, null for personal)');
+  }
+
+  const { assertWorkflowAccess } = await import('../lib/workflow-access.js');
+  const { id, userId: ownerUserId } = await assertWorkflowAccess(c.get('db'), user, idOrSlug, 'editor');
+  if (ownerUserId !== user.id) {
+    throw new ForbiddenError('Only the workflow owner can transfer ownership');
+  }
+
+  const { getTeamMembership } = await import('../lib/db/teams.js');
+  const { setWorkflowOwner } = await import('../lib/db/workflows.js');
+  if (body.teamId === null) {
+    await setWorkflowOwner(c.get('db'), id, { type: 'user', id: user.id });
+  } else {
+    const membership = await getTeamMembership(c.get('db'), body.teamId, user.id);
+    if (!membership) throw new NotFoundError('Team', body.teamId);
+    await setWorkflowOwner(c.get('db'), id, { type: 'team', id: body.teamId });
+  }
+  return c.json({ success: true });
+});
+
 workflowsRouter.get('/:id', async (c) => {
   const { id: idOrSlug } = c.req.param();
   const user = c.get('user');

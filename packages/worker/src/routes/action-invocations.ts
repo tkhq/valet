@@ -6,6 +6,7 @@ import {
   listPendingInvocationsByUser,
 } from '../lib/db.js';
 import { ErrorCodes, ForbiddenError, NotFoundError, ValidationError, ValetError } from '@valet/shared';
+import * as dbHelpers from '../lib/db.js';
 
 export const actionInvocationsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -23,9 +24,15 @@ async function sessionAgentError(response: Response): Promise<string> {
 
 async function notifyPromptResolved(
   env: Env,
-  sessionId: string,
+  sessionId: string | null | undefined,
   payload: { promptId: string; actionId: string; value?: string; resolvedBy: string },
 ) {
+  // Workflow-only invocations carry no session id (they gate on a
+  // workflow_execution_id and resolve through the workflow-approval route, not
+  // here). Reject clearly rather than crashing on idFromName(null).
+  if (!sessionId) {
+    throw new ValidationError('This approval is not attached to a session; resolve it from the workflow.');
+  }
   const doId = env.SESSIONS.idFromName(sessionId);
   const stub = env.SESSIONS.get(doId);
   let response: Response;
@@ -140,6 +147,30 @@ actionInvocationsRouter.get('/:id', async (c) => {
 });
 
 // POST /api/action-invocations/:id/approve — approve pending invocation
+/**
+ * Response-time eligibility. For invocations attached to a session, the
+ * session's ownership rule is authoritative (canActOnSessionPrompt): a
+ * team-owned session admits any CURRENT member and rejects a removed one —
+ * even the creator, so the `inv.userId` shortcut must NOT precede it for team
+ * sessions. Only sessionless (e.g. legacy) invocations fall back to owner id.
+ */
+async function assertInvocationResponder(
+  db: Parameters<typeof getInvocation>[0],
+  inv: { userId: string; sessionId?: string | null },
+  userId: string,
+  verb: string
+): Promise<void> {
+  if (inv.sessionId) {
+    const session = await dbHelpers.getSession(db, inv.sessionId);
+    if (session) {
+      if (await dbHelpers.canActOnSessionPrompt(db, session, userId)) return;
+      throw new ForbiddenError(`Not authorized to ${verb} this invocation`);
+    }
+  }
+  if (inv.userId === userId) return;
+  throw new ForbiddenError(`Not authorized to ${verb} this invocation`);
+}
+
 actionInvocationsRouter.post('/:id/approve', async (c) => {
   const id = c.req.param('id');
   const user = c.get('user');
@@ -151,9 +182,7 @@ actionInvocationsRouter.post('/:id/approve', async (c) => {
   if (!inv) {
     throw new NotFoundError('Invocation not found');
   }
-  if (inv.userId !== user.id) {
-    throw new ForbiddenError('Not authorized to approve this invocation');
-  }
+  await assertInvocationResponder(db, inv, user.id, 'approve');
   if (inv.status !== 'pending') {
     throw new NotFoundError('Invocation not found or not pending');
   }
@@ -184,9 +213,7 @@ actionInvocationsRouter.post('/:id/deny', async (c) => {
   if (!inv) {
     throw new NotFoundError('Invocation not found');
   }
-  if (inv.userId !== user.id) {
-    throw new ForbiddenError('Not authorized to deny this invocation');
-  }
+  await assertInvocationResponder(db, inv, user.id, 'deny');
   if (inv.status !== 'pending') {
     throw new NotFoundError('Invocation not found or not pending');
   }

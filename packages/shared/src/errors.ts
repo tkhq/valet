@@ -38,6 +38,7 @@ export const ErrorCodes = {
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   NOT_FOUND: 'NOT_FOUND',
   METHOD_NOT_ALLOWED: 'METHOD_NOT_ALLOWED',
+  CONFLICT: 'CONFLICT',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
@@ -87,6 +88,12 @@ export class ForbiddenError extends ValetError {
 export class ValidationError extends ValetError {
   constructor(message: string, details?: unknown) {
     super(message, ErrorCodes.VALIDATION_ERROR, 400, details);
+  }
+}
+
+export class ConflictError extends ValetError {
+  constructor(message: string, details?: unknown) {
+    super(message, ErrorCodes.CONFLICT, 409, details);
   }
 }
 
