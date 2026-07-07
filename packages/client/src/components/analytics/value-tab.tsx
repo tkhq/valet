@@ -4,9 +4,8 @@ import type { ValueMetricsWindow } from '@valet/shared';
 
 // The "Value metrics" panel: outcome metrics alongside the activity view.
 // v1 renders the metrics computable from existing signals; every headline is
-// a labeled proxy (see each card's tooltip). Metrics that need new
-// instrumentation are shown as planned placeholders so the roadmap is
-// visible instead of silently missing.
+// a labeled proxy (see each card's tooltip), and the footer states the data
+// sources and windowing so nobody has to guess where a number came from.
 
 function formatCost(cost: number | null): string {
   if (cost === null) return 'N/A';
@@ -98,40 +97,6 @@ function RouteIcon() {
   );
 }
 
-interface PlannedMetric {
-  label: string;
-  why: string;
-  blocker: string;
-}
-
-const PLANNED_METRICS: PlannedMetric[] = [
-  {
-    label: 'True Accepted-Output Rate',
-    why: 'Measures usable output per assistant message, not activity.',
-    blocker: 'Needs per-message feedback (thumbs up/down) — not instrumented anywhere in Valet yet.',
-  },
-  {
-    label: 'Cycle-Time Reduction',
-    why: 'Tests whether Valet accelerated completion vs doing the work without it.',
-    blocker: 'Needs a pre-Valet baseline per class of work; v1 shows absolute time-to-done only.',
-  },
-  {
-    label: 'Defect Rate & Maintainability',
-    why: 'Separates generation speed from long-term code quality.',
-    blocker: 'Needs PR follow-up ingestion (reverts and hotfixes touching agent-authored code within 14/30d).',
-  },
-  {
-    label: 'Customer Satisfaction & Repeat Contact',
-    why: 'Prevents hollow support metrics that hide frustration and churn.',
-    blocker: 'Valet is internal today; formal CSAT capture is a follow-up design conversation.',
-  },
-  {
-    label: 'Revenue per AI-Assisted Employee',
-    why: 'Measures commercial leverage and worker amplification.',
-    blocker: 'Needs org-level revenue attribution; explicitly out of scope for the first pass.',
-  },
-];
-
 export function ValueTab({ period }: { period: number }) {
   const { data, isLoading } = useAnalyticsValue(period);
 
@@ -149,13 +114,15 @@ export function ValueTab({ period }: { period: number }) {
 
   return (
     <div className="space-y-6">
-      <p className="text-xs text-neutral-400 dark:text-neutral-500">
-        First-pass outcome metrics. Every headline is a best-available proxy — hover a card for
-        what it measures, why it matters, and which proxy it uses. Deltas compare against the
-        prior window of equal length.
-      </p>
       <ValueHeroMetrics current={data.current} previous={data.previous} />
-      <PlannedMetrics />
+      <p className="border-t border-neutral-200/80 pt-3 text-xs leading-relaxed text-neutral-400 dark:border-neutral-800 dark:text-neutral-500">
+        How these are measured: workflow runs from workflow executions, task resolution and
+        escalations from session lifecycle + mailbox escalations, accepted output from approval
+        prompts a human explicitly decided, PR outcomes from agent-authored pull requests, and
+        model routing from per-model token telemetry (priced via models.dev). Each value covers
+        the selected window; the delta compares the equal-length window before it. Every headline
+        is a best-available proxy — hover a card for its exact definition and caveats.
+      </p>
     </div>
   );
 }
@@ -218,47 +185,15 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
   );
 }
 
-function PlannedMetrics() {
-  return (
-    <div>
-      <h3 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">
-        Planned — needs instrumentation
-      </h3>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {PLANNED_METRICS.map((m) => (
-          <div
-            key={m.label}
-            className="rounded-lg border border-dashed border-neutral-200/80 bg-neutral-50/50 p-5 dark:border-neutral-800 dark:bg-surface-1/50"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="label-mono text-neutral-400">{m.label}</span>
-              <span className="rounded-full bg-neutral-200/60 px-1.5 py-0.5 font-mono text-[10px] font-medium leading-none text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
-                Planned
-              </span>
-            </div>
-            <p className="mt-3 text-xs text-neutral-500 dark:text-neutral-400">{m.why}</p>
-            <p className="mt-1.5 text-xs text-neutral-400 dark:text-neutral-500">{m.blocker}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function ValueSkeleton() {
   return (
     <div className="space-y-6 animate-pulse">
-      <div className="h-8 rounded bg-neutral-100 dark:bg-surface-1" />
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {Array.from({ length: 6 }).map((_, i) => (
           <div key={i} className="h-24 rounded-lg border border-neutral-200/80 bg-white dark:border-neutral-800 dark:bg-surface-1" />
         ))}
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <div key={i} className="h-24 rounded-lg border border-dashed border-neutral-200/80 bg-white dark:border-neutral-800 dark:bg-surface-1" />
-        ))}
-      </div>
+      <div className="h-12 rounded bg-neutral-100 dark:bg-surface-1" />
     </div>
   );
 }
