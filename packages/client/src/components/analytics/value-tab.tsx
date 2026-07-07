@@ -118,16 +118,18 @@ export function ValueTab({ period }: { period: number }) {
         <SideEffectsTable rows={data.current.sideEffects} />
         <SessionSourcesTable rows={data.current.sessionSources} />
       </div>
-      <p className="border-t border-neutral-200/80 pt-3 text-xs leading-relaxed text-neutral-400 dark:border-neutral-800 dark:text-neutral-500">
-        How these are measured: workflow runs from workflow executions, task resolution and
-        escalations from session lifecycle + mailbox escalations, accepted output from approval
-        prompts a human explicitly decided, side effects from executed external actions
-        (action invocations), PR outcomes from agent-authored pull requests, session sources
-        from each session's git context, and model routing from per-model token telemetry
-        (priced via models.dev). Each value covers the selected window; the delta compares the
-        equal-length window before it. Every headline is a best-available proxy — hover a card
-        for its exact definition and caveats.
-      </p>
+    </div>
+  );
+}
+
+// Tooltip body for a metric card: the derivation formula, this window's
+// actual numbers plugged into it, and the proxy caveat.
+function MetricHelp({ formula, numbers, caveat }: { formula: string; numbers: string; caveat: string }) {
+  return (
+    <div className="space-y-1.5 py-1">
+      <p className="font-mono text-[11px] leading-snug">{formula}</p>
+      <p>{numbers}</p>
+      <p className="opacity-60">{caveat}</p>
     </div>
   );
 }
@@ -223,6 +225,7 @@ function SessionSourcesTable({ rows }: { rows: ValueMetricsWindow['sessionSource
 }
 
 function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; previous: ValueMetricsWindow }) {
+  const highRiskGated = current.sideEffects.reduce((sum, r) => sum + r.highRiskGated, 0);
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       <HeroMetricCard
@@ -231,7 +234,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         value={formatCost(current.costPerResolvedTask)}
         delta={pctDelta(current.costPerResolvedTask, previous.costPerResolvedTask)}
         deltaPolarity="lower-is-better"
-        tooltip={`Connects spend to completed work rather than autonomous loops. Total LLM + sandbox cost (${formatCost(current.totalCost)}) ÷ resolved tasks (${current.resolvedTasks}: ${current.resolvedWorkflowRuns} completed workflow runs + ${current.resolvedSessions} sessions whose activity ended without error). Proxy: "resolved" = workflow completed, or session settled (hibernated/archived/terminated) error-free — no explicit task-completion signal exists yet. Sandbox spend is prorated across the windows a session's life overlaps.`}
+        tooltip={
+          <MetricHelp
+            formula="(LLM tokens × models.dev price + sandbox seconds × Modal rate) ÷ (completed workflow runs + sessions ended without error)"
+            numbers={`${formatCost(current.totalCost)} ÷ ${current.resolvedTasks} resolved (${current.resolvedWorkflowRuns} workflow runs + ${current.resolvedSessions} sessions)`}
+            caveat={`"Resolved" is a proxy — workflow reached completed, or session settled (hibernated/archived/terminated) error-free; no explicit task-completion signal exists yet. Sandbox spend prorated across overlapping windows.`}
+          />
+        }
         index={0}
       />
       <HeroMetricCard
@@ -239,7 +248,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         label="Accepted Output Rate"
         value={formatPercent(current.acceptedOutputRate)}
         delta={pctDelta(current.acceptedOutputRate, previous.acceptedOutputRate)}
-        tooltip={`Measures usable output, not activity. Share of approval prompts a human explicitly decided that were accepted: ${current.approvalsAccepted} accepted vs ${current.approvalsDenied} denied (${current.approvalsExpired} expired, excluded; policy auto-allows/auto-denies excluded — no human decision). Proxy: counts action approvals + workflow gates only — Valet has no per-message feedback yet, so most assistant output carries no accept/reject signal.`}
+        tooltip={
+          <MetricHelp
+            formula="human-approved prompts ÷ (human-approved + human-denied)"
+            numbers={`${current.approvalsAccepted} accepted ÷ ${current.approvalsAccepted + current.approvalsDenied} decided (${current.approvalsExpired} expired, excluded)`}
+            caveat="Counts only action approvals + workflow gates a human explicitly decided; policy auto-allows/denies are excluded. No per-message feedback exists yet, so most assistant output carries no accept/reject signal."
+          />
+        }
         index={1}
       />
       <HeroMetricCard
@@ -248,7 +263,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         value={formatPercent(current.reworkEscalationRate)}
         delta={pctDelta(current.reworkEscalationRate, previous.reworkEscalationRate)}
         deltaPolarity="lower-is-better"
-        tooltip={`Shows whether automation reduces labor or creates oversight work. ${current.reworkSessions} of ${current.endedSessions} ended sessions errored or sent an explicit escalation message (${current.escalationMessages} escalation messages in window). Workflows: ${current.failedWorkflowRuns} of ${current.terminalWorkflowRuns} runs failed. Proxy: same-intent re-prompting and informal "get a human" requests are not detected yet.`}
+        tooltip={
+          <MetricHelp
+            formula="sessions errored or escalated ÷ sessions ended"
+            numbers={`${current.reworkSessions} ÷ ${current.endedSessions} sessions (${current.escalationMessages} escalation messages); workflows: ${current.failedWorkflowRuns}/${current.terminalWorkflowRuns} failed`}
+            caveat={`Escalation = explicit escalate-to-human message. Same-intent re-prompting and informal "get a human" requests are not detected yet.`}
+          />
+        }
         index={2}
       />
       <HeroMetricCard
@@ -257,7 +278,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         value={formatMinutes(current.medianSessionMinutes)}
         delta={pctDelta(current.medianSessionMinutes, previous.medianSessionMinutes)}
         deltaPolarity="lower-is-better"
-        tooltip={`Tests whether the tool accelerates completion. Median active lifespan (creation to last activity) of sessions that ended without error; completed workflow runs: ${formatMinutes(current.medianWorkflowMinutes)} median. Proxy: absolute time-to-done, NOT cycle-time reduction — no pre-Valet baseline exists to compare against.`}
+        tooltip={
+          <MetricHelp
+            formula="median(last activity − created) over sessions ended without error"
+            numbers={`${formatMinutes(current.medianSessionMinutes)} across ${current.resolvedSessions} sessions; workflow runs: ${formatMinutes(current.medianWorkflowMinutes)} median`}
+            caveat="Wall-clock span including waiting-on-user time. Absolute time-to-done, NOT cycle-time reduction — no pre-Valet baseline exists."
+          />
+        }
         index={3}
       />
       <HeroMetricCard
@@ -265,7 +292,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         label="Agent PR Merge Rate"
         value={formatPercent(current.prMergeRate)}
         delta={pctDelta(current.prMergeRate, previous.prMergeRate)}
-        tooltip={`Proxy for review burden: of agent-authored PRs that reached a decision, how many merged. ${current.prsMerged} merged vs ${current.prsClosedUnmerged} closed unmerged (${current.prsStillOpen} still open of ${current.prsOpened} opened; median ${current.medianHoursToMerge === null ? 'N/A' : `${Math.round(current.medianHoursToMerge)}h`} to merge). PR linkage collects forward from this panel's ship date — older PRs are not backfilled. True review burden (review rounds, requested changes) needs PR-review-event ingestion, which does not exist yet.`}
+        tooltip={
+          <MetricHelp
+            formula="merged ÷ (merged + closed unmerged) agent-authored PRs"
+            numbers={`${current.prsMerged} ÷ ${current.prsMerged + current.prsClosedUnmerged} decided; ${current.prsStillOpen} still open of ${current.prsOpened} opened; median ${current.medianHoursToMerge === null ? 'N/A' : `${Math.round(current.medianHoursToMerge)}h`} to merge`}
+            caveat="Proxy for review burden. PR linkage collects forward from ship date (no backfill); true review burden (review rounds, requested changes) needs PR-review-event ingestion."
+          />
+        }
         index={4}
       />
       <HeroMetricCard
@@ -273,7 +306,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         label="Non-Frontier Token Share"
         value={formatPercent(current.nonFrontierTokenShare)}
         delta={pctDelta(current.nonFrontierTokenShare, previous.nonFrontierTokenShare)}
-        tooltip={`Shows whether routine work is handled by cheaper models before expensive systems are used. Share of billable tokens on efficient/standard-tier models vs frontier; ${formatPercent(current.frontierFreeSessionShare)} of ${current.sessionsWithModelUsage} sessions never touched a frontier model. Tiers are classified by model name (haiku/mini/flash → efficient; sonnet/gpt-4 → standard; opus/fable/gpt-5 → frontier); unclassified models are excluded from the share (${formatTokenCount(current.unknownTokens)} tokens unclassified this window).`}
+        tooltip={
+          <MetricHelp
+            formula="(efficient + standard tokens) ÷ (efficient + standard + frontier tokens)"
+            numbers={`${formatPercent(current.frontierFreeSessionShare)} of ${current.sessionsWithModelUsage} sessions never touched a frontier model; ${formatTokenCount(current.unknownTokens)} unclassified tokens excluded`}
+            caveat="Tiers by model name: haiku/mini/flash → efficient; sonnet/gpt-4 → standard; opus/fable/gpt-5 → frontier. Billable = input + cache + output + reasoning."
+          />
+        }
         index={5}
       />
       <HeroMetricCard
@@ -281,7 +320,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         label="External Actions"
         value={current.totalSideEffects.toLocaleString()}
         delta={pctDelta(current.totalSideEffects, previous.totalSideEffects)}
-        tooltip={`Side effects: actions Valet executed in external systems this window (emails sent, messages posted, PRs opened, issues created, ...). ${current.highRiskSideEffects} were high-risk. Source: executed action invocations; test-mode workflow runs excluded. Breakdown by service below.`}
+        tooltip={
+          <MetricHelp
+            formula="count(executed action invocations)"
+            numbers={`${current.totalSideEffects} executed, ${current.highRiskSideEffects} high-risk; per-service breakdown below`}
+            caveat="Side effects = actions with impact outside Valet (emails, messages, PRs, issues). Test-mode workflow runs excluded."
+          />
+        }
         index={6}
       />
       <HeroMetricCard
@@ -289,7 +334,13 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         label="High-Risk Gate Coverage"
         value={formatPercent(current.highRiskGateCoverage)}
         delta={pctDelta(current.highRiskGateCoverage, previous.highRiskGateCoverage)}
-        tooltip={`Governance: of the ${current.highRiskSideEffects} high-risk external actions executed, how many passed through an explicit human decision before running. The remainder ran under policy auto-allow ("Always Allow" grants or low-friction policies on high-risk actions).`}
+        tooltip={
+          <MetricHelp
+            formula="human-decided high-risk executions ÷ all high-risk executions"
+            numbers={`${highRiskGated} gated ÷ ${current.highRiskSideEffects} high-risk executed`}
+            caveat={`The remainder ran under policy auto-allow ("Always Allow" grants or low-friction policies on high-risk actions).`}
+          />
+        }
         index={7}
       />
     </div>
