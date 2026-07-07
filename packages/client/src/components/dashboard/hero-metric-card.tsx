@@ -6,11 +6,16 @@ interface HeroMetricCardProps {
   value: string;
   userValue?: string;
   delta?: number;
+  /**
+   * Whether an increase is good (green) or bad (red). Cost- and error-style
+   * metrics should pass 'lower-is-better'. Defaults to 'higher-is-better'.
+   */
+  deltaPolarity?: 'higher-is-better' | 'lower-is-better';
   tooltip?: string;
   index?: number;
 }
 
-export function HeroMetricCard({ icon, label, value, userValue, delta, tooltip, index = 0 }: HeroMetricCardProps) {
+export function HeroMetricCard({ icon, label, value, userValue, delta, deltaPolarity = 'higher-is-better', tooltip, index = 0 }: HeroMetricCardProps) {
   return (
     <div
       className="group relative rounded-lg border border-neutral-200/80 bg-white p-5 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] transition-shadow hover:shadow-[0_2px_8px_-2px_rgb(0_0_0/0.08)] animate-stagger-in dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none"
@@ -36,7 +41,7 @@ export function HeroMetricCard({ icon, label, value, userValue, delta, tooltip, 
           <span
             className={cn(
               'inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] font-medium tabular-nums leading-none',
-              delta > 0
+              (delta > 0) === (deltaPolarity === 'higher-is-better')
                 ? 'bg-emerald-500/8 text-emerald-600'
                 : 'bg-red-500/8 text-red-600'
             )}

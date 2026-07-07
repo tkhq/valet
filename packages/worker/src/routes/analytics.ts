@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
+import type { D1Database } from '@cloudflare/workers-types';
 import type { Env, Variables } from '../env.js';
-import type { AnalyticsPerformanceResponse, AnalyticsEventsResponse } from '@valet/shared';
+import type { AnalyticsPerformanceResponse, AnalyticsEventsResponse, AnalyticsValueResponse, ValueMetricsWindow } from '@valet/shared';
 import {
   getPercentiles,
   getPerfTrend,
@@ -10,6 +11,20 @@ import {
   getThroughputStats,
   getEventFeed,
 } from '../lib/db/analytics.js';
+import {
+  getWorkflowResolutionStats,
+  getSessionResolutionStats,
+  getEscalationStats,
+  getApprovalDecisionStats,
+  getAgentPrStats,
+  getModelUsageRows,
+  getSessionModelPairs,
+  getSandboxSecondsInWindow,
+} from '../lib/db/value-metrics.js';
+import { classifyModelTier, safeRate, computeWindowBounds } from '../lib/value-metrics.js';
+import { getModelPricing, computeCost, type ModelPricing } from '../services/model-catalog.js';
+import { computeSandboxCost } from '../services/sandbox-pricing.js';
+import { getDb } from '../lib/drizzle.js';
 
 export const analyticsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -103,6 +118,116 @@ analyticsRouter.get('/events', async (c) => {
   const response: AnalyticsEventsResponse = {
     events: parsed,
     total,
+    period: periodHours,
+  };
+
+  return c.json(response);
+});
+
+/**
+ * Compute one window of value metrics. All queries are windowed [start, end)
+ * so the same function serves the current window and the prior one (deltas).
+ */
+async function computeValueWindow(
+  db: D1Database,
+  pricingMap: Map<string, ModelPricing>,
+  startIso: string,
+  endIso: string,
+): Promise<ValueMetricsWindow> {
+  const [workflows, sessions, escalations, approvals, prs, modelRows, sessionModels, sandboxSeconds] = await Promise.all([
+    getWorkflowResolutionStats(db, startIso, endIso),
+    getSessionResolutionStats(db, startIso, endIso),
+    getEscalationStats(db, startIso, endIso),
+    getApprovalDecisionStats(db, startIso, endIso),
+    getAgentPrStats(db, startIso, endIso),
+    getModelUsageRows(db, startIso, endIso),
+    getSessionModelPairs(db, startIso, endIso),
+    getSandboxSecondsInWindow(db, startIso, endIso),
+  ]);
+
+  // LLM cost mirrors /api/usage/stats: models without pricing contribute
+  // nothing and leave llmCost null only when NO model has pricing.
+  let llmCost: number | null = null;
+  let frontierTokens = 0;
+  let nonFrontierTokens = 0;
+  for (const row of modelRows) {
+    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    if (cost !== null) llmCost = (llmCost ?? 0) + cost;
+    const tokens = row.inputTokens + row.outputTokens;
+    if (classifyModelTier(row.model) === 'frontier') frontierTokens += tokens;
+    else nonFrontierTokens += tokens;
+  }
+
+  const sandboxCost = computeSandboxCost(sandboxSeconds);
+  const totalCost = llmCost !== null ? llmCost + sandboxCost : sandboxCost > 0 ? sandboxCost : null;
+
+  const resolvedTasks = workflows.completed + sessions.resolved;
+  const decisions = approvals.accepted + approvals.denied;
+
+  const sessionsWithModels = new Set<string>();
+  const frontierSessions = new Set<string>();
+  for (const pair of sessionModels) {
+    sessionsWithModels.add(pair.sessionId);
+    if (classifyModelTier(pair.model) === 'frontier') frontierSessions.add(pair.sessionId);
+  }
+
+  return {
+    totalCost,
+    llmCost,
+    sandboxCost,
+    resolvedWorkflowRuns: workflows.completed,
+    resolvedSessions: sessions.resolved,
+    resolvedTasks,
+    costPerResolvedTask: totalCost !== null && resolvedTasks > 0 ? totalCost / resolvedTasks : null,
+    approvalsAccepted: approvals.accepted,
+    approvalsDenied: approvals.denied,
+    approvalsExpired: approvals.expired,
+    acceptedOutputRate: safeRate(approvals.accepted, decisions),
+    reworkSessions: sessions.reworkSessions,
+    escalationMessages: escalations.escalationMessages,
+    erroredSessions: sessions.errored,
+    endedSessions: sessions.ended,
+    failedWorkflowRuns: workflows.failed,
+    terminalWorkflowRuns: workflows.terminal,
+    reworkEscalationRate: safeRate(sessions.reworkSessions, sessions.ended),
+    medianSessionMinutes: sessions.medianResolvedMinutes,
+    medianWorkflowMinutes: workflows.medianCompletedMinutes,
+    prsOpened: prs.opened,
+    prsMerged: prs.merged,
+    prsClosedUnmerged: prs.closedUnmerged,
+    prsStillOpen: prs.stillOpen,
+    prMergeRate: safeRate(prs.merged, prs.merged + prs.closedUnmerged),
+    medianHoursToMerge: prs.medianHoursToMerge,
+    frontierTokens,
+    nonFrontierTokens,
+    nonFrontierTokenShare: safeRate(nonFrontierTokens, frontierTokens + nonFrontierTokens),
+    sessionsWithModelUsage: sessionsWithModels.size,
+    frontierFreeSessionShare: safeRate(sessionsWithModels.size - frontierSessions.size, sessionsWithModels.size),
+  };
+}
+
+// GET /api/analytics/value?period=720
+analyticsRouter.get('/value', async (c) => {
+  const user = c.get('user');
+  if (!user || user.role !== 'admin') {
+    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
+  }
+
+  const rawPeriod = parseInt(c.req.query('period') || '720', 10);
+  const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
+  const windows = computeWindowBounds(new Date(), periodHours);
+
+  const db = c.env.DB;
+  const pricingMap = await getModelPricing(getDb(db), c.env);
+
+  const [current, previous] = await Promise.all([
+    computeValueWindow(db, pricingMap, windows.currentStart, windows.currentEnd),
+    computeValueWindow(db, pricingMap, windows.previousStart, windows.previousEnd),
+  ]);
+
+  const response: AnalyticsValueResponse = {
+    current,
+    previous,
     period: periodHours,
   };
 

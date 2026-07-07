@@ -5,6 +5,7 @@ const PERIODS = [
   { label: '1d', value: 24 },
   { label: '1wk', value: 168 },
   { label: '1mo', value: 720 },
+  { label: '1y', value: 8760 },
 ] as const;
 
 interface PeriodSelectorProps {
