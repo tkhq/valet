@@ -228,6 +228,86 @@ export async function getApprovalDecisionStats(
   };
 }
 
+// ─── Side effects (executed external actions) ───────────────────────────────
+
+export interface SideEffectServiceRow {
+  service: string;
+  executed: number;
+  highRisk: number;
+  /** High-risk executions that passed through an explicit human decision. */
+  highRiskGated: number;
+}
+
+// Every externally-visible action Valet takes (send email, post message,
+// open PR, ...) leaves an action_invocations row; status='executed' means it
+// actually ran. Windowed on executed_at (when the side effect happened),
+// falling back to created_at for legacy rows.
+export async function getSideEffectStats(
+  db: D1Database,
+  startIso: string,
+  endIso: string,
+): Promise<SideEffectServiceRow[]> {
+  const result = await db
+    .prepare(`
+      SELECT
+        ai.service,
+        COUNT(*) AS executed,
+        COALESCE(SUM(CASE WHEN ai.risk_level = 'high' THEN 1 ELSE 0 END), 0) AS high_risk,
+        COALESCE(SUM(CASE WHEN ai.risk_level = 'high' AND ai.resolved_by IS NOT NULL THEN 1 ELSE 0 END), 0) AS high_risk_gated
+      FROM action_invocations ai
+      LEFT JOIN workflow_executions we ON ai.workflow_execution_id = we.id
+      WHERE ai.status = 'executed'
+        AND (we.id IS NULL OR we.mode != 'test')
+        AND datetime(COALESCE(ai.executed_at, ai.created_at)) >= datetime(?)
+        AND datetime(COALESCE(ai.executed_at, ai.created_at)) < datetime(?)
+      GROUP BY ai.service
+      ORDER BY executed DESC
+    `)
+    .bind(startIso, endIso)
+    .all<{ service: string; executed: number; high_risk: number; high_risk_gated: number }>();
+
+  return (result.results ?? []).map((r) => ({
+    service: r.service,
+    executed: r.executed,
+    highRisk: r.high_risk,
+    highRiskGated: r.high_risk_gated,
+  }));
+}
+
+// ─── Session sources (what work starts from) ────────────────────────────────
+
+export interface SessionSourceRow {
+  /** session_git_state.source_type, or 'none' for sessions with no git context. */
+  sourceType: string;
+  sessions: number;
+}
+
+// Same ended-session population as getSessionResolutionStats, segmented by
+// what the session was started from (a PR, an issue, a branch, manual repo
+// work, or no git context at all).
+export async function getSessionSourceStats(
+  db: D1Database,
+  startIso: string,
+  endIso: string,
+): Promise<SessionSourceRow[]> {
+  const result = await db
+    .prepare(`
+      SELECT COALESCE(g.source_type, 'none') AS source_type, COUNT(*) AS sessions
+      FROM sessions s
+      LEFT JOIN session_git_state g ON g.session_id = s.id
+      WHERE s.is_orchestrator = 0
+        AND s.purpose = 'interactive'
+        AND s.status IN ('hibernated', 'archived', 'terminated', 'error')
+        AND datetime(s.last_active_at) >= datetime(?) AND datetime(s.last_active_at) < datetime(?)
+      GROUP BY COALESCE(g.source_type, 'none')
+      ORDER BY sessions DESC
+    `)
+    .bind(startIso, endIso)
+    .all<{ source_type: string; sessions: number }>();
+
+  return (result.results ?? []).map((r) => ({ sourceType: r.source_type, sessions: r.sessions }));
+}
+
 // ─── Agent-authored PR outcomes (review-burden proxy) ───────────────────────
 
 export interface AgentPrStats {

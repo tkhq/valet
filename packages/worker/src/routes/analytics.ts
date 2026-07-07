@@ -20,6 +20,8 @@ import {
   getModelUsageRows,
   getSessionModelPairs,
   getSandboxSecondsInWindow,
+  getSideEffectStats,
+  getSessionSourceStats,
 } from '../lib/db/value-metrics.js';
 import { classifyModelTier, safeRate, computeWindowBounds } from '../lib/value-metrics.js';
 import { getModelPricing, computeCost, type ModelPricing } from '../services/model-catalog.js';
@@ -134,7 +136,7 @@ async function computeValueWindow(
   startIso: string,
   endIso: string,
 ): Promise<ValueMetricsWindow> {
-  const [workflows, sessions, escalations, approvals, prs, modelRows, sessionModels, sandboxSeconds] = await Promise.all([
+  const [workflows, sessions, escalations, approvals, prs, modelRows, sessionModels, sandboxSeconds, sideEffects, sessionSources] = await Promise.all([
     getWorkflowResolutionStats(db, startIso, endIso),
     getSessionResolutionStats(db, startIso, endIso),
     getEscalationStats(db, startIso, endIso),
@@ -143,6 +145,8 @@ async function computeValueWindow(
     getModelUsageRows(db, startIso, endIso),
     getSessionModelPairs(db, startIso, endIso),
     getSandboxSecondsInWindow(db, startIso, endIso),
+    getSideEffectStats(db, startIso, endIso),
+    getSessionSourceStats(db, startIso, endIso),
   ]);
 
   // LLM cost mirrors /api/usage/stats: models without pricing contribute
@@ -174,6 +178,15 @@ async function computeValueWindow(
   for (const pair of sessionModels) {
     sessionsWithModels.add(pair.sessionId);
     if (classifyModelTier(pair.model) === 'frontier') frontierSessions.add(pair.sessionId);
+  }
+
+  let totalSideEffects = 0;
+  let highRiskSideEffects = 0;
+  let highRiskGated = 0;
+  for (const row of sideEffects) {
+    totalSideEffects += row.executed;
+    highRiskSideEffects += row.highRisk;
+    highRiskGated += row.highRiskGated;
   }
 
   return {
@@ -209,6 +222,11 @@ async function computeValueWindow(
     nonFrontierTokenShare: safeRate(nonFrontierTokens, frontierTokens + nonFrontierTokens),
     sessionsWithModelUsage: sessionsWithModels.size,
     frontierFreeSessionShare: safeRate(sessionsWithModels.size - frontierSessions.size, sessionsWithModels.size),
+    sideEffects,
+    totalSideEffects,
+    highRiskSideEffects,
+    highRiskGateCoverage: safeRate(highRiskGated, highRiskSideEffects),
+    sessionSources,
   };
 }
 

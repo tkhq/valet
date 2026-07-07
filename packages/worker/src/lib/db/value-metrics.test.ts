@@ -10,6 +10,8 @@ import {
   getModelUsageRows,
   getSessionModelPairs,
   getSandboxSecondsInWindow,
+  getSideEffectStats,
+  getSessionSourceStats,
 } from './value-metrics.js';
 
 // Fixed [start, end) window for every test. Seeds deliberately mix the two
@@ -252,6 +254,56 @@ describe('value-metrics db helpers', () => {
         's1:anthropic/claude-opus-4',
         's2:anthropic/claude-haiku-4-5',
       ]);
+    });
+  });
+
+  describe('getSideEffectStats', () => {
+    it('groups executed actions by service with high-risk gate coverage', async () => {
+      seedSession(sqlite, { id: 's1', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
+      const insert = `INSERT INTO action_invocations (id, session_id, user_id, service, action_id, risk_level, resolved_mode, status, resolved_by, executed_at, created_at) VALUES (?, 's1', 'u1', ?, 'a', ?, 'allow', ?, ?, ?, ?)`;
+      // github: 2 executed (1 high-risk, human-gated), slack: 1 executed low-risk auto
+      exec(sqlite, insert, 'e1', 'github', 'high', 'executed', 'u1', '2026-07-02T00:00:00.000Z', '2026-07-01T23:00:00.000Z');
+      exec(sqlite, insert, 'e2', 'github', 'low', 'executed', null, '2026-07-02 01:00:00', '2026-07-02 00:30:00');
+      exec(sqlite, insert, 'e3', 'slack', 'low', 'executed', null, null, '2026-07-03T00:00:00.000Z'); // falls back to created_at
+      // gmail: high-risk executed WITHOUT a human decision (auto-allowed)
+      exec(sqlite, insert, 'e4', 'gmail', 'high', 'executed', null, '2026-07-04T00:00:00.000Z', '2026-07-04T00:00:00.000Z');
+      // Excluded: not executed, out of window, test-mode workflow gate.
+      exec(sqlite, insert, 'e5', 'github', 'high', 'denied', 'u1', null, '2026-07-02T02:00:00.000Z');
+      exec(sqlite, insert, 'e6', 'github', 'low', 'executed', null, '2026-06-01 00:00:00', '2026-06-01 00:00:00');
+      exec(sqlite, `INSERT INTO workflow_executions (id, user_id, status, trigger_type, mode, started_at) VALUES ('wx-t2', 'u1', 'completed', 'manual', 'test', '2026-07-02 00:00:00')`);
+      exec(
+        sqlite,
+        `INSERT INTO action_invocations (id, session_id, user_id, workflow_execution_id, service, action_id, risk_level, resolved_mode, status, executed_at, created_at) VALUES ('e7', 's1', 'u1', 'wx-t2', 'slack', 'a', 'low', 'allow', 'executed', '2026-07-02T03:00:00.000Z', '2026-07-02T03:00:00.000Z')`,
+      );
+
+      const rows = await getSideEffectStats(db, START, END);
+      const byService = new Map(rows.map((r) => [r.service, r]));
+      expect(byService.get('github')).toMatchObject({ executed: 2, highRisk: 1, highRiskGated: 1 });
+      expect(byService.get('slack')).toMatchObject({ executed: 1, highRisk: 0, highRiskGated: 0 });
+      expect(byService.get('gmail')).toMatchObject({ executed: 1, highRisk: 1, highRiskGated: 0 });
+      expect(rows).toHaveLength(3);
+    });
+  });
+
+  describe('getSessionSourceStats', () => {
+    it('segments ended interactive sessions by git source type', async () => {
+      seedSession(sqlite, { id: 'src-pr', status: 'hibernated', createdAt: '2026-07-02T00:00:00.000Z', lastActiveAt: '2026-07-02T01:00:00.000Z' });
+      seedSession(sqlite, { id: 'src-issue', status: 'archived', createdAt: '2026-07-03T00:00:00.000Z', lastActiveAt: '2026-07-03T01:00:00.000Z' });
+      seedSession(sqlite, { id: 'src-none', status: 'terminated', createdAt: '2026-07-04T00:00:00.000Z', lastActiveAt: '2026-07-04T01:00:00.000Z' });
+      // Excluded: still active, orchestrator, out of window.
+      seedSession(sqlite, { id: 'src-active', status: 'active', createdAt: '2026-07-05T00:00:00.000Z', lastActiveAt: '2026-07-05T01:00:00.000Z' });
+      seedSession(sqlite, { id: 'src-orch', status: 'hibernated', createdAt: '2026-07-05T00:00:00.000Z', lastActiveAt: '2026-07-05T01:00:00.000Z', isOrchestrator: 1, purpose: 'orchestrator' });
+      seedSession(sqlite, { id: 'src-old', status: 'archived', createdAt: '2026-06-01 00:00:00', lastActiveAt: '2026-06-01 01:00:00' });
+      const git = `INSERT INTO session_git_state (id, session_id, source_type) VALUES (?, ?, ?)`;
+      exec(sqlite, git, 'g-pr', 'src-pr', 'pr');
+      exec(sqlite, git, 'g-issue', 'src-issue', 'issue');
+
+      const rows = await getSessionSourceStats(db, START, END);
+      const bySource = new Map(rows.map((r) => [r.sourceType, r.sessions]));
+      expect(bySource.get('pr')).toBe(1);
+      expect(bySource.get('issue')).toBe(1);
+      expect(bySource.get('none')).toBe(1);
+      expect(rows).toHaveLength(3);
     });
   });
 

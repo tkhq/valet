@@ -97,6 +97,23 @@ function RouteIcon() {
   );
 }
 
+function BoltIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </svg>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <polyline points="9 12 11 14 15 10" />
+    </svg>
+  );
+}
+
 export function ValueTab({ period }: { period: number }) {
   const { data, isLoading } = useAnalyticsValue(period);
 
@@ -115,14 +132,95 @@ export function ValueTab({ period }: { period: number }) {
   return (
     <div className="space-y-6">
       <ValueHeroMetrics current={data.current} previous={data.previous} />
+      <div className="grid gap-6 [&>*]:min-w-0 lg:grid-cols-2">
+        <SideEffectsTable rows={data.current.sideEffects} />
+        <SessionSourcesTable rows={data.current.sessionSources} />
+      </div>
       <p className="border-t border-neutral-200/80 pt-3 text-xs leading-relaxed text-neutral-400 dark:border-neutral-800 dark:text-neutral-500">
         How these are measured: workflow runs from workflow executions, task resolution and
         escalations from session lifecycle + mailbox escalations, accepted output from approval
-        prompts a human explicitly decided, PR outcomes from agent-authored pull requests, and
-        model routing from per-model token telemetry (priced via models.dev). Each value covers
-        the selected window; the delta compares the equal-length window before it. Every headline
-        is a best-available proxy — hover a card for its exact definition and caveats.
+        prompts a human explicitly decided, side effects from executed external actions
+        (action invocations), PR outcomes from agent-authored pull requests, session sources
+        from each session's git context, and model routing from per-model token telemetry
+        (priced via models.dev). Each value covers the selected window; the delta compares the
+        equal-length window before it. Every headline is a best-available proxy — hover a card
+        for its exact definition and caveats.
       </p>
+    </div>
+  );
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  pr: 'From a pull request',
+  issue: 'From an issue',
+  branch: 'From a branch',
+  manual: 'Manual repo work',
+  none: 'No git context',
+};
+
+function SideEffectsTable({ rows }: { rows: ValueMetricsWindow['sideEffects'] }) {
+  return (
+    <div className="rounded-lg border border-neutral-200/80 bg-white p-5 dark:border-neutral-800 dark:bg-surface-1">
+      <h3 className="label-mono mb-3 text-neutral-400">Side Effects by Service</h3>
+      {rows.length === 0 ? (
+        <p className="text-sm text-neutral-400">No external actions executed in this window</p>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left font-mono text-[10px] uppercase tracking-wide text-neutral-400">
+              <th className="pb-2 font-medium">Service</th>
+              <th className="pb-2 text-right font-medium">Executed</th>
+              <th className="pb-2 text-right font-medium">High-risk</th>
+              <th className="pb-2 text-right font-medium">Gated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.service} className="border-t border-neutral-100 dark:border-neutral-800">
+                <td className="py-1.5 text-neutral-700 dark:text-neutral-300">{r.service}</td>
+                <td className="py-1.5 text-right tabular-nums text-neutral-700 dark:text-neutral-300">{r.executed.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums text-neutral-500 dark:text-neutral-400">{r.highRisk.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums text-neutral-500 dark:text-neutral-400">
+                  {r.highRisk > 0 ? formatPercent(r.highRiskGated / r.highRisk) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function SessionSourcesTable({ rows }: { rows: ValueMetricsWindow['sessionSources'] }) {
+  const total = rows.reduce((sum, r) => sum + r.sessions, 0);
+  return (
+    <div className="rounded-lg border border-neutral-200/80 bg-white p-5 dark:border-neutral-800 dark:bg-surface-1">
+      <h3 className="label-mono mb-3 text-neutral-400">Session Sources</h3>
+      {rows.length === 0 ? (
+        <p className="text-sm text-neutral-400">No sessions ended in this window</p>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left font-mono text-[10px] uppercase tracking-wide text-neutral-400">
+              <th className="pb-2 font-medium">Started from</th>
+              <th className="pb-2 text-right font-medium">Sessions</th>
+              <th className="pb-2 text-right font-medium">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.sourceType} className="border-t border-neutral-100 dark:border-neutral-800">
+                <td className="py-1.5 text-neutral-700 dark:text-neutral-300">{SOURCE_LABELS[r.sourceType] ?? r.sourceType}</td>
+                <td className="py-1.5 text-right tabular-nums text-neutral-700 dark:text-neutral-300">{r.sessions.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums text-neutral-500 dark:text-neutral-400">
+                  {total > 0 ? formatPercent(r.sessions / total) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
@@ -180,6 +278,22 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         delta={pctDelta(current.nonFrontierTokenShare, previous.nonFrontierTokenShare)}
         tooltip={`Shows whether routine work is handled by cheaper models before expensive systems are used. Share of billable tokens on efficient/standard-tier models vs frontier; ${formatPercent(current.frontierFreeSessionShare)} of ${current.sessionsWithModelUsage} sessions never touched a frontier model. Tiers are classified by model name (haiku/mini/flash → efficient; sonnet/gpt-4 → standard; opus/fable/gpt-5 → frontier); unclassified models are excluded from the share (${formatTokenCount(current.unknownTokens)} tokens unclassified this window).`}
         index={5}
+      />
+      <HeroMetricCard
+        icon={<BoltIcon />}
+        label="External Actions"
+        value={current.totalSideEffects.toLocaleString()}
+        delta={pctDelta(current.totalSideEffects, previous.totalSideEffects)}
+        tooltip={`Side effects: actions Valet executed in external systems this window (emails sent, messages posted, PRs opened, issues created, ...). ${current.highRiskSideEffects} were high-risk. Source: executed action invocations; test-mode workflow runs excluded. Breakdown by service below.`}
+        index={6}
+      />
+      <HeroMetricCard
+        icon={<ShieldIcon />}
+        label="High-Risk Gate Coverage"
+        value={formatPercent(current.highRiskGateCoverage)}
+        delta={pctDelta(current.highRiskGateCoverage, previous.highRiskGateCoverage)}
+        tooltip={`Governance: of the ${current.highRiskSideEffects} high-risk external actions executed, how many passed through an explicit human decision before running. The remainder ran under policy auto-allow ("Always Allow" grants or low-friction policies on high-risk actions).`}
+        index={7}
       />
     </div>
   );
