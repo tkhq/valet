@@ -1,4 +1,5 @@
 import type { Env } from '../env.js';
+import type { PRState } from '@valet/shared';
 import * as db from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
 import { checkWorkflowConcurrency } from './executions.js';
@@ -426,7 +427,7 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
 
   if (targets.length === 0) return;
 
-  let prState: string;
+  let prState: PRState;
   if (pr.merged_at || action === 'closed' && pr.merged) {
     prState = 'merged';
   } else if (action === 'closed') {
@@ -434,12 +435,13 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
   } else if (action === 'reopened' || action === 'opened') {
     prState = pr.draft ? 'draft' : 'open';
   } else {
-    prState = pr.draft ? 'draft' : (pr.state === 'open' ? 'open' : pr.state);
+    // GitHub pull_request.state is only ever 'open' | 'closed'.
+    prState = pr.draft ? 'draft' : (pr.state === 'open' ? 'open' : 'closed');
   }
 
   for (const { sessionId, authored } of targets) {
     await db.updateSessionGitState(appDb, sessionId, {
-      prState: prState as any,
+      prState,
       prTitle: pr.title,
       prUrl: pr.html_url,
       prMergedAt: pr.merged_at || undefined,

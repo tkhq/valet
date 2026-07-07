@@ -385,8 +385,8 @@ export async function updateSessionStatus(
   // errorMessage semantics: undefined preserves the stored value, null (or
   // empty string) clears it, a string sets it. Terminal transitions must not
   // implicitly wipe the error — a session terminated after a failure stays
-  // classified as errored; recovery paths that reach a healthy state pass
-  // null to clear the stale message.
+  // classified as errored; recovery/restart paths pass null to clear the
+  // stale message.
   await db
     .update(sessions)
     .set({

@@ -1,13 +1,14 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import type BetterSqlite3 from 'better-sqlite3';
-import { createTestDb } from '../../test-utils/db.js';
+import type { D1Database } from '@cloudflare/workers-types';
+import { createTestDb, createD1TestShim } from '../../test-utils/db.js';
+import { getUsageByModel } from './analytics.js';
 import {
   getWorkflowResolutionStats,
   getSessionResolutionStats,
   getEscalationStats,
   getApprovalDecisionStats,
   getAgentPrStats,
-  getModelUsageRows,
   getSessionModelPairs,
   getSandboxSecondsInWindow,
   getSideEffectStats,
@@ -19,25 +20,6 @@ import {
 // datetime('now') strings) to lock in the datetime() normalisation.
 const START = '2026-07-01T00:00:00.000Z';
 const END = '2026-07-08T00:00:00.000Z';
-
-function d1(sqlite: BetterSqlite3.Database) {
-  return {
-    prepare(sql: string) {
-      return {
-        bind(...args: unknown[]) {
-          return {
-            async first() {
-              return sqlite.prepare(sql).get(...args) ?? null;
-            },
-            async all() {
-              return { results: sqlite.prepare(sql).all(...args) };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as import('@cloudflare/workers-types').D1Database;
-}
 
 function exec(sqlite: BetterSqlite3.Database, sql: string, ...args: unknown[]) {
   sqlite.prepare(sql).run(...args);
@@ -73,11 +55,11 @@ function seedSession(
 
 describe('value-metrics db helpers', () => {
   let sqlite: BetterSqlite3.Database;
-  let db: import('@cloudflare/workers-types').D1Database;
+  let db: D1Database;
 
   beforeEach(() => {
     ({ sqlite } = createTestDb());
-    db = d1(sqlite);
+    db = createD1TestShim(sqlite);
     exec(sqlite, `INSERT INTO users (id, email) VALUES ('u1', 'u1@example.com')`);
   });
 
@@ -228,17 +210,17 @@ describe('value-metrics db helpers', () => {
     beforeEach(() => {
       seedSession(sqlite, { id: 's1', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
       seedSession(sqlite, { id: 's2', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
-      const insert = `INSERT INTO analytics_events (id, event_type, session_id, model, input_tokens, output_tokens, cache_read_tokens, created_at) VALUES (?, 'llm_response', ?, ?, ?, ?, ?, ?)`;
-      exec(sqlite, insert, 'e1', 's1', 'anthropic/claude-opus-4', 1000, 500, null, '2026-07-02T00:00:00.000Z');
-      exec(sqlite, insert, 'e2', 's1', 'anthropic/claude-haiku-4-5', 2000, 1000, 1000, '2026-07-02T01:00:00.000Z');
-      exec(sqlite, insert, 'e3', 's2', 'anthropic/claude-haiku-4-5', 500, 500, null, '2026-07-02T02:00:00.000Z');
-      exec(sqlite, insert, 'e4', 's1', 'anthropic/claude-opus-4', 9999, 9999, null, '2026-06-01T00:00:00.000Z'); // out of window
-      exec(sqlite, insert, 'e5', 's1', null, 100, 100, null, '2026-07-02T03:00:00.000Z'); // no model
-      exec(sqlite, insert, 'e6', 's2', 'anthropic/claude-opus-4', null, null, null, '2026-07-02T04:00:00.000Z'); // zero tokens
+      const insert = `INSERT INTO analytics_events (id, event_type, session_id, model, input_tokens, output_tokens, cache_read_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+      exec(sqlite, insert, 'e1', 'llm_call', 's1', 'anthropic/claude-opus-4', 1000, 500, null, '2026-07-02T00:00:00.000Z');
+      exec(sqlite, insert, 'e2', 'llm_call', 's1', 'anthropic/claude-haiku-4-5', 2000, 1000, 1000, '2026-07-02T01:00:00.000Z');
+      exec(sqlite, insert, 'e3', 'llm_call', 's2', 'anthropic/claude-haiku-4-5', 500, 500, null, '2026-07-02T02:00:00.000Z');
+      exec(sqlite, insert, 'e4', 'llm_call', 's1', 'anthropic/claude-opus-4', 9999, 9999, null, '2026-06-01T00:00:00.000Z'); // out of window
+      exec(sqlite, insert, 'e5', 'turn_complete', 's1', null, 100, 100, null, '2026-07-02T03:00:00.000Z'); // not an llm_call, no model
+      exec(sqlite, insert, 'e6', 'llm_call', 's2', 'anthropic/claude-opus-4', null, null, null, '2026-07-02T04:00:00.000Z'); // zero tokens
     });
 
     it('aggregates billable tokens per model within the window', async () => {
-      const rows = await getModelUsageRows(db, START, END);
+      const rows = await getUsageByModel(db, START, END);
       const byModel = new Map(rows.map((r) => [r.model, r]));
       // Billable input includes cache reads: 2000 + 1000 + 500.
       expect(byModel.get('anthropic/claude-haiku-4-5')).toMatchObject({ inputTokens: 3500, outputTokens: 1500 });

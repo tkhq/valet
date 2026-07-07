@@ -3189,7 +3189,6 @@ export class SessionAgentDO {
             if (this.sessionState.status === 'waiting_runner') {
               this.sessionState.status = 'running';
               const sid = this.sessionState.sessionId;
-              // null clears any stale error now that the session is healthy again
               updateSessionStatus(this.appDb, sid, 'running', this.sessionState.sandboxId, null).catch((e) =>
                 console.error('[SessionAgentDO] Failed to sync running status to D1:', e),
               );
@@ -4487,7 +4486,6 @@ export class SessionAgentDO {
       this.sessionState.status = 'running';
       this.sessionState.sandboxStartedAt = Date.now();
       this.lifecycle.markRunningStarted();
-      // null clears any stale error now that the session is healthy again
       updateSessionStatus(this.appDb, body.sessionId, 'running', body.sandboxId, null).catch((err) =>
         console.error('[SessionAgentDO] Failed to sync status to D1:', err),
       );
@@ -5885,7 +5883,6 @@ export class SessionAgentDO {
       data: { status: 'initializing' },
     });
     if (sessionId) {
-      // null clears the previous error — this is the recovery restart path
       updateSessionStatus(this.appDb, sessionId, 'initializing', undefined, null).catch((e) =>
         console.error('[SessionAgentDO] Failed to sync initializing status to D1:', e),
       );

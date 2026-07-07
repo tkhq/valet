@@ -10,6 +10,7 @@ import {
   getSlowPaths,
   getThroughputStats,
   getEventFeed,
+  getUsageByModel,
 } from '../lib/db/analytics.js';
 import {
   getWorkflowResolutionStats,
@@ -17,7 +18,6 @@ import {
   getEscalationStats,
   getApprovalDecisionStats,
   getAgentPrStats,
-  getModelUsageRows,
   getSessionModelPairs,
   getSandboxSecondsInWindow,
   getSideEffectStats,
@@ -126,10 +126,6 @@ analyticsRouter.get('/events', async (c) => {
   return c.json(response);
 });
 
-/**
- * Compute one window of value metrics. All queries are windowed [start, end)
- * so the same function serves the current window and the prior one (deltas).
- */
 async function computeValueWindow(
   db: D1Database,
   pricingMap: Map<string, ModelPricing>,
@@ -142,7 +138,7 @@ async function computeValueWindow(
     getEscalationStats(db, startIso, endIso),
     getApprovalDecisionStats(db, startIso, endIso),
     getAgentPrStats(db, startIso, endIso),
-    getModelUsageRows(db, startIso, endIso),
+    getUsageByModel(db, startIso, endIso),
     getSessionModelPairs(db, startIso, endIso),
     getSandboxSecondsInWindow(db, startIso, endIso),
     getSideEffectStats(db, startIso, endIso),
@@ -160,8 +156,6 @@ async function computeValueWindow(
     if (cost !== null) llmCost = (llmCost ?? 0) + cost;
     const tokens = row.inputTokens + row.outputTokens;
     const tier = classifyModelTier(row.model);
-    // Unclassifiable models are excluded from the share rather than lumped
-    // into "non-frontier" — otherwise new model names silently inflate it.
     if (tier === 'frontier') frontierTokens += tokens;
     else if (tier === 'unknown') unknownTokens += tokens;
     else nonFrontierTokens += tokens;
@@ -191,8 +185,6 @@ async function computeValueWindow(
 
   return {
     totalCost,
-    llmCost,
-    sandboxCost,
     resolvedWorkflowRuns: workflows.completed,
     resolvedSessions: sessions.resolved,
     resolvedTasks,
@@ -203,7 +195,6 @@ async function computeValueWindow(
     acceptedOutputRate: safeRate(approvals.accepted, decisions),
     reworkSessions: sessions.reworkSessions,
     escalationMessages: escalations.escalationMessages,
-    erroredSessions: sessions.errored,
     endedSessions: sessions.ended,
     failedWorkflowRuns: workflows.failed,
     terminalWorkflowRuns: workflows.terminal,
@@ -216,8 +207,6 @@ async function computeValueWindow(
     prsStillOpen: prs.stillOpen,
     prMergeRate: safeRate(prs.merged, prs.merged + prs.closedUnmerged),
     medianHoursToMerge: prs.medianHoursToMerge,
-    frontierTokens,
-    nonFrontierTokens,
     unknownTokens,
     nonFrontierTokenShare: safeRate(nonFrontierTokens, frontierTokens + nonFrontierTokens),
     sessionsWithModelUsage: sessionsWithModels.size,

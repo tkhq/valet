@@ -1,29 +1,11 @@
 import { HeroMetricCard } from '@/components/dashboard/hero-metric-card';
 import { useAnalyticsValue } from '@/api/analytics';
+import { formatCost, formatTokenCount } from '@/lib/format';
 import type { ValueMetricsWindow } from '@valet/shared';
-
-// The "Value metrics" panel: outcome metrics alongside the activity view.
-// v1 renders the metrics computable from existing signals; every headline is
-// a labeled proxy (see each card's tooltip), and the footer states the data
-// sources and windowing so nobody has to guess where a number came from.
-
-function formatCost(cost: number | null): string {
-  if (cost === null) return 'N/A';
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  if (cost < 1) return `$${cost.toFixed(3)}`;
-  return `$${cost.toFixed(2)}`;
-}
 
 function formatPercent(rate: number | null): string {
   if (rate === null) return 'N/A';
   return `${Math.round(rate * 1000) / 10}%`;
-}
-
-function formatTokenCount(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
 }
 
 function formatMinutes(minutes: number | null): string {
@@ -159,68 +141,83 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 function SideEffectsTable({ rows }: { rows: ValueMetricsWindow['sideEffects'] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none">
+        <h3 className="label-mono text-neutral-400 mb-4">Side Effects by Service</h3>
+        <p className="text-sm text-neutral-300">No external actions executed in this window</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-lg border border-neutral-200/80 bg-white p-5 dark:border-neutral-800 dark:bg-surface-1">
-      <h3 className="label-mono mb-3 text-neutral-400">Side Effects by Service</h3>
-      {rows.length === 0 ? (
-        <p className="text-sm text-neutral-400">No external actions executed in this window</p>
-      ) : (
+    <div className="animate-stagger-in rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none" style={{ animationDelay: '300ms' }}>
+      <h3 className="label-mono text-neutral-400 mb-4">Side Effects by Service</h3>
+      <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left font-mono text-[10px] uppercase tracking-wide text-neutral-400">
-              <th className="pb-2 font-medium">Service</th>
-              <th className="pb-2 text-right font-medium">Executed</th>
-              <th className="pb-2 text-right font-medium">High-risk</th>
-              <th className="pb-2 text-right font-medium">Gated</th>
+            <tr className="border-b border-neutral-100 dark:border-neutral-800">
+              <th className="pb-2 pr-4 text-left font-mono text-2xs font-medium text-neutral-400">Service</th>
+              <th className="pb-2 px-4 text-right font-mono text-2xs font-medium text-neutral-400">Executed</th>
+              <th className="pb-2 px-4 text-right font-mono text-2xs font-medium text-neutral-400">High-risk</th>
+              <th className="pb-2 pl-4 text-right font-mono text-2xs font-medium text-neutral-400">Gated</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.service} className="border-t border-neutral-100 dark:border-neutral-800">
-                <td className="py-1.5 text-neutral-700 dark:text-neutral-300">{r.service}</td>
-                <td className="py-1.5 text-right tabular-nums text-neutral-700 dark:text-neutral-300">{r.executed.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums text-neutral-500 dark:text-neutral-400">{r.highRisk.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums text-neutral-500 dark:text-neutral-400">
+              <tr key={r.service} className="border-b border-neutral-50 last:border-0 dark:border-neutral-800/50">
+                <td className="py-2.5 pr-4 font-medium text-neutral-900 dark:text-neutral-100">{r.service}</td>
+                <td className="py-2.5 px-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">{r.executed.toLocaleString()}</td>
+                <td className="py-2.5 px-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">{r.highRisk.toLocaleString()}</td>
+                <td className="py-2.5 pl-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">
                   {r.highRisk > 0 ? formatPercent(r.highRiskGated / r.highRisk) : '—'}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-      )}
+      </div>
     </div>
   );
 }
 
 function SessionSourcesTable({ rows }: { rows: ValueMetricsWindow['sessionSources'] }) {
   const total = rows.reduce((sum, r) => sum + r.sessions, 0);
+
+  if (rows.length === 0) {
+    return (
+      <div className="rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none">
+        <h3 className="label-mono text-neutral-400 mb-4">Session Sources</h3>
+        <p className="text-sm text-neutral-300">No sessions ended in this window</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-lg border border-neutral-200/80 bg-white p-5 dark:border-neutral-800 dark:bg-surface-1">
-      <h3 className="label-mono mb-3 text-neutral-400">Session Sources</h3>
-      {rows.length === 0 ? (
-        <p className="text-sm text-neutral-400">No sessions ended in this window</p>
-      ) : (
+    <div className="animate-stagger-in rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none" style={{ animationDelay: '350ms' }}>
+      <h3 className="label-mono text-neutral-400 mb-4">Session Sources</h3>
+      <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left font-mono text-[10px] uppercase tracking-wide text-neutral-400">
-              <th className="pb-2 font-medium">Started from</th>
-              <th className="pb-2 text-right font-medium">Sessions</th>
-              <th className="pb-2 text-right font-medium">Share</th>
+            <tr className="border-b border-neutral-100 dark:border-neutral-800">
+              <th className="pb-2 pr-4 text-left font-mono text-2xs font-medium text-neutral-400">Started from</th>
+              <th className="pb-2 px-4 text-right font-mono text-2xs font-medium text-neutral-400">Sessions</th>
+              <th className="pb-2 pl-4 text-right font-mono text-2xs font-medium text-neutral-400">Share</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.sourceType} className="border-t border-neutral-100 dark:border-neutral-800">
-                <td className="py-1.5 text-neutral-700 dark:text-neutral-300">{SOURCE_LABELS[r.sourceType] ?? r.sourceType}</td>
-                <td className="py-1.5 text-right tabular-nums text-neutral-700 dark:text-neutral-300">{r.sessions.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums text-neutral-500 dark:text-neutral-400">
+              <tr key={r.sourceType} className="border-b border-neutral-50 last:border-0 dark:border-neutral-800/50">
+                <td className="py-2.5 pr-4 font-medium text-neutral-900 dark:text-neutral-100">{SOURCE_LABELS[r.sourceType] ?? r.sourceType}</td>
+                <td className="py-2.5 px-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">{r.sessions.toLocaleString()}</td>
+                <td className="py-2.5 pl-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">
                   {total > 0 ? formatPercent(r.sessions / total) : '—'}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-      )}
+      </div>
     </div>
   );
 }

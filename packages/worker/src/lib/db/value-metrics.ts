@@ -12,6 +12,10 @@ import { SQL_BILLABLE_INPUT_EXPR, SQL_BILLABLE_OUTPUT_EXPR } from './analytics.j
 // exception: it is written exclusively as ISO by the DO flush, and its
 // indexes cover the raw column).
 
+// valueSql must select the same rows as countSql, ordered ascending, and end
+// with `LIMIT 1 OFFSET ?` — the computed offset is bound after `binds`. A
+// population mismatch fails silently with a wrong median. Even-sized sets
+// take the lower-middle value (no interpolation).
 async function medianVia(
   db: D1Database,
   countSql: string,
@@ -362,40 +366,10 @@ export async function getAgentPrStats(
   };
 }
 
-// ─── Model usage (routing efficiency + LLM cost) ────────────────────────────
-
-export interface ModelUsageRow {
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-}
-
-export async function getModelUsageRows(
-  db: D1Database,
-  startIso: string,
-  endIso: string,
-): Promise<ModelUsageRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT
-        model,
-        SUM(${SQL_BILLABLE_INPUT_EXPR}) AS input_tokens,
-        SUM(${SQL_BILLABLE_OUTPUT_EXPR}) AS output_tokens
-      FROM analytics_events
-      WHERE model IS NOT NULL
-        AND created_at >= ? AND created_at < ?
-      GROUP BY model
-      HAVING input_tokens + output_tokens > 0
-    `)
-    .bind(startIso, endIso)
-    .all<{ model: string; input_tokens: number; output_tokens: number }>();
-
-  return (result.results ?? []).map((r) => ({
-    model: r.model,
-    inputTokens: r.input_tokens,
-    outputTokens: r.output_tokens,
-  }));
-}
+// ─── Model usage (routing efficiency) ───────────────────────────────────────
+// Per-model token totals come from getUsageByModel (lib/db/analytics.ts) with
+// the optional periodEnd bound, so the Value tab prices tokens identically to
+// the billing tab.
 
 export interface SessionModelPair {
   sessionId: string;

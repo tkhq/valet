@@ -377,6 +377,9 @@ export interface UsageByModelRow {
 export async function getUsageByModel(
   db: D1Database,
   periodStart: string,
+  // Optional exclusive upper bound so windowed consumers (Value tab deltas)
+  // can query [start, end); omitted = "since periodStart" (usage stats).
+  periodEnd?: string,
 ): Promise<UsageByModelRow[]> {
   const result = await db
     .prepare(`
@@ -388,10 +391,11 @@ export async function getUsageByModel(
       FROM analytics_events
       WHERE event_type = 'llm_call'
         AND created_at >= ?
+        ${periodEnd ? 'AND created_at < ?' : ''}
       GROUP BY model
       ORDER BY (SUM(${SQL_BILLABLE_INPUT_EXPR}) + SUM(${SQL_BILLABLE_OUTPUT_EXPR})) DESC
     `)
-    .bind(periodStart)
+    .bind(...(periodEnd ? [periodStart, periodEnd] : [periodStart]))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({

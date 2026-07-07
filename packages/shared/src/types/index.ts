@@ -1285,8 +1285,6 @@ export interface AnalyticsEventsResponse {
 export interface ValueMetricsWindow {
   // Cost per resolved task
   totalCost: number | null;
-  llmCost: number | null;
-  sandboxCost: number;
   resolvedWorkflowRuns: number;
   resolvedSessions: number;
   resolvedTasks: number;
@@ -1299,7 +1297,6 @@ export interface ValueMetricsWindow {
   // Rework & escalation
   reworkSessions: number;
   escalationMessages: number;
-  erroredSessions: number;
   endedSessions: number;
   failedWorkflowRuns: number;
   terminalWorkflowRuns: number;
@@ -1316,8 +1313,6 @@ export interface ValueMetricsWindow {
   medianHoursToMerge: number | null;
   // Model-routing efficiency. Unknown-tier tokens are excluded from the
   // share so unclassified model names cannot inflate it.
-  frontierTokens: number;
-  nonFrontierTokens: number;
   unknownTokens: number;
   nonFrontierTokenShare: number | null;
   sessionsWithModelUsage: number;
