@@ -187,7 +187,65 @@ Use the operation names returned by `workflows.schema`. Common string operations
 
 Foreach `body` may be `llm`, `tool`, `set`, `stop`, `orchestrator`, or `session`. Nested `if`, `wait`, `approval`, `trigger`, and `foreach` nodes are not supported inside a foreach body.
 
-Foreach `items` must be a single template that resolves to a typed array output. For session and orchestrator nodes, structured fields declared by `outputSchema` are nested under `data.output`, so an array field named `companies` is referenced as `{{nodes.scrape_yc.data.output.companies}}`, not `{{nodes.scrape_yc.data.companies}}`.
+Foreach `items` must be a single template that resolves to a *typed* array — the validator has to be able to prove the referenced path is an array. Where the typing comes from depends on the source node:
+
+- **Trigger source** — `{{trigger.data.<field>}}`. Declare `<field>` in `trigger.dataSchema` with `type: 'array'`.
+  ```json
+  { "id": "trigger", "type": "trigger", "dataSchema": { "items": { "type": "array" } } }
+  ```
+- **LLM source** — `{{nodes.<id>.data.<field>}}`. Declare `<field>` as an array in the llm node's `outputSchema` (the schema lives directly on `data`, not under `data.output`).
+  ```json
+  { "id": "classify", "type": "llm", "prompt": "...", "outputSchema": { "type": "object", "properties": { "items": { "type": "array" } } } }
+  ```
+- **Tool source** — `{{nodes.<id>.data.<field>}}`. Whether foreach can iterate depends on the tool action's registered output schema. If the action declares `<field>` as an array, this works; if the action has no registered schema at all, foreach validation for this node is skipped (the runtime still has to hand back an array).
+- **Session / orchestrator source** — `{{nodes.<id>.data.output.<field>}}`. Note the `.output.` prefix — session and orchestrator structured outputs are nested there so lifecycle fields (`sessionId`, `threadId`, `finalStatus`, `response`, etc.) can't be overwritten by agent output. Declare `<field>` as an array in `outputSchema` *and* set `wait.mode: 'until_idle'`. If you set `resultMode: 'transcript'`, `{{nodes.<id>.data.transcript}}` is also a valid foreach source.
+- **Nested foreach** — `{{nodes.<id>.data.items}}` chains one foreach off another's item stream.
+
+Concrete LLM → foreach fan-out (asking an LLM to produce a list and then processing each item):
+
+```json
+{
+  "version": "dag/v1",
+  "nodes": [
+    { "id": "trigger", "type": "trigger" },
+    {
+      "id": "classify",
+      "type": "llm",
+      "prompt": "Return JSON with an items array of {label, priority} objects for: {{trigger.data.text}}",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": { "type": "string" },
+                "priority": { "type": "string" }
+              },
+              "required": ["label", "priority"]
+            }
+          }
+        },
+        "required": ["items"]
+      }
+    },
+    {
+      "id": "process",
+      "type": "foreach",
+      "items": "{{nodes.classify.data.items}}",
+      "itemAlias": "item",
+      "body": { "id": "shape", "type": "set", "values": { "label": "{{item.label}}" } }
+    },
+    { "id": "done", "type": "stop", "outcome": "success" }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "classify" },
+    { "from": "classify", "to": "process" },
+    { "from": "process", "to": "done" }
+  ]
+}
+```
 
 `maxItems` is an optional truncation limit. If omitted, the foreach node processes up to 100 items by default. If the input array has more items than `maxItems`, the foreach node processes the first `maxItems` items and returns `inputCount` plus `truncatedCount` in its output envelope. It does not fail just because more items were available. Explicit `maxItems` may be set up to the default workflow policy ceiling of 5000 iterations.
 
