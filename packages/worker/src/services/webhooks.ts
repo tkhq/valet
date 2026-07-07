@@ -400,9 +400,31 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
   if (!repoFullName || !prNumber) return;
 
   const appDb = getDb(env.DB);
-  const rows = await db.findSessionsByPR(appDb, repoFullName, prNumber);
+  const prMatches = await db.findSessionsByPR(appDb, repoFullName, prNumber);
 
-  if (!rows.results || rows.results.length === 0) return;
+  // Sessions matched by pr_number authored this PR; matches via
+  // source_pr_number were merely spawned FROM it and must never have the
+  // payload's number stamped as their own output.
+  const targets: Array<{ sessionId: string; authored: boolean }> = (prMatches.results ?? []).map((r) => ({
+    sessionId: r.session_id,
+    authored: r.pr_number === prNumber,
+  }));
+
+  // A session that just opened this PR from its sandbox is not linked yet
+  // (nothing stamps pr_number at creation time) — link it via its head
+  // branch. Skip rows already tied to a different PR.
+  const headBranch: string | undefined = pr.head?.ref;
+  if (headBranch) {
+    const seen = new Set(targets.map((t) => t.sessionId));
+    const branchMatches = await db.findSessionsByRepoBranch(appDb, repoFullName, headBranch);
+    for (const bm of branchMatches.results ?? []) {
+      if (!seen.has(bm.session_id) && bm.pr_number == null) {
+        targets.push({ sessionId: bm.session_id, authored: true });
+      }
+    }
+  }
+
+  if (targets.length === 0) return;
 
   let prState: string;
   if (pr.merged_at || action === 'closed' && pr.merged) {
@@ -415,14 +437,18 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
     prState = pr.draft ? 'draft' : (pr.state === 'open' ? 'open' : pr.state);
   }
 
-  for (const row of rows.results) {
-    const sessionId = row.session_id;
-
+  for (const { sessionId, authored } of targets) {
     await db.updateSessionGitState(appDb, sessionId, {
       prState: prState as any,
       prTitle: pr.title,
       prUrl: pr.html_url,
       prMergedAt: pr.merged_at || undefined,
+      ...(authored
+        ? {
+            prNumber,
+            ...(pr.created_at ? { prCreatedAt: pr.created_at } : {}),
+          }
+        : {}),
     });
 
     try {

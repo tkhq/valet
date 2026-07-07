@@ -36,10 +36,15 @@ export interface WorkflowResolutionStats {
   medianCompletedMinutes: number | null;
 }
 
+// Runs are windowed by when they REACHED a terminal state, not when they
+// started — otherwise the current window is systematically incomplete
+// (recent runs still executing) and the prior window's numbers drift as its
+// stragglers finish.
 const WORKFLOW_WINDOW_WHERE = `
   mode = 'production'
   AND status IN ('completed', 'failed', 'cancelled')
-  AND datetime(started_at) >= datetime(?) AND datetime(started_at) < datetime(?)`;
+  AND datetime(COALESCE(completed_at, cancelled_at, started_at)) >= datetime(?)
+  AND datetime(COALESCE(completed_at, cancelled_at, started_at)) < datetime(?)`;
 
 export async function getWorkflowResolutionStats(
   db: D1Database,
@@ -90,17 +95,20 @@ export interface SessionResolutionStats {
   medianResolvedMinutes: number | null;
 }
 
-// "Ended" is proxied by last_active_at for sessions in a terminal status —
-// sessions carry no explicit closed_at. Orchestrators are long-lived
-// coordinators, and purpose='workflow' sessions are already counted through
+// "Ended" is proxied by last_active_at for sessions in a settled status —
+// sessions carry no explicit closed_at. 'hibernated' counts as ended because
+// it is the organic end state: idle sessions hibernate and most are never
+// explicitly terminated or archived (those transitions are mostly manual
+// cleanup). Orchestrators are long-lived coordinators, and
+// purpose='workflow' sessions are already counted through
 // workflow_executions, so both are excluded to avoid double counting.
 const SESSION_WINDOW_WHERE = `
   is_orchestrator = 0
   AND purpose = 'interactive'
-  AND status IN ('archived', 'terminated', 'error')
+  AND status IN ('hibernated', 'archived', 'terminated', 'error')
   AND datetime(last_active_at) >= datetime(?) AND datetime(last_active_at) < datetime(?)`;
 
-const SESSION_RESOLVED_COND = `status IN ('archived', 'terminated') AND error_message IS NULL`;
+const SESSION_RESOLVED_COND = `status IN ('hibernated', 'archived', 'terminated') AND error_message IS NULL`;
 
 export async function getSessionResolutionStats(
   db: D1Database,
@@ -190,17 +198,25 @@ export async function getApprovalDecisionStats(
   startIso: string,
   endIso: string,
 ): Promise<ApprovalDecisionStats> {
-  // 'executed' and 'failed' both pass through an approval, so they count as
-  // accepted — the user's decision is the signal, not whether the action
-  // later succeeded.
+  // Only rows a human actually resolved count as decisions: policy
+  // auto-allows are inserted directly as status='executed' and auto-denies
+  // as 'denied' with no resolver, and workflow cancel-cleanup flips pending
+  // gates to 'failed' — none of those carry resolved_by. Within resolved
+  // rows, 'executed' and 'failed' both passed through an approval, so they
+  // count as accepted — the user's decision is the signal, not whether the
+  // action later succeeded. Expired rows never have a resolver and stay
+  // unfiltered. Gates spawned by mode='test' workflow runs are excluded to
+  // match the workflow stats.
   const row = await db
     .prepare(`
       SELECT
-        COALESCE(SUM(CASE WHEN status IN ('approved', 'executed', 'failed') THEN 1 ELSE 0 END), 0) AS accepted,
-        COALESCE(SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END), 0) AS denied,
-        COALESCE(SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END), 0) AS expired
-      FROM action_invocations
-      WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
+        COALESCE(SUM(CASE WHEN ai.resolved_by IS NOT NULL AND ai.status IN ('approved', 'executed', 'failed') THEN 1 ELSE 0 END), 0) AS accepted,
+        COALESCE(SUM(CASE WHEN ai.resolved_by IS NOT NULL AND ai.status = 'denied' THEN 1 ELSE 0 END), 0) AS denied,
+        COALESCE(SUM(CASE WHEN ai.status = 'expired' THEN 1 ELSE 0 END), 0) AS expired
+      FROM action_invocations ai
+      LEFT JOIN workflow_executions we ON ai.workflow_execution_id = we.id
+      WHERE (we.id IS NULL OR we.mode != 'test')
+        AND datetime(ai.created_at) >= datetime(?) AND datetime(ai.created_at) < datetime(?)
     `)
     .bind(startIso, endIso)
     .first<{ accepted: number; denied: number; expired: number }>();
@@ -327,20 +343,36 @@ export async function getSessionModelPairs(
 
 // ─── Sandbox seconds (for total cost) ───────────────────────────────────────
 
-// Same attribution convention as getSandboxHeroStats: a session's cumulative
-// active_seconds are attributed to its creation window.
+// Sessions only store CUMULATIVE lifetime active_seconds, so attributing the
+// whole figure to the creation window (the billing-tab convention) both
+// leaks spend across window boundaries and drops long-lived sessions
+// entirely from recent windows. Instead, prorate each session's seconds by
+// how much of its [created_at, last_active_at] life overlaps the window.
+// Approximate — the real fix is flushing active-seconds deltas as analytics
+// events — but stable across window boundaries in both directions.
 export async function getSandboxSecondsInWindow(
   db: D1Database,
   startIso: string,
   endIso: string,
 ): Promise<number> {
+  // 1/86400 julian days = 1 second: floors zero-length lifespans so an
+  // in-window instant session still attributes fully (eps/eps = 1).
+  // Anonymous placeholders in appearance order: end, start, start, end.
   const row = await db
     .prepare(`
-      SELECT COALESCE(SUM(active_seconds), 0) AS s
+      SELECT COALESCE(SUM(
+        active_seconds * (
+          MAX(0.0,
+            MIN(julianday(?), MAX(julianday(last_active_at), julianday(created_at) + 1.0/86400.0))
+            - MAX(julianday(?), julianday(created_at))
+          )
+          / MAX(MAX(julianday(last_active_at), julianday(created_at) + 1.0/86400.0) - julianday(created_at), 1.0/86400.0)
+        )
+      ), 0) AS s
       FROM sessions
-      WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
+      WHERE datetime(last_active_at) >= datetime(?) AND datetime(created_at) < datetime(?)
     `)
-    .bind(startIso, endIso)
+    .bind(endIso, startIso, startIso, endIso)
     .first<{ s: number }>();
 
   return row?.s ?? 0;

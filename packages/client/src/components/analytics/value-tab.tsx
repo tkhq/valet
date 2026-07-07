@@ -20,6 +20,13 @@ function formatPercent(rate: number | null): string {
   return `${Math.round(rate * 1000) / 10}%`;
 }
 
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
 function formatMinutes(minutes: number | null): string {
   if (minutes === null) return 'N/A';
   if (minutes < 1) return '<1m';
@@ -162,7 +169,7 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         value={formatCost(current.costPerResolvedTask)}
         delta={pctDelta(current.costPerResolvedTask, previous.costPerResolvedTask)}
         deltaPolarity="lower-is-better"
-        tooltip={`Connects spend to completed work rather than autonomous loops. Total LLM + sandbox cost (${formatCost(current.totalCost)}) ÷ resolved tasks (${current.resolvedTasks}: ${current.resolvedWorkflowRuns} completed workflow runs + ${current.resolvedSessions} cleanly closed sessions). Proxy: "resolved" = workflow run completed, or session ended without error — no explicit task-completion signal exists yet.`}
+        tooltip={`Connects spend to completed work rather than autonomous loops. Total LLM + sandbox cost (${formatCost(current.totalCost)}) ÷ resolved tasks (${current.resolvedTasks}: ${current.resolvedWorkflowRuns} completed workflow runs + ${current.resolvedSessions} sessions whose activity ended without error). Proxy: "resolved" = workflow completed, or session settled (hibernated/archived/terminated) error-free — no explicit task-completion signal exists yet. Sandbox spend is prorated across the windows a session's life overlaps.`}
         index={0}
       />
       <HeroMetricCard
@@ -170,7 +177,7 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         label="Accepted Output Rate"
         value={formatPercent(current.acceptedOutputRate)}
         delta={pctDelta(current.acceptedOutputRate, previous.acceptedOutputRate)}
-        tooltip={`Measures usable output, not activity. Share of explicit approval decisions the user accepted: ${current.approvalsAccepted} accepted vs ${current.approvalsDenied} denied (${current.approvalsExpired} expired, excluded). Proxy: counts action approvals + workflow gates only — Valet has no per-message feedback yet, so most assistant output carries no accept/reject signal.`}
+        tooltip={`Measures usable output, not activity. Share of approval prompts a human explicitly decided that were accepted: ${current.approvalsAccepted} accepted vs ${current.approvalsDenied} denied (${current.approvalsExpired} expired, excluded; policy auto-allows/auto-denies excluded — no human decision). Proxy: counts action approvals + workflow gates only — Valet has no per-message feedback yet, so most assistant output carries no accept/reject signal.`}
         index={1}
       />
       <HeroMetricCard
@@ -179,7 +186,7 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         value={formatPercent(current.reworkEscalationRate)}
         delta={pctDelta(current.reworkEscalationRate, previous.reworkEscalationRate)}
         deltaPolarity="lower-is-better"
-        tooltip={`Shows whether automation reduces labor or creates oversight work. ${current.reworkSessions} of ${current.endedSessions} ended sessions errored or escalated to a human (${current.escalationMessages} escalation messages in window). Workflows: ${current.failedWorkflowRuns} of ${current.terminalWorkflowRuns} runs failed. Proxy: same-intent re-prompting is not detected yet — this only counts errors and explicit escalations.`}
+        tooltip={`Shows whether automation reduces labor or creates oversight work. ${current.reworkSessions} of ${current.endedSessions} ended sessions errored or sent an explicit escalation message (${current.escalationMessages} escalation messages in window). Workflows: ${current.failedWorkflowRuns} of ${current.terminalWorkflowRuns} runs failed. Proxy: same-intent re-prompting and informal "get a human" requests are not detected yet.`}
         index={2}
       />
       <HeroMetricCard
@@ -188,7 +195,7 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         value={formatMinutes(current.medianSessionMinutes)}
         delta={pctDelta(current.medianSessionMinutes, previous.medianSessionMinutes)}
         deltaPolarity="lower-is-better"
-        tooltip={`Tests whether the tool accelerates completion. Median first-message-to-close for cleanly closed sessions; workflow runs: ${formatMinutes(current.medianWorkflowMinutes)} median. Proxy: absolute time-to-done, NOT cycle-time reduction — no pre-Valet baseline exists to compare against.`}
+        tooltip={`Tests whether the tool accelerates completion. Median active lifespan (creation to last activity) of sessions that ended without error; completed workflow runs: ${formatMinutes(current.medianWorkflowMinutes)} median. Proxy: absolute time-to-done, NOT cycle-time reduction — no pre-Valet baseline exists to compare against.`}
         index={3}
       />
       <HeroMetricCard
@@ -196,15 +203,15 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         label="Agent PR Merge Rate"
         value={formatPercent(current.prMergeRate)}
         delta={pctDelta(current.prMergeRate, previous.prMergeRate)}
-        tooltip={`Proxy for review burden: of agent-authored PRs that reached a decision, how many merged. ${current.prsMerged} merged vs ${current.prsClosedUnmerged} closed unmerged (${current.prsStillOpen} still open of ${current.prsOpened} opened; median ${current.medianHoursToMerge === null ? 'N/A' : `${Math.round(current.medianHoursToMerge)}h`} to merge). True review burden (review rounds, requested changes, line rewrites) needs GitHub PR-event ingestion, which does not exist yet.`}
+        tooltip={`Proxy for review burden: of agent-authored PRs that reached a decision, how many merged. ${current.prsMerged} merged vs ${current.prsClosedUnmerged} closed unmerged (${current.prsStillOpen} still open of ${current.prsOpened} opened; median ${current.medianHoursToMerge === null ? 'N/A' : `${Math.round(current.medianHoursToMerge)}h`} to merge). PR linkage collects forward from this panel's ship date — older PRs are not backfilled. True review burden (review rounds, requested changes) needs PR-review-event ingestion, which does not exist yet.`}
         index={4}
       />
       <HeroMetricCard
         icon={<RouteIcon />}
-        label="Efficient-Model Token Share"
+        label="Non-Frontier Token Share"
         value={formatPercent(current.nonFrontierTokenShare)}
         delta={pctDelta(current.nonFrontierTokenShare, previous.nonFrontierTokenShare)}
-        tooltip={`Shows whether routine work is handled by cheaper models before expensive systems are used. Share of billable tokens on non-frontier models; ${formatPercent(current.frontierFreeSessionShare)} of ${current.sessionsWithModelUsage} sessions never touched a frontier model. Tiers are classified by model name (haiku/mini/flash → efficient; opus/fable/gpt-5 → frontier).`}
+        tooltip={`Shows whether routine work is handled by cheaper models before expensive systems are used. Share of billable tokens on efficient/standard-tier models vs frontier; ${formatPercent(current.frontierFreeSessionShare)} of ${current.sessionsWithModelUsage} sessions never touched a frontier model. Tiers are classified by model name (haiku/mini/flash → efficient; sonnet/gpt-4 → standard; opus/fable/gpt-5 → frontier); unclassified models are excluded from the share (${formatTokenCount(current.unknownTokens)} tokens unclassified this window).`}
         index={5}
       />
     </div>

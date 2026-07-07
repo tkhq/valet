@@ -42,7 +42,7 @@ function UsagePage() {
             title="Analytics"
             description="Usage, performance, and event analytics across your organization"
           />
-          <PeriodSelector value={period} onChange={setPeriod} />
+          <PeriodSelector value={period} onChange={setPeriod} includeYear />
         </div>
 
         <div className="flex gap-1 border-b border-neutral-200 dark:border-neutral-800">

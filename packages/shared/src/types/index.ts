@@ -1314,9 +1314,11 @@ export interface ValueMetricsWindow {
   prsStillOpen: number;
   prMergeRate: number | null;
   medianHoursToMerge: number | null;
-  // Model-routing efficiency
+  // Model-routing efficiency. Unknown-tier tokens are excluded from the
+  // share so unclassified model names cannot inflate it.
   frontierTokens: number;
   nonFrontierTokens: number;
+  unknownTokens: number;
   nonFrontierTokenShare: number | null;
   sessionsWithModelUsage: number;
   frontierFreeSessionShare: number | null;

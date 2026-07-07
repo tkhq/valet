@@ -150,11 +150,16 @@ async function computeValueWindow(
   let llmCost: number | null = null;
   let frontierTokens = 0;
   let nonFrontierTokens = 0;
+  let unknownTokens = 0;
   for (const row of modelRows) {
     const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
     if (cost !== null) llmCost = (llmCost ?? 0) + cost;
     const tokens = row.inputTokens + row.outputTokens;
-    if (classifyModelTier(row.model) === 'frontier') frontierTokens += tokens;
+    const tier = classifyModelTier(row.model);
+    // Unclassifiable models are excluded from the share rather than lumped
+    // into "non-frontier" — otherwise new model names silently inflate it.
+    if (tier === 'frontier') frontierTokens += tokens;
+    else if (tier === 'unknown') unknownTokens += tokens;
     else nonFrontierTokens += tokens;
   }
 
@@ -200,6 +205,7 @@ async function computeValueWindow(
     medianHoursToMerge: prs.medianHoursToMerge,
     frontierTokens,
     nonFrontierTokens,
+    unknownTokens,
     nonFrontierTokenShare: safeRate(nonFrontierTokens, frontierTokens + nonFrontierTokens),
     sessionsWithModelUsage: sessionsWithModels.size,
     frontierFreeSessionShare: safeRate(sessionsWithModels.size - frontierSessions.size, sessionsWithModels.size),

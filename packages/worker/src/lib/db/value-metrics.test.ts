@@ -90,6 +90,8 @@ describe('value-metrics db helpers', () => {
       // Cleanly closed but escalated to a human mid-session: 60 minutes.
       seedSession(sqlite, { id: 's-escalated', status: 'archived', createdAt: '2026-07-04T09:00:00.000Z', lastActiveAt: '2026-07-04T10:00:00.000Z' });
       exec(sqlite, `INSERT INTO mailbox_messages (id, from_session_id, message_type, content, created_at) VALUES ('m1', 's-escalated', 'escalation', 'help', '2026-07-04T09:30:00.000Z')`);
+      // Hibernated is the organic end state — counts as ended+resolved: 45 minutes.
+      seedSession(sqlite, { id: 's-hib', status: 'hibernated', createdAt: '2026-07-05T09:00:00.000Z', lastActiveAt: '2026-07-05T09:45:00.000Z' });
       // Excluded: orchestrator, workflow-purpose, out-of-window, still active.
       seedSession(sqlite, { id: 's-orch', status: 'archived', createdAt: '2026-07-02T00:00:00.000Z', lastActiveAt: '2026-07-02T01:00:00.000Z', isOrchestrator: 1, purpose: 'orchestrator' });
       seedSession(sqlite, { id: 's-workflow', status: 'archived', createdAt: '2026-07-02T00:00:00.000Z', lastActiveAt: '2026-07-02T01:00:00.000Z', purpose: 'workflow' });
@@ -99,13 +101,13 @@ describe('value-metrics db helpers', () => {
 
     it('counts resolved/errored/ended and dedupes rework sessions', async () => {
       const stats = await getSessionResolutionStats(db, START, END);
-      expect(stats.ended).toBe(4);
-      expect(stats.resolved).toBe(3);
+      expect(stats.ended).toBe(5);
+      expect(stats.resolved).toBe(4);
       expect(stats.errored).toBe(1);
       // s-error + s-escalated, counted once each.
       expect(stats.reworkSessions).toBe(2);
-      // Durations [30, 60, 120] → median 60.
-      expect(stats.medianResolvedMinutes).toBeCloseTo(60, 3);
+      // Durations [30, 45, 60, 120] → median (lower middle) 45.
+      expect(stats.medianResolvedMinutes).toBeCloseTo(45, 3);
     });
 
     it('respects the window end bound', async () => {
@@ -120,6 +122,9 @@ describe('value-metrics db helpers', () => {
       const insert = `INSERT INTO workflow_executions (id, user_id, status, trigger_type, mode, started_at, completed_at) VALUES (?, 'u1', ?, 'manual', ?, ?, ?)`;
       exec(sqlite, insert, 'wx-done-1', 'completed', 'production', '2026-07-02 10:00:00', '2026-07-02 10:30:00');
       exec(sqlite, insert, 'wx-done-2', 'completed', 'production', '2026-07-03T10:00:00.000Z', '2026-07-03T11:00:00.000Z');
+      // Started before the window but FINISHED inside it — runs are windowed
+      // by terminal time, so this counts.
+      exec(sqlite, insert, 'wx-boundary', 'completed', 'production', '2026-06-30 23:50:00', '2026-07-01 00:10:00');
       exec(sqlite, insert, 'wx-failed', 'failed', 'production', '2026-07-04 12:00:00', '2026-07-04 12:05:00');
       exec(sqlite, insert, 'wx-cancelled', 'cancelled', 'production', '2026-07-05 12:00:00', null);
       // Excluded: test mode, non-terminal, out of window.
@@ -128,12 +133,12 @@ describe('value-metrics db helpers', () => {
       exec(sqlite, insert, 'wx-old', 'completed', 'production', '2026-06-01 10:00:00', '2026-06-01 10:30:00');
     });
 
-    it('counts terminal production runs and the completed median', async () => {
+    it('counts terminal production runs (by terminal time) and the completed median', async () => {
       const stats = await getWorkflowResolutionStats(db, START, END);
-      expect(stats.completed).toBe(2);
+      expect(stats.completed).toBe(3);
       expect(stats.failed).toBe(1);
-      expect(stats.terminal).toBe(4);
-      // Durations [30, 60] → median (lower middle) 30.
+      expect(stats.terminal).toBe(5);
+      // Durations [20, 30, 60] → median 30.
       expect(stats.medianCompletedMinutes).toBeCloseTo(30, 3);
     });
   });
@@ -154,19 +159,35 @@ describe('value-metrics db helpers', () => {
   });
 
   describe('getApprovalDecisionStats', () => {
-    it('counts explicit decisions; post-approval failures count as accepted', async () => {
+    it('counts only human-resolved decisions; auto-policy and cancellation rows are excluded', async () => {
       seedSession(sqlite, { id: 's1', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
-      const action = `INSERT INTO action_invocations (id, session_id, user_id, service, action_id, risk_level, resolved_mode, status, created_at) VALUES (?, 's1', 'u1', ?, ?, 'high', 'ask', ?, ?)`;
-      exec(sqlite, action, 'a1', 'github', 'a', 'approved', '2026-07-02T00:00:00.000Z');
-      exec(sqlite, action, 'a2', 'github', 'a', 'executed', '2026-07-02 01:00:00');
-      exec(sqlite, action, 'a3', 'github', 'a', 'failed', '2026-07-02T02:00:00.000Z');
-      exec(sqlite, action, 'a4', 'github', 'a', 'denied', '2026-07-02T03:00:00.000Z');
-      exec(sqlite, action, 'a5', 'github', 'a', 'expired', '2026-07-02T04:00:00.000Z');
-      exec(sqlite, action, 'a6', 'github', 'a', 'pending', '2026-07-02T05:00:00.000Z'); // undecided, ignored
-      exec(sqlite, action, 'a7', 'github', 'a', 'approved', '2026-06-01 00:00:00'); // out of window
-      // Workflow gate, shaped like the 0022 migration's converted rows.
-      exec(sqlite, action, 'g1', 'workflow', 'request_approval', 'approved', '2026-07-03T00:00:00.000Z');
-      exec(sqlite, action, 'g2', 'workflow', 'request_approval', 'denied', '2026-07-03 01:00:00');
+      const human = `INSERT INTO action_invocations (id, session_id, user_id, service, action_id, risk_level, resolved_mode, status, resolved_by, created_at) VALUES (?, 's1', 'u1', ?, ?, 'high', 'require_approval', ?, 'u1', ?)`;
+      exec(sqlite, human, 'a1', 'github', 'a', 'approved', '2026-07-02T00:00:00.000Z');
+      exec(sqlite, human, 'a2', 'github', 'a', 'executed', '2026-07-02 01:00:00');
+      exec(sqlite, human, 'a3', 'github', 'a', 'failed', '2026-07-02T02:00:00.000Z'); // approved, then execution failed
+      exec(sqlite, human, 'a4', 'github', 'a', 'denied', '2026-07-02T03:00:00.000Z');
+      exec(sqlite, human, 'a7', 'github', 'a', 'approved', '2026-06-01 00:00:00'); // out of window
+      // Workflow gate a human approved (shaped like the 0022-migrated rows).
+      exec(sqlite, human, 'g1', 'workflow', 'request_approval', 'approved', '2026-07-03T00:00:00.000Z');
+      exec(sqlite, human, 'g2', 'workflow', 'request_approval', 'denied', '2026-07-03 01:00:00');
+
+      const auto = `INSERT INTO action_invocations (id, session_id, user_id, service, action_id, risk_level, resolved_mode, status, error, created_at) VALUES (?, 's1', 'u1', 'github', 'a', 'low', ?, ?, ?, ?)`;
+      // Policy auto-allow/auto-deny: no human decision, must not count.
+      exec(sqlite, auto, 'auto1', 'allow', 'executed', null, '2026-07-02T06:00:00.000Z');
+      exec(sqlite, auto, 'auto2', 'allow', 'executed', null, '2026-07-02T07:00:00.000Z');
+      exec(sqlite, auto, 'auto3', 'deny', 'denied', null, '2026-07-02T08:00:00.000Z');
+      // Workflow cancel-cleanup flips pending gates to failed with no resolver.
+      exec(sqlite, auto, 'auto4', 'require_approval', 'failed', 'workflow execution cancelled', '2026-07-02T09:00:00.000Z');
+      // Expired and pending rows never carry a resolver.
+      exec(sqlite, auto, 'a5', 'require_approval', 'expired', null, '2026-07-02T04:00:00.000Z');
+      exec(sqlite, auto, 'a6', 'require_approval', 'pending', null, '2026-07-02T05:00:00.000Z');
+
+      // Gate from a test-mode workflow run: excluded even though human-resolved.
+      exec(sqlite, `INSERT INTO workflow_executions (id, user_id, status, trigger_type, mode, started_at) VALUES ('wx-t', 'u1', 'completed', 'manual', 'test', '2026-07-02 00:00:00')`);
+      exec(
+        sqlite,
+        `INSERT INTO action_invocations (id, session_id, user_id, workflow_execution_id, service, action_id, risk_level, resolved_mode, status, resolved_by, created_at) VALUES ('gt', 's1', 'u1', 'wx-t', 'workflow', 'request_approval', 'high', 'require_approval', 'approved', 'u1', '2026-07-03T02:00:00.000Z')`,
+      );
 
       const stats = await getApprovalDecisionStats(db, START, END);
       expect(stats.accepted).toBe(4); // a1 + a2 + a3 + g1
@@ -235,11 +256,15 @@ describe('value-metrics db helpers', () => {
   });
 
   describe('getSandboxSecondsInWindow', () => {
-    it('sums active_seconds for sessions created in the window', async () => {
+    it('prorates active_seconds by how much of a session lifespan overlaps the window', async () => {
+      // Instant sessions fully inside the window attribute fully.
       seedSession(sqlite, { id: 's-in-1', status: 'active', createdAt: '2026-07-02T00:00:00.000Z', lastActiveAt: '2026-07-02T00:00:00.000Z', activeSeconds: 100 });
       seedSession(sqlite, { id: 's-in-2', status: 'active', createdAt: '2026-07-03 00:00:00', lastActiveAt: '2026-07-03 00:00:00', activeSeconds: 200 });
+      // Entirely before the window: excluded.
       seedSession(sqlite, { id: 's-out', status: 'active', createdAt: '2026-06-20 00:00:00', lastActiveAt: '2026-06-20 00:00:00', activeSeconds: 999 });
-      expect(await getSandboxSecondsInWindow(db, START, END)).toBe(300);
+      // Spans the window boundary: 11-day life, 4 days inside → 4/11 of 1100.
+      seedSession(sqlite, { id: 's-span', status: 'active', createdAt: '2026-06-24T00:00:00.000Z', lastActiveAt: '2026-07-05T00:00:00.000Z', activeSeconds: 1100 });
+      expect(await getSandboxSecondsInWindow(db, START, END)).toBeCloseTo(300 + 400, 1);
     });
   });
 });

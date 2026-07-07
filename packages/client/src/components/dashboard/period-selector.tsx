@@ -5,18 +5,26 @@ const PERIODS = [
   { label: '1d', value: 24 },
   { label: '1wk', value: 168 },
   { label: '1mo', value: 720 },
-  { label: '1y', value: 8760 },
 ] as const;
+
+const YEAR_PERIOD = { label: '1y', value: 8760 } as const;
 
 interface PeriodSelectorProps {
   value: number;
   onChange: (period: number) => void;
+  /**
+   * Adds the 1y option. Only enable on pages whose endpoints accept a
+   * year-long window — the main Dashboard endpoint clamps at 90 days and
+   * would silently mislabel the data.
+   */
+  includeYear?: boolean;
 }
 
-export function PeriodSelector({ value, onChange }: PeriodSelectorProps) {
+export function PeriodSelector({ value, onChange, includeYear = false }: PeriodSelectorProps) {
+  const periods = includeYear ? [...PERIODS, YEAR_PERIOD] : [...PERIODS];
   return (
     <div className="inline-flex items-center rounded-lg border border-neutral-200/80 bg-surface-1 p-0.5 dark:border-neutral-800">
-      {PERIODS.map((p) => (
+      {periods.map((p) => (
         <button
           key={p.value}
           onClick={() => onChange(p.value)}

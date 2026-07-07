@@ -380,14 +380,19 @@ export async function updateSessionStatus(
   id: string,
   status: AgentSession['status'],
   containerId?: string,
-  errorMessage?: string
+  errorMessage?: string | null
 ): Promise<void> {
+  // errorMessage semantics: undefined preserves the stored value, null (or
+  // empty string) clears it, a string sets it. Terminal transitions must not
+  // implicitly wipe the error — a session terminated after a failure stays
+  // classified as errored; recovery paths that reach a healthy state pass
+  // null to clear the stale message.
   await db
     .update(sessions)
     .set({
       status,
       containerId: containerId !== undefined ? sql`COALESCE(${containerId}, ${sessions.containerId})` : undefined,
-      errorMessage: errorMessage || null,
+      errorMessage: errorMessage !== undefined ? (errorMessage || null) : undefined,
       lastActiveAt: sql`datetime('now')`,
     })
     .where(eq(sessions.id, id));
