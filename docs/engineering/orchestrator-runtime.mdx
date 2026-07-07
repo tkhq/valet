@@ -39,7 +39,7 @@ The identity remains stable even when the backing session restarts.
 
 ## Memory files
 
-Orchestrator memory is stored as user-scoped files with full-text search. Common paths include:
+Orchestrator memory is an OKF-native bundle of typed Markdown documents, stored as user-scoped files with full-text search. Common paths include:
 
 | Path | Use |
 | --- | --- |
@@ -47,9 +47,32 @@ Orchestrator memory is stored as user-scoped files with full-text search. Common
 | `projects/<name>/` | Project-specific facts, repos, architecture, and decisions. |
 | `workflows/` | Reusable automation notes. |
 | `journal/YYYY-MM-DD.md` | Daily notes and recent events. |
+| `people/<name>.md` | One hub document per person, keyed to their email or handle. |
 | `notes/` | General scratch notes. |
 
-Preference files are pinned. Non-pinned files count toward memory caps and may be pruned when low relevance.
+Preference files are pinned. Non-pinned files count toward the memory cap (200 files) and are pruned expired-first, then by relevance and inbound-link count when low relevance.
+
+Each file carries structured metadata stored in columns; the YAML frontmatter you see on read is a rendered projection of those columns, not free-form text:
+
+| Field | Meaning |
+| --- | --- |
+| `type` | Concept kind (`preference`, `project-note`, `workflow`, `journal-entry`, `person`, `note`), defaulted per directory. |
+| `tags`, `description` | Classification and a one-line summary; feed search relevance. |
+| `resource` | Canonical URI of the external asset the note is about — the dedupe key (search by resource before creating a new note). |
+| `sensitivity` | `private` (default) or `shareable`; drives shareable-only export. |
+| `origin` | `user-stated` beats `inferred` on conflict. |
+| `expires` | Optional expiry; expired files are excluded from retrieval and pruned first. |
+
+## Links and knowledge graph
+
+Outgoing links are extracted from each body on write, building a link graph that powers backlinks, graph-aware retrieval, and broken-link hygiene. Derived edges and nodes are computed, not stored:
+
+- **Backlinks** — a "Linked from" list of files that reference a note.
+- **Session siblings** — files sharing a `source_session_id` render through a derived session hub (a weak association surfaced only on request, since one reorganization welds unrelated files together).
+- **Phantom nodes** — links whose target does not exist yet.
+- **Provenance** — `source_session_id` records the originating OpenCode thread, resolved to a session + thread link ("learned in session").
+
+The web client exposes this as a Memory workspace (file browser with rendered/edit views plus an interactive knowledge-graph view) backed by the `/api/me/memory` routes; export/import move OKF bundles between environments.
 
 ## Startup context
 
@@ -66,13 +89,15 @@ Valet also ensures today's journal exists.
 
 Agents use memory tools such as:
 
-- `mem_read(path)`
-- `mem_write(path, content)`
-- `mem_patch(path, operations)`
+- `mem_read(path)` — read a file (rendered document plus fenced backlink/notice decorations) or list a directory.
+- `mem_write(path, content?, {type, tags, description, resource, sensitivity, origin, expires})` — create or update; metadata is sticky (omitted fields stay unchanged).
+- `mem_patch(path, operations)` — append or surgically edit a body without a full rewrite.
+- `mem_move(from, to)` — relocate/rename, rewriting inbound links (use instead of write + rm).
 - `mem_rm(path)`
-- `mem_search(query, pathPrefix?)`
+- `mem_search(query, pathPrefix?, resource?, includeExpired?)`
+- `mem_links(path, direction?, depth?)` — traverse the link graph.
 
-Memory is for durable facts, preferences, project context, workflow notes, and notable outcomes. Routine status should stay in session messages.
+Memory is for durable facts, preferences, project context, workflow notes, and notable outcomes. Routine status should stay in session messages. Agents follow a `memory` curation skill for reorganization, dedup, and journal-distillation workflows.
 
 ## Mailbox and task board
 

@@ -13,7 +13,6 @@ export * from './notifications.js';
 export * from './tasks.js';
 export * from './telegram.js';
 export * from './slack.js';
-export * from './memories.js';
 export * from './memory-files.js';
 export * from './credentials.js';
 export * from './actions.js';

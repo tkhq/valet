@@ -37,6 +37,7 @@ export function Sidebar() {
       return [
         item,
         { href: '/sessions/orchestrator', label: 'Chat', icon: ChatIcon, indent: true },
+        { href: '/orchestrator/memory', label: 'Memory', icon: MemoryIcon, indent: true },
       ];
     }
     return [item];
@@ -235,6 +236,29 @@ function PersonasIcon({ className }: { className?: string }) {
       <circle cx="9" cy="7" r="4" />
       <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function MemoryIcon({ className }: { className?: string }) {
+  // Stacked-layers "knowledge base" glyph.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className}>
+      <path
+        d="M12 3l9 5-9 5-9-5 9-5z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M3 12.5l9 5 9-5M3 16.5l9 5 9-5"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity="0.55"
+      />
     </svg>
   );
 }

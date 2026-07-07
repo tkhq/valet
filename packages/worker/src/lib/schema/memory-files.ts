@@ -1,4 +1,4 @@
-import { sqliteTable, text, real, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, real, integer, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
 
@@ -11,6 +11,15 @@ export const orchestratorMemoryFiles = sqliteTable('orchestrator_memory_files', 
   path: text().notNull(),
   content: text().notNull(),
   title: text().notNull().default(''),
+  type: text().notNull().default(''),
+  description: text().notNull().default(''),
+  tags: text().notNull().default('[]'),
+  resource: text().notNull().default(''),
+  extras: text().notNull().default('{}'),
+  sensitivity: text().notNull().default('private'),
+  origin: text().notNull().default(''),
+  sourceSessionId: text('source_session_id').notNull().default(''),
+  expires: text(),
   relevance: real().notNull().default(1.0),
   pinned: integer().notNull().default(0),
   version: integer().notNull().default(1),
@@ -21,4 +30,16 @@ export const orchestratorMemoryFiles = sqliteTable('orchestrator_memory_files', 
   uniqueIndex('idx_memory_files_user_path').on(table.userId, table.path),
   index('idx_memory_files_user').on(table.userId),
   index('idx_memory_files_pinned').on(table.userId, table.pinned),
+  index('idx_memory_files_resource').on(table.userId, table.resource),
+]);
+
+export const memoryLinks = sqliteTable('memory_links', {
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  fromPath: text('from_path').notNull(),
+  toPath: text('to_path').notNull(),
+  context: text().notNull().default(''),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.fromPath, table.toPath] }),
+  index('idx_memory_links_to').on(table.userId, table.toPath),
 ]);
