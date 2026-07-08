@@ -491,6 +491,8 @@ A PR body documents one change for a reviewer and for whoever reads `git log` in
 - **Describe the change, not the process.** What changed, why, and what a reviewer needs to know (breaking changes, migrations, how it was verified). Leave out how the work unfolded — requests, conversations, dead ends, session play-by-play.
 - **Never name people.** No "per X's request", "as discussed with Y", "thanks to Z", reviewer call-outs, or quotes from Slack/meetings. Provenance belongs in the linked issue; requesting a review is the attribution. This applies to commit messages and PR comments too.
 - **Keep unrelated context out.** Other workstreams, roadmap plans, deprioritized items, team decisions, or anything the diff doesn't touch — if a sentence isn't about this change, cut it.
+- **Keep it current.** When the branch changes — scope cut, approach reversed, commits added — update the description to match the code as it stands. A body that describes an earlier draft of the PR is wrong, not just stale.
+- **No review-process narration.** Don't recount local review passes, fixed findings, agent/verification machinery, or test-count tallies. A finding that was fixed before the PR was opened (or updated) is not information about this change — describe the final behavior instead. One line on how the change was verified is enough.
 - **Stay short.** A few sentences or bullets is the norm. If the body outweighs the diff's complexity, trim it.
 
 ## Common Patterns
