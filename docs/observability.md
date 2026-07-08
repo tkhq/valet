@@ -152,15 +152,20 @@ so dark builds never even download it.
 - **Uncaught errors / unhandled rejections**, plus React error-boundary catches
   (`trackError` in `components/error-boundary.tsx`).
 - **Route transitions**: a `route_change` event per TanStack Router `onResolved` with the
-  **pathname only** — search params never leave the browser.
+  `to` and `from` **pathnames only** (`from` is absent on initial load, so funnels get
+  edges, not just nodes) — search params never leave the browser.
 - **Frontend traces** via `TracingInstrumentation`; `traceparent` is propagated **only to
   the API origin** (derived from `VITE_API_URL`, allowed by the worker's CORS
   `allowHeaders`), so frontend spans correlate with worker traces in Tempo.
 - **Sanitized API failures** (`api_error`: status/code/path) and **WebSocket lifecycle**
-  (`ws_connected` / `ws_disconnected` / `ws_error` with the socket path).
+  (`ws_connected` with the socket path and the reconnect `attempt` count that got the
+  connection up, `ws_disconnected` with the close `code` / `wasClean` flag, `ws_error`
+  with the socket path).
 - **Product events** via `trackEvent(name, attrs)` — a safe no-op when dark:
   `prompt_submitted`, `session_created`, `workflow_run`, `approval_resolved`, each carrying
-  ids/enums/counts only (`valet.session.id` where available).
+  ids/enums/counts only (`valet.session.id` where available; `approval_resolved` also
+  carries `valet.invocation.id` so approval behavior joins to server-side
+  `action_invocations`).
 
 **Scrubbing guarantees** (`scrubBeforeSend`, applied to every beacon — events, errors,
 measurements, traces):

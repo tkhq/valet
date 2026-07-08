@@ -86,8 +86,11 @@ export function useWebSocket(url: string | null, options: UseWebSocketOptions = 
 
     ws.onopen = () => {
       setStatus('connected');
+      // Number of reconnect attempts it took to get here (0 = first try) —
+      // captured before the counter resets for the next disconnect.
+      const attempt = reconnectAttemptsRef.current;
       reconnectAttemptsRef.current = 0;
-      trackEvent('ws_connected', { path: wsUrl.pathname });
+      trackEvent('ws_connected', { path: wsUrl.pathname, attempt });
       onConnectRef.current?.();
     };
 
@@ -106,7 +109,7 @@ export function useWebSocket(url: string | null, options: UseWebSocketOptions = 
       onErrorRef.current?.(event);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       // If a newer WebSocket has already replaced this one (e.g. session navigation
       // triggered disconnect + reconnect), skip all handling to avoid clobbering the
       // new connection's state and triggering a stale reconnect to the old URL.
@@ -114,7 +117,11 @@ export function useWebSocket(url: string | null, options: UseWebSocketOptions = 
 
       setStatus('disconnected');
       wsRef.current = null;
-      trackEvent('ws_disconnected', { path: wsUrl.pathname });
+      trackEvent('ws_disconnected', {
+        path: wsUrl.pathname,
+        code: event.code,
+        wasClean: event.wasClean,
+      });
       onDisconnectRef.current?.();
 
       if (reconnect && reconnectAttemptsRef.current < maxReconnectAttempts) {

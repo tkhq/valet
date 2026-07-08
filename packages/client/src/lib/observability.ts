@@ -173,14 +173,15 @@ interface RouterLike {
 }
 
 /**
- * Track route transitions on the TanStack Router instance. Only the pathname
- * is recorded — search params never leave the browser.
+ * Track route transitions on the TanStack Router instance. Only pathnames
+ * are recorded — search params never leave the browser. The `from` pathname
+ * is included (absent on initial load) so funnels get edges, not just nodes.
  */
 export function observeRouter(router: RouterLike): void {
   if (!isFaroEnabled()) return;
   router.subscribe('onResolved', ({ toLocation, fromLocation, pathChanged }) => {
     if (!pathChanged && fromLocation) return;
     faroInstance?.api.setView({ name: toLocation.pathname });
-    trackEvent('route_change', { to: toLocation.pathname });
+    trackEvent('route_change', { to: toLocation.pathname, from: fromLocation?.pathname });
   });
 }

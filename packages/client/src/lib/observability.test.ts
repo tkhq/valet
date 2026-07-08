@@ -270,7 +270,7 @@ describe('observeRouter', () => {
     expect(subscribe).not.toHaveBeenCalled();
   });
 
-  it('pushes route_change with the pathname only', async () => {
+  it('pushes route_change with from/to pathnames only', async () => {
     vi.stubEnv('VITE_FARO_URL', 'https://faro.example.com/collect');
     const { initFaro, observeRouter } = await freshImport();
     await initFaro();
@@ -299,7 +299,17 @@ describe('observeRouter', () => {
     expect(mocks.api.setView).toHaveBeenCalledWith({ name: '/sessions/sess-1' });
     expect(mocks.api.pushEvent).toHaveBeenCalledWith('route_change', {
       to: '/sessions/sess-1',
+      from: '/',
     });
+
+    // Initial load has no fromLocation — the event carries `to` only.
+    mocks.api.pushEvent.mockClear();
+    listener?.({
+      toLocation: { pathname: '/' },
+      fromLocation: undefined,
+      pathChanged: false,
+    });
+    expect(mocks.api.pushEvent).toHaveBeenCalledWith('route_change', { to: '/' });
 
     // Search-param-only navigation is not a route change.
     mocks.api.pushEvent.mockClear();

@@ -225,9 +225,12 @@ export function InteractivePromptCard({
     setSubmissionError(null);
 
     const message = buildApprovalResolutionSocketMessage(invocationId, actionId);
+    // Ids only — joins to the server-side action_invocations table.
     trackEvent('approval_resolved', {
       decision: message.type === 'approve-action' ? 'approve' : 'deny',
       risk: riskLevel,
+      'valet.session.id': prompt.sessionId,
+      'valet.invocation.id': invocationId,
     });
     const sentViaUnifiedWs = onResolveApprovalWs?.(invocationId, actionId) ?? false;
     if (sentViaUnifiedWs) {
