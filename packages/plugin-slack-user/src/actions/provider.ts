@@ -42,6 +42,10 @@ export const SLACK_USER_SCOPES: readonly string[] = [
 
   // ── write / act-as ──
   'chat:write',
+  // conversations.open (send_dm) needs write scope to open the IM/MPIM channel
+  // before chat.postMessage can deliver to it.
+  'im:write',
+  'mpim:write',
   'users.profile:write',
   'reactions:write',
   'reactions:read',

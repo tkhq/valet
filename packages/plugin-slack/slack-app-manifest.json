@@ -55,6 +55,8 @@
         "users.profile:read",
         "team:read",
         "chat:write",
+        "im:write",
+        "mpim:write",
         "users.profile:write",
         "reactions:write",
         "reactions:read",

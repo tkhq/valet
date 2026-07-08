@@ -136,15 +136,8 @@ describe('GET /oauth/callback', () => {
 
   it('redirects to /integrations?slack_user=linked on success and stores the xoxp token + metadata', async () => {
     const state = await signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId: USER_ID });
-    const fullScopes = [
-      'search:read', 'channels:history', 'groups:history', 'im:history', 'mpim:history',
-      'channels:read', 'groups:read', 'im:read', 'mpim:read', 'users:read',
-      'users.profile:read', 'team:read', 'chat:write', 'users.profile:write',
-      'reactions:write', 'reactions:read', 'dnd:write', 'dnd:read', 'files:read',
-      'files:write', 'pins:read', 'pins:write', 'bookmarks:read', 'bookmarks:write',
-      'stars:read', 'stars:write', 'reminders:read', 'reminders:write',
-      'usergroups:read', 'usergroups:write', 'emoji:read',
-    ];
+    // Use the live bundle so the granted-scope mock never drifts from the source.
+    const fullScopes = SLACK_USER_SCOPES;
     const restore = mockOauthV2Access({
       ok: true,
       authed_user: { id: 'U123', access_token: 'xoxp-real', scope: fullScopes.join(',') },
@@ -277,15 +270,8 @@ describe('GET /oauth/callback', () => {
     });
 
     const state = await signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId: USER_ID });
-    const fullScopes = [
-      'search:read', 'channels:history', 'groups:history', 'im:history', 'mpim:history',
-      'channels:read', 'groups:read', 'im:read', 'mpim:read', 'users:read',
-      'users.profile:read', 'team:read', 'chat:write', 'users.profile:write',
-      'reactions:write', 'reactions:read', 'dnd:write', 'dnd:read', 'files:read',
-      'files:write', 'pins:read', 'pins:write', 'bookmarks:read', 'bookmarks:write',
-      'stars:read', 'stars:write', 'reminders:read', 'reminders:write',
-      'usergroups:read', 'usergroups:write', 'emoji:read',
-    ];
+    // Use the live bundle so the granted-scope mock never drifts from the source.
+    const fullScopes = SLACK_USER_SCOPES;
     const restore = mockOauthV2Access({
       ok: true,
       authed_user: { id: 'U123', access_token: 'xoxp-new', scope: fullScopes.join(',') },
@@ -333,15 +319,8 @@ describe('GET /oauth/callback', () => {
     });
 
     const state = await signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId: USER_ID });
-    const fullScopes = [
-      'search:read', 'channels:history', 'groups:history', 'im:history', 'mpim:history',
-      'channels:read', 'groups:read', 'im:read', 'mpim:read', 'users:read',
-      'users.profile:read', 'team:read', 'chat:write', 'users.profile:write',
-      'reactions:write', 'reactions:read', 'dnd:write', 'dnd:read', 'files:read',
-      'files:write', 'pins:read', 'pins:write', 'bookmarks:read', 'bookmarks:write',
-      'stars:read', 'stars:write', 'reminders:read', 'reminders:write',
-      'usergroups:read', 'usergroups:write', 'emoji:read',
-    ];
+    // Use the live bundle so the granted-scope mock never drifts from the source.
+    const fullScopes = SLACK_USER_SCOPES;
     const restore = mockOauthV2Access({
       ok: true,
       authed_user: { id: 'U123', access_token: 'xoxp-new', scope: fullScopes.join(',') },
