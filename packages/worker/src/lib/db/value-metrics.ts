@@ -94,8 +94,6 @@ export interface SessionResolutionStats {
   errored: number;
   /** All interactive non-orchestrator sessions that ended in the window. */
   ended: number;
-  /** Deduped: ended sessions that errored OR escalated to a human at least once. */
-  reworkSessions: number;
   medianResolvedMinutes: number | null;
 }
 
@@ -103,9 +101,16 @@ export interface SessionResolutionStats {
 // sessions carry no explicit closed_at. 'hibernated' counts as ended because
 // it is the organic end state: idle sessions hibernate and most are never
 // explicitly terminated or archived (those transitions are mostly manual
-// cleanup). Orchestrators are long-lived coordinators, and
-// purpose='workflow' sessions are already counted through
-// workflow_executions, so both are excluded to avoid double counting.
+// cleanup). Hibernation is not terminal, so ended-ness is recomputed live
+// from the current status on every query: waking flips status away from
+// 'hibernated' immediately (performWake → 'restoring'), pulling the session
+// out of the ended pool until it settles again — a re-hibernate also moves
+// last_active_at forward, so the session re-enters in the later window.
+// Historical windows can therefore shift as hibernated sessions wake; that
+// is intentional (never count a live session as done). Orchestrators are
+// long-lived coordinators, and purpose='workflow' sessions are already
+// counted through workflow_executions, so both are excluded to avoid double
+// counting.
 const SESSION_WINDOW_WHERE = `
   is_orchestrator = 0
   AND purpose = 'interactive'
@@ -124,17 +129,12 @@ export async function getSessionResolutionStats(
       SELECT
         COALESCE(SUM(CASE WHEN ${SESSION_RESOLVED_COND} THEN 1 ELSE 0 END), 0) AS resolved,
         COALESCE(SUM(CASE WHEN status = 'error' OR error_message IS NOT NULL THEN 1 ELSE 0 END), 0) AS errored,
-        COUNT(*) AS ended,
-        COALESCE(SUM(CASE WHEN status = 'error' OR error_message IS NOT NULL
-          OR EXISTS (
-            SELECT 1 FROM mailbox_messages m
-            WHERE m.from_session_id = sessions.id AND m.message_type = 'escalation'
-          ) THEN 1 ELSE 0 END), 0) AS rework
+        COUNT(*) AS ended
       FROM sessions
       WHERE ${SESSION_WINDOW_WHERE}
     `)
     .bind(startIso, endIso)
-    .first<{ resolved: number; errored: number; ended: number; rework: number }>();
+    .first<{ resolved: number; errored: number; ended: number }>();
 
   const medianResolvedMinutes = await medianVia(
     db,
@@ -151,36 +151,7 @@ export async function getSessionResolutionStats(
     resolved: row?.resolved ?? 0,
     errored: row?.errored ?? 0,
     ended: row?.ended ?? 0,
-    reworkSessions: row?.rework ?? 0,
     medianResolvedMinutes,
-  };
-}
-
-// ─── Escalations ────────────────────────────────────────────────────────────
-
-export interface EscalationStats {
-  escalationMessages: number;
-  escalatedSessions: number;
-}
-
-export async function getEscalationStats(
-  db: D1Database,
-  startIso: string,
-  endIso: string,
-): Promise<EscalationStats> {
-  const row = await db
-    .prepare(`
-      SELECT COUNT(*) AS total, COUNT(DISTINCT from_session_id) AS sessions
-      FROM mailbox_messages
-      WHERE message_type = 'escalation'
-        AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
-    `)
-    .bind(startIso, endIso)
-    .first<{ total: number; sessions: number }>();
-
-  return {
-    escalationMessages: row?.total ?? 0,
-    escalatedSessions: row?.sessions ?? 0,
   };
 }
 

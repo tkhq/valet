@@ -199,15 +199,15 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
       />
       <HeroMetricCard
         icon={<ReworkIcon />}
-        label="Rework & Escalation"
-        value={formatPercent(current.reworkEscalationRate)}
-        delta={pctDelta(current.reworkEscalationRate, previous.reworkEscalationRate)}
+        label="Session Error Rate"
+        value={formatPercent(current.sessionErrorRate)}
+        delta={pctDelta(current.sessionErrorRate, previous.sessionErrorRate)}
         deltaPolarity="lower-is-better"
         tooltip={
           <MetricHelp
-            formula="sessions errored or escalated ÷ sessions ended"
-            numbers={`${current.reworkSessions} ÷ ${current.endedSessions} sessions (${current.escalationMessages} escalation messages); workflows: ${current.failedWorkflowRuns}/${current.terminalWorkflowRuns} failed`}
-            caveat={`Escalations are written automatically on session errors and when the agent sends an escalation-type message. Same-intent re-prompting and informal "get a human" requests are not detected yet.`}
+            formula="sessions that errored ÷ sessions ended"
+            numbers={`${current.erroredSessions} ÷ ${current.endedSessions} sessions; workflows: ${current.failedWorkflowRuns}/${current.terminalWorkflowRuns} failed`}
+            caveat={`Recomputed live from current session status — a hibernated session that wakes leaves the ended pool until it settles again. Escalations are no longer counted (the agent mailbox was retired); re-prompting and "get a human" requests leave no signal yet.`}
           />
         }
         index={2}

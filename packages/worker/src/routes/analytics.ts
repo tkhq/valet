@@ -15,7 +15,6 @@ import {
 import {
   getWorkflowResolutionStats,
   getSessionResolutionStats,
-  getEscalationStats,
   getApprovalDecisionStats,
   getAgentPrStats,
   getSessionModelPairs,
@@ -131,10 +130,9 @@ async function computeValueWindow(
   startIso: string,
   endIso: string,
 ): Promise<ValueMetricsWindow> {
-  const [workflows, sessions, escalations, approvals, prs, modelRows, sessionModels, sandboxSeconds, sessionSources] = await Promise.all([
+  const [workflows, sessions, approvals, prs, modelRows, sessionModels, sandboxSeconds, sessionSources] = await Promise.all([
     getWorkflowResolutionStats(db, startIso, endIso),
     getSessionResolutionStats(db, startIso, endIso),
-    getEscalationStats(db, startIso, endIso),
     getApprovalDecisionStats(db, startIso, endIso),
     getAgentPrStats(db, startIso, endIso),
     getUsageByModel(db, startIso, endIso),
@@ -182,12 +180,11 @@ async function computeValueWindow(
     approvalsDenied: approvals.denied,
     approvalsExpired: approvals.expired,
     acceptedOutputRate: safeRate(approvals.accepted, decisions),
-    reworkSessions: sessions.reworkSessions,
-    escalationMessages: escalations.escalationMessages,
+    erroredSessions: sessions.errored,
     endedSessions: sessions.ended,
     failedWorkflowRuns: workflows.failed,
     terminalWorkflowRuns: workflows.terminal,
-    reworkEscalationRate: safeRate(sessions.reworkSessions, sessions.ended),
+    sessionErrorRate: safeRate(sessions.errored, sessions.ended),
     medianSessionMinutes: sessions.medianResolvedMinutes,
     medianWorkflowMinutes: workflows.medianCompletedMinutes,
     prsOpened: prs.opened,

@@ -6,7 +6,6 @@ import { getUsageByModel } from './analytics.js';
 import {
   getWorkflowResolutionStats,
   getSessionResolutionStats,
-  getEscalationStats,
   getApprovalDecisionStats,
   getAgentPrStats,
   getSessionModelPairs,
@@ -70,9 +69,8 @@ describe('value-metrics db helpers', () => {
       seedSession(sqlite, { id: 's-resolved-2', status: 'terminated', createdAt: '2026-07-03 08:00:00', lastActiveAt: '2026-07-03 08:30:00', activeSeconds: 200 });
       // Errored.
       seedSession(sqlite, { id: 's-error', status: 'error', createdAt: '2026-07-04T09:00:00.000Z', lastActiveAt: '2026-07-04T09:10:00.000Z', errorMessage: 'boom' });
-      // Cleanly closed but escalated to a human mid-session: 60 minutes.
-      seedSession(sqlite, { id: 's-escalated', status: 'archived', createdAt: '2026-07-04T09:00:00.000Z', lastActiveAt: '2026-07-04T10:00:00.000Z' });
-      exec(sqlite, `INSERT INTO mailbox_messages (id, from_session_id, message_type, content, created_at) VALUES ('m1', 's-escalated', 'escalation', 'help', '2026-07-04T09:30:00.000Z')`);
+      // Cleanly closed: 60 minutes.
+      seedSession(sqlite, { id: 's-closed', status: 'archived', createdAt: '2026-07-04T09:00:00.000Z', lastActiveAt: '2026-07-04T10:00:00.000Z' });
       // Hibernated is the organic end state — counts as ended+resolved: 45 minutes.
       seedSession(sqlite, { id: 's-hib', status: 'hibernated', createdAt: '2026-07-05T09:00:00.000Z', lastActiveAt: '2026-07-05T09:45:00.000Z' });
       // Excluded: orchestrator, workflow-purpose, out-of-window, still active.
@@ -82,13 +80,11 @@ describe('value-metrics db helpers', () => {
       seedSession(sqlite, { id: 's-active', status: 'active', createdAt: '2026-07-05T00:00:00.000Z', lastActiveAt: '2026-07-05T01:00:00.000Z' });
     });
 
-    it('counts resolved/errored/ended and dedupes rework sessions', async () => {
+    it('counts resolved/errored/ended', async () => {
       const stats = await getSessionResolutionStats(db, START, END);
       expect(stats.ended).toBe(5);
       expect(stats.resolved).toBe(4);
       expect(stats.errored).toBe(1);
-      // s-error + s-escalated, counted once each.
-      expect(stats.reworkSessions).toBe(2);
       // Durations [30, 45, 60, 120] → median (lower middle) 45.
       expect(stats.medianResolvedMinutes).toBeCloseTo(45, 3);
     });
@@ -97,6 +93,32 @@ describe('value-metrics db helpers', () => {
       const stats = await getSessionResolutionStats(db, START, '2026-07-03T00:00:00.000Z');
       expect(stats.ended).toBe(1);
       expect(stats.resolved).toBe(1);
+    });
+
+    it('recomputes hibernated sessions live: waking removes a session from the ended pool', async () => {
+      // s-hib wakes: the DO flips status away from 'hibernated' immediately
+      // (performWake → 'restoring' → 'running'), so the same historical
+      // window must stop counting it as ended/resolved.
+      exec(sqlite, `UPDATE sessions SET status = 'running' WHERE id = 's-hib'`);
+      const stats = await getSessionResolutionStats(db, START, END);
+      expect(stats.ended).toBe(4);
+      expect(stats.resolved).toBe(3);
+      // Durations [30, 60, 120] → median 60 (s-hib's 45 no longer counted).
+      expect(stats.medianResolvedMinutes).toBeCloseTo(60, 3);
+    });
+
+    it('recomputes hibernated sessions live: re-hibernating re-enters at the new last_active_at', async () => {
+      // The woken session settles again later, still inside the window —
+      // it re-enters the ended pool once, at its new end time.
+      exec(sqlite, `UPDATE sessions SET status = 'running' WHERE id = 's-hib'`);
+      exec(sqlite, `UPDATE sessions SET status = 'hibernated', last_active_at = '2026-07-06T10:00:00.000Z' WHERE id = 's-hib'`);
+      const stats = await getSessionResolutionStats(db, START, END);
+      expect(stats.ended).toBe(5);
+      expect(stats.resolved).toBe(4);
+      // A re-hibernate AFTER the window end must drop it from this window.
+      exec(sqlite, `UPDATE sessions SET last_active_at = '2026-07-09T10:00:00.000Z' WHERE id = 's-hib'`);
+      const after = await getSessionResolutionStats(db, START, END);
+      expect(after.ended).toBe(4);
     });
   });
 
@@ -123,21 +145,6 @@ describe('value-metrics db helpers', () => {
       expect(stats.terminal).toBe(5);
       // Durations [20, 30, 60] → median 30.
       expect(stats.medianCompletedMinutes).toBeCloseTo(30, 3);
-    });
-  });
-
-  describe('getEscalationStats', () => {
-    it('counts escalation messages and distinct sessions in the window', async () => {
-      seedSession(sqlite, { id: 's1', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
-      const insert = `INSERT INTO mailbox_messages (id, from_session_id, message_type, content, created_at) VALUES (?, ?, ?, 'x', ?)`;
-      exec(sqlite, insert, 'm1', 's1', 'escalation', '2026-07-02T00:00:00.000Z');
-      exec(sqlite, insert, 'm2', 's1', 'escalation', '2026-07-03 00:00:00');
-      exec(sqlite, insert, 'm3', 's1', 'escalation', '2026-06-01 00:00:00'); // out of window
-      exec(sqlite, insert, 'm4', 's1', 'question', '2026-07-02T00:00:00.000Z'); // not an escalation
-
-      const stats = await getEscalationStats(db, START, END);
-      expect(stats.escalationMessages).toBe(2);
-      expect(stats.escalatedSessions).toBe(1);
     });
   });
 
