@@ -38,11 +38,13 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function CustomTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name: string; value: number; color: string; dataKey: string }>; label?: string }) {
+function CustomTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name: string; value: number; color: string; dataKey: string; payload?: { tokens: number } }>; label?: string }) {
   if (!active || !payload?.length) return null;
   const llmEntry = payload.find(p => p.dataKey === 'llmCost');
   const sandboxEntry = payload.find(p => p.dataKey === 'sandboxCost');
-  const tokensEntry = payload.find(p => p.dataKey === 'tokens');
+  // Tokens are no longer a plotted series (they just mirror LLM cost at a
+  // different scale) but stay in the hover detail via the raw datum.
+  const tokens = payload[0]?.payload?.tokens;
   return (
     <div className="rounded-lg border border-neutral-200/80 bg-white px-3 py-2.5 shadow-[0_4px_12px_-4px_rgb(0_0_0/0.1)] dark:border-neutral-700 dark:bg-surface-2">
       <p className="mb-1.5 font-mono text-2xs text-neutral-400">{formatDateLabel(String(label))}</p>
@@ -64,12 +66,12 @@ function CustomTooltip({ active, payload, label }: { active?: boolean; payload?:
           </span>
         </div>
       )}
-      {tokensEntry && (
+      {tokens !== undefined && (
         <div className="flex items-center gap-2">
-          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: tokensEntry.color }} />
+          <span className="h-1.5 w-1.5 rounded-full bg-neutral-300 dark:bg-neutral-600" />
           <span className="text-xs text-neutral-500 dark:text-neutral-400">Tokens</span>
           <span className="ml-auto font-mono text-xs font-medium tabular-nums text-neutral-900 dark:text-neutral-100">
-            {formatTokens(tokensEntry.value)}
+            {formatTokens(tokens)}
           </span>
         </div>
       )}
@@ -98,7 +100,7 @@ export function CostChart({ data }: CostChartProps) {
 
   return (
     <div className="animate-stagger-in rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none" style={{ animationDelay: '200ms' }}>
-      <h3 className="label-mono text-neutral-400 mb-4">Daily Cost & Token Usage</h3>
+      <h3 className="label-mono text-neutral-400 mb-4">Daily Cost</h3>
       <ResponsiveContainer width="100%" height={260}>
         <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
           <defs>
@@ -109,10 +111,6 @@ export function CostChart({ data }: CostChartProps) {
             <linearGradient id="gradSandboxCost" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="rgb(20 184 166)" stopOpacity={0.12} />
               <stop offset="100%" stopColor="rgb(20 184 166)" stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id="gradTokens" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="rgb(59 130 246)" stopOpacity={0.12} />
-              <stop offset="100%" stopColor="rgb(59 130 246)" stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="rgb(245 245 245)" vertical={false} />
@@ -131,15 +129,6 @@ export function CostChart({ data }: CostChartProps) {
             axisLine={false}
             tickLine={false}
             tickFormatter={(v: number) => v > 0 ? `$${v < 1 ? v.toFixed(2) : v.toFixed(0)}` : '$0'}
-            width={50}
-          />
-          <YAxis
-            yAxisId="tokens"
-            orientation="right"
-            tick={{ fontSize: 10, fill: '#a3a3a3', fontFamily: '"JetBrains Mono", monospace' }}
-            axisLine={false}
-            tickLine={false}
-            tickFormatter={(v: number) => formatTokens(v)}
             width={50}
           />
           <Tooltip content={<CustomTooltip />} />
@@ -166,17 +155,6 @@ export function CostChart({ data }: CostChartProps) {
             dot={false}
             activeDot={{ r: 3.5, strokeWidth: 2, fill: 'white', stroke: 'rgb(20 184 166)' }}
           />
-          <Area
-            yAxisId="tokens"
-            type="monotone"
-            dataKey="tokens"
-            name="Tokens"
-            stroke="rgb(59 130 246)"
-            strokeWidth={1.5}
-            fill="url(#gradTokens)"
-            dot={false}
-            activeDot={{ r: 3.5, strokeWidth: 2, fill: 'white', stroke: 'rgb(59 130 246)' }}
-          />
         </AreaChart>
       </ResponsiveContainer>
       <div className="flex items-center justify-end gap-4 pt-2">
@@ -187,10 +165,6 @@ export function CostChart({ data }: CostChartProps) {
         <div className="flex items-center gap-1.5">
           <span className="h-[3px] w-3 rounded-full" style={{ backgroundColor: 'rgb(20 184 166)' }} />
           <span className="font-mono text-2xs text-neutral-400">Compute</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="h-[3px] w-3 rounded-full" style={{ backgroundColor: 'rgb(59 130 246)' }} />
-          <span className="font-mono text-2xs text-neutral-400">Tokens</span>
         </div>
       </div>
     </div>
