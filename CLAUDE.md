@@ -488,6 +488,8 @@ This codebase has accumulated `any`, `unknown`, and type assertions (`as`) as sh
 
 ### Adding a new D1 table
 
+Migrations must be **additive and backward-compatible** (no `DROP`/`RENAME` of in-use tables or columns): migrations apply *before* the Worker deploys, so the previous Worker build serves traffic against the new schema during the deploy window — and a rollback redeploys an old Worker against it. Destructive cleanup ships in a later migration once no deployed Worker references the old shape.
+
 1. Create migration: `packages/worker/migrations/NNNN_name.sql`
 2. Add Drizzle schema: `packages/worker/src/lib/schema/<name>.ts` and re-export from `schema/index.ts`
 3. Add types to `packages/shared/src/types/index.ts`
