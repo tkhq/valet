@@ -1,6 +1,6 @@
 # Value Metrics — what we can track vs. what we'd want to track
 
-**Status**: proposal for review (Conner) · **Companion PR**: #94 (Value tab, first pass)
+**Status**: proposal for review · **Companion PR**: #94 (Value tab, first pass)
 
 Today the admin analytics dashboard measures activity: sessions, messages, tokens, hours.
 Those answer "is Valet busy?" — not "is Valet moving work forward?" This doc inventories
