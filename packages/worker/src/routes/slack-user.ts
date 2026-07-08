@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import type { Env, Variables } from '../env.js';
 import { signOAuthState, verifyOAuthState } from '../lib/oauth-state.js';
 import { revokeCredential, storeCredential, hasCredential } from '../services/credentials.js';
+import * as db from '../lib/db.js';
 import { credentials as credentialsTable } from '../lib/schema/index.js';
 import { SLACK_USER_SCOPES } from '@valet/plugin-slack-user/actions';
 
@@ -260,6 +261,27 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
     },
   );
 
+  // Register the integration row. storeCredential only persists the token, but
+  // the orchestrator enumerates its tool surface from the integrations table
+  // (getUserIntegrations) — without a row here the slack_user.* actions never
+  // appear in list_tools. Upsert to keep reconnects idempotent.
+  const appDb = c.get('db');
+  const existingIntegration = (await db.getUserIntegrations(appDb, userId)).find(
+    (i) => i.service === SLACK_USER_PROVIDER,
+  );
+  if (existingIntegration) {
+    await db.updateIntegrationStatus(appDb, existingIntegration.id, 'active');
+  } else {
+    const integrationId = crypto.randomUUID();
+    await db.createIntegration(appDb, {
+      id: integrationId,
+      userId,
+      service: SLACK_USER_PROVIDER,
+      config: { entities: grantedScopes },
+    });
+    await db.updateIntegrationStatus(appDb, integrationId, 'active');
+  }
+
   return c.redirect(frontendIntegrationsPath(c.env, new URLSearchParams({ slack_user: 'linked' }).toString()));
 });
 
@@ -273,6 +295,13 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
 slackUserOAuthRouter.delete('/oauth', async (c) => {
   const user = c.get('user');
   await revokeCredential(c.env, 'user', user.id, SLACK_USER_PROVIDER);
+  // Also remove the integration row so the slack_user.* tools drop out of the
+  // orchestrator's tool surface (they were added on connect).
+  const appDb = c.get('db');
+  const existing = (await db.getUserIntegrations(appDb, user.id)).find(
+    (i) => i.service === SLACK_USER_PROVIDER,
+  );
+  if (existing) await db.deleteIntegration(appDb, existing.id);
   return c.json({ success: true });
 });
 

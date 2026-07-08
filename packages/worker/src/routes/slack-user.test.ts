@@ -4,11 +4,12 @@ import { eq } from 'drizzle-orm';
 import type { Env, Variables } from '../env.js';
 import { errorHandler } from '../middleware/error-handler.js';
 import { createTestDb } from '../test-utils/db.js';
-import { credentials as credentialsTable } from '../lib/schema/index.js';
+import { credentials as credentialsTable, users } from '../lib/schema/index.js';
 import { encryptStringPBKDF2 } from '../lib/crypto.js';
 import { signOAuthState, verifyOAuthState } from '../lib/oauth-state.js';
 import { slackUserOAuthRouter } from './slack-user.js';
 import { SLACK_USER_SCOPES } from '@valet/plugin-slack-user/actions';
+import { getUserIntegrations } from '../lib/db.js';
 import type { AppDb } from '../lib/drizzle.js';
 
 const holder = vi.hoisted(() => ({
@@ -127,6 +128,9 @@ describe('GET /oauth/callback', () => {
     const { db: newDb } = createTestDb();
     db = newDb as unknown as AppDb;
     holder.db = db;
+    // integrations.userId is a FK to users — seed both test users.
+    db.insert(users).values({ id: USER_ID, email: `${USER_ID}@example.com` }).run();
+    db.insert(users).values({ id: OTHER_USER_ID, email: `${OTHER_USER_ID}@example.com` }).run();
     env = makeEnv();
   });
 
@@ -175,6 +179,13 @@ describe('GET /oauth/callback', () => {
       expect(metadata.slack_user_id).toBe('U123');
       expect(metadata.team_id).toBe('T1');
       expect(metadata.team_name).toBe('Test Workspace');
+
+      // The integration row must exist so the slack_user.* tools surface in
+      // the orchestrator's list_tools. Storing only the credential is not enough.
+      const integrationRows = await getUserIntegrations(db, USER_ID);
+      const slackUser = integrationRows.find((i) => i.service === 'slack-user');
+      expect(slackUser).toBeTruthy();
+      expect(slackUser!.status).toBe('active');
     } finally {
       restore();
     }
