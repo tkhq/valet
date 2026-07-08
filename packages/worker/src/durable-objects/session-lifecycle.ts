@@ -12,6 +12,17 @@
 
 import type { SessionState } from './session-state.js';
 
+// ─── Retry Helpers (TKAI-176) ────────────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Exponential backoff: 2s, 4s, 8s… */
+function backoffMs(attempt: number): number {
+  return Math.min(2_000 * 2 ** (attempt - 1), 8_000);
+}
+
 // ─── Error Types ──────────────────────────────────────────────────────────────
 
 /** Thrown when a sandbox operation receives a 409 — sandbox already exited. */
@@ -61,33 +72,90 @@ export class SessionLifecycle {
 
   // ─── Sandbox Operations (pure HTTP) ─────────────────────────────────
 
-  /** Spawn a new sandbox via the Modal backend. */
+  /**
+   * Spawn a new sandbox via the Modal backend.
+   *
+   * TKAI-176: The Modal `create-session` endpoint can occasionally exceed
+   * Cloudflare's ~100s edge cap and return `524 error code: 524`, or the
+   * connection can drop mid-flight. In practice the sandbox usually still
+   * comes up on Modal's side — we just gave up before it responded. To reduce
+   * the surface-level failure rate we:
+   *   1. Bound the outbound fetch with `AbortSignal.timeout(90_000)` so we
+   *      surface a clean `AbortError` before CF's edge times us out.
+   *   2. Retry once on transient failures (timeout, network error, 5xx
+   *      including 524). Non-transient errors (4xx auth/config) fail fast.
+   *
+   * Note: this does NOT adopt an in-flight sandbox that came up after our
+   * fetch timed out — that requires threading a clientRequestId all the way
+   * through to Modal and a separate adoption endpoint (Approach B in
+   * TKAI-176). Cheap retry only reduces how often we see the failure at all.
+   */
   async spawnSandbox(
     backendUrl: string,
     spawnRequest: Record<string, unknown>,
   ): Promise<SpawnResult> {
     const start = Date.now();
-    const response = await fetch(backendUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(spawnRequest),
-    });
+    const maxAttempts = 2;
+    let lastErr: unknown;
 
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Backend returned ${response.status}: ${err}`);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await fetch(backendUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(spawnRequest),
+          signal: AbortSignal.timeout(90_000),
+        });
+
+        if (!response.ok) {
+          const err = await response.text();
+          const status = response.status;
+          // Retry on 5xx (includes CF 524 edge timeout, 503 Modal cold, 502
+          // bad gateway). Fail fast on 4xx — auth/config errors won't fix
+          // themselves.
+          if (status >= 500 && attempt < maxAttempts) {
+            lastErr = new Error(`Backend returned ${status}: ${err}`);
+            console.warn(
+              `[SessionLifecycle] spawnSandbox attempt ${attempt}/${maxAttempts} failed with ${status}, retrying: ${err.slice(0, 200)}`,
+            );
+            await sleep(backoffMs(attempt));
+            continue;
+          }
+          throw new Error(`Backend returned ${status}: ${err}`);
+        }
+
+        const result = await response.json() as {
+          sandboxId: string;
+          tunnelUrls: Record<string, string>;
+        };
+
+        if (attempt > 1) {
+          console.log(`[SessionLifecycle] spawnSandbox succeeded on attempt ${attempt}/${maxAttempts}`);
+        }
+
+        return {
+          sandboxId: result.sandboxId,
+          tunnelUrls: result.tunnelUrls,
+          durationMs: Date.now() - start,
+        };
+      } catch (err) {
+        // AbortError (our 90s timeout) or network error — retry once.
+        const isAbort = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+        const isNetwork = err instanceof TypeError; // undici surfaces network errors as TypeError
+        if ((isAbort || isNetwork) && attempt < maxAttempts) {
+          lastErr = err;
+          console.warn(
+            `[SessionLifecycle] spawnSandbox attempt ${attempt}/${maxAttempts} threw ${err instanceof Error ? err.name : 'error'}, retrying: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw err;
+      }
     }
 
-    const result = await response.json() as {
-      sandboxId: string;
-      tunnelUrls: Record<string, string>;
-    };
-
-    return {
-      sandboxId: result.sandboxId,
-      tunnelUrls: result.tunnelUrls,
-      durationMs: Date.now() - start,
-    };
+    // Should be unreachable — loop either returns or throws — but satisfy TS.
+    throw lastErr ?? new Error('spawnSandbox: exhausted retries with no error captured');
   }
 
   /** Terminate the current sandbox via the backend. Best-effort, never throws. */
