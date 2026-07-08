@@ -1317,19 +1317,6 @@ export interface ValueMetricsWindow {
   nonFrontierTokenShare: number | null;
   sessionsWithModelUsage: number;
   frontierFreeSessionShare: number | null;
-  // Side effects: executed external actions (action_invocations), per action
-  sideEffects: Array<{
-    service: string;
-    actionId: string;
-    executed: number;
-    humanApproved: number;
-    highRisk: number;
-    highRiskGated: number;
-  }>;
-  totalSideEffects: number;
-  highRiskSideEffects: number;
-  /** Share of high-risk executed actions that passed an explicit human decision. */
-  highRiskGateCoverage: number | null;
   // What ended sessions were started from (session_git_state.source_type;
   // 'none' = no git context)
   sessionSources: Array<{

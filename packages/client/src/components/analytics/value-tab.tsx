@@ -79,23 +79,6 @@ function RouteIcon() {
   );
 }
 
-function BoltIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-    </svg>
-  );
-}
-
-function ShieldIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      <polyline points="9 12 11 14 15 10" />
-    </svg>
-  );
-}
-
 export function ValueTab({ period }: { period: number }) {
   const { data, isLoading } = useAnalyticsValue(period);
 
@@ -115,7 +98,6 @@ export function ValueTab({ period }: { period: number }) {
     <div className="space-y-6">
       <ValueHeroMetrics current={data.current} previous={data.previous} />
       <div className="grid gap-6 [&>*]:min-w-0 lg:grid-cols-2">
-        <SideEffectsTable rows={data.current.sideEffects} />
         <SessionSourcesTable rows={data.current.sessionSources} />
       </div>
     </div>
@@ -141,77 +123,6 @@ const SOURCE_LABELS: Record<string, string> = {
   manual: 'Manual repo work',
   none: 'No git context',
 };
-
-// "create_pull_request" → "Created pull requests" — the table should read as
-// a plain-English activity log, not internal action ids.
-const ACTION_VERB_PAST: Record<string, string> = {
-  create: 'Created',
-  send: 'Sent',
-  update: 'Updated',
-  delete: 'Deleted',
-  merge: 'Merged',
-  post: 'Posted',
-  add: 'Added',
-  remove: 'Removed',
-  close: 'Closed',
-  open: 'Opened',
-  reply: 'Replied to',
-  archive: 'Archived',
-  request: 'Requested',
-  list: 'Listed',
-};
-
-function humanizeAction(actionId: string, count: number): string {
-  const [verb, ...rest] = actionId.split('_');
-  const past = ACTION_VERB_PAST[verb];
-  if (!past || rest.length === 0) {
-    return actionId.replace(/_/g, ' ');
-  }
-  const object = rest.join(' ');
-  const plural = object.endsWith('s') ? object : `${object}s`;
-  return `${past} ${count === 1 ? object : plural}`;
-}
-
-function SideEffectsTable({ rows }: { rows: ValueMetricsWindow['sideEffects'] }) {
-  if (rows.length === 0) {
-    return (
-      <div className="rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none">
-        <h3 className="label-mono text-neutral-400 mb-4">Actions Taken in External Tools</h3>
-        <p className="text-sm text-neutral-300">No external actions executed in this window</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="animate-stagger-in rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none" style={{ animationDelay: '300ms' }}>
-      <h3 className="label-mono text-neutral-400 mb-4">Actions Taken in External Tools</h3>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-neutral-100 dark:border-neutral-800">
-              <th className="pb-2 pr-4 text-left font-mono text-2xs font-medium text-neutral-400">Action</th>
-              <th className="pb-2 px-4 text-left font-mono text-2xs font-medium text-neutral-400">Via</th>
-              <th className="pb-2 px-4 text-right font-mono text-2xs font-medium text-neutral-400">Count</th>
-              <th className="pb-2 pl-4 text-right font-mono text-2xs font-medium text-neutral-400">Human-approved</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={`${r.service}:${r.actionId}`} className="border-b border-neutral-50 last:border-0 dark:border-neutral-800/50">
-                <td className="py-2.5 pr-4 font-medium text-neutral-900 dark:text-neutral-100">{humanizeAction(r.actionId, r.executed)}</td>
-                <td className="py-2.5 px-4 font-mono text-xs text-neutral-600 dark:text-neutral-300">{r.service}</td>
-                <td className="py-2.5 px-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">{r.executed.toLocaleString()}</td>
-                <td className="py-2.5 pl-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">
-                  {r.humanApproved > 0 ? `${r.humanApproved} of ${r.executed}` : 'auto-allowed'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
 
 function SessionSourcesTable({ rows }: { rows: ValueMetricsWindow['sessionSources'] }) {
   const total = rows.reduce((sum, r) => sum + r.sessions, 0);
@@ -255,7 +166,6 @@ function SessionSourcesTable({ rows }: { rows: ValueMetricsWindow['sessionSource
 }
 
 function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; previous: ValueMetricsWindow }) {
-  const highRiskGated = current.sideEffects.reduce((sum, r) => sum + r.highRiskGated, 0);
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       <HeroMetricCard
@@ -297,7 +207,7 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
           <MetricHelp
             formula="sessions errored or escalated ÷ sessions ended"
             numbers={`${current.reworkSessions} ÷ ${current.endedSessions} sessions (${current.escalationMessages} escalation messages); workflows: ${current.failedWorkflowRuns}/${current.terminalWorkflowRuns} failed`}
-            caveat={`Escalation = explicit escalate-to-human message. Same-intent re-prompting and informal "get a human" requests are not detected yet.`}
+            caveat={`Escalations are written automatically on session errors and when the agent sends an escalation-type message. Same-intent re-prompting and informal "get a human" requests are not detected yet.`}
           />
         }
         index={2}
@@ -344,34 +254,6 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
           />
         }
         index={5}
-      />
-      <HeroMetricCard
-        icon={<BoltIcon />}
-        label="External Actions"
-        value={current.totalSideEffects.toLocaleString()}
-        delta={pctDelta(current.totalSideEffects, previous.totalSideEffects)}
-        tooltip={
-          <MetricHelp
-            formula="count(executed action invocations)"
-            numbers={`${current.totalSideEffects} executed, ${current.highRiskSideEffects} high-risk; per-action breakdown below`}
-            caveat="Side effects = actions with impact outside Valet (emails, messages, PRs, issues). Test-mode workflow runs excluded."
-          />
-        }
-        index={6}
-      />
-      <HeroMetricCard
-        icon={<ShieldIcon />}
-        label="High-Risk Gate Coverage"
-        value={formatPercent(current.highRiskGateCoverage)}
-        delta={pctDelta(current.highRiskGateCoverage, previous.highRiskGateCoverage)}
-        tooltip={
-          <MetricHelp
-            formula="human-decided high-risk executions ÷ all high-risk executions"
-            numbers={`${highRiskGated} gated ÷ ${current.highRiskSideEffects} high-risk executed`}
-            caveat={`The remainder ran under policy auto-allow ("Always Allow" grants or low-friction policies on high-risk actions).`}
-          />
-        }
-        index={7}
       />
     </div>
   );

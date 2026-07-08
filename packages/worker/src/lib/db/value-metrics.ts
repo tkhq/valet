@@ -232,60 +232,6 @@ export async function getApprovalDecisionStats(
   };
 }
 
-// ─── Side effects (executed external actions) ───────────────────────────────
-
-export interface SideEffectActionRow {
-  service: string;
-  actionId: string;
-  executed: number;
-  /** Executions a human explicitly approved (vs policy auto-allow). */
-  humanApproved: number;
-  highRisk: number;
-  /** High-risk executions that passed through an explicit human decision. */
-  highRiskGated: number;
-}
-
-// Every externally-visible action Valet takes (send email, post message,
-// open PR, ...) leaves an action_invocations row; status='executed' means it
-// actually ran. Grouped per action so the UI can say WHAT was done, not just
-// which service was touched. Windowed on executed_at (when the side effect
-// happened), falling back to created_at for legacy rows.
-export async function getSideEffectStats(
-  db: D1Database,
-  startIso: string,
-  endIso: string,
-): Promise<SideEffectActionRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT
-        ai.service,
-        ai.action_id,
-        COUNT(*) AS executed,
-        COALESCE(SUM(CASE WHEN ai.resolved_by IS NOT NULL THEN 1 ELSE 0 END), 0) AS human_approved,
-        COALESCE(SUM(CASE WHEN ai.risk_level = 'high' THEN 1 ELSE 0 END), 0) AS high_risk,
-        COALESCE(SUM(CASE WHEN ai.risk_level = 'high' AND ai.resolved_by IS NOT NULL THEN 1 ELSE 0 END), 0) AS high_risk_gated
-      FROM action_invocations ai
-      LEFT JOIN workflow_executions we ON ai.workflow_execution_id = we.id
-      WHERE ai.status = 'executed'
-        AND (we.id IS NULL OR we.mode != 'test')
-        AND datetime(COALESCE(ai.executed_at, ai.created_at)) >= datetime(?)
-        AND datetime(COALESCE(ai.executed_at, ai.created_at)) < datetime(?)
-      GROUP BY ai.service, ai.action_id
-      ORDER BY executed DESC
-    `)
-    .bind(startIso, endIso)
-    .all<{ service: string; action_id: string; executed: number; human_approved: number; high_risk: number; high_risk_gated: number }>();
-
-  return (result.results ?? []).map((r) => ({
-    service: r.service,
-    actionId: r.action_id,
-    executed: r.executed,
-    humanApproved: r.human_approved,
-    highRisk: r.high_risk,
-    highRiskGated: r.high_risk_gated,
-  }));
-}
-
 // ─── Session sources (what work starts from) ────────────────────────────────
 
 export interface SessionSourceRow {

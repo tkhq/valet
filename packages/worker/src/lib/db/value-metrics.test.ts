@@ -11,7 +11,6 @@ import {
   getAgentPrStats,
   getSessionModelPairs,
   getSandboxSecondsInWindow,
-  getSideEffectStats,
   getSessionSourceStats,
 } from './value-metrics.js';
 
@@ -236,47 +235,6 @@ describe('value-metrics db helpers', () => {
         's1:anthropic/claude-opus-4',
         's2:anthropic/claude-haiku-4-5',
       ]);
-    });
-  });
-
-  describe('getSideEffectStats', () => {
-    it('groups executed actions by service with high-risk gate coverage', async () => {
-      seedSession(sqlite, { id: 's1', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
-      const insert = `INSERT INTO action_invocations (id, session_id, user_id, service, action_id, risk_level, resolved_mode, status, resolved_by, executed_at, created_at) VALUES (?, 's1', 'u1', ?, 'a', ?, 'allow', ?, ?, ?, ?)`;
-      // github: 2 executed (1 high-risk, human-gated), slack: 1 executed low-risk auto
-      exec(sqlite, insert, 'e1', 'github', 'high', 'executed', 'u1', '2026-07-02T00:00:00.000Z', '2026-07-01T23:00:00.000Z');
-      exec(sqlite, insert, 'e2', 'github', 'low', 'executed', null, '2026-07-02 01:00:00', '2026-07-02 00:30:00');
-      exec(sqlite, insert, 'e3', 'slack', 'low', 'executed', null, null, '2026-07-03T00:00:00.000Z'); // falls back to created_at
-      // gmail: high-risk executed WITHOUT a human decision (auto-allowed)
-      exec(sqlite, insert, 'e4', 'gmail', 'high', 'executed', null, '2026-07-04T00:00:00.000Z', '2026-07-04T00:00:00.000Z');
-      // Excluded: not executed, out of window, test-mode workflow gate.
-      exec(sqlite, insert, 'e5', 'github', 'high', 'denied', 'u1', null, '2026-07-02T02:00:00.000Z');
-      exec(sqlite, insert, 'e6', 'github', 'low', 'executed', null, '2026-06-01 00:00:00', '2026-06-01 00:00:00');
-      exec(sqlite, `INSERT INTO workflow_executions (id, user_id, status, trigger_type, mode, started_at) VALUES ('wx-t2', 'u1', 'completed', 'manual', 'test', '2026-07-02 00:00:00')`);
-      exec(
-        sqlite,
-        `INSERT INTO action_invocations (id, session_id, user_id, workflow_execution_id, service, action_id, risk_level, resolved_mode, status, executed_at, created_at) VALUES ('e7', 's1', 'u1', 'wx-t2', 'slack', 'a', 'low', 'allow', 'executed', '2026-07-02T03:00:00.000Z', '2026-07-02T03:00:00.000Z')`,
-      );
-
-      const rows = await getSideEffectStats(db, START, END);
-      const byKey = new Map(rows.map((r) => [`${r.service}:${r.actionId}`, r]));
-      expect(byKey.get('github:a')).toMatchObject({ executed: 2, humanApproved: 1, highRisk: 1, highRiskGated: 1 });
-      expect(byKey.get('slack:a')).toMatchObject({ executed: 1, humanApproved: 0, highRisk: 0, highRiskGated: 0 });
-      expect(byKey.get('gmail:a')).toMatchObject({ executed: 1, humanApproved: 0, highRisk: 1, highRiskGated: 0 });
-      expect(rows).toHaveLength(3);
-    });
-
-    it('splits the same service by action id', async () => {
-      seedSession(sqlite, { id: 's2', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
-      const insert = `INSERT INTO action_invocations (id, session_id, user_id, service, action_id, risk_level, resolved_mode, status, executed_at, created_at) VALUES (?, 's2', 'u1', 'github', ?, 'low', 'allow', 'executed', ?, ?)`;
-      exec(sqlite, insert, 'sp1', 'create_pull_request', '2026-07-02T00:00:00.000Z', '2026-07-02T00:00:00.000Z');
-      exec(sqlite, insert, 'sp2', 'create_pull_request', '2026-07-02T01:00:00.000Z', '2026-07-02T01:00:00.000Z');
-      exec(sqlite, insert, 'sp3', 'merge_pull_request', '2026-07-02T02:00:00.000Z', '2026-07-02T02:00:00.000Z');
-
-      const rows = await getSideEffectStats(db, START, END);
-      const byKey = new Map(rows.map((r) => [`${r.service}:${r.actionId}`, r.executed]));
-      expect(byKey.get('github:create_pull_request')).toBe(2);
-      expect(byKey.get('github:merge_pull_request')).toBe(1);
     });
   });
 

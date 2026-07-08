@@ -20,7 +20,6 @@ import {
   getAgentPrStats,
   getSessionModelPairs,
   getSandboxSecondsInWindow,
-  getSideEffectStats,
   getSessionSourceStats,
 } from '../lib/db/value-metrics.js';
 import { classifyModelTier, safeRate, computeWindowBounds } from '../lib/value-metrics.js';
@@ -132,7 +131,7 @@ async function computeValueWindow(
   startIso: string,
   endIso: string,
 ): Promise<ValueMetricsWindow> {
-  const [workflows, sessions, escalations, approvals, prs, modelRows, sessionModels, sandboxSeconds, sideEffects, sessionSources] = await Promise.all([
+  const [workflows, sessions, escalations, approvals, prs, modelRows, sessionModels, sandboxSeconds, sessionSources] = await Promise.all([
     getWorkflowResolutionStats(db, startIso, endIso),
     getSessionResolutionStats(db, startIso, endIso),
     getEscalationStats(db, startIso, endIso),
@@ -141,7 +140,6 @@ async function computeValueWindow(
     getUsageByModel(db, startIso, endIso),
     getSessionModelPairs(db, startIso, endIso),
     getSandboxSecondsInWindow(db, startIso, endIso),
-    getSideEffectStats(db, startIso, endIso),
     getSessionSourceStats(db, startIso, endIso),
   ]);
 
@@ -174,15 +172,6 @@ async function computeValueWindow(
     if (classifyModelTier(pair.model) === 'frontier') frontierSessions.add(pair.sessionId);
   }
 
-  let totalSideEffects = 0;
-  let highRiskSideEffects = 0;
-  let highRiskGated = 0;
-  for (const row of sideEffects) {
-    totalSideEffects += row.executed;
-    highRiskSideEffects += row.highRisk;
-    highRiskGated += row.highRiskGated;
-  }
-
   return {
     totalCost,
     resolvedWorkflowRuns: workflows.completed,
@@ -211,10 +200,6 @@ async function computeValueWindow(
     nonFrontierTokenShare: safeRate(nonFrontierTokens, frontierTokens + nonFrontierTokens),
     sessionsWithModelUsage: sessionsWithModels.size,
     frontierFreeSessionShare: safeRate(sessionsWithModels.size - frontierSessions.size, sessionsWithModels.size),
-    sideEffects,
-    totalSideEffects,
-    highRiskSideEffects,
-    highRiskGateCoverage: safeRate(highRiskGated, highRiskSideEffects),
     sessionSources,
   };
 }
