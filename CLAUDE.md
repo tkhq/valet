@@ -484,6 +484,15 @@ This codebase has accumulated `any`, `unknown`, and type assertions (`as`) as sh
 - Commit at logical checkpoints — each phase / sub-task / passing test surface — rather than batching everything into one mega-commit at the end.
 - Keep commit messages succinct. The subject line is one short sentence (≤72 chars); the body, when needed, is a few terse bullet points covering what changed and why. Skip exhaustive enumerations of files, line counts, or test totals — `git log` and the diff already show that. If you find yourself writing a multi-paragraph essay, trim.
 
+### PR Descriptions
+
+A PR body documents one change for a reviewer and for whoever reads `git log` in a year. It is not a status update, a story, or a place to give credit.
+
+- **Describe the change, not the process.** What changed, why, and what a reviewer needs to know (breaking changes, migrations, how it was verified). Leave out how the work unfolded — requests, conversations, dead ends, session play-by-play.
+- **Never name people.** No "per X's request", "as discussed with Y", "thanks to Z", reviewer call-outs, or quotes from Slack/meetings. Provenance belongs in the linked issue; requesting a review is the attribution. This applies to commit messages and PR comments too.
+- **Keep unrelated context out.** Other workstreams, roadmap plans, deprioritized items, team decisions, or anything the diff doesn't touch — if a sentence isn't about this change, cut it.
+- **Stay short.** A few sentences or bullets is the norm. If the body outweighs the diff's complexity, trim it.
+
 ## Common Patterns
 
 ### Adding a new D1 table
