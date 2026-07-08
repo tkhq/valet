@@ -3221,7 +3221,7 @@ function KeyValueEditor({
         </p>
       ) : (
         entries.map(([key, currentValue], index) => (
-          <div key={`${key}-${index}`} className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_auto] gap-2">
+          <div key={index} className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_auto] gap-2">
             <Input value={key} onChange={(event) => setEntry(index, event.target.value, stringifyEditableValue(currentValue))} placeholder="Key" />
             <TemplateTextInput
               value={stringifyEditableValue(currentValue)}
