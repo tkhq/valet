@@ -821,7 +821,7 @@ function summarizeNode(node: WorkflowNode): string {
     case 'trigger':
       return 'Where the workflow starts and what data it receives';
     case 'tool':
-      return trimSummary(node.service && node.action ? `${node.service}.${node.action}` : 'No action configured');
+      return trimSummary(node.service && node.action ? formatToolCall(node.service, node.action) : 'No action configured');
     case 'if':
       return `${node.conditions.length} condition${node.conditions.length === 1 ? '' : 's'}`;
     case 'foreach':
@@ -1347,6 +1347,20 @@ function trimSummary(value: string): string {
 
 function createToolCatalogActionKey(service: string, actionId: string): string {
   return `${service}:${actionId}`;
+}
+
+/**
+ * Render `service.action` for a tool node without double-prefixing.
+ *
+ * Both MCP-derived action ids (minted as `${service}.${tool}` in
+ * `packages/sdk/src/mcp/action-source.ts`) and native plugin action ids
+ * (e.g. `slack.dm_owner`) already carry the service prefix. Naively
+ * concatenating `${service}.${action}` produced doubled labels like
+ * `linear.linear.list_issues` in the workflow editor and trace views.
+ */
+export function formatToolCall(service: string, action: string): string {
+  if (!service || !action) return action || service || '';
+  return action.startsWith(`${service}.`) ? action : `${service}.${action}`;
 }
 
 function getTargetConfiguredInputExpression(node: WorkflowNode): string | undefined {

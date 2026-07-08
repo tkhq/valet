@@ -6,6 +6,7 @@ import { MarkdownContent } from '@/components/chat/markdown/markdown-content';
 import { formatRelativeTime } from '@/lib/format';
 import { cn } from '@/lib/cn';
 import { correctNodeStatusForFinishedExecution } from './workflow-execution-viewer-model';
+import { formatToolCall } from './workflow-editor-model';
 import { ToolPayload } from '@/components/payload/tool-payload';
 
 // ─── Public ──────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ export function TraceNodeCard({
     () => findDefNodeById(definition, node.nodeId),
     [definition, node.nodeId],
   );
-  const toolCall = defNode?.type === 'tool' ? `${defNode.service}.${defNode.action}` : null;
+  const toolCall = defNode?.type === 'tool' ? formatToolCall(defNode.service, defNode.action) : null;
   const summary = describeNodeOutcome(node, output, defNode);
   const isError = status === 'failed' || !!node.error;
 
@@ -359,7 +360,7 @@ function ToolBody({
 }) {
   const o = asObject(output);
   const isTool = defNode?.type === 'tool';
-  const callName = isTool ? `${defNode.service}.${defNode.action}` : null;
+  const callName = isTool ? formatToolCall(defNode.service, defNode.action) : null;
   const params = isTool && defNode.params && Object.keys(defNode.params).length > 0 ? defNode.params : null;
   const hasIterations = Array.isArray(iterations) && iterations.length > 0;
 
@@ -1047,7 +1048,7 @@ function describeNodeOutcome(node: ExecutionNode, output: unknown, defNode: Work
       return 'Generated response';
     }
     case 'tool': {
-      const callName = defNode && defNode.type === 'tool' ? `${defNode.service}.${defNode.action}` : null;
+      const callName = defNode && defNode.type === 'tool' ? formatToolCall(defNode.service, defNode.action) : null;
       if (o) {
         // Sheets append/clear: summarize updates.
         const u = asObject(o.updates);

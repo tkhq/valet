@@ -48,6 +48,11 @@ vi.mock('../../lib/db/channels.js', () => ({
   getUserIdentityLinks: (...args: unknown[]) => getUserIdentityLinksMock(...args),
 }));
 
+const listMcpToolCacheMock = vi.fn();
+vi.mock('../../lib/db/mcp-tool-cache.js', () => ({
+  listMcpToolCache: (...args: unknown[]) => listMcpToolCacheMock(...args),
+}));
+
 vi.mock('../approvals.js', () => ({
   waitForApprovalEvent: (...args: unknown[]) => waitForApprovalEventMock(...args),
 }));
@@ -107,6 +112,8 @@ beforeEach(() => {
   markFailedMock.mockReset();
   getUserIdentityLinksMock.mockReset();
   getUserIdentityLinksMock.mockResolvedValue([]);
+  listMcpToolCacheMock.mockReset();
+  listMcpToolCacheMock.mockResolvedValue([]);
   isActionDisabledMock.mockResolvedValue(false);
   loadCustomMcpConnectorContextMock.mockResolvedValue({ connectors: new Map() });
   listActionsMock.mockResolvedValue([{ id: 'slack.send_message', riskLevel: 'low' }, { id: 'slack.test', riskLevel: 'low' }, { id: 'gmail.send', riskLevel: 'medium' }, { id: 'sheets.clear_range', riskLevel: 'medium' }, { id: 'unknown.x', riskLevel: 'low' }, { id: 'unknown.y', riskLevel: 'low' }]);
@@ -151,6 +158,38 @@ describe('executeTool', () => {
     listActionsMock.mockResolvedValue([{ id: 'something_else', riskLevel: 'low' }]);
     const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
     await expect(executeTool(args(node))).rejects.toThrow(/not found in slack package/);
+  });
+
+  it('preflight falls back to mcp_tool_cache when listActions returns empty (TKAI-172)', async () => {
+    // Simulates an MCP-backed action source: `listActions()` returns `[]`
+    // because no credential context is threaded through the workflow
+    // preflight. Without the cache fallback the executor throws
+    // `action "linear.list_issues" not found in linear package` and
+    // every MCP tool node fails. With the cache-fallback in place the
+    // preflight resolves via mcp_tool_cache and execution proceeds.
+    listActionsMock.mockResolvedValue([]);
+    listMcpToolCacheMock.mockResolvedValue([
+      { service: 'linear', actionId: 'linear.list_issues', name: 'list_issues', description: '', riskLevel: 'low' },
+    ]);
+    executeMock.mockResolvedValue({ success: true, data: { issues: [] } });
+    const node: ToolNode = {
+      id: 't', type: 'tool', service: 'linear', action: 'linear.list_issues', params: {},
+    };
+    const out = await executeTool(args(node));
+    expect(out).toEqual({ issues: [] });
+    expect(listMcpToolCacheMock).toHaveBeenCalledWith(expect.anything(), 'linear');
+    expect(executeMock).toHaveBeenCalledWith('linear.list_issues', {}, expect.anything());
+  });
+
+  it('preflight still throws when both listActions and mcp_tool_cache miss (TKAI-172)', async () => {
+    listActionsMock.mockResolvedValue([]);
+    listMcpToolCacheMock.mockResolvedValue([
+      { service: 'linear', actionId: 'linear.other', name: 'other', description: '', riskLevel: 'low' },
+    ]);
+    const node: ToolNode = {
+      id: 't', type: 'tool', service: 'linear', action: 'linear.list_issues', params: {},
+    };
+    await expect(executeTool(args(node))).rejects.toThrow(/not found in linear package/);
   });
 
   it('fails when the action-policy resolves to denied', async () => {

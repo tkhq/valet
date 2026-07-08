@@ -28,6 +28,7 @@ import { getDb } from '../../lib/drizzle.js';
 import { invokeWorkflowAction, markExecuted, markFailed } from '../../services/actions.js';
 import { buildActionCredentials } from '../../services/credentials.js';
 import { updateInvocationStatus } from '../../lib/db/actions.js';
+import { listMcpToolCache } from '../../lib/db/mcp-tool-cache.js';
 import { getUserIdentityLinks } from '../../lib/db/channels.js';
 import { waitForApprovalEvent } from '../approvals.js';
 import { setExecutionStatus } from '../execution-status.js';
@@ -61,7 +62,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   // re-reading D1 or re-listing integration actions.
   const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, async () => {
     if (await isActionDisabled(db, node.service, node.action)) {
-      throw new Error(`tool node "${node.id}": action ${node.service}.${node.action} is disabled`);
+      throw new Error(`tool node "${node.id}": action ${formatToolCallLabel(node.service, node.action)} is disabled`);
     }
     const customCtx = await loadCustomMcpConnectorContext(env, db);
     const source = integrationRegistry.getActions(node.service, customCtx);
@@ -70,10 +71,24 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     }
     const defs = await source.listActions();
     const def = defs.find((a) => a.id === node.action);
-    if (!def) {
-      throw new Error(`tool node "${node.id}": action "${node.action}" not found in ${node.service} package`);
+    if (def) {
+      return JSON.stringify({ riskLevel: def.riskLevel ?? 'medium' });
     }
-    return JSON.stringify({ riskLevel: def.riskLevel ?? 'medium' });
+    // MCP action sources return `[]` when no credential context is
+    // threaded through (see packages/sdk/src/mcp/action-source.ts:59-66).
+    // The workflow preflight doesn't resolve credentials yet — that
+    // happens further down after the invocation row is created — so
+    // every MCP tool node would throw "action not found" here. Fall
+    // back to the mcp_tool_cache (populated on interactive listing and
+    // by the catalog endpoint) to recover the risk level without
+    // touching the remote MCP server. Mirrors how the catalog route
+    // mixes live + cache in packages/worker/src/routes/integrations.ts.
+    const cached = await listMcpToolCache(db, node.service);
+    const cachedEntry = cached.find((entry) => entry.actionId === node.action);
+    if (cachedEntry) {
+      return JSON.stringify({ riskLevel: cachedEntry.riskLevel ?? 'medium' });
+    }
+    throw new Error(`tool node "${node.id}": action "${node.action}" not found in ${node.service} package`);
   });
   const preflight = JSON.parse(preflightJson) as { riskLevel: string };
 
@@ -376,5 +391,15 @@ function isAuthFailure(result: ActionResult): boolean {
   return !result.success &&
     typeof result.error === 'string' &&
     /\b(401|unauthorized|invalid.credentials|token.*expired|token.*revoked)\b/i.test(result.error);
+}
+
+// Render `service.action` without double-prefixing. Mirrors the
+// client-side `formatToolCall` in workflow-editor-model.ts. Both MCP
+// action ids and native plugin action ids already carry the service
+// prefix; naively concatenating produced "linear.linear.list_issues"
+// in operator-facing error messages.
+function formatToolCallLabel(service: string, action: string): string {
+  if (!service || !action) return action || service || '';
+  return action.startsWith(`${service}.`) ? action : `${service}.${action}`;
 }
 
