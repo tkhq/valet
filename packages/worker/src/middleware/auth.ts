@@ -27,6 +27,13 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env; Variables: Varia
   if (/^\/api\/triggers\/[^/]+\/webhook$/.test(url.pathname)) {
     return next();
   }
+  // Slack per-user OAuth callback: Slack redirects the browser here with no
+  // Authorization header (Valet auth is bearer-token, not cookie-based). The
+  // user's identity is carried by the HMAC-signed `state` param and verified
+  // inside the handler.
+  if (url.pathname === '/api/me/slack-user/oauth/callback') {
+    return next();
+  }
 
   // Extract bearer token from Authorization header, WebSocket subprotocol, or legacy ?token= query param
   const bearerToken = extractBearerToken(c.req.raw);

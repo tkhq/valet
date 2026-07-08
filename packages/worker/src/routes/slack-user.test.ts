@@ -8,6 +8,7 @@ import { credentials as credentialsTable } from '../lib/schema/index.js';
 import { encryptStringPBKDF2 } from '../lib/crypto.js';
 import { signOAuthState, verifyOAuthState } from '../lib/oauth-state.js';
 import { slackUserOAuthRouter } from './slack-user.js';
+import { SLACK_USER_SCOPES } from '@valet/plugin-slack-user/actions';
 import type { AppDb } from '../lib/drizzle.js';
 
 const holder = vi.hoisted(() => ({
@@ -174,6 +175,45 @@ describe('GET /oauth/callback', () => {
       expect(metadata.slack_user_id).toBe('U123');
       expect(metadata.team_id).toBe('T1');
       expect(metadata.team_name).toBe('Test Workspace');
+    } finally {
+      restore();
+    }
+  });
+
+  it('resolves the user from the signed state even when the request is unauthenticated', async () => {
+    // Slack redirects the browser here with no Authorization header, so no
+    // `user` is set in context. Identity must come from the signed state alone.
+    const appNoAuth = new Hono<{ Bindings: Env; Variables: Variables }>();
+    appNoAuth.onError(errorHandler);
+    appNoAuth.use('*', async (c, next) => {
+      c.set('db', db);
+      c.set('requestId', 'req-slack-user-test');
+      await next();
+    });
+    appNoAuth.route('/', slackUserOAuthRouter);
+
+    const state = await signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId: USER_ID });
+    const restore = mockOauthV2Access({
+      ok: true,
+      authed_user: { id: 'U123', access_token: 'xoxp-real', scope: SLACK_USER_SCOPES.join(',') },
+      team: { id: 'T1', name: 'Test Workspace' },
+    });
+    try {
+      const res = await appNoAuth.request(
+        `https://api.example.com/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+        { method: 'GET', redirect: 'manual' },
+        env,
+      );
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe(
+        'https://app.example.com/integrations?slack_user=linked',
+      );
+      const row = await db
+        .select()
+        .from(credentialsTable)
+        .where(eq(credentialsTable.provider, 'slack-user'))
+        .get();
+      expect((row as { ownerId: string }).ownerId).toBe(USER_ID);
     } finally {
       restore();
     }

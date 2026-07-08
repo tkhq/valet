@@ -156,13 +156,13 @@ slackUserOAuthRouter.post('/oauth/start', async (c) => {
  * persist the user's xoxp token + metadata, then redirect to
  * /integrations?slack_user=linked (or =error / =error&reason=already_linked).
  *
- * NOTE: this is intentionally authenticated by the auth middleware that
- * guards all /api/* routes; the user must be logged in for the cookie/session
- * to carry through the redirect roundtrip. (Slack will hit this endpoint via
- * the browser, so the auth cookie is sent automatically.)
+ * NOTE: this route is exempt from the /api/* bearer-auth middleware (see
+ * middleware/auth.ts). Slack redirects the browser here with no Authorization
+ * header, and Valet has no auth cookie to fall back on. Identity is instead
+ * carried by the HMAC-signed `state` param and verified below — that signature
+ * (minted with ENCRYPTION_KEY, short expiry) is the proof this callback trusts.
  */
 slackUserOAuthRouter.get('/oauth/callback', async (c) => {
-  const user = c.get('user');
   const code = c.req.query('code');
   const state = c.req.query('state');
 
@@ -181,7 +181,10 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
 
   const payload = await verifyOAuthState(c.env.ENCRYPTION_KEY, SLACK_USER_PROVIDER, state);
   if (!payload) return errorRedirect('invalid_state');
-  if (payload.userId !== user.id) return errorRedirect('user_mismatch');
+  // The signed state carries the initiating user's id — it is the identity
+  // proof for this callback (the request itself is unauthenticated).
+  const userId = typeof payload.userId === 'string' ? payload.userId : '';
+  if (!userId) return errorRedirect('invalid_state');
 
   // Exchange the code for an xoxp token (authed_user.access_token).
   let tokenResult: {
@@ -226,7 +229,7 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
   for (const s of requested) if (!granted.has(s)) missing.push(s);
   if (missing.length > 0) {
     console.warn(
-      `[slack-user] OAuth returned missing scopes for user=${user.id}: ${missing.join(',')}`,
+      `[slack-user] OAuth returned missing scopes for user=${userId}: ${missing.join(',')}`,
     );
     return errorRedirect('missing_scopes');
   }
@@ -235,7 +238,7 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
   // Valet user. Reconnect by the same user → upsert + refresh.
   if (slackUserId) {
     const existing = await findExistingSlackUserLink(c.env, c.get('db'), slackUserId);
-    if (existing && existing.userId !== user.id) {
+    if (existing && existing.userId !== userId) {
       return errorRedirect('already_linked');
     }
   }
@@ -243,7 +246,7 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
   await storeCredential(
     c.env,
     'user',
-    user.id,
+    userId,
     SLACK_USER_PROVIDER,
     { access_token: accessToken },
     {
