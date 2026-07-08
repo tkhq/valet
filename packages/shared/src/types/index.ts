@@ -1360,6 +1360,61 @@ export interface AnalyticsEventsResponse {
   period: number;
 }
 
+/**
+ * One window of outcome/value metrics for the admin "Value" tab. The route
+ * returns the trailing window plus the equal-length window before it so the
+ * client can render deltas. All rates are 0–1 fractions; null means the
+ * denominator was empty for the window.
+ */
+export interface ValueMetricsWindow {
+  // Cost per resolved task
+  totalCost: number | null;
+  resolvedWorkflowRuns: number;
+  resolvedSessions: number;
+  resolvedTasks: number;
+  costPerResolvedTask: number | null;
+  // Accepted output (proxy: explicit approval decisions)
+  approvalsAccepted: number;
+  approvalsDenied: number;
+  approvalsExpired: number;
+  acceptedOutputRate: number | null;
+  // Rework & escalation
+  reworkSessions: number;
+  escalationMessages: number;
+  endedSessions: number;
+  failedWorkflowRuns: number;
+  terminalWorkflowRuns: number;
+  reworkEscalationRate: number | null;
+  // Cycle time (proxy: absolute time-to-resolution, no pre-Valet baseline)
+  medianSessionMinutes: number | null;
+  medianWorkflowMinutes: number | null;
+  // Review burden (proxy: agent-authored PR outcomes)
+  prsOpened: number;
+  prsMerged: number;
+  prsClosedUnmerged: number;
+  prsStillOpen: number;
+  prMergeRate: number | null;
+  medianHoursToMerge: number | null;
+  // Model-routing efficiency. Unknown-tier tokens are excluded from the
+  // share so unclassified model names cannot inflate it.
+  unknownTokens: number;
+  nonFrontierTokenShare: number | null;
+  sessionsWithModelUsage: number;
+  frontierFreeSessionShare: number | null;
+  // What ended sessions were started from (session_git_state.source_type;
+  // 'none' = no git context)
+  sessionSources: Array<{
+    sourceType: string;
+    sessions: number;
+  }>;
+}
+
+export interface AnalyticsValueResponse {
+  current: ValueMetricsWindow;
+  previous: ValueMetricsWindow;
+  period: number;
+}
+
 // Plugin types
 export interface OrgPlugin {
   id: string;
