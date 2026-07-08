@@ -1378,13 +1378,13 @@ export interface ValueMetricsWindow {
   approvalsDenied: number;
   approvalsExpired: number;
   acceptedOutputRate: number | null;
-  // Rework & escalation
-  reworkSessions: number;
-  escalationMessages: number;
+  // Session errors (recomputed live from current session status; the
+  // agent-mailbox escalation signal was retired with the mailbox)
+  erroredSessions: number;
   endedSessions: number;
   failedWorkflowRuns: number;
   terminalWorkflowRuns: number;
-  reworkEscalationRate: number | null;
+  sessionErrorRate: number | null;
   // Cycle time (proxy: absolute time-to-resolution, no pre-Valet baseline)
   medianSessionMinutes: number | null;
   medianWorkflowMinutes: number | null;
