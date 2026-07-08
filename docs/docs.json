@@ -131,6 +131,7 @@
               "product/integrations/pylon",
               "product/integrations/sentry",
               "product/integrations/slack",
+              "product/integrations/slack-personal",
               "product/integrations/socket",
               "product/integrations/stripe",
               "product/integrations/turnkey-docs",

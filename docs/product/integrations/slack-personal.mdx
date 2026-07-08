@@ -1,0 +1,205 @@
+---
+title: Slack (personal)
+description: Act on Slack as yourself — search, read, and post using your own Slack identity via a per-user OAuth token.
+---
+
+Act on Slack as yourself — search, read, and post using your own Slack identity via a per-user OAuth token.
+
+This integration is **distinct from the [Slack](/product/integrations/slack) bot integration**. The bot integration acts as the workspace bot using an org-level token; this one acts **as you**, using a personal Slack user token (`xoxp`) obtained through OAuth. Each user connects their own account, and actions run against the full surface *your* Slack account can see — including private channels and DMs you are a member of.
+
+<Note>
+Use the bot integration for the agent's own outbound communication. Use this personal integration only when you have explicitly delegated a task to be done *as you* (e.g. "post this update to #proj as me"). The two live side by side on the **Integrations** page as separate cards.
+</Note>
+
+## Connection summary
+
+| Field | Value |
+| --- | --- |
+| Service slug | `slack-user` |
+| Display name | Slack (personal) |
+| Auth type | `oauth2` |
+| Credential scope | `user` (each user connects their own account) |
+| Supported entities | `channels`, `messages`, `users`, `profile` |
+
+## Setup
+
+Personal OAuth — each user connects their own Slack account from the **Integrations** page. Clicking **Connect** on the "Slack (personal)" card starts the Slack OAuth consent flow; on approval, Valet stores your encrypted user token and the tools become available to your orchestrator.
+
+Self-hosters must configure the Slack app once before users can connect:
+
+1. Create a Slack app and enable OAuth with the **User Token Scopes** the plugin requests (search, channel/DM read, `chat:write`, `im:write`/`mpim:write`, profile, reactions, DND, files, pins, bookmarks, reminders, usergroups, emoji).
+2. Register the redirect URL `${API_PUBLIC_URL}/api/me/slack-user/oauth/callback`.
+3. Set the worker secrets `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET`.
+
+If Slack does not grant every requested scope (for example, a workspace admin restricted one), the connect flow refuses to store a partial credential and returns a `missing_scopes` error naming the gap. Adding new scopes later requires each user to reconnect.
+
+## Actions
+
+14 actions are defined for Slack (personal). All write/act-as actions are `high` risk so they route through approval gates by default — see [Approvals](/product/approvals) for what `low`, `medium`, `high`, and `critical` mean at run time.
+
+| Action ID | What it does | Key params | Risk |
+| --- | --- | --- | --- |
+| `slack_user.search_messages` | Search messages across the full surface visible to your Slack account (public + private channels, DMs, group DMs). Returns slim results plus `next_cursor`. | `query`, `sort`?, `sort_dir`?, `count`?, `cursor`?, `highlight`? | low |
+| `slack_user.list_channels` | List channels visible to you (public, private, DMs, group DMs). Private channels you are in are included. | `types`?, `prefix`?, `exclude_archived`?, `limit`? | low |
+| `slack_user.read_history` | Read recent messages from any channel/DM/MPIM you can see, using your personal token. | `channel`, `limit`?, `cursor`?, `oldest`?, `latest`? | low |
+| `slack_user.read_thread` | Read replies in a thread visible to you. | `channel`, `thread_ts`, `limit`?, `cursor`? | low |
+| `slack_user.set_status` | Set your Slack status text + emoji (acts as you via `users.profile.set`). | `status_text`, `status_emoji`?, `status_expiration`? | high |
+| `slack_user.set_dnd` | Turn on Do-Not-Disturb on your account for N minutes. | `num_minutes` | high |
+| `slack_user.end_dnd` | Turn off Do-Not-Disturb on your account. | — | high |
+| `slack_user.send_dm` | Send a DM to a Slack user from your account. Opens the DM channel, then posts. | `user`, `text` | high |
+| `slack_user.post_message` | Post a message to a channel from your account. Only when the user delegates "post this as me." | `channel`, `text`, `thread_ts`?, `blocks`? | high |
+| `slack_user.add_reaction` | Add a reaction to a message as you. | `channel`, `timestamp`, `name` | high |
+| `slack_user.upload_file` | Upload a small file to a channel as you (Slack external upload flow). Text inline or base64 for binary. | `channels`, `filename`, `title`?, `initial_comment`?, `content`?, `content_base64`?, `filetype`? | high |
+| `slack_user.add_pin` | Pin a message to a channel as you. | `channel`, `timestamp` | high |
+| `slack_user.add_bookmark` | Add a link bookmark to a channel as you. | `channel_id`, `title`, `link`, `emoji`? | high |
+| `slack_user.add_reminder` | Create a Slack reminder for you. | `text`, `time` | high |
+
+## Action parameters
+
+### `slack_user.search_messages`
+
+Search Slack messages across the full surface visible to your Slack account (public + private channels, DMs, group DMs you are a member of). Uses `search.messages` with your personal token. Returns slim results plus `next_cursor`.
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `query` | string | Yes | Slack search query. Supports operators like `in:#channel`, `from:@user`, `before:`, `after:`, `has:link`. |
+| `sort` | enum(score,timestamp) | No | Sort order (default `score`). |
+| `sort_dir` | enum(asc,desc) | No | Sort direction (default `desc`). |
+| `count` | number | No | Results per page (1–100, default 20). |
+| `cursor` | string | No | Pagination cursor from a previous response (`next_cursor`). |
+| `highlight` | boolean | No | Whether to highlight matched terms (default false). |
+
+### `slack_user.list_channels`
+
+List channels visible to you on Slack (public, private, DMs, group DMs you are a member of). Uses your personal token, so private channels you are in are included.
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `types` | string | No | Comma-separated Slack channel types: `public_channel,private_channel,im,mpim`. Default: `public_channel,private_channel,mpim,im`. |
+| `prefix` | string | No | Filter channels whose name starts with this prefix (case-insensitive). |
+| `exclude_archived` | boolean | No | Default true. |
+| `limit` | number | No | Max channels per Slack page (default 200). |
+
+### `slack_user.read_history`
+
+Read recent messages from any channel/DM/MPIM you can see on Slack (using your personal token).
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `channel` | string | Yes | Channel ID (`C…`/`G…`/`D…`). |
+| `limit` | number | No | Max messages per page (1–200). |
+| `cursor` | string | No | Pagination cursor from a previous response's `next_cursor`. |
+| `oldest` | string | No | ISO-8601 datetime or Unix seconds. |
+| `latest` | string | No | ISO-8601 datetime or Unix seconds. |
+
+### `slack_user.read_thread`
+
+Read replies in a thread visible to you on Slack.
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `channel` | string | Yes | Channel ID (`C…`/`G…`/`D…`). |
+| `thread_ts` | string | Yes | Parent message timestamp. |
+| `limit` | number | No | Max replies per page (1–200). |
+| `cursor` | string | No | Pagination cursor from a previous response's `next_cursor`. |
+
+### `slack_user.set_status`
+
+Set your Slack status text + emoji (acts as you via `users.profile.set`). Use only when the user has explicitly delegated a status change — this writes to your profile.
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `status_text` | string | Yes | Status text shown next to your name (max 100 chars per Slack). |
+| `status_emoji` | string | No | Emoji with colons (e.g. `:coffee:`). Default empty. |
+| `status_expiration` | number | No | Unix timestamp (seconds) when status should clear; 0 = no expiration. |
+
+### `slack_user.set_dnd`
+
+Turn on Do-Not-Disturb on your Slack account for N minutes (`dnd.setSnooze`).
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `num_minutes` | number | Yes | Number of minutes to snooze notifications. |
+
+### `slack_user.end_dnd`
+
+Turn off Do-Not-Disturb on your Slack account (`dnd.endDnd`). Takes no parameters.
+
+### `slack_user.send_dm`
+
+Send a DM to a Slack user from your account (opens the DM channel via `conversations.open`, then `chat.postMessage`). Use only for explicit user-delegated tasks; the agent's own outbound communication should continue to use the bot integration.
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `user` | string | Yes | Slack user ID (`U…`/`W…`) to DM. |
+| `text` | string | Yes | Message text. |
+
+### `slack_user.post_message`
+
+Post a message to a Slack channel from your account (`chat.postMessage`). Only use when the user explicitly delegates "post this as me."
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `channel` | string | Yes | Channel ID (`C…`/`G…`) or user ID (`U…`) for a DM. |
+| `text` | string | Yes | Message text. Supports Slack mrkdwn formatting. |
+| `thread_ts` | string | No | Post as a threaded reply. |
+| `blocks` | string | No | Block Kit JSON array as a string for rich formatting. |
+
+### `slack_user.add_reaction`
+
+Add a reaction to a message as you on Slack (`reactions.add`).
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `channel` | string | Yes | Channel ID. |
+| `timestamp` | string | Yes | Message timestamp. |
+| `name` | string | Yes | Emoji name without colons (e.g. `thumbsup`). |
+
+### `slack_user.upload_file`
+
+Upload a small file to a Slack channel as you, using Slack's external upload flow (`files.getUploadURLExternal` → upload bytes → `files.completeUploadExternal`). Accepts text content inline; for binary uploads provide base64 in `content_base64`.
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `channels` | string | Yes | Channel ID to share the upload in. If several are given (comma-separated) the file is shared to the first. |
+| `filename` | string | Yes | File name. |
+| `title` | string | No | File title. |
+| `initial_comment` | string | No | Message posted alongside the file. |
+| `content` | string | No | Text content (use either `content` or `content_base64`). |
+| `content_base64` | string | No | Base64-encoded content for non-text uploads. |
+| `filetype` | string | No | Slack filetype short code (e.g. `txt`, `png`). Accepted for compatibility; the external upload flow infers type from the filename. |
+
+### `slack_user.add_pin`
+
+Pin a message to a channel as you (`pins.add`).
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `channel` | string | Yes | Channel ID. |
+| `timestamp` | string | Yes | Message timestamp. |
+
+### `slack_user.add_bookmark`
+
+Add a link bookmark to a channel as you (`bookmarks.add`).
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `channel_id` | string | Yes | Channel ID. |
+| `title` | string | Yes | Bookmark title. |
+| `link` | string (URL) | Yes | Bookmark URL. |
+| `emoji` | string | No | Emoji for the bookmark. |
+
+### `slack_user.add_reminder`
+
+Create a Slack reminder for you (`reminders.add`).
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `text` | string | Yes | Reminder text. |
+| `time` | string | Yes | Slack natural-language time string (`"in 20 minutes"`) or Unix seconds. |
+
+## See also
+
+- [Slack](/product/integrations/slack) — the org-level bot integration that acts as the workspace bot.
+- [Approvals](/product/approvals) — how the `high`-risk act-as actions are gated.
+- [Integrations overview](/product/integrations/overview) — the full catalog.
