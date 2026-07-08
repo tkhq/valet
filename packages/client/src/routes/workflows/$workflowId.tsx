@@ -13,7 +13,16 @@ import {
   useWorkflowVersions,
   useRestoreWorkflowVersion,
 } from '@/api/workflows';
-import { useExecution, useRetryExecution, useWorkflowExecutions } from '@/api/executions';
+import {
+  useCancelExecution,
+  useExecution,
+  useRetryExecution,
+  useWorkflowExecutions,
+} from '@/api/executions';
+import {
+  getCancelButtonState,
+  shouldShowExecutionCancel,
+} from '@/components/workflows/workflow-execution-viewer-model';
 import { VisualWorkflowEditor } from '@/components/workflows/visual-workflow-editor';
 import { CopilotPanel } from '@/components/workflows/copilot-panel';
 import { WorkflowExecutionViewer } from '@/components/workflows/workflow-execution-viewer';
@@ -77,6 +86,7 @@ function WorkflowDetailPage() {
   const updateWorkflow = useUpdateWorkflow();
   const restoreVersion = useRestoreWorkflowVersion();
   const retryExecution = useRetryExecution();
+  const cancelExecution = useCancelExecution();
 
   const workflow = data?.workflow;
   const [editorDefinition, setEditorDefinition] = useState<WorkflowDefinition | null>(null);
@@ -88,6 +98,10 @@ function WorkflowDetailPage() {
   const [versionsDialogOpen, setVersionsDialogOpen] = useState(false);
   const [publishConfirming, setPublishConfirming] = useState(false);
   const [publishSubmitting, setPublishSubmitting] = useState(false);
+  // Two-phase cancel for the workflow-editor Test button row — copied
+  // verbatim from routes/automation/executions/$executionId.tsx. First
+  // click arms, second confirms; auto-disarms after 4s.
+  const [testCancelArmed, setTestCancelArmed] = useState(false);
   // Deep-linked copilot state from the automation landing:
   // `?copilot=open` auto-opens the panel; `?prompt=…` is consumed once
   // by the panel and sent as the first message. Both params get cleared
@@ -132,6 +146,12 @@ function WorkflowDetailPage() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!testCancelArmed) return;
+    const timer = window.setTimeout(() => setTestCancelArmed(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [testCancelArmed]);
 
   if (isLoading) {
     return (
@@ -271,6 +291,34 @@ function WorkflowDetailPage() {
     setManualDialogOpen(true);
   }
 
+  async function handleCancelTestRun() {
+    // Two-phase confirm — first click arms, second click sends the
+    // cancel. The button label swap in the render below makes this
+    // visible to the user.
+    if (!testCancelArmed) {
+      setTestCancelArmed(true);
+      return;
+    }
+    setTestCancelArmed(false);
+    const executionId = selectedExecutionId;
+    if (!executionId) {
+      // Nothing to cancel yet — the test-run mutation hasn't returned an
+      // execution id. This is the "user clicked cancel before the row
+      // was created" case; there's no server-side action we can take.
+      toastError('Cancel unavailable', 'Test run has not started yet — try again in a moment.');
+      return;
+    }
+    try {
+      await cancelExecution.mutateAsync({
+        executionId,
+        data: { reason: 'Cancelled from workflow editor test run' },
+      });
+      toastSuccess('Test run cancelled');
+    } catch (err) {
+      toastError('Cancel failed', err instanceof Error ? err.message : 'unknown error');
+    }
+  }
+
   function handleSaveClick() {
     resetPublishConfirmation();
     if (!editorDefinition) return;
@@ -365,6 +413,17 @@ function WorkflowDetailPage() {
   const publishButton = getPublishButtonState({
     isConfirming: publishConfirming,
     isPending: publishSubmitting || publish.isPending,
+  });
+  // Show Cancel next to Test when a test run is starting up (mutation
+  // pending, no execution row yet) OR when the selected execution is
+  // still active. Lets users bail even during the brief window between
+  // clicking Test and the row appearing.
+  const selectedExecutionRecord = selectedExecution.data?.execution ?? null;
+  const showTestCancel =
+    testRun.isPending || shouldShowExecutionCancel(selectedExecutionRecord);
+  const testCancelButton = getCancelButtonState({
+    armed: testCancelArmed,
+    isPending: cancelExecution.isPending,
   });
 
   return (
@@ -538,6 +597,23 @@ function WorkflowDetailPage() {
           >
             {saveDraft.isPending ? 'Saving...' : 'Save draft'}
           </Button>
+          {showTestCancel && (
+            <Button
+              variant={testCancelButton.variant}
+              onClick={handleCancelTestRun}
+              disabled={cancelExecution.isPending}
+              className={
+                testCancelButton.variant === 'secondary'
+                  ? `hidden border border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800 sm:inline-flex${
+                      testCancelButton.animate ? ' animate-pulse' : ''
+                    }`
+                  : `hidden sm:inline-flex${testCancelButton.animate ? ' animate-pulse' : ''}`
+              }
+              title={selectedExecutionId ? undefined : 'Test run is starting…'}
+            >
+              {testCancelButton.label}
+            </Button>
+          )}
           <Button
             variant="secondary"
             onClick={openManualWorkflowDialog}

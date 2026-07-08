@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { ExecutionApproval, ExecutionNode } from '@/api/executions';
+import type { Execution, ExecutionApproval, ExecutionNode } from '@/api/executions';
 import {
   buildExecutionNodeStateMap,
   buildTraceDetailSections,
+  getCancelButtonState,
   getReadableJsonItemTitle,
   getReadableJsonSummary,
   getReadableJsonTable,
@@ -12,6 +13,7 @@ import {
   getSelectedNodeApproval,
   getSelectedNodeApprovals,
   parseExecutionPayload,
+  shouldShowExecutionCancel,
 } from './workflow-execution-viewer-model';
 
 function trace(partial: Partial<ExecutionNode> & Pick<ExecutionNode, 'id' | 'nodeId' | 'status'>): ExecutionNode {
@@ -230,6 +232,67 @@ describe('workflow execution viewer model', () => {
       totalRows: 2,
       hiddenRows: 0,
       hiddenColumns: 0,
+    });
+  });
+
+  describe('cancel button state (armed double-click)', () => {
+    it('is idle by default', () => {
+      expect(getCancelButtonState({ armed: false, isPending: false })).toEqual({
+        label: 'Cancel',
+        variant: 'secondary',
+        animate: false,
+      });
+    });
+
+    it('flips to destructive with pulse when armed', () => {
+      expect(getCancelButtonState({ armed: true, isPending: false })).toEqual({
+        label: 'Click again to confirm',
+        variant: 'destructive',
+        animate: true,
+      });
+    });
+
+    it('shows the pending label while the request is in flight', () => {
+      // Pending should win over armed — the caller disarms before firing
+      // the mutation but the race between disarm + isPending flipping
+      // true shouldn't briefly show the armed label.
+      expect(getCancelButtonState({ armed: true, isPending: true })).toEqual({
+        label: 'Cancelling…',
+        variant: 'secondary',
+        animate: false,
+      });
+      expect(getCancelButtonState({ armed: false, isPending: true })).toEqual({
+        label: 'Cancelling…',
+        variant: 'secondary',
+        animate: false,
+      });
+    });
+  });
+
+  describe('shouldShowExecutionCancel', () => {
+    it('is false when there is no execution', () => {
+      expect(shouldShowExecutionCancel(null)).toBe(false);
+      expect(shouldShowExecutionCancel(undefined)).toBe(false);
+    });
+
+    it('is true for active statuses', () => {
+      const active: Execution['status'][] = [
+        'pending',
+        'running',
+        'waiting_approval',
+        'waiting_time',
+        'cancelling',
+      ];
+      for (const status of active) {
+        expect(shouldShowExecutionCancel({ status })).toBe(true);
+      }
+    });
+
+    it('is false for terminal statuses', () => {
+      const terminal: Execution['status'][] = ['completed', 'failed', 'cancelled'];
+      for (const status of terminal) {
+        expect(shouldShowExecutionCancel({ status })).toBe(false);
+      }
     });
   });
 

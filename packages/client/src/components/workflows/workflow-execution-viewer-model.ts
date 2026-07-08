@@ -1,7 +1,64 @@
 import type { Execution, ExecutionApproval, ExecutionNode } from '@/api/executions';
 import type { WorkflowNode } from '@valet/shared';
 
+// Mirror of the terminal set from @/api/executions. Duplicated here so
+// the model stays pure — importing @/api/executions at runtime pulls
+// the whole app graph (router, react-query wiring) which breaks
+// node-env vitest resolution. Keep this in sync with
+// TERMINAL_EXECUTION_STATUSES in @/api/executions.ts.
+const TERMINAL_EXECUTION_STATUSES = new Set<Execution['status']>([
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
 export type ExecutionDisplayStatus = ExecutionNode['status'] | 'not_run';
+
+/**
+ * Presentational mapping for the two-phase Cancel button.
+ *
+ * The button lives in three places (execution detail page, execution
+ * viewer summary pane, workflow-editor Test row). The armed-double-click
+ * state itself stays in each caller — this is just the label/variant/
+ * pulse mapping so all three sites render identically and can be unit-
+ * tested without a React renderer.
+ *
+ * States:
+ *   - idle       → 'Cancel', secondary
+ *   - armed      → 'Click again to confirm', destructive, animate
+ *   - pending    → 'Cancelling…', secondary (disabled by caller)
+ */
+export interface CancelButtonState {
+  label: string;
+  variant: 'secondary' | 'destructive';
+  animate: boolean;
+}
+
+export function getCancelButtonState({
+  armed,
+  isPending,
+}: {
+  armed: boolean;
+  isPending: boolean;
+}): CancelButtonState {
+  if (isPending) return { label: 'Cancelling…', variant: 'secondary', animate: false };
+  if (armed) return { label: 'Click again to confirm', variant: 'destructive', animate: true };
+  return { label: 'Cancel', variant: 'secondary', animate: false };
+}
+
+/**
+ * Should the Cancel button be visible for an execution?
+ *
+ * Mirrors the isActiveExecutionStatus check from @/api/executions but
+ * keeps this file free of runtime imports from that module (so the
+ * node-env vitest run can load it without pulling the router + query-
+ * client graph). Callers who don't need a nullable input should still
+ * prefer isActiveExecutionStatus directly.
+ */
+export function shouldShowExecutionCancel(execution: { status: Execution['status'] } | null | undefined): boolean {
+  if (!execution) return false;
+  return !TERMINAL_EXECUTION_STATUSES.has(execution.status);
+}
 
 export function buildExecutionNodeStateMap(nodes: ExecutionNode[]): Map<string, ExecutionNode> {
   const latest = new Map<string, ExecutionNode>();

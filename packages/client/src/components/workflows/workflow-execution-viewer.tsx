@@ -3,6 +3,8 @@ import { Link } from '@tanstack/react-router';
 import type { NodeProps } from '@xyflow/react';
 import { ReactFlowProvider } from '@xyflow/react';
 import type { Execution, ExecutionApproval, ExecutionNode } from '@/api/executions';
+import { useCancelExecution } from '@/api/executions';
+import { toastError, toastSuccess } from '@/hooks/use-toast';
 import type { WorkflowDefinition, WorkflowNode } from '@valet/shared';
 import { Canvas } from '@/components/ai-elements/canvas';
 import { Controls } from '@/components/ai-elements/controls';
@@ -30,6 +32,7 @@ import {
   buildTraceDetailSections,
   formatReadableScalar,
   formatExecutionDuration,
+  getCancelButtonState,
   getExecutionDisplayStatus,
   getNodeParametersForDisplay,
   getReadableJsonItemTitle,
@@ -39,6 +42,7 @@ import {
   getSessionTraceLink,
   isRecord,
   parseExecutionPayload,
+  shouldShowExecutionCancel,
   type ParsedExecutionPayload,
   type ReadableJsonTable,
   type ExecutionDisplayStatus,
@@ -334,6 +338,43 @@ function ExecutionSummaryPane({
   isRetryingExecution?: boolean;
   onClose: () => void;
 }) {
+  const cancel = useCancelExecution();
+
+  // Two-phase cancel — copied verbatim from the execution detail page
+  // (see routes/automation/executions/$executionId.tsx). First click
+  // arms, second confirms. Auto-disarms after 4s so a stray click
+  // doesn't leave the button in a dangerous state.
+  const [cancelArmed, setCancelArmed] = React.useState(false);
+  const isCancelable = shouldShowExecutionCancel(execution);
+  React.useEffect(() => {
+    if (!cancelArmed) return;
+    const timer = window.setTimeout(() => setCancelArmed(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [cancelArmed]);
+  React.useEffect(() => {
+    // Reset when the execution goes terminal — no point staying armed.
+    if (!isCancelable) setCancelArmed(false);
+  }, [isCancelable]);
+
+  const onCancel = async () => {
+    if (!cancelArmed) {
+      setCancelArmed(true);
+      return;
+    }
+    setCancelArmed(false);
+    try {
+      await cancel.mutateAsync({
+        executionId: execution.id,
+        data: { reason: 'Cancelled from workflow editor test run' },
+      });
+      toastSuccess('Execution cancelled');
+    } catch (err) {
+      toastError('Cancel failed', err instanceof Error ? err.message : 'unknown error');
+    }
+  };
+
+  const cancelButton = getCancelButtonState({ armed: cancelArmed, isPending: cancel.isPending });
+
   return (
     <div className="nodrag nopan nowheel absolute bottom-5 right-5 top-5 z-20 flex w-[min(400px,calc(100%-2.5rem))] flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl shadow-neutral-900/15 dark:border-neutral-800 dark:bg-neutral-950 dark:shadow-black/30">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-neutral-200 px-4 py-3 dark:border-neutral-800">
@@ -355,21 +396,40 @@ function ExecutionSummaryPane({
           drawer grew past the viewport and nothing scrolled. */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="space-y-4 p-4">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-2">
             <ExecutionStatusPill status={execution.status} />
-            {onRetryExecution && (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => onRetryExecution(execution.id)}
-                disabled={isRetryingExecution}
-                className="border border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800"
-              >
-                <RetryIcon />
-                {isRetryingExecution ? 'Retrying...' : 'Retry'}
-              </Button>
-            )}
+            <div className="flex items-center gap-2">
+              {isCancelable && (
+                <Button
+                  type="button"
+                  variant={cancelButton.variant}
+                  size="sm"
+                  onClick={onCancel}
+                  disabled={cancel.isPending}
+                  className={cn(
+                    cancelButton.variant === 'secondary' &&
+                      'border border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800',
+                    cancelButton.animate && 'animate-pulse',
+                  )}
+                >
+                  <CancelIcon />
+                  {cancelButton.label}
+                </Button>
+              )}
+              {onRetryExecution && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onRetryExecution(execution.id)}
+                  disabled={isRetryingExecution}
+                  className="border border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800"
+                >
+                  <RetryIcon />
+                  {isRetryingExecution ? 'Retrying...' : 'Retry'}
+                </Button>
+              )}
+            </div>
           </div>
           <div className="space-y-2 text-xs text-neutral-600 dark:text-neutral-400">
             <KeyValue label="Started" value={formatExecutionTimestamp(execution.startedAt)} />
@@ -664,6 +724,16 @@ function RetryIcon() {
     <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M3 12a9 9 0 1 0 3-6.7" />
       <path d="M3 4v6h6" />
+    </svg>
+  );
+}
+
+function CancelIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M15 9l-6 6" />
+      <path d="M9 9l6 6" />
     </svg>
   );
 }
