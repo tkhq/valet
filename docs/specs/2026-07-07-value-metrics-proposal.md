@@ -41,10 +41,19 @@ underlying signal is written reliably on every relevant path.
 
 ## 3. One small emit away
 
-5. **Explicit `session_outcome` event** — emitted at terminal transitions with a reason
-   (user closed / idle timeout / error / escalated). Hardens cost-per-task, separates
-   "abandoned" from "done", and makes time-to-done trustworthy. Cheap: the DO already
-   batch-flushes analytics events.
+5. **Explicit `session_outcome` event** — ✅ **shipped.** Emitted as a `session.outcome`
+   analytics event at every terminal transition in the SessionAgent DO, with
+   `properties.reason ∈ { terminated, hibernated, error, recovery_exhausted }` and an
+   optional `error_code` on the `error`/`recovery_exhausted` paths. Hardens cost-per-task,
+   separates "abandoned" from "done", and makes time-to-done trustworthy. Cheap: the DO
+   already batch-flushes analytics events, so this rides the existing flush.
+   **Consumer semantics:** `hibernated` recurs across a single session's life (hibernate →
+   wake → run → hibernate again is normal), so a session can have several `session.outcome`
+   rows. Consumers must take the **last** outcome per session (by `created_at` / event id):
+   a later wake-and-run supersedes a prior `hibernated`, and a subsequent `terminated` or
+   `error` supersedes everything before it. `recovery_exhausted` is a distinct terminal
+   reason even though it routes through the same `handleStop` termination path as
+   `terminated`.
 6. **Webhook delivery health** — receipt/processing outcome per webhook. Doubles as
    automation debugging and a freshness guarantee for the PR metrics (a stale merge rate
    should look stale, not wrong).

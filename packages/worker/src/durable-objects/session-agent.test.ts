@@ -543,6 +543,7 @@ function createMockCtx() {
       sql,
       setAlarm: vi.fn(),
       getAlarm: vi.fn(),
+      deleteAlarm: vi.fn(),
     },
     blockConcurrencyWhile(fn: () => Promise<void>) {
       initPromise = Promise.resolve(fn());
@@ -731,6 +732,80 @@ describe('SessionAgentDO', () => {
         sandboxAgeMs: twentyFourHoursMs + 30_000,
         modalTimeoutMs: twentyFourHoursMs,
       }),
+    });
+  });
+
+  describe('session.outcome terminal events', () => {
+    it('emits session.outcome { reason: terminated } when a session stops', async () => {
+      const { agent } = await createTestAgent();
+      (agent as any).sessionState.set('status', 'waiting_runner');
+      (agent as any).flushMetrics = vi.fn().mockResolvedValue(undefined);
+      (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+      await (agent as any).handleStop('user_stopped');
+
+      expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+        errorCode: undefined,
+        properties: { reason: 'terminated' },
+      });
+    });
+
+    it('emits session.outcome { reason: recovery_exhausted } when stopped for recovery exhaustion', async () => {
+      const { agent } = await createTestAgent();
+      (agent as any).sessionState.set('status', 'recovering');
+      (agent as any).flushMetrics = vi.fn().mockResolvedValue(undefined);
+      (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+      await (agent as any).handleStop('recovery_exhausted');
+
+      expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+        errorCode: undefined,
+        properties: { reason: 'recovery_exhausted' },
+      });
+    });
+
+    it('routes circuit-breaker exhaustion of a regular session to a recovery_exhausted outcome', async () => {
+      const { agent } = await createTestAgent();
+      // Regular (non-orchestrator) sessions terminate once recovery is exhausted.
+      (agent as any).sessionState.set('sessionId', 'session-regular-1');
+      (agent as any).sessionState.set('status', 'running');
+      (agent as any).sessionState.recoveryAttemptCount = 3; // becomes 4 (> max) after increment
+      (agent as any).flushMetrics = vi.fn().mockResolvedValue(undefined);
+      (agent as any).flushActiveSeconds = vi.fn().mockResolvedValue(undefined);
+      (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+      await (agent as any).performRecovery('sandbox_lost');
+
+      expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+        errorCode: undefined,
+        properties: { reason: 'recovery_exhausted' },
+      });
+    });
+
+    it('emits session.outcome { reason: error, errorCode } on first-time spawn failure', async () => {
+      const { agent } = await createTestAgent();
+      (agent as any).sessionState.set('sessionId', 'session-regular-1');
+      (agent as any).sessionState.set('status', 'initializing');
+      (agent as any).sessionState.recoveryAttemptCount = 0; // not a recovery spawn — hard error
+      (agent as any).lifecycle.spawnSandbox = vi.fn().mockRejectedValue(new Error('boom'));
+
+      await (agent as any).spawnSandbox('https://backend/create-session', { sessionId: 'session-regular-1' });
+
+      expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+        errorCode: 'sandbox_spawn_failed',
+        properties: { reason: 'error' },
+      });
+    });
+
+    it('emitSessionOutcome passes reason and errorCode straight through to emitEvent', async () => {
+      const { agent } = await createTestAgent();
+
+      (agent as any).emitSessionOutcome('error', 'hibernate_failed');
+
+      expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+        errorCode: 'hibernate_failed',
+        properties: { reason: 'error' },
+      });
     });
   });
 

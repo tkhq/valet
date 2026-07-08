@@ -4629,6 +4629,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      this.emitSessionOutcome('error', 'sandbox_spawn_failed');
       const errId = crypto.randomUUID();
       this.messageStore.writeMessage({
         id: errId,
@@ -4760,6 +4761,10 @@ export class SessionAgentDO {
     });
 
     this.emitAuditEvent('session.terminated', 'Session terminated');
+    // `handleStop` is the funnel for every termination, including recovery
+    // exhaustion (reason 'recovery_exhausted'). Surface that as its own
+    // terminal outcome; all other stop reasons collapse to 'terminated'.
+    this.emitSessionOutcome(reason === 'recovery_exhausted' ? 'recovery_exhausted' : 'terminated');
 
     // Publish session.completed to EventBus
     this.notifyEventBus({
@@ -5891,6 +5896,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      this.emitSessionOutcome('error', 'recover_missing_config');
       this.broadcastToClients({ type: 'status', data: { status: 'error' } });
       this.broadcastToClients({ type: 'error', error: 'Cannot recover: missing spawn configuration' });
       return;
@@ -5991,6 +5997,7 @@ export class SessionAgentDO {
       }
 
       this.emitAuditEvent('session.hibernated', 'Session hibernated');
+      this.emitSessionOutcome('hibernated');
       console.log(`[SessionAgentDO] Session ${sessionId} hibernated, snapshot: ${result.snapshotImageId}`);
       await this.notifyParentEvent(`Child session event: ${sessionId} hibernated.`, { wake: true, childStatus: 'hibernated' });
 
@@ -6033,6 +6040,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      this.emitSessionOutcome('error', 'hibernate_failed');
       const errId = crypto.randomUUID();
       this.messageStore.writeMessage({
         id: errId,
@@ -6065,6 +6073,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      this.emitSessionOutcome('error', 'wake_missing_config');
       this.broadcastToClients({ type: 'status', data: { status: 'error' } });
       this.broadcastToClients({ type: 'error', error: errorText });
       await this.notifyParentEvent(`Child session event: ${sessionId} errored (${errorText}).`, { wake: true, childStatus: 'error' });
@@ -6619,6 +6628,30 @@ export class SessionAgentDO {
         metadata: metadata || null,
         createdAt: new Date().toISOString(),
       },
+    });
+  }
+
+  /**
+   * Emit a `session.outcome` analytics event at a terminal session transition.
+   * One emit per terminal transition (terminated / hibernated / error /
+   * recovery_exhausted).
+   *
+   * Consumer semantics: `hibernated` recurs across a single session's life —
+   * a session can hibernate, wake, run, and hibernate again, so multiple
+   * `session.outcome` rows per session are expected and correct. Consumers
+   * take the LAST outcome per session (by created_at / event id); a later
+   * wake-and-run supersedes a prior `hibernated`, and a subsequent
+   * `terminated`/`error` supersedes everything before it. `recovery_exhausted`
+   * is a distinct terminal reason even though it routes through the same
+   * termination path as `terminated`.
+   */
+  private emitSessionOutcome(
+    reason: 'terminated' | 'hibernated' | 'error' | 'recovery_exhausted',
+    errorCode?: string,
+  ): void {
+    this.emitEvent('session.outcome', {
+      errorCode,
+      properties: { reason },
     });
   }
 
