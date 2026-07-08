@@ -65,6 +65,7 @@ import {
   markSessionsArchived,
   getTrackedGitHubResources,
   pruneEmptyJournals,
+  sweepExpiredMemories,
 } from './lib/db.js';
 import { getCredential } from './services/credentials.js';
 import { getDb } from './lib/drizzle.js';
@@ -337,12 +338,30 @@ const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) 
     }
 
     try {
-      const pruned = await pruneEmptyJournals(env.DB);
+      // pruneEmptyJournals is now per-user scoped; sweep every user that has
+      // journal files rather than the old single unscoped query.
+      const userRows = await env.DB
+        .prepare("SELECT DISTINCT user_id FROM orchestrator_memory_files WHERE path LIKE 'journal/%.md'")
+        .all<{ user_id: string }>();
+      let pruned = 0;
+      for (const { user_id } of userRows.results ?? []) {
+        pruned += await pruneEmptyJournals(env.DB, { userId: user_id });
+      }
       if (pruned > 0) {
         console.log(`Pruned ${pruned} empty journal stubs`);
       }
     } catch (error) {
       console.error('Journal prune error:', error);
+    }
+
+    // Expiry sweep: delete expired memory files + their FTS/link rows.
+    try {
+      const swept = await sweepExpiredMemories(env.DB);
+      if (swept > 0) {
+        console.log(`Swept ${swept} expired memory files`);
+      }
+    } catch (error) {
+      console.error('Memory expiry sweep error:', error);
     }
 
     // Delete analytics events older than 90 days (batched to avoid D1 timeout)

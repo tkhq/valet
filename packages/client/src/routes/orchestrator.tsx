@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
+import { createFileRoute, Link, Outlet, useMatch, useNavigate } from '@tanstack/react-router';
 import { PageContainer, PageHeader } from '@/components/layout/page-container';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -13,7 +13,7 @@ import {
   useMemoryFiles,
   useUploadAvatar,
 } from '@/api/orchestrator';
-import { MemoryExplorer } from '@/components/orchestrator/memory-explorer';
+import { MemoryOverviewCard } from '@/components/orchestrator/memory-overview-card';
 import { useAutoRestartOrchestrator } from '@/hooks/use-auto-restart-orchestrator';
 import { useDebounced } from '@/hooks/use-debounced';
 import { useInfiniteSessionChildren, useSessionDoStatus } from '@/api/sessions';
@@ -29,6 +29,12 @@ export const Route = createFileRoute('/orchestrator')({
 
 function OrchestratorPage() {
   const { data: orchInfo, isLoading } = useOrchestratorInfo();
+  // Child route (/orchestrator/memory) renders instead of the dashboard.
+  const childMatch = useMatch({ from: '/orchestrator/memory', shouldThrow: false });
+
+  if (childMatch) {
+    return <Outlet />;
+  }
 
   if (isLoading) {
     return (
@@ -493,7 +499,7 @@ function OrchestratorDashboard() {
 
         {/* Memory Files */}
         <section aria-label="Memory Files">
-          <MemoryExplorer files={memoryFiles ?? []} />
+          <MemoryOverviewCard files={memoryFiles ?? []} />
         </section>
       </div>
     </PageContainer>

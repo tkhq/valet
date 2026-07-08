@@ -26,8 +26,10 @@ Anything not captured here is permanently lost after compaction.
 
 ## Resume Instructions
 When you resume after this compaction, your FIRST action must be:
-1. Call mem_patch to write a journal entry summarizing the above:
-   mem_patch("journal/YYYY-MM-DD.md", [{ op: "append", content: "\\n\\n## [time] — Resumed after compaction\\n[paste Active Work + Artifacts here]" }])
+1. Call mem_patch to write a journal entry summarizing the above, linking every file touched
+   (created, updated, or discovered) this session — the journal is the memory graph's
+   chronological spine, so links here matter as much as the summary:
+   mem_patch("journal/YYYY-MM-DD.md", [{ op: "append", content: "\\n\\n## [time] — Resumed after compaction\\n[paste Active Work + Artifacts here]\\n- **Touched:** [links to files updated this session, e.g. [notes](/projects/x/notes.md)]" }])
 2. Check on any child sessions that were running (use get_session_status)
 3. Then continue whatever was in progress
 
