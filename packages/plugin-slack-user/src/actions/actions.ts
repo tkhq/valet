@@ -212,10 +212,10 @@ const uploadFile: ActionDefinition = {
   id: 'slack_user.upload_file',
   name: 'Upload File (as user)',
   description:
-    'Upload a small file to a Slack channel as YOU (files.upload). Accepts text content inline; for binary uploads provide base64 in `content_base64` and a mimetype.',
+    'Upload a small file to a Slack channel as YOU (external upload flow). Accepts text content inline; for binary uploads provide base64 in `content_base64`.',
   riskLevel: 'high',
   params: z.object({
-    channels: z.string().describe('Comma-separated channel IDs to share the upload in.'),
+    channels: z.string().describe('Channel ID to share the upload in. If several are given (comma-separated) the file is shared to the first.'),
     filename: z.string(),
     title: z.string().optional(),
     initial_comment: z.string().optional(),
@@ -633,41 +633,65 @@ async function executeAction(
         if (p.content && p.content_base64) {
           return { success: false, error: 'Provide only one of `content` or `content_base64`.' };
         }
-        const form = new FormData();
-        form.append('channels', p.channels);
-        form.append('filename', p.filename);
-        if (p.title) form.append('title', p.title);
-        if (p.initial_comment) form.append('initial_comment', p.initial_comment);
-        if (p.filetype) form.append('filetype', p.filetype);
-        if (p.content) {
-          form.append('content', p.content);
-        } else if (p.content_base64) {
-          const bin = atob(p.content_base64);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          form.append('file', new Blob([bytes]), p.filename);
-        }
-        const res = await fetch('https://slack.com/api/files.upload', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-          body: form,
+        // files.upload was sunset by Slack. Current flow:
+        //   1) files.getUploadURLExternal -> { upload_url, file_id }
+        //   2) POST the raw bytes to upload_url
+        //   3) files.completeUploadExternal -> publishes + shares the file
+        // Uint8Array.from yields a fresh ArrayBuffer-backed array (not
+        // ArrayBufferLike), so it satisfies BodyInit without a cast.
+        const bytes = p.content_base64
+          ? Uint8Array.from(atob(p.content_base64), (ch) => ch.charCodeAt(0))
+          : Uint8Array.from(new TextEncoder().encode(p.content ?? ''));
+
+        const urlRes = await slackGet('files.getUploadURLExternal', token, {
+          filename: p.filename,
+          length: bytes.length,
         });
-        if (!res.ok) return readSlackError(res, ctx);
-        const data = (await res.json()) as {
+        if (!urlRes.ok) return readSlackError(urlRes, ctx);
+        const urlData = (await urlRes.json()) as {
           ok: boolean;
           error?: string;
-          file?: { id?: string; permalink?: string };
+          upload_url?: string;
+          file_id?: string;
         };
-        if (!data.ok) {
-          if (isRevokedError(data.error)) {
+        if (!urlData.ok || !urlData.upload_url || !urlData.file_id) {
+          if (isRevokedError(urlData.error)) {
             await maybeClearCredential(ctx);
             return { success: false, error: reconnectError() };
           }
-          return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
+          return { success: false, error: `Slack API error: ${urlData.error || 'get_upload_url_failed'}` };
         }
+
+        const putRes = await fetch(urlData.upload_url, { method: 'POST', body: bytes });
+        if (!putRes.ok) {
+          return { success: false, error: `Slack upload failed: HTTP ${putRes.status}` };
+        }
+
+        const channelId = p.channels.split(',')[0]?.trim();
+        const completeBody: Record<string, unknown> = {
+          files: [p.title ? { id: urlData.file_id, title: p.title } : { id: urlData.file_id }],
+        };
+        if (channelId) completeBody.channel_id = channelId;
+        if (p.initial_comment) completeBody.initial_comment = p.initial_comment;
+
+        const doneRes = await slackFetch('files.completeUploadExternal', token, completeBody);
+        if (!doneRes.ok) return readSlackError(doneRes, ctx);
+        const doneData = (await doneRes.json()) as {
+          ok: boolean;
+          error?: string;
+          files?: Array<{ id?: string; permalink?: string }>;
+        };
+        if (!doneData.ok) {
+          if (isRevokedError(doneData.error)) {
+            await maybeClearCredential(ctx);
+            return { success: false, error: reconnectError() };
+          }
+          return { success: false, error: `Slack API error: ${doneData.error || 'unknown'}` };
+        }
+        const uploaded = doneData.files?.[0];
         return {
           success: true,
-          data: { ok: true, file_id: data.file?.id, permalink: data.file?.permalink },
+          data: { ok: true, file_id: uploaded?.id, permalink: uploaded?.permalink },
         };
       }
 

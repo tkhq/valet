@@ -248,6 +248,56 @@ describe('slack_user.send_dm', () => {
 
 // ─── Action metadata — riskLevel is what drives the policy gate ──────────
 
+describe('slack_user.upload_file', () => {
+  it('runs the external upload flow: getUploadURLExternal → PUT bytes → completeUploadExternal', async () => {
+    mocks.slackGet.mockResolvedValueOnce(
+      slackOk({ upload_url: 'https://files.slack.com/upload/abc', file_id: 'F123' }),
+    );
+    mocks.slackFetch.mockResolvedValueOnce(slackOk({ files: [{ id: 'F123', permalink: 'https://x/F123' }] }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('OK', { status: 200 }));
+
+    try {
+      const result = await slackUserActions.execute(
+        'slack_user.upload_file',
+        { channels: 'C1', filename: 'note.txt', title: 'Note', content: 'hello world', initial_comment: 'fyi' },
+        ctxWithToken(),
+      );
+
+      expect(result.success).toBe(true);
+      // Step 1: reserve URL with the exact UTF-8 byte length.
+      expect(mocks.slackGet).toHaveBeenCalledWith('files.getUploadURLExternal', 'xoxp-fake', {
+        filename: 'note.txt',
+        length: 11,
+      });
+      // Step 2: raw bytes POSTed to the reserved URL.
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://files.slack.com/upload/abc',
+        expect.objectContaining({ method: 'POST' }),
+      );
+      // Step 3: finalize, sharing to the channel with the title + comment.
+      expect(mocks.slackFetch).toHaveBeenCalledWith('files.completeUploadExternal', 'xoxp-fake', {
+        files: [{ id: 'F123', title: 'Note' }],
+        channel_id: 'C1',
+        initial_comment: 'fyi',
+      });
+      expect(result.data).toMatchObject({ ok: true, file_id: 'F123' });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('surfaces the deprecated-method style error from step 1', async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackErr('method_deprecated'));
+    const result = await slackUserActions.execute(
+      'slack_user.upload_file',
+      { channels: 'C1', filename: 'note.txt', content: 'hi' },
+      ctxWithToken(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/method_deprecated/);
+  });
+});
+
 describe('action surface metadata', () => {
   it('exposes slack_user.* actions only (no slack.* leakage)', () => {
     const actions = (slackUserActions.listActions() as Array<{ id: string }>) || [];
