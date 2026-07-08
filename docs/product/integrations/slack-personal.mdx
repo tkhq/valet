@@ -25,11 +25,7 @@ Use the bot integration for the agent's own outbound communication. Use this per
 
 Personal OAuth — each user connects their own Slack account from the **Integrations** page. Clicking **Connect** on the "Slack (personal)" card starts the Slack OAuth consent flow; on approval, Valet stores your encrypted user token and the tools become available to your orchestrator.
 
-Self-hosters must configure the Slack app once before users can connect:
-
-1. Create a Slack app and enable OAuth with the **User Token Scopes** the plugin requests (search, channel/DM read, `chat:write`, `im:write`/`mpim:write`, profile, reactions, DND, files, pins, bookmarks, reminders, usergroups, emoji).
-2. Register the redirect URL `${API_PUBLIC_URL}/api/me/slack-user/oauth/callback`.
-3. Set the worker secrets `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET`.
+Self-hosters configure the Slack app once before users can connect: add the plugin's **User Token Scopes**, register the redirect URL `${API_PUBLIC_URL}/api/me/slack-user/oauth/callback`, set the `SLACK_CLIENT_ID`/`SLACK_CLIENT_SECRET` worker secrets, and reinstall the app. The full step-by-step — including the complete scope list and troubleshooting — is in [Personal (per-user) Slack setup](/slack-setup#personal-per-user-slack-setup).
 
 If Slack does not grant every requested scope (for example, a workspace admin restricted one), the connect flow refuses to store a partial credential and returns a `missing_scopes` error naming the gap. Adding new scopes later requires each user to reconnect.
 
