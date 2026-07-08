@@ -607,18 +607,25 @@ function customConnectorRequiresUserCredential(connector: { authType: string; cr
   return connector.credentialScope === 'user';
 }
 
-function matchesServiceFilter(
+export function matchesServiceFilter(
   service: string,
   filter: string,
   provider?: { displayName?: string; isCustomConnector?: boolean },
 ): boolean {
   const normalizedFilter = filter.trim().toLowerCase();
   if (!normalizedFilter) return true;
-  if (service.toLowerCase() === normalizedFilter) return true;
+  const normalizedService = service.toLowerCase();
+  if (normalizedService === normalizedFilter) return true;
+
+  // Sub-service prefix match: a base-service filter also matches its hyphenated
+  // sub-services, so `slack` returns both `slack` and `slack-user`, and `google`
+  // returns `google-drive`/`google-calendar`/etc. The trailing hyphen keeps this
+  // boundary-aware — `git` does NOT match `github`.
+  if (normalizedService.startsWith(`${normalizedFilter}-`)) return true;
 
   if (!provider?.isCustomConnector) return false;
 
-  return service.toLowerCase().includes(normalizedFilter)
+  return normalizedService.includes(normalizedFilter)
     || (provider.displayName ?? '').toLowerCase().includes(normalizedFilter);
 }
 
