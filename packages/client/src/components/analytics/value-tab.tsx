@@ -142,11 +142,41 @@ const SOURCE_LABELS: Record<string, string> = {
   none: 'No git context',
 };
 
+// "create_pull_request" → "Created pull requests" — the table should read as
+// a plain-English activity log, not internal action ids.
+const ACTION_VERB_PAST: Record<string, string> = {
+  create: 'Created',
+  send: 'Sent',
+  update: 'Updated',
+  delete: 'Deleted',
+  merge: 'Merged',
+  post: 'Posted',
+  add: 'Added',
+  remove: 'Removed',
+  close: 'Closed',
+  open: 'Opened',
+  reply: 'Replied to',
+  archive: 'Archived',
+  request: 'Requested',
+  list: 'Listed',
+};
+
+function humanizeAction(actionId: string, count: number): string {
+  const [verb, ...rest] = actionId.split('_');
+  const past = ACTION_VERB_PAST[verb];
+  if (!past || rest.length === 0) {
+    return actionId.replace(/_/g, ' ');
+  }
+  const object = rest.join(' ');
+  const plural = object.endsWith('s') ? object : `${object}s`;
+  return `${past} ${count === 1 ? object : plural}`;
+}
+
 function SideEffectsTable({ rows }: { rows: ValueMetricsWindow['sideEffects'] }) {
   if (rows.length === 0) {
     return (
       <div className="rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none">
-        <h3 className="label-mono text-neutral-400 mb-4">Side Effects by Service</h3>
+        <h3 className="label-mono text-neutral-400 mb-4">Actions Taken in External Tools</h3>
         <p className="text-sm text-neutral-300">No external actions executed in this window</p>
       </div>
     );
@@ -154,25 +184,25 @@ function SideEffectsTable({ rows }: { rows: ValueMetricsWindow['sideEffects'] })
 
   return (
     <div className="animate-stagger-in rounded-lg border border-neutral-200/80 bg-white p-6 shadow-[0_1px_2px_0_rgb(0_0_0/0.04)] dark:border-neutral-800 dark:bg-surface-1 dark:shadow-none" style={{ animationDelay: '300ms' }}>
-      <h3 className="label-mono text-neutral-400 mb-4">Side Effects by Service</h3>
+      <h3 className="label-mono text-neutral-400 mb-4">Actions Taken in External Tools</h3>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-neutral-100 dark:border-neutral-800">
-              <th className="pb-2 pr-4 text-left font-mono text-2xs font-medium text-neutral-400">Service</th>
-              <th className="pb-2 px-4 text-right font-mono text-2xs font-medium text-neutral-400">Executed</th>
-              <th className="pb-2 px-4 text-right font-mono text-2xs font-medium text-neutral-400">High-risk</th>
-              <th className="pb-2 pl-4 text-right font-mono text-2xs font-medium text-neutral-400">Gated</th>
+              <th className="pb-2 pr-4 text-left font-mono text-2xs font-medium text-neutral-400">Action</th>
+              <th className="pb-2 px-4 text-left font-mono text-2xs font-medium text-neutral-400">Via</th>
+              <th className="pb-2 px-4 text-right font-mono text-2xs font-medium text-neutral-400">Count</th>
+              <th className="pb-2 pl-4 text-right font-mono text-2xs font-medium text-neutral-400">Human-approved</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.service} className="border-b border-neutral-50 last:border-0 dark:border-neutral-800/50">
-                <td className="py-2.5 pr-4 font-medium text-neutral-900 dark:text-neutral-100">{r.service}</td>
+              <tr key={`${r.service}:${r.actionId}`} className="border-b border-neutral-50 last:border-0 dark:border-neutral-800/50">
+                <td className="py-2.5 pr-4 font-medium text-neutral-900 dark:text-neutral-100">{humanizeAction(r.actionId, r.executed)}</td>
+                <td className="py-2.5 px-4 font-mono text-xs text-neutral-600 dark:text-neutral-300">{r.service}</td>
                 <td className="py-2.5 px-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">{r.executed.toLocaleString()}</td>
-                <td className="py-2.5 px-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">{r.highRisk.toLocaleString()}</td>
                 <td className="py-2.5 pl-4 text-right font-mono text-xs tabular-nums text-neutral-600 dark:text-neutral-300">
-                  {r.highRisk > 0 ? formatPercent(r.highRiskGated / r.highRisk) : '—'}
+                  {r.humanApproved > 0 ? `${r.humanApproved} of ${r.executed}` : 'auto-allowed'}
                 </td>
               </tr>
             ))}
@@ -323,7 +353,7 @@ function ValueHeroMetrics({ current, previous }: { current: ValueMetricsWindow; 
         tooltip={
           <MetricHelp
             formula="count(executed action invocations)"
-            numbers={`${current.totalSideEffects} executed, ${current.highRiskSideEffects} high-risk; per-service breakdown below`}
+            numbers={`${current.totalSideEffects} executed, ${current.highRiskSideEffects} high-risk; per-action breakdown below`}
             caveat="Side effects = actions with impact outside Valet (emails, messages, PRs, issues). Test-mode workflow runs excluded."
           />
         }

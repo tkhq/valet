@@ -1317,10 +1317,12 @@ export interface ValueMetricsWindow {
   nonFrontierTokenShare: number | null;
   sessionsWithModelUsage: number;
   frontierFreeSessionShare: number | null;
-  // Side effects: executed external actions (action_invocations)
+  // Side effects: executed external actions (action_invocations), per action
   sideEffects: Array<{
     service: string;
+    actionId: string;
     executed: number;
+    humanApproved: number;
     highRisk: number;
     highRiskGated: number;
   }>;

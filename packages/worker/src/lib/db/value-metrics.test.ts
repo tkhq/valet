@@ -259,11 +259,24 @@ describe('value-metrics db helpers', () => {
       );
 
       const rows = await getSideEffectStats(db, START, END);
-      const byService = new Map(rows.map((r) => [r.service, r]));
-      expect(byService.get('github')).toMatchObject({ executed: 2, highRisk: 1, highRiskGated: 1 });
-      expect(byService.get('slack')).toMatchObject({ executed: 1, highRisk: 0, highRiskGated: 0 });
-      expect(byService.get('gmail')).toMatchObject({ executed: 1, highRisk: 1, highRiskGated: 0 });
+      const byKey = new Map(rows.map((r) => [`${r.service}:${r.actionId}`, r]));
+      expect(byKey.get('github:a')).toMatchObject({ executed: 2, humanApproved: 1, highRisk: 1, highRiskGated: 1 });
+      expect(byKey.get('slack:a')).toMatchObject({ executed: 1, humanApproved: 0, highRisk: 0, highRiskGated: 0 });
+      expect(byKey.get('gmail:a')).toMatchObject({ executed: 1, humanApproved: 0, highRisk: 1, highRiskGated: 0 });
       expect(rows).toHaveLength(3);
+    });
+
+    it('splits the same service by action id', async () => {
+      seedSession(sqlite, { id: 's2', status: 'active', createdAt: '2026-07-01T00:00:00.000Z', lastActiveAt: '2026-07-01T00:00:00.000Z' });
+      const insert = `INSERT INTO action_invocations (id, session_id, user_id, service, action_id, risk_level, resolved_mode, status, executed_at, created_at) VALUES (?, 's2', 'u1', 'github', ?, 'low', 'allow', 'executed', ?, ?)`;
+      exec(sqlite, insert, 'sp1', 'create_pull_request', '2026-07-02T00:00:00.000Z', '2026-07-02T00:00:00.000Z');
+      exec(sqlite, insert, 'sp2', 'create_pull_request', '2026-07-02T01:00:00.000Z', '2026-07-02T01:00:00.000Z');
+      exec(sqlite, insert, 'sp3', 'merge_pull_request', '2026-07-02T02:00:00.000Z', '2026-07-02T02:00:00.000Z');
+
+      const rows = await getSideEffectStats(db, START, END);
+      const byKey = new Map(rows.map((r) => [`${r.service}:${r.actionId}`, r.executed]));
+      expect(byKey.get('github:create_pull_request')).toBe(2);
+      expect(byKey.get('github:merge_pull_request')).toBe(1);
     });
   });
 
