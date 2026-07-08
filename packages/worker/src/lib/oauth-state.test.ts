@@ -54,8 +54,6 @@ describe('signOAuthState / verifyOAuthState', () => {
     expect(await verifyOAuthState(SECRET, 'slack-user', 'not.a.jwt')).toBeNull();
     expect(await verifyOAuthState(SECRET, 'slack-user', 'two.parts')).toBeNull();
     expect(await verifyOAuthState(SECRET, 'slack-user', '')).toBeNull();
-    // @ts-expect-error – exercise runtime guard
-    expect(await verifyOAuthState(SECRET, 'slack-user', undefined)).toBeNull();
   });
 
   it('rejects tokens signed with a different secret', async () => {

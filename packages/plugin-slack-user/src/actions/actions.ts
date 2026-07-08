@@ -1,39 +1,24 @@
 import { z } from 'zod';
 import type { ActionContext, ActionDefinition, ActionResult, ActionSource } from '@valet/sdk';
+import { slimMessage } from '@valet/plugin-slack/actions';
 import { isRevokedError, notConnectedError, reconnectError, slackFetch, slackGet } from './api.js';
 
 // ─── Token + revocation handling ────────────────────────────────────────────
-
-/**
- * Hook the worker invokes (via context) to clear a revoked user credential.
- * Optional — exposed so the worker can pass a callback. When absent we still
- * surface the structured reconnect error; the worker also independently
- * revokes user credentials on 401 paths via its credentials service.
- *
- * The hook is provided by setting `ctx.guardConfig.onRevoked` to an async
- * `() => Promise<void>` from the action invocation site, but in practice the
- * worker's per-user credential resolver also clears tokens on `not_authed`.
- */
-async function maybeClearCredential(ctx: ActionContext): Promise<void> {
-  const guard = ctx.guardConfig as
-    | { onRevoked?: () => Promise<void> | void }
-    | undefined;
-  if (guard?.onRevoked) {
-    try {
-      await guard.onRevoked();
-    } catch {
-      // Non-fatal — the agent still gets the reconnect error.
-    }
-  }
-}
 
 function getUserToken(ctx: ActionContext): string {
   return ctx.credentials.access_token || '';
 }
 
+/**
+ * Parse a Slack error response. On the "credential is permanently invalid"
+ * cases (`token_revoked`, `invalid_auth`, `not_authed`, `account_inactive`),
+ * set `revokeCredential: true` so the executor clears the stored xoxp token
+ * and marks the integration for reconnect — otherwise the row would linger
+ * as `connected: true` in the UI forever.
+ */
 async function readSlackError(
   res: Response,
-  ctx: ActionContext,
+  _ctx: ActionContext,
 ): Promise<ActionResult> {
   let data: { ok?: boolean; error?: string } | undefined;
   try {
@@ -42,8 +27,7 @@ async function readSlackError(
     /* fall through */
   }
   if (data && data.error && isRevokedError(data.error)) {
-    await maybeClearCredential(ctx);
-    return { success: false, error: reconnectError() };
+    return { success: false, error: reconnectError(), revokeCredential: true };
   }
   if (data && data.error) {
     return { success: false, error: `Slack API error: ${data.error}` };
@@ -70,7 +54,11 @@ const searchMessages: ActionDefinition = {
   name: 'Search Messages (as user)',
   description:
     'Search Slack messages across the full surface visible to YOUR Slack account (public + private channels, DMs, group DMs you are a member of). Uses search.messages with your personal token. Returns slim results plus next_cursor.',
-  riskLevel: 'low',
+  // Reads the OWNER's private DMs / private-channel history. In a shared or
+  // agent-driven session anything that reaches the agent (prompt injection,
+  // another participant, a workflow node) could otherwise exfiltrate DMs
+  // silently. `medium` → requires approval; orgs can loosen via policy override.
+  riskLevel: 'medium',
   params: z.object({
     query: z.string().describe('Slack search query. Supports operators like in:#channel, from:@user, before:, after:, has:link.'),
     sort: z.enum(['score', 'timestamp']).optional().describe('Sort order (default score).'),
@@ -105,7 +93,10 @@ const readHistory: ActionDefinition = {
   name: 'Read History (as user)',
   description:
     'Read recent messages from any channel/DM/MPIM YOU can see on Slack (using your personal token). Same shape as the bot equivalent but operates on your full visible surface.',
-  riskLevel: 'low',
+  // Same exfiltration risk as search_messages — this reads the owner's
+  // private DMs / channels. Approval-gated by default; policy override
+  // lets trusted setups loosen it.
+  riskLevel: 'medium',
   params: z.object({
     channel: z.string().describe('Channel ID (C…/G…/D…).'),
     limit: z.number().int().min(1).max(200).optional(),
@@ -119,7 +110,8 @@ const readThread: ActionDefinition = {
   id: 'slack_user.read_thread',
   name: 'Read Thread (as user)',
   description: 'Read replies in a thread visible to YOU on Slack.',
-  riskLevel: 'low',
+  // Threads are just as sensitive as history — same treatment.
+  riskLevel: 'medium',
   params: z.object({
     channel: z.string().describe('Channel ID (C…/G…/D…).'),
     thread_ts: z.string().describe('Parent message timestamp.'),
@@ -296,18 +288,9 @@ function slimSearchMatch(m: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function slimMessage(msg: Record<string, unknown>): Record<string, unknown> {
-  const reply_count = typeof msg.reply_count === 'number' ? msg.reply_count : undefined;
-  return {
-    user: msg.user,
-    bot_id: msg.bot_id || undefined,
-    subtype: msg.subtype || undefined,
-    text: msg.text,
-    ts: msg.ts,
-    thread_ts: msg.thread_ts || undefined,
-    reply_count,
-  };
-}
+// `slimMessage` is shared with plugin-slack — importing keeps file-attachment
+// and reaction extraction consistent across bot + user views. See
+// packages/plugin-slack/src/actions/actions.ts for the definition.
 
 function slimChannel(ch: Record<string, unknown>): Record<string, unknown> {
   const topic = (ch.topic || {}) as Record<string, unknown>;
@@ -361,8 +344,7 @@ async function executeAction(
         };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -399,8 +381,7 @@ async function executeAction(
           };
           if (!data.ok) {
             if (isRevokedError(data.error)) {
-              await maybeClearCredential(ctx);
-              return { success: false, error: reconnectError() };
+              return { success: false, error: reconnectError(), revokeCredential: true };
             }
             return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
           }
@@ -441,8 +422,7 @@ async function executeAction(
         };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -474,8 +454,7 @@ async function executeAction(
         };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -502,8 +481,7 @@ async function executeAction(
         const data = (await res.json()) as { ok: boolean; error?: string };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -517,8 +495,7 @@ async function executeAction(
         const data = (await res.json()) as { ok: boolean; error?: string; snooze_endtime?: number };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -532,8 +509,7 @@ async function executeAction(
         const data = (await res.json()) as { ok: boolean; error?: string };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -551,8 +527,7 @@ async function executeAction(
         };
         if (!openData.ok || !openData.channel?.id) {
           if (isRevokedError(openData.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${openData.error || 'open failed'}` };
         }
@@ -569,8 +544,7 @@ async function executeAction(
         };
         if (!postData.ok) {
           if (isRevokedError(postData.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${postData.error || 'unknown'}` };
         }
@@ -598,8 +572,7 @@ async function executeAction(
         };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -617,8 +590,7 @@ async function executeAction(
         const data = (await res.json()) as { ok: boolean; error?: string };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -656,8 +628,7 @@ async function executeAction(
         };
         if (!urlData.ok || !urlData.upload_url || !urlData.file_id) {
           if (isRevokedError(urlData.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${urlData.error || 'get_upload_url_failed'}` };
         }
@@ -683,8 +654,7 @@ async function executeAction(
         };
         if (!doneData.ok) {
           if (isRevokedError(doneData.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${doneData.error || 'unknown'}` };
         }
@@ -702,8 +672,7 @@ async function executeAction(
         const data = (await res.json()) as { ok: boolean; error?: string };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -728,8 +697,7 @@ async function executeAction(
         };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }
@@ -750,8 +718,7 @@ async function executeAction(
         };
         if (!data.ok) {
           if (isRevokedError(data.error)) {
-            await maybeClearCredential(ctx);
-            return { success: false, error: reconnectError() };
+            return { success: false, error: reconnectError(), revokeCredential: true };
           }
           return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
         }

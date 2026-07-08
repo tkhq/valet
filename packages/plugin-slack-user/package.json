@@ -14,6 +14,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@valet/plugin-slack": "workspace:*",
     "@valet/sdk": "workspace:*",
     "@valet/shared": "workspace:*",
     "zod": "^3.22.4"

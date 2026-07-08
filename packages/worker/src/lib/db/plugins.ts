@@ -137,9 +137,11 @@ export function pluginNameToService(name: string): string {
 }
 
 /**
- * Returns service names for plugins that have been disabled by an admin.
- * Used by SessionAgentDO to block tool discovery and invocation.
- * Names are normalized to service identifiers (hyphens → underscores).
+ * Returns raw plugin names for plugins that have been disabled by an admin
+ * (e.g. `slack`, `slack-user`, `google-workspace`). Kept in *plugin-name*
+ * form (hyphenated) rather than *service* form (underscored) so callers
+ * can decide how to compare against a given service identifier — see
+ * `isServiceDisabledByPlugin` for the matching rules.
  */
 export async function getDisabledPluginServices(
   db: D1Database,
@@ -152,7 +154,31 @@ export async function getDisabledPluginServices(
     )
     .bind(orgId)
     .all();
-  return new Set((result.results || []).map((row: any) => pluginNameToService(row.name as string)));
+  return new Set((result.results || []).map((row: any) => (row.name as string)));
+}
+
+/**
+ * True if `service` (an integration row's `service` column, e.g. `slack-user`
+ * or the underscored `slack_user`) is disabled by any plugin name in
+ * `disabledPluginNames`.
+ *
+ * Compares in a canonical hyphenated form so the disable toggle isn't
+ * silently defeated by naming skew: the integration registry uses
+ * underscored service ids (e.g. `google_workspace`) while D1 stores
+ * hyphenated plugin names (`google-workspace`), and callers may pass
+ * either form. This does NOT cascade parent → sub-service — `slack` and
+ * `slack-user` are distinct plugins with distinct admin toggles.
+ */
+export function isServiceDisabledByPlugin(
+  service: string,
+  disabledPluginNames: Set<string>,
+): boolean {
+  if (disabledPluginNames.size === 0) return false;
+  const normalized = service.replace(/_/g, '-');
+  for (const raw of disabledPluginNames) {
+    if (raw.replace(/_/g, '-') === normalized) return true;
+  }
+  return false;
 }
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────

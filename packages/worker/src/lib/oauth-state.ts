@@ -1,44 +1,18 @@
 /**
  * OAuth state token helpers (HMAC-SHA256, no external deps).
  *
- * Thin domain-typed wrappers around the base64url-JWT primitives in `./jwt.ts`.
- * Where the SandboxJWTPayload shape used by signJWT/verifyJWT is tied to
- * sandbox/session semantics (sub=userId, sid=sessionId), this module signs
- * arbitrary state for per-integration OAuth flows and enforces a matching
- * provider id on verify to prevent cross-provider state confusion (i.e. a
- * state minted for provider A must never validate for provider B).
+ * Thin wrapper on the shared HS256 primitives in `./hmac-jwt.ts`. Where
+ * `signJWT`/`verifyJWT` in `./jwt.ts` are pinned to sandbox/session
+ * semantics (sub=userId, sid=sessionId), this module signs arbitrary
+ * claims for per-integration OAuth flows and pins `sub` to the provider
+ * id — a state minted for provider A must never validate for provider B.
  *
- * Use this for per-user integration OAuth (e.g. slack-user). The login-side
- * OAuth flow in routes/oauth.ts has its own state envelope and continues to
- * use signJWT/verifyJWT directly — this module is intentionally NOT a
- * drop-in replacement for that.
+ * Use this for per-user integration OAuth (e.g. slack-user). The
+ * login-side OAuth flow in `routes/oauth.ts` has its own state envelope
+ * and continues to use `signJWT`/`verifyJWT` directly.
  */
 
-const encoder = new TextEncoder();
-
-function base64UrlEncode(data: Uint8Array): string {
-  let binary = '';
-  for (const byte of data) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function base64UrlDecode(str: string): Uint8Array {
-  const padded = str.replace(/-/g, '+').replace(/_/g, '/');
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-async function getKey(secret: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign', 'verify'],
-  );
-}
+import { signHmacJwt, verifyHmacJwt } from './hmac-jwt.js';
 
 export interface OAuthStateClaims {
   /** Arbitrary claims to embed in the state token (e.g. { userId }). */
@@ -48,7 +22,7 @@ export interface OAuthStateClaims {
 export interface OAuthStatePayload extends OAuthStateClaims {
   /** Provider id the state was minted for (enforced on verify). */
   sub: string;
-  /** Random nonce — defends against replay across concurrent flows. */
+  /** Random nonce — reserved for future replay defence (persist+consume). */
   jti: string;
   /** Issued-at (unix seconds). */
   iat: number;
@@ -61,7 +35,7 @@ export interface OAuthStatePayload extends OAuthStateClaims {
  *
  * @param secret HMAC secret (the worker ENCRYPTION_KEY).
  * @param provider Provider id (becomes `sub`; required on verify).
- * @param claims  Additional claims to embed (e.g. `{ userId }`).
+ * @param claims  Additional claims to embed (e.g. `{ userId, nonceHash }`).
  * @param ttlSeconds State lifetime in seconds (default 600 = 10 min).
  */
 export async function signOAuthState(
@@ -78,14 +52,7 @@ export async function signOAuthState(
     iat: now,
     exp: now + ttlSeconds,
   };
-
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const headerB64 = base64UrlEncode(encoder.encode(JSON.stringify(header)));
-  const payloadB64 = base64UrlEncode(encoder.encode(JSON.stringify(payload)));
-  const signingInput = `${headerB64}.${payloadB64}`;
-  const key = await getKey(secret);
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(signingInput));
-  return `${signingInput}.${base64UrlEncode(new Uint8Array(sig))}`;
+  return signHmacJwt(payload, secret);
 }
 
 /**
@@ -100,33 +67,9 @@ export async function verifyOAuthState(
   provider: string,
   token: string,
 ): Promise<OAuthStatePayload | null> {
-  if (typeof token !== 'string') return null;
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  const [headerB64, payloadB64, sigB64] = parts;
-  const signingInput = `${headerB64}.${payloadB64}`;
-  const key = await getKey(secret);
-  let valid: boolean;
-  try {
-    valid = await crypto.subtle.verify(
-      'HMAC',
-      key,
-      base64UrlDecode(sigB64),
-      encoder.encode(signingInput),
-    );
-  } catch {
-    return null;
-  }
-  if (!valid) return null;
-
-  let payload: OAuthStatePayload;
-  try {
-    payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(payloadB64))) as OAuthStatePayload;
-  } catch {
-    return null;
-  }
-
+  const payload = await verifyHmacJwt<OAuthStatePayload>(token, secret);
+  if (!payload) return null;
   if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) return null;
-  if (payload.sub !== provider) return null; // cross-provider state confusion guard
+  if (payload.sub !== provider) return null;
   return payload;
 }

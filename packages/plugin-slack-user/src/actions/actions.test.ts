@@ -326,15 +326,24 @@ describe('action surface metadata', () => {
     }
   });
 
-  it('marks read actions low-risk', () => {
-    const readIds = [
+  // Message-reading actions default to `medium` (require_approval) — a
+  // shared/agent-driven session with the owner's xoxp token shouldn't be
+  // able to exfiltrate DMs without a human tap. Only list_channels (which
+  // just enumerates channel membership metadata) stays `low`.
+  it('marks message-reading actions medium-risk and channel listing low-risk', () => {
+    const mediumIds = [
       'slack_user.search_messages',
-      'slack_user.list_channels',
       'slack_user.read_history',
       'slack_user.read_thread',
     ];
+    const lowIds = ['slack_user.list_channels'];
     const actions = (slackUserActions.listActions() as Array<{ id: string; riskLevel: string }>) || [];
-    for (const id of readIds) {
+    for (const id of mediumIds) {
+      const a = actions.find((x) => x.id === id);
+      expect(a, `missing action def: ${id}`).toBeDefined();
+      expect(a!.riskLevel).toBe('medium');
+    }
+    for (const id of lowIds) {
       const a = actions.find((x) => x.id === id);
       expect(a, `missing action def: ${id}`).toBeDefined();
       expect(a!.riskLevel).toBe('low');

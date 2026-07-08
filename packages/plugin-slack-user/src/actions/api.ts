@@ -1,69 +1,16 @@
-const SLACK_API = 'https://slack.com/api';
+/**
+ * Slack Web API helpers for the `slack-user` plugin.
+ *
+ * The HTTP client itself (`slackFetch` / `slackGet`, with 429 retry) is
+ * imported from `@valet/plugin-slack/actions` so bug fixes and behavior
+ * changes stay in one place. What lives here is the small user-token
+ * revocation vocabulary that only makes sense for the xoxp flow — the
+ * bot-token side has different failure modes.
+ */
+export { slackFetch, slackGet } from '@valet/plugin-slack/actions';
 
-/** Authenticated POST against the Slack Web API. Retries 429s. */
-export async function slackFetch(
-  method: string,
-  token: string,
-  body?: Record<string, unknown>,
-): Promise<Response> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(`${SLACK_API}/${method}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json; charset=utf-8',
-      },
-      body: body ? JSON.stringify(body) : '{}',
-    });
-
-    if (res.status === 429) {
-      const retryAfter = Number(res.headers.get('Retry-After') || '2');
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
-      continue;
-    }
-
-    return res;
-  }
-
-  return new Response(JSON.stringify({ ok: false, error: 'rate_limited' }), { status: 429 });
-}
-
-/** Authenticated GET against the Slack Web API. Retries 429s. */
-export async function slackGet(
-  method: string,
-  token: string,
-  params?: Record<string, unknown>,
-): Promise<Response> {
-  const url = new URL(`${SLACK_API}/${method}`);
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    }
-  }
-
-  // Slack expects literal commas (not %2C) in CSV params like
-  // types=public_channel,private_channel.
-  const finalUrl = url.toString().replace(/%2C/gi, ',');
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(finalUrl, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (res.status === 429) {
-      const retryAfter = Number(res.headers.get('Retry-After') || '2');
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
-      continue;
-    }
-
-    return res;
-  }
-
-  return new Response(JSON.stringify({ ok: false, error: 'rate_limited' }), { status: 429 });
-}
-
-/** "Token revoked / no longer valid" errors that should clear stored credentials. */
+/** Slack `error` codes that indicate the stored xoxp token is permanently
+ *  invalid and must be cleared from D1 (see ActionResult.revokeCredential). */
 const REVOKED_ERRORS = new Set([
   'token_revoked',
   'invalid_auth',

@@ -74,6 +74,8 @@ export const slackUserProvider: IntegrationProvider = {
   credentialScope: 'user',
   supportedEntities: ['channels', 'messages', 'users', 'profile'],
   oauthScopes: [...SLACK_USER_SCOPES],
+  // Shares the org bot's Slack app credentials — the app manifest declares
+  // both bot scopes and user scopes. See packages/plugin-slack/slack-app-manifest.json.
   oauthEnvKeys: { clientId: 'SLACK_CLIENT_ID', clientSecret: 'SLACK_CLIENT_SECRET' },
 
   validateCredentials(credentials: IntegrationCredentials): boolean {

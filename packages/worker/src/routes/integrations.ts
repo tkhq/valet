@@ -19,7 +19,7 @@ import { integrationRegistry } from '../integrations/registry.js';
 import { revokeCredential } from '../services/credentials.js';
 import { getDb } from '../lib/drizzle.js';
 import { listMcpToolCache } from '../lib/db/mcp-tool-cache.js';
-import { getDisabledPluginServices } from '../lib/db/plugins.js';
+import { getDisabledPluginServices, isServiceDisabledByPlugin } from '../lib/db/plugins.js';
 import {
   getCustomMcpOAuthConfig,
   getCustomMcpOAuthConnector,
@@ -191,7 +191,7 @@ integrationsRouter.get('/', async (c) => {
       createdAt: i.createdAt,
     })),
   ].filter((i) => {
-    if (disabledPlugins.has(i.service)) return false;
+    if (isServiceDisabledByPlugin(i.service, disabledPlugins)) return false;
     if (integrationRegistry.isBuiltinService(i.service)) return true;
     return customContext.connectors.has(i.service);
   });
@@ -251,7 +251,7 @@ integrationsRouter.get('/available', async (c) => {
   }> = packages
     .filter((pkg) => {
       // Skip plugins disabled by admin
-      if (disabledPlugins.has(pkg.service)) return false;
+      if (isServiceDisabledByPlugin(pkg.service, disabledPlugins)) return false;
       // Skip plugins that don't require user authentication
       if (pkg.provider.authType === 'none') return false;
       // MCP OAuth services — always available (dynamic client registration)
@@ -552,7 +552,7 @@ integrationsRouter.get('/:service/oauth', async (c) => {
 
   // Block OAuth flows for disabled plugins
   const disabledPlugins = await getDisabledPluginServices(c.env.DB);
-  if (disabledPlugins.has(service)) {
+  if (isServiceDisabledByPlugin(service, disabledPlugins)) {
     throw new ValidationError(`Integration "${service}" is disabled by your organization.`);
   }
 

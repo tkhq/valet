@@ -59,6 +59,15 @@ export interface ActionResult<T = unknown> {
   error?: string;
   /** Images to inject into the agent's vision context via the image protocol. */
   images?: Array<{ data: string; mimeType: string; description: string }>;
+  /**
+   * Set by a plugin when the upstream provider reports the stored credential
+   * is permanently invalid (e.g. Slack `token_revoked` / `invalid_auth` /
+   * `not_authed`). The worker's executor honors this by clearing the
+   * credential row and marking the integration as needing reconnect —
+   * without this signal a revoked token sits in D1 forever and the
+   * integration UI keeps reporting `connected: true`.
+   */
+  revokeCredential?: boolean;
 }
 
 /** Context passed to listActions for credential-dependent sources (e.g. MCP). */

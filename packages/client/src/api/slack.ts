@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
-import type { UserIdentityLink } from '@valet/shared';
+import type { SlackUserOAuthStatus, UserIdentityLink } from '@valet/shared';
+export type { SlackUserOAuthStatus } from '@valet/shared';
 
 // ─── Query Keys ─────────────────────────────────────────────────────────
 
@@ -127,16 +128,8 @@ export function useUnlinkSlack() {
 //
 // This is a SEPARATE integration from the org Slack bot above. It acts AS the
 // user (search their messages, post as them, set their status, etc.). The bot
-// integration is unchanged. See packages/plugin-slack-user.
-
-export interface SlackUserOAuthStatus {
-  /** True when SLACK_CLIENT_ID/SLACK_CLIENT_SECRET are configured server-side. */
-  oauthAvailable: boolean;
-  connected: boolean;
-  slackUserId: string | null;
-  teamId: string | null;
-  teamName: string | null;
-}
+// integration is unchanged. See packages/plugin-slack-user. The status type
+// lives in @valet/shared so the worker and client agree on the wire shape.
 
 export function useSlackUserOAuthStatus() {
   return useQuery({

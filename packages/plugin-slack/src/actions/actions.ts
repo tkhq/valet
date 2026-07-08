@@ -724,7 +724,13 @@ function slimChannel(ch: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function slimMessage(msg: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Reduce a Slack message payload to the fields the agent actually needs
+ * (skips deleted file tombstones, folds reactions to name+count, drops
+ * unstable per-response fields). Exported so plugin-slack-user can reuse
+ * the same shape — see packages/plugin-slack-user/src/actions/actions.ts.
+ */
+export function slimMessage(msg: Record<string, unknown>): Record<string, unknown> {
   const reply_count = typeof msg.reply_count === 'number' ? msg.reply_count : undefined;
 
   // Extract file metadata (skip deleted/tombstone files)

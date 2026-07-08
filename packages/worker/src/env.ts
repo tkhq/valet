@@ -42,7 +42,13 @@ export interface Env {
   // Example: https://api.example.com
   API_PUBLIC_URL?: string;
 
-  // Slack integration
+  // Slack integration — shared by the org bot (plugin-slack) and the
+  // per-user personal OAuth flow (plugin-slack-user). Both flows use the
+  // same Slack app; the manifest declares both bot and user scopes.
+  // Tradeoff: an admin reinstalling the app sees all declared scopes
+  // (including user scopes) in the approval prompt even if they never
+  // plan to enable personal Slack. Accepted to avoid the operational
+  // cost of two separate Slack apps + two sets of env vars per deploy.
   SLACK_SIGNING_SECRET?: string;
   SLACK_BOT_TOKEN?: string;
   SLACK_CLIENT_ID?: string;

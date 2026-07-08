@@ -1,15 +1,63 @@
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Env, Variables } from '../env.js';
 import { signOAuthState, verifyOAuthState } from '../lib/oauth-state.js';
 import { revokeCredential, storeCredential, hasCredential } from '../services/credentials.js';
 import * as db from '../lib/db.js';
+import { getCredentialRow } from '../lib/db/credentials.js';
 import { credentials as credentialsTable } from '../lib/schema/index.js';
-import { SLACK_USER_SCOPES } from '@valet/plugin-slack-user/actions';
+import { SLACK_USER_SCOPES, slackUserProvider } from '@valet/plugin-slack-user/actions';
+import type { SlackUserOAuthStatus } from '@valet/shared';
 
-const SLACK_API = 'https://slack.com/api';
-const SLACK_AUTHORIZE = 'https://slack.com/oauth/v2/authorize';
 const SLACK_USER_PROVIDER = 'slack-user';
+
+/**
+ * Browser-bound nonce for the OAuth handshake. On /oauth/start we mint a
+ * random nonce, embed its SHA-256 hash in the signed state, and set the raw
+ * nonce as an HttpOnly cookie scoped to /api/me/slack-user/oauth/. On the
+ * callback we require the cookie and that its hash matches the hash carried
+ * in state — this binds the flow to the browser that started it and blocks
+ * the account-linking CSRF where an attacker mints a state for their own
+ * userId and gets a victim to complete Slack consent.
+ *
+ * SameSite=Lax is required (Slack redirects via a top-level GET; Strict
+ * would drop the cookie). Path is scoped tightly so this cookie is never
+ * sent to any other route.
+ */
+const OAUTH_NONCE_COOKIE = 'slack_user_oauth_n';
+// Cookie is set by POST /api/me/slack-user/oauth/start and consumed by
+// GET /auth/slack-user/callback (which is mounted OUTSIDE /api/* so it can
+// run unauthenticated — Slack redirects the browser here with no bearer).
+// Those two paths share no natural prefix, so the cookie is scoped to
+// `/auth/slack-user` (the read side); the browser stores it regardless of
+// which request Set-Cookie came from.
+const OAUTH_NONCE_COOKIE_PATH = '/auth/slack-user';
+const OAUTH_NONCE_TTL_SECONDS = 600;
+
+function b64url(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function randomNonce(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return b64url(bytes);
+}
+
+async function sha256B64Url(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return b64url(new Uint8Array(buf));
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let out = 0;
+  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return out === 0;
+}
 
 /** Default redirect path on the frontend after the OAuth callback finishes. */
 function frontendIntegrationsPath(env: Env, qs: string): string {
@@ -18,58 +66,48 @@ function frontendIntegrationsPath(env: Env, qs: string): string {
 }
 
 /**
- * The Slack OAuth redirect URI MUST be a fixed, registered URL. We use the
- * worker's own /api/me/slack-user/oauth/callback endpoint so the callback runs
- * server-side (cookies stay on the worker origin) and we can redirect to the
- * frontend with a status query string at the end.
+ * The Slack OAuth redirect URI MUST be a fixed, registered URL. We use
+ * /auth/slack-user/callback (mounted at app root, outside /api/*) so the
+ * callback route runs without the shared bearer-auth middleware — Slack
+ * redirects the browser here with no Authorization header. Identity is
+ * carried by the signed state + browser-bound nonce cookie (see below).
  */
 function workerCallbackUrl(env: Env, req: Request): string {
   const url = new URL(req.url);
-  // Prefer the explicit public API origin when configured, otherwise fall back
-  // to the request's own origin. Either way, the path is /api/me/slack-user/oauth/callback.
   const base = env.API_PUBLIC_URL
     ? env.API_PUBLIC_URL.replace(/\/+$/, '')
     : `${url.protocol}//${url.host}`;
-  return `${base}/api/me/slack-user/oauth/callback`;
+  return `${base}/auth/slack-user/callback`;
 }
 
 /**
- * Decrypt and inspect every stored `slack-user` credential row to look for an
- * existing link to the same `slack_user_id`. Returns the row's userId if one
- * is found (so the caller can decide whether it's a same-user reconnect or a
- * cross-user collision).
+ * Look up an existing `slack-user` credential linked to `slackUserId`.
+ * Returns the row's userId if one is found (so the caller can decide
+ * whether it's a same-user reconnect or a cross-user collision).
  *
- * The slack-user table is small (one row per linked user) so this linear
- * scan is acceptable; if it becomes a hot path we'd add an indexed column
- * for slack_user_id at the schema level.
+ * The filter runs at the SQLite layer via `json_extract(metadata,
+ * '$.slack_user_id')` — the row's encrypted `access_token` is never
+ * touched (that lives in the `encrypted_data` blob, not `metadata`). If
+ * this ever becomes hot we'd promote `slack_user_id` to a real indexed
+ * column at the schema level.
  */
 async function findExistingSlackUserLink(
-  env: Env,
-  db: import('../lib/drizzle.js').AppDb,
+  _env: Env,
+  appDb: import('../lib/drizzle.js').AppDb,
   slackUserId: string,
 ): Promise<{ userId: string } | null> {
-  const rows = (await db
-    .select()
+  const row = await appDb
+    .select({ ownerId: credentialsTable.ownerId })
     .from(credentialsTable)
-    .where(eq(credentialsTable.provider, SLACK_USER_PROVIDER))) as Array<{
-    ownerId: string;
-    ownerType: string;
-    metadata: string | null;
-  }>;
-  for (const row of rows) {
-    if (row.ownerType !== 'user') continue;
-    if (!row.metadata) continue;
-    let parsed: { slack_user_id?: string } | null = null;
-    try {
-      parsed = JSON.parse(row.metadata) as { slack_user_id?: string };
-    } catch {
-      continue;
-    }
-    if (parsed?.slack_user_id === slackUserId) {
-      return { userId: row.ownerId };
-    }
-  }
-  return null;
+    .where(
+      and(
+        eq(credentialsTable.provider, SLACK_USER_PROVIDER),
+        eq(credentialsTable.ownerType, 'user'),
+        sql`json_extract(${credentialsTable.metadata}, '$.slack_user_id') = ${slackUserId}`,
+      ),
+    )
+    .get();
+  return row ? { userId: row.ownerId } : null;
 }
 
 // ─── Authenticated User Router (mounted at /api/me/slack-user) ──────────────
@@ -89,13 +127,10 @@ slackUserOAuthRouter.get('/', async (c) => {
   let slackUserId: string | null = null;
   let teamId: string | null = null;
   let teamName: string | null = null;
+  // Read the connected user's own credential row via the indexed lookup
+  // helper — no full-table scan across every user's slack-user rows.
   if (connected) {
-    const row = (await db
-      .select()
-      .from(credentialsTable)
-      .where(eq(credentialsTable.provider, SLACK_USER_PROVIDER))
-      .all()) as Array<{ ownerId: string; metadata: string | null }>;
-    const mine = row.find((r) => r.ownerId === user.id);
+    const mine = await getCredentialRow(db, 'user', user.id, SLACK_USER_PROVIDER);
     if (mine?.metadata) {
       try {
         const parsed = JSON.parse(mine.metadata) as {
@@ -112,13 +147,14 @@ slackUserOAuthRouter.get('/', async (c) => {
     }
   }
 
-  return c.json({
+  const body: SlackUserOAuthStatus = {
     oauthAvailable: !!c.env.SLACK_CLIENT_ID && !!c.env.SLACK_CLIENT_SECRET,
     connected,
     slackUserId,
     teamId,
     teamName,
-  });
+  };
+  return c.json(body);
 });
 
 /**
@@ -133,41 +169,66 @@ slackUserOAuthRouter.post('/oauth/start', async (c) => {
     return c.json({ error: 'Slack OAuth is not configured (SLACK_CLIENT_ID unset).' }, 400);
   }
 
+  // Mint a browser-bound nonce: raw value goes in an HttpOnly cookie, its
+  // SHA-256 hash goes into the signed state. On callback both must match —
+  // that is what ties this OAuth flow to the initiator's browser and blocks
+  // the account-linking CSRF (see OAUTH_NONCE_COOKIE docs above).
+  const nonce = randomNonce();
+  const nonceHash = await sha256B64Url(nonce);
   const state = await signOAuthState(
     c.env.ENCRYPTION_KEY,
     SLACK_USER_PROVIDER,
-    { userId: user.id },
-    600,
+    { userId: user.id, nonceHash },
+    OAUTH_NONCE_TTL_SECONDS,
   );
-  const redirectUri = workerCallbackUrl(c.env, c.req.raw);
-  const params = new URLSearchParams({
-    client_id: c.env.SLACK_CLIENT_ID,
-    redirect_uri: redirectUri,
-    state,
-    scope: '',
-    user_scope: SLACK_USER_SCOPES.join(','),
+  setCookie(c, OAUTH_NONCE_COOKIE, nonce, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    path: OAUTH_NONCE_COOKIE_PATH,
+    maxAge: OAUTH_NONCE_TTL_SECONDS,
   });
-  const authorizeUrl = `${SLACK_AUTHORIZE}?${params}`;
+  const redirectUri = workerCallbackUrl(c.env, c.req.raw);
+  // Delegate URL construction to the provider so `plugin-slack-user` owns
+  // the shape of the authorize URL (scope split, user_scope bundling) —
+  // this route stays a thin transport wrapper. getOAuthUrl is declared
+  // non-optional on IntegrationProvider (see @valet/sdk).
+  const authorizeUrl = slackUserProvider.getOAuthUrl!(
+    { clientId: c.env.SLACK_CLIENT_ID, clientSecret: c.env.SLACK_CLIENT_SECRET },
+    redirectUri,
+    state,
+  );
   return c.json({ authorizeUrl });
 });
 
+// ─── Public Callback Router (mounted at /auth/slack-user) ───────────────────
+//
+// Mounted OUTSIDE /api/* so it does not go through the bearer-auth middleware
+// — Slack redirects the browser here with no Authorization header. Sibling
+// pattern of /auth/github and /github (GitHub App setup callback). Keeping
+// this separate from /api/me/slack-user avoids accumulating per-path
+// exemptions inside the shared auth middleware (regression shape of the
+// prior webhook-401 incident).
+//
+// Identity is carried by the HMAC-signed `state` param + the browser-bound
+// nonce cookie set at /oauth/start.
+
+export const slackUserCallbackRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
+
 /**
- * GET /api/me/slack-user/oauth/callback?code=&state= — Slack redirects here
- * after consent. We verify state, exchange the code via oauth.v2.access,
- * persist the user's xoxp token + metadata, then redirect to
- * /integrations?slack_user=linked (or =error / =error&reason=already_linked).
- *
- * NOTE: this route is exempt from the /api/* bearer-auth middleware (see
- * middleware/auth.ts). Slack redirects the browser here with no Authorization
- * header, and Valet has no auth cookie to fall back on. Identity is instead
- * carried by the HMAC-signed `state` param and verified below — that signature
- * (minted with ENCRYPTION_KEY, short expiry) is the proof this callback trusts.
+ * GET /auth/slack-user/callback?code=&state= — Slack redirects here after
+ * consent. We verify state + cookie nonce, exchange the code via
+ * oauth.v2.access, persist the user's xoxp token + metadata, then redirect
+ * to /integrations?slack_user=linked (or =error / =error&reason=…).
  */
-slackUserOAuthRouter.get('/oauth/callback', async (c) => {
+slackUserCallbackRouter.get('/callback', async (c) => {
   const code = c.req.query('code');
   const state = c.req.query('state');
+  const nonceCookie = getCookie(c, OAUTH_NONCE_COOKIE);
 
+  // Always clear the handshake cookie on the way out — it is single-use.
   const errorRedirect = (reason?: string) => {
+    deleteCookie(c, OAUTH_NONCE_COOKIE, { path: OAUTH_NONCE_COOKIE_PATH });
     const qs = new URLSearchParams({ slack_user: 'error' });
     if (reason) qs.set('reason', reason);
     return c.redirect(frontendIntegrationsPath(c.env, qs.toString()));
@@ -182,44 +243,54 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
 
   const payload = await verifyOAuthState(c.env.ENCRYPTION_KEY, SLACK_USER_PROVIDER, state);
   if (!payload) return errorRedirect('invalid_state');
-  // The signed state carries the initiating user's id — it is the identity
-  // proof for this callback (the request itself is unauthenticated).
+  // The signed state carries the initiating user's id, but the signature
+  // alone is not enough — an attacker could mint a state for their own id
+  // and have a victim complete Slack consent, storing the victim's token
+  // under the attacker's account. The nonce cookie set by /oauth/start
+  // binds this callback to the initiator's browser: if the cookie is
+  // missing or its hash doesn't match the hash in state, the request did
+  // not originate from the browser that started this flow.
   const userId = typeof payload.userId === 'string' ? payload.userId : '';
   if (!userId) return errorRedirect('invalid_state');
+  const expectedHash = typeof payload.nonceHash === 'string' ? payload.nonceHash : '';
+  if (!expectedHash || !nonceCookie) return errorRedirect('user_mismatch');
+  const cookieHash = await sha256B64Url(nonceCookie);
+  if (!timingSafeEqual(cookieHash, expectedHash)) return errorRedirect('user_mismatch');
 
-  // Exchange the code for an xoxp token (authed_user.access_token).
-  let tokenResult: {
-    ok: boolean;
-    error?: string;
-    authed_user?: { id?: string; access_token?: string; scope?: string };
-    team?: { id?: string; name?: string };
+  // Exchange the code via the provider — plugin-slack-user owns the
+  // `oauth.v2.access` shape (JSON parsing, xoxp extraction, team_id +
+  // slack_user_id capture). Keeping it there lets the plugin evolve without
+  // touching the worker route.
+  const redirectUri = workerCallbackUrl(c.env, c.req.raw);
+  let exchanged: {
+    access_token?: string;
+    scope?: string;
+    slack_user_id?: string;
+    team_id?: string;
+    team_name?: string;
   };
   try {
-    const redirectUri = workerCallbackUrl(c.env, c.req.raw);
-    const res = await fetch(`${SLACK_API}/oauth.v2.access`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: c.env.SLACK_CLIENT_ID,
-        client_secret: c.env.SLACK_CLIENT_SECRET,
-        code,
-        redirect_uri: redirectUri,
-      }).toString(),
-    });
-    if (!res.ok) return errorRedirect('oauth_http_error');
-    tokenResult = (await res.json()) as typeof tokenResult;
-  } catch {
-    return errorRedirect('oauth_fetch_error');
+    exchanged = (await slackUserProvider.exchangeOAuthCode!(
+      { clientId: c.env.SLACK_CLIENT_ID, clientSecret: c.env.SLACK_CLIENT_SECRET },
+      code,
+      redirectUri,
+    )) as typeof exchanged;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Best-effort reason extraction: exchangeOAuthCode throws
+    // `oauth.v2.access failed: <slack error>` on API-level failures and
+    // `oauth.v2.access HTTP <code>` on transport failures — pass those
+    // through as the reason so the client mirrors the previous UX.
+    const match = /oauth\.v2\.access failed: (\S+)/.exec(msg);
+    return errorRedirect(match?.[1] || (msg.includes('HTTP') ? 'oauth_http_error' : 'oauth_fetch_error'));
   }
+  if (!exchanged.access_token) return errorRedirect('oauth_failed');
 
-  if (!tokenResult.ok || !tokenResult.authed_user?.access_token) {
-    return errorRedirect(tokenResult.error || 'oauth_failed');
-  }
-  const accessToken = tokenResult.authed_user.access_token;
-  const slackUserId = tokenResult.authed_user.id || '';
-  const teamId = tokenResult.team?.id || '';
-  const teamName = tokenResult.team?.name || '';
-  const grantedScopes = (tokenResult.authed_user.scope || '').split(',').filter(Boolean);
+  const accessToken = exchanged.access_token;
+  const slackUserId = exchanged.slack_user_id || '';
+  const teamId = exchanged.team_id || '';
+  const teamName = exchanged.team_name || '';
+  const grantedScopes = (exchanged.scope || '').split(',').filter(Boolean);
 
   // Validate that Slack returned the scopes we requested. If the workspace
   // admin restricted any of them, surface a structured error and don't store
@@ -261,27 +332,18 @@ slackUserOAuthRouter.get('/oauth/callback', async (c) => {
     },
   );
 
-  // Register the integration row. storeCredential only persists the token, but
-  // the orchestrator enumerates its tool surface from the integrations table
-  // (getUserIntegrations) — without a row here the slack_user.* actions never
-  // appear in list_tools. Upsert to keep reconnects idempotent.
+  // Register the integration row. storeCredential only persists the token,
+  // but the orchestrator enumerates its tool surface from the integrations
+  // table (getUserIntegrations) — without a row here the slack_user.*
+  // actions never appear in list_tools. Uses the atomic upsert
+  // (`onConflictDoUpdate` on userId+service+scope) so concurrent callbacks
+  // can't race into duplicate rows or a pending→active gap.
   const appDb = c.get('db');
-  const existingIntegration = (await db.getUserIntegrations(appDb, userId)).find(
-    (i) => i.service === SLACK_USER_PROVIDER,
-  );
-  if (existingIntegration) {
-    await db.updateIntegrationStatus(appDb, existingIntegration.id, 'active');
-  } else {
-    const integrationId = crypto.randomUUID();
-    await db.createIntegration(appDb, {
-      id: integrationId,
-      userId,
-      service: SLACK_USER_PROVIDER,
-      config: { entities: grantedScopes },
-    });
-    await db.updateIntegrationStatus(appDb, integrationId, 'active');
-  }
+  await db.ensureIntegration(appDb, userId, SLACK_USER_PROVIDER, 'user', {
+    entities: grantedScopes,
+  });
 
+  deleteCookie(c, OAUTH_NONCE_COOKIE, { path: OAUTH_NONCE_COOKIE_PATH });
   return c.redirect(frontendIntegrationsPath(c.env, new URLSearchParams({ slack_user: 'linked' }).toString()));
 });
 
