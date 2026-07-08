@@ -488,6 +488,8 @@ This codebase has accumulated `any`, `unknown`, and type assertions (`as`) as sh
 
 A PR body documents one change for a reviewer and for whoever reads `git log` in a year. It is not a status update, a story, or a place to give credit.
 
+Every PR uses the template at [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) (What / Why / Test plan / Checklist). GitHub only pre-fills it in the web UI — `gh pr create --body` and API calls bypass it — so when filing a PR from the CLI, structure the body on the template explicitly: fill in every section and delete checklist lines that don't apply.
+
 - **Describe the change, not the process.** What changed, why, and what a reviewer needs to know (breaking changes, migrations, how it was verified). Leave out how the work unfolded — requests, conversations, dead ends, session play-by-play.
 - **Never name people.** No "per X's request", "as discussed with Y", "thanks to Z", reviewer call-outs, or quotes from Slack/meetings. Provenance belongs in the linked issue; requesting a review is the attribution. This applies to commit messages and PR comments too.
 - **Keep unrelated context out.** Other workstreams, roadmap plans, deprioritized items, team decisions, or anything the diff doesn't touch — if a sentence isn't about this change, cut it.
