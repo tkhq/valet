@@ -29,6 +29,11 @@ function actionContext(): ActionContext {
   };
 }
 
+function actionContextWithAnalytics(): { ctx: ActionContext; emit: ReturnType<typeof vi.fn> } {
+  const emit = vi.fn();
+  return { ctx: { ...actionContext(), analytics: { emit } }, emit };
+}
+
 describe('resolveToSlackTimestamp', () => {
   it('passes through Unix timestamps unchanged', () => {
     expect(resolveToSlackTimestamp('1774000000')).toBe('1774000000');
@@ -534,6 +539,28 @@ describe('slackActions send_message', () => {
     expect(body.unfurl_links).toBe(true);
     expect(body).not.toHaveProperty('unfurl_media');
   });
+
+  it('emits slack.message_sent with the resolved channel on success', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'C001' }));
+    const { ctx, emit } = actionContextWithAnalytics();
+
+    await slackActions.execute('slack.send_message', { channel: 'C001', text: 'hello' }, ctx);
+
+    expect(emit).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledWith('slack.message_sent', { properties: { channel: 'C001' } });
+  });
+
+  it('does not emit slack.message_sent when Slack rejects the post', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackFailure('channel_not_found'));
+    const { ctx, emit } = actionContextWithAnalytics();
+
+    const result = await slackActions.execute('slack.send_message', { channel: 'C001', text: 'hello' }, ctx);
+
+    expect(result.success).toBe(false);
+    expect(emit).not.toHaveBeenCalled();
+  });
 });
 
 describe('slackActions update_message', () => {
@@ -629,6 +656,36 @@ describe('slackActions update_message', () => {
     expect(result.success).toBe(false);
     expect(mocks.slackFetch).not.toHaveBeenCalled();
   });
+
+  it('emits slack.message_updated on a successful edit', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'C001', text: 'fixed' }));
+    const { ctx, emit } = actionContextWithAnalytics();
+
+    await slackActions.execute('slack.update_message', {
+      channel: 'C001',
+      ts: '1780887543.189519',
+      text: 'fixed',
+    }, ctx);
+
+    expect(emit).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledWith('slack.message_updated', { properties: { channel: 'C001' } });
+  });
+
+  it('does not emit slack.message_updated when the edit is rejected', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackFailure('cant_update_message'));
+    const { ctx, emit } = actionContextWithAnalytics();
+
+    const result = await slackActions.execute('slack.update_message', {
+      channel: 'C001',
+      ts: '1780887543.189519',
+      text: 'nope',
+    }, ctx);
+
+    expect(result.success).toBe(false);
+    expect(emit).not.toHaveBeenCalled();
+  });
 });
 
 describe('slackActions delete_message', () => {
@@ -696,5 +753,33 @@ describe('slackActions delete_message', () => {
 
     expect(result.success).toBe(false);
     expect(mocks.slackFetch).not.toHaveBeenCalled();
+  });
+
+  it('emits slack.message_deleted on a successful delete', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'C001' }));
+    const { ctx, emit } = actionContextWithAnalytics();
+
+    await slackActions.execute('slack.delete_message', {
+      channel: 'C001',
+      ts: '1780887543.189519',
+    }, ctx);
+
+    expect(emit).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledWith('slack.message_deleted', { properties: { channel: 'C001' } });
+  });
+
+  it('does not emit slack.message_deleted when the delete is rejected', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackFailure('cant_delete_message'));
+    const { ctx, emit } = actionContextWithAnalytics();
+
+    const result = await slackActions.execute('slack.delete_message', {
+      channel: 'C001',
+      ts: '1780887543.189519',
+    }, ctx);
+
+    expect(result.success).toBe(false);
+    expect(emit).not.toHaveBeenCalled();
   });
 });

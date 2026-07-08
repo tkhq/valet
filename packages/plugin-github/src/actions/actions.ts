@@ -1069,6 +1069,7 @@ async function executeAction(
             owner: p.owner, repo: p.repo, title: p.title,
             body: finalBody || undefined,
           });
+          ctx.analytics?.emit('github.issue_created', { properties: { repo: p.repo, number: data.number } });
           return { success: true, data };
         } catch (err: any) {
           return handleOctokitError(err, actionId, 'Create issue');
@@ -1306,6 +1307,7 @@ async function executeAction(
             body: finalBody || undefined,
             draft: p.draft,
           });
+          ctx.analytics?.emit('github.pr_created', { properties: { repo: p.repo, number: pr.number, draft: !!pr.draft } });
           return { success: true, data: { number: pr.number, url: pr.html_url, title: pr.title, state: pr.state, draft: pr.draft } };
         } catch (err: any) {
           return handleOctokitError(err, actionId, 'Create pull request');
@@ -1324,6 +1326,9 @@ async function executeAction(
             commit_title: p.commitTitle,
             commit_message: commitMessage,
           });
+          if (data.merged) {
+            ctx.analytics?.emit('github.pr_merged', { properties: { repo: p.repo, number: p.pullNumber } });
+          }
           return { success: true, data: { merged: data.merged, message: data.message, sha: data.sha } };
         } catch (err: any) {
           return handleOctokitError(err, actionId, 'Merge pull request');

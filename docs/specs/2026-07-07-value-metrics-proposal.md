@@ -59,6 +59,23 @@ underlying signal is written reliably on every relevant path.
    should look stale, not wrong).
 7. **Daily sandbox-seconds deltas** — exact windowed compute cost instead of proration.
 
+**Also shipped alongside `session_outcome`: plugin action-outcome signals.** GitHub and
+Slack plugin executors now emit low-cardinality analytics events on their success paths
+(ids/enums/numbers only) via the `ctx.analytics` emitter already threaded through
+`ActionSource.execute`:
+
+- `github.pr_created` `{ repo, number, draft }`, `github.pr_merged` `{ repo, number }`,
+  `github.issue_created` `{ repo, number }`
+- `slack.message_sent` / `slack.message_updated` / `slack.message_deleted` `{ channel }`
+
+These are behavior-signal *foundations*, not a leadership chart — see §5's
+"External-action volume" note: the raw signal is worth having (it corroborates the
+webhook-sourced PR merge rate and gives the reaction-feedback work in §4 a message anchor),
+but a "side effects by service" volume chart was deliberately cut and is not reintroduced
+here. Linear is intentionally **not** instrumented: its actions run through the generic
+remote-MCP passthrough (`McpActionSource`), which has no per-action success branch or typed
+result to source `{ team }` from — see the deferral note in the PR description.
+
 ## 4. Bigger lifts, in rough priority order
 
 8. **True accepted-output rate** — per-message feedback. The high-volume path is Slack:

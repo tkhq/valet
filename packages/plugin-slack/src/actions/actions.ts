@@ -972,6 +972,7 @@ async function executeAction(
         const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
         if (!data.ok) return slackError(res, data);
 
+        ctx.analytics?.emit('slack.message_sent', { properties: { channel: data.channel ?? channelId } });
         return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
       }
 
@@ -1007,6 +1008,7 @@ async function executeAction(
           return slackError(res, data);
         }
 
+        ctx.analytics?.emit('slack.message_updated', { properties: { channel: p.channel } });
         return { success: true, data: { ok: true, ts: data.ts, channel: data.channel, text: data.text } };
       }
 
@@ -1028,6 +1030,7 @@ async function executeAction(
           return slackError(res, data);
         }
 
+        ctx.analytics?.emit('slack.message_deleted', { properties: { channel: p.channel } });
         return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
       }
 
