@@ -734,6 +734,71 @@ describe('SessionAgentDO', () => {
     });
   });
 
+  describe('recovery circuit breaker (TKAI-180)', () => {
+    // Drives the real SessionAgentDO through the incident's recover→ready→die
+    // cycle: performRecovery (real) increments the attempt counter and checks
+    // the breaker; the runner reaching "ready" is simulated by the reset call
+    // the agentStatus:idle handler makes (session-agent.ts). spawnSandbox is
+    // mocked so no Modal sandbox is needed — the recovery logic runs for real.
+    async function armRecovery() {
+      const { agent, sql, waitUntil, broadcasts } = await createTestAgent();
+      (agent as any).sessionState.backendUrl = 'https://backend/create-session';
+      (agent as any).sessionState.spawnRequest = { sessionId: 'orchestrator:user-1' };
+      (agent as any).spawnSandbox = vi.fn().mockResolvedValue(undefined);
+      return { agent, sql, waitUntil, broadcasts };
+    }
+
+    it('REPRO: unconditional reset on every ready pins the breaker at #1 and loops forever', async () => {
+      const { agent } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      // The pre-fix behavior: the fresh runner reaches ready each cycle and
+      // resets unconditionally, so the counter never climbs past 1.
+      for (let i = 0; i < 8; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+        clock += 3_000; // runner connects + reaches ready ~3s later
+        (agent as any).sessionState.resetRecoveryState(); // unconditional (bug)
+        clock += 62_000; // ~grace period later the sandbox is lost again
+      }
+
+      expect((agent as any).sessionState.status).not.toBe('backoff');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBeLessThanOrEqual(1);
+    });
+
+    it('FIX: guarded reset lets a rapid recover→die loop trip into backoff', async () => {
+      const { agent } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      for (let i = 0; i < 8; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+        if ((agent as any).sessionState.status === 'backoff') break;
+        clock += 3_000; // transient readiness — shorter than a recover→die cycle
+        (agent as any).resetRecoveryStateIfStable(); // guarded: won't reset
+        clock += 62_000;
+      }
+
+      // Orchestrator trips to backoff after >3 rapid recoveries instead of looping.
+      expect((agent as any).sessionState.status).toBe('backoff');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBeGreaterThan(3);
+    });
+
+    it('does not penalize a genuinely healthy interval', async () => {
+      const { agent } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      await (agent as any).performRecovery('sandbox_lost');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1);
+
+      // Runner stays up well past a recover→die cycle before the next idle.
+      clock += 5 * 60_000;
+      (agent as any).resetRecoveryStateIfStable();
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
+    });
+  });
+
   it('sends a minimal init payload during client websocket upgrade', async () => {
     const send = vi.fn();
     const serverSocket = { send };

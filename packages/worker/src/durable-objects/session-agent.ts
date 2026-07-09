@@ -364,6 +364,12 @@ export class SessionAgentDO {
   private _activeWorkflowExecutionId: string | undefined;
 
   private static readonly RUNNER_GRACE_PERIOD_MS = 60_000;
+  // A runner reaching "ready" only clears the recovery circuit breaker once it
+  // has outlived a recover→ready→die cycle — i.e. it stayed up longer than the
+  // grace period that would otherwise trigger the next recovery. Without this,
+  // a sandbox that dies ~every grace period resets the breaker each cycle and
+  // the session recovers forever instead of tripping into backoff.
+  private static readonly RECOVERY_STABLE_INTERVAL_MS = 2 * SessionAgentDO.RUNNER_GRACE_PERIOD_MS;
   private static readonly MODAL_SANDBOX_MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
   private static readonly MODAL_SANDBOX_TIMEOUT_EDGE_THRESHOLD_MS =
     SessionAgentDO.MODAL_SANDBOX_MAX_LIFETIME_MS - 5 * 60 * 1000;
@@ -3196,8 +3202,10 @@ export class SessionAgentDO {
             }
 
             // Runner is healthy — reset recovery counters so the circuit breaker
-            // starts fresh for any future sandbox loss.
-            this.sessionState.resetRecoveryState();
+            // starts fresh for any future sandbox loss. Guarded so a transient
+            // recover→ready→die cycle can't reset the breaker every grace period
+            // and loop forever (see resetRecoveryStateIfStable).
+            this.resetRecoveryStateIfStable();
 
             // Revert any processing entries that survived DO eviction.
             // The disconnectRevertTimer is an in-memory setTimeout that is lost
@@ -5761,6 +5769,26 @@ export class SessionAgentDO {
         sessionId,
       },
     });
+  }
+
+  /**
+   * Clear the recovery circuit breaker only when a ready runner reflects a
+   * genuinely healthy interval, not a transient recover→ready→die cycle.
+   *
+   * A runner that reconnects after recovery and then loses its sandbox again a
+   * grace period later would, if it reset unconditionally, keep the breaker
+   * pinned at attempt #1 forever — the session never trips into backoff and
+   * loops indefinitely. So only reset once the runner has been up longer than a
+   * recover→die cycle since the last recovery (or if no recovery has happened).
+   */
+  private resetRecoveryStateIfStable(): void {
+    const lastRecoveryAt = this.sessionState.lastRecoveryAt;
+    const stable =
+      lastRecoveryAt === 0 ||
+      Date.now() - lastRecoveryAt > SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS;
+    if (stable) {
+      this.sessionState.resetRecoveryState();
+    }
   }
 
   /**
