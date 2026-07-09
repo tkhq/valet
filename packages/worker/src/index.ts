@@ -13,6 +13,7 @@ import { sessionsRouter } from './routes/sessions.js';
 import { integrationsRouter } from './routes/integrations.js';
 import { filesRouter } from './routes/files.js';
 import { webhooksRouter } from './routes/webhooks.js';
+import { runDeepHealthProbe } from './routes/health.js';
 import { agentRouter } from './routes/agent.js';
 import { authRouter } from './routes/auth.js';
 import { oauthRouter } from './routes/oauth.js';
@@ -168,6 +169,15 @@ app.use('*', async (c, next) => {
 // Health check (no auth required)
 app.get('/health', (c) => {
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Deep health probe: exercises the critical dependencies (D1, R2, EventBus DO)
+// so an external canary can distinguish "worker up" from "worker up but a
+// backing store is unreachable". Unauthenticated like /health, and exposes
+// nothing beyond a per-check ok flag + latency. 503 if any check fails.
+app.get('/health/deep', async (c) => {
+  const result = await runDeepHealthProbe(c.env);
+  return c.json(result, result.status === 'ok' ? 200 : 503);
 });
 
 // Webhook routes (authenticated via webhook signatures)

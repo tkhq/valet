@@ -70,6 +70,25 @@ Or run **`make otel-e2e`** for an automated smoke (no Grafana needed): it boots 
 worker against a throwaway local collector and asserts spans export, query-string
 secrets are redacted, and disabling the endpoint is a true no-op.
 
+## App-state signals (no external backend required)
+
+These read straight from D1 and work today, independent of the trace pipeline:
+
+- **`GET /health`** — static liveness (`{status:'ok'}`), unauthenticated.
+- **`GET /health/deep`** — probes D1, R2, and the EventBus DO (each time-boxed to
+  2s); returns `{status, checks:{d1,r2,eventbus:{ok,ms}}}` with HTTP 503 if any
+  dependency is down. Unauthenticated, safe for an external canary — exposes only
+  per-check ok/latency. Point an uptime monitor here, not at `/health`.
+- **`GET /api/analytics/health`** (admin) — cron heartbeats and webhook delivery
+  health. Every scheduled sweep runs through a `runSweep` wrapper that upserts a
+  `cron_heartbeats` row (last success/error, duration, item count); a job is
+  flagged `stale` when its last success is older than 3× its expected interval, so
+  a silently-dead sweep (credential refresh, PR reconciler, retention…) becomes
+  visible instead of rotting. The same endpoint returns per-provider
+  `webhook_deliveries` counts (received / invalid_signature / processed / failed)
+  from the last 24h — recorded fire-and-forget at each inbound webhook route so
+  telemetry can never break a delivery ACK. Rows are pruned after 30 days.
+
 ## Production
 
 Do **not** point the worker directly at the backend in production. The `otel-cf-workers`
