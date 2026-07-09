@@ -1,5 +1,5 @@
 import {
-  context, trace, SpanKind, SpanStatusCode, TraceFlags,
+  context, trace, ROOT_CONTEXT, SpanKind, SpanStatusCode, TraceFlags,
   type Span, type Attributes, type Context,
 } from '@opentelemetry/api';
 import {
@@ -41,14 +41,22 @@ export interface DoTracer {
    *  its originating turn) the span nests under it; otherwise it's a child of the active span, or
    *  a new root when none is active (the WebSocket/alarm entrypoints carry no inbound context). */
   span<T>(name: string, fn: (span: Span) => Promise<T> | T, attrs?: Attributes, parent?: Context): Promise<T>;
+  /** Run background DO work as an independent root, never inheriting a completed request span. */
+  traceTask<T>(name: string, fn: (span: Span) => Promise<T> | T, attrs?: Attributes): Promise<T>;
   /** Drain buffered spans now. Called from the alarm, webSocketClose, pre-hibernate, and per-fetch. */
   forceFlush(): Promise<void>;
+}
+
+export interface DoTracerOptions {
+  /** Test seam that avoids importing the Workers-only OTLP exporter. */
+  provider?: BasicTracerProvider;
 }
 
 const NOOP_SPAN = trace.wrapSpanContext({ traceId: '0'.repeat(32), spanId: '0'.repeat(16), traceFlags: TraceFlags.NONE });
 const NOOP: DoTracer = {
   traceFetch: (_req, _name, handler) => handler(NOOP_SPAN),
   span: async (_name, fn) => fn(NOOP_SPAN),
+  traceTask: async (_name, fn) => fn(NOOP_SPAN),
   forceFlush: () => Promise.resolve(),
 };
 
@@ -82,28 +90,37 @@ class DropCountingSpanExporter implements SpanExporter {
   forceFlush(): Promise<void> { return this.inner.forceFlush?.() ?? Promise.resolve(); }
 }
 
-export async function createDoTracer(env: Env, ctx: DurableObjectState, serviceName: string): Promise<DoTracer> {
+export async function createDoTracer(
+  env: Env,
+  ctx: DurableObjectState,
+  serviceName: string,
+  options?: DoTracerOptions,
+): Promise<DoTracer> {
   if (!isTracingEnabled(env)) return NOOP;
   const config = buildTraceConfig(env, serviceName);
   if (!('exporter' in config) || !config.exporter || !('url' in config.exporter)) return NOOP;
-  // Lazy import keeps `@microlabs/otel-cf-workers` (which pulls `cloudflare:workers`) off the
-  // module-load path, so the DOs that import this file stay loadable in Node unit tests.
-  const { OTLPExporter } = await import('@microlabs/otel-cf-workers');
-  // Exporter chain: redact URL secrets, then count drops, then OTLP. Redaction must run before
-  // bytes leave; the counter wraps it so it sees the real OTLP export result.
-  const dropCounter = new DropCountingSpanExporter(new RedactingSpanExporter(new OTLPExporter(config.exporter)));
-  // Batch within the DO rather than one POST per span. maxQueueSize/maxExportBatchSize use the
-  // library defaults (2048 / 512); only the scheduled delay (a long backstop — the DO drives
-  // flushing on lifecycle events, and hibernation freezes this timer anyway) and the export
-  // timeout are overridden.
-  const batch = new BatchSpanProcessor(dropCounter, {
-    scheduledDelayMillis: 30_000,
-    exportTimeoutMillis: 15_000,
-  });
-  const provider = new BasicTracerProvider({
-    resource: resourceFromAttributes({ 'service.name': serviceName }),
-    spanProcessors: [batch],
-  });
+  let provider = options?.provider;
+  let dropCounter: DropCountingSpanExporter | undefined;
+  if (!provider) {
+    // Lazy import keeps `@microlabs/otel-cf-workers` (which pulls `cloudflare:workers`) off the
+    // module-load path, so the DOs that import this file stay loadable in Node unit tests.
+    const { OTLPExporter } = await import('@microlabs/otel-cf-workers');
+    // Exporter chain: redact URL secrets, then count drops, then OTLP. Redaction must run before
+    // bytes leave; the counter wraps it so it sees the real OTLP export result.
+    dropCounter = new DropCountingSpanExporter(new RedactingSpanExporter(new OTLPExporter(config.exporter)));
+    // Batch within the DO rather than one POST per span. maxQueueSize/maxExportBatchSize use the
+    // library defaults (2048 / 512); only the scheduled delay (a long backstop — the DO drives
+    // flushing on lifecycle events, and hibernation freezes this timer anyway) and the export
+    // timeout are overridden.
+    const batch = new BatchSpanProcessor(dropCounter, {
+      scheduledDelayMillis: 30_000,
+      exportTimeoutMillis: 15_000,
+    });
+    provider = new BasicTracerProvider({
+      resource: resourceFromAttributes({ 'service.name': serviceName }),
+      spanProcessors: [batch],
+    });
+  }
   const tracer = provider.getTracer(serviceName);
 
   return {
@@ -111,7 +128,7 @@ export async function createDoTracer(env: Env, ctx: DurableObjectState, serviceN
       const parent = parentContext(request);
       const span = tracer.startSpan(name, { kind: SpanKind.SERVER }, parent);
       // Surface the running drop total so silent export failures are visible on the next trace.
-      span.setAttribute('do.trace.export_dropped_total', dropCounter.dropped);
+      span.setAttribute('do.trace.export_dropped_total', dropCounter?.dropped ?? 0);
       const active = trace.setSpan(parent, span);
       try {
         const res = await context.with(active, () => handler(span));
@@ -137,6 +154,25 @@ export async function createDoTracer(env: Env, ctx: DurableObjectState, serviceN
           return await fn(span);
         } catch (err) {
           span.recordException(err as Error);
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          throw err;
+        } finally {
+          span.end();
+        }
+      });
+    },
+    traceTask(name, fn, attrs) {
+      // Background work scheduled with ctx.waitUntil() must not accidentally become a child of
+      // the already-completed request which scheduled it. ROOT_CONTEXT makes it independently
+      // queryable and lets lifecycle work outlive its request trace safely.
+      const span = tracer.startSpan(name, { kind: SpanKind.INTERNAL, attributes: attrs }, ROOT_CONTEXT);
+      return context.with(trace.setSpan(ROOT_CONTEXT, span), async () => {
+        try {
+          return await fn(span);
+        } catch (err) {
+          // Lifecycle tasks can include backend response bodies in their existing user-facing
+          // errors. Mark the trace without recording that potentially sensitive message.
+          span.setAttribute('do.task.error.class', 'unexpected');
           span.setStatus({ code: SpanStatusCode.ERROR });
           throw err;
         } finally {

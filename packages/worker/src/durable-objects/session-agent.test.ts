@@ -11,6 +11,7 @@ import * as sessionTools from '../services/session-tools.js';
 import * as channelsDb from '../lib/db/channels.js';
 import * as channelThreadsDb from '../lib/db/channel-threads.js';
 import * as slackDb from '../lib/db/slack.js';
+import { SpanStatusCode, trace } from '@opentelemetry/api';
 
 interface QueueRow {
   id: string;
@@ -705,6 +706,85 @@ describe('SessionAgentDO', () => {
     await agent.alarm();
 
     expect(scheduleAlarm).toHaveBeenCalledTimes(1);
+  });
+
+  it('traces background sandbox creation as an independent lifecycle task', async () => {
+    const { agent, waitUntil } = await createTestAgent();
+    const traceTask = vi.fn(async (
+      _name: string,
+      run: (span: unknown) => Promise<unknown>,
+      _attrs: Record<string, unknown>,
+    ) => run({ setAttribute: vi.fn() }));
+    (agent as any).getTracer = vi.fn().mockResolvedValue({ traceTask });
+    (agent as any).spawnSandbox = vi.fn().mockResolvedValue(undefined);
+
+    await (agent as any).handleStart(new Request('https://session/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: 'session-1',
+        userId: 'user-1',
+        workspace: 'workspace',
+        runnerToken: 'runner-token',
+        backendUrl: 'https://backend/spawn',
+        spawnRequest: { sessionId: 'session-1' },
+      }),
+    }));
+
+    expect(waitUntil).toHaveBeenCalledOnce();
+    await expect(waitUntil.mock.calls[0][0]).resolves.toBeUndefined();
+    expect(traceTask).toHaveBeenCalledWith(
+      'session.lifecycle.spawn',
+      expect.any(Function),
+      expect.objectContaining({
+        'valet.session.id': 'session-1',
+        'valet.user.id': 'user-1',
+        'valet.lifecycle.trigger': 'initial_start',
+      }),
+    );
+  });
+
+  it('marks a caught lifecycle failure with a fixed error class', async () => {
+    const { agent } = await createTestAgent();
+    const setAttribute = vi.fn();
+    const setStatus = vi.fn();
+    const span = { setAttribute, setStatus };
+    const getActiveSpan = vi.spyOn(trace, 'getActiveSpan').mockReturnValue(span as any);
+    const traceTask = vi.fn(async (_name: string, run: (taskSpan: unknown) => Promise<unknown>) => run(span));
+    (agent as any).getTracer = vi.fn().mockResolvedValue({ traceTask, forceFlush: vi.fn() });
+
+    await (agent as any).traceLifecycleTask(
+      'session.lifecycle.recover',
+      'watchdog_timeout',
+      () => (agent as any).performRecovery('new-watchdog-reason'),
+    );
+
+    expect(setAttribute).toHaveBeenCalledWith('valet.lifecycle.error.class', 'configuration_missing');
+    expect(setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.ERROR });
+    getActiveSpan.mockRestore();
+  });
+
+  it('records a safe failed termination result and its expected terminal status', async () => {
+    const { agent } = await createTestAgent();
+    const setAttribute = vi.fn();
+    const setStatus = vi.fn();
+    const span = { setAttribute, setStatus };
+    const tracer = {
+      span: vi.fn(async (_name: string, run: (taskSpan: unknown) => Promise<unknown>) => run(span)),
+    };
+    (agent as any).getTracer = vi.fn().mockResolvedValue(tracer);
+    (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue({
+      outcome: 'failed',
+      httpStatus: 503,
+      errorClass: 'backend_http',
+    });
+
+    await (agent as any).terminateSandboxTraced('manual_stop', 'terminated');
+
+    expect(setAttribute).toHaveBeenCalledWith('valet.lifecycle.outcome', 'failed');
+    expect(setAttribute).toHaveBeenCalledWith('http.response.status_code', 503);
+    expect(setAttribute).toHaveBeenCalledWith('valet.lifecycle.error.class', 'backend_http');
+    expect(setAttribute).toHaveBeenCalledWith('valet.session.status.to', 'terminated');
+    expect(setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.ERROR });
   });
 
   it('logs loudly when sandbox_lost happens near the Modal 24h hard timeout', async () => {

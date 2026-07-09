@@ -48,6 +48,12 @@ export interface RestoreResult {
   durationMs: number;
 }
 
+export interface TerminateSandboxResult {
+  outcome: 'skipped' | 'terminated' | 'failed';
+  httpStatus?: number;
+  errorClass?: 'backend_http' | 'backend_network';
+}
+
 // ─── SessionLifecycle ─────────────────────────────────────────────────────────
 
 export class SessionLifecycle {
@@ -91,19 +97,25 @@ export class SessionLifecycle {
   }
 
   /** Terminate the current sandbox via the backend. Best-effort, never throws. */
-  async terminateSandbox(): Promise<void> {
+  async terminateSandbox(): Promise<TerminateSandboxResult> {
     const sandboxId = this.state.sandboxId;
     const terminateUrl = this.state.terminateUrl;
-    if (!sandboxId || !terminateUrl) return;
+    if (!sandboxId || !terminateUrl) return { outcome: 'skipped' };
 
     try {
-      await fetch(terminateUrl, {
+      const response = await fetch(terminateUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sandboxId }),
       });
+      if (!response.ok) {
+        console.error(`Failed to terminate sandbox: backend returned ${response.status}`);
+        return { outcome: 'failed', httpStatus: response.status, errorClass: 'backend_http' };
+      }
+      return { outcome: 'terminated', httpStatus: response.status };
     } catch (err) {
       console.error('Failed to terminate sandbox:', err);
+      return { outcome: 'failed', errorClass: 'backend_network' };
     }
   }
 

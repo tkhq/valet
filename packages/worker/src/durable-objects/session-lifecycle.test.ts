@@ -55,6 +55,30 @@ describe('SessionLifecycle.snapshotSandbox', () => {
   });
 });
 
+describe('SessionLifecycle.terminateSandbox', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  function makeLifecycle() {
+    const state = {
+      sandboxId: 'sb-123',
+      terminateUrl: 'https://backend/terminate',
+    } as any;
+    return new SessionLifecycle(state, {} as DurableObjectState);
+  }
+
+  it('returns a safe HTTP failure result without reading the response body', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('secret backend body', { status: 503 }));
+
+    await expect(makeLifecycle().terminateSandbox()).resolves.toEqual({
+      outcome: 'failed',
+      httpStatus: 503,
+      errorClass: 'backend_http',
+    });
+  });
+});
+
 describe('SessionLifecycle.scheduleAlarm', () => {
   it('clamps past deadlines to at least 30s in the future', () => {
     const setAlarm = vi.fn();

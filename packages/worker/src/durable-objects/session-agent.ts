@@ -3,7 +3,7 @@ import type { AppDb } from '../lib/drizzle.js';
 import { getDb } from '../lib/drizzle.js';
 import { createDoTracer, parseTraceparent, type DoTracer } from '../lib/do-tracing.js';
 import { activeTraceparent } from '../lib/tracing.js';
-import type { Context } from '@opentelemetry/api';
+import { SpanStatusCode, trace, type Context } from '@opentelemetry/api';
 import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
 import { getCredential, type CredentialResult } from '../services/credentials.js';
 import { memRead, memWrite, memMove, memLinks, memPatch, memRm, memSearch, toPatchOperations } from '../services/session-memory.js';
@@ -24,8 +24,15 @@ import { getChannelForMessage, dropEmission } from './channel-resolver.js';
 import { ChannelRouter } from './channel-router.js';
 import { PromptQueue, type QueueEntry } from './prompt-queue.js';
 import { RunnerLink, type RunnerToDOMessage, type DOToRunnerMessage, type PromptAttachment, type RunnerMessageHandlers, type DOMessageOf } from './runner-link.js';
-import { SessionState, type SessionStartParams } from './session-state.js';
+import { SessionState, type SessionLifecycleStatus, type SessionStartParams } from './session-state.js';
 import { SessionLifecycle, SandboxAlreadyExitedError, SandboxSnapshotFailedError } from './session-lifecycle.js';
+import {
+  lifecycleTaskAttributes,
+  recoveryTraceTrigger,
+  stopTraceTrigger,
+  type LifecycleTraceErrorClass,
+  type LifecycleTraceTrigger,
+} from './lifecycle-tracing.js';
 import { SessionHealthMonitor, DISCONNECT_GRACE_MS, SANDBOX_WAKE_TIMEOUT_MS, type HealthSnapshot } from './session-health-monitor.js';
 import { resolveOrchestratorPersona } from '../services/persona.js';
 import { mailboxSend, mailboxCheck } from '../services/session-mailbox.js';
@@ -1237,7 +1244,12 @@ export class SessionAgentDO {
       if (backoffUntil > 0 && now >= backoffUntil) {
         console.log('[SessionAgentDO] Backoff cooldown elapsed — retrying recovery');
         this.sessionState.resetRecoveryState();
-        await this.performRecovery('backoff_retry');
+        await this.traceLifecycleTask(
+          'session.lifecycle.recover',
+          'backoff_retry',
+          () => this.performRecovery('backoff_retry'),
+          this.sessionState.recoveryAttemptCount + 1,
+        );
       }
       // Whether we retried or the timer hasn't expired yet, re-arm and return.
       // performRecovery transitions to initializing (success) or backoff/terminated (failure).
@@ -1249,7 +1261,12 @@ export class SessionAgentDO {
     if (this.sessionState.runnerDisconnectedAt && now - this.sessionState.runnerDisconnectedAt >= SessionAgentDO.RUNNER_GRACE_PERIOD_MS) {
       console.log(`[SessionAgentDO] Runner did not reconnect within ${SessionAgentDO.RUNNER_GRACE_PERIOD_MS / 1000}s — attempting recovery`);
       this.sessionState.runnerDisconnectedAt = null;
-      await this.performRecovery('sandbox_lost');
+      await this.traceLifecycleTask(
+        'session.lifecycle.recover',
+        'runner_disconnect',
+        () => this.performRecovery('sandbox_lost'),
+        this.sessionState.recoveryAttemptCount + 1,
+      );
       // performRecovery transitions to initializing (spawning new sandbox) or
       // terminal state (circuit breaker tripped). Re-arm if still alive.
       if (!['terminated', 'error'].includes(this.sessionState.status)) {
@@ -1274,8 +1291,9 @@ export class SessionAgentDO {
     if (idleHibernateAllowed && this.lifecycle.checkIdleTimeout()) {
       // Set status immediately to prevent re-entrant hibernation from subsequent alarms.
       // performHibernate() checks this guard and skips if already in progress.
+      const statusFrom = this.sessionState.status;
       this.sessionState.status = 'hibernating';
-      this.ctx.waitUntil(this.performHibernate());
+      this.scheduleLifecycleTask('session.lifecycle.hibernate', 'idle_timeout', () => this.performHibernate(), statusFrom);
       // Don't return — still process question expiry below
     }
 
@@ -1378,7 +1396,12 @@ export class SessionAgentDO {
             break;
           case 'perform_recovery':
             this.sessionState.sandboxWakeStartedAt = 0;
-            await this.performRecovery(action.reason);
+            await this.traceLifecycleTask(
+              'session.lifecycle.recover',
+              recoveryTraceTrigger(action.reason),
+              () => this.performRecovery(action.reason),
+              this.sessionState.recoveryAttemptCount + 1,
+            );
             break;
         }
         this.broadcastToClients({
@@ -2091,7 +2114,7 @@ export class SessionAgentDO {
     const currentStatus = this.sessionState.status;
     if (currentStatus === 'hibernated') {
       // Fire wake in background — prompt will be queued since runner won't be connected yet
-      this.ctx.waitUntil(this.performWake());
+      this.scheduleLifecycleTask('session.lifecycle.restore', 'auto_wake', () => this.performWake());
     }
     // Note: if status is 'hibernating', the prompt will be queued below (runner
     // is disconnecting). performHibernate() checks the queue after completing
@@ -4528,7 +4551,11 @@ export class SessionAgentDO {
         type: 'status',
         data: { status: 'initializing' },
       });
-      this.ctx.waitUntil(this.spawnSandbox(body.backendUrl, body.spawnRequest));
+      this.scheduleLifecycleTask(
+        'session.lifecycle.spawn',
+        'initial_start',
+        () => this.spawnSandbox(body.backendUrl!, body.spawnRequest!),
+      );
     }
 
     // Publish session.started to EventBus
@@ -4613,12 +4640,18 @@ export class SessionAgentDO {
       console.log(`[SessionAgentDO] Sandbox spawned: ${result.sandboxId} for session ${sessionId}`);
     } catch (err) {
       console.error(`[SessionAgentDO] Failed to spawn sandbox for session ${sessionId}:`, err);
+      this.markLifecycleTaskFailure('backend_failure');
       const errorText = `Failed to create sandbox: ${err instanceof Error ? err.message : String(err)}`;
 
       // If this spawn was triggered by recovery, let the circuit breaker decide
       if (this.sessionState.status === 'initializing' && this.sessionState.recoveryAttemptCount > 0) {
         console.log(`[SessionAgentDO] Recovery spawn failed for ${sessionId}: ${errorText}`);
-        await this.performRecovery(`spawn_failed: ${errorText}`);
+        await this.traceLifecycleTask(
+          'session.lifecycle.recover',
+          recoveryTraceTrigger(`spawn_failed: ${errorText}`),
+          () => this.performRecovery(`spawn_failed: ${errorText}`),
+          this.sessionState.recoveryAttemptCount + 1,
+        );
         return;
       }
 
@@ -4729,7 +4762,7 @@ export class SessionAgentDO {
 
     // Only terminate sandbox if it's actually running (not hibernated/hibernating)
     if (currentStatus !== 'hibernated' && currentStatus !== 'hibernating') {
-      await this.lifecycle.terminateSandbox();
+      await this.terminateSandboxTraced(stopTraceTrigger(reason), 'terminated');
     }
 
     // Clear idle alarm
@@ -4999,7 +5032,7 @@ export class SessionAgentDO {
       if (status === 'hibernated') {
         // Queue the prompt so the runner picks it up after connecting.
         this.promptQueue.enqueue({ id: messageId, content, threadId, channelType: sysChannelType, channelId: sysChannelId, channelKey: sysQueueChannelKey, childSessionId: queueChildSessionId, childStatus: queueChildStatus });
-        this.ctx.waitUntil(this.performWake());
+        this.scheduleLifecycleTask('session.lifecycle.restore', 'auto_wake', () => this.performWake());
       } else if (status === 'restoring') {
         // Wake already in progress — just queue the prompt for when the runner connects.
         this.promptQueue.enqueue({ id: messageId, content, threadId, channelType: sysChannelType, channelId: sysChannelId, channelKey: sysQueueChannelKey, childSessionId: queueChildSessionId, childStatus: queueChildStatus });
@@ -5605,7 +5638,7 @@ export class SessionAgentDO {
     }
 
     this.sessionState.status = 'hibernating';
-    this.ctx.waitUntil(this.performHibernate());
+    this.scheduleLifecycleTask('session.lifecycle.hibernate', 'manual_hibernate', () => this.performHibernate(), status);
     return Response.json({ status: 'hibernating', message: 'Hibernate initiated' });
   }
 
@@ -5617,7 +5650,7 @@ export class SessionAgentDO {
     }
 
     if (status === 'hibernated') {
-      this.ctx.waitUntil(this.performWake());
+      this.scheduleLifecycleTask('session.lifecycle.restore', 'manual_wake', () => this.performWake());
       return Response.json({ status: 'restoring', message: 'Restore initiated' });
     }
 
@@ -5653,7 +5686,12 @@ export class SessionAgentDO {
         if (backoffUntil > 0 && now >= backoffUntil) {
           // Cooldown elapsed — reset circuit breaker before retrying
           this.sessionState.resetRecoveryState();
-          await this.performRecovery('ensure_running_after_backoff');
+          await this.traceLifecycleTask(
+            'session.lifecycle.recover',
+            'ensure_running',
+            () => this.performRecovery('ensure_running_after_backoff'),
+            this.sessionState.recoveryAttemptCount + 1,
+          );
           return Response.json({ status: 'recovering' }, { status: 202 });
         }
         const retryAfterMs = Math.max(0, backoffUntil - now);
@@ -5664,7 +5702,7 @@ export class SessionAgentDO {
         return Response.json({ status: 'hibernating' }, { status: 202 });
 
       case 'hibernated':
-        this.ctx.waitUntil(this.performWake());
+        this.scheduleLifecycleTask('session.lifecycle.restore', 'ensure_running', () => this.performWake());
         return Response.json({ status: 'restoring' }, { status: 202 });
 
       case 'terminated':
@@ -5676,7 +5714,12 @@ export class SessionAgentDO {
             { status: 500 },
           );
         }
-        await this.performRecovery('ensure_running');
+        await this.traceLifecycleTask(
+          'session.lifecycle.recover',
+          'ensure_running',
+          () => this.performRecovery('ensure_running'),
+          this.sessionState.recoveryAttemptCount + 1,
+        );
         return Response.json({ status: 'recovering' }, { status: 202 });
       }
 
@@ -5697,7 +5740,7 @@ export class SessionAgentDO {
       for (const ws of runnerSockets) {
         try { ws.close(1000, 'Session refreshing'); } catch { /* ignore */ }
       }
-      await this.lifecycle.terminateSandbox();
+      await this.terminateSandboxTraced('refresh', 'initializing');
     }
 
     // Clear state for fresh start
@@ -5728,7 +5771,12 @@ export class SessionAgentDO {
     this.sessionState.resetRecoveryState();
 
     // Spawn fresh via recovery path (handles token rotation, generation increment)
-    await this.performRecovery('refresh');
+    await this.traceLifecycleTask(
+      'session.lifecycle.recover',
+      'refresh',
+      () => this.performRecovery('refresh'),
+      this.sessionState.recoveryAttemptCount + 1,
+    );
 
     return Response.json({ status: 'recovering' }, { status: 202 });
   }
@@ -5874,6 +5922,7 @@ export class SessionAgentDO {
         // Regular sessions terminate after exhausting recovery attempts
         console.log(`[SessionAgentDO] Circuit breaker tripped for session ${sessionId} — terminating (recovery exhausted)`);
         this.emitAuditEvent('session.recovery_exhausted', `Recovery exhausted after ${attemptCount} attempts`);
+        this.markLifecycleTaskFailure('recovery_exhausted');
         await this.handleStop('recovery_exhausted');
         return;
       }
@@ -5885,6 +5934,7 @@ export class SessionAgentDO {
 
     if (!backendUrl || !spawnRequest) {
       console.error(`[SessionAgentDO] Cannot recover session ${sessionId}: missing backendUrl or spawnRequest`);
+      this.markLifecycleTaskFailure('configuration_missing');
       this.sessionState.status = 'error';
       if (sessionId) {
         updateSessionStatus(this.appDb, sessionId, 'error', undefined, 'Cannot recover: missing spawn configuration').catch((e) =>
@@ -5915,7 +5965,13 @@ export class SessionAgentDO {
     this.emitAuditEvent('session.recovering', `Respawning sandbox (attempt #${attemptCount})`);
 
     // Spawn in background — same pattern as handleStart
-    this.ctx.waitUntil(this.spawnSandbox(backendUrl, updatedSpawnRequest));
+    this.scheduleLifecycleTask(
+      'session.lifecycle.spawn',
+      recoveryTraceTrigger(reason),
+      () => this.spawnSandbox(backendUrl, updatedSpawnRequest),
+      undefined,
+      this.sessionState.recoveryAttemptCount,
+    );
   }
 
   private async performHibernate(): Promise<void> {
@@ -5936,6 +5992,7 @@ export class SessionAgentDO {
 
     if (!this.sessionState.sandboxId || !this.sessionState.hibernateUrl) {
       console.error('[SessionAgentDO] Cannot hibernate: missing sandboxId or hibernateUrl');
+      this.markLifecycleTaskFailure('configuration_missing');
       this.sessionState.status = 'running';
       return;
     }
@@ -6004,28 +6061,31 @@ export class SessionAgentDO {
       const queuedDuringHibernate = this.promptQueue.length;
       if (queuedDuringHibernate > 0) {
         console.log(`[SessionAgentDO] ${queuedDuringHibernate} prompt(s) queued during hibernation — auto-waking`);
-        this.ctx.waitUntil(this.performWake());
+        this.scheduleLifecycleTask('session.lifecycle.restore', 'auto_wake', () => this.performWake());
       }
     } catch (err) {
       // 409: sandbox already exited — route through proper termination
       if (err instanceof SandboxAlreadyExitedError) {
         console.log(`[SessionAgentDO] Session ${sessionId} sandbox already finished — routing to handleStop`);
+        this.markLifecycleTaskFailure('sandbox_exited');
         await this.handleStop('sandbox_exited');
         return;
       }
 
       if (err instanceof SandboxSnapshotFailedError) {
         console.warn(`[SessionAgentDO] Session ${sessionId} snapshot failed — terminating instead: ${err.message}`);
+        this.markLifecycleTaskFailure('snapshot_failed');
         // The sandbox is still alive (snapshot_and_terminate only calls terminate on
         // success). Terminate it explicitly before routing through handleStop.
         // Don't reset status to 'running' — active time was already flushed at the top
         // of performHibernate(), and faking 'running' would double-flush active seconds.
-        await this.lifecycle.terminateSandbox();
+        await this.terminateSandboxTraced('snapshot_failed', 'terminated');
         await this.handleStop('snapshot_failed');
         return;
       }
 
       console.error(`[SessionAgentDO] Failed to hibernate session ${sessionId}:`, err);
+      this.markLifecycleTaskFailure('backend_failure');
       const errorText = `Failed to hibernate: ${err instanceof Error ? err.message : String(err)}`;
       this.sessionState.status = 'error';
       if (sessionId) {
@@ -6059,6 +6119,7 @@ export class SessionAgentDO {
     if (!this.sessionState.snapshotImageId || !this.sessionState.restoreUrl || !this.sessionState.spawnRequest) {
       const errorText = 'Cannot wake: missing snapshotImageId, restoreUrl, or spawnRequest';
       console.error(`[SessionAgentDO] ${errorText}`);
+      this.markLifecycleTaskFailure('configuration_missing');
       this.sessionState.status = 'error';
       if (sessionId) {
         updateSessionStatus(this.appDb, sessionId, 'error', undefined, errorText).catch((e) =>
@@ -6124,9 +6185,15 @@ export class SessionAgentDO {
       console.log(`[SessionAgentDO] Session ${sessionId} restored, new sandbox: ${result.sandboxId}`);
     } catch (err) {
       console.error(`[SessionAgentDO] Failed to restore session ${sessionId}:`, err);
+      this.markLifecycleTaskFailure('backend_failure');
       const errorText = `Failed to restore session: ${err instanceof Error ? err.message : String(err)}`;
       this.sessionState.sandboxWakeStartedAt = 0;
-      await this.performRecovery(`restore_failed: ${errorText}`);
+      await this.traceLifecycleTask(
+        'session.lifecycle.recover',
+        recoveryTraceTrigger(`restore_failed: ${errorText}`),
+        () => this.performRecovery(`restore_failed: ${errorText}`),
+        this.sessionState.recoveryAttemptCount + 1,
+      );
     }
   }
 
@@ -6210,6 +6277,80 @@ export class SessionAgentDO {
   // ─── DO-scoped tracing (batched; see do-tracing.ts) ───────────────────
   private getTracer(): Promise<DoTracer> {
     return (this.doTracerPromise ??= createDoTracer(this.env, this.ctx, 'valet-session-agent-do'));
+  }
+
+  private async traceLifecycleTask<T>(
+    name: string,
+    trigger: LifecycleTraceTrigger,
+    work: () => Promise<T>,
+    recoveryAttempt?: number,
+    statusFrom = this.sessionState.status,
+  ): Promise<T> {
+    const tracer = await this.getTracer();
+    try {
+      return await tracer.traceTask(name, async (span) => {
+        try {
+          return await work();
+        } finally {
+          span.setAttribute('valet.session.status.to', this.sessionState.status);
+        }
+      }, lifecycleTaskAttributes({
+        sessionId: this.sessionState.sessionId,
+        userId: this.sessionState.userId,
+        statusFrom,
+        trigger,
+        recoveryAttempt,
+      }));
+    } finally {
+      // Lifecycle spans are rare but can outlive their initiating request. Flush after the task
+      // completes so the cached batch processor cannot lose the final span on DO hibernation.
+      this.ctx.waitUntil(this.flushTraces());
+    }
+  }
+
+  private scheduleLifecycleTask(
+    name: string,
+    trigger: LifecycleTraceTrigger,
+    work: () => Promise<void>,
+    statusFrom?: SessionLifecycleStatus,
+    recoveryAttempt?: number,
+  ): void {
+    this.ctx.waitUntil(this.traceLifecycleTask(name, trigger, work, recoveryAttempt, statusFrom));
+  }
+
+  private markLifecycleTaskFailure(errorClass: LifecycleTraceErrorClass): void {
+    const span = trace.getActiveSpan();
+    if (!span) return;
+    span.setAttribute('valet.lifecycle.error.class', errorClass);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+  }
+
+  private async terminateSandboxTraced(
+    trigger: LifecycleTraceTrigger,
+    statusTo: SessionLifecycleStatus,
+  ): Promise<void> {
+    const tracer = await this.getTracer();
+    const statusFrom = this.sessionState.status;
+    await tracer.span('session.lifecycle.terminate', async (span) => {
+      try {
+        const result = await this.lifecycle.terminateSandbox();
+        span.setAttribute('valet.lifecycle.outcome', result.outcome);
+        if (result.httpStatus !== undefined) {
+          span.setAttribute('http.response.status_code', result.httpStatus);
+        }
+        if (result.errorClass) {
+          span.setAttribute('valet.lifecycle.error.class', result.errorClass);
+          span.setStatus({ code: SpanStatusCode.ERROR });
+        }
+      } finally {
+        span.setAttribute('valet.session.status.to', statusTo);
+      }
+    }, lifecycleTaskAttributes({
+      sessionId: this.sessionState.sessionId,
+      userId: this.sessionState.userId,
+      statusFrom,
+      trigger,
+    }));
   }
 
   /** Drain buffered spans now (alarm / close / hibernate / fetch). Best-effort — never throws. */

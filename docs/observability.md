@@ -16,13 +16,22 @@ The Worker fetch/scheduled handler is wrapped with
 [`@microlabs/otel-cf-workers`](https://github.com/evanderkoogh/otel-cf-workers), which
 auto-creates spans for each request, instruments outbound `fetch`, and — via the DO
 bindings — emits a **client span + W3C trace-context propagation for each worker→DO
-call**, so DO calls stay correlated even though the DOs run uninstrumented. On top of that:
+call**, so DO calls stay correlated. On top of that:
 
 > **The DOs are deliberately not wrapped with `instrumentDO()`.** That wrapper proxies
 > `ctx.storage`, which breaks the SQLite storage API (`ctx.storage.sql.exec`) the DOs
 > rely on with an `Illegal invocation` error — even when tracing is disabled. DO-internal
-> spans are a follow-up that adds manual spans inside the DO code (which bypass the
-> storage proxy).
+> spans therefore use the manual tracer inside the DO code, which bypasses the storage
+> proxy.
+
+- **Manual Durable Object spans**: `SessionAgentDO` and `EventBusDO` use the
+  native storage API with the manual tracer. SessionAgentDO traces HTTP control
+  endpoints, non-noisy WebSocket messages, alarm ticks, and lifecycle tasks
+  (`spawn`, `hibernate`, `restore`, and `recover`). Lifecycle tasks are
+  independent roots because they outlive their scheduling request; the existing
+  cached DO tracer batches them and flushes at task completion. Failures use
+  fixed classifications and never include backend response text. The Modal
+  sandbox, Runner, and OpenCode remain outside this instrumentation boundary.
 
 - **`valet.*` correlation attributes** (`valet.session.id`, `valet.user.id`,
   `valet.org.id`) are set as **span attributes** (not resource attributes — a Worker
