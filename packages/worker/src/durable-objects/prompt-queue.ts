@@ -107,6 +107,14 @@ export interface PromptQueueDeps {
   setState: (key: string, value: string) => void;
 }
 
+/**
+ * Max times a prompt may be re-dispatched after the sandbox dies mid-processing
+ * before it is dead-lettered. Bounds the crash-recovery loop where a prompt that
+ * reliably kills the sandbox would otherwise re-dispatch (and re-acknowledge) on
+ * every recovery cycle forever, spamming the user and burning cost. See TKAI-180.
+ */
+export const MAX_DISPATCH_ATTEMPTS = 3;
+
 export class PromptQueue {
   private sql: SqlStorage;
   private deps: PromptQueueDeps;
@@ -156,6 +164,9 @@ export class PromptQueue {
     // watchdog don't get clobbered by sibling thread activity.
     try { this.sql.exec('ALTER TABLE prompt_queue ADD COLUMN received_at INTEGER'); } catch { /* already exists */ }
     try { this.sql.exec('ALTER TABLE prompt_queue ADD COLUMN dispatched_at INTEGER'); } catch { /* already exists */ }
+    // Count of dispatches that ended in a sandbox loss before completion; caps
+    // re-dispatch of a prompt that keeps crashing the sandbox (TKAI-180).
+    try { this.sql.exec('ALTER TABLE prompt_queue ADD COLUMN dispatch_attempts INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists */ }
     // Per-channel idle/safety-net timers replace the global `idleQueuedSince` and
     // `errorSafetyNetAt` session-state keys for the same reason.
     try { this.sql.exec('ALTER TABLE channel_state ADD COLUMN idle_queued_since INTEGER'); } catch { /* already exists */ }
@@ -335,13 +346,28 @@ export class PromptQueue {
 
   /** Revert processing entries back to queued. Optionally scope to a single entry by id.
    *  NULLs `dispatched_at` so it remains a faithful "row was sent to the
-   *  runner" signal — reverted rows haven't been sent (yet) for this attempt. */
-  revertProcessingToQueued(id?: string): void {
+   *  runner" signal — reverted rows haven't been sent (yet) for this attempt.
+   *
+   *  Pass `countFailedDispatch` ONLY for lifecycle-loss reverts (the sandbox
+   *  died while the row was in flight) — this bumps `dispatch_attempts` so a
+   *  poison prompt is eventually dead-lettered instead of re-dispatched forever
+   *  (TKAI-180). Benign "channel busy, try later" reverts must NOT set it, or a
+   *  prompt merely waiting on a busy channel would be counted as failing. */
+  revertProcessingToQueued(id?: string, opts?: { countFailedDispatch?: boolean }): void {
+    const bump = opts?.countFailedDispatch ? ', dispatch_attempts = dispatch_attempts + 1' : '';
     if (id) {
-      this.sql.exec("UPDATE prompt_queue SET status = 'queued', dispatched_at = NULL WHERE id = ?", id);
+      this.sql.exec(`UPDATE prompt_queue SET status = 'queued', dispatched_at = NULL${bump} WHERE id = ?`, id);
     } else {
-      this.sql.exec("UPDATE prompt_queue SET status = 'queued', dispatched_at = NULL WHERE status = 'processing'");
+      this.sql.exec(`UPDATE prompt_queue SET status = 'queued', dispatched_at = NULL${bump} WHERE status = 'processing'`);
     }
+  }
+
+  /** Number of times this row was dispatched to a runner that then died before
+   *  completion. Read by the dispatch path to dead-letter a prompt that keeps
+   *  crashing the sandbox rather than re-dispatching it (TKAI-180). */
+  getDispatchAttempts(id: string): number {
+    const rows = this.sql.exec('SELECT dispatch_attempts FROM prompt_queue WHERE id = ?', id).toArray();
+    return rows.length > 0 ? Number(rows[0].dispatch_attempts ?? 0) : 0;
   }
 
   /** Drop a single entry — marks completed and DELETEs in one step so the

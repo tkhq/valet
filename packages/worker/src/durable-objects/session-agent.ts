@@ -22,7 +22,7 @@ import type { ChannelTarget, ChannelContext, InteractivePrompt, InteractiveActio
 import { MessageStore } from './message-store.js';
 import { getChannelForMessage, dropEmission } from './channel-resolver.js';
 import { ChannelRouter } from './channel-router.js';
-import { PromptQueue, type QueueEntry } from './prompt-queue.js';
+import { PromptQueue, MAX_DISPATCH_ATTEMPTS, type QueueEntry } from './prompt-queue.js';
 import { RunnerLink, type RunnerToDOMessage, type DOToRunnerMessage, type PromptAttachment, type RunnerMessageHandlers, type DOMessageOf } from './runner-link.js';
 import { SessionState, type SessionStartParams } from './session-state.js';
 import { SessionLifecycle, SandboxAlreadyExitedError, SandboxSnapshotFailedError } from './session-lifecycle.js';
@@ -1089,7 +1089,7 @@ export class SessionAgentDO {
         // Only revert if runner is still disconnected
         if (!this.runnerLink.isConnected) {
           console.log(`[SessionAgentDO] Disconnect grace expired — reverting processing→queued`);
-          this.promptQueue.revertProcessingToQueued();
+          this.promptQueue.revertProcessingToQueued(undefined, { countFailedDispatch: true });
           this.promptQueue.runnerBusy = false;
           this._activeWorkflowExecutionId = undefined;
           // Clear all per-channel busy flags and error safety nets — the
@@ -3206,7 +3206,7 @@ export class SessionAgentDO {
             const stuckProcessing = this.promptQueue.processingCount;
             if (stuckProcessing > 0) {
               console.log(`[SessionAgentDO] Runner ready: reverting ${stuckProcessing} stuck processing entries from previous lifecycle`);
-              this.promptQueue.revertProcessingToQueued();
+              this.promptQueue.revertProcessingToQueued(undefined, { countFailedDispatch: true });
               this.promptQueue.runnerBusy = false;
             }
             // Reset per-channel busy state from previous lifecycle
@@ -5095,6 +5095,50 @@ export class SessionAgentDO {
   }
 
   /**
+   * Remove a prompt that has exhausted its dispatch attempts (it kept losing the
+   * sandbox mid-processing) and surface the failure instead of re-dispatching it
+   * forever. Frees the row + its channel so the session can idle, records the
+   * terminal error for the error-rate signal, and writes a user-visible message.
+   * Web clients see it via the broadcast; channel (Slack/Telegram) delivery is a
+   * follow-up since it needs the transport layer the dead runner normally drives.
+   * See TKAI-180.
+   */
+  private deadLetterPoisonPrompt(prompt: QueueEntry): void {
+    const attempts = this.promptQueue.getDispatchAttempts(prompt.id);
+    const channelKey =
+      prompt.channelKey || this.channelKeyFrom(prompt.channelType || undefined, prompt.channelId || undefined);
+    console.error(
+      `[SessionAgentDO] Dead-lettering prompt ${prompt.id} after ${attempts} failed dispatches (sandbox kept dying) channel=${channelKey}`,
+    );
+
+    // Free the row + its channel so the drain proceeds and the session can idle
+    // instead of looping on this prompt.
+    this.promptQueue.dropEntry(prompt.id);
+    if (channelKey) this.promptQueue.setChannelBusy(channelKey, false);
+
+    // Terminal error for the Performance-tab error rate + an audit breadcrumb.
+    this.emitEvent('turn_error', {
+      errorCode: 'dispatch_attempts_exceeded',
+      channel: prompt.channelType || undefined,
+      properties: { promptId: prompt.id, attempts },
+    });
+    this.emitAuditEvent('prompt.dead_lettered', `${attempts} failed dispatches (sandbox_lost)`);
+
+    // Surface a user-visible message so the request doesn't silently vanish.
+    const messageId = crypto.randomUUID();
+    const content =
+      `⚠️ I couldn't complete this request — the session repeatedly lost its sandbox while working on it, ` +
+      `so I stopped after ${attempts} attempts instead of retrying in a loop. Please try again; if it keeps ` +
+      `failing, the request may be triggering a sandbox crash.`;
+    try {
+      this.messageStore.writeMessage({ id: messageId, role: 'assistant', content });
+      this.broadcastToClients({ type: 'message', data: { id: messageId, role: 'assistant', content } });
+    } catch (err) {
+      console.error('[SessionAgentDO] deadLetterPoisonPrompt: failed to write user-facing message:', err);
+    }
+  }
+
+  /**
    * Select the next queue row that can be dispatched right now: drops
    * malformed/filtered entries, reverts rows whose channels are busy, and
    * returns the first row marked 'processing' that's ready to send.
@@ -5121,6 +5165,16 @@ export class SessionAgentDO {
     let prompt = this.promptQueue.dequeueNext(skippedBusyIds);
     while (prompt) {
       console.log(`[SessionAgentDO] sendNextQueuedPrompt: found queued item id=${prompt.id} channelType=${prompt.channelType || 'none'} channelId=${prompt.channelId || 'none'} queueType=${prompt.queueType || 'prompt'}`);
+
+      // Dead-letter a prompt that keeps killing the sandbox. Each dispatch that
+      // ended in a sandbox loss mid-processing bumped dispatch_attempts; past the
+      // cap, stop re-dispatching. Otherwise a poison prompt loops forever —
+      // re-dispatched and re-acknowledged on every recovery cycle (TKAI-180).
+      if (this.promptQueue.getDispatchAttempts(prompt.id) >= MAX_DISPATCH_ATTEMPTS) {
+        this.deadLetterPoisonPrompt(prompt);
+        prompt = this.promptQueue.dequeueNext(skippedBusyIds);
+        continue;
+      }
 
       // Apply wait subscription filter to queued child events.
       // Events queued while the agent was busy may not match the subscription
@@ -5797,7 +5851,7 @@ export class SessionAgentDO {
     const stuckProcessing = this.promptQueue.processingCount;
     if (stuckProcessing > 0) {
       console.log(`[SessionAgentDO] Recovery: reverting ${stuckProcessing} processing entries to queued`);
-      this.promptQueue.revertProcessingToQueued();
+      this.promptQueue.revertProcessingToQueued(undefined, { countFailedDispatch: true });
     }
     this.promptQueue.runnerBusy = false;
     this.promptQueue.clearDispatchTimers();

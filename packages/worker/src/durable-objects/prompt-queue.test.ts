@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { PromptQueue, type EnqueueParams, type CollectBufferEntry } from './prompt-queue.js';
+import { PromptQueue, MAX_DISPATCH_ATTEMPTS, type EnqueueParams, type CollectBufferEntry } from './prompt-queue.js';
 
 // ─── SqlStorage Mock ─────────────────────────────────────────────────────────
 //
@@ -33,6 +33,7 @@ interface QueueRow {
   replaceable: number;
   received_at: number | null;
   dispatched_at: number | null;
+  dispatch_attempts: number;
   created_at: number;
 }
 
@@ -99,6 +100,7 @@ function createMockSql(): SqlStorage & { queue: Map<string, QueueRow>; state: Ma
           replaceable: 1,
           received_at: null,
           dispatched_at: null,
+          dispatch_attempts: 0,
           created_at: insertCounter, // monotonic for ordering
         };
 
@@ -261,10 +263,12 @@ function createMockSql(): SqlStorage & { queue: Map<string, QueueRow>; state: Ma
           if (row) row.status = 'completed';
         } else if (q.includes("SET status = 'queued'") && q.includes("WHERE status = 'processing'")) {
           // The new revertProcessingToQueued NULLs dispatched_at alongside.
+          const bump = q.includes('dispatch_attempts = dispatch_attempts + 1');
           for (const row of queue.values()) {
             if (row.status === 'processing') {
               row.status = 'queued';
               if (q.includes('dispatched_at = NULL')) row.dispatched_at = null;
+              if (bump) row.dispatch_attempts += 1;
             }
           }
         } else if (q.includes("SET status = 'queued'") && q.includes('WHERE id = ?')) {
@@ -272,6 +276,7 @@ function createMockSql(): SqlStorage & { queue: Map<string, QueueRow>; state: Ma
           if (row) {
             row.status = 'queued';
             if (q.includes('dispatched_at = NULL')) row.dispatched_at = null;
+            if (q.includes('dispatch_attempts = dispatch_attempts + 1')) row.dispatch_attempts += 1;
           }
         }
         return cursor([]);
@@ -509,6 +514,41 @@ describe('PromptQueue', () => {
       pq.revertProcessingToQueued('p1');
       expect(pq.length).toBe(1);
       expect(pq.processingCount).toBe(1);
+    });
+
+    it('does not count a plain revert as a failed dispatch (TKAI-180)', () => {
+      pq.enqueue({ id: 'p1', content: 'a', status: 'processing' });
+      // Benign "channel busy, try later" reverts must not bump the counter,
+      // or a prompt merely waiting on a busy channel would be dead-lettered.
+      pq.revertProcessingToQueued('p1');
+      pq.revertProcessingToQueued('p1', {});
+      expect(pq.getDispatchAttempts('p1')).toBe(0);
+    });
+
+    it('counts a lifecycle-loss revert toward dispatch attempts (TKAI-180)', () => {
+      pq.enqueue({ id: 'p1', content: 'a', status: 'processing' });
+      pq.revertProcessingToQueued('p1', { countFailedDispatch: true });
+      expect(pq.getDispatchAttempts('p1')).toBe(1);
+
+      // Re-dispatch → lose the sandbox again → revert-all path also counts.
+      pq.dequeueNext();
+      pq.revertProcessingToQueued(undefined, { countFailedDispatch: true });
+      expect(pq.getDispatchAttempts('p1')).toBe(2);
+    });
+
+    it('reaches the dead-letter cap after MAX_DISPATCH_ATTEMPTS losses (TKAI-180)', () => {
+      pq.enqueue({ id: 'p1', content: 'poison', status: 'processing' });
+      for (let i = 0; i < MAX_DISPATCH_ATTEMPTS; i++) {
+        pq.revertProcessingToQueued('p1', { countFailedDispatch: true });
+        pq.dequeueNext(); // re-dispatch
+      }
+      expect(pq.getDispatchAttempts('p1')).toBe(MAX_DISPATCH_ATTEMPTS);
+      // At/above the cap the dispatch path stops re-dispatching (dead-letters).
+      expect(pq.getDispatchAttempts('p1')).toBeGreaterThanOrEqual(MAX_DISPATCH_ATTEMPTS);
+    });
+
+    it('getDispatchAttempts returns 0 for an unknown id', () => {
+      expect(pq.getDispatchAttempts('nope')).toBe(0);
     });
   });
 
