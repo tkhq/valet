@@ -62,7 +62,7 @@ their Worker/DO boundary.
 
 Run focused Vitest files, `pnpm typecheck`, and `make otel-e2e`.
 
-- [ ] **Step 3: Commit and open a pull request**
+- [x] **Step 3: Commit and open a pull request**
 
 Commit implementation, tests, and documentation; push
 `codex/lifecycle-background-tracing`; create a PR targeting `main`.
