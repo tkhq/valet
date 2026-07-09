@@ -5783,12 +5783,27 @@ export class SessionAgentDO {
    */
   private resetRecoveryStateIfStable(): void {
     const lastRecoveryAt = this.sessionState.lastRecoveryAt;
+    const msSinceLastRecovery = Date.now() - lastRecoveryAt;
     const stable =
       lastRecoveryAt === 0 ||
-      Date.now() - lastRecoveryAt > SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS;
+      msSinceLastRecovery > SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS;
     if (stable) {
       this.sessionState.resetRecoveryState();
+      return;
     }
+    // Held the breaker: the runner reached ready, but too soon after the last
+    // recovery to count as a healthy interval — the session is flapping
+    // (recover → briefly ready → die). Emit a leading indicator BEFORE the
+    // breaker trips into backoff so a recovery-rate signal / the health endpoint
+    // can catch a flapping session early instead of after the fact.
+    const attempt = this.sessionState.recoveryAttemptCount;
+    console.warn(
+      `[SessionAgentDO] Recovery breaker held — session ${this.sessionState.sessionId} flapping (attempt #${attempt}, ready ${msSinceLastRecovery}ms after last recovery)`,
+    );
+    this.emitAuditEvent(
+      'recovery.flapping',
+      `Runner ready ${msSinceLastRecovery}ms after recovery #${attempt} — breaker held`,
+    );
   }
 
   /**

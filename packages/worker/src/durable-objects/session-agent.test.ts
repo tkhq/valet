@@ -796,6 +796,27 @@ describe('SessionAgentDO', () => {
       clock += 5 * 60_000;
       (agent as any).resetRecoveryStateIfStable();
       expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
+      // A healthy reset is not flapping — no leading-indicator event.
+      expect((agent as any).emitAuditEvent).not.toHaveBeenCalledWith(
+        'recovery.flapping',
+        expect.anything(),
+      );
+    });
+
+    it('emits recovery.flapping when readiness is too transient to reset the breaker', async () => {
+      const { agent } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      await (agent as any).performRecovery('sandbox_lost');
+      clock += 3_000; // ready 3s after recovery — a flapping cycle, not healthy
+      (agent as any).resetRecoveryStateIfStable();
+
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1); // breaker held
+      expect((agent as any).emitAuditEvent).toHaveBeenCalledWith(
+        'recovery.flapping',
+        expect.stringContaining('breaker held'),
+      );
     });
   });
 
