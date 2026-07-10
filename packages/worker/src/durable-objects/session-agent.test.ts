@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { ACTION_APPROVAL_EXPIRY_MS, SessionAgentDO, buildActionApprovalPromptActions, buildForwardedParts, resolveSlackChannelId } from './session-agent.js';
 import { createTestDb } from '../test-utils/db.js';
+import { makeD1Adapter } from '../test-utils/d1.js';
 import { sessions } from '../lib/schema/sessions.js';
 import { users } from '../lib/schema/users.js';
 import { userIdentityLinks } from '../lib/schema/channels.js';
@@ -623,6 +625,108 @@ async function createTestAgent(opts?: {
   return { agent, sql, waitUntil, broadcasts, ctx, sockets };
 }
 
+/**
+ * A real better-sqlite3-backed `SqlStorage` for tests that need the genuine
+ * DO-local buffer (INSERT into analytics_events, SELECT unflushed, UPDATE
+ * flushed=1) instead of the hand-rolled `createMockSql` fake. The DO only ever
+ * calls `.exec(sql, ...params)` on its storage, so that is the one method we
+ * bridge; the generic result exposes `.toArray()` / `.one()` like the real API.
+ */
+function createRealSqlStorage(sqlite: DatabaseType): SqlStorage {
+  return {
+    exec(query: string, ...params: unknown[]) {
+      let rows: Array<Record<string, unknown>>;
+      try {
+        const stmt = sqlite.prepare(query);
+        rows = stmt.reader ? (stmt.all(...(params as [])) as Array<Record<string, unknown>>) : (stmt.run(...(params as [])), []);
+      } catch (err) {
+        // better-sqlite3's prepare() rejects multi-statement SQL (the DDL
+        // blocks the DO runs at construction). exec() runs them; no rows.
+        if (err instanceof Error && /more than one statement/.test(err.message)) {
+          sqlite.exec(query);
+          rows = [];
+        } else {
+          throw err;
+        }
+      }
+      return {
+        toArray: () => rows,
+        one: () => {
+          if (rows.length !== 1) throw new Error('Expected exactly one row');
+          return rows[0];
+        },
+        [Symbol.iterator]: () => rows[Symbol.iterator](),
+      };
+    },
+  } as unknown as SqlStorage;
+}
+
+/**
+ * Dedicated persistence harness: unlike `createTestAgent` (which stubs
+ * `emitEvent`/`flushMetrics`), this wires the DO's local SQLite buffer and its
+ * D1 sink to two REAL better-sqlite3 databases so a terminal transition
+ * exercises the genuine emit → buffer → flush → D1 path end to end. The
+ * returned `d1` handle is the D1-side SQLite, queried directly in assertions
+ * to prove the row actually persisted (not merely buffered).
+ */
+async function createPersistenceAgent() {
+  // D1 side: full migrated schema (analytics_events, sessions, users, ...).
+  const { db: appDb, sqlite: d1 } = createTestDb();
+  appDb.insert(users).values({ id: 'user-1', email: 'user-1@example.com' }).run();
+  appDb.insert(sessions).values({
+    id: 'orchestrator:user-1',
+    userId: 'user-1',
+    workspace: '/tmp/session-agent-persistence',
+    status: 'running',
+  }).run();
+
+  // DO-local side: a fresh SQLite the DO owns; its constructor creates the
+  // local tables (state, messages, analytics_events, ...).
+  const doSqlite = new Database(':memory:');
+  const doSql = createRealSqlStorage(doSqlite);
+
+  let initPromise: Promise<void> = Promise.resolve();
+  const ctx = {
+    storage: {
+      sql: doSql,
+      setAlarm: vi.fn(),
+      getAlarm: vi.fn(),
+      deleteAlarm: vi.fn(),
+    },
+    blockConcurrencyWhile(fn: () => Promise<void>) {
+      initPromise = Promise.resolve(fn());
+      return initPromise;
+    },
+    acceptWebSocket: vi.fn(),
+    getWebSockets: vi.fn(() => []),
+    getTags: vi.fn(() => []),
+    waitUntil: vi.fn((p: Promise<unknown>) => p),
+  } as unknown as DurableObjectState;
+
+  const env = { DB: makeD1Adapter(d1) } as unknown as ConstructorParameters<typeof SessionAgentDO>[1];
+  const agent = new SessionAgentDO(ctx, env);
+  await initPromise;
+
+  (agent as any).sessionState.set('sessionId', 'orchestrator:user-1');
+  (agent as any).sessionState.set('userId', 'user-1');
+  (agent as any).sessionState.set('status', 'running');
+
+  // `appDb` reads env.DB through getDb(); pin it to the same migrated handle so
+  // updateSessionMetrics/updateSessionStatus hit the real schema.
+  Object.defineProperty(agent, 'appDb', { value: appDb });
+
+  // Keep everything on the emit→flush→D1 path real. Only stub the sandbox
+  // teardown and client I/O that would otherwise reach external services.
+  (agent as any).broadcastToClients = vi.fn();
+  (agent as any).notifyEventBus = vi.fn();
+  (agent as any).enqueueOwnerNotification = vi.fn().mockResolvedValue(undefined);
+  (agent as any).flushMessagesToD1 = vi.fn().mockResolvedValue(undefined);
+  (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+  (agent as any).runnerLink.send = vi.fn();
+
+  return { agent, appDb, d1, doSqlite };
+}
+
 describe('SessionAgentDO', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -800,12 +904,44 @@ describe('SessionAgentDO', () => {
     it('emitSessionOutcome passes reason and errorCode straight through to emitEvent', async () => {
       const { agent } = await createTestAgent();
 
-      (agent as any).emitSessionOutcome('error', 'hibernate_failed');
+      await (agent as any).emitSessionOutcome('error', 'hibernate_failed');
 
       expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
         errorCode: 'hibernate_failed',
         properties: { reason: 'error' },
       });
+    });
+
+    // Persistence-level test (Conner's review): don't mock emitEvent or
+    // flushMetrics — drive a real terminal transition and assert the
+    // session.outcome row actually landed in the D1 analytics_events sink,
+    // not just the DO-local buffer.
+    it('persists session.outcome { recovery_exhausted } to D1 through the real emit + flush path', async () => {
+      const { agent, d1, doSqlite } = await createPersistenceAgent();
+      (agent as any).sessionState.set('status', 'recovering');
+
+      await (agent as any).handleStop('recovery_exhausted');
+
+      // Query the actual D1-side SQLite. The row exists here only if
+      // emitSessionOutcome emitted AND flushMetrics persisted the buffered
+      // row (flushed=0 → batchInsertAnalyticsEvents → analytics_events).
+      const rows = d1
+        .prepare(
+          "SELECT event_type, session_id, user_id, properties FROM analytics_events WHERE event_type = 'session.outcome'",
+        )
+        .all() as Array<{ event_type: string; session_id: string; user_id: string | null; properties: string | null }>;
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].session_id).toBe('orchestrator:user-1');
+      expect(rows[0].user_id).toBe('user-1');
+      expect(JSON.parse(rows[0].properties ?? '{}')).toEqual({ reason: 'recovery_exhausted' });
+
+      // The DO-local buffer row was marked flushed=1, so a later flush won't
+      // re-persist it — proves the row was drained, not merely double-written.
+      const localOutcome = doSqlite
+        .prepare("SELECT flushed FROM analytics_events WHERE event_type = 'session.outcome'")
+        .get() as { flushed: number } | undefined;
+      expect(localOutcome?.flushed).toBe(1);
     });
   });
 

@@ -4646,7 +4646,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
-      this.emitSessionOutcome('error', 'sandbox_spawn_failed');
+      await this.emitSessionOutcome('error', 'sandbox_spawn_failed');
       const errId = crypto.randomUUID();
       this.messageStore.writeMessage({
         id: errId,
@@ -4781,7 +4781,7 @@ export class SessionAgentDO {
     // `handleStop` is the funnel for every termination, including recovery
     // exhaustion (reason 'recovery_exhausted'). Surface that as its own
     // terminal outcome; all other stop reasons collapse to 'terminated'.
-    this.emitSessionOutcome(reason === 'recovery_exhausted' ? 'recovery_exhausted' : 'terminated');
+    await this.emitSessionOutcome(reason === 'recovery_exhausted' ? 'recovery_exhausted' : 'terminated');
 
     // Publish session.completed to EventBus
     this.notifyEventBus({
@@ -5913,7 +5913,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
-      this.emitSessionOutcome('error', 'recover_missing_config');
+      await this.emitSessionOutcome('error', 'recover_missing_config');
       this.broadcastToClients({ type: 'status', data: { status: 'error' } });
       this.broadcastToClients({ type: 'error', error: 'Cannot recover: missing spawn configuration' });
       return;
@@ -6014,7 +6014,7 @@ export class SessionAgentDO {
       }
 
       this.emitAuditEvent('session.hibernated', 'Session hibernated');
-      this.emitSessionOutcome('hibernated');
+      await this.emitSessionOutcome('hibernated');
       console.log(`[SessionAgentDO] Session ${sessionId} hibernated, snapshot: ${result.snapshotImageId}`);
       await this.notifyParentEvent(`Child session event: ${sessionId} hibernated.`, { wake: true, childStatus: 'hibernated' });
 
@@ -6057,7 +6057,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
-      this.emitSessionOutcome('error', 'hibernate_failed');
+      await this.emitSessionOutcome('error', 'hibernate_failed');
       const errId = crypto.randomUUID();
       this.messageStore.writeMessage({
         id: errId,
@@ -6090,7 +6090,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
-      this.emitSessionOutcome('error', 'wake_missing_config');
+      await this.emitSessionOutcome('error', 'wake_missing_config');
       this.broadcastToClients({ type: 'status', data: { status: 'error' } });
       this.broadcastToClients({ type: 'error', error: errorText });
       await this.notifyParentEvent(`Child session event: ${sessionId} errored (${errorText}).`, { wake: true, childStatus: 'error' });
@@ -6661,15 +6661,21 @@ export class SessionAgentDO {
    * `terminated`/`error` supersedes everything before it. `recovery_exhausted`
    * is a distinct terminal reason even though it routes through the same
    * termination path as `terminated`.
+   *
+   * `emitEvent` only writes the DO-local SQLite buffer (`flushed = 0`); a
+   * terminal session may never run `flushMetrics` again, so we flush here to
+   * persist the row to D1 immediately. Callers must `await` this so the flush
+   * completes before the terminal path tears the DO down.
    */
-  private emitSessionOutcome(
+  private async emitSessionOutcome(
     reason: 'terminated' | 'hibernated' | 'error' | 'recovery_exhausted',
     errorCode?: string,
-  ): void {
+  ): Promise<void> {
     this.emitEvent('session.outcome', {
       errorCode,
       properties: { reason },
     });
+    await this.flushMetrics();
   }
 
   private async handleTunnelDelete(
