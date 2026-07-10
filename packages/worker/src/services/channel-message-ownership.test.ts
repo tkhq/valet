@@ -145,4 +145,23 @@ describe('channel message ownership', () => {
 
     expect(result).toEqual({ success: false, error: 'Message sent, but provider returned no message ID' });
   });
+
+  it('injects the worker-owned capability before provider delivery', async () => {
+    const { db } = createTestDb();
+    db.insert(users).values({ id: 'owner', email: 'owner@example.com' }).run();
+    let providerContext: any;
+    const transport = {
+      channelType: 'custom-channel',
+      sendMessage: vi.fn().mockImplementation(async (_target: unknown, _message: unknown, ctx: unknown) => {
+        providerContext = ctx;
+        return { success: true, messageId: 'message-1' };
+      }),
+    } as any;
+    await expect(sendManagedChannelMessage({
+      db, encryptionKey: 'test-key', transport,
+      target: { channelType: 'custom-channel', channelId: 'chat-1' },
+      message: { markdown: 'hello' }, ctx: { token: 'token', userId: 'owner' }, orgId: 'org-1',
+    })).resolves.toMatchObject({ success: true, messageId: 'message-1' });
+    expect(providerContext.channelMessageOwnership).toBeDefined();
+  });
 });
