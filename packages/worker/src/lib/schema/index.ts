@@ -24,6 +24,7 @@ export * from './skills.js';
 export * from './persona-tools.js';
 export * from './threads.js';
 export * from './channel-threads.js';
+export * from './channel-message-refs.js';
 export * from './mcp-tool-cache.js';
 export * from './service-configs.js';
 export * from './github-installations.js';
