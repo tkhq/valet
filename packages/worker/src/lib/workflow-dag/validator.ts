@@ -770,18 +770,55 @@ function validateForeachItemSources(
     }
 
     if (arrayPaths.has(formatPathSegments(segments))) continue;
-    errors.push(foreachUntypedArrayError(node.id, node.items));
+    errors.push(foreachUntypedArrayError(node.id, node.items, sourceNode.type, sourceId));
   }
 }
 
-function foreachUntypedArrayError(nodeId: string, items: string): WorkflowValidationError {
+function foreachUntypedArrayError(
+  nodeId: string,
+  items: string,
+  sourceNodeType?: string,
+  sourceNodeId?: string,
+): WorkflowValidationError {
   return {
     scope: 'field',
     nodeId,
     path: 'items',
     code: 'foreach_items_untyped_array_output',
-    message: `foreach "${nodeId}" uses ${items}, but it is not a typed array output`,
+    message: foreachUntypedArrayMessage(nodeId, items, sourceNodeType, sourceNodeId),
   };
+}
+
+function foreachUntypedArrayMessage(
+  nodeId: string,
+  items: string,
+  sourceNodeType: string | undefined,
+  sourceNodeId: string | undefined,
+): string {
+  const diagnosis = `foreach "${nodeId}" uses ${items}, but it is not a typed array output.`;
+
+  // Trigger source: tell the author to declare trigger.dataSchema.
+  if (!sourceNodeType) {
+    return `${diagnosis} To fix: declare the field in trigger.dataSchema with type: 'array' (e.g. { <field>: { type: 'array' } }).`;
+  }
+
+  // Session / orchestrator: outputs are nested under .data.output.
+  if (sourceNodeType === 'session' || sourceNodeType === 'orchestrator') {
+    return `${diagnosis} To fix: declare an outputSchema on ${sourceNodeType} node "${sourceNodeId}" with an array field and set wait.mode: 'until_idle', then reference it as {{nodes.${sourceNodeId}.data.output.<field>}} (note the .output. prefix — session and orchestrator structured outputs are nested there).`;
+  }
+
+  // LLM: outputs are direct on .data.
+  if (sourceNodeType === 'llm') {
+    return `${diagnosis} To fix: declare an outputSchema on llm node "${sourceNodeId}" with an array field, then reference it as {{nodes.${sourceNodeId}.data.<field>}}.`;
+  }
+
+  // Tool: the tool's action must have a registered output schema declaring the field as an array.
+  if (sourceNodeType === 'tool') {
+    return `${diagnosis} To fix: the tool action on node "${sourceNodeId}" must expose an output schema declaring <field> as an array, then reference it as {{nodes.${sourceNodeId}.data.<field>}}. If the tool has no registered schema, foreach validation is skipped entirely.`;
+  }
+
+  // Set node or other: fall back to a generic hint.
+  return `${diagnosis} To fix: source node "${sourceNodeId}" must produce an array at the referenced path (for set nodes, provide a literal array value; for other node types, declare an outputSchema with an array field).`;
 }
 
 function parseSinglePathTemplate(value: string): string[] | null {
