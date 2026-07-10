@@ -29,3 +29,4 @@ export * from './service-configs.js';
 export * from './github-installations.js';
 export * from './custom-mcp-connectors.js';
 export * from './copilot.js';
+export * from './observability.js';

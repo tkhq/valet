@@ -12,6 +12,7 @@ import { handleChannelCommand } from './channel-webhooks.js';
 import { getSlackUserInfo, getSlackBotInfo } from '../services/slack.js';
 import { buildThreadContext, buildDmContext } from '../services/slack-threads.js';
 import { updateThreadCursor } from '../lib/db/channel-threads.js';
+import { recordWebhookDeliveryFireAndForget as recordDelivery } from '../lib/webhook-delivery.js';
 
 export const slackEventsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -82,10 +83,12 @@ slackEventsRouter.post('/slack/events', async (c) => {
   });
 
   const signingSecret = install.signingSecret || c.env.SLACK_SIGNING_SECRET;
+  const inboundEventType = (payload.event as Record<string, unknown> | undefined)?.type as string | undefined;
 
   if (signingSecret) {
     const valid = await verifySlackSignature(rawHeaders, rawBody, signingSecret);
     if (!valid) {
+      recordDelivery(c, { provider: 'slack', eventType: inboundEventType ?? null, outcome: 'invalid_signature' });
       return c.json({ error: 'Invalid signature' }, 401);
     }
   }
@@ -337,6 +340,7 @@ slackEventsRouter.post('/slack/events', async (c) => {
       );
       console.log(`[Slack] Bound session response: status=${resp.status}`);
       if (resp.ok) {
+        recordDelivery(c, { provider: 'slack', eventType: inboundEventType ?? null, outcome: 'processed' });
         const slackTransport = transport as SlackTransport;
         if (slackTransport.setThreadStatus && threadId) {
           const statusTarget: ChannelTarget = { channelType: 'slack', channelId: message.channelId, threadId };
@@ -461,6 +465,7 @@ slackEventsRouter.post('/slack/events', async (c) => {
 
   // Dispatch to orchestrator
   console.log(`[Slack] Orchestrator dispatch: userId=${userId} channelId=${dispatchChannelId}`);
+  recordDelivery(c, { provider: 'slack', eventType: inboundEventType ?? null, outcome: 'processed' });
   const result = await dispatchOrchestratorPrompt(c.env, {
     userId,
     content: message.text || '[Attachment]',
