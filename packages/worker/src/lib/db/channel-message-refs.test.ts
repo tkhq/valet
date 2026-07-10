@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { createTestDb } from '../../test-utils/db.js';
+import { actionInvocations } from '../schema/actions.js';
 import { channelMessageRefs } from '../schema/channel-message-refs.js';
+import { sessions } from '../schema/sessions.js';
 import { users } from '../schema/users.js';
 import {
   assertCanModifyChannelMessageRef,
@@ -57,12 +59,51 @@ describe('channel message reference DB helpers', () => {
   });
 
   it('registers the same owner idempotently without replacing provenance', async () => {
-    await register();
-    await register();
+    db.insert(sessions).values([
+      { id: 'session-1', userId: 'owner', workspace: '/workspace/one' },
+      { id: 'session-2', userId: 'owner', workspace: '/workspace/two' },
+    ]).run();
+    db.insert(actionInvocations).values([
+      {
+        id: 'invocation-1',
+        sessionId: 'session-1',
+        userId: 'owner',
+        service: 'slack',
+        actionId: 'send_message',
+        riskLevel: 'low',
+        resolvedMode: 'allow',
+      },
+      {
+        id: 'invocation-2',
+        sessionId: 'session-2',
+        userId: 'owner',
+        service: 'slack',
+        actionId: 'send_message',
+        riskLevel: 'low',
+        resolvedMode: 'allow',
+      },
+    ]).run();
+
+    await registerChannelMessageRef(db as any, {
+      ...ref,
+      ownerUserId: 'owner',
+      sessionId: 'session-1',
+      actionInvocationId: 'invocation-1',
+    });
+    await registerChannelMessageRef(db as any, {
+      ...ref,
+      ownerUserId: 'owner',
+      sessionId: 'session-2',
+      actionInvocationId: 'invocation-2',
+    });
 
     const rows = db.select().from(channelMessageRefs).all();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ ownerUserId: 'owner', sessionId: null, actionInvocationId: null });
+    expect(rows[0]).toMatchObject({
+      ownerUserId: 'owner',
+      sessionId: 'session-1',
+      actionInvocationId: 'invocation-1',
+    });
   });
 
   it('rejects registration that would transfer an existing message to another owner', async () => {
