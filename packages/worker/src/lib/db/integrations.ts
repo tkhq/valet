@@ -83,6 +83,41 @@ export async function getUserIntegrations(db: AppDb, userId: string): Promise<In
   return rows.map(rowToIntegration);
 }
 
+/**
+ * Return the selected active integration connection for a service. Org-level
+ * connections take precedence because every actor uses that one configuration.
+ */
+export async function getActiveIntegrationConnectionId(
+  db: AppDb,
+  userId: string,
+  service: string,
+): Promise<string | null> {
+  const orgConnection = await db
+    .select({ id: integrations.id })
+    .from(integrations)
+    .where(and(
+      eq(integrations.service, service),
+      eq(integrations.scope, 'org'),
+      eq(integrations.status, 'active'),
+    ))
+    .orderBy(desc(integrations.createdAt))
+    .get();
+  if (orgConnection) return orgConnection.id;
+
+  const userConnection = await db
+    .select({ id: integrations.id })
+    .from(integrations)
+    .where(and(
+      eq(integrations.userId, userId),
+      eq(integrations.service, service),
+      eq(integrations.scope, 'user'),
+      eq(integrations.status, 'active'),
+    ))
+    .orderBy(desc(integrations.createdAt))
+    .get();
+  return userConnection?.id ?? null;
+}
+
 export async function updateIntegrationStatus(
   db: AppDb,
   id: string,

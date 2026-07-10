@@ -453,6 +453,8 @@ export async function resolveActionPolicy(
 export interface ExecuteActionOpts {
   credentialCache: CredentialCache;
   orgId?: string;
+  /** Session provenance for messages created by a normal session tool. */
+  sessionId?: string;
   /** Spawn request env vars, used to detect orchestrator sessions */
   spawnEnvVars?: Record<string, string>;
   /** Org-level guard configuration, threaded from the DO to action plugins. */
@@ -534,8 +536,8 @@ export async function executeAction(
       encryptionKey: env.ENCRYPTION_KEY,
       channelType: service,
       userId,
-      credentialScopeMaterial: credentials.refresh_token ?? credentials.bot_token ?? credentials.access_token,
     }),
+    sessionId: opts.sessionId,
     actionInvocationId: invocationId,
   });
   // `workflows` is a worker-internal action source, not an external plugin.

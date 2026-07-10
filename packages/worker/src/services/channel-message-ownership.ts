@@ -5,7 +5,9 @@ import {
   markChannelMessageRefDeleted,
   registerChannelMessageRef,
 } from '../lib/db/channel-message-refs.js';
+import { getActiveIntegrationConnectionId } from '../lib/db/integrations.js';
 import { getOrgSlackInstallAny } from '../lib/db/slack.js';
+import { getUserTelegramConfig } from '../lib/db/telegram.js';
 
 export interface ChannelMessageOwnershipOptions {
   db: AppDb;
@@ -22,8 +24,6 @@ export interface ConnectionScopeOptions {
   encryptionKey: string;
   channelType: string;
   userId: string;
-  /** Worker-only secret material from the credential resolver; never exposed to plugins. */
-  credentialScopeMaterial?: string;
 }
 
 /** Resolve a stable credential namespace without exposing credential material. */
@@ -38,19 +38,21 @@ export async function resolveChannelMessageConnectionScope(
     return install.teamId;
   }
 
-  if (options.credentialScopeMaterial) {
-    return `credential:${await credentialScopeFingerprint(options.credentialScopeMaterial)}`;
+  if (options.channelType === 'telegram') {
+    const config = await getUserTelegramConfig(options.db, options.userId);
+    if (config) return `config:${config.id}`;
   }
 
-  // Actions without a user credential (for example worker-internal tools)
-  // still need an injected capability, but cannot correspond to an external
-  // user-scoped channel connection.
-  return `service:${options.channelType}:user:${options.userId}`;
-}
+  const integrationId = await getActiveIntegrationConnectionId(
+    options.db,
+    options.userId,
+    options.channelType,
+  );
+  if (integrationId) return `integration:${integrationId}`;
 
-async function credentialScopeFingerprint(material: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  // No-auth/internal actions still receive a capability, but this fallback
+  // deliberately does not represent a user-scoped external connection.
+  return `unconfigured:${options.channelType}`;
 }
 
 /** Create the narrow, worker-bound ownership capability exposed to plugins. */

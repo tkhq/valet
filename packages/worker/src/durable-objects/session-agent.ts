@@ -7135,7 +7135,13 @@ export class SessionAgentDO {
       result = await executeActionSvc(
         this.appDb, this.env, userId, toolId, service, actionId, params,
         actionSource, invocationId,
-        { credentialCache: this.credentialCacheAdapter, spawnEnvVars, guardConfig, orgId: orgId ?? 'default' },
+        {
+          credentialCache: this.credentialCacheAdapter,
+          spawnEnvVars,
+          guardConfig,
+          orgId: orgId ?? 'default',
+          sessionId: this.sessionState.sessionId ?? undefined,
+        },
       );
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);

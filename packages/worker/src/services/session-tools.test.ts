@@ -3,7 +3,7 @@ import { executeAction, listTools, resolveActionPolicy } from './session-tools.j
 import { createTestDb } from '../test-utils/db.js';
 import { upsertActionPolicy } from '../lib/db/actions.js';
 import { upsertMcpToolCache } from '../lib/db/mcp-tool-cache.js';
-import { actionInvocations, integrations, sessions, users, customMcpConnectors, disabledActions } from '../lib/schema/index.js';
+import { actionInvocations, integrations, sessions, userTelegramConfig, users, customMcpConnectors, disabledActions } from '../lib/schema/index.js';
 import { getChannelMessageRef } from '../lib/db/channel-message-refs.js';
 import { resolveChannelMessageConnectionScope } from './channel-message-ownership.js';
 import { encryptString } from '../lib/crypto.js';
@@ -454,6 +454,9 @@ describe('executeAction ownership context', () => {
     db.insert(actionInvocations).values({
       id: 'invocation-1', sessionId: SESSION_ID, userId: USER_ID, service: 'telegram', actionId: 'send', riskLevel: 'low', resolvedMode: 'allow',
     }).run();
+    db.insert(userTelegramConfig).values({
+      id: 'telegram-connection-1', userId: USER_ID, botUsername: 'valet', botInfo: '{}',
+    }).run();
     const source: ActionSource = {
       listActions: () => [],
       execute: async (_actionId, _params, ctx) => {
@@ -474,17 +477,16 @@ describe('executeAction ownership context', () => {
     });
     const expectedScope = await resolveChannelMessageConnectionScope({
       db: appDb, encryptionKey: 'test-key', channelType: 'telegram', userId: USER_ID,
-      credentialScopeMaterial: 'shared-telegram-bot-token',
     });
 
     await executeAction(
       appDb, { ENCRYPTION_KEY: 'test-key' } as Env, USER_ID, 'telegram:send', 'telegram', 'send', {}, source, 'invocation-1',
-      { credentialCache: emptyCredentialCache(), orgId: 'org-1' },
+      { credentialCache: emptyCredentialCache(), orgId: 'org-1', sessionId: SESSION_ID },
     );
 
     await expect(getChannelMessageRef(appDb, {
       orgId: 'org-1', channelType: 'telegram', connectionScope: expectedScope,
       channelId: 'chat-1', messageId: 'message-1',
-    })).resolves.toMatchObject({ ownerUserId: USER_ID, actionInvocationId: 'invocation-1' });
+    })).resolves.toMatchObject({ ownerUserId: USER_ID, sessionId: SESSION_ID, actionInvocationId: 'invocation-1' });
   });
 });

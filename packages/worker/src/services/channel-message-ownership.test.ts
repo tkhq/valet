@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestDb } from '../test-utils/db.js';
-import { actionInvocations, sessions, users } from '../lib/schema/index.js';
+import { actionInvocations, integrations, sessions, userTelegramConfig, users } from '../lib/schema/index.js';
 import { getChannelMessageRef } from '../lib/db/channel-message-refs.js';
 
 const getOrgSlackInstallAnyMock = vi.fn();
@@ -67,9 +67,13 @@ describe('channel message ownership', () => {
     expect(providerCall).not.toHaveBeenCalled();
   });
 
-  it('uses the configured Slack team and a stable credential fingerprint that changes on reconnect', async () => {
+  it('uses the configured Slack team and stable worker-owned connection configuration IDs', async () => {
     getOrgSlackInstallAnyMock.mockResolvedValue({ teamId: 'T-configured' });
     const { db } = createTestDb();
+    db.insert(users).values({ id: 'user-1', email: 'user-1@example.com' }).run();
+    db.insert(userTelegramConfig).values({
+      id: 'telegram-config-before-reconnect', userId: 'user-1', botUsername: 'before', botInfo: '{}',
+    }).run();
 
     await expect(resolveChannelMessageConnectionScope({
       db,
@@ -77,32 +81,23 @@ describe('channel message ownership', () => {
       channelType: 'slack',
       userId: 'user-1',
     })).resolves.toBe('T-configured');
-    const scope = await resolveChannelMessageConnectionScope({
+    await expect(resolveChannelMessageConnectionScope({
       db,
       encryptionKey: 'test-key',
       channelType: 'telegram',
       userId: 'user-1',
-      credentialScopeMaterial: 'bot-token-before-reconnect',
-    });
-    const repeatedScope = await resolveChannelMessageConnectionScope({
-      db,
-      encryptionKey: 'test-key',
-      channelType: 'telegram',
-      userId: 'user-1',
-      credentialScopeMaterial: 'bot-token-before-reconnect',
-    });
-    expect(repeatedScope).toBe(scope);
-    expect(scope).not.toContain('bot-token-before-reconnect');
+    })).resolves.toBe('config:telegram-config-before-reconnect');
 
-    const reconnectedScope = await resolveChannelMessageConnectionScope({
+    db.delete(userTelegramConfig).run();
+    db.insert(userTelegramConfig).values({
+      id: 'telegram-config-after-reconnect', userId: 'user-1', botUsername: 'after', botInfo: '{}',
+    }).run();
+    await expect(resolveChannelMessageConnectionScope({
       db,
       encryptionKey: 'test-key',
       channelType: 'telegram',
       userId: 'user-1',
-      credentialScopeMaterial: 'bot-token-after-reconnect',
-    });
-    expect(reconnectedScope).not.toBe(scope);
-    expect(reconnectedScope).not.toContain('bot-token-after-reconnect');
+    })).resolves.toBe('config:telegram-config-after-reconnect');
   });
 
   it('allows an admin to modify a member ref through their shared credential scope', async () => {
@@ -111,23 +106,26 @@ describe('channel message ownership', () => {
       { id: 'member', email: 'member@example.com' },
       { id: 'admin', email: 'admin@example.com', role: 'admin' },
     ]).run();
+    db.insert(integrations).values({
+      id: 'shared-org-connection', userId: 'member', service: 'custom-channel', config: { entities: [] }, status: 'active', scope: 'org',
+    }).run();
     const shared = {
       db,
       orgId: 'org-1',
-      channelType: 'telegram',
+      channelType: 'custom-channel',
     };
     const memberScope = await resolveChannelMessageConnectionScope({
-      db, encryptionKey: 'test-key', channelType: 'telegram', userId: 'member', credentialScopeMaterial: 'shared-bot-token',
+      db, encryptionKey: 'test-key', channelType: 'custom-channel', userId: 'member',
     });
     const adminScope = await resolveChannelMessageConnectionScope({
-      db, encryptionKey: 'test-key', channelType: 'telegram', userId: 'admin', credentialScopeMaterial: 'shared-bot-token',
+      db, encryptionKey: 'test-key', channelType: 'custom-channel', userId: 'admin',
     });
-    expect(adminScope).toBe(memberScope);
+    expect(adminScope).toBe('integration:shared-org-connection');
     const member = createChannelMessageOwnership({ ...shared, actorUserId: 'member', connectionScope: memberScope });
     const admin = createChannelMessageOwnership({ ...shared, actorUserId: 'admin', connectionScope: adminScope });
-    await member.registerCreated({ channelType: 'telegram', channelId: 'chat-1', messageId: 'message-1' });
+    await member.registerCreated({ channelType: 'custom-channel', channelId: 'chat-1', messageId: 'message-1' });
 
-    await expect(admin.assertCanModify({ channelType: 'telegram', channelId: 'chat-1', messageId: 'message-1' }))
+    await expect(admin.assertCanModify({ channelType: 'custom-channel', channelId: 'chat-1', messageId: 'message-1' }))
       .resolves.toBeUndefined();
   });
 });

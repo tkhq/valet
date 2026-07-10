@@ -306,7 +306,6 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
         encryptionKey: env.ENCRYPTION_KEY,
         channelType: node.service,
         userId: runParams.userId,
-        credentialScopeMaterial: credentials.refresh_token ?? credentials.bot_token ?? credentials.access_token,
       }),
       actionInvocationId: invocationId,
     }),
