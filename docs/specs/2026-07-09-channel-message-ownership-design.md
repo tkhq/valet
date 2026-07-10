@@ -37,9 +37,10 @@ session, that is currently the session's owning user, matching existing action
 policy and invocation attribution. Attributing an action to a particular
 shared-session participant is a separate feature.
 
-This design does not add administrator overrides. Only the recorded owner may
-mutate a message. A future override policy can be added centrally without
-changing plugin contracts.
+The recorded owner may mutate a message. A Valet user whose current
+`users.role` is `admin` may also mutate any managed, live message in the same
+organization. The worker evaluates that role at authorization time; plugins
+never receive a caller-controlled admin flag.
 
 ## Decision
 
@@ -129,10 +130,11 @@ cross-connection mutation, never grant one.
 `deleted_at` preserves an authorization/audit tombstone after a successful
 external deletion. A tombstoned row cannot be updated or deleted again.
 
-If the owner is deleted, the foreign key is set to `NULL`; subsequent mutation
-requests fail closed. Session and action-invocation references are provenance
-only and may be nulled independently without changing the message's external
-identity.
+If the owner is deleted, the foreign key is set to `NULL`. Members cannot
+mutate that ref, but a current admin may mutate its live managed ref under the
+same override used for unattributed system messages. Session and
+action-invocation references are provenance only and may be nulled
+independently without changing the message's external identity.
 
 ## SDK Contract
 
@@ -168,8 +170,8 @@ The capability is bound to an effective owner before the plugin runs:
 - Interactive-prompt updates use the prompt's owning session user, not the
   person who clicked a button; the responder is display/audit metadata only.
 - A truly unattributed system send is recorded with `owner_user_id = NULL`.
-  No user-facing mutation capability may modify that row until a future
-  explicit system/admin policy is designed.
+  It cannot be mutated by a member, but a current organization admin may
+  mutate it through the same centralized authorization check.
 
 The capability returns stable authorization errors:
 
@@ -177,11 +179,12 @@ The capability returns stable authorization errors:
 - `message_not_owned` for an existing message owned by another user;
 - `message_deleted` for a tombstoned reference.
 
-For an exact external identity, the Worker checks the owner before the
-tombstone. A non-owner (and all unattributed/system rows) receives
-`message_not_owned` whether or not the message was deleted; this avoids
-revealing lifecycle state to another user. The owner receives
-`message_deleted` for their own tombstoned row.
+For an exact external identity, the Worker first determines whether the actor
+is the recorded owner or has the current `admin` role. A member who is neither
+receives `message_not_owned` whether or not the message was deleted; this
+avoids revealing lifecycle state to another user. The owner or an admin
+receives `message_deleted` for a tombstoned row. An admin cannot revive or
+modify an unknown/legacy ref.
 
 Plugins map those errors to concise user-facing messages but must not call the
 external mutation API after an authorization error.
@@ -212,7 +215,8 @@ trusted reconciliation process records it.
 1. The mutation action parses the external channel/message identifier.
 2. The plugin calls `assertCanModify` before the platform API request.
 3. The worker does an exact lookup on the unique external identity and requires
-   a live row whose `owner_user_id` equals the context user.
+   a live row whose `owner_user_id` equals the context user or whose context
+   user currently has `users.role = 'admin'`.
 4. Only then does the plugin call the external update API.
 
 Private-channel membership checks remain in place. They are complementary:
@@ -302,11 +306,14 @@ Tests must demonstrate these properties:
    failure and leaves no authorization bypass.
 9. Identical platform channel/message IDs under different resolved connection
    scopes cannot authorize each other.
+10. An admin can update/delete another user's managed live ref, while a member
+    cannot; neither can mutate an unknown or tombstoned ref.
+11. An admin can mutate a managed live ref whose owner was deleted; a member
+    cannot.
 
 ## Non-Goals
 
 - Retroactively granting mutability to untracked messages.
-- Administrator or organization-wide mutation overrides.
 - Storing external message bodies or attachments.
 - Inferring message ownership from untrusted action parameters, arbitrary JSON
   result fields, analytics events, or routing mappings.
