@@ -145,6 +145,22 @@ describe('channel message reference DB helpers', () => {
     }
   });
 
+  it('preserves an existing tombstone timestamp on repeated deletion marking', async () => {
+    await register();
+    const originalDeletedAt = '2020-01-01 00:00:00';
+    const registered = await getChannelMessageRef(db as any, ref);
+    db.update(channelMessageRefs)
+      .set({ deletedAt: originalDeletedAt })
+      .where(eq(channelMessageRefs.id, registered!.id))
+      .run();
+
+    await markChannelMessageRefDeleted(db as any, ref);
+
+    await expect(getChannelMessageRef(db as any, ref)).resolves.toMatchObject({
+      deletedAt: originalDeletedAt,
+    });
+  });
+
   it('does not reveal a tombstone to a member who is not the owner', async () => {
     await register();
     await markChannelMessageRefDeleted(db as any, ref);

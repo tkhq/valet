@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { AppDb } from '../drizzle.js';
 import { channelMessageRefs, users, type ChannelMessageRefRow } from '../schema/index.js';
 
@@ -128,5 +128,5 @@ export async function markChannelMessageRefDeleted(
   await db
     .update(channelMessageRefs)
     .set({ deletedAt: sql`datetime('now')` })
-    .where(externalIdentityWhere(identity));
+    .where(and(externalIdentityWhere(identity), isNull(channelMessageRefs.deletedAt)));
 }
