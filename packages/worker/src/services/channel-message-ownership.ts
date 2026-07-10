@@ -8,6 +8,7 @@ import {
 import { getActiveIntegrationConnectionId } from '../lib/db/integrations.js';
 import { getOrgSlackInstallAny } from '../lib/db/slack.js';
 import { getUserTelegramConfig } from '../lib/db/telegram.js';
+import type { ChannelContext, ChannelTarget, ChannelTransport, OutboundMessage, SendResult } from '@valet/sdk';
 
 export interface ChannelMessageOwnershipOptions {
   db: AppDb;
@@ -71,7 +72,7 @@ export function createChannelMessageOwnership(
     async registerCreated(ref) {
       await registerChannelMessageRef(options.db, {
         ...identity(ref),
-        ownerUserId: options.actorUserId,
+        ownerUserId: options.actorUserId || null,
         sessionId: options.sessionId,
         actionInvocationId: options.actionInvocationId,
       });
@@ -90,4 +91,46 @@ export function createChannelMessageOwnership(
       await markChannelMessageRefDeleted(options.db, identity(ref));
     },
   };
+}
+
+/** Send through a channel transport and persist the provider ref before reporting success. */
+export async function sendManagedChannelMessage(options: {
+  db: AppDb;
+  encryptionKey: string;
+  transport: ChannelTransport;
+  target: ChannelTarget;
+  message: OutboundMessage;
+  ctx: ChannelContext;
+  orgId?: string;
+  sessionId?: string;
+}): Promise<SendResult> {
+  const result = await options.transport.sendMessage(options.target, options.message, options.ctx);
+  if (!result.success || !result.messageId) return result;
+  if (!options.orgId) {
+    return { success: false, error: 'Message sent, but ownership could not be recorded' };
+  }
+  const scope = await resolveChannelMessageConnectionScope({
+    db: options.db,
+    encryptionKey: options.encryptionKey,
+    channelType: options.transport.channelType,
+    userId: options.ctx.userId,
+  });
+  const ownership = createChannelMessageOwnership({
+    db: options.db,
+    actorUserId: options.ctx.userId,
+    orgId: options.orgId,
+    channelType: options.transport.channelType,
+    connectionScope: scope,
+    sessionId: options.sessionId,
+  });
+  try {
+    await ownership.registerCreated({
+      channelType: options.transport.channelType,
+      channelId: options.target.channelId,
+      messageId: result.messageId,
+    });
+  } catch {
+    return { success: false, error: 'Message sent, but ownership could not be recorded' };
+  }
+  return result;
 }

@@ -16,6 +16,7 @@ import type {
   InteractivePromptRef,
   InteractiveResolution,
   OutboundMessage,
+  ChannelMessageOwnership,
 } from '@valet/sdk';
 import { channelRegistry } from '../channels/registry.js';
 
@@ -25,6 +26,7 @@ export interface ChannelRouterDeps {
   resolveToken(channelType: string, userId: string): Promise<string | undefined>;
   resolvePersona(userId: string): Promise<Persona | undefined>;
   onReplySent(channelType: string, channelId: string): Promise<void>;
+  resolveChannelMessageOwnership?(channelType: string, userId: string): Promise<ChannelMessageOwnership | undefined>;
 }
 
 export interface SendReplyOpts {
@@ -78,11 +80,26 @@ export class ChannelRouter {
       const target: ChannelTarget = transport.parseTarget?.(channelId) ?? { channelType, channelId };
       const outbound = this.buildOutboundMessage(opts);
       const persona = await this.deps.resolvePersona(userId).catch(() => undefined);
-      const ctx: ChannelContext = { token, userId, persona };
+      const ownership = await this.deps.resolveChannelMessageOwnership?.(channelType, userId);
+      if (!ownership) return { success: false, error: 'Message ownership context unavailable' };
+      const ctx: ChannelContext = { token, userId, persona, channelMessageOwnership: ownership };
 
       const result = await transport.sendMessage(target, outbound, ctx);
       if (!result.success) {
         return { success: false, error: result.error || `${channelType} API error` };
+      }
+
+      if (!result.messageId) {
+        return { success: false, error: 'Message sent, but provider returned no message ID' };
+      }
+      if (ownership) {
+        try {
+          await ownership.registerCreated({ channelType, channelId: target.channelId, messageId: result.messageId });
+        } catch (err) {
+          console.error(`[ChannelRouter] message ownership registration failed for ${channelType}:${target.channelId}`,
+            err instanceof Error ? err.message : String(err));
+          return { success: false, error: 'Message sent, but ownership could not be recorded' };
+        }
       }
 
       if (followUp !== false) {
@@ -115,10 +132,22 @@ export class ChannelRouter {
 
       const target: ChannelTarget =
         transport.parseTarget?.(t.channelId) ?? { channelType: t.channelType, channelId: t.channelId };
-      const ctx: ChannelContext = { token, userId };
+      const ownership = await this.deps.resolveChannelMessageOwnership?.(t.channelType, userId);
+      if (!ownership) throw new Error('Message ownership context unavailable');
+      const ctx: ChannelContext = { token, userId, channelMessageOwnership: ownership };
 
       const ref = await transport.sendInteractivePrompt(target, prompt, ctx);
       if (ref) {
+        if (!ref.channelId || !ref.messageId) throw new Error('Provider returned an incomplete message reference');
+        if (ownership) {
+          try {
+            await ownership.registerCreated({ channelType: t.channelType, channelId: ref.channelId, messageId: ref.messageId });
+          } catch (err) {
+            console.error(`[ChannelRouter] interactive message ownership registration failed for ${t.channelType}:${ref.channelId}`,
+              err instanceof Error ? err.message : String(err));
+            throw new Error('Message sent, but ownership could not be recorded');
+          }
+        }
         refs.push({ channelType: t.channelType, ref });
       }
     }
@@ -151,7 +180,16 @@ export class ChannelRouter {
 
       const target: ChannelTarget =
         transport.parseTarget?.(ref.channelId) ?? { channelType, channelId: ref.channelId };
-      const ctx: ChannelContext = { token, userId: userId || '' };
+      const ownership = await this.deps.resolveChannelMessageOwnership?.(channelType, userId || '');
+      if (!ownership) throw new Error('Message ownership context unavailable');
+      try {
+        await ownership.assertCanModify({ channelType, channelId: ref.channelId, messageId: ref.messageId });
+      } catch (err) {
+        console.error(`[ChannelRouter] interactive message authorization failed for ${channelType}:${ref.channelId}:`,
+          err instanceof Error ? err.message : String(err));
+        throw err;
+      }
+      const ctx: ChannelContext = { token, userId: userId || '', channelMessageOwnership: ownership };
 
       try {
         await transport.updateInteractivePrompt(target, ref, resolution, ctx);

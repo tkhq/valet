@@ -7,6 +7,7 @@ import * as db from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
 import { getCredential } from '../services/credentials.js';
 import { dispatchOrchestratorPrompt } from '../services/orchestrator.js';
+import { sendManagedChannelMessage } from '../services/channel-message-ownership.js';
 
 export const channelWebhooksRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -386,7 +387,8 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
     } else {
       msg = `Failed to reach your orchestrator (${result.reason ?? 'unknown'}). Try again in a moment.`;
     }
-    await transport.sendMessage(target, { markdown: msg }, ctx);
+    const orgId = (await db.getOrgSettings(getDb(c.env.DB)))?.id;
+    await sendManagedChannelMessage({ db: getDb(c.env.DB), encryptionKey: c.env.ENCRYPTION_KEY, transport, target, message: { markdown: msg }, ctx, orgId });
   }
 
   return c.json({ ok: true });
@@ -404,6 +406,21 @@ export async function handleChannelCommand(
 ): Promise<void> {
   const command = message.command!;
   const sessionId = `orchestrator:${userId}`;
+  const orgId = (await db.getOrgSettings(getDb(env.DB)))?.id;
+  const baseTransport = transport;
+  transport = {
+    ...baseTransport,
+    sendMessage: (target, outbound, context) => sendManagedChannelMessage({
+      db: getDb(env.DB),
+      encryptionKey: env.ENCRYPTION_KEY,
+      transport: baseTransport,
+      target,
+      message: outbound,
+      ctx: context,
+      orgId,
+      sessionId,
+    }),
+  };
 
   // Check if user has an orchestrator configured
   const identity = await db.getOrchestratorIdentity(getDb(env.DB), userId);

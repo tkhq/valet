@@ -12,6 +12,7 @@ import { handleChannelCommand } from './channel-webhooks.js';
 import { getSlackUserInfo, getSlackBotInfo } from '../services/slack.js';
 import { buildThreadContext, buildDmContext } from '../services/slack-threads.js';
 import { updateThreadCursor } from '../lib/db/channel-threads.js';
+import { sendManagedChannelMessage } from '../services/channel-message-ownership.js';
 
 export const slackEventsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -202,9 +203,9 @@ slackEventsRouter.post('/slack/events', async (c) => {
         channelId: message.channelId,
         threadId: isDm ? undefined : threadId,
       };
-      await transport.sendMessage(target, {
+      await sendManagedChannelMessage({ db: c.get('db'), encryptionKey: c.env.ENCRYPTION_KEY, transport, target, message: {
         markdown: `I don't recognize your Slack account yet. To get started, link your account in Valet:\n\n1. <${(c.env as Env).FRONTEND_URL || 'https://valet.bot'}|Log in to Valet>\n2. Go to **Integrations** in the sidebar\n3. Click **Link Account** on the Slack card\n4. Find your name and enter the verification code I'll DM you`,
-      }, ctx);
+      }, ctx, orgId: (await db.getOrgSettings(c.get('db')))?.id });
     }
     return c.json({ ok: true });
   }
@@ -501,7 +502,7 @@ slackEventsRouter.post('/slack/events', async (c) => {
     } else {
       msg = `Failed to reach your orchestrator (${result.reason ?? 'unknown'}). Try again in a moment.`;
     }
-    await transport.sendMessage(target, { markdown: msg }, ctx);
+    await sendManagedChannelMessage({ db: c.get('db'), encryptionKey: c.env.ENCRYPTION_KEY, transport, target, message: { markdown: msg }, ctx, orgId: (await db.getOrgSettings(c.get('db')))?.id });
   }
 
   return c.json({ ok: true });

@@ -7,6 +7,11 @@ function mockDeps(overrides?: Partial<ChannelRouterDeps>): ChannelRouterDeps {
     resolveToken: vi.fn().mockResolvedValue('mock-token'),
     resolvePersona: vi.fn().mockResolvedValue(undefined),
     onReplySent: vi.fn().mockResolvedValue(undefined),
+    resolveChannelMessageOwnership: vi.fn().mockResolvedValue({
+      registerCreated: vi.fn().mockResolvedValue(undefined),
+      assertCanModify: vi.fn().mockResolvedValue(undefined),
+      markDeleted: vi.fn().mockResolvedValue(undefined),
+    }),
     ...overrides,
   };
 }
@@ -64,6 +69,21 @@ describe('ChannelRouter', () => {
         { markdown: 'hello' },
         expect.objectContaining({ token: 'mock-token', userId: 'u1' }),
       );
+    });
+
+    it('registers the provider message after a successful send', async () => {
+      const registerCreated = vi.fn().mockResolvedValue(undefined);
+      deps = mockDeps({ resolveChannelMessageOwnership: vi.fn().mockResolvedValue({ registerCreated, assertCanModify: vi.fn(), markDeleted: vi.fn() }) });
+      router = new ChannelRouter(deps);
+      await router.sendReply({ userId: 'u1', channelType: 'slack', channelId: 'C123:thread', message: 'hello' });
+      expect(registerCreated).toHaveBeenCalledWith({ channelType: 'slack', channelId: 'C123', messageId: 'ts123' });
+    });
+
+    it('reports an uncertain delivery when ownership registration fails', async () => {
+      deps = mockDeps({ resolveChannelMessageOwnership: vi.fn().mockResolvedValue({ registerCreated: vi.fn().mockRejectedValue(new Error('db down')), assertCanModify: vi.fn(), markDeleted: vi.fn() }) });
+      router = new ChannelRouter(deps);
+      const result = await router.sendReply({ userId: 'u1', channelType: 'slack', channelId: 'C123', message: 'hello' });
+      expect(result).toEqual({ success: false, error: 'Message sent, but ownership could not be recorded' });
     });
 
     it('calls onReplySent on success when followUp is not false', async () => {
@@ -232,6 +252,14 @@ describe('ChannelRouter', () => {
       expect(refs[0].ref).toEqual({ channelId: 'C123', messageId: 'msg1' });
     });
 
+    it('registers interactive prompt refs', async () => {
+      const registerCreated = vi.fn().mockResolvedValue(undefined);
+      deps = mockDeps({ resolveChannelMessageOwnership: vi.fn().mockResolvedValue({ registerCreated, assertCanModify: vi.fn(), markDeleted: vi.fn() }) });
+      router = new ChannelRouter(deps);
+      await router.sendInteractivePrompt({ userId: 'u1', targets: [{ channelType: 'slack', channelId: 'C123' }], prompt: { id: 'p', sessionId: 's', type: 'approval', title: 'Approve', actions: [] } });
+      expect(registerCreated).toHaveBeenCalledWith({ channelType: 'slack', channelId: 'C123', messageId: 'msg1' });
+    });
+
     it('skips targets with no transport', async () => {
       const prompt: InteractivePrompt = {
         id: 'p1',
@@ -306,6 +334,22 @@ describe('ChannelRouter', () => {
       });
 
       expect(mockTransport.updateInteractivePrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('authorizes interactive refs before provider mutation', async () => {
+      const assertCanModify = vi.fn().mockResolvedValue(undefined);
+      deps = mockDeps({ resolveChannelMessageOwnership: vi.fn().mockResolvedValue({ registerCreated: vi.fn(), assertCanModify, markDeleted: vi.fn() }) });
+      router = new ChannelRouter(deps);
+      await router.updateInteractivePrompt({ userId: 'u1', refs: [{ channelType: 'slack', ref: { channelId: 'C123', messageId: 'msg1' } }], resolution: { actionId: 'approve', resolvedBy: 'user' } });
+      expect(assertCanModify).toHaveBeenCalledWith({ channelType: 'slack', channelId: 'C123', messageId: 'msg1' });
+      expect(mockTransport.updateInteractivePrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not mutate the provider when ref authorization fails', async () => {
+      deps = mockDeps({ resolveChannelMessageOwnership: vi.fn().mockResolvedValue({ registerCreated: vi.fn(), assertCanModify: vi.fn().mockRejectedValue(new Error('not owned')), markDeleted: vi.fn() }) });
+      router = new ChannelRouter(deps);
+      await expect(router.updateInteractivePrompt({ userId: 'u1', refs: [{ channelType: 'slack', ref: { channelId: 'C123', messageId: 'msg1' } }], resolution: { actionId: 'approve', resolvedBy: 'user' } })).rejects.toThrow('not owned');
+      expect(mockTransport.updateInteractivePrompt).not.toHaveBeenCalled();
     });
 
     it('swallows errors per-ref', async () => {

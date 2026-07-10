@@ -49,6 +49,7 @@ import { ensureChannelBinding } from '../lib/db/channels.js';
 import { getOrgSlackInstallAny } from '../lib/db/slack.js';
 import { registerChannelThread } from '../lib/db/channel-threads.js';
 import { channelScopeKey } from '@valet/shared';
+import { createChannelMessageOwnership, resolveChannelMessageConnectionScope } from '../services/channel-message-ownership.js';
 
 // ─── WebSocket Message Types ───────────────────────────────────────────────
 
@@ -390,6 +391,24 @@ export class SessionAgentDO {
       resolveOrchestratorPersona(this.appDb, userId).catch(() => undefined),
     onReplySent: async (channelType, channelId) => {
       this.resolveChannelFollowups(channelType, channelId);
+    },
+    resolveChannelMessageOwnership: async (channelType, userId) => {
+      const orgId = await this.resolveOrgId();
+      if (!orgId || !userId) return undefined;
+      const connectionScope = await resolveChannelMessageConnectionScope({
+        db: this.appDb,
+        encryptionKey: this.env.ENCRYPTION_KEY,
+        channelType,
+        userId,
+      });
+      return createChannelMessageOwnership({
+        db: this.appDb,
+        actorUserId: userId,
+        orgId,
+        channelType,
+        connectionScope,
+        sessionId: this.sessionState?.sessionId,
+      });
     },
   });
 
