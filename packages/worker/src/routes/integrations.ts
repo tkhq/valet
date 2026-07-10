@@ -18,16 +18,15 @@ import * as integrationService from '../services/integrations.js';
 import { integrationRegistry } from '../integrations/registry.js';
 import { revokeCredential } from '../services/credentials.js';
 import { getDb } from '../lib/drizzle.js';
-import { listMcpToolCache } from '../lib/db/mcp-tool-cache.js';
 import { getDisabledPluginServices } from '../lib/db/plugins.js';
 import {
   getCustomMcpOAuthConfig,
   getCustomMcpOAuthConnector,
   loadCustomMcpConnectorContext,
 } from '../services/custom-mcp-connectors.js';
+import { buildActionCatalog } from '../services/action-catalog.js';
 import { validateOutboundUrl } from '../services/outbound-url-policy.js';
 import { createSafeFetchOutbound } from '../services/safe-fetch-outbound.js';
-import { zodToJsonSchema } from '../lib/zod-json-schema.js';
 
 export const integrationsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -296,87 +295,8 @@ integrationsRouter.get('/available', async (c) => {
  * List all actions from the integration registry (for policy editor autocomplete)
  */
 integrationsRouter.get('/actions', async (c) => {
-  const serviceFilter = c.req.query('service');
-  const packages = integrationRegistry.listPackages();
-  const customContext = await loadCustomMcpConnectorContext(c.env, c.get('db'), 'default');
-
-  // Build a lookup of provider display names by service for cache entries
-  const displayNameMap = new Map<string, string>();
-  for (const pkg of packages) {
-    displayNameMap.set(pkg.service, pkg.provider.displayName);
-  }
-  for (const connector of customContext.connectors.values()) {
-    displayNameMap.set(connector.serviceSlug, connector.displayName);
-  }
-
-  const catalog: Array<{
-    service: string;
-    serviceDisplayName: string;
-    actionId: string;
-    name: string;
-    description: string;
-    riskLevel: string;
-    inputSchema?: Record<string, unknown>;
-    outputSchema?: Record<string, unknown>;
-  }> = [];
-
-  // Track which service:actionId combos we've already added from static sources
-  const seen = new Set<string>();
-
-  for (const pkg of packages) {
-    if (serviceFilter && pkg.service !== serviceFilter) continue;
-    // listActions may be async (e.g. MCP-backed sources). Without credentials
-    // MCP sources return [] gracefully, which is fine for the catalog endpoint.
-    const actions = await (pkg.actions?.listActions() ?? []);
-    for (const a of actions) {
-      const key = `${pkg.service}:${a.id}`;
-      seen.add(key);
-      // Fall back to converting the Zod `params` to JSON Schema when the
-      // action doesn't ship an explicit inputSchema. Lets the workflow tool
-      // node render typed parameters for every plugin action without each
-      // one hand-authoring a duplicate schema.
-      const inputSchema = a.inputSchema ?? zodToJsonSchema(a.params);
-      catalog.push({
-        service: pkg.service,
-        serviceDisplayName: pkg.provider.displayName,
-        actionId: a.id,
-        name: a.name,
-        description: a.description,
-        riskLevel: a.riskLevel,
-        ...(inputSchema && Object.keys(inputSchema).length > 0 ? { inputSchema } : {}),
-        ...(a.outputSchema ? { outputSchema: a.outputSchema } : {}),
-      });
-    }
-  }
-
-  // Merge cached MCP tool metadata (discovered at runtime by SessionAgentDO).
-  // This surfaces MCP-backed tools that can't be listed without credentials.
-  try {
-    const appDb = c.get('db');
-    const cached = await listMcpToolCache(appDb, serviceFilter ?? undefined);
-    for (const entry of cached) {
-      if (!integrationRegistry.isBuiltinService(entry.service) && !customContext.connectors.has(entry.service)) {
-        continue;
-      }
-      const key = `${entry.service}:${entry.actionId}`;
-      if (seen.has(key)) continue; // static source already provided this tool
-      seen.add(key);
-      catalog.push({
-        service: entry.service,
-        serviceDisplayName: displayNameMap.get(entry.service) ?? entry.service,
-        actionId: entry.actionId,
-        name: entry.name,
-        description: entry.description,
-        riskLevel: entry.riskLevel,
-        ...(entry.inputSchema ? { inputSchema: entry.inputSchema } : {}),
-        ...(entry.outputSchema ? { outputSchema: entry.outputSchema } : {}),
-      });
-    }
-  } catch (err) {
-    // Cache read failure is non-fatal — static catalog still works
-    console.warn('[integrations/actions] mcp tool cache read failed:', err instanceof Error ? err.message : String(err));
-  }
-
+  const serviceFilter = c.req.query('service') ?? undefined;
+  const catalog = await buildActionCatalog(c.env, c.get('db'), serviceFilter);
   return c.json({ actions: catalog });
 });
 

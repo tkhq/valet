@@ -56,6 +56,10 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   // wake and a retry of any single step does not re-fire side effects
   // already committed by an earlier step.
 
+  // Render params before preflight because some credential resolvers use
+  // action parameters to select the credential source.
+  const renderedParams = renderJsonTemplates(node.params, ctx) as Record<string, unknown>;
+
   // 1. Preflight reads (disabled-action + action definition) — cached
   // so a replay returns the same risk level and disabled state without
   // re-reading D1 or re-listing integration actions.
@@ -68,7 +72,23 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     if (!source) {
       throw new Error(`tool node "${node.id}": no integration package for service "${node.service}"`);
     }
-    const defs = await source.listActions();
+    const provider = integrationRegistry.getProvider(node.service, customCtx);
+    let listCtx: { credentials: { access_token: string } } | undefined;
+    // MCP servers advertise actions dynamically and credential-gated servers
+    // return no definitions unless the owner's token is supplied. Static
+    // integration packages ignore this context, so avoid an unnecessary
+    // credential lookup for them.
+    if (provider?.mcpServerUrl && providerRequiresUserCredential(provider)) {
+      const credentialResult = await integrationRegistry.resolveCredentials(node.service, env, runParams.userId, {
+        params: renderedParams,
+        forceRefresh: false,
+      });
+      if (!credentialResult.ok) {
+        throw new Error(`tool node "${node.id}": no credentials for ${node.service}: ${credentialResult.error.message}`);
+      }
+      listCtx = { credentials: { access_token: credentialResult.credential.accessToken } };
+    }
+    const defs = await source.listActions(listCtx);
     const def = defs.find((a) => a.id === node.action);
     if (!def) {
       throw new Error(`tool node "${node.id}": action "${node.action}" not found in ${node.service} package`);
@@ -87,10 +107,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     throw new Error(`tool node "${node.id}": no integration package for service "${node.service}"`);
   }
 
-  // 2. Render params (deterministic from trigger + state.nodes).
-  const renderedParams = renderJsonTemplates(node.params, ctx) as Record<string, unknown>;
-
-  // 3. Invocation row + policy resolution. Cached because creating /
+  // 2. Invocation row + policy resolution. Cached because creating /
   // resolving the row is the contract that prevents re-firing the
   // action on replay.
   const invocationId = aliasedInvocationId(runParams.executionId, node.id, args.aliases);
@@ -113,7 +130,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   });
   const invocation = JSON.parse(invocationJson) as { outcome: 'allowed' | 'denied' | 'pending_approval' };
 
-  // 4. Handle policy outcome.
+  // 3. Handle policy outcome.
   if (invocation.outcome === 'denied') {
     if (node.onPolicyDeny === 'skip') {
       return { denied: true, reason: 'policy_denied' } satisfies ToolDeniedOutput;
@@ -225,7 +242,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     });
   }
 
-  // 5. Resolve credentials inside step.do — the credential fetch
+  // 4. Resolve credentials inside step.do — the credential fetch
   // touches D1 + external token refresh; we want the resolved tuple
   // cached so a retry doesn't re-issue a refresh token call.
   const provider = integrationRegistry.getProvider(node.service, customContext);
@@ -377,4 +394,3 @@ function isAuthFailure(result: ActionResult): boolean {
     typeof result.error === 'string' &&
     /\b(401|unauthorized|invalid.credentials|token.*expired|token.*revoked)\b/i.test(result.error);
 }
-
