@@ -19,6 +19,78 @@ async function guardPrivateChannel(token: string, channelId: string, ctx: Action
   return null;
 }
 
+function ownershipError(error: unknown): ActionResult {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  switch (code) {
+    case 'message_not_managed':
+      return { success: false, error: 'This message is not managed by Valet, so it cannot be modified.' };
+    case 'message_not_owned':
+      return { success: false, error: 'You can only modify messages that your Valet user created.' };
+    case 'message_deleted':
+      return { success: false, error: 'This message was already deleted.' };
+    default:
+      return { success: false, error: 'Message ownership could not be verified; refusing to modify the message.' };
+  }
+}
+
+async function assertMessageOwnership(
+  ctx: ActionContext,
+  channelId: string,
+  messageId: string,
+): Promise<ActionResult | null> {
+  if (!ctx.channelMessageOwnership) {
+    return { success: false, error: 'Message ownership checks are unavailable; refusing to modify the message.' };
+  }
+  try {
+    await ctx.channelMessageOwnership.assertCanModify({ channelType: 'slack', channelId, messageId });
+    return null;
+  } catch (error) {
+    return ownershipError(error);
+  }
+}
+
+async function registerCreatedMessage(
+  ctx: ActionContext,
+  channelId: string | undefined,
+  messageId: string | undefined,
+): Promise<ActionResult | null> {
+  if (!ctx.channelMessageOwnership || !channelId || !messageId) {
+    return {
+      success: false,
+      error: 'Slack accepted the message, but Valet could not record ownership. Delivery status is uncertain; do not retry automatically.',
+    };
+  }
+  try {
+    await ctx.channelMessageOwnership.registerCreated({ channelType: 'slack', channelId, messageId });
+    return null;
+  } catch (error) {
+    console.error('Failed to register Slack message ownership after delivery', { channelId, messageId, error });
+    return {
+      success: false,
+      error: 'Slack accepted the message, but Valet could not record ownership. Delivery status is uncertain; do not retry automatically.',
+    };
+  }
+}
+
+async function markMessageDeleted(
+  ctx: ActionContext,
+  channelId: string,
+  messageId: string,
+): Promise<ActionResult | null> {
+  try {
+    await ctx.channelMessageOwnership!.markDeleted({ channelType: 'slack', channelId, messageId });
+    return null;
+  } catch (error) {
+    console.error('Failed to tombstone Slack message ownership after deletion', { channelId, messageId, error });
+    return {
+      success: false,
+      error: 'Slack deleted the message, but Valet could not record the deletion. Delivery status is uncertain; do not retry automatically.',
+    };
+  }
+}
+
 // ─── Timestamp Helpers ───────────────────────────────────────────────────────
 
 /**
@@ -819,16 +891,19 @@ async function openAndSendDM(
   token: string,
   userId: string,
   text: string,
-  callerIdentity?: { name: string; avatar?: string },
+  ctx: ActionContext,
 ): Promise<ActionResult> {
+  if (!ctx.channelMessageOwnership) {
+    return { success: false, error: 'Message ownership checks are unavailable; refusing to send the message.' };
+  }
   const openRes = await slackFetch('conversations.open', token, { users: userId });
   if (!openRes.ok) return slackError(openRes);
   const openData = (await openRes.json()) as { ok: boolean; error?: string; channel?: { id?: string } };
   if (!openData.ok || !openData.channel?.id) return slackError(openRes, openData);
 
   const body: Record<string, unknown> = { channel: openData.channel.id, text };
-  if (callerIdentity?.name) body.username = callerIdentity.name;
-  if (callerIdentity?.avatar) body.icon_url = callerIdentity.avatar;
+  if (ctx.callerIdentity?.name) body.username = ctx.callerIdentity.name;
+  if (ctx.callerIdentity?.avatar) body.icon_url = ctx.callerIdentity.avatar;
 
   // For long messages, use blocks so Slack doesn't split into separate threads.
   // Prefers markdown blocks (native table/formatting support), falls back to
@@ -842,6 +917,9 @@ async function openAndSendDM(
   if (!res.ok) return slackError(res);
   const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
   if (!data.ok) return slackError(res, data);
+
+  const registrationFailure = await registerCreatedMessage(ctx, data.channel, data.ts);
+  if (registrationFailure) return registrationFailure;
 
   return { success: true, data: { ts: data.ts, channel: data.channel } };
 }
@@ -906,16 +984,19 @@ async function executeAction(
         const p = dmOwner.params.parse(params);
         const ownerSlackId = ctx.credentials.owner_slack_user_id;
         if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.' };
-        return openAndSendDM(token, ownerSlackId, p.text, ctx.callerIdentity);
+        return openAndSendDM(token, ownerSlackId, p.text, ctx);
       }
 
       case 'slack.dm_user': {
         const p = dmUser.params.parse(params);
-        return openAndSendDM(token, p.user, p.text, ctx.callerIdentity);
+        return openAndSendDM(token, p.user, p.text, ctx);
       }
 
       case 'slack.send_message': {
         const p = sendMessage.params.parse(params);
+        if (!ctx.channelMessageOwnership) {
+          return { success: false, error: 'Message ownership checks are unavailable; refusing to send the message.' };
+        }
 
         // Resolve #name to channel ID via conversations.list
         let channelId = p.channel;
@@ -972,6 +1053,9 @@ async function executeAction(
         const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
         if (!data.ok) return slackError(res, data);
 
+        const registrationFailure = await registerCreatedMessage(ctx, data.channel, data.ts);
+        if (registrationFailure) return registrationFailure;
+
         return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
       }
 
@@ -979,6 +1063,8 @@ async function executeAction(
         const p = updateMessage.params.parse(params);
         const denied = await guardPrivateChannel(token, p.channel, ctx);
         if (denied) return denied;
+        const ownershipDenied = await assertMessageOwnership(ctx, p.channel, p.ts);
+        if (ownershipDenied) return ownershipDenied;
 
         // chat.update re-parses the message on every edit and its parse default is
         // 'client' (unlike chat.postMessage's 'none'), which breaks <url|label>
@@ -1014,6 +1100,8 @@ async function executeAction(
         const p = deleteMessage.params.parse(params);
         const denied = await guardPrivateChannel(token, p.channel, ctx);
         if (denied) return denied;
+        const ownershipDenied = await assertMessageOwnership(ctx, p.channel, p.ts);
+        if (ownershipDenied) return ownershipDenied;
 
         const res = await slackFetch('chat.delete', token, { channel: p.channel, ts: p.ts });
         if (!res.ok) return slackError(res);
@@ -1027,6 +1115,9 @@ async function executeAction(
           }
           return slackError(res, data);
         }
+
+        const tombstoneFailure = await markMessageDeleted(ctx, p.channel, p.ts);
+        if (tombstoneFailure) return tombstoneFailure;
 
         return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
       }

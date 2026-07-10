@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { ActionContext } from '@valet/sdk';
+import type { ActionContext, ChannelMessageOwnership } from '@valet/sdk';
 
 const mocks = vi.hoisted(() => ({
   slackGet: vi.fn(),
   slackFetch: vi.fn(),
+  registerCreated: vi.fn(),
+  assertCanModify: vi.fn(),
+  markDeleted: vi.fn(),
 }));
 
 vi.mock('./api.js', () => ({
@@ -22,11 +25,27 @@ function slackFailure(error: string): Response {
   return new Response(JSON.stringify({ ok: false, error }), { status: 200 });
 }
 
-function actionContext(): ActionContext {
+function ownershipCapability(): ChannelMessageOwnership {
+  return {
+    registerCreated: mocks.registerCreated,
+    assertCanModify: mocks.assertCanModify,
+    markDeleted: mocks.markDeleted,
+  };
+}
+
+function actionContext(overrides: Partial<ActionContext> = {}): ActionContext {
   return {
     credentials: { bot_token: 'xoxb-token' },
     userId: 'user-1',
+    channelMessageOwnership: ownershipCapability(),
+    ...overrides,
   };
+}
+
+function resetOwnership(): void {
+  mocks.registerCreated.mockReset().mockResolvedValue(undefined);
+  mocks.assertCanModify.mockReset().mockResolvedValue(undefined);
+  mocks.markDeleted.mockReset().mockResolvedValue(undefined);
 }
 
 describe('resolveToSlackTimestamp', () => {
@@ -474,6 +493,7 @@ describe('slackActions send_message', () => {
   beforeEach(() => {
     mocks.slackGet.mockReset();
     mocks.slackFetch.mockReset();
+    resetOwnership();
   });
 
   // guardPrivateChannel calls conversations.info via slackGet before posting;
@@ -499,6 +519,25 @@ describe('slackActions send_message', () => {
     expect(body).toEqual({ channel: 'C001', text: 'hello' });
     expect(body).not.toHaveProperty('unfurl_links');
     expect(body).not.toHaveProperty('unfurl_media');
+    expect(mocks.registerCreated).toHaveBeenCalledWith({
+      channelType: 'slack', channelId: 'C001', messageId: '1780887543.189519',
+    });
+  });
+
+  it('reports delivery uncertainty when ownership registration fails after Slack accepts the message', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'C001' }));
+    mocks.registerCreated.mockRejectedValueOnce(new Error('database unavailable'));
+
+    const result = await slackActions.execute('slack.send_message', {
+      channel: 'C001', text: 'hello',
+    }, actionContext());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack accepted the message, but Valet could not record ownership. Delivery status is uncertain; do not retry automatically.',
+    });
+    expect(mocks.slackFetch).toHaveBeenCalledTimes(1);
   });
 
   it('forwards unfurl_links=false to chat.postMessage to suppress link embeds', async () => {
@@ -536,10 +575,46 @@ describe('slackActions send_message', () => {
   });
 });
 
+describe('slackActions direct messages', () => {
+  beforeEach(() => {
+    mocks.slackGet.mockReset();
+    mocks.slackFetch.mockReset();
+    resetOwnership();
+  });
+
+  it('registers the canonical channel and timestamp after sending an owner DM', async () => {
+    mocks.slackFetch
+      .mockResolvedValueOnce(slackResponse({ channel: { id: 'D001' } }))
+      .mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'D001' }));
+
+    const result = await slackActions.execute('slack.dm_owner', { text: 'hello' }, actionContext({
+      credentials: { bot_token: 'xoxb-token', owner_slack_user_id: 'UOWNER' },
+    }));
+
+    expect(result).toEqual({ success: true, data: { ts: '1780887543.189519', channel: 'D001' } });
+    expect(mocks.registerCreated).toHaveBeenCalledWith({
+      channelType: 'slack', channelId: 'D001', messageId: '1780887543.189519',
+    });
+  });
+
+  it('registers the canonical channel and timestamp after sending a user DM', async () => {
+    mocks.slackFetch
+      .mockResolvedValueOnce(slackResponse({ channel: { id: 'D001' } }))
+      .mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'D001' }));
+
+    await slackActions.execute('slack.dm_user', { user: 'UOTHER', text: 'hello' }, actionContext());
+
+    expect(mocks.registerCreated).toHaveBeenCalledWith({
+      channelType: 'slack', channelId: 'D001', messageId: '1780887543.189519',
+    });
+  });
+});
+
 describe('slackActions update_message', () => {
   beforeEach(() => {
     mocks.slackGet.mockReset();
     mocks.slackFetch.mockReset();
+    resetOwnership();
   });
 
   function mockPublicChannel(): void {
@@ -563,10 +638,36 @@ describe('slackActions update_message', () => {
       parse: 'none',
       blocks: [],
     });
+    expect(mocks.assertCanModify).toHaveBeenCalledWith({
+      channelType: 'slack', channelId: 'C001', messageId: '1780887543.189519',
+    });
     expect(result).toEqual({
       success: true,
       data: { ok: true, ts: '1780887543.189519', channel: 'C001', text: 'fixed' },
     });
+  });
+
+  it('denies an unowned message before calling chat.update', async () => {
+    mockPublicChannel();
+    mocks.assertCanModify.mockRejectedValueOnce(Object.assign(new Error('message_not_owned'), { code: 'message_not_owned' }));
+
+    const result = await slackActions.execute('slack.update_message', {
+      channel: 'C001', ts: '1780887543.189519', text: 'nope',
+    }, actionContext());
+
+    expect(result).toEqual({ success: false, error: 'You can only modify messages that your Valet user created.' });
+    expect(mocks.slackFetch).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before chat.update when the ownership capability is unavailable', async () => {
+    mockPublicChannel();
+
+    const result = await slackActions.execute('slack.update_message', {
+      channel: 'C001', ts: '1780887543.189519', text: 'nope',
+    }, actionContext({ channelMessageOwnership: undefined }));
+
+    expect(result).toEqual({ success: false, error: 'Message ownership checks are unavailable; refusing to modify the message.' });
+    expect(mocks.slackFetch).not.toHaveBeenCalled();
   });
 
   it('chunks long replacement text into blocks with a truncated notification fallback', async () => {
@@ -635,6 +736,7 @@ describe('slackActions delete_message', () => {
   beforeEach(() => {
     mocks.slackGet.mockReset();
     mocks.slackFetch.mockReset();
+    resetOwnership();
   });
 
   function mockPublicChannel(): void {
@@ -654,10 +756,39 @@ describe('slackActions delete_message', () => {
       channel: 'C001',
       ts: '1780887543.189519',
     });
+    expect(mocks.assertCanModify).toHaveBeenCalledWith({
+      channelType: 'slack', channelId: 'C001', messageId: '1780887543.189519',
+    });
+    expect(mocks.markDeleted).toHaveBeenCalledWith({
+      channelType: 'slack', channelId: 'C001', messageId: '1780887543.189519',
+    });
     expect(result).toEqual({
       success: true,
       data: { ok: true, ts: '1780887543.189519', channel: 'C001' },
     });
+  });
+
+  it('denies an unowned message before calling chat.delete', async () => {
+    mockPublicChannel();
+    mocks.assertCanModify.mockRejectedValueOnce(Object.assign(new Error('message_not_owned'), { code: 'message_not_owned' }));
+
+    const result = await slackActions.execute('slack.delete_message', {
+      channel: 'C001', ts: '1780887543.189519',
+    }, actionContext());
+
+    expect(result).toEqual({ success: false, error: 'You can only modify messages that your Valet user created.' });
+    expect(mocks.slackFetch).not.toHaveBeenCalled();
+  });
+
+  it('does not tombstone a message when Slack rejects deletion', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackFailure('message_not_found'));
+
+    await slackActions.execute('slack.delete_message', {
+      channel: 'C001', ts: '1780887543.189519',
+    }, actionContext());
+
+    expect(mocks.markDeleted).not.toHaveBeenCalled();
   });
 
   it('maps cant_delete_message to an own-messages-only error', async () => {
