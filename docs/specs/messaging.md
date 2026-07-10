@@ -119,6 +119,45 @@ Stored in the SessionAgent Durable Object's local SQLite, NOT in D1. Tracks prom
 | `created_at` | integer | Unix epoch |
 | `expires_at` | integer | Unix epoch (nullable) |
 
+### `channel_message_refs` table
+
+The Worker keeps a compact D1 authorization index for every new outbound
+message that Valet may later edit or delete. This table stores external
+identity and provenance only; message content remains in the channel provider
+and existing transcripts.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | text PK | UUID |
+| `orgId` | text NOT NULL | Organization boundary for authorization |
+| `channelType` | text NOT NULL | `'slack'`, `'telegram'`, etc. |
+| `connectionScope` | text NOT NULL | Worker-derived credential/install namespace |
+| `channelId` | text NOT NULL | External conversation/channel identifier |
+| `messageId` | text NOT NULL | Canonical provider message ID (Slack: `ts`) |
+| `ownerUserId` | text | Effective Valet owner; null for unattributed system sends |
+| `sessionId` | text | Optional provenance, set null on session deletion |
+| `actionInvocationId` | text | Optional provenance, set null on invocation deletion |
+| `createdAt` | text NOT NULL | Registration time |
+| `deletedAt` | text | Tombstone set after a successful provider deletion |
+
+**Unique identity:** `(orgId, channelType, connectionScope, channelId,
+messageId)`. Registration is immutable: retries are idempotent for the same
+owner and never transfer ownership. The Worker derives `connectionScope`
+(Slack uses the installed workspace/team; user-scoped channels use a stable
+credential/configuration ID) so plugins cannot choose a scope that aliases
+another connection.
+
+The Worker injects a typed ownership capability into action and channel
+contexts. Plugins receive `registerCreated`, `assertCanModify`, and
+`markDeleted`; they do not receive D1 or raw Worker database handles.
+
+For a live managed reference, the owning user may mutate it. An organization
+admin may mutate any managed live reference, including a null-owner system
+message or a reference whose original user/session was deleted. Unknown or
+legacy provider messages fail closed (`message_not_managed`), and tombstones
+cannot be mutated (`message_deleted`). A non-owner member receives
+`message_not_owned` without learning whether a matching tombstone exists.
+
 ## SDK Interface Contract
 
 All channel transports implement `ChannelTransport` from `@valet/sdk`:
@@ -170,6 +209,18 @@ interface ChannelTarget {
 interface ChannelContext {
   token: string;           // Bot/API token
   userId: string;          // Internal Valet user ID
+  channelMessageOwnership?: ChannelMessageOwnership;
+}
+
+interface ChannelMessageRefInput {
+  channelId: string;
+  messageId: string;
+}
+
+interface ChannelMessageOwnership {
+  registerCreated(ref: ChannelMessageRefInput): Promise<void>;
+  assertCanModify(ref: ChannelMessageRefInput): Promise<void>;
+  markDeleted(ref: ChannelMessageRefInput): Promise<void>;
 }
 
 interface InteractivePrompt {
@@ -291,8 +342,9 @@ When the session agent (DO) needs to send a message back to a channel:
    - All others: per-user credential from `getCredential`
 4. **Slack channel ID parsing:** Slack uses composite `channelId:threadTs` format. The DO parses this to extract `channelId` and `threadId` for the `ChannelTarget`.
 5. **Message building:** Construct `OutboundMessage` with markdown and optional image attachment.
-6. **Send:** Call `transport.sendMessage(target, outbound, ctx)`.
-7. **Post-send:** Clear Slack shimmer status, mark auto-reply handled, resolve followup reminders.
+6. **Send and register:** Call the Worker-owned send wrapper, which injects the ownership capability, calls `transport.sendMessage`, and registers the provider's canonical message ID in `channel_message_refs` before reporting success.
+7. **Delivery uncertainty:** If the provider accepted the message but the canonical ID is missing or D1 registration fails, return a deterministic delivery-uncertain result and log the provider identifiers for reconciliation. The message is not considered managed or mutable through Valet until registration succeeds.
+8. **Post-send:** Clear Slack shimmer status, mark auto-reply handled, resolve followup reminders.
 
 ### Interactive Prompt Delivery
 
@@ -305,7 +357,7 @@ When the DO creates an interactive prompt (approval or question):
    - Currently active channel
 2. **Per-target send:** For each target with `sendInteractivePrompt` capability:
    - Resolve token
-   - Call `transport.sendInteractivePrompt(target, prompt, ctx)`
+   - Call the Worker-owned send path, injecting the capability and registering the returned canonical prompt message ID
    - Collect `InteractivePromptRef` results
 3. **Store refs:** Save channel refs as JSON in the DO's `interactive_prompts` table for later updates.
 
@@ -319,7 +371,8 @@ When a prompt is resolved (button click, text reply, expiry):
    - Telegram: D1 `getInvocation` for approvals, `getOrchestratorSession` for questions
 3. **DO notification:** `POST /prompt-resolved` with `{promptId, actionId, resolvedBy}`.
 4. **DO processes:** Updates prompt status, unblocks runner, sends `updateInteractivePrompt` to all channels.
-5. **Channel update:** For each stored channel ref, call `transport.updateInteractivePrompt(target, ref, resolution, ctx)`.
+5. **Authorization:** Before each update, the Worker capability checks the stored canonical message reference. The prompt's owning session user is the effective owner; the clicker is not substituted as owner. Admins may override live managed references.
+6. **Channel update:** For each authorized stored channel ref, call `transport.updateInteractivePrompt(target, ref, resolution, ctx)`. If an update path deletes the provider message, tombstone the reference only after the provider confirms deletion.
 
 ## Channel Bindings
 
@@ -353,6 +406,14 @@ Bindings route inbound messages from a channel to a specific session. Without a 
 **Supported inbound types:** Text, files (via `files` array in event), slash commands, `app_mention` events, assistant thread events.
 
 **Interactive prompts:** Button values encode `sessionId:promptId`. Slack has no size limit on button values, so full session IDs are included.
+
+**Message ownership:** Every Valet-created Slack message (including action
+messages, replies, and prompts) is registered with its canonical `{channel,
+ts}` identity before the send is reported as successful. `slack.update_message`
+and `slack.delete_message` authorize against that index before calling Slack.
+The private-channel membership check remains complementary: membership controls
+whether the bot may read or access a private channel, while ownership controls
+which Valet-created message a user may mutate.
 
 **Thread context:** On each inbound message, recent conversation history is fetched from the Slack API and prepended to the message. A cursor (`lastSeenTs`) prevents re-fetching previously seen messages.
 
@@ -411,6 +472,14 @@ When a bound session's DO is unreachable or returns non-200, the handler falls t
 - **Telegram question prompts:** No D1 `action_invocations` record exists. The callback handler falls back to `getOrchestratorSession` to find the session. If the prompt was from a child session (not the orchestrator), this fallback may route to the wrong session.
 - **Expired prompts:** The DO rejects resolution with a non-200 response. The button click is silently dropped.
 - **Duplicate clicks:** The DO validates prompt status; re-resolution of an already-resolved prompt is a no-op.
+
+### Channel Message Authorization Failures
+
+- **Unknown or legacy message:** Update/delete is rejected before any provider API call because there is no managed reference.
+- **Different member:** A non-owner member is rejected before provider mutation with `message_not_owned`; the response does not disclose tombstone state.
+- **Deleted message:** After a successful provider deletion, the reference is tombstoned. Owners and admins receive `message_deleted` on later mutation attempts.
+- **Registration after send:** A provider-successful send whose canonical ID cannot be persisted is delivery-uncertain. It is logged for reconciliation and is not added to the mutable managed set.
+- **Admin override:** The current organization role is checked at authorization time. Admins can mutate any live managed reference in their organization, but cannot mutate unknown or tombstoned references.
 
 ### Identity Resolution Failures
 
