@@ -453,6 +453,27 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
         : {}),
     });
 
+    // A GitHub merge is the ultimate indicator that an authoring session
+    // produced value — record it as a `session.outcome{ pr_merged }`. This
+    // must work out-of-band: the session may be terminated/hibernated/gone by
+    // the time the webhook lands, so write straight to analytics_events rather
+    // than waking the DO. Never fires for source_pr matches (authored=false),
+    // which were merely spawned FROM this PR. The event id is deterministic so
+    // GitHub redeliveries dedupe via INSERT OR IGNORE.
+    if (authored && prState === 'merged') {
+      const session = await db.getSession(appDb, sessionId);
+      if (session) {
+        await db.batchInsertAnalyticsEvents(env.DB, sessionId, session.userId ?? null, [
+          {
+            id: `${sessionId}:pr_merged:${prNumber}`,
+            eventType: 'session.outcome',
+            createdAt: pr.merged_at || new Date().toISOString(),
+            properties: JSON.stringify({ reason: 'pr_merged', repo: repoFullName, prNumber }),
+          },
+        ]);
+      }
+    }
+
     try {
       const doId = env.SESSIONS.idFromName(sessionId);
       const stub = env.SESSIONS.get(doId);

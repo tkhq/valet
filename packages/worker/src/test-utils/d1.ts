@@ -32,6 +32,10 @@ export function makeD1Adapter(sqlite: DatabaseType): D1Database {
     async run() { return d1RunResult(sqlite.prepare(sql).run(...args)); },
     async all() { return { results: sqlite.prepare(sql).all(...args) }; },
     async first() { return sqlite.prepare(sql).get(...args) ?? null; },
+    // D1 statements expose raw() (rows as arrays, not objects). Drizzle's D1
+    // driver uses it for every select, so callers that wrap this adapter in
+    // drizzle (getDb) — not just raw-SQL callers — work.
+    async raw() { return sqlite.prepare(sql).raw().all(...args); },
   });
   const adapter = {
     prepare(sql: string) {

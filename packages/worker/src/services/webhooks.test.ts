@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { canonicalizeRawQuery, handleGenericWebhook } from './webhooks.js';
+import { canonicalizeRawQuery, handleGenericWebhook, handlePullRequestWebhook } from './webhooks.js';
 import type { Env } from '../env.js';
+import { createTestDb } from '../test-utils/db.js';
+import { makeD1Adapter } from '../test-utils/d1.js';
+import { users } from '../lib/schema/users.js';
+import { sessions, sessionGitState } from '../lib/schema/sessions.js';
 
 describe('canonicalizeRawQuery — webhook idempotency hash input', () => {
   // GET webhooks without a delivery header use this canonicalization to
@@ -133,5 +137,143 @@ describe('handleGenericWebhook — tokenized triggers refuse the path-based rout
       '',
     );
     expect(result?.statusCode).toBe(404);
+  });
+});
+
+describe('handlePullRequestWebhook — session.outcome { pr_merged } out-of-band write', () => {
+  // A GitHub merge is the ultimate indicator that an authoring session shipped
+  // value. The handler records it as a session.outcome{pr_merged} written
+  // straight to analytics_events (the session may be gone), and must never do
+  // so for source_pr matches, nor for non-merge actions.
+
+  const REPO = 'octo/valet';
+  const PR = 42;
+
+  function makeEnv() {
+    const { db: appDb, sqlite } = createTestDb();
+    // env.SESSIONS is only used for the best-effort DO notification; a stub
+    // that resolves is enough to keep handlePullRequestWebhook happy.
+    const stub = { fetch: vi.fn().mockResolvedValue(new Response(null)) };
+    const env = {
+      DB: makeD1Adapter(sqlite),
+      SESSIONS: {
+        idFromName: vi.fn().mockReturnValue('do-id'),
+        get: vi.fn().mockReturnValue(stub),
+      },
+    } as unknown as Env;
+    return { env, appDb, sqlite, stub };
+  }
+
+  async function seedSession(
+    appDb: ReturnType<typeof createTestDb>['db'],
+    opts: { sessionId: string; git: Record<string, unknown> },
+  ) {
+    appDb.insert(users).values({ id: 'user-1', email: 'user-1@example.com' }).onConflictDoNothing().run();
+    appDb.insert(sessions).values({
+      id: opts.sessionId,
+      userId: 'user-1',
+      workspace: '/tmp/pr-webhook',
+      status: 'terminated',
+    }).run();
+    appDb.insert(sessionGitState).values({
+      id: `sgs-${opts.sessionId}`,
+      sessionId: opts.sessionId,
+      sourceRepoFullName: REPO,
+      ...opts.git,
+    }).run();
+  }
+
+  function mergedPayload() {
+    return {
+      action: 'closed',
+      pull_request: {
+        number: PR,
+        title: 'Ship it',
+        html_url: `https://github.com/${REPO}/pull/${PR}`,
+        merged: true,
+        merged_at: '2026-07-09T10:00:00Z',
+        head: { ref: 'feature/x' },
+        state: 'closed',
+      },
+      repository: { full_name: REPO },
+    };
+  }
+
+  function outcomeRows(sqlite: ReturnType<typeof createTestDb>['sqlite']) {
+    return sqlite
+      .prepare("SELECT id, session_id, user_id, properties FROM analytics_events WHERE event_type = 'session.outcome'")
+      .all() as Array<{ id: string; session_id: string; user_id: string | null; properties: string | null }>;
+  }
+
+  it('inserts exactly one session.outcome{pr_merged} for a merged PR authored by the session', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    await seedSession(appDb, { sessionId: 'sess-author', git: { prNumber: PR } });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    const rows = outcomeRows(sqlite);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session_id).toBe('sess-author');
+    expect(rows[0].user_id).toBe('user-1');
+    expect(JSON.parse(rows[0].properties ?? '{}')).toEqual({ reason: 'pr_merged', repo: REPO, prNumber: PR });
+  });
+
+  it('is idempotent across GitHub redeliveries (deterministic id, INSERT OR IGNORE)', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    await seedSession(appDb, { sessionId: 'sess-author', git: { prNumber: PR } });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    expect(outcomeRows(sqlite)).toHaveLength(1);
+  });
+
+  it('does NOT write pr_merged for a session merely spawned FROM the PR (source_pr match)', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    // Matches via source_pr_number (spawned from), NOT pr_number (authored),
+    // and a different head branch so no branch-based authorship link is made.
+    await seedSession(appDb, {
+      sessionId: 'sess-source',
+      git: { sourcePrNumber: PR, branch: 'unrelated-branch' },
+    });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    expect(outcomeRows(sqlite)).toHaveLength(0);
+  });
+
+  it('does NOT write pr_merged for a non-merged action (opened / closed-unmerged)', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    await seedSession(appDb, { sessionId: 'sess-author', git: { prNumber: PR } });
+
+    // opened → open
+    await handlePullRequestWebhook(env, {
+      action: 'opened',
+      pull_request: {
+        number: PR,
+        title: 'Ship it',
+        html_url: `https://github.com/${REPO}/pull/${PR}`,
+        merged: false,
+        head: { ref: 'feature/x' },
+        state: 'open',
+      },
+      repository: { full_name: REPO },
+    });
+    // closed without merge → closed
+    await handlePullRequestWebhook(env, {
+      action: 'closed',
+      pull_request: {
+        number: PR,
+        title: 'Ship it',
+        html_url: `https://github.com/${REPO}/pull/${PR}`,
+        merged: false,
+        merged_at: null,
+        head: { ref: 'feature/x' },
+        state: 'closed',
+      },
+      repository: { full_name: REPO },
+    });
+
+    expect(outcomeRows(sqlite)).toHaveLength(0);
   });
 });
