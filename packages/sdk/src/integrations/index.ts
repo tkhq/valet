@@ -37,6 +37,20 @@ export interface CallerIdentity {
   avatar?: string;
 }
 
+/** The external identity returned by a channel provider for one message. */
+export interface ChannelMessageRefInput {
+  channelType: string;
+  channelId: string;
+  messageId: string;
+}
+
+/** Worker-owned authorization capability for externally mutable messages. */
+export interface ChannelMessageOwnership {
+  registerCreated(ref: ChannelMessageRefInput): Promise<void>;
+  assertCanModify(ref: ChannelMessageRefInput): Promise<void>;
+  markDeleted(ref: ChannelMessageRefInput): Promise<void>;
+}
+
 /** Context passed to action execution. */
 export interface ActionContext {
   credentials: IntegrationCredentials;
@@ -50,6 +64,8 @@ export interface ActionContext {
   attribution?: { name: string; email: string };
   /** Org-level guard configuration, passed by the worker at execution time. */
   guardConfig?: Record<string, unknown>;
+  /** Worker-bound ownership authorization for externally mutable channel messages. */
+  channelMessageOwnership?: ChannelMessageOwnership;
 }
 
 /** Result of executing an action. */

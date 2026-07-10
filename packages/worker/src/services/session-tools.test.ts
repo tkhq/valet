@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { listTools, resolveActionPolicy } from './session-tools.js';
+import { executeAction, listTools, resolveActionPolicy } from './session-tools.js';
 import { createTestDb } from '../test-utils/db.js';
 import { upsertActionPolicy } from '../lib/db/actions.js';
 import { upsertMcpToolCache } from '../lib/db/mcp-tool-cache.js';
-import { integrations, sessions, users, customMcpConnectors, disabledActions } from '../lib/schema/index.js';
+import { actionInvocations, integrations, sessions, users, customMcpConnectors, disabledActions } from '../lib/schema/index.js';
+import { getChannelMessageRef } from '../lib/db/channel-message-refs.js';
 import { encryptString } from '../lib/crypto.js';
 import type { AppDb } from '../lib/drizzle.js';
 import { integrationRegistry } from '../integrations/registry.js';
@@ -440,5 +441,42 @@ describe('resolveActionPolicy', () => {
       actionId: 'salesforce.query',
       riskLevel: 'low',
     });
+  });
+});
+
+describe('executeAction ownership context', () => {
+  it('injects a worker-owned capability into normal session actions', async () => {
+    const { db } = createTestDb();
+    const appDb: AppDb = db;
+    db.insert(users).values({ id: USER_ID, email: 'session-owner@example.com' }).run();
+    db.insert(sessions).values({ id: SESSION_ID, userId: USER_ID, workspace: '/tmp', status: 'running' }).run();
+    db.insert(actionInvocations).values({
+      id: 'invocation-1', sessionId: SESSION_ID, userId: USER_ID, service: 'telegram', actionId: 'send', riskLevel: 'low', resolvedMode: 'allow',
+    }).run();
+    const source: ActionSource = {
+      listActions: () => [],
+      execute: async (_actionId, _params, ctx) => {
+        expect('appDb' in ctx).toBe(false);
+        expect('env' in ctx).toBe(false);
+        await ctx.channelMessageOwnership!.registerCreated({
+          channelType: 'untrusted', channelId: 'chat-1', messageId: 'message-1',
+        });
+        return { success: true };
+      },
+    };
+    vi.spyOn(integrationRegistry, 'getProvider').mockReturnValue({
+      service: 'telegram', displayName: 'Telegram', authType: 'none', supportedEntities: [],
+      validateCredentials: () => true, testConnection: async () => true,
+    });
+
+    await executeAction(
+      appDb, {} as Env, USER_ID, 'telegram:send', 'telegram', 'send', {}, source, 'invocation-1',
+      { credentialCache: emptyCredentialCache(), orgId: 'org-1' },
+    );
+
+    await expect(getChannelMessageRef(appDb, {
+      orgId: 'org-1', channelType: 'telegram', connectionScope: `user:${USER_ID}`,
+      channelId: 'chat-1', messageId: 'message-1',
+    })).resolves.toMatchObject({ ownerUserId: USER_ID, actionInvocationId: 'invocation-1' });
   });
 });

@@ -9,6 +9,7 @@ import { listMcpToolCache, upsertMcpToolCache } from '../lib/db/mcp-tool-cache.j
 import { getAutoEnabledServices, getDisabledPluginServices } from '../lib/db/plugins.js';
 import { getUserIdentityLinks, getOrchestratorIdentity } from '../lib/db.js';
 import { loadCustomMcpConnectorContext } from './custom-mcp-connectors.js';
+import { createChannelMessageOwnership, resolveChannelMessageConnectionScope } from './channel-message-ownership.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -523,6 +524,23 @@ export async function executeAction(
       collectedEvents.push({ eventType, ...data });
     },
   };
+  const channelMessageOwnership = createChannelMessageOwnership({
+    db: appDb,
+    actorUserId: userId,
+    orgId,
+    channelType: service,
+    connectionScope: await resolveChannelMessageConnectionScope({
+      db: appDb,
+      encryptionKey: env.ENCRYPTION_KEY,
+      channelType: service,
+      userId,
+    }),
+    actionInvocationId: invocationId,
+  });
+  // `workflows` is a worker-internal action source, not an external plugin.
+  // It still owns the platform's workflow-management API; all plugin sources
+  // receive only the typed ActionContext capability above.
+  const workerInternalContext = service === 'workflows' ? { appDb, env } : {};
 
   const toolExecStart = Date.now();
   let actionResult;
@@ -535,9 +553,9 @@ export async function executeAction(
       callerIdentity,
       analytics: actionAnalytics,
       guardConfig: opts.guardConfig,
-      appDb,
-      env,
-    } as any);
+      channelMessageOwnership,
+      ...workerInternalContext,
+    });
 
     // Auth failure retry — force-refresh on 401 and retry once (simple token-expired retry)
     // Note: 403 is excluded — GitHub 403s are permission problems (missing App permissions),
@@ -560,9 +578,9 @@ export async function executeAction(
         actionResult = await actionSource.execute(actionId, params, {
           credentials: refreshedCredentials, userId, attribution, callerIdentity, analytics: actionAnalytics, guardConfig: opts.guardConfig,
           orgId,
-          appDb,
-          env,
-        } as any);
+          channelMessageOwnership,
+          ...workerInternalContext,
+        });
       }
     }
   } catch (err) {

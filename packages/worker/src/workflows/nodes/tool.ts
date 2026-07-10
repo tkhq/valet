@@ -29,6 +29,7 @@ import { invokeWorkflowAction, markExecuted, markFailed } from '../../services/a
 import { buildActionCredentials } from '../../services/credentials.js';
 import { updateInvocationStatus } from '../../lib/db/actions.js';
 import { getUserIdentityLinks } from '../../lib/db/channels.js';
+import { createChannelMessageOwnership, resolveChannelMessageConnectionScope } from '../../services/channel-message-ownership.js';
 import { waitForApprovalEvent } from '../approvals.js';
 import { setExecutionStatus } from '../execution-status.js';
 import { CancelledError, iterationSuffix, NO_RETRY } from '../types.js';
@@ -295,6 +296,19 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     userId: runParams.userId,
     ...(attribution ? { attribution } : {}),
     analytics: { emit: () => { /* TODO: wire into analytics_events */ } },
+    channelMessageOwnership: createChannelMessageOwnership({
+      db,
+      actorUserId: runParams.userId,
+      orgId: 'default',
+      channelType: node.service,
+      connectionScope: await resolveChannelMessageConnectionScope({
+        db,
+        encryptionKey: env.ENCRYPTION_KEY,
+        channelType: node.service,
+        userId: runParams.userId,
+      }),
+      actionInvocationId: invocationId,
+    }),
   } satisfies ActionContext;
 
   // node.retries is the author-declared number of additional attempts
@@ -344,6 +358,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
         userId: runParams.userId,
         ...(attribution ? { attribution } : {}),
         analytics: { emit: () => { /* TODO: wire into analytics_events */ } },
+        channelMessageOwnership: actionContext.channelMessageOwnership,
       } satisfies ActionContext;
       const retryJson = await step.do(`tool:${node.id}${iSuffix}:execute:auth-retry`, { retries: { ...NO_RETRY } }, async () => {
         const retryResult = await actionSource.execute(node.action, renderedParams, actionContext);

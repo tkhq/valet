@@ -10,6 +10,13 @@ const loadCustomMcpConnectorContextMock = vi.fn();
 const invokeWorkflowActionMock = vi.fn();
 const updateInvocationStatusMock = vi.fn();
 const waitForApprovalEventMock = vi.fn();
+const channelMessageOwnership = {
+  registerCreated: vi.fn(),
+  assertCanModify: vi.fn(),
+  markDeleted: vi.fn(),
+};
+const createChannelMessageOwnershipMock = vi.fn(() => channelMessageOwnership);
+const resolveChannelMessageConnectionScopeMock = vi.fn(async ({ channelType, userId }: { channelType: string; userId: string }) => `${channelType}:${userId}`);
 
 vi.mock('../../integrations/registry.js', () => ({
   integrationRegistry: {
@@ -29,6 +36,11 @@ vi.mock('../../services/custom-mcp-connectors.js', () => ({
 
 vi.mock('../../lib/drizzle.js', () => ({
   getDb: () => ({} as unknown),
+}));
+
+vi.mock('../../services/channel-message-ownership.js', () => ({
+  createChannelMessageOwnership: () => createChannelMessageOwnershipMock(),
+  resolveChannelMessageConnectionScope: (options: { channelType: string; userId: string }) => resolveChannelMessageConnectionScopeMock(options),
 }));
 
 const markExecutedMock = vi.fn();
@@ -106,6 +118,8 @@ beforeEach(() => {
   markExecutedMock.mockReset();
   markFailedMock.mockReset();
   getUserIdentityLinksMock.mockReset();
+  createChannelMessageOwnershipMock.mockClear();
+  resolveChannelMessageConnectionScopeMock.mockClear();
   getUserIdentityLinksMock.mockResolvedValue([]);
   isActionDisabledMock.mockResolvedValue(false);
   loadCustomMcpConnectorContextMock.mockResolvedValue({ connectors: new Map() });
@@ -127,7 +141,7 @@ describe('executeTool', () => {
     expect(executeMock).toHaveBeenCalledWith(
       'slack.send_message',
       { channel: 'C1', text: 'hi bob' },
-      expect.objectContaining({ userId: 'user-1' }),
+      expect.objectContaining({ userId: 'user-1', channelMessageOwnership: expect.any(Object) }),
     );
     expect(invokeWorkflowActionMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       invocationId: 'workflow:exec-1:t',
@@ -320,5 +334,21 @@ describe('executeTool', () => {
     );
     expect(markExecutedMock).toHaveBeenCalledWith(expect.anything(), 'workflow:exec-1:clear_sheet', { clearedRange: 'Tasks!A1:D6' });
     expect(markFailedMock).not.toHaveBeenCalled();
+  });
+
+  it('injects the same ownership capability for the auth-refresh retry', async () => {
+    getProviderMock.mockReturnValue({ authType: 'oauth2' });
+    resolveCredentialsMock
+      .mockResolvedValueOnce({ ok: true, credential: { accessToken: 'stale-token', credentialType: 'oauth2' } })
+      .mockResolvedValueOnce({ ok: true, credential: { accessToken: 'fresh-token', credentialType: 'oauth2' } });
+    executeMock
+      .mockResolvedValueOnce({ success: false, error: '401 unauthorized' })
+      .mockResolvedValueOnce({ success: true, data: 'ok' });
+
+    await executeTool(args({ id: 't', type: 'tool', service: 'unknown', action: 'unknown.x', params: {} }));
+
+    const firstOwnership = executeMock.mock.calls[0][2].channelMessageOwnership;
+    expect(firstOwnership).toBeDefined();
+    expect(executeMock.mock.calls[1][2].channelMessageOwnership).toBe(firstOwnership);
   });
 });

@@ -1,3 +1,6 @@
+import type { ChannelMessageOwnership } from '../integrations/index.js';
+export type { ChannelMessageOwnership, ChannelMessageRefInput } from '../integrations/index.js';
+
 // ─── Inbound Types ───────────────────────────────────────────────────────────
 
 export interface InboundAttachment {
@@ -66,6 +69,8 @@ export interface ChannelContext {
     avatar?: string;
     metadata?: Record<string, unknown>;
   };
+  /** Worker-bound ownership authorization for externally mutable channel messages. */
+  channelMessageOwnership?: ChannelMessageOwnership;
 }
 
 // ─── Interactive Prompt Types ───────────────────────────────────────────────
