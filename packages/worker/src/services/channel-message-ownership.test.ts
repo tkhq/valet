@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestDb } from '../test-utils/db.js';
-import { actionInvocations, integrations, sessions, userTelegramConfig, users } from '../lib/schema/index.js';
+import { actionInvocations, integrations, sessions, users } from '../lib/schema/index.js';
 import { getChannelMessageRef } from '../lib/db/channel-message-refs.js';
+import { saveUserTelegramConfig } from '../lib/db/telegram.js';
 
 const getOrgSlackInstallAnyMock = vi.fn();
 
@@ -71,9 +72,9 @@ describe('channel message ownership', () => {
     getOrgSlackInstallAnyMock.mockResolvedValue({ teamId: 'T-configured' });
     const { db } = createTestDb();
     db.insert(users).values({ id: 'user-1', email: 'user-1@example.com' }).run();
-    db.insert(userTelegramConfig).values({
+    await saveUserTelegramConfig(db, {
       id: 'telegram-config-before-reconnect', userId: 'user-1', botUsername: 'before', botInfo: '{}',
-    }).run();
+    });
 
     await expect(resolveChannelMessageConnectionScope({
       db,
@@ -88,10 +89,9 @@ describe('channel message ownership', () => {
       userId: 'user-1',
     })).resolves.toBe('config:telegram-config-before-reconnect');
 
-    db.delete(userTelegramConfig).run();
-    db.insert(userTelegramConfig).values({
+    await saveUserTelegramConfig(db, {
       id: 'telegram-config-after-reconnect', userId: 'user-1', botUsername: 'after', botInfo: '{}',
-    }).run();
+    });
     await expect(resolveChannelMessageConnectionScope({
       db,
       encryptionKey: 'test-key',

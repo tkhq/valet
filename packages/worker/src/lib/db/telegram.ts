@@ -52,6 +52,10 @@ export async function saveUserTelegramConfig(
   }).onConflictDoUpdate({
     target: userTelegramConfig.userId,
     set: {
+      // A new setup can point at a different external bot. Rotate the
+      // configuration identity so connection-scoped authorization refs from
+      // the previous bot cannot be reused against the new connection.
+      id: sql`excluded.id`,
       botUsername: sql`excluded.bot_username`,
       botInfo: sql`excluded.bot_info`,
       updatedAt: sql`excluded.updated_at`,
