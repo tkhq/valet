@@ -1,0 +1,302 @@
+---
+title: Integration System
+description: How Valet's integration system is implemented — Action plugins, Channel plugins, native vs MCP-proxied actions, risk-driven policy, and the channel webhook path.
+---
+
+# Integration System
+
+Valet has two conceptually distinct kinds of integration, backed by two different plugin capabilities in the same [plugin system](/engineering/plugin-system):
+
+- **Action plugins** — provide typed actions the agent can call (API calls, data fetching, side-effectful writes). The vast majority of Valet integrations are action plugins.
+- **Channel plugins** — provide a bi-directional transport between the Orchestrator and an external chat surface. Only two exist today: Slack and Telegram.
+
+A single package can implement both. `packages/plugin-slack` is the canonical example: it exports an `ActionSource` for actions like `slack.send_message` **and** a `ChannelTransport` for Slack DMs / channels. `packages/plugin-telegram` exports only a `ChannelTransport`.
+
+This page walks through the runtime shape of each kind, how they contrast, and where the code lives. For step-by-step plugin authoring (folder layout, `plugin.yaml`, registry generation), see [Plugin System](/engineering/plugin-system).
+
+## Action plugins
+
+An Action plugin exposes typed actions the agent discovers and calls through the tool interface. Every action is described by an `ActionDefinition` and every plugin's actions are surfaced through an `ActionSource`.
+
+### The `ActionSource` interface
+
+Defined in `packages/sdk/src/integrations/index.ts`:
+
+```ts
+export interface ActionDefinition<TParams extends z.ZodType = z.ZodType> {
+  id: string;                            // service.action_name
+  name: string;
+  description: string;
+  riskLevel: RiskLevel;                  // 'low' | 'medium' | 'high' | 'critical'
+  params: TParams;                       // Zod schema
+  inputSchema?: Record<string, unknown>; // raw JSON Schema (MCP passes this through)
+  outputSchema?: Record<string, unknown>;
+}
+
+export interface ActionSource {
+  listActions(ctx?: ActionListContext): ActionDefinition[] | Promise<ActionDefinition[]>;
+  execute(actionId: string, params: unknown, ctx: ActionContext): Promise<ActionResult>;
+}
+```
+
+Every integration surfaces exactly one `ActionSource`. There are two flavors of implementation.
+
+### Flavor 1: Native action plugins
+
+Native plugins hand-implement `ActionSource` in TypeScript against the upstream provider's own HTTP API. Current native plugins: `plugin-gmail`, `plugin-github`, `plugin-slack`, `plugin-google-calendar`, `plugin-google-workspace`.
+
+Layout:
+
+```text
+packages/plugin-<service>/
+  plugin.yaml                # omits actionType
+  package.json               # exports './actions' (and './channels' if applicable)
+  src/actions/
+    index.ts                 # default export: IntegrationPackage
+    provider.ts              # IntegrationProvider — auth type, OAuth methods, testConnection
+    actions.ts               # ActionDefinition consts + executeAction switch + exported ActionSource
+    api.ts                   # optional auth'd fetch helper
+```
+
+- `plugin.yaml` **omits** `actionType`. Native is the default.
+- `provider.ts` declares `oauthEnvKeys: { clientId, clientSecret }` and implements `getOAuthUrl`, `exchangeOAuthCode`, `refreshOAuthTokens` (unless the auth type is `bot_token` / `api_key` / `none`).
+- `src/actions/api.ts` is a thin auth'd fetch helper (`Authorization: Bearer ${credentials.access_token}` and error mapping).
+- `src/actions/actions.ts` exports individual `ActionDefinition` consts, a private `executeAction(actionId, params, ctx)` switch that dispatches to per-action handlers, and an `ActionSource` object shaped `{ listActions, execute }`.
+- Every action's `riskLevel` is set explicitly at the definition site.
+
+The Worker holds the code path end-to-end: OAuth refresh, request signing, response parsing, error normalization. Zero external dependency at runtime beyond the upstream API.
+
+### Flavor 2: MCP-proxied action plugins
+
+MCP-proxied plugins delegate action discovery and execution to a remote [Model Context Protocol](https://modelcontextprotocol.io) server. Current MCP-proxied plugins: `plugin-linear`, `plugin-notion`, `plugin-stripe`, `plugin-sentry`, `plugin-cloudflare`, `plugin-figma`, `plugin-typefully`, `plugin-socket`, `plugin-grafana`, `plugin-granola`, `plugin-pylon`, `plugin-deepwiki`, `plugin-turnkey-docs`.
+
+Layout:
+
+```text
+packages/plugin-<service>/
+  plugin.yaml                # actionType: mcp
+  src/actions/
+    index.ts                 # IntegrationPackage
+    provider.ts              # IntegrationProvider with mcpServerUrl for OAuth-backed MCPs
+    actions.ts               # ~5 lines: new McpActionSource(...)
+```
+
+- `plugin.yaml` sets `actionType: mcp` as a UI hint.
+- `src/actions/actions.ts` typically looks like:
+
+  ```ts
+  import { McpActionSource } from '@valet/sdk';
+
+  export const linearActions = new McpActionSource({
+    mcpUrl: 'https://mcp.linear.app/mcp',
+    serviceName: 'linear',
+    defaultRiskLevel: 'medium',
+  });
+  ```
+
+- `McpActionSource` (defined in `packages/sdk/src/mcp/action-source.ts`) handles the wire protocol:
+  - `listActions(ctx)` calls MCP `tools/list`. Without credentials it returns `[]` unless `noAuth: true`.
+  - Each MCP tool becomes an action ID of `${serviceName}.${tool.name}`.
+  - MCP `inputSchema` passes through directly as `ActionDefinition.inputSchema`; `params` is a permissive `z.record(z.unknown())`.
+  - Risk-level derivation: `readOnlyHint` maps to `low`, `destructiveHint` maps to `critical`, otherwise `defaultRiskLevel`.
+  - `execute(actionId, params, ctx)` strips the service prefix and calls MCP `tools/call`.
+- For OAuth-backed MCPs, `provider.mcpServerUrl` triggers MCP OAuth (RFC 8414 authorization-server metadata discovery + RFC 7591 dynamic client registration + RFC 7636 PKCE), implemented in `packages/sdk/src/mcp/oauth.ts`. This runs at connect time and replaces the env-var `oauthEnvKeys` flow used by native plugins.
+
+**Trade-off:** Valet has zero control over the action catalog of an MCP-proxied plugin. The upstream MCP server defines which tools exist, their input schemas, their descriptions, and (via hints) their risk levels. Adding, removing, or renaming an action requires a change on the MCP server, not in Valet.
+
+### Registration
+
+Both flavors export a default `IntegrationPackage` from `src/actions/index.ts`:
+
+```ts
+const linearPackage: IntegrationPackage = {
+  name: '@valet/actions-linear',
+  version: '0.0.1',
+  service: 'linear',
+  provider: linearProvider,
+  actions: linearActions,
+};
+export default linearPackage;
+```
+
+The Worker imports these through the generated registry at `packages/worker/src/integrations/packages.ts`, which exports `installedIntegrations`. This file is **auto-generated** by `packages/worker/scripts/generate-plugin-registry.ts` (run via `make generate-registries`). Do not hand-edit — the generator scans `packages/plugin-*` directories and rewrites it wholesale.
+
+### Risk-level → policy cascade
+
+Every action carries a `riskLevel` of `low`, `medium`, `high`, or `critical`. The system-default policy cascade lives in `packages/worker/src/lib/db/actions.ts`:
+
+```ts
+const SYSTEM_DEFAULTS: Record<string, ActionMode> = {
+  low: 'allow',
+  medium: 'require_approval',
+  high: 'require_approval',
+  critical: 'deny',
+};
+```
+
+Admin/org policies and per-session runtime grants layer on top of that cascade; see [Policy Engine](/engineering/policy-engine).
+
+### DO-level enforcement (tools never enter the sandbox)
+
+Actions **never execute inside the sandbox**. The Runner exposes integration tools to the OpenCode agent as call-through stubs, but every actual call round-trips back to the SessionAgent Durable Object in the Worker.
+
+The relevant code path is in `packages/worker/src/durable-objects/session-agent.ts` (search for `resolveActionPolicy`):
+
+1. The DO receives a `call-tool` request over the Runner WebSocket.
+2. `resolveActionPolicy(...)` (in `packages/worker/src/services/session-tools.ts`) resolves the effective policy for the caller — combining admin policy, session grants, and system default cascade — and returns `{ outcome: 'allowed' | 'pending_approval' | 'denied', invocationId, riskLevel, actionSource }`.
+3. On `denied`: the DO returns an error immediately, records the invocation, and never touches the upstream service.
+4. On `pending_approval`: the DO records the pending invocation, dispatches an approval prompt to the user's configured channel(s) (see below), and pauses the tool call until the user resolves.
+5. On `allowed`: the DO fetches credentials from encrypted storage, builds an `ActionContext`, and calls `actionSource.execute(actionId, params, ctx)`. For native plugins this hits the provider's HTTP API from the Worker; for MCP-proxied plugins it round-trips to the MCP server.
+
+Because credentials are held by the Worker and never sent to the sandbox, a compromised or misbehaving sandbox cannot exfiltrate OAuth tokens or call actions outside the policy layer. This is a load-bearing property of the design — see [Auth & access internals](/engineering/auth-access-internals) and [Security model](/security-model).
+
+## Channel plugins
+
+Channel plugins expose a **bi-directional transport** between an external chat surface and the Valet Orchestrator. They are not modeled as request/response tool calls; they are inbound-webhook + outbound-send loops with routing state.
+
+### The `ChannelTransport` interface
+
+Defined in `packages/sdk/src/channels/index.ts`:
+
+```ts
+export interface ChannelTransport {
+  readonly channelType: string;
+
+  // Inbound
+  verifySignature(rawHeaders, rawBody, secret?): boolean;
+  parseInbound(rawHeaders, rawBody, routing): Promise<InboundMessage | null>;
+  scopeKeyParts(message, userId): { channelType: string; channelId: string };
+
+  // Outbound
+  formatMarkdown(markdown: string): string;
+  sendMessage(target, message, ctx): Promise<SendResult>;
+
+  // Optional
+  editMessage?(...): Promise<SendResult>;
+  deleteMessage?(...): Promise<boolean>;
+  sendTypingIndicator?(...): Promise<void>;
+  sendInteractivePrompt?(...): Promise<InteractivePromptRef | null>;
+  updateInteractivePrompt?(...): Promise<void>;
+  registerWebhook?(...): Promise<boolean>;
+  unregisterWebhook?(...): Promise<boolean>;
+  resolveLabel?(...): Promise<string>;
+  parseTarget?(channelId: string): ChannelTarget;
+  resolveUserDmTarget?(...): Promise<ChannelTarget | null>;
+}
+```
+
+The two implementations today are `SlackTransport` (`packages/plugin-slack/src/channels/transport.ts`) and `TelegramTransport` (`packages/plugin-telegram/src/channels/transport.ts`). Both implement `sendMessage`, `editMessage`, `deleteMessage`, and `sendInteractivePrompt`; Slack additionally uploads files and Telegram supports inline callback buttons for approvals.
+
+### Registration
+
+Channel packages default-export a `ChannelPackage` from `src/channels/index.ts`:
+
+```ts
+const slackChannelPackage: ChannelPackage = {
+  name: '@valet/channel-slack',
+  version: '0.0.1',
+  channelType: 'slack',
+  createTransport: () => new SlackTransport(),
+  provider: slackProvider,
+};
+export default slackChannelPackage;
+```
+
+They're picked up by the auto-generated `packages/worker/src/channels/packages.ts` (`installedChannels`), which the `ChannelRegistry` (`packages/worker/src/channels/registry.ts`) instantiates once per Worker cold start:
+
+```ts
+init(): void {
+  for (const pkg of installedChannels) {
+    const transport = pkg.createTransport();
+    this.transports.set(pkg.channelType, transport);
+    this.packages.set(pkg.channelType, pkg);
+  }
+}
+```
+
+### Inbound: webhook → orchestrator/session
+
+The universal inbound route is `POST /channels/:channelType/webhook/:userId` in `packages/worker/src/routes/channel-webhooks.ts`. On each request:
+
+1. Look up the transport by `:channelType`. Reject unknown types with 404.
+2. Fetch the user's channel credential (bot token) from the encrypted credential store.
+3. Read raw body and headers.
+4. **Signature verification / callback-query handling** (transport-specific). Telegram callback queries — the inline-button responses used for approvals — are handled inline: verify the sender is the channel owner, dismiss the loading spinner via `answerCallbackQuery`, then dispatch a `prompt-resolved` message to the target session DO.
+5. `transport.parseInbound(rawHeaders, rawBody, routing)` converts the raw payload into an `InboundMessage` (or `null` to drop). This is where Telegram groups get filtered to `@mention` messages only, and where Slack channel/thread IDs are packed into a composite `channelId`.
+6. `transport.scopeKeyParts(message, userId)` produces a stable scope key, and the Worker looks up any existing **channel binding** for `(userId, channelType, channelId)`.
+7. **Route:**
+   - If a binding exists and points to a non-terminal session, the message is dispatched to that session's DO as a prompt (with `queueMode`, attachments, thread id, and channel-reply metadata).
+   - If no binding exists, or the bound session is terminated/archived/error, the message is dispatched to the user's **orchestrator** session via `dispatchOrchestratorPrompt`. Terminated bindings are evicted (with a hand-off to the parent session where possible).
+   - The response — including any tool output, streaming tokens, and channel replies from `channel_reply` calls — is sent back through outbound dispatch (below).
+
+Slash commands (`/valet ...` in Slack, `/start` in Telegram) short-circuit before binding lookup and go through a channel-command handler.
+
+### Outbound: DO → transport.sendMessage
+
+Outbound dispatch lives in `packages/worker/src/durable-objects/channel-router.ts`. When the agent calls the `channel_reply` built-in tool (or when the DO needs to send an approval prompt / follow-up reminder), `ChannelRouter.sendReply` runs:
+
+1. Resolve the `ChannelTransport` from `channelRegistry.getTransport(channelType)`. Missing transport → error.
+2. Resolve the caller's bot token for that channel.
+3. Build a `ChannelTarget` (via `transport.parseTarget` for encoded channel IDs, or the plain `{ channelType, channelId }`).
+4. Build an `OutboundMessage` from the requested text / markdown / attachments / interactive prompt.
+5. Load the persona identity (name, avatar) for attribution.
+6. Call `transport.sendMessage(target, outbound, ctx)`.
+7. If successful and `followUp !== false`, invoke the follow-up notifier so the reminder timer clears.
+
+Interactive approval prompts follow the same shape via `sendInteractivePrompt` / `updateInteractivePrompt`. The Slack transport emits Block Kit buttons; the Telegram transport emits `reply_markup.inline_keyboard` entries whose callback data is `"actionId|promptId"` — which is what the inbound callback-query handler decodes in step 4 above.
+
+## Action plugins vs Channel plugins
+
+| | Action plugin | Channel plugin |
+| --- | --- | --- |
+| Purpose | Let the agent read/write an external system on demand. | Move messages between the Orchestrator and an external chat surface. |
+| SDK contract | `ActionSource` (+ `IntegrationProvider`) | `ChannelTransport` (+ optional `IntegrationProvider`) |
+| Package export | `./actions` in `package.json` | `./channels` in `package.json` |
+| Default export | `IntegrationPackage` | `ChannelPackage` |
+| Registry | `packages/worker/src/integrations/packages.ts` → `installedIntegrations` | `packages/worker/src/channels/packages.ts` → `installedChannels` |
+| Invocation shape | Agent calls a tool → DO resolves policy → `execute()` returns data. | External webhook lands → transport parses → DO receives prompt. Outbound: DO builds message → `sendMessage()` posts. |
+| Where execution happens | Worker (native flavor) or upstream MCP server (MCP flavor). Never the sandbox. | Worker (both directions). Never the sandbox. |
+| Policy layer | Every call passes through `resolveActionPolicy` → allow / require_approval / deny. | No per-call policy; individual **actions** invoked from within a channel session still flow through the action policy layer. |
+| Auth type | `oauth2`, `bot_token`, `api_key`, `app_install`, or `none`. | `bot_token` (Telegram) or `oauth2` (Slack workspace app). |
+| Current count | 18 plugins. | 2 plugins (Slack, Telegram). |
+
+### Plugins that implement both
+
+A single package can implement both capabilities by exporting both `./actions` and `./channels` from `package.json`. `plugin-slack` does this: the `ActionSource` exposes tool actions (`slack.send_message`, `slack.list_channels`, `slack.dm_owner`, and 16 more), while the `ChannelTransport` handles the bi-directional Slack channel/DM routing that lets users invoke Valet from Slack itself.
+
+That's why "Slack is where I *do* work" and "Slack is where I *talk to Valet*" are both true — and why "post to #proj-valet" (an action call from anywhere) is a different code path from "reply on the thread the user wrote from" (a channel-reply back through the transport that delivered the inbound message). The `channel_reply` built-in is route-bound to the originating conversation; `slack.send_message` is a general-purpose action.
+
+## Verifying claims in code
+
+```bash
+# List every action package and its actionType (or lack thereof)
+for p in packages/plugin-*; do
+  grep -H '^actionType' "$p/plugin.yaml" 2>/dev/null || echo "$p/plugin.yaml: (native)"
+done
+
+# List every channel package
+rg -n "channelType: '" packages/plugin-*/src/channels/index.ts
+
+# Confirm which plugins export both actions and channels
+for p in packages/plugin-*; do
+  test -d "$p/src/actions" && test -d "$p/src/channels" && basename "$p"
+done
+
+# System-default risk cascade
+rg -n 'low:|medium:|high:|critical:' packages/worker/src/lib/db/actions.ts
+
+# DO-level policy resolution
+rg -n 'resolveActionPolicy' packages/worker/src
+
+# Outbound channel dispatch
+rg -n 'transport.sendMessage|channelRegistry.getTransport' packages/worker/src
+```
+
+## See also
+
+- [Plugin System](/engineering/plugin-system) — how to build a plugin package end-to-end.
+- [Policy Engine](/engineering/policy-engine) — how admin, session, and system-default policies compose.
+- [Orchestrator Runtime](/engineering/orchestrator-runtime) — the session that receives channel-routed prompts.
+- [Auth & access internals](/engineering/auth-access-internals) — where credentials live and how they never reach the sandbox.
+- [Product: Channel Integrations](/product/integrations/channel-integrations) — the product-level view of Slack/Telegram as channels.
+- [Product: Integrations overview](/product/integrations/overview) — the connected catalog.
