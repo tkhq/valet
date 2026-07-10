@@ -3126,6 +3126,23 @@ export class SessionAgentDO {
         }
         const final = this.messageStore.finalizeTurn(turnId, msg.finalText, msg.reason, msg.error);
         if (!final) return;
+        // Errored turns must land in analytics. The V2 sync-prompt path reports
+        // errors exclusively through this finalize message (reason: 'error') —
+        // the legacy 'error' runner message only fires for rare hard exceptions —
+        // so this is the emit site that keeps the Performance tab's error rate
+        // (turn_error vs turn_complete) honest. The runner still sends 'complete'
+        // after an errored finalize, so turn_complete fires for every turn and
+        // turn_error marks the errored subset, matching the legacy semantics.
+        if (msg.reason === 'error') {
+          const finalizeErrorText = msg.error || 'Unknown error';
+          this.emitEvent('turn_error', {
+            turnId,
+            errorCode: 'agent_error',
+            channel: final.metadata.channelType || undefined,
+            properties: { message: finalizeErrorText.slice(0, 200) },
+          });
+          this.emitAuditEvent('agent.error', finalizeErrorText.slice(0, 120));
+        }
         // Broadcast final message state
         this.broadcastToClients({
           type: 'message.updated',

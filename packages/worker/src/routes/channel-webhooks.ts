@@ -7,6 +7,7 @@ import * as db from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
 import { getCredential } from '../services/credentials.js';
 import { dispatchOrchestratorPrompt } from '../services/orchestrator.js';
+import { recordWebhookDeliveryFireAndForget as recordDelivery } from '../lib/webhook-delivery.js';
 
 export const channelWebhooksRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -215,6 +216,7 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
     const ctx: ChannelContext = { token: botToken, userId };
     const target: ChannelTarget = { channelType, channelId: message.channelId };
     await handleChannelCommand(c.env, transport, target, ctx, message, userId);
+    recordDelivery(c, { provider: channelType, eventType: 'command', outcome: 'processed' });
     return c.json({ ok: true });
   }
 
@@ -318,7 +320,10 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
         }),
       );
       console.log(`[Channel:${channelType}] Bound session response: status=${resp.status}`);
-      if (resp.ok) return c.json({ ok: true });
+      if (resp.ok) {
+        recordDelivery(c, { provider: channelType, eventType: 'message', outcome: 'processed' });
+        return c.json({ ok: true });
+      }
       if (resp.status === 409) {
         // 409 = session terminated/archived. The DO rejected without processing.
         // Stale binding eviction (lines 214-222) usually catches this, but there's
@@ -362,6 +367,7 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
   // Dispatch to orchestrator
 
   console.log(`[Channel:${channelType}] Orchestrator dispatch: userId=${userId} channelId=${message.channelId}`);
+  recordDelivery(c, { provider: channelType, eventType: 'message', outcome: 'processed' });
   const result = await dispatchOrchestratorPrompt(c.env, {
     userId,
     content: message.text || '[Attachment]',

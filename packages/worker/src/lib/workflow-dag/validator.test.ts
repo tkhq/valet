@@ -374,7 +374,7 @@ describe('validateDefinition', () => {
         code: 'foreach_items_untyped_array_output',
         nodeId: 'sweep',
         path: 'items',
-        message: 'foreach "sweep" uses {{trigger.data.names}}, but it is not a typed array output',
+        message: expect.stringContaining('foreach "sweep" uses {{trigger.data.names}}, but it is not a typed array output'),
       }),
     ]);
   });
@@ -457,7 +457,7 @@ describe('validateDefinition', () => {
         nodeId: 'write_companies',
         path: 'items',
         code: 'foreach_items_untyped_array_output',
-        message: 'foreach "write_companies" uses {{nodes.scrape_yc.data.companies}}, but it is not a typed array output',
+        message: expect.stringContaining('foreach "write_companies" uses {{nodes.scrape_yc.data.companies}}, but it is not a typed array output'),
       }),
     ]));
   });
@@ -538,6 +538,122 @@ describe('validateDefinition', () => {
     expect(blockingErrors(validateDefinition(def))).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'foreach_items_untyped_array_output' }),
     ]));
+  });
+
+  it('accepts foreach items that reference an array declared by an llm outputSchema', () => {
+    const def = definition({
+      nodes: [
+        {
+          id: 'classify',
+          type: 'llm',
+          prompt: 'Classify these into categories.',
+          outputSchema: {
+            type: 'object',
+            properties: {
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    label: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+        {
+          id: 'process_items',
+          type: 'foreach',
+          items: '{{nodes.classify.data.items}}',
+          body: { id: 'process_item', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'classify', to: 'process_items' },
+        { from: 'process_items', to: 'finish' },
+      ],
+    });
+
+    expect(blockingErrors(validateDefinition(def))).toEqual([]);
+  });
+
+  it('accepts foreach items that reference an array declared by an orchestrator outputSchema', () => {
+    const def = definition({
+      nodes: [
+        {
+          id: 'ask_orch',
+          type: 'orchestrator',
+          prompt: 'Return a list of tasks as JSON.',
+          wait: { mode: 'until_idle' },
+          outputSchema: {
+            type: 'object',
+            properties: {
+              tasks: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+        {
+          id: 'process_tasks',
+          type: 'foreach',
+          items: '{{nodes.ask_orch.data.output.tasks}}',
+          body: { id: 'process_task', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'ask_orch', to: 'process_tasks' },
+        { from: 'process_tasks', to: 'finish' },
+      ],
+    });
+
+    expect(blockingErrors(validateDefinition(def))).toEqual([]);
+  });
+
+  it('rejects foreach items that reference an llm output field with no outputSchema', () => {
+    const def = definition({
+      nodes: [
+        {
+          id: 'classify',
+          type: 'llm',
+          prompt: 'Classify these.',
+        },
+        {
+          id: 'process_items',
+          type: 'foreach',
+          items: '{{nodes.classify.data.items}}',
+          body: { id: 'process_item', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'classify', to: 'process_items' },
+        { from: 'process_items', to: 'finish' },
+      ],
+    });
+
+    const errs = blockingErrors(validateDefinition(def));
+    expect(errs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'foreach_items_untyped_array_output',
+        nodeId: 'process_items',
+        path: 'items',
+        // Message should name the source node concretely and point to the outputSchema fix.
+        message: expect.stringContaining('llm node "classify"'),
+      }),
+    ]));
+    // Also verify the actionable fix hint mentions outputSchema.
+    const untyped = errs.find((e) => e.code === 'foreach_items_untyped_array_output');
+    expect(untyped?.message).toMatch(/outputSchema/);
   });
 
   it('rejects foreach itemAlias shadowing reserved context names', () => {

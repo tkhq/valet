@@ -213,6 +213,21 @@ describe('executeTool', () => {
     );
   });
 
+  it('uses user credentials to discover credential-gated actions during preflight', async () => {
+    getProviderMock.mockReturnValue({ authType: 'oauth2', mcpServerUrl: 'https://mcp.example.test' });
+    resolveCredentialsMock.mockResolvedValue({
+      ok: true,
+      credential: { accessToken: 'tok-1', credentialType: 'oauth2' },
+    });
+    executeMock.mockResolvedValue({ success: true, data: null });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'custom_mcp', action: 'custom_mcp.search', params: {} };
+    listActionsMock.mockResolvedValue([{ id: 'custom_mcp.search', riskLevel: 'low' }]);
+
+    await executeTool(args(node));
+
+    expect(listActionsMock).toHaveBeenCalledWith({ credentials: { access_token: 'tok-1' } });
+  });
+
   it('injects owner_slack_user_id from identity links for slack service', async () => {
     // slack.dm_owner and the private-channel guard both read
     // ctx.credentials.owner_slack_user_id. The session-tools path injects

@@ -1415,6 +1415,34 @@ export interface AnalyticsValueResponse {
   period: number;
 }
 
+/**
+ * Application-state health for the admin dashboard: the last outcome of every
+ * scheduled sweep (from cron_heartbeats) plus a 24h webhook-delivery rollup.
+ * `stale` is derived server-side — a job is stale when it hasn't succeeded in
+ * more than 3x its expected interval; jobs with no known interval are never
+ * flagged stale.
+ */
+export interface AnalyticsHealthResponse {
+  jobs: Array<{
+    jobName: string;
+    lastSuccessAt: string | null;
+    lastErrorAt: string | null;
+    lastError: string | null;
+    lastDurationMs: number | null;
+    lastItems: number | null;
+    stale: boolean;
+  }>;
+  webhooks: Array<{
+    provider: string;
+    received: number;
+    invalidSignature: number;
+    processed: number;
+    failed: number;
+    total: number;
+    lastCreatedAt: string | null;
+  }>;
+}
+
 // Plugin types
 export interface OrgPlugin {
   id: string;

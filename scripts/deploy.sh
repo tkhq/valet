@@ -201,6 +201,8 @@ deploy_client_pages() {
 
 # ─── Subcommands ─────────────────────────────────────────────────────────────
 
+# Deploys the Worker only — does NOT apply migrations. If the new code depends
+# on schema changes, run `deploy.sh migrate` first (cmd_all does this order).
 cmd_worker() {
     echo -e "${GREEN}Deploying Worker...${NC}"
     preflight wrangler jq bun
@@ -283,11 +285,25 @@ cmd_all() {
     pnpm --filter '@valet/*' --filter '!@valet/worker' --filter '!@valet/client' run build
     echo -e "${GREEN}✓ Packages built${NC}"
 
-    # --- Step 4: Deploy Worker ---
+    # --- Step 4: Run D1 migrations ---
+    # Migrations MUST apply before the Worker deploy: the new Worker reads new
+    # columns on hot paths (drizzle enumerates every schema column in SELECT),
+    # so deploy-first serves "no such column" 500s until migrations land.
+    # Migrate-first is safe because migrations are required to be additive/
+    # backward-compatible with the RUNNING Worker version — the old Worker
+    # tolerates new columns, the new Worker requires them. The same invariant
+    # covers rollback.yml, which redeploys an older Worker against the newer
+    # schema.
     echo ""
-    echo "Step 4/7: Deploying Worker..."
-    (cd packages/worker && bun scripts/generate-plugin-registry.ts)
+    echo "Step 4/7: Running migrations..."
     generate_wrangler_config
+    (cd packages/worker && wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote -c wrangler.deploy.toml)
+    echo -e "${GREEN}✓ Migrations applied${NC}"
+
+    # --- Step 5: Deploy Worker ---
+    echo ""
+    echo "Step 5/7: Deploying Worker..."
+    (cd packages/worker && bun scripts/generate-plugin-registry.ts)
 
     DEPLOY_OUT=$(cd packages/worker && wrangler deploy -c wrangler.deploy.toml 2>&1) || {
         echo -e "${RED}Worker deploy failed:${NC}"
@@ -296,12 +312,6 @@ cmd_all() {
     }
     echo "$DEPLOY_OUT"
     echo -e "${GREEN}✓ Worker: ${WORKER_URL}${NC}"
-
-    # --- Step 5: Run D1 migrations ---
-    echo ""
-    echo "Step 5/7: Running migrations..."
-    (cd packages/worker && wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote -c wrangler.deploy.toml)
-    echo -e "${GREEN}✓ Migrations applied${NC}"
 
     # --- Step 6: Deploy Modal backend ---
     echo ""

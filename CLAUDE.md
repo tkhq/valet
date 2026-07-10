@@ -204,7 +204,7 @@ Three deploy workflows live in `.github/workflows/`:
 | `deploy-dev.yml` | Push to `main` | dev environment |
 | `deploy-prod.yml` | Push of a `v*` tag | prod environment |
 
-`deploy-dev.yml` and `deploy-prod.yml` call `make deploy` (the full `scripts/deploy.sh cmd_all` path: worker → migrations → modal → client). `deploy-preview.yml` calls `make deploy-client` with `PAGES_DEPLOY_BRANCH=pr-<number>` so the preview branch is published to the dev Pages project without deploying a per-PR Worker, D1, R2 bucket, or Modal backend. All three workflows write `API_PUBLIC_URL` into `.env.deploy.<env>` from a GitHub Actions **secret** of the same name in each environment; the deploy script requires it (no auto-discovery fallback) and the client build uses it as `VITE_API_URL`.
+`deploy-dev.yml` and `deploy-prod.yml` call `make deploy` (the full `scripts/deploy.sh cmd_all` path: migrations → worker → modal → client). `deploy-preview.yml` calls `make deploy-client` with `PAGES_DEPLOY_BRANCH=pr-<number>` so the preview branch is published to the dev Pages project without deploying a per-PR Worker, D1, R2 bucket, or Modal backend. All three workflows write `API_PUBLIC_URL` into `.env.deploy.<env>` from a GitHub Actions **secret** of the same name in each environment; the deploy script requires it (no auto-discovery fallback) and the client build uses it as `VITE_API_URL`.
 
 The Worker accepts preview OAuth redirects only for the configured frontend origin or for hosts under `FRONTEND_PREVIEW_ORIGIN_SUFFIX`, which defaults to `${PAGES_PROJECT_NAME}.pages.dev` during deploy config generation. Keep that suffix project-specific; do not set it to a broad value like `pages.dev`.
 
@@ -500,6 +500,8 @@ Every PR uses the template at [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_
 ## Common Patterns
 
 ### Adding a new D1 table
+
+Migrations must be **additive and backward-compatible** (no `DROP`/`RENAME` of in-use tables or columns): migrations apply *before* the Worker deploys, so the previous Worker build serves traffic against the new schema during the deploy window — and a rollback redeploys an old Worker against it. Destructive cleanup ships in a later migration once no deployed Worker references the old shape.
 
 1. Create migration: `packages/worker/migrations/NNNN_name.sql`
 2. Add Drizzle schema: `packages/worker/src/lib/schema/<name>.ts` and re-export from `schema/index.ts`

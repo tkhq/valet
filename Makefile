@@ -645,7 +645,7 @@ release: _require-env ## Full idempotent release: install, build, push image, de
 	@echo "Step 3/4: Building and pushing OpenCode image to GHCR..."
 	@make image-push VERSION=$(VERSION)
 	@echo ""
-	@echo "Step 4/4: Deploying (worker + migrations + modal + client)..."
+	@echo "Step 4/4: Deploying (migrations + worker + modal + client)..."
 	@ENVIRONMENT=$(ENVIRONMENT) ./scripts/deploy.sh all
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"

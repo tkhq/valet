@@ -40,3 +40,4 @@ export * from './db/service-configs.js';
 export * from './db/github-installations.js';
 export * from './db/custom-mcp-connectors.js';
 export * from './db/value-metrics.js';
+export * from './db/observability.js';
