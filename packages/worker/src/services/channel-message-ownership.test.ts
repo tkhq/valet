@@ -13,6 +13,7 @@ vi.mock('../lib/db/slack.js', () => ({
 import {
   createChannelMessageOwnership,
   resolveChannelMessageConnectionScope,
+  sendManagedChannelMessage,
 } from './channel-message-ownership.js';
 
 describe('channel message ownership', () => {
@@ -127,5 +128,21 @@ describe('channel message ownership', () => {
 
     await expect(admin.assertCanModify({ channelType: 'custom-channel', channelId: 'chat-1', messageId: 'message-1' }))
       .resolves.toBeUndefined();
+  });
+
+  it('reports delivery uncertainty when the provider omits a message ID', async () => {
+    const { db } = createTestDb();
+    db.insert(users).values({ id: 'owner', email: 'owner@example.com' }).run();
+    const result = await sendManagedChannelMessage({
+      db,
+      encryptionKey: 'test-key',
+      transport: { channelType: 'custom-channel', sendMessage: vi.fn().mockResolvedValue({ success: true }) } as any,
+      target: { channelType: 'custom-channel', channelId: 'chat-1' },
+      message: { markdown: 'hello' },
+      ctx: { token: 'token', userId: 'owner' },
+      orgId: 'org-1',
+    });
+
+    expect(result).toEqual({ success: false, error: 'Message sent, but provider returned no message ID' });
   });
 });

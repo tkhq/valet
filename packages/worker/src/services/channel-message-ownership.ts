@@ -105,7 +105,10 @@ export async function sendManagedChannelMessage(options: {
   sessionId?: string;
 }): Promise<SendResult> {
   const result = await options.transport.sendMessage(options.target, options.message, options.ctx);
-  if (!result.success || !result.messageId) return result;
+  if (!result.success) return result;
+  if (!result.messageId) {
+    return { success: false, error: 'Message sent, but provider returned no message ID' };
+  }
   if (!options.orgId) {
     return { success: false, error: 'Message sent, but ownership could not be recorded' };
   }
