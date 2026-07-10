@@ -534,6 +534,7 @@ export async function executeAction(
       encryptionKey: env.ENCRYPTION_KEY,
       channelType: service,
       userId,
+      credentialScopeMaterial: credentials.refresh_token ?? credentials.bot_token ?? credentials.access_token,
     }),
     actionInvocationId: invocationId,
   });

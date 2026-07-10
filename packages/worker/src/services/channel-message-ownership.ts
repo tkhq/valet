@@ -22,6 +22,8 @@ export interface ConnectionScopeOptions {
   encryptionKey: string;
   channelType: string;
   userId: string;
+  /** Worker-only secret material from the credential resolver; never exposed to plugins. */
+  credentialScopeMaterial?: string;
 }
 
 /** Resolve a stable credential namespace without exposing credential material. */
@@ -36,7 +38,19 @@ export async function resolveChannelMessageConnectionScope(
     return install.teamId;
   }
 
-  return `user:${options.userId}`;
+  if (options.credentialScopeMaterial) {
+    return `credential:${await credentialScopeFingerprint(options.credentialScopeMaterial)}`;
+  }
+
+  // Actions without a user credential (for example worker-internal tools)
+  // still need an injected capability, but cannot correspond to an external
+  // user-scoped channel connection.
+  return `service:${options.channelType}:user:${options.userId}`;
+}
+
+async function credentialScopeFingerprint(material: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 /** Create the narrow, worker-bound ownership capability exposed to plugins. */

@@ -5,6 +5,7 @@ import { upsertActionPolicy } from '../lib/db/actions.js';
 import { upsertMcpToolCache } from '../lib/db/mcp-tool-cache.js';
 import { actionInvocations, integrations, sessions, users, customMcpConnectors, disabledActions } from '../lib/schema/index.js';
 import { getChannelMessageRef } from '../lib/db/channel-message-refs.js';
+import { resolveChannelMessageConnectionScope } from './channel-message-ownership.js';
 import { encryptString } from '../lib/crypto.js';
 import type { AppDb } from '../lib/drizzle.js';
 import { integrationRegistry } from '../integrations/registry.js';
@@ -465,17 +466,24 @@ describe('executeAction ownership context', () => {
       },
     };
     vi.spyOn(integrationRegistry, 'getProvider').mockReturnValue({
-      service: 'telegram', displayName: 'Telegram', authType: 'none', supportedEntities: [],
+      service: 'telegram', displayName: 'Telegram', authType: 'bot_token', supportedEntities: [],
       validateCredentials: () => true, testConnection: async () => true,
+    });
+    vi.spyOn(integrationRegistry, 'resolveCredentials').mockResolvedValue({
+      ok: true, credential: { accessToken: 'shared-telegram-bot-token', credentialType: 'bot_token', refreshed: false },
+    });
+    const expectedScope = await resolveChannelMessageConnectionScope({
+      db: appDb, encryptionKey: 'test-key', channelType: 'telegram', userId: USER_ID,
+      credentialScopeMaterial: 'shared-telegram-bot-token',
     });
 
     await executeAction(
-      appDb, {} as Env, USER_ID, 'telegram:send', 'telegram', 'send', {}, source, 'invocation-1',
+      appDb, { ENCRYPTION_KEY: 'test-key' } as Env, USER_ID, 'telegram:send', 'telegram', 'send', {}, source, 'invocation-1',
       { credentialCache: emptyCredentialCache(), orgId: 'org-1' },
     );
 
     await expect(getChannelMessageRef(appDb, {
-      orgId: 'org-1', channelType: 'telegram', connectionScope: `user:${USER_ID}`,
+      orgId: 'org-1', channelType: 'telegram', connectionScope: expectedScope,
       channelId: 'chat-1', messageId: 'message-1',
     })).resolves.toMatchObject({ ownerUserId: USER_ID, actionInvocationId: 'invocation-1' });
   });
