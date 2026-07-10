@@ -45,15 +45,28 @@ underlying signal is written reliably on every relevant path.
    analytics event at every terminal transition in the SessionAgent DO, with
    `properties.reason ∈ { terminated, hibernated, error, recovery_exhausted }` and an
    optional `error_code` on the `error`/`recovery_exhausted` paths. Hardens cost-per-task,
-   separates "abandoned" from "done", and makes time-to-done trustworthy. Cheap: the DO
-   already batch-flushes analytics events, so this rides the existing flush.
+   separates "abandoned" from "done", and makes time-to-done trustworthy. The DO-emitted
+   outcomes are persisted the moment they fire: `emitSessionOutcome` writes the event to the
+   DO-local buffer and then `await`s a `flushMetrics()` to D1, so a terminal session that
+   never runs another flush doesn't leave the row at `flushed = 0`.
+   **Plus a GitHub-webhook-driven terminal outcome:** `properties.reason = 'pr_merged'`
+   (`{ repo, prNumber }`), written when a `pull_request` webhook reports a merge for a session
+   that **authored** that PR (matched on `session_git_state`; never for `source_pr` matches).
+   This is the ultimate "shipped value" signal, so it is sourced from the webhook rather than
+   the agent's own actions. It is written **out-of-band** — straight to `analytics_events` via
+   `batchInsertAnalyticsEvents`, **not** by waking the DO — because the session is usually
+   terminated/hibernated/gone by the time the PR merges. The event id is deterministic
+   (`{sessionId}:pr_merged:{prNumber}`) so GitHub redeliveries dedupe via `INSERT OR IGNORE`.
+   Cheap: the DO already batch-flushes analytics events, so the terminal-transition variants
+   ride the existing flush.
    **Consumer semantics:** `hibernated` recurs across a single session's life (hibernate →
    wake → run → hibernate again is normal), so a session can have several `session.outcome`
    rows. Consumers must take the **last** outcome per session (by `created_at` / event id):
    a later wake-and-run supersedes a prior `hibernated`, and a subsequent `terminated` or
    `error` supersedes everything before it. `recovery_exhausted` is a distinct terminal
    reason even though it routes through the same `handleStop` termination path as
-   `terminated`.
+   `terminated`. `pr_merged` is asynchronous to the DO lifecycle and can arrive after any
+   terminal outcome — it is a positive-value marker, not part of the supersession chain.
 6. **Webhook delivery health** — receipt/processing outcome per webhook. Doubles as
    automation debugging and a freshness guarantee for the PR metrics (a stale merge rate
    should look stale, not wrong).
@@ -67,6 +80,11 @@ Slack plugin executors now emit low-cardinality analytics events on their succes
 - `github.pr_created` `{ repo, number, draft }`, `github.pr_merged` `{ repo, number }`,
   `github.issue_created` `{ repo, number }`
 - `slack.message_sent` / `slack.message_updated` / `slack.message_deleted` `{ channel }`
+
+Note the two `pr_merged` signals are distinct and complementary: `github.pr_merged` above
+fires when the **agent** merges through the plugin, whereas the `session.outcome{pr_merged}`
+in item 5 is **webhook-sourced** and fires whenever the PR merges (agent or human) — the
+latter is the trustworthy shipped-value indicator; the former only corroborates it.
 
 These are behavior-signal *foundations*, not a leadership chart — see §5's
 "External-action volume" note: the raw signal is worth having (it corroborates the
