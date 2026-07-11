@@ -28,8 +28,8 @@ This spec covers:
 - This spec does NOT cover frontend component implementation details, but it DOES define the API and event contracts the frontend consumes.
 - This spec does NOT cover sandbox image building (Dockerfiles, Modal image definitions, warm pools) — the sandbox image gets simpler but that's a separate concern.
 - This spec does NOT cover auth, users, orgs, or billing — those stay in the API layer.
-- This spec does NOT cover workflow execution details — a workflow step is "create a session, prompt it, read the result" and uses the engine's session API.
-- This spec does NOT cover orchestrator persona or long-term memory product behavior — those are application-level concerns built on top of the engine.
+- This spec does NOT cover workflow execution internals (definition format, DAG interpretation, trigger management) — but it DOES define the Workflow Caller Contract: the engine primitives workflow steps consume (durable submission ids, result-await, settled events, transcript reads).
+- This spec does NOT cover orchestrator persona or long-term memory product behavior — those are application-level services built on top of the engine. The engine-level hooks they consume ARE covered: tool registration, per-session tool configuration, thread identity in ToolContext, the pre-compaction hook, and ordered system-context injection.
 
 ## Design Pillars
 
@@ -216,6 +216,8 @@ The V1 implementation must define and implement these contracts:
 | Decision gate contract | `packages/engine` + adapters | Approval, question, and credential-request gates, delivery refs, resolution, expiry, withdrawal, restart-safe resume |
 | Durable submission contract | `packages/engine` | Idempotent admission, claim/lease lifecycle, attempt markers, reconciliation decision tree, two-phase settlement, terminalization |
 | Signal ingress contract | `packages/engine` + adapters | `SignalContent` admission, XML envelope rendering, dispatchId idempotency |
+| Workflow caller contract | `packages/engine` + adapters | Idempotent session creation, durable submission ids, `awaitResult`, settled events, unified transcript read, dual-target approvals |
+| Application service hooks | `packages/engine` | Per-session `toolConfig`, ordered `systemContext` injection, compaction hooks, thread identity in ToolContext |
 | Provider contracts | adapters | SessionStore, SandboxProvider, EventStream, BlobStore, CredentialStore |
 | Sandbox RPC contract | sandbox runtime + adapters | File operations, process execution, snapshots, tunnels, health, auth, request limits |
 | Channel transport contract | SDK + adapters | Outbound messages, decision gate delivery/update, inbound action parsing, free-text gate resolution |
@@ -231,7 +233,7 @@ The following are explicitly post-V1 unless needed to preserve an existing produ
 - User-facing branch/replay controls beyond preserving DAG metadata.
 - Kubernetes production deployment. The contract must exist, but Cloudflare is the V1 shipping adapter.
 - Rewriting every plugin package by hand. V1 may use an `ActionSource` to `ToolDef` bridge.
-- Replacing workflow execution internals. Workflows may continue to call the session API.
+- Replacing workflow execution internals. The workflow interpreter stays on its durable substrate and consumes the engine through the Workflow Caller Contract; migrating its polling and memoized-prompt patterns onto `awaitResult` and durable submission ids is the integration work, not a rewrite of the interpreter.
 - Removing old tables immediately. V1 may run side-by-side with current tables while the migration completes.
 
 ## Engine Public API
@@ -272,6 +274,22 @@ interface CreateSessionOptions {
   model: string;
   modelFailover?: string[];
   queueMode?: QueueMode;
+  /**
+   * Ordered system-context fragments injected after the base system prompt
+   * and role overlays. Application services use this to inject session-start
+   * context (e.g. the orchestrator's memory snapshot) with a stable position.
+   */
+  systemContext?: Array<{ name: string; content: string; order?: number }>;
+  /**
+   * Per-session tool configuration injected by the adapter and surfaced to
+   * every tool via ToolContext.config: service endpoints, API base URLs,
+   * feature flags. Tools must receive endpoints through this config, never
+   * assume loopback addresses or read ambient process env — tool code runs
+   * in the engine host, not the sandbox.
+   */
+  toolConfig?: Record<string, unknown>;
+  /** Compaction lifecycle hooks (see Compaction hooks). Run in order; failures never block compaction. */
+  compactionHooks?: CompactionHook[];
   metadata?: Record<string, unknown>;
 }
 
@@ -291,6 +309,8 @@ interface SessionHandle {
 interface ThreadHandle {
   id: string;
   prompt(content: PromptContent, opts?: PromptOptions): Promise<PromptReceipt>;
+  /** Durably await a submission's terminal result. Resumable across caller restarts. */
+  awaitResult(queueItemId: string, opts?: AwaitResultOptions): Promise<SubmissionResult>;
   skill(name: string, opts?: SkillInvokeOptions): Promise<PromptReceipt>;
   shell(command: string, opts?: ExecOpts): Promise<ExecResult>;
   readThread(key: string, opts?: MessageQuery): Promise<SessionEntry[]>;
@@ -368,7 +388,27 @@ interface PromptReceipt {
 }
 ```
 
-Prompt submission is **fire-and-forget**: `prompt()` resolves when the submission is durably admitted, not when the model finishes. Results are observed through the event stream and the message history API. There is no await-the-result surface; callers that need a final answer (workflow steps, `task` tools) subscribe to the submission's terminal event.
+Prompt submission is **fire-and-forget**: `prompt()` resolves when the submission is durably admitted, not when the model finishes. Results are observed through the event stream and the message history API.
+
+Callers that need a final answer (workflow steps, `task` tools) use `thread.awaitResult(queueItemId)` — a **derived** observation primitive built on the event stream and submission settlement, not a change to admission semantics. It is resumable by construction: because the submission id and its terminal outcome are durable, `awaitResult` can be called again after a caller restart with the same `queueItemId`; a settled submission returns its result immediately from the store, an unsettled one subscribes to the stream. This replaces poll-until-idle loops entirely.
+
+```typescript
+interface AwaitResultOptions {
+  timeoutMs?: number;
+  resultSchema?: TSchema;   // validate/repair structured output from the final assistant message
+  signal?: AbortSignal;
+}
+
+interface SubmissionResult {
+  queueItemId: string;
+  outcome: 'completed' | 'failed' | 'aborted' | 'superseded';
+  /** Final assistant message text for the turn(s) this submission drove. */
+  text?: string;
+  /** Present when resultSchema was supplied: validated structured output. */
+  output?: unknown;
+  error?: string;
+}
+```
 
 **Signal rendering:** signals are persisted as `MessageEntry` rows with `signal` metadata and rendered into LLM context as an XML envelope — `signalType` and each `attributes` entry become XML attributes, `body` is XML-escaped text content, `tagName` is the element name. `tagName` is regex-validated because it renders unescaped; `body` and attribute values are always escaped. Direct user prompts render as ordinary user messages.
 
@@ -729,6 +769,11 @@ interface ToolContext {
   // Credentials
   credentials: CredentialProvider;
 
+  // Per-session tool configuration (from CreateSessionOptions.toolConfig):
+  // service endpoints, API base URLs. The replacement for sandbox-loopback
+  // URLs and ambient env reads now that tools execute in the engine host.
+  config?: Record<string, unknown>;
+
   // Sandbox (for tools that need file/shell access)
   sandbox: Sandbox;
 
@@ -957,6 +1002,32 @@ After a successful proactive compaction (i.e., one we ran on our own initiative,
 > "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
 
 The synthetic message is tagged with `metadata: { compaction_continue: true }` so client UIs can render it differently or hide it. Reactive (overflow) compactions don't auto-continue — they just retry the original turn that triggered the overflow.
+
+#### Compaction hooks
+
+Application services participate in compaction through a named lifecycle hook registered per session. This is a first-class engine contract: the orchestrator's memory system depends on it to shape the summary and to mandate a post-compaction knowledge flush.
+
+```typescript
+interface CompactionHook {
+  /**
+   * Called before the summarizer runs. Returned fragments are appended to
+   * the summarizer's context (e.g. "preserve an ## Active Work section",
+   * "your first post-compaction action must be a mem_patch journal write").
+   */
+  beforeCompact?(ctx: CompactionHookContext): Promise<{ summarizerContext?: string[] }> | { summarizerContext?: string[] };
+  /** Called after the CompactionEntry is persisted, before auto-continue. */
+  afterCompact?(ctx: CompactionHookContext & { compactionEntryId: string }): Promise<void> | void;
+}
+
+interface CompactionHookContext {
+  sessionId: string;
+  threadId: string;
+  reason: 'proactive' | 'overflow';
+  tokensBefore: number;
+}
+```
+
+Hooks are registered via `CreateSessionOptions` (`compactionHooks?: CompactionHook[]`) and run in registration order. Hook failures are logged and skipped — a broken hook must never block compaction, because compaction failure is context exhaustion.
 
 #### Configuration
 
@@ -1337,6 +1408,18 @@ Optional schema-validated output extraction. Any prompt or skill invocation can 
 - Delimiters: `---RESULT_START---` and `---RESULT_END---`
 - If validation fails and no delimiters found: auto-retry with a follow-up prompt
 - Returns typed data matching the schema
+
+### Workflow Caller Contract
+
+Workflow execution (definition format, DAG interpretation, triggers, version history) lives outside the engine, in a durable workflow substrate — Cloudflare Workflows on CF; an equivalent durable-step engine (durable timers, signal waits, memoized steps, per-instance signals and termination) is an adapter dependency on Kubernetes. The engine's obligation is the primitive set workflow steps consume, and it must be identical on both platforms:
+
+1. **Session creation** — `engine.createSession(...)` with `purpose: 'workflow'` and caller-supplied `id` for idempotent creation under step replay.
+2. **Durable prompt submission** — `thread.prompt(...)` returning a durable `queueItemId`. Idempotency comes from the submission contract (`dispatchId` derived from `workflow:{executionId}:{nodeId}[:{iteration}]`), not from workflow-step memoization. A replayed step re-submits with the same dispatchId and receives the original receipt.
+3. **Result-await** — `thread.awaitResult(queueItemId, { resultSchema })`. Replaces poll-until-idle loops: no status polling, no backoff tuning against step budgets, no divergent DO-vs-database transcript read paths. After a workflow instance hibernates and replays, it re-awaits the same submission id and gets the settled result.
+4. **Settled/idle events** — workflow-visible progress (`turn_end`, submission settlement, `queue_state`) is read from the durable event stream when a workflow needs observation finer than terminal results.
+5. **Transcript read** — `SessionStore.getEntries(...)` is the single history read path for all session kinds (interactive, orchestrator, workflow-spawned). Structured-output extraction and repair against a node's `outputSchema` may remain a workflow-layer concern layered over `awaitResult`.
+
+**Approvals — one pending-decision model, two resume targets.** An approval raised *inside* an engine session (a tool's decision gate) suspends a submission and resumes through `resolveDecision` → the submission lifecycle. An approval raised *by the workflow itself* (an approval node, a tool-policy hold) suspends the workflow instance and resumes through the workflow substrate's signal mechanism. Both surface to users as the same pending-decision record; the resolver dispatches on which durable waiter owns the pause. The engine owns the session-side target; the adapter owns workflow-instance signaling; the application layer owns the unified record and the stuck-approval sweep that recovers lost signals.
 
 ## Provider Interfaces
 
