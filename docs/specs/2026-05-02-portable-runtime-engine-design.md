@@ -1411,7 +1411,7 @@ Optional schema-validated output extraction. Any prompt or skill invocation can 
 
 ### Workflow Caller Contract
 
-Workflow execution (definition format, DAG interpretation, triggers, version history) lives outside the engine, in a durable workflow substrate — Cloudflare Workflows on CF; an equivalent durable-step engine (durable timers, signal waits, memoized steps, per-instance signals and termination) is an adapter dependency on Kubernetes. The engine's obligation is the primitive set workflow steps consume, and it must be identical on both platforms:
+Workflow execution (definition format, DAG interpretation, triggers, version history) lives outside the engine. Its portable execution substrate — a checkpointed interpreter over a minimal `RunHost` port — is specified in [`docs/specs/2026-07-11-workflow-run-host-design.md`](2026-07-11-workflow-run-host-design.md). The engine's obligation is the primitive set workflow steps consume, and it must be identical on both platforms:
 
 1. **Session creation** — `engine.createSession(...)` with `purpose: 'workflow'` and caller-supplied `id` for idempotent creation under step replay.
 2. **Durable prompt submission** — `thread.prompt(...)` returning a durable `queueItemId`. Idempotency comes from the submission contract (`dispatchId` derived from `workflow:{executionId}:{nodeId}[:{iteration}]`), not from workflow-step memoization. A replayed step re-submits with the same dispatchId and receives the original receipt.
