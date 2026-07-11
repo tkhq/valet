@@ -41,6 +41,7 @@ The engine is defined by these commitments; every contract in this spec serves o
 - **Channel-aware, tenant-aware routing.** Web, Slack, Telegram, and child-session threads route into one session under org/user identity and access control. Channel identity resolution is a first-class engine-adjacent concern, not application glue.
 - **Decision-gated execution.** Approvals, questions, and credential acquisition are persisted engine primitives that survive restarts and deliver across channels.
 - **Replayable event streams.** Events are an offset-addressed durable log, not a fire-and-forget broadcast. Reconnection is a resume, not a refetch-and-hope.
+- **Decoupled lifecycles: the agent is instant; the sandbox is a disposable, asynchronously attached resource.** Session state restores from the store in milliseconds and the turn starts immediately; the sandbox warms in the background and only sandbox-requiring tool calls ever wait on it. The workspace survives; the sandbox does not have to.
 
 ## Why: Contrast with Current Architecture
 
@@ -220,6 +221,7 @@ The V1 implementation must define and implement these contracts:
 | Application service hooks | `packages/engine` | Per-session `toolConfig`, ordered `systemContext` injection, compaction hooks, thread identity in ToolContext |
 | Provider contracts | adapters | SessionStore, SandboxProvider, EventStream, BlobStore, CredentialStore |
 | Sandbox RPC contract | sandbox runtime + adapters | File operations, process execution, snapshots, tunnels, health, auth, request limits |
+| Sandbox attachment contract | `packages/engine` + providers | Lazy attachment, capabilities, provider registry, `sandbox_status` events, cold-attachment model hint, workspace survival |
 | Channel transport contract | SDK + adapters | Outbound messages, decision gate delivery/update, inbound action parsing, free-text gate resolution |
 | API route contract | `packages/api` + adapters | Shared session/thread/prompt/history/decision/control routes |
 | Client event contract | adapters | WebSocket/SSE event names and payloads for web UI consumption |
@@ -774,7 +776,10 @@ interface ToolContext {
   // URLs and ambient env reads now that tools execute in the engine host.
   config?: Record<string, unknown>;
 
-  // Sandbox (for tools that need file/shell access)
+  // Sandbox (for tools that need file/shell access). A LAZY handle: the
+  // attachment may still be provisioning. The first operation awaits
+  // readiness (bounded by a timeout, then a structured
+  // workspace_provisioning error). Tools that never touch it never wait.
   sandbox: Sandbox;
 
   // Structured runtime interactions
@@ -1352,6 +1357,7 @@ type EngineEvent =
   | { type: 'compaction_start' | 'compaction_end'; threadId: string }
   | { type: 'task_start' | 'task_end'; childSessionId: string; threadId: string }
   | { type: 'status'; threadId: string; status: 'idle' | 'queued' | 'thinking' | 'tool_calling' | 'streaming' | 'blocked_on_decision_gate' }
+  | { type: 'sandbox_status'; sandboxId?: string; state: 'provisioning' | 'ready' | 'idle' | 'snapshotting' | 'released' | 'error'; estimateMs?: number }
   | { type: 'error'; threadId?: string; code: string; error: string; recoverable: boolean }
   | { type: 'decision_gate'; threadId: string; gate: DecisionGate }
   | { type: 'decision_gate_resolved'; threadId: string; gateId: string; resolution: DecisionResolution }
@@ -1429,15 +1435,50 @@ These are the contracts that platform adapters implement. The engine depends onl
 
 Creates and manages sandbox compute. The engine calls this to get a Sandbox handle, then uses it for all file and process operations.
 
+#### Lifecycle decoupling
+
+The session and the sandbox are **two independent state machines with different cost profiles**, and the engine never couples them:
+
+- **Session lifecycle** is cheap. State lives entirely in SessionStore; restoring a hibernated session is one load. A prompt to a cold session is durably admitted and the turn starts immediately — there is no user-visible "agent waking up" state.
+- **Sandbox lifecycle** is expensive and asynchronous: `detached → provisioning → ready → idle → snapshotting/released`. A session owns a **sandbox attachment** that may be cold. When a prompt arrives against a cold attachment, the engine starts the turn and kicks the provider's warm path in parallel.
+
+The joint is the lazy handle: `ToolContext.sandbox` is not guaranteed ready. The first sandbox-requiring operation awaits attachment readiness, subject to a configurable timeout, after which it fails with a structured `workspace_provisioning` tool error. Tools with no sandbox dependency (memory, plugin API calls, `thread_read`, decision gates) never wait. Orchestrator turns that touch no files respond instantly regardless of sandbox state.
+
+Two required behaviors around cold attachments:
+
+- The engine emits `sandbox_status` events so clients render workspace readiness as ambient state, not a blocking spinner.
+- When a turn starts against a cold attachment, the engine injects a short system-context note ("workspace is provisioning, ~Ns; sequence non-filesystem work first" — using the provider's `coldStartEstimateMs`) so the model reorders work instead of stalling on its first tool call.
+
+A dead or crashed sandbox mid-turn is a failed tool call plus a background re-provision — never a session error. The invariant the engine enforces is stated at workspace level: **the workspace survives; the sandbox is disposable.** How the workspace survives is provider-specific (memory snapshot, persistent volume, re-materialization).
+
+Idle management runs on independent timers: the engine host idles aggressively (DO hibernation / pool eviction within minutes — free and invisible), while the sandbox idles on its own schedule keyed to the last sandbox *operation*, not the last prompt (stay warm for snappy tool calls, then snapshot or release per capabilities; per-org tunable, cost-driven).
+
+#### Provider contract
+
 ```typescript
 interface SandboxProvider {
+  readonly backend: string;   // 'modal' | 'daytona' | 'k8s' | 'docker' | 'local' | 'virtual' | ...
+  capabilities(): SandboxCapabilities;
   create(opts: SandboxCreateOpts): Promise<Sandbox>;
   restore(id: string): Promise<Sandbox>;
   destroy(id: string): Promise<void>;
   status(id: string): Promise<SandboxStatus>;
 }
 
+interface SandboxCapabilities {
+  /** How a released sandbox comes back: memory snapshot, filesystem snapshot, or recreate-only. */
+  snapshot: 'memory' | 'filesystem' | 'none';
+  /** Workspace storage survives sandbox destruction (volume, mount). */
+  persistentWorkspace: boolean;
+  tunnels: boolean;
+  warmPool: boolean;
+  /** Feeds the cold-attachment model hint and client UI. */
+  coldStartEstimateMs?: number;
+}
+
 interface SandboxCreateOpts {
+  /** Provider selection when multiple backends are registered; defaults per org/repo policy. */
+  backend?: string;
   image?: string;
   workspace?: string;
   env?: Record<string, string>;
@@ -1487,7 +1528,7 @@ interface ExecResult {
 
 interface SandboxStatus {
   id: string;
-  state: 'creating' | 'running' | 'stopped' | 'error';
+  state: 'provisioning' | 'ready' | 'idle' | 'snapshotting' | 'released' | 'error';
   startedAt?: number;
   error?: string;
 }
@@ -1498,11 +1539,14 @@ interface SandboxStatus {
 **Policy wrapper:** provider implementations stay thin because the engine wraps every `Sandbox` in a single policy layer that centralizes the cross-cutting semantics: pre-dispatch and post-completion `signal.aborted` checks (so aborts are observed at operation boundaries even when the provider can't interrupt), path resolution against the workspace cwd, output-limit enforcement, and write-with-parent-creation (attempt the write; on failure `mkdir -p` the parent and retry once — one round-trip on the happy path). A provider implements only the raw file/exec primitives; it never re-implements abort, path, or limit policy.
 
 **Implementations:**
-- `ModalSandbox` — wraps Modal's Python SDK (called via HTTP to the Modal backend)
-- `K8sPodSandbox` — creates a K8s pod, exec via K8s API
-- `DockerSandbox` — local Docker container (dev/testing)
+- `ModalSandbox` — wraps Modal's Python SDK (called via HTTP to the Modal backend); `snapshot: 'memory'`
+- `DaytonaSandbox` — Daytona workspace API; capabilities per their snapshot/volume support
+- `K8sPodSandbox` — creates a K8s pod, exec via K8s API; `snapshot: 'none'`, `persistentWorkspace: true` (PVC)
+- `DockerSandbox` — local Docker container (dev/testing); `snapshot: 'filesystem'`
 - `LocalSandbox` — host filesystem + child_process (CI, local dev)
 - `VirtualSandbox` — in-memory filesystem + just-bash (lightweight agents, no container)
+
+Providers register in a registry keyed by `backend`; sessions select via `SandboxCreateOpts.backend` with per-org/per-repo defaults, so one deployment can run Modal in production, Docker locally, and evaluate a new backend without a fork. A provider is supported when it passes the **sandbox provider conformance suite**: filesystem semantics, exec timeout forwarding, the two-tier cancellation contract, structured `workspace_provisioning` errors, and workspace survival across destroy/recreate. A `snapshot: 'none'` provider is fully valid — its restore path is recreate-plus-reattach, which the asynchronous attachment model absorbs as background warming rather than user-facing latency.
 
 #### Sandbox RPC Contract
 
@@ -2118,7 +2162,7 @@ Every adapter must provide:
 - Lease heartbeats for claimed submissions and a periodic expired-lease scan that routes reclaimed submissions through reconciliation.
 - Event subscription and client delivery over WebSocket and/or SSE.
 - Startup restoration of queued, running, and blocked threads from `SessionStore` via `engine.restoreSession({ sessionId, options })`. The adapter is responsible for reconstructing `options` (tools, sandbox handle, model, system prompt, role/skill sources) from its own configuration — the engine itself does not persist creation options.
-- Idle eviction/hibernation that calls `store.flush()` and leaves enough persisted state to resume. Specifically: any thread with status `running` or `blocked_on_decision_gate`, plus its active queue item and (for blocked threads) its `SuspendedTurnState`, must be readable on wake.
+- Idle eviction/hibernation that calls `store.flush()` and leaves enough persisted state to resume. Specifically: any thread with status `running` or `blocked_on_decision_gate`, plus its active queue item and (for blocked threads) its `SuspendedTurnState`, must be readable on wake. Host idle timers are independent of sandbox idle timers — evicting the engine host must not release a warm sandbox, and releasing an idle sandbox must not evict the host.
 - Fatal error handling that marks the session `error`, publishes a client `error` event, and prevents silent queue accumulation.
 
 Cloudflare V1 uses one `SessionHostDO` per session ID. Kubernetes may use a process-local `SessionPool`, but must provide equivalent session affinity and restore behavior.
