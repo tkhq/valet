@@ -225,7 +225,7 @@ The V1 implementation must define and implement these contracts:
 | Channel transport contract | SDK + adapters | Outbound messages, decision gate delivery/update, inbound action parsing, free-text gate resolution |
 | API route contract | `packages/api` + adapters | Shared session/thread/prompt/history/decision/control routes |
 | Client event contract | adapters | WebSocket/SSE event names and payloads for web UI consumption |
-| Schema/migration contract | `packages/engine` | Drizzle schema, SQLite and PostgreSQL migrations, coexistence with current app tables during rollout |
+| Schema/migration contract | `packages/engine` | Drizzle schema (clean-slate, no legacy compatibility), SQLite and PostgreSQL migrations, schema version stamping |
 | Observability contract | `packages/engine` + adapters | Audit events, analytics events, logs, status events, recoverable vs fatal errors |
 
 ### V1 Exclusions
@@ -236,7 +236,7 @@ The following are explicitly post-V1 unless needed to preserve an existing produ
 - Kubernetes production deployment. The contract must exist, but Cloudflare is the V1 shipping adapter.
 - Rewriting every plugin package by hand. V1 may use an `ActionSource` to `ToolDef` bridge.
 - Replacing workflow execution internals. The workflow interpreter stays on its durable substrate and consumes the engine through the Workflow Caller Contract; migrating its polling and memoized-prompt patterns onto `awaitResult` and durable submission ids is the integration work, not a rewrite of the interpreter.
-- Removing old tables immediately. V1 may run side-by-side with current tables while the migration completes.
+- Importers for legacy state beyond memory bundles. Export/import is the transfer model (see Clean-Slate Schema); additional importers ship on demand, never dual-schema bridges.
 
 ## Engine Public API
 
@@ -1767,7 +1767,7 @@ Hot/cold storage tiering (e.g., DO SQLite as write-through cache for D1) is an i
 
 #### Required Tables
 
-The engine schema owns these tables. Existing application tables may mirror selected fields during rollout, but the engine must not depend on current `messages`, `session_threads`, or DO-local queue tables for correctness.
+The engine schema owns these tables outright — they are the only storage the engine reads or writes (see Clean-Slate Schema).
 
 | Table | Purpose | Key fields |
 |---|---|---|
@@ -2040,18 +2040,17 @@ The SessionStore interface has no `migrate()` method. Migrations are a deploymen
 
 **Schema version enforcement:** the engine schema carries an integer version (`ENGINE_SCHEMA_VERSION`). Every store durably records the version it was created at (the `engine_meta` table, key `schema_version`) and, on open, **fails loudly before reading or writing any data** when the recorded version is unknown, newer than the code supports, or absent from a populated database. A version mismatch is a deployment error surfaced at startup — never a silent runtime corruption. Migrations bring the store to the current version and re-stamp it in the same transaction where the backend supports transactional DDL.
 
-### Current Schema Coexistence
+### Clean-Slate Schema
 
-During rollout, engine tables live beside current application tables. The Cloudflare adapter may mirror engine data into existing tables used by the current client, analytics, and admin views, but the engine source of truth is always the `engine_*` schema.
+The v2 database is designed from scratch — engine tables and application tables alike. There is **no coexistence, no mirroring, and no legacy reader compatibility**: the engine never reads or writes legacy tables, the v2 API serves only the v2 schema, and no v2 table inherits shape constraints from the current implementation. Names may coincide with legacy tables where the fresh design lands in the same place; no compatibility is implied by that.
 
-Required mirroring during the transition:
+State transfer between the stacks is **export/import bundles, not schema migration**:
 
-- `engine_sessions` to current `sessions` for session lists and access control joins.
-- `engine_threads` to current `session_threads` for thread lists.
-- `engine_entries` message entries to current `messages` for existing history readers.
-- `engine_decision_gates` to client event/API responses. No legacy decision-prompt table is created or written by the new engine path.
+- **Memory** — the existing OKF export/import bundles (`include=all|shareable`) are the transfer mechanism, already shipped.
+- **Credentials, identity links, bindings** — exported/re-established at cutover through their own bundle formats or re-connection flows; secrets re-encrypt under the v2 credential store.
+- **Conversation history** — does not migrate. The legacy system remains readable until sunset; v2 sessions start clean. An optional import (legacy transcript → `engine_entries`) may be built if demand warrants, as an importer against the export format — never as a dual-schema bridge.
 
-The old DO-local prompt queue and decision storage are not part of the new runtime. Once the Cloudflare adapter is fully switched over, DO storage is limited to hosting concerns such as hibernation state and WebSocket bookkeeping.
+DO storage in the v2 Cloudflare adapter is limited to hosting concerns (hibernation state, WebSocket bookkeeping); it is never a data store the schema must accommodate.
 
 ## Platform Adapters
 

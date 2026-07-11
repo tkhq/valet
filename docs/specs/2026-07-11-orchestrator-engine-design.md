@@ -150,7 +150,7 @@ Scoping rules (normative):
 - **Membership resolves per query, not per snapshot.** Leaving a team drops read access instantly. Wake-time memory snapshots cover only the owner's own scope; cross-team knowledge arrives through explicit `mem_search`/`mem_read`, keeping snapshots small and scope changes immediate.
 - The OKF `sensitivity` field governs export bundles (`include=shareable`); it does not create additional cross-scope read paths in V1. Owner-tuple partitioning + read-union is the entire sharing model.
 
-> **Schema reconciliation note:** owner-tuple partitioning and the OKF metadata columns (`sensitivity`, `origin`, `expires`, pinning) were developed on separate branches touching the same table. The merged schema carries both; the memory design spec (`2026-07-02-okf-memory-design.md`) must be updated with the owner-tuple key when the teams work lands.
+The v2 memory schema is defined fresh (clean-slate DB) and carries both dimensions from day one: the owner-tuple scoping key `(owner_type, owner_id, path)` and the OKF metadata columns (`sensitivity`, `origin`, `expires`, pinning, relevance). OKF import bundles are the ingestion path for existing memory, per scope.
 
 ## Notifications and Attention Routing
 
@@ -195,16 +195,15 @@ Membership is the only access path to team-owned resources — no creator shortc
 
 ## Migration
 
-The one-Jarvis rule: an orchestrator identity runs on exactly one stack at a time. Cutover is per-principal and atomic at the binding layer:
+The v2 stack owns a **clean-slate database** (see the engine spec's Clean-Slate Schema); nothing is shared with the legacy system and nothing mirrors. State transfer is export/import, and cutover is a routing repoint:
 
-0. Session IDs migrate to principal form (`orchestrator:{userId}` → `orchestrator:user:{userId}`) as part of the teams schema migration, before any engine cutover — the engine only ever sees principal-form IDs.
-1. Engine orchestrator session is created (same well-known ID, new `engine_*` state). Memory requires no migration — it is worker-owned D1 state reached over the API from either stack.
-2. Binding resolution flips: the routing layer targets the engine session instead of the legacy DO. From this instant, new events admit to the engine.
-3. The legacy DO drains: in-flight prompts finish, pending legacy approvals resolve through the legacy path, then the DO is stopped. A drain deadline (default 10 minutes) force-settles stragglers.
-4. Legacy thread history is either bridged read-only (web UI reads old threads from legacy tables) or imported into `engine_entries` — decided per rollout stage; the engine never writes legacy tables.
-5. Rollback before drain-complete is the reverse flip; after drain-complete, rollback is a fresh flip forward (the engine state is authoritative).
+1. **One-Jarvis rule.** An orchestrator identity is live on exactly one stack at a time. Cutover per principal: channel webhooks and linking flows repoint to v2 routing, and the legacy orchestrator is deactivated in the same operation. In-flight legacy work finishes in the legacy system; nothing drains across.
+2. **Memory transfers via OKF bundles** — the shipped export/import path (`include=all|shareable`), imported per scope into the v2 memory tables. Bundles are scope-shaped, so personal and team memory move independently and membership correctness is preserved.
+3. **Credentials and identity links re-establish** through v2 connection/linking flows (or bundle import where a format exists); secrets re-encrypt under the v2 credential store. Team credentials re-source from their owning members.
+4. **Conversation history does not migrate.** v2 orchestrator sessions start clean, oriented by imported memory (this is what the journal spine is for). The legacy system stays readable until sunset. An optional transcript importer against the export format may ship later if demand warrants — never a dual-schema bridge.
+5. **Rollback** is repointing routing back to legacy (still intact until sunset) and re-exporting any memory written in the interim.
 
-Org orchestrators have no legacy counterpart and launch engine-only.
+Team and org orchestrators have no meaningful legacy counterpart and launch v2-only.
 
 ## Open Items
 
