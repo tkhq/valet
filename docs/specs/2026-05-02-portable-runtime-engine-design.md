@@ -7,12 +7,13 @@
 This spec covers:
 
 - Engine library architecture and abstraction boundaries
-- The V1 feature superset required beyond Flue-style agent harness behavior
 - Session, thread, and message hierarchy
 - Agent loop, tool system, compaction, and event emission
-- Per-thread prompt queue with modes
+- Per-thread prompt queue with modes, backed by durable submissions
+- Durable execution: submission lifecycle, claims, leases, reconciliation, terminalization
 - Decision-gated execution (approvals, credential requests, questions)
-- Provider interfaces (SessionStore, SandboxProvider, EventBus, BlobStore, CredentialStore)
+- Prompt and signal ingress (`PromptContent`, `SignalContent`, idempotent admission)
+- Provider interfaces (SessionStore, SandboxProvider, EventStream, BlobStore, CredentialStore)
 - Schema ownership and migration strategy
 - Platform adapter contracts (Cloudflare and Kubernetes)
 - Channel transport contracts, with Slack as the required reference transport for V1
@@ -30,27 +31,16 @@ This spec covers:
 - This spec does NOT cover workflow execution details — a workflow step is "create a session, prompt it, read the result" and uses the engine's session API.
 - This spec does NOT cover orchestrator persona or long-term memory product behavior — those are application-level concerns built on top of the engine.
 
-## Relationship to Flue
+## Design Pillars
 
-This design is informed by Flue's runtime architecture and may reuse implementation ideas heavily, but V1 is specified as a Valet-owned engine built in-repo rather than a direct dependency on `@flue/sdk`.
+The engine is defined by these commitments; every contract in this spec serves one of them:
 
-Flue is the baseline reference for:
-
-- a portable session runtime over `pi-ai` and `pi-agent-core`
-- sandbox abstraction
-- built-in file/shell/task tools
-- DAG-style history with compaction
-- Cloudflare-hosted session persistence and SSE streaming
-
-Valet V1 intentionally goes beyond that baseline in a few core areas:
-
-- multi-threaded sessions with concurrent per-thread queues
-- channel-aware routing between web, Slack, Telegram, and child-session threads
-- decision-gated execution via approvals, questions, and credential acquisition
-- richer tool context (identity, credentials, sandbox, thread/session metadata, channel metadata)
-- adapter-facing event contracts suitable for multiplayer clients and external channel transports
-
-Where Flue and this spec differ, this spec is authoritative for Valet V1.
+- **Portable core, injected platform.** The engine has zero platform dependencies. Cloudflare and Kubernetes are provider bundles, not architectures.
+- **Multi-threaded sessions with concurrent per-thread queues.** The thread is the concurrency, history, and FIFO boundary.
+- **Durable-by-default execution.** Every accepted prompt is a durable submission with an explicit lifecycle. A crash, restart, or host replacement never loses accepted work and never leaves the transcript in an ambiguous state.
+- **Channel-aware, tenant-aware routing.** Web, Slack, Telegram, and child-session threads route into one session under org/user identity and access control. Channel identity resolution is a first-class engine-adjacent concern, not application glue.
+- **Decision-gated execution.** Approvals, questions, and credential acquisition are persisted engine primitives that survive restarts and deliver across channels.
+- **Replayable event streams.** Events are an offset-addressed durable log, not a fire-and-forget broadcast. Reconnection is a resume, not a refetch-and-hope.
 
 ## Why: Contrast with Current Architecture
 
@@ -145,11 +135,11 @@ Total moving parts: 2 processes (adapter + sandbox), 1 transport protocol (HTTP 
 
 **We own the agent loop.** Compaction behavior, tool call handling, context management, model failover: all modifiable. No working around an opaque dependency.
 
-**Platform is a configuration choice, not an architectural commitment.** The engine doesn't know about DOs, Workers, pods, or containers. It knows about SessionStore, SandboxProvider, EventBus, BlobStore, and CredentialStore. Porting to a new platform means implementing provider interfaces, not redesigning the session model.
+**Platform is a configuration choice, not an architectural commitment.** The engine doesn't know about DOs, Workers, pods, or containers. It knows about SessionStore, SandboxProvider, EventStream, BlobStore, and CredentialStore. Porting to a new platform means implementing provider interfaces, not redesigning the session model.
 
 **The sandbox becomes simpler.** The sandbox runs only dev tools (code-server, VNC, TTYD) and a lightweight auth gateway. The agent brain is elsewhere. Sandbox boot time decreases. Sandbox crashes don't kill the agent; they just make tool calls fail temporarily until the sandbox recovers.
 
-**Testing becomes trivial.** The engine is a TypeScript library with injected interfaces. Test it with InMemorySessionStore, VirtualSandbox (just-bash), and InMemoryEventBus. No containers, no DOs, no network. Full integration tests run in milliseconds.
+**Testing becomes trivial.** The engine is a TypeScript library with injected interfaces. Test it with InMemorySessionStore, VirtualSandbox (just-bash), and InMemoryEventStream. No containers, no DOs, no network. Full integration tests run in milliseconds.
 
 ## Architecture
 
@@ -157,7 +147,7 @@ Total moving parts: 2 processes (adapter + sandbox), 1 transport protocol (HTTP 
 
 **1. Engine (`packages/engine/`)** — Portable TypeScript library, zero platform dependencies. Owns the agent loop, session/thread state, tool execution, prompt queuing, compaction, model failover, event emission, roles, and skills.
 
-**2. Provider interfaces** — Contracts defined by the engine, implemented per-platform. Five interfaces: SessionStore, SandboxProvider, EventBus, BlobStore, CredentialStore.
+**2. Provider interfaces** — Contracts defined by the engine, implemented per-platform. Five interfaces: SessionStore, SandboxProvider, EventStream, BlobStore, CredentialStore.
 
 **3. Platform adapters (`packages/adapter-cloudflare/`, `packages/adapter-k8s/`)** — Thin packages (~200-400 lines each) that implement the provider interfaces for a specific deployment target and host the engine process.
 
@@ -173,7 +163,7 @@ Total moving parts: 2 processes (adapter + sandbox), 1 transport protocol (HTTP 
 │        │             │               │               │
 │  ┌─────▼─────────────▼───────────────▼───────────┐  │
 │  │            Provider Interfaces                 │  │
-│  │  SessionStore | SandboxProvider | EventBus     │  │
+│  │  SessionStore | SandboxProvider | EventStream     │  │
 │  │  BlobStore    | CredentialStore                │  │
 │  └───────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
@@ -224,7 +214,9 @@ The V1 implementation must define and implement these contracts:
 | Agent loop contract | `packages/engine` | pi-agent-core integration, model resolution, tool execution, failover, abort propagation, structured results |
 | Tool contract | `packages/engine` + plugin packages | Built-in tools, plugin `ToolDef`s, command tools, action-policy wrapping, attachment handling |
 | Decision gate contract | `packages/engine` + adapters | Approval, question, and credential-request gates, delivery refs, resolution, expiry, withdrawal, restart-safe resume |
-| Provider contracts | adapters | SessionStore, SandboxProvider, EventBus, BlobStore, CredentialStore |
+| Durable submission contract | `packages/engine` | Idempotent admission, claim/lease lifecycle, attempt markers, reconciliation decision tree, two-phase settlement, terminalization |
+| Signal ingress contract | `packages/engine` + adapters | `SignalContent` admission, XML envelope rendering, dispatchId idempotency |
+| Provider contracts | adapters | SessionStore, SandboxProvider, EventStream, BlobStore, CredentialStore |
 | Sandbox RPC contract | sandbox runtime + adapters | File operations, process execution, snapshots, tunnels, health, auth, request limits |
 | Channel transport contract | SDK + adapters | Outbound messages, decision gate delivery/update, inbound action parsing, free-text gate resolution |
 | API route contract | `packages/api` + adapters | Shared session/thread/prompt/history/decision/control routes |
@@ -314,7 +306,27 @@ type PromptContent =
   | {
       text?: string;
       attachments?: PromptAttachment[];
-    };
+    }
+  | SignalContent;
+
+/**
+ * A signal is an event the agent observes rather than a direct user→assistant
+ * message: a Slack thread reply, a GitHub issue comment, a webhook, a timer.
+ * External conversations are multi-party — the agent participates as one
+ * member — so sender identity and event metadata travel as flat string
+ * attributes, not as the message author.
+ */
+interface SignalContent {
+  kind: 'signal';
+  /** Namespaced event type, e.g. 'slack.message', 'github.issue_comment', 'schedule.tick'. */
+  signalType: string;
+  /** The event's text payload. Always a plain string; JSON-stringify structured payloads. */
+  body: string;
+  /** Flat, string-valued metadata: sender, external ids, timestamps, permalinks. */
+  attributes?: Record<string, string>;
+  /** XML envelope tag for model rendering. Must match /^[A-Za-z_][A-Za-z0-9_.-]*$/; defaults to 'signal'. */
+  tagName?: string;
+}
 
 interface PromptOptions {
   author?: PromptAuthor;
@@ -324,6 +336,14 @@ interface PromptOptions {
   model?: string;
   role?: string;
   resultSchema?: TSchema;
+  /**
+   * Idempotent admission key, typically the provider's stable event id
+   * (Slack event_id, Telegram update_id). Re-submitting the same dispatchId
+   * with the same payload returns the original receipt; the same dispatchId
+   * with a different payload returns a conflict error. Required for
+   * at-least-once webhook delivery to be safe.
+   */
+  dispatchId?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -346,7 +366,13 @@ interface PromptReceipt {
   queueItemId: string;
   status: 'queued' | 'running' | 'blocked_on_decision_gate';
 }
+```
 
+Prompt submission is **fire-and-forget**: `prompt()` resolves when the submission is durably admitted, not when the model finishes. Results are observed through the event stream and the message history API. There is no await-the-result surface; callers that need a final answer (workflow steps, `task` tools) subscribe to the submission's terminal event.
+
+**Signal rendering:** signals are persisted as `MessageEntry` rows with `signal` metadata and rendered into LLM context as an XML envelope — `signalType` and each `attributes` entry become XML attributes, `body` is XML-escaped text content, `tagName` is the element name. `tagName` is regex-validated because it renders unescaped; `body` and attribute values are always escaped. Direct user prompts render as ordinary user messages.
+
+```typescript
 interface MessageQuery {
   limit?: number;
   cursor?: string;
@@ -446,6 +472,13 @@ interface MessageEntry extends BaseEntry {
   parts?: MessagePart[];
   author?: PromptAuthor;
   channel?: ChannelTarget;
+  /** Present when this entry was admitted as a signal rather than a direct user prompt. */
+  signal?: {
+    signalType: string;
+    attributes?: Record<string, string>;
+    tagName?: string;
+    dispatchId?: string;
+  };
   model?: string;
 }
 
@@ -855,8 +888,6 @@ type ToolAttachment =
 
 Token-aware context compression with two complementary techniques. When a thread approaches the model's context window, the engine **prunes** stale tool outputs cheaply (no LLM) and, if more space is needed, **compacts** older messages into a structured summary (one LLM call). The DAG is preserved verbatim — pruning marks tool-output strings as elided, compaction inserts a `CompactionEntry`. Both transformations apply only when assembling the LLM-visible context; the engine's history record never loses anything.
 
-This design is informed by OpenCode's compaction module (which itself iterates on prior tools like Aider's repo-summarization). Where this spec and that implementation differ, this spec is authoritative for Valet V1.
-
 #### Triggers
 
 - **Proactive (auto)** — after each turn, if `tokens.total >= usable(model, cfg)` where
@@ -975,12 +1006,7 @@ Each thread owns its own prompt queue. Threads execute independently and concurr
 
 The engine must never allow an old gate resolution to resume a turn that was already superseded by `steer`.
 
-**Persisted runtime state:** A thread with a pending decision gate remains the active processing item in queue state, but with a distinct suspended status. V1 queue persistence must distinguish at least:
-
-- `queued`
-- `running`
-- `blocked_on_decision_gate`
-- `paused`
+**Persisted runtime state:** A thread with a pending decision gate remains the active processing item in queue state, but with a distinct suspended status. Thread-level queue state distinguishes `idle`, `queued`, `running`, `blocked_on_decision_gate`, and `paused`; item-level lifecycle (`queued` → `running` → `terminalizing` → `settled`, with `blocked_on_decision_gate` as a suspended running state) is defined by the durable submission contract below.
 
 When a thread enters `blocked_on_decision_gate`, the engine persists a `SuspendedTurnState` checkpoint containing enough information to safely resume after restart:
 
@@ -993,7 +1019,7 @@ When a thread enters `blocked_on_decision_gate`, the engine persists a `Suspende
 
 On restore, the engine reloads the blocked thread, reloads the decision gate, and waits for either resolution, expiry, or cancellation. Once resolved, the engine reconstructs the turn from the checkpoint and re-drives execution.
 
-**Persistence:** Queue state is persisted via SessionStore so it survives process restarts. On engine startup, pending queue entries are restored and dispatched.
+**Persistence:** Every queue item is a durable submission (see Durable Execution below). Admission, claim, progress markers, and settlement are all persisted through SessionStore, so queue state survives process restarts, host replacement, and crashes mid-turn. On engine startup, reconciliation (not blind re-dispatch) decides what happens to each unsettled submission.
 
 **Controls:**
 - `thread.abort()` — abort current prompt on this thread, clear this thread's queue
@@ -1001,6 +1027,58 @@ On restore, the engine reloads the blocked thread, reloads the decision gate, an
 - `session.abort()` — abort all threads
 - `session.pause()` / `session.resume()` — freeze/unfreeze all thread queues
 - Session-wide idle = all threads idle
+
+### Durable Execution
+
+A prompt accepted by the engine is a **submission**: a durable record with an explicit lifecycle. The submission machinery is what makes the engine safe to run on any host — a Durable Object that gets evicted, a Kubernetes pod that gets rescheduled, a process that crashes mid-tool-call. Accepted work is never lost, never silently duplicated, and never leaves the transcript in an ambiguous state.
+
+#### Submission lifecycle
+
+```
+queued → running → terminalizing → settled
+            ↑ ↓
+  blocked_on_decision_gate
+```
+
+- **queued** — durably admitted, waiting its turn in the thread's FIFO. Admission is idempotent by `dispatchId` (same id + same payload → original receipt; same id + different payload → conflict).
+- **running** — claimed by exactly one engine instance via a compare-and-set transition, recording an `attemptId`, `ownerId`, and lease. Two concurrent claims for the same submission must never both succeed. Only the oldest unsettled submission of a thread is claimable (per-thread FIFO gating); `steer` supersedes it explicitly rather than jumping the queue.
+- **blocked_on_decision_gate** — the claimed turn is suspended on a pending gate. The claim is retained; the lease continues to renew while the process holding it is alive.
+- **terminalizing** — the terminal outcome has been decided and durably reserved, but post-settlement repairs (transcript rest-state, gate withdrawal, event emission) may still be in flight.
+- **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, or `superseded` (replaced by a `steer` prompt). The first terminal write wins; later attempts to settle differently are conflicts.
+
+Durability parameters are per-submission with engine defaults: `maxAttempts` (default 10), `timeoutAt` (default admission + 1 hour), lease duration 30 seconds with heartbeat renewal.
+
+#### Ownership and leases
+
+Exactly one live engine instance owns a session at a time. How exclusivity is achieved differs by platform, but the durable claim/lease protocol is uniform so the store contract is identical:
+
+- **Cloudflare** — the per-session Durable Object is a natural single writer; claims still record `ownerId` + lease so recovery logic is platform-independent.
+- **Kubernetes** — session affinity routes requests to the owning pod as an optimization, but **leases are the correctness mechanism**. A pod claims submissions, heartbeats its leases (renew every ~10s against a 30s lease), and a replacement pod reclaims expired leases after the old owner dies. This supports restart and host-replacement recovery; it is not active-active — a session never has two live owners.
+
+**Attempt markers** are durable evidence that an attempt started executing. A fresh marker means "this attempt may still be running — do not reconcile it as interrupted." Markers are deleted on clean settlement; a stale marker plus an expired lease is the signal that reconciliation may proceed.
+
+#### Reconciliation
+
+On engine startup, and whenever an expired lease is reclaimed, each unsettled submission passes through a fixed decision tree. Order matters and is normative:
+
+1. **Finished work settles first.** If the persisted transcript shows the turn completed (terminal assistant entry for this submission), settle `completed` unconditionally — retry budgets and timeouts never discard finished work.
+2. **Abort wins next.** If `abortRequestedAt` is set, settle `aborted`. A crash-interrupted abort is never resurrected as a retry.
+3. **Retry budget.** If `attemptCount >= maxAttempts`, settle `failed` with a retry-exhausted error.
+4. **Timeout.** If now ≥ `timeoutAt`, settle `failed` with a timeout error.
+5. **Blocked on a gate.** If the submission was `blocked_on_decision_gate` and a `SuspendedTurnState` checkpoint exists, re-arm the gate wait (or replay immediately if the gate resolved while the engine was down) per the restart-safe gate contract.
+6. **Otherwise, resume.** Atomically replace the attempt (CAS: new `attemptId`, incremented `attemptCount`, fresh lease) *before* appending any recovery output, then continue the turn from persisted history.
+
+`abort()` stamps `abortRequestedAt` on unsettled submissions durably but is **not** itself a terminal transition — settlement always flows through the claim/reconcile path so a canonical terminal record exists even when abort races a crash.
+
+#### Terminalization
+
+Before any submission settles on a terminal path (completion, failure, abort, supersession), the engine settles the transcript to a **deterministic rest state**:
+
+- Any trailing assistant `tool_call` part with no persisted result is updated in place to `status: 'error'` with an explicit interrupted marker. **Interrupted tool calls are never re-executed** — a tool whose result was lost gets a visible error outcome, and the model decides whether to retry on the next turn. (The one deliberate exception is decision-gate replay, which re-runs the suspended tool under its own re-entrancy contract with deterministic gate identity.)
+- Repairs use deterministic entry updates so the attempt path and the terminal path converge idempotently — running terminalization twice produces the same transcript.
+- No tool call is ever left permanently unresolved in persisted history.
+
+Settlement is two-phase: `running → terminalizing` durably reserves the exact terminal record, then `terminalizing → settled` finalizes it. A crash between the phases is repaired by re-running finalization, which is idempotent.
 
 ### Decision Gates
 
@@ -1250,6 +1328,8 @@ POST /api/sessions/:sessionId/decision-gates/:gateId/withdraw
 
 Adapters must include all pending decision gates in the initial connection payload so reconnecting clients can render outstanding approvals, questions, and credential requests without waiting for a replayed event.
 
+**Offset-based resume:** every delivered client event carries the durable stream `offset`. On (re)connect, a client supplies its last seen offset; the adapter replays durable events from that offset via `EventStream.read` and then switches to live delivery, deduplicating by offset at the boundary. A client with no offset receives `init` (metadata-only) and loads message history through the REST API; live-only delta events are never replayed — the persisted entries are their durable record.
+
 ### Structured Results
 
 Optional schema-validated output extraction. Any prompt or skill invocation can pass a result schema (Valibot or TypeBox). The engine instructs the LLM to emit a result in a delimited block, extracts it, and validates against the schema.
@@ -1330,6 +1410,10 @@ interface SandboxStatus {
 }
 ```
 
+**Cancellation contract (two-tier):** `timeout` is the **primary** cancellation mechanism — providers forward it to their native process-timeout facility, and this is how the `bash` tool enforces deadlines. `signal` is **best-effort**: most remote sandbox SDKs cannot interrupt an in-flight call, so implementations are only required to honor it where the underlying platform supports it. The engine compensates uniformly.
+
+**Policy wrapper:** provider implementations stay thin because the engine wraps every `Sandbox` in a single policy layer that centralizes the cross-cutting semantics: pre-dispatch and post-completion `signal.aborted` checks (so aborts are observed at operation boundaries even when the provider can't interrupt), path resolution against the workspace cwd, output-limit enforcement, and write-with-parent-creation (attempt the write; on failure `mkdir -p` the parent and retry once — one round-trip on the happy path). A provider implements only the raw file/exec primitives; it never re-implements abort, path, or limit policy.
+
 **Implementations:**
 - `ModalSandbox` — wraps Modal's Python SDK (called via HTTP to the Modal backend)
 - `K8sPodSandbox` — creates a K8s pod, exec via K8s API
@@ -1362,7 +1446,7 @@ RPC implementations must enforce output limits, command timeouts, workspace path
 
 ### SessionStore
 
-Persists session state, thread state, message history, and queue state. Used by both the engine (writes) and the API layer (reads). One implementation per database backend, shared by engine and API.
+Persists session state, thread state, message history, queue state, and submission lifecycle. Used by both the engine (writes) and the API layer (reads). One implementation per database backend, shared by engine and API. There is one uniform contract for every backend — no capability tiers — and an implementation is correct when it passes the executable contract suites (see Conformance). Backends satisfy the atomicity invariants (CAS claims, unique dispatch admission, two-phase settlement) with their native primitives: transactions and conditional updates on SQL, single-writer serialization on DO SQLite.
 
 ```typescript
 interface SessionStore {
@@ -1378,6 +1462,34 @@ interface SessionStore {
    */
   updateEntry(sessionId: string, threadId: string, entry: SessionEntry): Promise<void>;
   saveQueueState(sessionId: string, threadId: string, queue: QueueState): Promise<void>;
+
+  // === Submission lifecycle (durable execution) ===
+  /**
+   * Idempotent admission. Same dispatchId + same payload returns the existing
+   * item; same dispatchId + different payload throws ConflictError. Items
+   * without a dispatchId always admit.
+   */
+  admitSubmission(sessionId: string, threadId: string, item: QueueItem): Promise<QueueItem>;
+  /**
+   * CAS transition queued→running for the oldest unsettled item of the
+   * thread. Records attemptId, ownerId, and lease. Returns null when the
+   * item is not the runnable head or is already claimed. Two concurrent
+   * claims must never both succeed.
+   */
+  claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null>;
+  /** Atomically install a new attempt on a running submission during reconciliation. */
+  replaceSubmissionAttempt(sessionId: string, threadId: string, itemId: string, claim: SubmissionClaim): Promise<QueueItem | null>;
+  insertAttemptMarker(itemId: string, attemptId: string): Promise<void>;
+  deleteAttemptMarker(itemId: string, attemptId: string): Promise<void>;
+  renewLeases(ownerId: string, itemIds: string[]): Promise<void>;
+  listExpiredSubmissions(): Promise<QueueItem[]>;
+  /** Stamp abortRequestedAt on all unsettled submissions in scope. First write wins; not terminal. */
+  requestAbort(sessionId: string, threadId?: string): Promise<void>;
+  /** Two-phase settlement: reserve records the exact terminal outcome (running→terminalizing). */
+  reserveSettlement(sessionId: string, threadId: string, itemId: string, outcome: SubmissionOutcome): Promise<void>;
+  /** Finalize terminalizing→settled. Idempotent; safe to re-run after a crash. */
+  finalizeSettlement(sessionId: string, threadId: string, itemId: string): Promise<void>;
+
   saveDecisionGate(sessionId: string, threadId: string, gate: DecisionGate): Promise<void>;
   saveDecisionGateRef(sessionId: string, threadId: string, gateId: string, ref: { channelType: string; ref: DecisionGateRef }): Promise<void>;
   updateDecisionGateEntry(sessionId: string, threadId: string, gateId: string, patch: Partial<DecisionGateEntry>): Promise<void>;
@@ -1460,13 +1572,41 @@ interface QueueState {
 interface QueueItem {
   id: string;
   threadId: string;
+  /** Idempotent admission key (provider event id). Unique per session when present. */
+  dispatchId?: string;
   content: PromptContent;
   author?: PromptAuthor;
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
   model?: string;
   metadata?: Record<string, unknown>;
+
+  // Durable execution lifecycle
+  status: 'queued' | 'running' | 'blocked_on_decision_gate' | 'terminalizing' | 'settled';
+  outcome?: SubmissionOutcome;
+  attemptId?: string;
+  attemptCount: number;
+  maxAttempts: number;        // default 10
+  timeoutAt: number;          // default createdAt + 1h
+  abortRequestedAt?: number;
+  ownerId?: string;
+  leaseExpiresAt?: number;
+
   createdAt: number;
+}
+
+interface SubmissionClaim {
+  sessionId: string;
+  threadId: string;
+  itemId: string;
+  attemptId: string;
+  ownerId: string;
+  leaseDurationMs?: number;   // default 30_000
+}
+
+interface SubmissionOutcome {
+  outcome: 'completed' | 'failed' | 'aborted' | 'superseded';
+  error?: string;
 }
 
 type SessionEntry =
@@ -1494,7 +1634,10 @@ The engine schema owns these tables. Existing application tables may mirror sele
 | `engine_sessions` | Canonical engine session state | `id`, `user_id`, `org_id`, `workspace`, `purpose`, `status`, `sandbox_id`, `snapshot_id`, `metadata`, timestamps |
 | `engine_threads` | Thread metadata and active leaf | `id`, `session_id`, `key`, `status`, `active_leaf_entry_id`, `queue_mode`, `model`, `summary`, `metadata` |
 | `engine_entries` | DAG history | `id`, `session_id`, `thread_id`, `parent_id`, `entry_type`, `role`, `content`, `parts`, `metadata`, `created_at` |
-| `engine_queue_items` | Persisted per-thread queue | `id`, `session_id`, `thread_id`, `status`, `mode`, `content`, `author`, `channel`, `reply_target`, `model`, `metadata`, timestamps |
+| `engine_queue_items` | Durable submissions (per-thread queue + execution lifecycle) | `id`, `session_id`, `thread_id`, `dispatch_id` (unique per session when set), `status`, `outcome`, `error`, `mode`, `content`, `author`, `channel`, `reply_target`, `model`, `attempt_id`, `attempt_count`, `max_attempts`, `timeout_at`, `abort_requested_at`, `owner_id`, `lease_expires_at`, `metadata`, timestamps |
+| `engine_attempt_markers` | Durable evidence an attempt started (crash-recovery gating) | `item_id`, `attempt_id`, `created_at` — PK `(item_id, attempt_id)` |
+| `engine_events` | Offset-addressed durable event stream | `session_id`, `offset`, `thread_id`, `event_type`, `payload`, `created_at` — PK `(session_id, offset)` |
+| `engine_meta` | Store metadata | key/value; key `schema_version` stamped at creation |
 | `engine_decision_gates` | Pending and terminal gate state | `id`, `session_id`, `thread_id`, `type`, `status`, `title`, `body`, `actions`, `origin`, `context`, `resolution`, `expires_at`, timestamps |
 | `engine_decision_gate_refs` | Delivered channel refs | `id`, `gate_id`, `channel_type`, `ref`, `created_at`, `updated_at` |
 | `engine_suspended_turns` | Restart-safe blocked turn checkpoints | `session_id`, `thread_id`, `queue_item_id`, `gate_id`, `model`, `leaf_entry_id`, `tool_call_id`, `tool_name`, `tool_args`, `resume_key`, `attempt`, `created_at` |
@@ -1503,14 +1646,18 @@ The engine schema owns these tables. Existing application tables may mirror sele
 
 Indexes are required on `(session_id, thread_id, created_at)` for entries, `(session_id, thread_id, status)` for queue items and gates, and `(owner_type, owner_id, service)` for credentials.
 
-### EventBus
+### EventStream
 
-Broadcasts engine events to external subscribers (clients, other services). The engine pushes events; the adapter subscribes and relays to clients.
+Engine events are an **offset-addressed durable log per session**, not a fire-and-forget broadcast. The engine appends; adapters and clients read from an offset and subscribe live. Reconnection is a resume from the last seen offset — no replay buffer bolted onto a transport, no refetch-and-reconcile dance.
 
 ```typescript
-interface EventBus {
-  publish(event: BusEvent): Promise<void>;
-  subscribe(filter: EventFilter, callback: (event: BusEvent) => void): Unsubscribe;
+interface EventStream {
+  /** Durably append and fan out to live subscribers. Returns the assigned offset. */
+  append(event: BusEvent): Promise<{ offset: string }>;
+  /** Read durable events at or after fromOffset, in offset order. */
+  read(sessionId: string, opts?: { fromOffset?: string; limit?: number }): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
+  /** Live subscription. Delivery order matches offset order for a given session. */
+  subscribe(filter: EventFilter, callback: (event: StoredBusEvent) => void): Unsubscribe;
 }
 
 interface BusEvent {
@@ -1519,6 +1666,11 @@ interface BusEvent {
   userId?: string;
   event: EngineEvent;
   timestamp: number;
+}
+
+interface StoredBusEvent extends BusEvent {
+  /** Opaque, lexicographically ordered, monotonic per session. */
+  offset: string;
 }
 
 interface EventFilter {
@@ -1530,14 +1682,38 @@ interface EventFilter {
 type Unsubscribe = () => void;
 ```
 
+**Delta handling:** high-frequency streaming events (`text_delta`) are live-only — they fan out to subscribers but are not durably appended (the durable record of streamed text is the persisted `MessageEntry`, delivered via `message_update`/`message_end`). All discrete events (message lifecycle, tool start/end, queue state, decision gates, status, errors) are durable. This keeps the log linear in conversation size rather than quadratic in streamed bytes.
+
+**Retention:** a session's stream is truncatable after the session reaches a terminal status plus a configurable retention window. Truncation never removes events for unsettled submissions.
+
 **Implementations:**
-- `DOEventBus` — posts to a thin EventBus Durable Object
-- `RedisEventBus` — Redis pub/sub channels per session/user
-- `InMemoryEventBus` — direct callback (single-process, tests)
+- `DOEventStream` — DO-storage-backed log with in-process fan-out (Cloudflare)
+- `PostgresEventStream` / `RedisEventStream` — table- or stream-backed log with pub/sub fan-out (Kubernetes)
+- `InMemoryEventStream` — array-backed (single-process, tests)
 
 ### Channel Transports
 
-Channel transports are in scope for V1 at the adapter boundary. The engine does not render Slack or Telegram payloads directly, but it does define the decision-gate and reply-routing contract that transports must implement.
+Channel transports live at the adapter boundary. The engine does not render Slack or Telegram payloads directly, but it defines the full contract transports implement: verified ingress, conversation identity, outbound delivery, and decision-gate delivery.
+
+A transport has four responsibilities:
+
+1. **Verified ingress** — signature verification over the exact raw request bytes (HMAC, Ed25519, or shared secret per provider) before any parsing or application code runs. Payload parsing yields typed, provider-native shapes; normalization into engine types happens at the resolution layer, not by flattening provider fields into a lossy common shape.
+2. **Conversation identity** — a bijective codec between provider conversation references and stable string keys: `conversationKey(ref)` / `parseConversationKey(key)`. Keys are versioned and namespaced (`slack:v1:{teamId}:{channelId}:{threadTs}`, `telegram:v1:{chatId}:{messageThreadId}`), URL-safe, and round-trip exactly — `parseConversationKey` re-serializes and rejects non-canonical input. **A conversation key is an identifier, not an authorization capability**; nothing may be admitted on the strength of a key alone.
+3. **Outbound delivery** — `sendMessage` / `updateMessage` rendering engine output into provider payloads.
+4. **Decision-gate delivery** — `sendDecisionGate` / `updateDecisionGate` / `parseInboundDecision`, so gates reach approvers on their channel and resolutions flow back.
+
+**Ingress pipeline (tenancy resolution):** inbound events pass through a fixed pipeline before reaching the engine:
+
+```
+webhook → verifySignature (raw bytes)
+        → parseInbound (typed provider event)
+        → conversationKey (stable identity)
+        → channel-binding resolution: key → { orgId, userId, sessionId, threadKey }
+          (authorization check — is this conversation bound, and to whom?)
+        → thread.prompt(SignalContent, { dispatchId: providerEventId, channel, author })
+```
+
+The channel-binding table is owned by the application layer (it is a tenancy concern), but the pipeline shape is normative: verification before parsing, resolution before admission, and admission always as a `SignalContent` with `dispatchId` set to the provider's stable event id so at-least-once webhook delivery is idempotent. Unbound conversations route to the org orchestrator's unattributed-event handling or are rejected, per application policy — never silently admitted.
 
 ```typescript
 interface ChannelTransport {
@@ -1545,6 +1721,9 @@ interface ChannelTransport {
 
   verifySignature?(headers: Record<string, string>, rawBody: string, secret?: string): boolean | Promise<boolean>;
   parseInbound?(headers: Record<string, string>, rawBody: string, ctx: ChannelTransportContext): Promise<InboundChannelEvent | null>;
+
+  conversationKey(ref: Record<string, string>): string;
+  parseConversationKey(key: string): Record<string, string>;
 
   sendMessage(target: ChannelTarget, message: OutboundMessage, ctx: ChannelTransportContext): Promise<ChannelMessageRef | null>;
   updateMessage?(target: ChannelTarget, ref: ChannelMessageRef, message: OutboundMessage, ctx: ChannelTransportContext): Promise<void>;
@@ -1719,6 +1898,8 @@ packages/engine/
 
 The SessionStore interface has no `migrate()` method. Migrations are a deployment concern, not a runtime interface. The engine is a library; it does not own the deployment lifecycle.
 
+**Schema version enforcement:** the engine schema carries an integer version (`ENGINE_SCHEMA_VERSION`). Every store durably records the version it was created at (the `engine_meta` table, key `schema_version`) and, on open, **fails loudly before reading or writing any data** when the recorded version is unknown, newer than the code supports, or absent from a populated database. A version mismatch is a deployment error surfaced at startup — never a silent runtime corruption. Migrations bring the store to the current version and re-stamp it in the same transaction where the backend supports transactional DDL.
+
 ### Current Schema Coexistence
 
 During rollout, engine tables live beside current application tables. The Cloudflare adapter may mirror engine data into existing tables used by the current client, analytics, and admin views, but the engine source of truth is always the `engine_*` schema.
@@ -1736,7 +1917,7 @@ The old DO-local prompt queue and decision storage are not part of the new runti
 
 A platform adapter wires the engine to a specific deployment target. It does three things:
 
-1. Instantiates provider implementations (SessionStore, SandboxProvider, EventBus, BlobStore, CredentialStore)
+1. Instantiates provider implementations (SessionStore, SandboxProvider, EventStream, BlobStore, CredentialStore)
 2. Hosts the engine process (DO on CF, long-running process on K8s)
 3. Provides the HTTP/WebSocket entrypoint for clients and API routes
 
@@ -1798,13 +1979,13 @@ Cloudflare Worker (Hono)
   ├── API routes (shared from packages/api/)
   │     └── reads/writes via D1SessionStore
   │
-  ├── WebSocket upgrade → subscribes to DOEventBus → relays to client
+  ├── WebSocket upgrade → subscribes to DOEventStream → relays to client
   │
   └── Session operations → SessionHostDO
         │
         SessionHostDO (thin shell, ~100 lines)
           ├── creates Engine instance on first request
-          ├── injects: D1SessionStore, ModalSandbox, DOEventBus, R2BlobStore
+          ├── injects: D1SessionStore, ModalSandbox, DOEventStream, R2BlobStore
           ├── forwards prompt/abort/pause/resume to engine
           └── engine runs agent loop, emits events, writes state
 ```
@@ -1818,13 +1999,13 @@ K8s Service (Hono/Node)
   ├── API routes (shared from packages/api/)
   │     └── reads/writes via PostgresSessionStore
   │
-  ├── WebSocket upgrade → subscribes to RedisEventBus → relays to client
+  ├── WebSocket upgrade → subscribes to RedisEventStream → relays to client
   │
   └── Session operations → SessionPool
         │
         SessionPool (process manager)
           ├── spawns/reuses engine instances per session
-          ├── injects: PostgresSessionStore, ModalSandbox, RedisEventBus, S3BlobStore
+          ├── injects: PostgresSessionStore, ModalSandbox, RedisEventStream, S3BlobStore
           ├── forwards prompt/abort/pause/resume to engine
           └── engine runs in-process
 ```
@@ -1837,7 +2018,7 @@ The SessionPool manages engine instances in-process. Idle instances are evicted 
 |---|---|---|
 | SessionStore | D1 via Drizzle | PostgreSQL via Drizzle |
 | SandboxProvider | Modal SDK | Modal SDK / K8s Pod API |
-| EventBus | DO singleton | Redis pub/sub |
+| EventStream | DO singleton | Redis pub/sub |
 | BlobStore | R2 | S3 / MinIO |
 | CredentialStore | D1 (encrypted) | PostgreSQL (encrypted) |
 | Channel transports | Worker-integrated (Slack required for V1) | Service-integrated (Slack required for V1) |
@@ -1850,7 +2031,8 @@ Every adapter must provide:
 - Request authentication and authorization before calling shared API route handlers.
 - Provider construction for the current deployment target.
 - Engine instance lookup by session ID.
-- Session affinity so prompts, decision resolutions, and aborts for one session reach the same active engine instance.
+- Session affinity so prompts, decision resolutions, and aborts for one session reach the same active engine instance. Affinity is a routing optimization; **exclusive ownership is enforced by the durable submission claim/lease protocol**, so a mis-routed or racing request degrades to a failed claim, never a double execution.
+- Lease heartbeats for claimed submissions and a periodic expired-lease scan that routes reclaimed submissions through reconciliation.
 - Event subscription and client delivery over WebSocket and/or SSE.
 - Startup restoration of queued, running, and blocked threads from `SessionStore` via `engine.restoreSession({ sessionId, options })`. The adapter is responsible for reconstructing `options` (tools, sandbox handle, model, system prompt, role/skill sources) from its own configuration — the engine itself does not persist creation options.
 - Idle eviction/hibernation that calls `store.flush()` and leaves enough persisted state to resume. Specifically: any thread with status `running` or `blocked_on_decision_gate`, plus its active queue item and (for blocked threads) its `SuspendedTurnState`, must be readable on wake.
@@ -1989,25 +2171,13 @@ Required behavior:
 - Decision gates measure wait duration from creation to terminal state.
 - Logs may contain IDs and high-level errors, but must not contain secrets, OAuth tokens, command environment secrets, or full credential payloads.
 
-## Implementation Direction
+## Conformance
 
-### Reference Flue, Build In-Repo
+The prose in this spec defines intent; executable contract suites define conformance. The engine ships reusable test suites that any provider implementation must pass:
 
-Valet V1 will build its own engine in-repo and may borrow ideas or implementation patterns from Flue, but will not depend directly on `@flue/sdk` as the runtime substrate.
+- **SessionStore contract** — entity round-trips, `updateEntry` in-place transitions, entry/queue/gate persistence.
+- **Submission lifecycle contract** — idempotent admission, single-claim exclusivity, lease expiry and reclaim, attempt replacement, two-phase settlement, abort stamping, reconciliation outcomes.
+- **Restart-safe gate contract** — suspended-turn checkpointing, gate re-arming, deterministic gate identity on replay.
+- **EventStream contract** — monotonic offsets, replay-from-offset, live subscription ordering, idempotent append.
 
-Reasons:
-- Full control over the agent loop, compaction, and threading model
-- First-class support for multi-threaded sessions rather than single-active-operation sessions
-- First-class decision-gated execution rather than Flue's headless-only default
-- Channel-aware routing and adapter contracts for web, Slack, Telegram, and orchestrator threads
-- Richer tool context and persistence contracts aligned with Valet's integrations and multiplayer model
-
-Flue remains a useful reference implementation for:
-
-- session/runtime structure around `pi-ai` and `pi-agent-core`
-- sandbox abstraction
-- built-in filesystem/shell/task tools
-- DAG-style history and compaction patterns
-- Cloudflare adapter and persistence patterns
-
-This is a settled V1 decision, not an open implementation choice. The engine package will be built in-repo and may reference Flue code where useful, but Valet owns the runtime contracts and implementation.
+A backend (SQLite, D1, PostgreSQL) is supported when its store passes these suites, not when it has been manually verified. New invariants added to this spec must land with a corresponding contract test in the same change.
