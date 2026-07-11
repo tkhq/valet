@@ -66,19 +66,19 @@ The interpreter is a portable library function: `runWorkflow(runId, deps)` where
 
 ### Checkpoints
 
-Every node execution writes exactly one checkpoint on completion:
+Each node execution owns exactly one checkpoint row per `(runId, nodeId, iteration)`, which moves through a small status lifecycle:
 
 ```typescript
 interface NodeCheckpoint {
   runId: string;
   nodeId: string;
   iteration: number;          // 0 for non-foreach nodes
-  status: 'completed' | 'failed' | 'skipped';
+  status: 'intent' | 'completed' | 'failed' | 'skipped';
   result?: unknown;           // JSON-serializable node output
   error?: string;
   /** Values the node read from the environment (clock, generated ids). */
   effects?: Record<string, unknown>;
-  attempt: number;
+  attempt: number;            // the attempt that wrote the current status
   createdAt: number;
 }
 ```
@@ -86,9 +86,9 @@ interface NodeCheckpoint {
 Rules:
 
 - **Effects live only inside node executors.** Clock reads, generated IDs, and any other nondeterminism a node needs are recorded in `effects` and read back on resume. The interpreter loop itself is pure over (definition, checkpoints, signals).
-- **Checkpoint before external dispatch, dispatch idempotently.** A node that fires a billed or side-effecting call (LLM node, tool action, session prompt) first checkpoints its intent with the deterministic idempotency key, then dispatches. Session prompts use the submission `dispatchId` convention `workflow:{runId}:{nodeId}[:{iteration}]`; tool actions use the existing deterministic invocation id. Re-execution after a crash re-dispatches with the same key and is absorbed by the receiver. This is stronger than step memoization: it survives even a substrate that re-runs a "completed" step.
-- **Checkpoint writes are CAS on `(runId, nodeId, iteration, attempt)`.** A stale owner (expired lease, delayed write) cannot overwrite a successor attempt's checkpoint.
-- Checkpoints are append-only per attempt; the JSON-only value boundary from the current interpreter is preserved unchanged.
+- **Checkpoint before external dispatch, dispatch idempotently.** A node that fires a billed or side-effecting call (LLM node, tool action, session prompt) first writes an `intent` checkpoint carrying the deterministic idempotency key, then dispatches, then CAS-transitions the same row to a terminal status. Session prompts use the submission `dispatchId` convention `workflow:{runId}:{nodeId}[:{iteration}]`; tool actions use the deterministic invocation id. For dedup-capable receivers (engine submissions, action invocations), re-execution after a crash re-dispatches with the same key and is absorbed; such receivers MUST return the original result for a duplicate key — never a "duplicate" error — or a successor attempt can never obtain the effect's outcome. Raw LLM provider calls have no receiver-side dedup: LLM-node dispatch is **at-least-once**. The `intent` checkpoint narrows the duplicate window to a crash between dispatch and the completion checkpoint, and one duplicate billed call in that window is the accepted cost.
+- **Status transitions are CAS, fenced by `attempt`.** The owning attempt transitions its own `intent(N)` to `completed(N)`/`failed(N)`/`skipped(N)`. A successor attempt encountering a stale `intent` row (from an expired lease) may CAS-replace it with its own `intent` — higher attempt wins. Terminal rows (`completed`/`failed`/`skipped`) are immutable: the first terminal write wins, and a stale attempt's late terminal write is rejected.
+- The JSON-only value boundary applies to `result` and `effects`: checkpoint values are plain JSON, nothing else.
 
 ### Parking and wake conditions
 
@@ -97,7 +97,7 @@ When no node is runnable, the interpreter parks by persisting the run's wake con
 ```typescript
 interface RunParkState {
   runId: string;
-  status: 'running' | 'parked' | 'terminalizing' | 'settled';
+  status: 'pending' | 'running' | 'parked' | 'terminalizing' | 'settled';  // pending = created, not yet driven
   outcome?: 'completed' | 'failed' | 'cancelled';
   waitingOn: Array<
     | { kind: 'timer'; nodeId: string; wakeAt: number }
@@ -127,13 +127,15 @@ interface RunSignal {
   signalType: string;         // e.g. 'approval:{nodeId}' | 'cancel'
   payload?: unknown;
   createdAt: number;
-  consumedAt?: number;        // set by the interpreter when a wait absorbs it
+  consumedAt?: number;        // set when a wait absorbs it
+  consumedBy?: { nodeId: string; iteration: number; attempt: number };
 }
 ```
 
-- Signals are durable and consumed exactly once (CAS on `consumedAt`).
+- Signals are durable and consumed at most once per delivery: consumption is a CAS on `consumedAt` that also records `consumedBy` — the node, iteration, and attempt that absorbed the signal.
+- **Consumption and the wait-node's checkpoint commit atomically.** Where the backend allows, the signal-consume write and the waiting node's checkpoint are the same transaction — a crash cannot leave a consumed signal with no checkpoint. Where they cannot share a transaction, reconciliation closes the gap: any signal whose `consumedBy` references an attempt that produced no corresponding checkpoint is re-delivered (its consumption is voided and it is treated as unconsumed).
 - A signal arriving before its wait is registered is not lost — the wait finds it on the next pass. This is what the current `step.waitForEvent` model cannot express without careful sequencing.
-- Lost-wake recovery is a sweep: any parked run with an unconsumed matching signal, a due timer, or a settled awaited submission gets re-woken. This subsumes the current stuck-approval sweep.
+- Lost-wake recovery is a normative RunHost obligation (see RunHost Port): a periodic sweep re-wakes any parked run with an unconsumed matching signal, a due timer, a settled awaited submission, or a consumed-but-uncheckpointed signal per the re-delivery rule above. This subsumes the current stuck-approval sweep.
 - **Cancellation is a signal** (`signalType: 'cancel'`), not a special channel. The interpreter observes it at the next node boundary, withdraws in-flight engine work (`session.abort()`, which flows into the submission abort contract), settles the run `cancelled`, and runs terminal cleanup. `terminate(runId)` on the port is the hard-stop escape hatch for a wedged run; normal cancellation flows through the signal.
 
 ### Run ownership and reconciliation
@@ -143,6 +145,8 @@ Runs use the same claim/lease protocol as engine submissions, with the run as th
 - **Claim**: CAS `parked|pending → running` recording `ownerId` and a 30s lease; heartbeat renews while the interpreter is executing.
 - **Reclaim**: a scan loop finds runs with expired leases and re-claims them. Reconciliation is trivial by construction: load checkpoints and park state, absorb any signals/settlements that arrived meanwhile, continue the wave loop. There is no replay and therefore no replay-divergence class of bugs.
 - **Settlement is two-phase** (`terminalizing → settled`), mirroring the submission contract: reserve the terminal outcome, run terminal cleanup (trace finalization, spawned-session bookkeeping), finalize. Finalization is idempotent.
+
+All checkpoint and signal writes carry the writing attempt, and the store rejects writes from superseded attempts — a delayed write from an attempt whose lease expired and was reclaimed cannot land after its successor's. This is the engine's general effect-fencing principle applied to this spec's two tables.
 
 ## RunHost Port
 
@@ -157,9 +161,19 @@ interface RunHost {
   /** Hard stop: revoke the lease, mark the run for cancellation reconciliation. */
   terminate(runId: string): Promise<void>;
 }
+
+/** Parameters to start a run. JSON-serializable. */
+interface RunParams {
+  workflowId: string;
+  definitionVersionId: string;
+  triggerId?: string;
+  input?: unknown;            // JSON-serializable trigger/manual input
+}
 ```
 
 The port is deliberately this small. Everything correctness-critical (checkpoints, signals, leases, idempotent dispatch) lives in the interpreter + store, where it is testable in-memory and identical across platforms.
+
+Beyond the four methods, every host carries one standing obligation: the **lost-wake sweep**. Each host runs a periodic sweep with bounded staleness (at most 60 seconds between passes) that wakes any parked run with an unconsumed matching signal, a due timer, a settled awaited submission, or a consumed-but-uncheckpointed signal (per the signal re-delivery rule). Wakes are already idempotent, so the sweep needs no coordination with the primary wake paths — it is the backstop that makes every wake delivery best-effort.
 
 ### Cloudflare host
 
@@ -182,9 +196,9 @@ A worker pool over the store — the same pattern as the engine's k8s session po
 |---|---|---|
 | `workflow_runs` | Run state + park conditions + ownership | `id`, `workflow_id`, `definition_version_id`, `status`, `outcome`, `waiting_on` (JSON), `wake_at`, `owner_id`, `lease_expires_at`, `params`, timestamps |
 | `workflow_checkpoints` | Node results (the replay replacement) | `run_id`, `node_id`, `iteration`, `attempt`, `status`, `result`, `effects`, `error`, `created_at` — PK `(run_id, node_id, iteration)` |
-| `workflow_signals` | Durable signals incl. approvals and cancel | `run_id`, `signal_id` (unique), `signal_type`, `payload`, `created_at`, `consumed_at` |
+| `workflow_signals` | Durable signals incl. approvals and cancel | `run_id`, `signal_id` (unique), `signal_type`, `payload`, `created_at`, `consumed_at`, `consumed_by` (JSON) |
 
-These live in the application schema (workflows are an application feature), on D1 for Cloudflare and PostgreSQL for Kubernetes, with one Drizzle schema and per-dialect generated migrations — the same model as the engine schema. Existing `workflow_executions`, trace rows, and `action_invocations` are unchanged; checkpoints and signals are additive.
+These live in the application schema (workflows are an application feature), on D1 for Cloudflare and PostgreSQL for Kubernetes, with one Drizzle schema and per-dialect generated migrations — the same model as the engine schema. `workflow_runs` is the run table — there is no separate execution table. Trace and action-invocation records are fresh v2 application tables defined by the workflows domain spec; nothing here inherits shape from prior storage.
 
 ## Interaction with the Engine
 
@@ -193,7 +207,7 @@ Workflow nodes consume the engine exclusively through the Workflow Caller Contra
 | Node need | Engine primitive |
 |---|---|
 | Spawn a session | `engine.createSession({ id: presetSessionId, purpose: 'workflow' })` — idempotent by id |
-| Prompt a session/orchestrator | `thread.prompt(content, { dispatchId: 'workflow:{runId}:{nodeId}[:{iter}]' })` — idempotent by dispatchId |
+| Prompt a session/orchestrator | `thread.prompt(content, { dispatchId: 'workflow:{runId}:{nodeId}[:{iteration}]' })` — idempotent by dispatchId |
 | Await the result | `thread.awaitResult(queueItemId, { resultSchema })` — resumable; replaces poll-until-idle |
 | Observe progress | engine EventStream (settled/`turn_end`/`queue_state` events) |
 | Read transcripts | `SessionStore.getEntries(...)` — one path for all session kinds |
@@ -217,9 +231,9 @@ Steps 1–3 are pure hardening of the current CF deployment — they reduce reli
 
 Executable contract suites, mirroring the engine's conformance approach:
 
-- **Checkpoint contract** — skip-if-completed, CAS on attempt, effects round-trip, idempotent-dispatch key derivation.
-- **Signal contract** — idempotent insert, exactly-once consumption, signal-before-wait delivery, cancel observation at node boundary.
+- **Checkpoint contract** — skip-if-completed, intent → terminal CAS transitions, stale-attempt fencing (higher-attempt intent replacement, rejected late terminal writes), effects round-trip, idempotent-dispatch key derivation.
+- **Signal contract** — idempotent insert, at-most-once consumption with `consumedBy` recording, atomic consume + checkpoint (or re-delivery of consumed-but-uncheckpointed signals), signal-before-wait delivery, cancel observation at node boundary.
 - **Run ownership contract** — single-claim exclusivity, lease expiry and reclaim, reconciliation resumes from checkpoints without duplicate external dispatch (asserted via dispatchId capture).
-- **RunHost contract** — start idempotency, spurious-wake safety, timer move-forward semantics, terminate → cancellation reconciliation.
+- **RunHost contract** — start idempotency, spurious-wake safety, timer move-forward semantics, terminate → cancellation reconciliation, lost-wake sweep (wakes parked runs with unconsumed signals, due timers, settled submissions, or consumed-but-uncheckpointed signals within the staleness bound).
 
 A host implementation is supported when the suites pass against it; the in-memory host is the reference implementation used by interpreter unit tests.

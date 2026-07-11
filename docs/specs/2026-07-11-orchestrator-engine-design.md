@@ -105,7 +105,7 @@ Bindings are unique per `(channelType, conversationKey)` within an org — **one
 
 - **User linking** — a user connects a channel (Telegram `/start`, Slack account link): binds their DM conversation to their orchestrator.
 - **Team/admin configuration** — a team admin binds a shared surface (a Slack channel) to the team orchestrator; an org admin binds org-wide surfaces to the org orchestrator.
-- **Agent outbound** — when an orchestrator initiates a conversation on a channel, the send tool records the binding so replies route back.
+- **Agent outbound** — when an orchestrator initiates a conversation on a channel, the send tool records the binding so replies route back. Agent-initiated bindings on **shared surfaces require human confirmation before inbound traffic is admitted** — a team admin for team orchestrators, an org admin for the org orchestrator; until confirmed, the binding delivers outbound only. DM/private-surface outbound bindings auto-confirm.
 
 **A conversation key is never a capability.** Resolution authorizes against the binding (and the actor's identity link) before admission; an event with no binding follows the unbound policy below.
 
@@ -118,9 +118,11 @@ Bindings are unique per `(channelType, conversationKey)` within an org — **one
 The arbitration rule is structural, not heuristic — **the binding's owner picks the orchestrator**; there is no fallback ranking:
 
 1. **Direct/private surfaces** (Slack DM, Telegram private chat) → the linked user's orchestrator. Unlinked actor → account-linking reply, no admission. Personal orchestrators exist on DM/web surfaces only — never on shared ones, which makes "which of N members' Jarvises answers?" unaskable.
-2. **Team-bound shared surfaces** → the team orchestrator, gated in order: (a) actor resolves via identity link — unmapped actors are ignored silently; (b) actor is a current team member — non-members are ignored silently; (c) `triggerMode` passes (`mention` requires a bot mention or an actively mapped thread; `all` admits everything). The admitting member becomes the actor/author on the signal.
-3. **Org-bound surfaces** → the org orchestrator, same gates with org membership. The org orchestrator may delegate to a user's orchestrator via a signal (conversation context + reply target); the user's orchestrator replies *through the org binding* with delegation attribution.
+2. **Team-bound shared surfaces** → the team orchestrator, gated in order: (a) actor resolves via identity link — unmapped actors are ignored on-channel (drop-logged, below); (b) actor is a current team member — non-members are ignored on-channel (drop-logged); (c) `triggerMode` passes (`mention` requires a bot mention or an actively mapped thread; `all` admits everything). The admitting member becomes the actor/author on the signal.
+3. **Org-bound surfaces** → the org orchestrator, same gates with org membership. The org orchestrator may delegate to a user's orchestrator via a signal (conversation context + reply target). Delegation grants no ambient posting rights: the delegation signal carries a **scoped, expiring reply capability** — bound to one binding and one external conversation, with a TTL — and the recipient's channel send tool must present it to post through the org binding (with delegation attribution). Expiry or org revocation kills the capability; without it the recipient cannot post to the org surface.
 4. **Unbound** — shared-surface events with no binding are acknowledged and ignored. Nothing is ever admitted without a binding.
+
+**Policy drops are never invisible.** Every event dropped by routing policy is durably logged and queryable, with `reason: unlinked | non_member | unbound | trigger_mode_filtered`, the conversation key, and a timestamp. Unlinked actors who directly mention the bot receive a one-time ephemeral/DM account-linking nudge, rate-limited per actor. The drop log is the first support surface for "the bot ignored me."
 
 Admission is always a `SignalContent` (`signalType: 'slack.message'` etc., sender identity and external IDs in attributes) with `dispatchId` = the provider's stable event ID. Duplicate provider event shapes (e.g. Slack sending both `app_mention` and `message.*` for one utterance) are deduplicated at parse time with one canonical shape.
 
@@ -147,7 +149,7 @@ Scoping rules (normative):
 - **Each orchestrator writes only its own scope.** A personal orchestrator writes `user:{userId}`; a team orchestrator writes `team:{teamId}`. Writes never cross scopes — a personal orchestrator cannot write team memory, and a team orchestrator cannot write a member's personal memory.
 - **Personal orchestrators read a union**: their own scope plus every team the user currently belongs to. Cross-scope results surface under a **virtual `team:{teamId}/…` path prefix** — a read-time projection, never stored (colons are invalid in stored paths). Reading a `team:{id}/…` path re-checks membership at query time.
 - **Team orchestrators read only their own scope.** A team orchestrator never sees members' personal memory. Org orchestrators likewise read only `org:{orgId}`.
-- **Membership resolves per query, not per snapshot.** Leaving a team drops read access instantly. Wake-time memory snapshots cover only the owner's own scope; cross-team knowledge arrives through explicit `mem_search`/`mem_read`, keeping snapshots small and scope changes immediate.
+- **Membership resolves per query, not per snapshot.** Leaving a team drops read access instantly. Wake-time memory snapshots cover only the owner's own scope; cross-team knowledge arrives through explicit `mem_search`/`mem_read`, keeping snapshots small and scope changes immediate. Content read cross-scope becomes part of the reading orchestrator's transcript and compaction summaries and is not retroactively scrubbed on membership loss — an accepted residual risk; orgs with stricter offboarding needs can archive-and-recreate the personal orchestrator's threads.
 - The OKF `sensitivity` field governs export bundles (`include=shareable`); it does not create additional cross-scope read paths in V1. Owner-tuple partitioning + read-union is the entire sharing model.
 
 The v2 memory schema is defined fresh (clean-slate DB) and carries both dimensions from day one: the owner-tuple scoping key `(owner_type, owner_id, path)` and the OKF metadata columns (`sensitivity`, `origin`, `expires`, pinning, relevance). OKF import bundles are the ingestion path for existing memory, per scope.
@@ -157,6 +159,15 @@ The v2 memory schema is defined fresh (clean-slate DB) and carries both dimensio
 The legacy mailbox is retired as a peer-to-peer subsystem. Two mechanisms replace it, split by direction:
 
 **Agent-to-orchestrator messaging is engine signals.** Cross-orchestrator communication (org → user delegation, child → parent result reporting, task assignment, user → user handoff) is a `SignalContent` admission to the recipient orchestrator (`signalType: 'orchestrator.message'`, `'child.settled'`, `'task.assigned'`, …; sender and context in attributes; `dispatchId` unique per message), routed to an appropriately keyed thread. There is no second agent messaging pathway and no polling inbox tool.
+
+### Signal authorization
+
+Cross-orchestrator signals are authorized at admission, not trusted from attributes:
+
+- **The engine stamps verified sender identity** — `senderSessionId` and the sender's owner Principal — on every internally-admitted signal. Attributes may carry context but can never override the stamped identity; a signal claiming a different sender in attributes is still attributed to the stamped one.
+- **Allowed edges** are exactly: (a) parent ↔ child sessions; (b) orchestrator → orchestrator within one org, per policy — org → user delegation is always allowed, user → user requires org policy opt-in; (c) task and workflow dispatch from the same org. Cross-org signaling is rejected at admission.
+- **`dispatchId` for internal signals is namespaced by the engine-stamped sender session ID** (prefixed with it), so senders cannot collide with or replay each other's dispatch IDs.
+- **`signal:{senderSessionId}` thread admission is authorized by the same edge rule** — a thread keyed to a sender exists only for senders permitted to signal the recipient.
 
 **Agent-to-human notification is the attention router.** Typed events `{ kind: 'notification' | 'question' | 'escalation' | 'approval', urgency, owner: Principal, actorUserId?, sessionId? }` flow through a per-kind policy registry that resolves an audience (`queueUserIds` + whether to post to the bound team channel). Delivery is preference-gated per user (`user_notification_preferences`: web/slack/email per kind) against a `notifications` queue table; urgent kinds (question/escalation/approval) additionally post to the owner's bound channel. Audience resolution is a pure function over membership resolved once by the caller — delivery code never queries membership. Timed escalation tiers (re-route unacknowledged urgent items) are a post-V1 addition and slot into the same policy registry.
 
@@ -179,9 +190,19 @@ Unchanged as a data model: `session_tasks` + `session_task_dependencies`, scoped
 
 Scheduled triggers and workflow `orchestrator` nodes dispatch through the same admission path as channels: a `SignalContent` (`signalType: 'schedule.tick'` / `'workflow.dispatch'`) with `dispatchId` = trigger/run-scoped ID, into an automation-origin thread, `followup` mode, optional per-dispatch model override. Workflow nodes then use `awaitResult` per the Workflow Caller Contract. The persona continues to recommend orchestrator-mediated automation over direct workflow execution for judgment-requiring tasks.
 
+## Limits
+
+Normative ceilings; defaults are per-org configurable:
+
+- **Per-binding admission throttle** — default 60 admissions/min per binding; beyond it, events are coalesced or dropped with a drop-log entry.
+- **Per-thread pending submissions** — default max 20; beyond it, admission is rejected with channel feedback rather than queued silently.
+- **Org-level active-session ceiling** — one aggregate cap that workflow-spawned and orchestrator-spawned sessions *both* count against; the per-orchestrator child limit (above) is a sub-limit, not an alternative.
+- **Scheduled dispatch never stacks** — a schedule tick whose prior tick's turn is unsettled is skipped (with a drop-log entry), so a slow turn cannot pile up scheduled work.
+- **Signal hop budget** — the engine maintains a hop count in the signal envelope for cross-orchestrator chains; default max 3. Exceeding it rejects the signal and emits an attention event, so delegation loops die loudly instead of ricocheting.
+
 ## Team Credentials
 
-Team-owned sessions resolve credentials by **reference, not copy**: a team credential row records `sourcedFromUserId` and resolution delegates to that member's live credential. Token refresh rotates only the member's row (lineage never splits); a revoked or broken reference resolves to *nothing* — team sessions **fail visibly rather than borrow** another member's token, and there is no fallback to the actor's personal credentials. Sharing and re-sourcing are explicit member actions. In the engine's terms this is a `CredentialStore` owner type `team` whose implementation is a reference-resolving wrapper.
+Team-owned sessions resolve credentials by **reference, not copy**: a team credential row records `sourcedFromUserId` and resolution delegates to that member's live credential. Token refresh rotates only the member's row (lineage never splits); a revoked or broken reference resolves to *nothing* — team sessions **fail visibly rather than borrow** another member's token, and there is no fallback to the actor's personal credentials. Sharing and re-sourcing are explicit member actions. In the engine's terms this is a `CredentialStore` owner type `team` whose implementation is a reference-resolving wrapper. Beyond the visible in-session failure, a broken or revoked reference emits a `credential_reference_broken` attention-router event (kind: `escalation`) to team admins, naming the credential and the blocked work — re-sourcing must not depend on someone noticing a failed turn.
 
 ## Access Control
 
@@ -191,16 +212,18 @@ Membership is the only access path to team-owned resources — no creator shortc
 - **Eligibility is re-checked at action time**, not delivery time: a decision-gate resolution or prompt from a forwarded card is validated against *current* membership at click. Removal from a team breaks the member's sourced credentials and evicts them from live team-session connections immediately.
 - **User orchestrators** are visible and steerable only by their owner. **Org orchestrators** are readable by members, steerable by admins.
 - Decision gates route to actors authorized to resolve them: child-session gates to the parent's audience (team members for team-owned parents, the owner for personal), org-orchestrator gates to admins or an automation rule's designated approvers.
+- **Gate hygiene on shared surfaces**: Slack channel membership ≠ team membership, so gate deliveries to shared channels render **minimized bodies** — title plus action buttons, full context behind a web link. Free-text gate resolution on a shared surface requires an **explicitly addressed reply** (a mention or a thread-reply to the gate message); ambient thread chatter never resolves a gate.
+- **Abort authority on team threads**: a collaborator may abort queue items they authored; team admins (session owners) may abort any item or the thread.
 - Bulk operations are scoped to `owner_type = 'user'` so departed members can never mass-affect team resources.
 
 ## Migration
 
 The v2 stack owns a **clean-slate database** (see the engine spec's Clean-Slate Schema); nothing is shared with the legacy system and nothing mirrors. State transfer is export/import, and cutover is a routing repoint:
 
-1. **One-Jarvis rule.** An orchestrator identity is live on exactly one stack at a time. Cutover per principal: channel webhooks and linking flows repoint to v2 routing, and the legacy orchestrator is deactivated in the same operation. In-flight legacy work finishes in the legacy system; nothing drains across.
+1. **One-Jarvis rule.** An orchestrator identity is live on exactly one stack at a time. Cutover per principal: channel webhooks and linking flows repoint to v2 routing, and the legacy orchestrator is deactivated in the same operation. In-flight legacy work finishes in the legacy system; nothing drains across. **Cutover is blocked while legacy pending decision gates exist for the principal** — drain or resolve them first. (Noted alternative: a grace-window forwarder that maps unknown legacy gateIds back to the legacy resolver; the drain precondition is primary.)
 2. **Memory transfers via OKF bundles** — the shipped export/import path (`include=all|shareable`), imported per scope into the v2 memory tables. Bundles are scope-shaped, so personal and team memory move independently and membership correctness is preserved.
-3. **Credentials and identity links re-establish** through v2 connection/linking flows (or bundle import where a format exists); secrets re-encrypt under the v2 credential store. Team credentials re-source from their owning members.
-4. **Conversation history does not migrate.** v2 orchestrator sessions start clean, oriented by imported memory (this is what the journal spine is for). The legacy system stays readable until sunset. An optional transcript importer against the export format may ship later if demand warrants — never a dual-schema bridge.
+3. **Credentials and identity links re-establish** through v2 connection/linking flows (or bundle import where a format exists); secrets re-encrypt under the v2 credential store. Team credentials re-source from their owning members. The **pre-cutover checklist enumerates team credentials not yet re-sourced**; cutover warns or blocks on unresolved entries per org policy.
+4. **Conversation history does not migrate.** v2 orchestrator sessions start clean, oriented by imported memory (this is what the journal spine is for). A **pre-cutover pass instructs the legacy orchestrator to summarize its active conversations into memory** so the state survives the transcript gap, and the v2 orchestrator's first contact on a pre-existing surface includes a brief continuity disclosure (new system, memory carried over, transcripts not). The legacy system stays readable until sunset. An optional transcript importer against the export format may ship later if demand warrants — never a dual-schema bridge.
 5. **Rollback** is repointing routing back to legacy (still intact until sunset) and re-exporting any memory written in the interim.
 
 Team and org orchestrators have no meaningful legacy counterpart and launch v2-only.
@@ -208,6 +231,5 @@ Team and org orchestrators have no meaningful legacy counterpart and launch v2-o
 ## Open Items
 
 - Delegation UX: how the org orchestrator presents "answered on behalf of" attribution on shared surfaces.
-- Whether `agent_outbound` bindings require user confirmation for new shared surfaces (spam/abuse control).
 - Author-aware steer on team threads (a member steering their own in-flight turn without affecting others').
 - Whether org memory participates in personal orchestrators' read union the way team memory does, or stays org-orchestrator-private.
