@@ -262,6 +262,9 @@ interface RestoreSessionOptions {
 
 interface CreateSessionOptions {
   id?: string;
+  /** Owning principal. Defaults to user:{userId}. Children inherit the parent's owner. */
+  owner?: Principal;
+  /** Actor: the human whose action created the session (attribution, not access). */
   userId: string;
   orgId: string;
   workspace: string;
@@ -1627,7 +1630,8 @@ interface SessionStore {
 
   // === API reads ===
   getSession(id: string): Promise<SessionData | null>;
-  listSessions(userId: string, opts?: ListOpts): Promise<SessionData[]>;
+  /** List by owning principal; a user's full view is a union over user:{id} plus their teams' principals. */
+  listSessions(owner: Principal, opts?: ListOpts): Promise<SessionData[]>;
   getThread(sessionId: string, threadId: string): Promise<ThreadData | null>;
   listThreads(sessionId: string): Promise<ThreadData[]>;
   getEntries(sessionId: string, threadId: string, opts?: MessageQuery): Promise<SessionEntry[]>;
@@ -1657,8 +1661,17 @@ interface SuspendedTurnState {
 ```
 
 ```typescript
+/** Ownership principal, shared with the application layer. Serialized `${type}:${id}`. */
+interface Principal {
+  type: 'user' | 'team' | 'org';
+  id: string;
+}
+
 interface SessionData {
   id: string;
+  /** Who the session belongs to; access to team/org-owned sessions follows membership. */
+  owner: Principal;
+  /** Actor: the human whose action created or triggered the session. */
   userId: string;
   orgId: string;
   workspace: string;
@@ -1964,7 +1977,7 @@ interface CredentialStore {
 }
 
 interface CredentialOwner {
-  type: 'user' | 'org' | 'session';
+  type: 'user' | 'team' | 'org' | 'session';
   id: string;
 }
 
