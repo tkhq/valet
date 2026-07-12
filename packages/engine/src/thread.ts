@@ -563,9 +563,15 @@ export class Thread {
   async kick(): Promise<void> {
     if (this.kicking) return this.kickTail;
     this.kicking = true;
-    this.kickTail = this.kickLoop().finally(() => {
-      this.kicking = false;
-    });
+    this.kickTail = this.kickLoop()
+      .catch((err) => {
+        // The loop handles expected failures itself; anything escaping here
+        // must not become an unhandled rejection through `void this.kick()`.
+        this.emitError("kick_failed", err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        this.kicking = false;
+      });
     return this.kickTail;
   }
 
@@ -574,8 +580,19 @@ export class Thread {
     while (true) {
       if (this.paused) return;
       if (this.runningItem) return;
-      const head = await this.runnableHead();
+      const head = await this.unsettledHead();
       if (!head) return;
+
+      // A previous settlement durably recorded its outcome (reserve) but the
+      // finalize half failed transiently: retry it under the item's stored
+      // current attemptId. The terminalizing head blocks claims until it lands.
+      if (head.status === "terminalizing") {
+        if (!(await this.retryFinalize(head))) return; // still failing; next sweep retries
+        continue;
+      }
+      // running / blocked head: owned by a live attempt — nothing to claim
+      // until it settles (expired-lease reclaim is Task 5 reconciliation).
+      if (head.status !== "queued") return;
 
       // An abort was requested while this item was still queued: settle it
       // `aborted` without ever running it, rather than claiming it.
@@ -602,23 +619,76 @@ export class Thread {
       this.session.ensureTimers();
       await this.emitQueueState();
 
+      let turnFailed = false;
+      let turnError: unknown;
       try {
         await this.runItem(claimed);
       } catch (err) {
+        turnFailed = true;
+        turnError = err;
         this.emitError("run_failed", err instanceof Error ? err.message : String(err));
       }
-      await this.settleTurn(claimed);
-      this.runningItem = null;
-      this.fence = undefined;
+      try {
+        await this.settleTurn(claimed, turnFailed ? { error: turnError } : undefined);
+      } catch (err) {
+        // Transient (non-stale) settlement failure: keep the attempt marker so
+        // the sweep / reconciliation can finish the job. Do not wedge the
+        // thread and do not leak the rejection to void callers.
+        this.emitError(
+          "settlement_failed",
+          err instanceof Error ? err.message : String(err),
+        );
+        return;
+      } finally {
+        this.runningItem = null;
+        this.fence = undefined;
+      }
     }
   }
 
-  /** The thread's oldest queued, non-superseded submission — the claimable head. */
-  private async runnableHead(): Promise<QueueItem | undefined> {
+  /**
+   * The thread's oldest unsettled, non-superseded, non-collecting submission —
+   * mirrors the store's claim-head rule. A running/blocked/terminalizing head
+   * blocks every later item from being claimed.
+   */
+  private async unsettledHead(): Promise<QueueItem | undefined> {
     const all = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
     return all
-      .filter((i) => i.threadId === this.id && i.status === "queued" && !i.supersededByItemId)
+      .filter((i) => i.threadId === this.id && i.status !== "collecting" && !i.supersededByItemId)
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+  }
+
+  /**
+   * Retry the finalize half of an interrupted settlement. The outcome is
+   * already durably recorded on the item; finalize re-runs the fence against
+   * the item's stored CURRENT attemptId (never cleared on terminal
+   * transitions), so this is safe even after the in-memory fence is gone.
+   */
+  private async retryFinalize(item: QueueItem): Promise<boolean> {
+    const store = this.session.providers.store;
+    const attemptId = item.attemptId;
+    if (!attemptId) return false; // defensive: terminalizing items always carry one
+    const fence: WriteFence = { itemId: item.id, attemptId };
+    try {
+      await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
+    } catch (err) {
+      if (err instanceof StaleAttemptError) return false; // successor owns it now
+      this.emitError(
+        "settlement_failed",
+        err instanceof Error ? err.message : String(err),
+      );
+      return false;
+    }
+    await store.deleteAttemptMarker(item.id, attemptId);
+    await this.session.emit({
+      type: "submission_settled",
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: item.id,
+      outcome: item.outcome ?? { outcome: "completed" },
+    });
+    await this.emitQueueState();
+    return true;
   }
 
   /**
@@ -626,7 +696,7 @@ export class Thread {
    * blocked on a decision gate (the claim is retained), or when a stale fence
    * signalled that a successor already owns the item.
    */
-  private async settleTurn(item: QueueItem): Promise<void> {
+  private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
     if (this.staleFenceDetected) {
       // A successor owns this item; do not settle. (Zombie self-fencing.)
       return;
@@ -641,7 +711,7 @@ export class Thread {
     if (current.status === "blocked_on_decision_gate") return;
     if (current.status === "settled" || current.status === "terminalizing") return;
 
-    const outcome = this.decideTurnOutcome(current);
+    const outcome = this.decideTurnOutcome(current, turnFailure);
     try {
       await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
       await this.repairRestState(item, fence);
@@ -665,15 +735,27 @@ export class Thread {
   }
 
   /** Map the turn's terminal state to a SubmissionOutcome. */
-  private decideTurnOutcome(current: QueueItem): SubmissionOutcome {
+  private decideTurnOutcome(
+    current: QueueItem,
+    turnFailure?: { error: unknown },
+  ): SubmissionOutcome {
     const last = this.agent.state.messages[this.agent.state.messages.length - 1];
     const stop = last && last.role === "assistant" ? last.stopReason : undefined;
     if (current.supersededByItemId) return { outcome: "superseded" };
     if (current.abortRequestedAt !== undefined || stop === "aborted") return { outcome: "aborted" };
+    // A throw outside the agent stream (tool building, store I/O, model
+    // resolution) must settle `failed` — the last agent message may be a stale
+    // prior turn's clean stop and would otherwise decide `completed`.
+    if (turnFailure) {
+      const e = turnFailure.error;
+      return { outcome: "failed", error: e instanceof Error ? e.message : String(e) };
+    }
     if (stop === "error") {
       const errText = last && last.role === "assistant" ? last.errorMessage : undefined;
       return { outcome: "failed", error: errText ?? "turn ended with an error" };
     }
+    // "stop" and "length" both settle completed — a length-terminated turn
+    // still ended with usable output (revisit if we want to distinguish).
     return { outcome: "completed" };
   }
 
@@ -1085,6 +1167,18 @@ export class Thread {
         // turn. Undefined only on the replay path, which short-circuits above.
         const fence = this.fence;
         const runningItemId = this.runningItem?.id;
+        // Fenced writes in the gate path route through fencedWrite (design
+        // point 3): a stale fence aborts the turn, marks it for skipped
+        // settlement, and unwinds the tool. The agent is already aborted at
+        // that point, so the unwind never reaches the model as a tool error.
+        // Non-stale errors (e.g. ConflictError from a wrong-direction blocked
+        // toggle) still propagate — they are deliberate contract violations.
+        const fencedGateWrite = async (fn: () => Promise<void>): Promise<void> => {
+          await this.fencedWrite(fn);
+          if (this.staleFenceDetected) {
+            throw new Error(`turn superseded: stale write fence for item ${runningItemId}`);
+          }
+        };
         const gate = fromRequest(req, gateCtx);
         await session.providers.store.saveDecisionGate(session.id, this.id, gate);
         const gateEntry: SessionEntry = {
@@ -1097,39 +1191,45 @@ export class Thread {
           queueItemId: runningItemId,
           createdAt: Date.now(),
         };
-        await session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence);
+        await fencedGateWrite(() =>
+          session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
+        );
 
         // checkpoint the suspended turn — use real toolName + toolArgs so
         // restoreSession can replay this exact tool call.
-        await session.providers.store.saveSuspendedTurn(
-          session.id,
-          this.id,
-          {
-            sessionId: session.id,
-            threadId: this.id,
-            queueItemId: runningItemId ?? "",
-            gateId: gate.id,
-            model: session.options.model.id,
-            toolCallId,
-            toolName,
-            toolArgs,
-            resumeKey: req.resumeKey ?? gate.id,
-            attempt: 1,
-            createdAt: Date.now(),
-          },
-          fence,
+        await fencedGateWrite(() =>
+          session.providers.store.saveSuspendedTurn(
+            session.id,
+            this.id,
+            {
+              sessionId: session.id,
+              threadId: this.id,
+              queueItemId: runningItemId ?? "",
+              gateId: gate.id,
+              model: session.options.model.id,
+              toolCallId,
+              toolName,
+              toolArgs,
+              resumeKey: req.resumeKey ?? gate.id,
+              attempt: 1,
+              createdAt: Date.now(),
+            },
+            fence,
+          ),
         );
 
         // Durable block flag under the fence (running → blocked). Gate-blocked
         // turns retain their claim and do not settle until the gate resolves.
         this.blockedGateId = gate.id;
         if (fence && runningItemId) {
-          await session.providers.store.setSubmissionBlocked(
-            session.id,
-            this.id,
-            runningItemId,
-            true,
-            fence,
+          await fencedGateWrite(() =>
+            session.providers.store.setSubmissionBlocked(
+              session.id,
+              this.id,
+              runningItemId,
+              true,
+              fence,
+            ),
           );
         }
         await session.emit({
@@ -1159,15 +1259,19 @@ export class Thread {
           });
           this.blockedGateId = undefined;
           if (fence && runningItemId) {
-            await session.providers.store.setSubmissionBlocked(
-              session.id,
-              this.id,
-              runningItemId,
-              false,
-              fence,
+            await fencedGateWrite(() =>
+              session.providers.store.setSubmissionBlocked(
+                session.id,
+                this.id,
+                runningItemId,
+                false,
+                fence,
+              ),
             );
           }
-          await session.providers.store.clearSuspendedTurn(session.id, this.id, fence);
+          await fencedGateWrite(() =>
+            session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
+          );
           return resolution;
         } catch (err) {
           // Withdrawn or expired: persist the terminal status, then propagate.
@@ -1186,15 +1290,19 @@ export class Thread {
           // Flip the durable block back to running so the turn can end and
           // settle normally (the model sees the gate's terminal state).
           if (fence && runningItemId) {
-            await session.providers.store.setSubmissionBlocked(
-              session.id,
-              this.id,
-              runningItemId,
-              false,
-              fence,
+            await fencedGateWrite(() =>
+              session.providers.store.setSubmissionBlocked(
+                session.id,
+                this.id,
+                runningItemId,
+                false,
+                fence,
+              ),
             );
           }
-          await session.providers.store.clearSuspendedTurn(session.id, this.id, fence);
+          await fencedGateWrite(() =>
+            session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
+          );
           throw err;
         }
       },
@@ -1276,12 +1384,15 @@ export class Thread {
           if (text) parts.push({ type: "text", text });
           for (const p of this.currentAssistantParts) parts.push(p);
 
+          // "length" maps to end_turn: a length-terminated turn still ended
+          // with usable output (Task 6 resolves result text from the last
+          // assistant entry with stopReason end_turn).
           const stopReason: MessageEntry["stopReason"] | undefined =
             event.message.stopReason === "aborted"
               ? "abort"
               : event.message.stopReason === "error"
               ? "error"
-              : event.message.stopReason === "stop"
+              : event.message.stopReason === "stop" || event.message.stopReason === "length"
               ? "end_turn"
               : undefined; // toolUse (mid-turn) carries no stopReason
           const entry: MessageEntry = {

@@ -8,6 +8,9 @@ import {
   type BusEvent,
   type EngineEvent,
   type MessageEntry,
+  type SessionEntry,
+  type SubmissionOutcome,
+  type WriteFence,
 } from "../src/index.js";
 
 function makeEngine() {
@@ -229,6 +232,158 @@ describe("queue: abort", () => {
     const aborted = await store.getQueueItem(session.id, r2.queueItemId);
     expect(aborted?.status).toBe("settled");
     expect(aborted?.outcome).toEqual({ outcome: "aborted" });
+
+    faux.unregister();
+  });
+});
+
+describe("queue: settlement resilience", () => {
+  it("a transient finalizeSettlement failure does not wedge the thread or leak a rejection", async () => {
+    // Store whose finalizeSettlement throws once (transient I/O, SQLITE_BUSY).
+    class FlakyFinalizeStore extends InMemorySessionStore {
+      failuresRemaining = 1;
+      override async finalizeSettlement(
+        sessionId: string,
+        threadId: string,
+        itemId: string,
+        fence: WriteFence,
+      ): Promise<void> {
+        if (this.failuresRemaining > 0) {
+          this.failuresRemaining -= 1;
+          throw new Error("SQLITE_BUSY");
+        }
+        return super.finalizeSettlement(sessionId, threadId, itemId, fence);
+      }
+    }
+    const faux = registerFauxProvider({ provider: "flaky-finalize" });
+    faux.setResponses([fauxAssistantMessage("a-done"), fauxAssistantMessage("b-done")]);
+
+    const store = new FlakyFinalizeStore();
+    const bus = new InMemoryEventBus();
+    const engine = new Engine({
+      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("a");
+    // The item must eventually settle despite the one-shot finalize failure
+    // (retried by the claim loop / sweep once the store recovers), and no
+    // unhandled rejection may escape (vitest fails the run on those).
+    await waitFor(async () => {
+      await session.sweepOnce();
+      return (await store.getQueueItem(session.id, r1.queueItemId))?.status === "settled";
+    });
+    const a = await store.getQueueItem(session.id, r1.queueItemId);
+    expect(a?.outcome).toEqual({ outcome: "completed" });
+
+    // Thread stays usable: a subsequent prompt claims and settles normally.
+    const r2 = await session.prompt("b");
+    await waitFor(async () => {
+      await session.sweepOnce();
+      return (await store.getQueueItem(session.id, r2.queueItemId))?.status === "settled";
+    });
+    const b = await store.getQueueItem(session.id, r2.queueItemId);
+    expect(b?.outcome).toEqual({ outcome: "completed" });
+
+    faux.unregister();
+  });
+
+  it("a turn that throws outside the agent stream settles failed with the error text", async () => {
+    // Store whose appendEntries throws once (the turn's first fenced write —
+    // the user entry) with a non-stale error: the turn must settle `failed`,
+    // not `completed` derived from a stale prior stop reason.
+    class DiskFullOnceStore extends InMemorySessionStore {
+      failuresRemaining = 1;
+      override async appendEntries(
+        sessionId: string,
+        threadId: string,
+        entries: SessionEntry[],
+        fence?: WriteFence,
+      ): Promise<void> {
+        if (this.failuresRemaining > 0 && entries.some((e) => e.type === "message")) {
+          this.failuresRemaining -= 1;
+          throw new Error("disk full");
+        }
+        return super.appendEntries(sessionId, threadId, entries, fence);
+      }
+    }
+    const faux = registerFauxProvider({ provider: "turn-throws" });
+    faux.setResponses([fauxAssistantMessage("never-used"), fauxAssistantMessage("second-ok")]);
+
+    const store = new DiskFullOnceStore();
+    const bus = new InMemoryEventBus();
+    const engine = new Engine({
+      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("a");
+    await waitFor(async () => {
+      const item = await store.getQueueItem(session.id, r1.queueItemId);
+      return item?.status === "settled";
+    });
+    const item = await store.getQueueItem(session.id, r1.queueItemId);
+    const outcome: SubmissionOutcome | undefined = item?.outcome;
+    expect(outcome?.outcome).toBe("failed");
+    expect(outcome?.error).toContain("disk full");
+
+    // Thread stays usable afterwards.
+    const r2 = await session.prompt("b");
+    await waitFor(async () => {
+      const it = await store.getQueueItem(session.id, r2.queueItemId);
+      return it?.status === "settled";
+    });
+    expect((await store.getQueueItem(session.id, r2.queueItemId))?.outcome).toEqual({
+      outcome: "completed",
+    });
+
+    faux.unregister();
+  });
+});
+
+describe("queue: length-terminated turns", () => {
+  it("stopReason 'length' persists as end_turn and settles completed", async () => {
+    const faux = registerFauxProvider({ provider: "max-tokens" });
+    faux.setResponses([fauxAssistantMessage("truncated but usable", { stopReason: "length" })]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("go long");
+    await waitFor(async () => {
+      const item = await store.getQueueItem(session.id, r1.queueItemId);
+      return item?.status === "settled";
+    });
+
+    const item = await store.getQueueItem(session.id, r1.queueItemId);
+    expect(item?.outcome).toEqual({ outcome: "completed" });
+
+    // Task 6 resolves result text from "last assistant entry with stopReason
+    // end_turn" — a max-tokens turn must still carry one.
+    const entries = await session.readEntries("web:default");
+    const lastAssistant = entries
+      .filter((e): e is MessageEntry => e.type === "message" && e.role === "assistant")
+      .at(-1);
+    expect(lastAssistant?.stopReason).toBe("end_turn");
+    expect(lastAssistant?.queueItemId).toBe(r1.queueItemId);
 
     faux.unregister();
   });
