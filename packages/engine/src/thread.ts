@@ -1488,10 +1488,14 @@ export class Thread {
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
       applyPrune(mutable, prunePlan);
-      // Persist each elided entry back to the store via updateEntry.
+      // Persist each elided entry back to the store via updateEntry. Compaction
+      // only runs inside a claimed turn (from runItem after runAgent, or the
+      // reactive-overflow path in runAgent), so `this.fence` names the current
+      // attempt — thread it through so a superseding successor's fence still
+      // wins over these writes.
       for (const entry of mutable) {
         if (!prunePlan.toElide.has(entry.id)) continue;
-        await store.updateEntry(session.id, this.id, entry);
+        await store.updateEntry(session.id, this.id, entry, this.fence);
       }
       // Apply to the live agent transcript:
       this.applyElisionsToAgentMessages(prunePlan);
@@ -1539,7 +1543,8 @@ export class Thread {
       fileContext: extractFileContext(head),
       createdAt: Date.now(),
     };
-    await store.appendEntries(session.id, this.id, [compactionEntry]);
+    // Fenced under the current turn's attempt (compaction is always in-turn).
+    await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
 
     // Step 5: rewrite agent.state.messages. The simplest and most
     // correct path is to rebuild from the now-augmented DAG.

@@ -1163,11 +1163,13 @@ Exactly one live engine instance owns a session at a time. How exclusivity is ac
 - **Cloudflare** — the per-session Durable Object is a natural single writer; claims still record `ownerId` + lease so recovery logic is platform-independent.
 - **Kubernetes** — session affinity routes requests to the owning pod as an optimization, but **leases are the correctness mechanism**. A pod claims submissions, heartbeats its leases (renew every ~10s against a 30s lease), and a replacement pod reclaims expired leases after the old owner dies. This supports restart and host-replacement recovery; it is not active-active — a session never has two live owners.
 
-**Attempt markers** are durable evidence that an attempt started executing. A fresh marker means "this attempt may still be running — do not reconcile it as interrupted." Markers are deleted on clean settlement; a stale marker plus an expired lease is the signal that reconciliation may proceed.
+**Attempt markers** are durable evidence that an attempt started executing. A fresh marker means "this attempt may still be running — do not reconcile it as interrupted." The store exposes this to the reconciler as `hasAttemptMarker(itemId, attemptId)`, which the engine combines with the lease: an attempt counts as *live* (action `wait`) only when its marker exists **and** its lease is unexpired. Markers are deleted on clean settlement; a stale marker plus an expired lease is the signal that reconciliation may proceed.
 
 #### Reconciliation
 
 On engine startup, and whenever an expired lease is reclaimed, each unsettled submission passes through a fixed decision tree. Order matters and is normative:
+
+**Startup is an ownership assertion, not a probe.** `restoreSession` establishes this instance as the session's single live owner (the platform guarantees exclusivity — DO single-writer, or pod lease affinity). So on the *startup* pass an unexpired prior lease is **not** treated as evidence of a live attempt: the previous owner is gone by contract, and the reconciler reclaims eagerly rather than waiting out the 30s lease. Correctness does not rest on that assumption being perfectly timed — the fresh attempt's fence makes any late write from a slow zombie predecessor fail (see Effect fencing), so eager takeover is always safe. On the periodic sweep (a live owner reclaiming its own expired-lease items) only already-expired-lease items reach the tree, so the same reclaim applies.
 
 1. **Finished work settles first.** If a persisted assistant entry carries this submission's `queueItemId` with `stopReason: 'end_turn'`, settle `completed` unconditionally — retry budgets and timeouts never discard finished work. The transcript linkage is the test; there is no heuristic "looks finished" fallback.
 2. **Abort wins next.** If `abortRequestedAt` is set, settle `aborted`. A crash-interrupted abort is never resurrected as a retry.
@@ -1646,8 +1648,14 @@ interface SessionStore {
   // === Engine writes ===
   saveSession(session: SessionData): Promise<void>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
-  /** Fenced (see Effect fencing): rejects writes from a superseded attempt. */
-  appendEntries(sessionId: string, threadId: string, entries: SessionEntry[], fence: WriteFence): Promise<void>;
+  /**
+   * Fenced (see Effect fencing): rejects a write whose fence names a superseded
+   * attempt with StaleAttemptError. The fence is OPTIONAL — during the durable
+   * submission transition the engine passes one from inside every claimed turn,
+   * while out-of-turn writers (seed helpers, pre-claim setup) omit it. The store
+   * still rejects a *stale* fence whenever one is supplied.
+   */
+  appendEntries(sessionId: string, threadId: string, entries: SessionEntry[], fence?: WriteFence): Promise<void>;
   /**
    * Replace an existing entry in place. Required so pruning during
    * compaction can persist tool-result elision; also useful for any
@@ -1659,37 +1667,81 @@ interface SessionStore {
 
   // === Submission lifecycle (durable execution) ===
   /**
-   * Idempotent admission. Same dispatchId + same payload returns the existing
-   * item; same dispatchId + different payload throws ConflictError. Items
-   * without a dispatchId always admit.
+   * Idempotent admission. Same dispatchId + deep-equal content returns the
+   * existing item with admitted=false; same dispatchId + different content
+   * throws ConflictError. Items without a dispatchId always admit. `steer:true`
+   * additionally stamps supersededByItemId on every unsettled item of the
+   * thread admitted before this one, in the same atomic step, and returns their
+   * ids in `supersededItemIds`.
    */
-  admitSubmission(sessionId: string, threadId: string, item: QueueItem): Promise<QueueItem>;
+  admitSubmission(
+    sessionId: string,
+    threadId: string,
+    item: QueueItem,
+    opts?: { steer?: boolean },
+  ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }>;
   /**
-   * CAS transition queued→running for the oldest unsettled item of the
-   * thread. Records attemptId, ownerId, and lease. Returns null when the
-   * item is not the runnable head or is already claimed. Two concurrent
-   * claims must never both succeed.
+   * CAS transition queued→running for the oldest unsettled, non-superseded item
+   * of the thread. Records attemptId, ownerId, and lease; increments
+   * attemptCount. Returns null when the item is not the runnable head or is
+   * already claimed. Two concurrent claims must never both succeed.
    */
   claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null>;
-  /** Atomically install a new attempt on a running submission during reconciliation. */
-  replaceSubmissionAttempt(sessionId: string, threadId: string, itemId: string, claim: SubmissionClaim): Promise<QueueItem | null>;
+  /**
+   * CAS: install a new attempt on a running/blocked item during reconciliation.
+   * `expectedAttemptId` is the dead attempt being replaced; the CAS loses
+   * (returns null) if another reclaimer already moved the item's attempt on
+   * (double-reclaim race). Increments attemptCount.
+   */
+  replaceSubmissionAttempt(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    claim: SubmissionClaim,
+    opts: { expectedAttemptId: string },
+  ): Promise<QueueItem | null>;
   insertAttemptMarker(itemId: string, attemptId: string): Promise<void>;
   deleteAttemptMarker(itemId: string, attemptId: string): Promise<void>;
+  /**
+   * True when an attempt-marker row exists for (itemId, attemptId). Durable
+   * evidence the attempt began executing; reconciliation combines it with the
+   * lease to distinguish "may still be running" from "safe to reclaim".
+   */
+  hasAttemptMarker(itemId: string, attemptId: string): Promise<boolean>;
   renewLeases(ownerId: string, itemIds: string[]): Promise<void>;
-  listExpiredSubmissions(): Promise<QueueItem[]>;
+  listExpiredSubmissions(now: number): Promise<QueueItem[]>;
+  /** All unsettled submissions of a session — reconciliation and awaitResult scan this. */
+  listUnsettledSubmissions(sessionId: string): Promise<QueueItem[]>;
+  getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /** Stamp abortRequestedAt on all unsettled submissions in scope. First write wins; not terminal. */
   requestAbort(sessionId: string, threadId?: string): Promise<void>;
-  /** Two-phase settlement: reserve records the exact terminal outcome (running→terminalizing). Fenced. */
+  /** Two-phase settlement: reserve records the exact terminal outcome (running|blocked→terminalizing). Fenced. */
   reserveSettlement(sessionId: string, threadId: string, itemId: string, outcome: SubmissionOutcome, fence: WriteFence): Promise<void>;
   /** Finalize terminalizing→settled. Idempotent; safe to re-run after a crash. Fenced. */
   finalizeSettlement(sessionId: string, threadId: string, itemId: string, fence: WriteFence): Promise<void>;
+  /**
+   * CAS settle for never-claimed items: succeeds only when status is
+   * 'collecting' or 'queued' (returns false otherwise, e.g. a running item).
+   * Used for superseded / merged / aborted-while-queued outcomes;
+   * mergedIntoItemId is stamped when outcome is 'merged'. No fence — an
+   * unclaimed item has no attempt to fence against.
+   */
+  settleUnclaimed(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    outcome: SubmissionOutcome,
+    opts?: { mergedIntoItemId?: string },
+  ): Promise<boolean>;
+  /** Fenced: running↔blocked_on_decision_gate transition for the claimed turn. */
+  setSubmissionBlocked(sessionId: string, threadId: string, itemId: string, blocked: boolean, fence: WriteFence): Promise<void>;
 
   saveDecisionGate(sessionId: string, threadId: string, gate: DecisionGate): Promise<void>;
   saveDecisionGateRef(sessionId: string, threadId: string, gateId: string, ref: { channelType: string; ref: DecisionGateRef }): Promise<void>;
   updateDecisionGateEntry(sessionId: string, threadId: string, gateId: string, patch: Partial<DecisionGateEntry>): Promise<void>;
   /** Fenced: only the current attempt may write or clear its checkpoint. */
-  saveSuspendedTurn(sessionId: string, threadId: string, suspended: SuspendedTurnState, fence: WriteFence): Promise<void>;
-  clearSuspendedTurn(sessionId: string, threadId: string, fence: WriteFence): Promise<void>;
+  saveSuspendedTurn(sessionId: string, threadId: string, suspended: SuspendedTurnState, fence?: WriteFence): Promise<void>;
+  clearSuspendedTurn(sessionId: string, threadId: string, fence?: WriteFence): Promise<void>;
   updateSessionStatus(id: string, status: string, metadata?: Partial<SessionData>): Promise<void>;
   flush?(): Promise<void>;
 
@@ -2263,7 +2315,7 @@ The SessionPool manages engine instances in-process. Idle instances are evicted 
 The local development host is the Kubernetes shape at N=1 with local providers, and it is a first-class supported topology — every contract in this spec must hold on it, because it is where the conformance suites and the end-to-end dogfood run:
 
 - One Node process (`packages/api`): Hono routes + a single-process SessionPool.
-- `SqliteSessionStore` (better-sqlite3) as the authoritative store; `SqliteEventStream` over the same database as the durable, offset-addressed event log (in-process fan-out — the reference EventStream implementation).
+- `SqliteSessionStore` (better-sqlite3) as the authoritative store; `SqliteEventStream` over the same database as the durable, offset-addressed event log (in-process fan-out — the reference EventStream implementation). The store opens with `journal_mode=WAL`, `busy_timeout=5000`, and `synchronous=FULL` — FULL (not NORMAL) is deliberate: this subsystem's premise is durability, and NORMAL can lose the last committed transaction on host power loss, which is exactly the write a kill-mid-turn must survive.
 - `DockerSandbox` / `LocalSandbox` as in-process `Sandbox` implementations under the policy wrapper (no sandboxd required locally).
 - The same claim/lease/fence machinery runs even though there is exactly one owner — a locally killed-and-restarted process exercises the identical reconciliation paths the DO and pod hosts rely on. Kill-mid-turn recovery is a local test, not a production-only behavior.
 - Workflow runs use the same leased-worker RunHost in-process; channel ingress uses long-polling transports (e.g. Telegram) so no public webhook is needed.

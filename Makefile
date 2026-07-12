@@ -124,6 +124,19 @@ dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
 	@if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required$(NC)"; exit 1; fi
 	$(PNPM) --filter @valet/api dogfood
 
+# Manual kill-mid-turn recovery proof (Engine v2 Phase 1 exit criterion).
+# The automated cross-process SIGKILL test lives at
+# packages/engine/test/kill-mid-turn.test.ts. To reproduce it by hand against a
+# real Anthropic + Docker stack:
+#   1. make dev-local            # API :8788 + web :5173 (needs ANTHROPIC_API_KEY + Docker)
+#   2. In the web UI, send a prompt that runs a slow tool (e.g. a long shell/build).
+#   3. While the tool is executing, kill the API process:  kill -9 <api pid>
+#   4. Restart:  make dev-local
+#   5. Confirm on reload: the turn completes, and the transcript shows the
+#      interrupted tool call repaired to an "interrupted — result lost in
+#      restart" error followed by the model's recovery — with NO duplicated tool
+#      side effect. This is a human-visible pass, not a CI gate.
+
 # ==========================================
 # Database Operations
 # ==========================================
