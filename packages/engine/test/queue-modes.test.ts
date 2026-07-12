@@ -139,20 +139,161 @@ describe("queue mode: followup (FIFO)", () => {
   });
 });
 
-// Task 4: collect mode operates on real durable collect windows (merge +
-// settleUnclaimed). Until then collect submissions route to plain admission,
-// so this behavioral test is deferred.
-describe.skip("queue mode: collect (buffered window)", () => {
+describe("queue mode: collect (buffered window)", () => {
   it("merges buffered prompts into one combined prompt", async () => {
-    // Task 4
+    const faux = registerFauxProvider({ provider: "collect-merge" });
+    faux.setResponses([fauxAssistantMessage("merged-done")]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      queueMode: "collect",
+      collectWindowMs: 60,
+    });
+
+    const r1 = await session.prompt("one");
+    const r2 = await session.prompt("two");
+    const r3 = await session.prompt("three");
+
+    await waitFor(async () => {
+      const items = await Promise.all([
+        store.getQueueItem(session.id, r1.queueItemId),
+        store.getQueueItem(session.id, r2.queueItemId),
+        store.getQueueItem(session.id, r3.queueItemId),
+      ]);
+      return items.every((i) => i?.status === "settled");
+    });
+
+    const [a, b, c] = await Promise.all([
+      store.getQueueItem(session.id, r1.queueItemId),
+      store.getQueueItem(session.id, r2.queueItemId),
+      store.getQueueItem(session.id, r3.queueItemId),
+    ]);
+    expect(a?.outcome).toEqual({ outcome: "merged" });
+    expect(b?.outcome).toEqual({ outcome: "merged" });
+    expect(c?.outcome).toEqual({ outcome: "merged" });
+    const mergedId = a?.mergedIntoItemId;
+    expect(mergedId).toBeDefined();
+    expect(b?.mergedIntoItemId).toBe(mergedId);
+    expect(c?.mergedIntoItemId).toBe(mergedId);
+
+    await waitFor(async () => (await store.getQueueItem(session.id, mergedId!))?.status === "settled");
+    const merged = await store.getQueueItem(session.id, mergedId!);
+    expect(merged?.outcome).toEqual({ outcome: "completed" });
+    const constituentIds = (merged?.metadata?.collect as { constituentIds: string[] } | undefined)
+      ?.constituentIds;
+    expect(constituentIds).toEqual([r1.queueItemId, r2.queueItemId, r3.queueItemId]);
+
+    const entries = await session.readEntries("web:default");
+    const mergedUser = entries.find(
+      (e): e is MessageEntry => e.type === "message" && e.role === "user" && e.queueItemId === mergedId,
+    );
+    expect(mergedUser?.content).toBe("[1] one\n\n[2] two\n\n[3] three");
+    const mergedAssistant = entries.find(
+      (e): e is MessageEntry =>
+        e.type === "message" && e.role === "assistant" && e.queueItemId === mergedId,
+    );
+    expect(mergedAssistant?.content).toBe("merged-done");
+
+    faux.unregister();
+  });
+
+  it("dispatchId dedup: re-submitting mid-window returns the existing constituent, flush still has 3", async () => {
+    const faux = registerFauxProvider({ provider: "collect-dedup" });
+    faux.setResponses([fauxAssistantMessage("merged-done")]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      queueMode: "collect",
+      collectWindowMs: 80,
+    });
+
+    const r1 = await session.thread().submitPrompt("one", { dispatchId: "d-1" });
+    const r2 = await session.thread().submitPrompt("two", {});
+    const dup = await session.thread().submitPrompt("one", { dispatchId: "d-1" });
+    expect(dup.queueItemId).toBe(r1.queueItemId);
+    const r3 = await session.thread().submitPrompt("three", {});
+
+    await waitFor(async () => (await store.getQueueItem(session.id, r1.queueItemId))?.status === "settled");
+
+    const a = await store.getQueueItem(session.id, r1.queueItemId);
+    const mergedId = a?.mergedIntoItemId;
+    await waitFor(async () => (await store.getQueueItem(session.id, mergedId!))?.status === "settled");
+    const merged = await store.getQueueItem(session.id, mergedId!);
+    const constituentIds = (merged?.metadata?.collect as { constituentIds: string[] } | undefined)
+      ?.constituentIds;
+    expect(constituentIds).toEqual([r1.queueItemId, r2.queueItemId, r3.queueItemId]);
+    expect(constituentIds).toHaveLength(3);
+
+    faux.unregister();
   });
 });
 
-// Task 4: steer supersession is transactional (admitSubmission steer option +
-// settleUnclaimed). Deferred to Task 4.
-describe.skip("queue mode: steer (abort + new)", () => {
+describe("queue mode: steer (abort + new)", () => {
   it("aborts the current turn and starts a new one immediately", async () => {
-    // Task 4
+    const faux = registerFauxProvider({ provider: "steer-mode", tokensPerSecond: 30 });
+    const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("steer-done")]);
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("original");
+    // Wait until the turn is actively streaming before steering, so the
+    // interrupt lands mid-turn rather than after a natural completion.
+    await waitFor(() => events.some((e) => e.event.type === "text_delta"));
+
+    const r2 = await session.thread().submitPrompt("steer-in", { queueMode: "steer" });
+
+    await waitFor(async () => {
+      const items = await Promise.all([
+        store.getQueueItem(session.id, r1.queueItemId),
+        store.getQueueItem(session.id, r2.queueItemId),
+      ]);
+      return items.every((i) => i?.status === "settled");
+    });
+
+    // Store truth: A superseded pointing at S; S completed.
+    const a = await store.getQueueItem(session.id, r1.queueItemId);
+    expect(a?.outcome).toEqual({ outcome: "superseded" });
+    expect(a?.supersededByItemId).toBe(r2.queueItemId);
+
+    const s = await store.getQueueItem(session.id, r2.queueItemId);
+    expect(s?.outcome).toEqual({ outcome: "completed" });
+
+    // A's partial entries remain, persisted under A's own queueItemId — not
+    // discarded by the steer.
+    const entries = await session.readEntries("web:default");
+    const aAssistant = entries.find(
+      (e): e is MessageEntry =>
+        e.type === "message" && e.role === "assistant" && e.queueItemId === r1.queueItemId,
+    );
+    expect(aAssistant).toBeDefined();
+    expect(aAssistant?.stopReason).toBe("abort");
+    expect((aAssistant?.content.length ?? 0) > 0).toBe(true);
+
+    const sAssistant = entries.find(
+      (e): e is MessageEntry =>
+        e.type === "message" && e.role === "assistant" && e.queueItemId === r2.queueItemId,
+    );
+    expect(sAssistant?.content).toBe("steer-done");
+
+    faux.unregister();
   });
 });
 

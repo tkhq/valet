@@ -90,9 +90,14 @@ export class Session {
     await this.providers.store.renewLeases(this.ownerId, ids);
   }
 
-  /** One sweep pass: re-kick every thread so missed wakeups can't strand queued work. */
+  /**
+   * One sweep pass: flush any collect window whose deadline has already
+   * passed (safety net for a missed/never-armed in-process timer), then
+   * re-kick every thread so missed wakeups can't strand queued work.
+   */
   async sweepOnce(): Promise<void> {
     for (const t of this.threads.values()) {
+      await t.checkCollectDeadline();
       await t.kick();
     }
   }

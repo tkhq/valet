@@ -89,6 +89,10 @@ export class Thread {
   /** Serializes the claim loop; a second `kick()` while one is running joins the in-flight tail. */
   private kicking = false;
   private kickTail: Promise<void> = Promise.resolve();
+  /** In-process collect-window flush timer; armed by the first item of a window. */
+  private collectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Guards against the in-process timer and the session sweep both flushing the same window. */
+  private flushingCollect = false;
   private gates = new GateManager();
   private mode: QueueMode;
   private aborted = false;
@@ -205,6 +209,12 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
+
+    if (effectiveMode === "collect") {
+      return this.submitCollect(content, opts);
+    }
+
     const item = this.buildQueueItem(content, {
       dispatchId: opts.dispatchId,
       author: opts.author,
@@ -215,14 +225,16 @@ export class Thread {
       metadata: opts.metadata,
     });
 
-    // Steer/collect are routed to plain durable admission for now; their real
-    // transactional supersession / merge semantics land in Task 4. The mode is
-    // still recorded so Task 4 can branch on it without a signature change.
-    const { item: admitted } = await this.session.providers.store.admitSubmission(
+    const store = this.session.providers.store;
+    const { item: admitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
+      effectiveMode === "steer" ? { steer: true } : undefined,
     );
+    if (supersededItemIds.length > 0) {
+      await this.handleSteerSupersession(supersededItemIds);
+    }
     await this.emitQueueState();
     void this.kick();
     return {
@@ -231,6 +243,175 @@ export class Thread {
       queueItemId: admitted.id,
       status: receiptStatus(admitted.status),
     };
+  }
+
+  /**
+   * Steer supersession (Task 4, design decision 3): the durable supersession
+   * stamp already landed atomically inside `admitSubmission({ steer: true })`
+   * before this runs — so a gate-resolution race against a superseded item is
+   * always a no-op by the time it could matter. Here we (1) withdraw any
+   * pending gate owned by this thread (only the running turn can have one),
+   * (2) settle every superseded item that never had a live attempt via
+   * `settleUnclaimed` (a no-op / false for the currently-running item, which
+   * settles through its own attempt's interrupted-handler / decideTurnOutcome
+   * precedence instead), then (3) if the running item was superseded, abort
+   * the live agent run so its turn unblocks and settles. The claim loop
+   * (`kickLoop`'s `while (true)`) picks up the new head — the steer item —
+   * once the running turn's settlement completes; no separate claim step is
+   * needed here.
+   */
+  private async handleSteerSupersession(supersededItemIds: string[]): Promise<void> {
+    const store = this.session.providers.store;
+    const runningId = this.runningItem?.id;
+    const runningSuperseded = runningId !== undefined && supersededItemIds.includes(runningId);
+    // Abort synchronously, before any awaited I/O below, so a tool blocked on
+    // a decision gate sees the signal already set once its withdrawal
+    // propagates — otherwise the awaits in the settleUnclaimed loop give the
+    // agent loop's tool-error follow-up call a chance to race ahead.
+    // `Agent.abort()`/`waitForIdle()` are safe no-ops when nothing is running.
+    if (runningSuperseded) {
+      this.agent.abort();
+    }
+    for (const g of this.pendingDecisionGates()) {
+      this.withdrawDecision(g.id, "steer");
+    }
+    for (const id of supersededItemIds) {
+      await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
+    }
+    if (runningSuperseded) {
+      await this.agent.waitForIdle();
+    }
+  }
+
+  /**
+   * Collect-mode admission (Task 4): admits with status "collecting" and a
+   * durable `metadata.collectDeadline`. dispatchId dedup applies at admission
+   * via the same `admitSubmission` idempotency the other modes use. Arms an
+   * in-process flush timer for the window; `Session.sweepOnce` additionally
+   * flushes any window whose deadline has already passed (covers a deadline
+   * elapsing while the process was down between the timer arming and firing).
+   */
+  private async submitCollect(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    const store = this.session.providers.store;
+    const windowMs = this.session.options.collectWindowMs ?? 5000;
+    const base = this.buildQueueItem(content, {
+      dispatchId: opts.dispatchId,
+      author: opts.author,
+      channel: opts.channel,
+      replyTarget: opts.replyTarget,
+      model: opts.model,
+      role: opts.role,
+      metadata: opts.metadata,
+    });
+    const deadline = base.createdAt + windowMs;
+    const item: QueueItem = {
+      ...base,
+      status: "collecting",
+      metadata: { ...(base.metadata ?? {}), collectDeadline: deadline },
+    };
+    const { item: admittedItem, admitted: wasAdmitted } = await store.admitSubmission(
+      this.session.id,
+      this.id,
+      item,
+    );
+    await this.emitQueueState();
+    if (wasAdmitted) {
+      this.armCollectTimer(
+        typeof admittedItem.metadata?.collectDeadline === "number"
+          ? admittedItem.metadata.collectDeadline
+          : deadline,
+      );
+    }
+    return {
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: admittedItem.id,
+      status: receiptStatus(admittedItem.status),
+    };
+  }
+
+  private armCollectTimer(deadline: number): void {
+    if (this.collectTimer) return; // window already open; flush reads all live constituents when it fires
+    const delay = Math.max(0, deadline - Date.now());
+    const timer = setTimeout(() => {
+      this.collectTimer = null;
+      void this.flushCollectWindow();
+    }, delay);
+    timer.unref?.();
+    this.collectTimer = timer;
+  }
+
+  /**
+   * Session-sweep hook (Task 4 design point 2): flush a collect window whose
+   * deadline has already passed even if no in-process timer is live for it
+   * (e.g. the timer never got armed this process, or restart — reconciliation
+   * proper is Task 5, this is just the safety net the sweep owns).
+   */
+  async checkCollectDeadline(): Promise<void> {
+    const store = this.session.providers.store;
+    const items = await store.listUnsettledSubmissions(this.session.id);
+    const collecting = items.filter((i) => i.threadId === this.id && i.status === "collecting");
+    if (collecting.length === 0) return;
+    const now = Date.now();
+    const earliestDeadline = Math.min(
+      ...collecting.map((i) =>
+        typeof i.metadata?.collectDeadline === "number" ? i.metadata.collectDeadline : now,
+      ),
+    );
+    if (earliestDeadline <= now) {
+      await this.flushCollectWindow();
+    }
+  }
+
+  /**
+   * Flush the collect window: merge every currently-collecting item of this
+   * thread (oldest-first, numbered-concatenation content — the same merge
+   * shape the legacy in-memory `flushCollectBuffer` used) into one durable
+   * item, settle each constituent `merged` pointing at it, then kick. Guarded
+   * against the in-process timer and the session sweep both firing for the
+   * same window (only the synchronous prefix before the first await runs
+   * unconditionally, so the flag correctly serializes the two triggers).
+   */
+  private async flushCollectWindow(): Promise<void> {
+    if (this.flushingCollect) return;
+    this.flushingCollect = true;
+    try {
+      if (this.collectTimer) {
+        clearTimeout(this.collectTimer);
+        this.collectTimer = null;
+      }
+      const store = this.session.providers.store;
+      const items = await store.listUnsettledSubmissions(this.session.id);
+      const collecting = items
+        .filter((i) => i.threadId === this.id && i.status === "collecting")
+        .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (collecting.length === 0) return;
+
+      const mergedContent = collecting
+        .map((it, i) => `[${i + 1}] ${promptText(it.content)}`)
+        .join("\n\n");
+      const merged = this.buildQueueItem(mergedContent, {
+        author: collecting[0].author,
+        channel: collecting[0].channel,
+        replyTarget: collecting[0].replyTarget,
+        model: collecting[0].model,
+        metadata: { collect: { constituentIds: collecting.map((i) => i.id) } },
+      });
+      const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
+      for (const constituent of collecting) {
+        await store.settleUnclaimed(
+          this.session.id,
+          this.id,
+          constituent.id,
+          { outcome: "merged" },
+          { mergedIntoItemId: admittedMerged.id },
+        );
+      }
+      await this.emitQueueState();
+      void this.kick();
+    } finally {
+      this.flushingCollect = false;
+    }
   }
 
   private buildQueueItem(
@@ -303,6 +484,10 @@ export class Thread {
 
   async abort(): Promise<void> {
     this.aborted = true;
+    if (this.collectTimer) {
+      clearTimeout(this.collectTimer);
+      this.collectTimer = null;
+    }
     const store = this.session.providers.store;
     // Durable intent first: stamps abortRequestedAt on unsettled items so the
     // in-flight turn's settlement records `aborted`, and so a crash mid-abort
