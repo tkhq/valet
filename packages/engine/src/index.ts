@@ -21,6 +21,7 @@ export { Thread } from "./thread.js";
 export {
   InMemoryBlobStore,
   InMemoryEventBus,
+  InMemoryEventStream,
   InMemoryCredentialStore,
   InMemorySessionStore,
 } from "./providers/in-memory/index.js";

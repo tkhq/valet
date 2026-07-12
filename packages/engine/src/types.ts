@@ -612,10 +612,20 @@ export type EngineEvent =
 export interface BusEvent {
   sessionId: string;
   threadId?: string;
+  /** The submission whose turn produced this event. Drives retention/truncation. */
+  queueItemId?: string;
   userId?: string;
   event: EngineEvent;
   timestamp: number;
 }
+
+/** Durable, offset-addressed event. Offset is 16-digit zero-padded decimal, monotonic per session. */
+export interface StoredBusEvent extends BusEvent {
+  offset: string;
+}
+
+/** What live subscribers receive: durable events carry offset, live-only deltas don't. */
+export type DeliveredBusEvent = BusEvent & { offset?: string };
 
 export type Unsubscribe = () => void;
 
@@ -628,6 +638,28 @@ export interface EventFilter {
   sessionId?: string;
   userId?: string;
   eventTypes?: string[];
+}
+
+export interface EventStream {
+  /**
+   * Durably append and fan out to live subscribers. `eventKey` is unique per
+   * session: an append whose eventKey already exists is a no-op returning the
+   * original offset (appendOnce).
+   */
+  append(event: BusEvent, eventKey: string): Promise<{ offset: string }>;
+  /** Read durable events with offset > fromOffset (exclusive), in offset order. */
+  read(
+    sessionId: string,
+    opts?: { fromOffset?: string; limit?: number },
+  ): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
+  /** Live fan-out. Durable events are delivered AFTER their append commits, in offset order per session. */
+  subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe;
+  /** Live-only fan-out for text_delta: no append, no offset. */
+  publishEphemeral(event: BusEvent): void;
+  /** Delete durable events whose queueItemId is in the list. Returns deleted count. */
+  prune(sessionId: string, queueItemIds: string[]): Promise<number>;
+  /** Drop the session's entire log (called from deleteSession paths / tests). */
+  deleteSession(sessionId: string): Promise<void>;
 }
 
 // ── Session store ──────────────────────────────────────────────────
