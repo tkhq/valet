@@ -47,6 +47,14 @@ describe("engine: single-thread happy path", () => {
     expect(messages[0]).toMatchObject({ role: "user", content: "say hi" });
     expect(messages[1]).toMatchObject({ role: "assistant", content: "hello, world" });
 
+    // Transcript↔submission linkage: both entries carry the turn's queueItemId,
+    // and the final assistant entry records stopReason end_turn.
+    expect(messages[0]).toMatchObject({ queueItemId: receipt.queueItemId });
+    expect(messages[1]).toMatchObject({
+      queueItemId: receipt.queueItemId,
+      stopReason: "end_turn",
+    });
+
     // Bus emitted the lifecycle events
     const types = events.map((e) => e.event.type);
     expect(types).toContain("thread_start");
@@ -116,6 +124,20 @@ describe("engine: single-thread happy path", () => {
     expect(typeof resultObj.text).toBe("string");
     expect((resultObj.text as string).length).toBeGreaterThan(0);
     expect(resultObj.text).toContain("/tmp/note.txt");
+
+    // Linkage: the user entry, the tool_call-bearing assistant entry, and the
+    // final assistant entry all carry this turn's queueItemId — this is what
+    // awaitResult / reconciliation compute over.
+    const userEntry = entries.find((e) => e.type === "message" && e.role === "user");
+    expect(userEntry?.queueItemId).toBe(receipt.queueItemId);
+    expect(assistant.queueItemId).toBe(receipt.queueItemId);
+    const finalAssistant = entries
+      .filter((e) => e.type === "message" && e.role === "assistant")
+      .at(-1);
+    expect(finalAssistant?.queueItemId).toBe(receipt.queueItemId);
+    if (finalAssistant?.type === "message") {
+      expect(finalAssistant.stopReason).toBe("end_turn");
+    }
 
     faux.unregister();
   });

@@ -183,6 +183,8 @@ export interface PromptOptions {
   role?: string;
   resultSchema?: TSchema;
   metadata?: Record<string, unknown>;
+  /** Idempotent admission key. Re-submitting the same dispatchId returns the existing submission. */
+  dispatchId?: string;
 }
 
 export interface PromptReceipt {
@@ -583,7 +585,14 @@ export type EngineEvent =
       gateId: string;
       reason: DecisionWithdrawReason;
     }
-  | { type: "model_switched"; threadId: string; fromModel: string; toModel: string; reason: string };
+  | { type: "model_switched"; threadId: string; fromModel: string; toModel: string; reason: string }
+  | {
+      type: "submission_settled";
+      sessionId: string;
+      threadId: string;
+      queueItemId: string;
+      outcome: SubmissionOutcome;
+    };
 
 export interface BusEvent {
   sessionId: string;

@@ -254,6 +254,8 @@ export function busEventToWire(ev: BusEvent): WireEventDraft[] {
     case "compaction_end":
     case "task_start":
     case "task_end":
+    // submission_settled is consumed in-process by awaitResult; no wire mapping.
+    case "submission_settled":
       return [];
   }
 }

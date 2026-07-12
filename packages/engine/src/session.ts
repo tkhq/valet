@@ -34,12 +34,21 @@ export class Session {
   readonly options: CreateSessionOptions;
   readonly sandbox: Sandbox;
   readonly builtinTools: ToolDef[] = builtinTools;
+  /**
+   * Opaque per-instance owner id for lease ownership. Claims taken by this
+   * running Session carry it; `renewLeases` extends only leases we still own,
+   * and a replaced attempt (reconciliation, Task 5) changes the owner so our
+   * heartbeat stops touching it.
+   */
+  readonly ownerId = uid("owner");
   /** Indexed copies of options.roles / options.skills for fast lookup. */
   readonly roles = new Map<string, RoleSpec>();
   readonly skills = new Map<string, SkillSource>();
   private threads = new Map<string, Thread>();
   private threadsByKey = new Map<string, Thread>();
   private destroyed = false;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(id: string, options: CreateSessionOptions, providers: ProviderBundle, sandbox: Sandbox) {
     this.id = id;
@@ -48,6 +57,53 @@ export class Session {
     this.sandbox = sandbox;
     for (const role of options.roles ?? []) this.roles.set(role.name, role);
     for (const skill of options.skills ?? []) this.skills.set(skill.name, skill);
+  }
+
+  // ── durable-execution timers ────────────────────────────────────
+
+  /**
+   * Lazily start the heartbeat (10s lease renewal) and sweep (5s claim retry)
+   * intervals. Called by a thread on its first successful claim so idle
+   * sessions carry no timers. Both intervals are `unref()`d so they never keep
+   * the process alive, and are cleared in `destroy()`.
+   */
+  ensureTimers(): void {
+    if (this.destroyed) return;
+    if (this.heartbeatTimer === null) {
+      this.heartbeatTimer = setInterval(() => {
+        void this.heartbeatOnce();
+      }, 10_000);
+      this.heartbeatTimer.unref?.();
+    }
+    if (this.sweepTimer === null) {
+      this.sweepTimer = setInterval(() => {
+        void this.sweepOnce();
+      }, 5_000);
+      this.sweepTimer.unref?.();
+    }
+  }
+
+  /** Renew leases for every submission this instance is currently running. */
+  async heartbeatOnce(): Promise<void> {
+    const ids = this.runningItemIds();
+    if (ids.length === 0) return;
+    await this.providers.store.renewLeases(this.ownerId, ids);
+  }
+
+  /** One sweep pass: re-kick every thread so missed wakeups can't strand queued work. */
+  async sweepOnce(): Promise<void> {
+    for (const t of this.threads.values()) {
+      await t.kick();
+    }
+  }
+
+  private runningItemIds(): string[] {
+    const ids: string[] = [];
+    for (const t of this.threads.values()) {
+      const id = t.runningItemId();
+      if (id) ids.push(id);
+    }
+    return ids;
   }
 
   /**
@@ -204,6 +260,14 @@ export class Session {
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.sweepTimer !== null) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
     await Promise.all([...this.threads.values()].map((t) => t.abort()));
     if (this.sandbox.destroy) await this.sandbox.destroy();
     await this.providers.store.deleteSession(this.id);

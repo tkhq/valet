@@ -8,6 +8,8 @@ import type { Session } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import { fromRequest, GateManager, shouldShortCircuit } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
+import { deriveQueueState } from "./submission.js";
+import { StaleAttemptError } from "./errors.js";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -28,7 +30,6 @@ import type {
   DecisionGateRequest,
   DecisionResolution,
   DecisionWithdrawReason,
-  EngineEvent,
   MessagePart,
   MessageEntry,
   MessageQuery,
@@ -38,22 +39,16 @@ import type {
   PromptReceipt,
   QueueItem,
   QueueMode,
-  QueueState,
-  QueueStatus,
   SessionEntry,
   SkillInvokeOptions,
+  SubmissionOutcome,
   SuspendedTurnState,
   ThreadData,
   ToolContext,
   ToolDef,
+  WriteFence,
 } from "./types.js";
 
-interface PendingResolver {
-  resolve: () => void;
-  reject: (err: unknown) => void;
-}
-
-const DEFAULT_COLLECT_WINDOW_MS = 5000;
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 
@@ -75,13 +70,25 @@ export class Thread {
   readonly key: string;
   private readonly session: Session;
   private agent: Agent;
-  private status: QueueStatus = "idle";
-  private pending: QueueItem[] = [];
-  private collectBuffer: QueueItem[] = [];
-  private collectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Persisted pause flag — the only stored piece of queue state. */
+  private paused = false;
   private blockedGateId: string | undefined;
-  private activeItem: QueueItem | null = null;
-  private activeStartedResolver: PendingResolver | null = null;
+  /**
+   * The submission currently being run by this instance (claimed → settled).
+   * Set by the claim loop, held across the whole turn (including a gate block),
+   * cleared when the turn settles. Replaces the old in-memory `activeItem`.
+   */
+  private runningItem: QueueItem | null = null;
+  /** Write fence for the claimed turn — `{ itemId, attemptId }`. Every store write during the turn carries it. */
+  private fence: WriteFence | undefined;
+  /**
+   * Set when a fenced write throws StaleAttemptError mid-turn: a successor owns
+   * the item, so the turn aborts and skips settlement (zombie self-fencing).
+   */
+  private staleFenceDetected = false;
+  /** Serializes the claim loop; a second `kick()` while one is running joins the in-flight tail. */
+  private kicking = false;
+  private kickTail: Promise<void> = Promise.resolve();
   private gates = new GateManager();
   private mode: QueueMode;
   private aborted = false;
@@ -127,6 +134,7 @@ export class Thread {
     this.key = data.key;
     this.mode = data.queueMode;
     this.modelOverride = data.model;
+    this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
     this.agent = this.buildAgent();
   }
@@ -197,66 +205,64 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
-    const item: QueueItem = {
-      id: uid("q"),
-      threadId: this.id,
-      content,
+    const item = this.buildQueueItem(content, {
+      dispatchId: opts.dispatchId,
       author: opts.author,
       channel: opts.channel,
       replyTarget: opts.replyTarget,
       model: opts.model,
       role: opts.role,
       metadata: opts.metadata,
-      status: "queued",
-      attemptCount: 0,
-      maxAttempts: 10,
-      timeoutAt: Date.now() + 3_600_000,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    const mode = opts.queueMode ?? this.mode;
+    });
 
-    if (mode === "steer") {
-      // Withdraw any pending gate, abort the active run, clear the queue.
-      await this.steer(item);
-      return {
-        sessionId: this.session.id,
-        threadId: this.id,
-        queueItemId: item.id,
-        status: this.status === "running" ? "running" : "queued",
-      };
-    }
-
-    if (mode === "collect") {
-      this.collectBuffer.push(item);
-      if (this.collectTimer === null) {
-        const windowMs = this.session.options.collectWindowMs ?? DEFAULT_COLLECT_WINDOW_MS;
-        this.collectTimer = setTimeout(() => {
-          this.flushCollectBuffer().catch((e) =>
-            this.emitError("collect_flush_failed", String(e)),
-          );
-        }, windowMs);
-        const t = this.collectTimer as { unref?: () => void };
-        if (typeof t.unref === "function") t.unref();
-      }
-      void this.persistQueueState();
-      return {
-        sessionId: this.session.id,
-        threadId: this.id,
-        queueItemId: item.id,
-        status: "queued",
-      };
-    }
-
-    // default: followup
-    this.pending.push(item);
-    void this.persistQueueState();
-    void this.tickQueue();
+    // Steer/collect are routed to plain durable admission for now; their real
+    // transactional supersession / merge semantics land in Task 4. The mode is
+    // still recorded so Task 4 can branch on it without a signature change.
+    const { item: admitted } = await this.session.providers.store.admitSubmission(
+      this.session.id,
+      this.id,
+      item,
+    );
+    await this.emitQueueState();
+    void this.kick();
     return {
       sessionId: this.session.id,
       threadId: this.id,
-      queueItemId: item.id,
-      status: this.status === "idle" ? "running" : "queued",
+      queueItemId: admitted.id,
+      status: receiptStatus(admitted.status),
+    };
+  }
+
+  private buildQueueItem(
+    content: PromptContent,
+    fields: {
+      dispatchId?: string;
+      author?: PromptAuthor;
+      channel?: QueueItem["channel"];
+      replyTarget?: QueueItem["replyTarget"];
+      model?: string;
+      role?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ): QueueItem {
+    const now = Date.now();
+    return {
+      id: uid("q"),
+      threadId: this.id,
+      dispatchId: fields.dispatchId,
+      content,
+      author: fields.author,
+      channel: fields.channel,
+      replyTarget: fields.replyTarget,
+      model: fields.model,
+      role: fields.role,
+      metadata: fields.metadata,
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: now + 3_600_000,
+      createdAt: now,
+      updatedAt: now,
     };
   }
 
@@ -297,36 +303,45 @@ export class Thread {
 
   async abort(): Promise<void> {
     this.aborted = true;
+    const store = this.session.providers.store;
+    // Durable intent first: stamps abortRequestedAt on unsettled items so the
+    // in-flight turn's settlement records `aborted`, and so a crash mid-abort
+    // still reconciles to aborted.
+    await store.requestAbort(this.session.id, this.id);
     // Withdraw any pending gates owned by this thread.
     for (const g of this.pendingDecisionGates()) {
       this.withdrawDecision(g.id, "abort");
     }
-    this.pending = [];
-    this.collectBuffer = [];
-    if (this.collectTimer) {
-      clearTimeout(this.collectTimer);
-      this.collectTimer = null;
-    }
+    // Interrupt the in-flight turn (if any) and let the claim loop drain — its
+    // settlement path records the running item `aborted`.
     if (this.agent.state.isStreaming) {
       this.agent.abort();
       await this.agent.waitForIdle();
     }
-    this.activeItem = null;
-    this.setStatus("idle");
-    void this.persistQueueState();
+    await this.kickTail;
+    // Settle any never-claimed (queued/collecting) items `aborted`.
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    for (const it of unsettled) {
+      if (it.threadId !== this.id) continue;
+      if (it.status === "queued" || it.status === "collecting") {
+        await store.settleUnclaimed(this.session.id, this.id, it.id, { outcome: "aborted" });
+      }
+    }
+    await this.emitQueueState();
   }
 
   async pause(): Promise<void> {
-    this.setStatus("paused");
-    void this.persistQueueState();
+    this.paused = true;
+    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
+    await this.emitQueueState();
   }
 
   async resume(): Promise<void> {
-    if (this.status === "paused") {
-      this.setStatus("idle");
-      void this.persistQueueState();
-      void this.tickQueue();
-    }
+    if (!this.paused) return;
+    this.paused = false;
+    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
+    await this.emitQueueState();
+    void this.kick();
   }
 
   /**
@@ -366,8 +381,8 @@ export class Thread {
     // item — so we must mirror the original queueItemId here, otherwise
     // the short-circuit won't match and the tool will try to open a
     // brand-new gate.
-    const priorActive = this.activeItem;
-    this.activeItem = {
+    const priorActive = this.runningItem;
+    this.runningItem = {
       id: suspended.queueItemId,
       threadId: this.id,
       content: "",
@@ -387,14 +402,14 @@ export class Thread {
         fakeAbort.signal,
       );
     } catch (err) {
-      this.activeItem = priorActive;
+      this.runningItem = priorActive;
       this.emitError(
         "replay_tool_failed",
         err instanceof Error ? err.message : String(err),
       );
       return;
     }
-    this.activeItem = priorActive;
+    this.runningItem = priorActive;
     this.agent.state.messages = [
       ...this.agent.state.messages,
       {
@@ -408,7 +423,7 @@ export class Thread {
       },
     ];
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id);
-    this.setStatus("running");
+    this.blockedGateId = undefined;
     try {
       await this.agent.continue();
       await this.agent.waitForIdle();
@@ -418,7 +433,7 @@ export class Thread {
         err instanceof Error ? err.message : String(err),
       );
     }
-    if (this.readStatus() === "running") this.setStatus("idle");
+    await this.emitQueueState();
   }
 
   /**
@@ -427,7 +442,6 @@ export class Thread {
    */
   armPendingGateForRestart(gate: DecisionGate, suspended: SuspendedTurnState): void {
     this.blockedGateId = gate.id;
-    this.setStatus("blocked_on_decision_gate");
     this.gates
       .register(gate, () => {
         // expiry handler: replay never runs for an expired gate
@@ -467,9 +481,10 @@ export class Thread {
       id: this.id,
       sessionId: this.session.id,
       key: this.key,
-      status: this.status === "paused" ? "paused" : "active",
+      status: this.paused ? "paused" : "active",
       activeLeafEntryId: undefined,
       queueMode: this.mode,
+      paused: this.paused,
       model: this.modelOverride,
       summary: undefined,
       createdAt: this.threadCreatedAt,
@@ -533,88 +548,167 @@ export class Thread {
 
   // ── internals ───────────────────────────────────────────────────
 
-  private async steer(item: QueueItem): Promise<void> {
-    // Withdraw any pending gate from the superseded turn first.
-    const pendingGate = this.blockedGateId;
-    if (pendingGate) {
-      this.withdrawDecision(pendingGate, "steer");
-      this.blockedGateId = undefined;
-    }
-    if (this.agent.state.isStreaming) {
-      this.agent.abort();
-      await this.agent.waitForIdle();
-    }
-    this.pending = [];
-    this.collectBuffer = [];
-    if (this.collectTimer) {
-      clearTimeout(this.collectTimer);
-      this.collectTimer = null;
-    }
-    this.pending.push(item);
-    void this.persistQueueState();
-    void this.tickQueue();
-  }
-
-  private async flushCollectBuffer(): Promise<void> {
-    if (this.collectTimer) {
-      clearTimeout(this.collectTimer);
-      this.collectTimer = null;
-    }
-    if (this.collectBuffer.length === 0) return;
-    const items = this.collectBuffer;
-    this.collectBuffer = [];
-
-    const merged: QueueItem = {
-      id: uid("q-merged"),
-      threadId: this.id,
-      content: items.map((it, i) => `[${i + 1}] ${promptText(it.content)}`).join("\n\n"),
-      author: items[0].author,
-      channel: items[0].channel,
-      replyTarget: items[0].replyTarget,
-      model: items[0].model,
-      metadata: { mergedFrom: items.map((i) => i.id) },
-      status: "queued",
-      attemptCount: 0,
-      maxAttempts: 10,
-      timeoutAt: Date.now() + 3_600_000,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    this.pending.push(merged);
-    void this.persistQueueState();
-    void this.tickQueue();
-  }
-
-  private async tickQueue(): Promise<void> {
-    if (this.status === "paused") return;
-    if (this.status === "running" || this.status === "blocked_on_decision_gate") return;
-    const next = this.pending.shift();
-    if (!next) {
-      this.setStatus("idle");
-      return;
-    }
-    this.activeItem = next;
-    this.setStatus("running");
-    void this.persistQueueState();
-    try {
-      await this.runItem(next);
-    } catch (err) {
-      this.emitError("run_failed", String(err));
-    }
-    this.activeItem = null;
-    if (this.readStatus() === "running") this.setStatus("idle");
-    void this.persistQueueState();
-    if (this.pending.length > 0 && this.readStatus() !== "paused") void this.tickQueue();
+  /** Current running submission id (for the session heartbeat's lease renewal). */
+  runningItemId(): string | undefined {
+    return this.runningItem?.id;
   }
 
   /**
-   * Reads `this.status` through a method call to defeat TS's control-flow
-   * narrowing across awaits — `setStatus("running")` makes TS think the
-   * property type is the narrow literal forever, even after async work that
-   * could call back into setStatus with other values.
+   * The claim loop. Drives the thread's durable queue: repeatedly claim the
+   * thread's runnable head from the store, run the turn under a write fence,
+   * settle two-phase, and loop until nothing is claimable. Serialized — a
+   * second call while one is in flight joins the same tail (the store's
+   * head-blocking makes a redundant claim a harmless null).
    */
-  private readStatus(): QueueStatus {
-    return this.status;
+  async kick(): Promise<void> {
+    if (this.kicking) return this.kickTail;
+    this.kicking = true;
+    this.kickTail = this.kickLoop().finally(() => {
+      this.kicking = false;
+    });
+    return this.kickTail;
+  }
+
+  private async kickLoop(): Promise<void> {
+    const store = this.session.providers.store;
+    while (true) {
+      if (this.paused) return;
+      if (this.runningItem) return;
+      const head = await this.runnableHead();
+      if (!head) return;
+
+      // An abort was requested while this item was still queued: settle it
+      // `aborted` without ever running it, rather than claiming it.
+      if (head.abortRequestedAt !== undefined) {
+        await store.settleUnclaimed(this.session.id, this.id, head.id, { outcome: "aborted" });
+        await this.emitQueueState();
+        continue;
+      }
+
+      const attemptId = uid("att");
+      const claimed = await store.claimSubmission({
+        sessionId: this.session.id,
+        threadId: this.id,
+        itemId: head.id,
+        attemptId,
+        ownerId: this.session.ownerId,
+      });
+      if (!claimed) return; // lost the race or head is not actually claimable
+
+      await store.insertAttemptMarker(claimed.id, attemptId);
+      this.runningItem = claimed;
+      this.fence = { itemId: claimed.id, attemptId };
+      this.staleFenceDetected = false;
+      this.session.ensureTimers();
+      await this.emitQueueState();
+
+      try {
+        await this.runItem(claimed);
+      } catch (err) {
+        this.emitError("run_failed", err instanceof Error ? err.message : String(err));
+      }
+      await this.settleTurn(claimed);
+      this.runningItem = null;
+      this.fence = undefined;
+    }
+  }
+
+  /** The thread's oldest queued, non-superseded submission — the claimable head. */
+  private async runnableHead(): Promise<QueueItem | undefined> {
+    const all = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
+    return all
+      .filter((i) => i.threadId === this.id && i.status === "queued" && !i.supersededByItemId)
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+  }
+
+  /**
+   * Two-phase settlement for a claimed turn. Skipped when the turn is still
+   * blocked on a decision gate (the claim is retained), or when a stale fence
+   * signalled that a successor already owns the item.
+   */
+  private async settleTurn(item: QueueItem): Promise<void> {
+    if (this.staleFenceDetected) {
+      // A successor owns this item; do not settle. (Zombie self-fencing.)
+      return;
+    }
+    const fence = this.fence;
+    if (!fence) return;
+    const store = this.session.providers.store;
+    const current = await store.getQueueItem(this.session.id, item.id);
+    if (!current) return;
+    // Gate-blocked turns do not settle — the claim is retained until the gate
+    // resolves and the turn actually ends.
+    if (current.status === "blocked_on_decision_gate") return;
+    if (current.status === "settled" || current.status === "terminalizing") return;
+
+    const outcome = this.decideTurnOutcome(current);
+    try {
+      await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
+      await this.repairRestState(item, fence);
+      await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
+    } catch (err) {
+      if (err instanceof StaleAttemptError) {
+        this.staleFenceDetected = true;
+        return;
+      }
+      throw err;
+    }
+    await store.deleteAttemptMarker(item.id, fence.attemptId);
+    await this.session.emit({
+      type: "submission_settled",
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: item.id,
+      outcome,
+    });
+    await this.emitQueueState();
+  }
+
+  /** Map the turn's terminal state to a SubmissionOutcome. */
+  private decideTurnOutcome(current: QueueItem): SubmissionOutcome {
+    const last = this.agent.state.messages[this.agent.state.messages.length - 1];
+    const stop = last && last.role === "assistant" ? last.stopReason : undefined;
+    if (current.supersededByItemId) return { outcome: "superseded" };
+    if (current.abortRequestedAt !== undefined || stop === "aborted") return { outcome: "aborted" };
+    if (stop === "error") {
+      const errText = last && last.role === "assistant" ? last.errorMessage : undefined;
+      return { outcome: "failed", error: errText ?? "turn ended with an error" };
+    }
+    return { outcome: "completed" };
+  }
+
+  /**
+   * Rest-state repair (spec, Terminalization): any trailing assistant tool_call
+   * part still marked `running` when the turn ends (interrupted mid-tool) is
+   * rewritten to an error part — never re-executed. Fenced.
+   */
+  private async repairRestState(item: QueueItem, fence: WriteFence): Promise<void> {
+    const store = this.session.providers.store;
+    const entries = await store.getEntries(this.session.id, this.id);
+    for (const e of entries) {
+      if (e.type !== "message" || e.role !== "assistant") continue;
+      if (e.queueItemId !== item.id) continue;
+      const parts = e.parts;
+      if (!parts) continue;
+      let mutated = false;
+      for (const p of parts) {
+        if (p.type === "tool_call" && p.status === "running") {
+          p.status = "error";
+          p.error = "interrupted";
+          mutated = true;
+        }
+      }
+      if (mutated) {
+        await store.updateEntry(this.session.id, this.id, e, fence);
+      }
+    }
+  }
+
+  /** Emit the derived `queue_state` event for this thread from durable rows. */
+  private async emitQueueState(): Promise<void> {
+    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
+    const state = deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
+    await this.session.emit({ type: "queue_state", threadId: this.id, state });
   }
 
   private async runItem(item: QueueItem): Promise<void> {
@@ -638,9 +732,12 @@ export class Thread {
       author: item.author,
       channel: item.channel,
       metadata: item.metadata,
+      queueItemId: item.id,
       createdAt: Date.now(),
     };
-    await this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry]);
+    await this.fencedWrite(() =>
+      this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
+    );
 
     // Build the AgentTool list with closures over this turn's ToolContext.
     this.agent.state.tools = this.buildTools();
@@ -881,23 +978,16 @@ export class Thread {
 
     // Step 6: auto-continue (proactive only). Inject a synthetic user
     // message tagged with metadata.compaction_continue so client UIs can
-    // hide it. Pushed onto the thread's queue so the agent picks it up on
-    // the next tickQueue cycle (which runs after runItem returns).
+    // hide it. Admitted as a durable submission so the claim loop picks it up
+    // after the current turn settles.
     if (opts.mode === "proactive" && cfg?.autoContinue !== false) {
-      const followUp: QueueItem = {
-        id: uid("q"),
-        threadId: this.id,
-        content: AUTO_CONTINUE_PROMPT,
+      // Durable admission: the claim loop picks this up after the current turn
+      // settles. metadata flags let client UIs hide the synthetic continuation.
+      const followUp = this.buildQueueItem(AUTO_CONTINUE_PROMPT, {
         metadata: { compaction_continue: true, synthetic: true },
-        status: "queued",
-        attemptCount: 0,
-        maxAttempts: 10,
-        timeoutAt: Date.now() + 3_600_000,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      this.pending.unshift(followUp);
-      void this.persistQueueState();
+      });
+      await store.admitSubmission(session.id, this.id, followUp);
+      await this.emitQueueState();
     }
 
     // Cool-down: skip the next proactive check so the auto-continue turn
@@ -978,7 +1068,7 @@ export class Thread {
         const gateCtx = {
           sessionId: session.id,
           threadId: this.id,
-          queueItemId: this.activeItem?.id ?? "",
+          queueItemId: this.runningItem?.id ?? "",
           resumeKey: req.resumeKey,
         };
         // Restart-safe replay: if running with a suspendedDecision and the
@@ -991,6 +1081,10 @@ export class Thread {
           this.suspendedDecisionForReplay = undefined; // one-shot
           return sc.resolution;
         }
+        // Fence captured for the whole suspend/resume cycle of this claimed
+        // turn. Undefined only on the replay path, which short-circuits above.
+        const fence = this.fence;
+        const runningItemId = this.runningItem?.id;
         const gate = fromRequest(req, gateCtx);
         await session.providers.store.saveDecisionGate(session.id, this.id, gate);
         const gateEntry: SessionEntry = {
@@ -1000,28 +1094,44 @@ export class Thread {
           parentId: null,
           type: "decision_gate",
           gate,
+          queueItemId: runningItemId,
           createdAt: Date.now(),
         };
-        await session.providers.store.appendEntries(session.id, this.id, [gateEntry]);
+        await session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence);
 
         // checkpoint the suspended turn — use real toolName + toolArgs so
         // restoreSession can replay this exact tool call.
-        await session.providers.store.saveSuspendedTurn(session.id, this.id, {
-          sessionId: session.id,
-          threadId: this.id,
-          queueItemId: this.activeItem?.id ?? "",
-          gateId: gate.id,
-          model: session.options.model.id,
-          toolCallId,
-          toolName,
-          toolArgs,
-          resumeKey: req.resumeKey ?? gate.id,
-          attempt: 1,
-          createdAt: Date.now(),
-        });
+        await session.providers.store.saveSuspendedTurn(
+          session.id,
+          this.id,
+          {
+            sessionId: session.id,
+            threadId: this.id,
+            queueItemId: runningItemId ?? "",
+            gateId: gate.id,
+            model: session.options.model.id,
+            toolCallId,
+            toolName,
+            toolArgs,
+            resumeKey: req.resumeKey ?? gate.id,
+            attempt: 1,
+            createdAt: Date.now(),
+          },
+          fence,
+        );
 
+        // Durable block flag under the fence (running → blocked). Gate-blocked
+        // turns retain their claim and do not settle until the gate resolves.
         this.blockedGateId = gate.id;
-        this.setStatus("blocked_on_decision_gate");
+        if (fence && runningItemId) {
+          await session.providers.store.setSubmissionBlocked(
+            session.id,
+            this.id,
+            runningItemId,
+            true,
+            fence,
+          );
+        }
         await session.emit({
           type: "status",
           threadId: this.id,
@@ -1048,8 +1158,16 @@ export class Thread {
             resolvedAt: new Date(resolution.resolvedAt).toISOString(),
           });
           this.blockedGateId = undefined;
-          this.setStatus("running");
-          await session.providers.store.clearSuspendedTurn(session.id, this.id);
+          if (fence && runningItemId) {
+            await session.providers.store.setSubmissionBlocked(
+              session.id,
+              this.id,
+              runningItemId,
+              false,
+              fence,
+            );
+          }
+          await session.providers.store.clearSuspendedTurn(session.id, this.id, fence);
           return resolution;
         } catch (err) {
           // Withdrawn or expired: persist the terminal status, then propagate.
@@ -1065,7 +1183,18 @@ export class Thread {
             withdrawnReason: reason,
           });
           this.blockedGateId = undefined;
-          await session.providers.store.clearSuspendedTurn(session.id, this.id);
+          // Flip the durable block back to running so the turn can end and
+          // settle normally (the model sees the gate's terminal state).
+          if (fence && runningItemId) {
+            await session.providers.store.setSubmissionBlocked(
+              session.id,
+              this.id,
+              runningItemId,
+              false,
+              fence,
+            );
+          }
+          await session.providers.store.clearSuspendedTurn(session.id, this.id, fence);
           throw err;
         }
       },
@@ -1147,6 +1276,14 @@ export class Thread {
           if (text) parts.push({ type: "text", text });
           for (const p of this.currentAssistantParts) parts.push(p);
 
+          const stopReason: MessageEntry["stopReason"] | undefined =
+            event.message.stopReason === "aborted"
+              ? "abort"
+              : event.message.stopReason === "error"
+              ? "error"
+              : event.message.stopReason === "stop"
+              ? "end_turn"
+              : undefined; // toolUse (mid-turn) carries no stopReason
           const entry: MessageEntry = {
             id: this.currentAssistantMessageId,
             sessionId: this.session.id,
@@ -1157,9 +1294,13 @@ export class Thread {
             content: text,
             parts,
             model: event.message.model,
+            queueItemId: this.runningItem?.id,
+            stopReason,
             createdAt: Date.now(),
           };
-          await this.session.providers.store.appendEntries(this.session.id, this.id, [entry]);
+          await this.fencedWrite(() =>
+            this.session.providers.store.appendEntries(this.session.id, this.id, [entry], this.fence),
+          );
           // Hold a reference so tool_execution_end can re-persist as each
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).
@@ -1211,10 +1352,9 @@ export class Thread {
         // mutated. Without this, sqlite still has status="running" + no
         // result; on reload the chat shows tool cards stuck mid-execution.
         if (this.currentAssistantEntry) {
-          await this.session.providers.store.updateEntry(
-            this.session.id,
-            this.id,
-            this.currentAssistantEntry,
+          const entry = this.currentAssistantEntry;
+          await this.fencedWrite(() =>
+            this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
           );
         }
         await this.session.emit({
@@ -1265,21 +1405,23 @@ export class Thread {
     }
   }
 
-  private setStatus(status: QueueStatus): void {
-    this.status = status;
-  }
-
-  private async persistQueueState(): Promise<void> {
-    const state: QueueState = {
-      threadId: this.id,
-      mode: this.mode,
-      status: this.status,
-      activeItemId: this.activeItem?.id,
-      pending: [...this.pending],
-      collectBuffer: this.collectBuffer.length > 0 ? [...this.collectBuffer] : undefined,
-      blockedGateId: this.blockedGateId,
-    };
-    await this.session.emit({ type: "queue_state", threadId: this.id, state });
+  /**
+   * Run a fenced store write. A StaleAttemptError means a successor now owns
+   * the item: mark the turn stale (so settlement is skipped), abort the agent,
+   * and swallow — never rethrow to the user (zombie self-fencing signal).
+   */
+  private async fencedWrite(fn: () => Promise<void>): Promise<void> {
+    try {
+      await fn();
+    } catch (err) {
+      if (err instanceof StaleAttemptError) {
+        this.staleFenceDetected = true;
+        this.emitError("stale_fence", `turn superseded for item ${err.itemId}`);
+        if (this.agent.state.isStreaming) this.agent.abort();
+        return;
+      }
+      throw err;
+    }
   }
 
   private emitError(code: string, message: string): void {
@@ -1296,6 +1438,13 @@ export class Thread {
 function promptText(content: PromptContent): string {
   if (typeof content === "string") return content;
   return content.text ?? "";
+}
+
+/** Map a submission's live status onto the narrower PromptReceipt status. */
+function receiptStatus(status: QueueItem["status"]): PromptReceipt["status"] {
+  if (status === "running") return "running";
+  if (status === "blocked_on_decision_gate") return "blocked_on_decision_gate";
+  return "queued";
 }
 
 function textOf(message: AgentMessage): string {
