@@ -207,7 +207,12 @@ export class Thread {
       model: opts.model,
       role: opts.role,
       metadata: opts.metadata,
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: Date.now() + 3_600_000,
       createdAt: Date.now(),
+      updatedAt: Date.now(),
     };
     const mode = opts.queueMode ?? this.mode;
 
@@ -366,7 +371,12 @@ export class Thread {
       id: suspended.queueItemId,
       threadId: this.id,
       content: "",
+      status: "running",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: suspended.createdAt + 3_600_000,
       createdAt: suspended.createdAt,
+      updatedAt: Date.now(),
     };
     const fakeAbort = new AbortController();
     let toolResult;
@@ -563,7 +573,12 @@ export class Thread {
       replyTarget: items[0].replyTarget,
       model: items[0].model,
       metadata: { mergedFrom: items.map((i) => i.id) },
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: Date.now() + 3_600_000,
       createdAt: Date.now(),
+      updatedAt: Date.now(),
     };
     this.pending.push(merged);
     void this.persistQueueState();
@@ -874,7 +889,12 @@ export class Thread {
         threadId: this.id,
         content: AUTO_CONTINUE_PROMPT,
         metadata: { compaction_continue: true, synthetic: true },
+        status: "queued",
+        attemptCount: 0,
+        maxAttempts: 10,
+        timeoutAt: Date.now() + 3_600_000,
         createdAt: Date.now(),
+        updatedAt: Date.now(),
       };
       this.pending.unshift(followUp);
       void this.persistQueueState();
@@ -1259,7 +1279,6 @@ export class Thread {
       collectBuffer: this.collectBuffer.length > 0 ? [...this.collectBuffer] : undefined,
       blockedGateId: this.blockedGateId,
     };
-    await this.session.providers.store.saveQueueState(this.session.id, this.id, state);
     await this.session.emit({ type: "queue_state", threadId: this.id, state });
   }
 

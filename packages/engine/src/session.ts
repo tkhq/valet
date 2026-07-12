@@ -222,12 +222,14 @@ export class Session {
   async toData(): Promise<SessionData> {
     return {
       id: this.id,
+      owner: { type: "user", id: this.options.userId },
       userId: this.options.userId,
       orgId: this.options.orgId,
       workspace: this.options.workspace,
       purpose: this.options.purpose ?? "interactive",
       status: "running",
       sandboxId: this.sandbox.id,
+      parentThreadId: this.options.parentThreadId,
       model: this.options.model.id,
       createdAt: Date.now(),
       updatedAt: Date.now(),

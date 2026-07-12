@@ -28,8 +28,16 @@ export type SessionStatus =
   | "terminated"
   | "error";
 
+/** Ownership principal, shared with the application layer. Serialized `${type}:${id}`. */
+export interface Principal {
+  type: "user" | "team" | "org";
+  id: string;
+}
+
 export interface SessionData {
   id: string;
+  /** Who the session belongs to; access to team/org-owned sessions follows membership. */
+  owner: Principal;
   userId: string;
   orgId: string;
   workspace: string;
@@ -38,6 +46,7 @@ export interface SessionData {
   sandboxId?: string;
   snapshotId?: string;
   parentSessionId?: string;
+  parentThreadId?: string;
   /**
    * Persisted session-default model id (e.g. "claude-haiku-4-5" or
    * "anthropic/claude-opus-4-7"). Layered resolution at turn time:
@@ -61,6 +70,8 @@ export interface ThreadData {
   status: ThreadStatus;
   activeLeafEntryId?: string;
   queueMode: QueueMode;
+  /** Persisted pause flag — the only stored piece of queue state; everything else in QueueState derives from durable queue items. */
+  paused?: boolean;
   model?: string;
   summary?: string;
   metadata?: Record<string, unknown>;
@@ -78,9 +89,38 @@ export interface QueueState {
   blockedGateId?: string;
 }
 
+export interface WriteFence {
+  itemId: string;
+  attemptId: string;
+}
+
+export interface SubmissionClaim {
+  sessionId: string;
+  threadId: string;
+  itemId: string;
+  attemptId: string;
+  ownerId: string;
+  leaseDurationMs?: number; // default 30_000
+}
+
+export interface SubmissionOutcome {
+  outcome: "completed" | "failed" | "aborted" | "superseded" | "merged";
+  error?: string;
+}
+
+export type SubmissionStatus =
+  | "collecting"
+  | "queued"
+  | "running"
+  | "blocked_on_decision_gate"
+  | "terminalizing"
+  | "settled";
+
 export interface QueueItem {
   id: string;
   threadId: string;
+  /** Idempotent admission key. Unique per session when present. */
+  dispatchId?: string;
   content: PromptContent;
   author?: PromptAuthor;
   channel?: ChannelTarget;
@@ -89,7 +129,35 @@ export interface QueueItem {
   /** Role name to apply for this one prompt (system-prompt overlay + optional model override). */
   role?: string;
   metadata?: Record<string, unknown>;
+  // Durable execution lifecycle
+  status: SubmissionStatus;
+  outcome?: SubmissionOutcome;
+  supersededByItemId?: string;
+  mergedIntoItemId?: string;
+  attemptId?: string;
+  attemptCount: number; // starts 0; claim/replace set+increment
+  maxAttempts: number; // default 10
+  timeoutAt: number; // default createdAt + 3_600_000
+  abortRequestedAt?: number;
+  ownerId?: string;
+  leaseExpiresAt?: number;
   createdAt: number;
+  updatedAt: number;
+}
+
+export interface SubmissionResult {
+  queueItemId: string;
+  outcome: SubmissionOutcome["outcome"];
+  /** Content of the last persisted assistant entry carrying this queueItemId with stopReason 'end_turn'. */
+  text?: string;
+  output?: unknown; // Phase 5 (resultSchema) — always undefined in Phase 1
+  error?: string;
+}
+
+export interface AwaitResultOptions {
+  timeoutMs?: number;
+  resultSchema?: TSchema; // typed now, rejected until Phase 5
+  signal?: AbortSignal;
 }
 
 // ── Prompts ────────────────────────────────────────────────────────
@@ -133,6 +201,8 @@ export interface BaseEntry {
   parentId: string | null;
   createdAt: number;
   metadata?: Record<string, unknown>;
+  /** The submission that produced this entry — the transcript↔submission linkage. */
+  queueItemId?: string;
 }
 
 export type MessagePart =
@@ -160,6 +230,8 @@ export interface MessageEntry extends BaseEntry {
   author?: PromptAuthor;
   channel?: ChannelTarget;
   model?: string;
+  /** Persisted on the turn's final assistant entry. */
+  stopReason?: "end_turn" | "error" | "abort";
 }
 
 export interface CompactionEntry extends BaseEntry {
@@ -547,15 +619,26 @@ export interface ListOpts {
 export interface SessionStore {
   saveSession(session: SessionData): Promise<void>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
-  appendEntries(sessionId: string, threadId: string, entries: SessionEntry[]): Promise<void>;
+  // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
+  // fence is provided and does not name the item's current attempt.
+  appendEntries(
+    sessionId: string,
+    threadId: string,
+    entries: SessionEntry[],
+    fence?: WriteFence,
+  ): Promise<void>;
   /**
    * Replace an existing entry in place. Required for pruning during
    * compaction to persist tool-result elision; also useful for any
    * other in-place mutation. Throws NotFoundError if no entry with the
    * given id exists in (sessionId, threadId).
    */
-  updateEntry(sessionId: string, threadId: string, entry: SessionEntry): Promise<void>;
-  saveQueueState(sessionId: string, threadId: string, queue: QueueState): Promise<void>;
+  updateEntry(
+    sessionId: string,
+    threadId: string,
+    entry: SessionEntry,
+    fence?: WriteFence,
+  ): Promise<void>;
   saveDecisionGate(sessionId: string, threadId: string, gate: DecisionGate): Promise<void>;
   saveDecisionGateRef(
     sessionId: string,
@@ -573,14 +656,90 @@ export interface SessionStore {
     sessionId: string,
     threadId: string,
     suspended: SuspendedTurnState,
+    fence?: WriteFence,
   ): Promise<void>;
-  clearSuspendedTurn(sessionId: string, threadId: string): Promise<void>;
+  clearSuspendedTurn(sessionId: string, threadId: string, fence?: WriteFence): Promise<void>;
   updateSessionStatus(
     id: string,
     status: SessionStatus,
     metadata?: Partial<SessionData>,
   ): Promise<void>;
   flush?(): Promise<void>;
+
+  // === Submission lifecycle (durable execution) ===
+  /**
+   * Idempotent admission. Same dispatchId + deep-equal content → returns the
+   * existing item with admitted=false. Same dispatchId + different content →
+   * throws ConflictError. steer:true additionally stamps supersededByItemId
+   * on every unsettled item of the thread admitted before this one, in the
+   * same atomic step, and returns their ids.
+   */
+  admitSubmission(
+    sessionId: string,
+    threadId: string,
+    item: QueueItem,
+    opts?: { steer?: boolean },
+  ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }>;
+  /**
+   * CAS queued→running. Succeeds only when itemId is the thread's runnable
+   * head: the oldest item with status 'queued' and no supersededByItemId.
+   * Records attemptId, ownerId, lease; increments attemptCount. Returns the
+   * updated item, or null when not head / not queued / already claimed.
+   */
+  claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null>;
+  /** CAS: install a new attempt on a running/blocked item whose lease expired. Null when the CAS loses. */
+  replaceSubmissionAttempt(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    claim: SubmissionClaim,
+    opts: { expectedAttemptId: string },
+  ): Promise<QueueItem | null>;
+  insertAttemptMarker(itemId: string, attemptId: string): Promise<void>;
+  deleteAttemptMarker(itemId: string, attemptId: string): Promise<void>;
+  /** Renew leases for items this owner still owns; silently skips items whose attempt was replaced. */
+  renewLeases(ownerId: string, itemIds: string[]): Promise<void>;
+  listExpiredSubmissions(now: number): Promise<QueueItem[]>;
+  listUnsettledSubmissions(sessionId: string): Promise<QueueItem[]>;
+  getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
+  /** Stamp abortRequestedAt on unsettled submissions in scope. First write wins; NOT terminal. */
+  requestAbort(sessionId: string, threadId?: string): Promise<void>;
+  /** Fenced two-phase settlement for claimed turns: running|blocked→terminalizing, recording the outcome. */
+  reserveSettlement(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    outcome: SubmissionOutcome,
+    fence: WriteFence,
+  ): Promise<void>;
+  /** terminalizing→settled. Idempotent (re-running after settled is a no-op). Fenced. */
+  finalizeSettlement(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+  ): Promise<void>;
+  /**
+   * CAS settle for never-claimed items (decision 2): succeeds only when
+   * status is 'collecting' or 'queued'. Used for superseded/merged/
+   * aborted-while-queued outcomes. mergedIntoItemId is stamped when
+   * outcome is 'merged'.
+   */
+  settleUnclaimed(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    outcome: SubmissionOutcome,
+    opts?: { mergedIntoItemId?: string },
+  ): Promise<boolean>;
+  /** Fenced: running↔blocked_on_decision_gate transitions for the claimed turn. */
+  setSubmissionBlocked(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    blocked: boolean,
+    fence: WriteFence,
+  ): Promise<void>;
 
   getSession(id: string): Promise<SessionData | null>;
   listSessions(userId: string, opts?: ListOpts): Promise<SessionData[]>;
@@ -591,7 +750,6 @@ export interface SessionStore {
     threadId: string,
     opts?: MessageQuery,
   ): Promise<SessionEntry[]>;
-  getQueueState(sessionId: string, threadId: string): Promise<QueueState | null>;
   listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]>;
   getDecisionGate(sessionId: string, gateId: string): Promise<DecisionGate | null>;
   getSuspendedTurn(sessionId: string, threadId: string): Promise<SuspendedTurnState | null>;

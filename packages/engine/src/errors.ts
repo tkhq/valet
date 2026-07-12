@@ -19,3 +19,39 @@ function formatKey(key: string | Record<string, string>): string {
     .map(([k, v]) => `${k}=${v}`)
     .join(" ");
 }
+
+/**
+ * Thrown when a fenced write (appendEntries, updateEntry, saveSuspendedTurn,
+ * clearSuspendedTurn, reserveSettlement, finalizeSettlement,
+ * setSubmissionBlocked) carries a WriteFence whose attemptId no longer
+ * matches the submission's current attempt — i.e. a superseded/zombie
+ * attempt is trying to land a write after it lost ownership.
+ */
+export class StaleAttemptError extends Error {
+  constructor(
+    public readonly itemId: string,
+    public readonly staleAttemptId: string,
+    public readonly currentAttemptId: string | undefined,
+  ) {
+    super(
+      `stale attempt for queue item ${itemId}: attempt ${staleAttemptId} is no longer current (current: ${currentAttemptId ?? "none"})`,
+    );
+    this.name = "StaleAttemptError";
+  }
+}
+
+/**
+ * Thrown when a durable write conflicts with existing state — e.g. admitting
+ * a submission with a dispatchId that's already bound to different content,
+ * or settling a submission with a different terminal outcome than the one
+ * already reserved.
+ */
+export class ConflictError extends Error {
+  constructor(
+    message: string,
+    public readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "ConflictError";
+  }
+}

@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import type {
   DecisionGate,
   MessageEntry,
-  QueueState,
   SessionData,
   SessionEntry,
   SessionStore,
@@ -26,6 +25,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
     function newSession(overrides: Partial<SessionData> = {}): SessionData {
       return {
         id: "sess-1",
+        owner: { type: "user", id: "u1" },
         userId: "u1",
         orgId: "o1",
         workspace: "/",
@@ -269,19 +269,39 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(gateEntry && gateEntry.type === "decision_gate" && gateEntry.gate.id).toBe("g-1");
     });
 
-    it("saveQueueState + getQueueState round-trips", async () => {
+    it("entry queueItemId + stopReason round-trip through appendEntries/getEntries", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));
-      const qs: QueueState = {
+      const entry: MessageEntry = {
+        id: "e-1",
+        sessionId: "sess-1",
         threadId: "th-1",
-        mode: "followup",
-        status: "running",
-        activeItemId: "q-1",
-        pending: [],
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "done",
+        queueItemId: "q-1",
+        stopReason: "end_turn",
+        createdAt: 10,
       };
-      await store.saveQueueState("sess-1", "th-1", qs);
-      const loaded = await store.getQueueState("sess-1", "th-1");
-      expect(loaded).toMatchObject({ threadId: "th-1", status: "running", activeItemId: "q-1" });
+      await store.appendEntries("sess-1", "th-1", [entry]);
+      const loaded = await store.getEntries("sess-1", "th-1");
+      expect(loaded).toHaveLength(1);
+      expect(loaded[0].queueItemId).toBe("q-1");
+      const reloaded = loaded[0];
+      if (reloaded.type !== "message") throw new Error("unreachable");
+      expect(reloaded.stopReason).toBe("end_turn");
+    });
+
+    it("session owner/parentThreadId round-trips", async () => {
+      const s = newSession({
+        owner: { type: "team", id: "team-1" },
+        parentThreadId: "parent-th-1",
+      });
+      await store.saveSession(s);
+      const loaded = await store.getSession(s.id);
+      expect(loaded?.owner).toEqual({ type: "team", id: "team-1" });
+      expect(loaded?.parentThreadId).toBe("parent-th-1");
     });
 
     it("saveDecisionGate + listDecisionGates + getDecisionGate", async () => {

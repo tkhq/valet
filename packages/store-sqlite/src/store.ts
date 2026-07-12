@@ -17,13 +17,17 @@ import type {
   DecisionGateRef,
   ListOpts,
   MessageQuery,
+  QueueItem,
   QueueState,
   SessionData,
   SessionEntry,
   SessionStatus,
   SessionStore,
+  SubmissionClaim,
+  SubmissionOutcome,
   SuspendedTurnState,
   ThreadData,
+  WriteFence,
 } from "@valet/engine";
 import { entryToRow, jsonOrNull, parseJson, rowToEntry, type EntryRow } from "./helpers.js";
 
@@ -323,6 +327,9 @@ export class SqliteSessionStore implements SessionStore {
     if (!row) return null;
     return {
       id: row.id,
+      // TODO(Task 2): owner_type/owner_id columns not yet on engine_sessions;
+      // default to the actor until the schema/migration lands.
+      owner: { type: "user", id: row.userId },
       userId: row.userId,
       orgId: row.orgId,
       workspace: row.workspace,
@@ -346,6 +353,7 @@ export class SqliteSessionStore implements SessionStore {
       .all();
     let result: SessionData[] = rows.map((r) => ({
       id: r.id,
+      owner: { type: "user", id: r.userId },
       userId: r.userId,
       orgId: r.orgId,
       workspace: r.workspace,
@@ -478,6 +486,104 @@ export class SqliteSessionStore implements SessionStore {
       attempt: row.attempt,
       createdAt: row.createdAt,
     };
+  }
+
+  // === Submission lifecycle (durable execution) ===
+  // NOT YET IMPLEMENTED: engine_queue_items lacks the lifecycle columns
+  // (dispatch_id, status, outcome, attempt_id, attempt_count, max_attempts,
+  // timeout_at, abort_requested_at, owner_id, lease_expires_at) and there is
+  // no attempt-marker table yet. Implemented in Task 2 alongside the schema
+  // migration. Stubbed here only so the workspace typechecks per CLAUDE.md's
+  // edit-migrations-in-place policy (no new numbered migration for Task 1).
+
+  async admitSubmission(
+    _sessionId: string,
+    _threadId: string,
+    _item: QueueItem,
+    _opts?: { steer?: boolean },
+  ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async claimSubmission(_claim: SubmissionClaim): Promise<QueueItem | null> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async replaceSubmissionAttempt(
+    _sessionId: string,
+    _threadId: string,
+    _itemId: string,
+    _claim: SubmissionClaim,
+    _opts: { expectedAttemptId: string },
+  ): Promise<QueueItem | null> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async insertAttemptMarker(_itemId: string, _attemptId: string): Promise<void> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async deleteAttemptMarker(_itemId: string, _attemptId: string): Promise<void> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async renewLeases(_ownerId: string, _itemIds: string[]): Promise<void> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async listExpiredSubmissions(_now: number): Promise<QueueItem[]> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async listUnsettledSubmissions(_sessionId: string): Promise<QueueItem[]> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async getQueueItem(_sessionId: string, _itemId: string): Promise<QueueItem | null> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async requestAbort(_sessionId: string, _threadId?: string): Promise<void> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async reserveSettlement(
+    _sessionId: string,
+    _threadId: string,
+    _itemId: string,
+    _outcome: SubmissionOutcome,
+    _fence: WriteFence,
+  ): Promise<void> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async finalizeSettlement(
+    _sessionId: string,
+    _threadId: string,
+    _itemId: string,
+    _fence: WriteFence,
+  ): Promise<void> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async settleUnclaimed(
+    _sessionId: string,
+    _threadId: string,
+    _itemId: string,
+    _outcome: SubmissionOutcome,
+    _opts?: { mergedIntoItemId?: string },
+  ): Promise<boolean> {
+    throw new Error("implemented in Task 2");
+  }
+
+  async setSubmissionBlocked(
+    _sessionId: string,
+    _threadId: string,
+    _itemId: string,
+    _blocked: boolean,
+    _fence: WriteFence,
+  ): Promise<void> {
+    throw new Error("implemented in Task 2");
   }
 
   async deleteSession(id: string): Promise<void> {

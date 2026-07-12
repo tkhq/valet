@@ -1,5 +1,5 @@
 export * from "./types.js";
-export { NotFoundError } from "./errors.js";
+export { NotFoundError, StaleAttemptError, ConflictError } from "./errors.js";
 export {
   parseMarkdownArtifact,
   renderTemplate,
