@@ -1225,6 +1225,27 @@ export class Thread {
       // Rest-state repair FIRST — before appending any recovery output.
       await this.repairRestState(item, this.fence, "interrupted — result lost in restart");
 
+      // A resume reached from the blocked fall-through (gate expired/withdrawn/
+      // missing while the engine was down) still has the suspended-turn
+      // checkpoint on disk; clear it so a later restart doesn't try to replay a
+      // dead gate.
+      const staleSuspended = await store.getSuspendedTurn(this.session.id, this.id);
+      if (staleSuspended && staleSuspended.queueItemId === item.id) {
+        await store.clearSuspendedTurn(this.session.id, this.id, this.fence);
+      }
+      // Same fall-through: flip the durable block back to running (strict
+      // blocked→running toggle, done once) so the resumed turn can settle —
+      // settleTurn refuses to settle a blocked item.
+      if (replaced.status === "blocked_on_decision_gate") {
+        await store.setSubmissionBlocked(this.session.id, this.id, item.id, false, this.fence);
+      }
+
+      // Rehydrate from the repaired entries. entriesToAgentMessages answers
+      // every resolved (completed/error) tool call — including the crash point
+      // just repaired to an interrupted error — so the trailing message is
+      // toolResult-convertible, satisfying the continuation contract. No
+      // separate synthetic append: entriesToAgentMessages is the single owner
+      // of toolResult emission (no callId is ever answered twice).
       const entries = await store.getEntries(this.session.id, this.id);
       this.agent.state.messages = entriesToAgentMessages(entries, {
         api: this.session.options.model.api,
@@ -1232,15 +1253,6 @@ export class Thread {
         id: this.session.options.model.id,
       });
       this.agent.state.tools = this.buildTools();
-
-      // Append synthetic toolResults for the interrupted turn's tool calls so
-      // the trailing message satisfies the continuation contract (must be
-      // user/toolResult). Interrupted calls carry their error result; any
-      // completed-before-crash calls carry their persisted output.
-      const toolResults = resumeToolResults(entries, item.id);
-      if (toolResults.length > 0) {
-        this.agent.state.messages = [...this.agent.state.messages, ...toolResults];
-      }
 
       await this.agent.continue();
       await this.agent.waitForIdle();
@@ -2088,46 +2100,6 @@ export function resolveModelId(spec: string): PiModel | undefined {
 // Back-compat alias used by applyRoleForTurn in this file.
 const resolveRoleModel = resolveModelId;
 
-/**
- * Build synthetic `toolResult` AgentMessages for the tool calls of an
- * interrupted turn's assistant entry, so a rehydrated transcript ending in
- * unanswered tool_call blocks becomes toolResult-terminated (the continuation
- * contract requires the trailing LLM message be user/toolResult). Interrupted
- * (error) parts carry their error text; completed-before-crash parts carry
- * their persisted output. The tool is NEVER re-executed — these results are
- * pulled straight from persisted history.
- */
-export function resumeToolResults(
-  entries: readonly SessionEntry[],
-  itemId: string,
-): AgentMessage[] {
-  let target: MessageEntry | undefined;
-  for (const e of entries) {
-    if (e.type !== "message" || e.role !== "assistant") continue;
-    if (e.queueItemId !== itemId) continue;
-    if (!e.parts?.some((p) => p.type === "tool_call")) continue;
-    target = e; // keep the last matching assistant entry
-  }
-  if (!target) return [];
-  const out: AgentMessage[] = [];
-  for (const p of target.parts ?? []) {
-    if (p.type !== "tool_call") continue;
-    const isError = p.status !== "completed";
-    const text = isError
-      ? p.error ?? "interrupted — result lost in restart"
-      : toolResultText(p.result);
-    out.push({
-      role: "toolResult",
-      toolCallId: p.callId,
-      toolName: p.toolName,
-      content: [{ type: "text", text }],
-      isError,
-      timestamp: Date.now(),
-    });
-  }
-  return out;
-}
-
 /** Extract readable text from a persisted tool_call `result` (any shape). */
 function toolResultText(result: unknown): string {
   if (result && typeof result === "object") {
@@ -2239,6 +2211,30 @@ export function entriesToAgentMessages(
         stopReason: "stop",
         timestamp: e.createdAt,
       });
+      // Answer every resolved tool call from persisted history — providers
+      // reject a context whose toolCall lacks a matching toolResult, and a
+      // multi-round turn has tool calls in EARLIER assistant messages too.
+      // This function is the single owner of toolResult emission: the resume
+      // path repairs dangling parts to `error` BEFORE rehydrating, so the
+      // crash point is answered here with its honest interrupted error (never
+      // a fabricated success, never re-executed). Parts still `running` (a
+      // suspended gate's tool) stay unanswered — `replayBlocked` pushes their
+      // result after re-running the tool, so no callId is answered twice.
+      for (const p of parts) {
+        if (p.type !== "tool_call") continue;
+        if (p.status !== "completed" && p.status !== "error") continue;
+        const isError = p.status === "error";
+        out.push({
+          role: "toolResult",
+          toolCallId: p.callId,
+          toolName: p.toolName,
+          content: [
+            { type: "text", text: isError ? p.error ?? "tool call failed" : toolResultText(p.result) },
+          ],
+          isError,
+          timestamp: e.createdAt,
+        });
+      }
     }
   }
   return out;

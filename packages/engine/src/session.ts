@@ -226,9 +226,13 @@ export class Session {
       gateStatus,
     };
 
-    this.maybeEmitStuck(item, now);
-
     const action = decideReconciliation(item, ctx);
+    // Stuck-head observation only for items reconciliation actually acts on —
+    // a `wait` item is owned by a live attempt or a collect window, not a
+    // wedged head.
+    if (action.kind !== "wait") {
+      this.maybeEmitStuck(item, now);
+    }
     switch (action.kind) {
       case "wait":
         return;

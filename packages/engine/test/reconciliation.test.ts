@@ -281,10 +281,162 @@ describe("decideReconciliation — step 7 (resume)", () => {
   });
 });
 
-// ── Executor integration ────────────────────────────────────────────
+// ── entriesToAgentMessages: multi-round tool answering ──────────────
 
 const SESSION = "sess-recon";
 const THREAD = "th-recon";
+
+describe("entriesToAgentMessages — toolResult emission", () => {
+  it("answers every completed/error toolCall exactly once, in source order", async () => {
+    const { entriesToAgentMessages } = await import("../src/thread.js");
+    const now = Date.now();
+    const modelHint = { api: "a", provider: "p", id: "m" };
+    const entries: MessageEntry[] = [
+      {
+        id: "e-u",
+        sessionId: SESSION,
+        threadId: THREAD,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "go",
+        createdAt: now,
+      },
+      // Round 1: tool A completed before the crash.
+      {
+        id: "e-a1",
+        sessionId: SESSION,
+        threadId: THREAD,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "call-A",
+            toolName: "read_thing",
+            status: "completed",
+            args: { path: "/a" },
+            result: { text: "contents of A" },
+          },
+        ],
+        createdAt: now + 1,
+      },
+      // Round 2: tool B crashed and was repaired to error.
+      {
+        id: "e-a2",
+        sessionId: SESSION,
+        threadId: THREAD,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "call-B",
+            toolName: "read_thing",
+            status: "error",
+            args: { path: "/b" },
+            error: "interrupted — result lost in restart",
+          },
+        ],
+        createdAt: now + 2,
+      },
+    ];
+    const messages = entriesToAgentMessages(entries, modelHint);
+
+    // Shape: user, assistant[A], toolResult A, assistant[B], toolResult B.
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+      "assistant",
+      "toolResult",
+    ]);
+    const results = messages.filter((m) => m.role === "toolResult");
+    // Exactly one toolResult per callId, in source order.
+    expect(results.map((r) => (r.role === "toolResult" ? r.toolCallId : ""))).toEqual([
+      "call-A",
+      "call-B",
+    ]);
+    const a = results[0];
+    const b = results[1];
+    if (a.role !== "toolResult" || b.role !== "toolResult") throw new Error("unreachable");
+    expect(a.isError).toBe(false);
+    expect(a.content).toEqual([{ type: "text", text: "contents of A" }]);
+    expect(b.isError).toBe(true);
+    expect(b.content).toEqual([
+      { type: "text", text: "interrupted — result lost in restart" },
+    ]);
+    // Trailing message is toolResult — continuation contract holds.
+    expect(messages.at(-1)?.role).toBe("toolResult");
+  });
+
+  it("leaves a still-running (suspended-gate) toolCall unanswered for replay to answer", async () => {
+    const { entriesToAgentMessages } = await import("../src/thread.js");
+    const now = Date.now();
+    const entries: MessageEntry[] = [
+      {
+        id: "e-a",
+        sessionId: SESSION,
+        threadId: THREAD,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "call-S",
+            toolName: "do_thing",
+            status: "running",
+            args: {},
+          },
+        ],
+        createdAt: now,
+      },
+    ];
+    const messages = entriesToAgentMessages(entries, { api: "a", provider: "p", id: "m" });
+    expect(messages.filter((m) => m.role === "toolResult")).toHaveLength(0);
+  });
+
+  it("renders an elided tool result's stored placeholder, not a fabricated value", async () => {
+    const { entriesToAgentMessages } = await import("../src/thread.js");
+    const now = Date.now();
+    const entries: MessageEntry[] = [
+      {
+        id: "e-a",
+        sessionId: SESSION,
+        threadId: THREAD,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "call-E",
+            toolName: "read_thing",
+            status: "completed",
+            args: {},
+            result: { text: "[output elided to save context]" },
+            elided: true,
+          },
+        ],
+        createdAt: now,
+      },
+    ];
+    const messages = entriesToAgentMessages(entries, { api: "a", provider: "p", id: "m" });
+    const r = messages.find((m) => m.role === "toolResult");
+    expect(r && r.role === "toolResult" ? r.content : undefined).toEqual([
+      { type: "text", text: "[output elided to save context]" },
+    ]);
+  });
+});
+
+// ── Executor integration ────────────────────────────────────────────
 
 /** A spy tool that records every execution — reconciliation must NEVER re-run it. */
 function spyTool(): { def: ToolDef; calls: () => number } {
@@ -511,6 +663,161 @@ describe("reconciliation executor (integration)", () => {
       (e): e is MessageEntry => e.type === "message" && e.role === "assistant",
     );
     expect(assistants.at(-1)?.content).toBe("resumed and done");
+
+    faux.unregister();
+  });
+
+  it("resumes a multi-round crashed turn: round-1 tool completed, round-2 tool crashed — both answered, settles completed, no re-execution", async () => {
+    // Round 1's tool call (A) completed before the crash; round 2's (B) was
+    // mid-flight. The rehydrated context must answer BOTH calls (A from its
+    // persisted result, B from the repaired interrupted-error) or a real
+    // provider rejects it. entriesToAgentMessages owns all toolResult emission.
+    const store = new InMemorySessionStore();
+    const spy = spyTool();
+    const now = Date.now();
+    await store.saveSession({
+      id: SESSION,
+      owner: { type: "user", id: "u1" },
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      purpose: "interactive",
+      status: "running",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.saveThread(SESSION, {
+      id: THREAD,
+      sessionId: SESSION,
+      key: "web:default",
+      status: "active",
+      queueMode: "followup",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const itemId = "q-multi";
+    await store.admitSubmission(SESSION, THREAD, {
+      id: itemId,
+      threadId: THREAD,
+      content: "do two things",
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: now + 3_600_000,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const attemptId = "att-multi";
+    const claimed = await store.claimSubmission({
+      sessionId: SESSION,
+      threadId: THREAD,
+      itemId,
+      attemptId,
+      ownerId: "dead-owner",
+    });
+    if (!claimed) throw new Error("seed: claim failed");
+    await store.insertAttemptMarker(itemId, attemptId);
+    const fence: WriteFence = { itemId, attemptId };
+    await store.appendEntries(
+      SESSION,
+      THREAD,
+      [
+        {
+          id: "e-user",
+          sessionId: SESSION,
+          threadId: THREAD,
+          parentId: null,
+          type: "message",
+          role: "user",
+          content: "do two things",
+          queueItemId: itemId,
+          createdAt: now,
+        },
+        // Round 1: tool A ran to completion, result persisted.
+        {
+          id: "e-round1",
+          sessionId: SESSION,
+          threadId: THREAD,
+          parentId: null,
+          type: "message",
+          role: "assistant",
+          content: "",
+          parts: [
+            {
+              type: "tool_call",
+              callId: "call-A",
+              toolName: "read_thing",
+              status: "completed",
+              args: { path: "/a" },
+              result: { text: "contents of A" },
+            },
+          ],
+          queueItemId: itemId,
+          createdAt: now + 1,
+        },
+        // Round 2: tool B started, crash before its result landed.
+        {
+          id: "e-round2",
+          sessionId: SESSION,
+          threadId: THREAD,
+          parentId: null,
+          type: "message",
+          role: "assistant",
+          content: "",
+          parts: [
+            {
+              type: "tool_call",
+              callId: "call-B",
+              toolName: "read_thing",
+              status: "running",
+              args: { path: "/b" },
+            },
+          ],
+          queueItemId: itemId,
+          createdAt: now + 2,
+        },
+      ],
+      fence,
+    );
+
+    const faux = registerFauxProvider({ provider: "recon-multiround" });
+    faux.setResponses([fauxAssistantMessage("multi-round resumed")]);
+
+    const bus = new InMemoryEventBus();
+    const engine = new Engine({
+      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    await engine.restoreSession({
+      sessionId: SESSION,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: faux.getModel(),
+        tools: [spy.def],
+      },
+    });
+
+    const settled = await store.getQueueItem(SESSION, itemId);
+    expect(settled?.status).toBe("settled");
+    expect(settled?.outcome).toEqual({ outcome: "completed" });
+
+    const entries = await store.getEntries(SESSION, THREAD);
+    // Round 1's completed part is untouched; round 2's dangling part repaired.
+    const round1 = entries.find((e): e is MessageEntry => e.type === "message" && e.id === "e-round1");
+    const partA = round1?.parts?.find((p) => p.type === "tool_call" && p.callId === "call-A");
+    expect(partA && partA.type === "tool_call" ? partA.status : undefined).toBe("completed");
+    const round2 = entries.find((e): e is MessageEntry => e.type === "message" && e.id === "e-round2");
+    const partB = round2?.parts?.find((p) => p.type === "tool_call" && p.callId === "call-B");
+    expect(partB && partB.type === "tool_call" ? partB.status : undefined).toBe("error");
+
+    // Continuation completed and neither tool was re-executed.
+    const assistants = entries.filter(
+      (e): e is MessageEntry => e.type === "message" && e.role === "assistant",
+    );
+    expect(assistants.at(-1)?.content).toBe("multi-round resumed");
+    expect(spy.calls()).toBe(0);
 
     faux.unregister();
   });

@@ -656,12 +656,18 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loser).toBeNull();
     });
 
-    it("attempt markers insert/delete round-trip", async () => {
+    it("attempt markers insert/delete round-trip and hasAttemptMarker reads them", async () => {
       const item = makeItem();
       await store.admitSubmission(SESSION_ID, THREAD_ID, item);
-      // No dedicated read method: verify no throw, and delete is idempotent.
+      // Never-inserted pair reads false.
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
       await expect(store.insertAttemptMarker(item.id, "att-1")).resolves.toBeUndefined();
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
+      // A different (item, attempt) pair is still false.
+      expect(await store.hasAttemptMarker(item.id, "att-other")).toBe(false);
       await expect(store.deleteAttemptMarker(item.id, "att-1")).resolves.toBeUndefined();
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
+      // Delete is idempotent.
       await expect(store.deleteAttemptMarker(item.id, "att-1")).resolves.toBeUndefined();
     });
 
