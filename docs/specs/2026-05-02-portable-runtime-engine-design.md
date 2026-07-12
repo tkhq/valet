@@ -219,6 +219,9 @@ The V1 implementation must define and implement these contracts:
 | Signal ingress contract | `packages/engine` + adapters | `SignalContent` admission, XML envelope rendering, dispatchId idempotency |
 | Workflow caller contract | `packages/engine` + adapters | Idempotent session creation, durable submission ids, `awaitResult`, settled events, unified transcript read, dual-target approvals |
 | Application service hooks | `packages/engine` | Per-session `toolConfig`, ordered `systemContext` injection, compaction hooks, thread identity in ToolContext |
+| Compaction contract | `packages/engine` | Pruning, LLM compaction, tail preservation, `CompactionEntry` persistence, auto-continue, compaction hooks |
+| Model registry contract | `packages/engine` + adapters | Provider registration, model resolution order, failover authorization boundary |
+| Roles/skills contract | `packages/engine` | Role overlays and precedence, skill discovery and invocation, load-error semantics |
 | Provider contracts | adapters | SessionStore, SandboxProvider, EventStream, BlobStore, CredentialStore |
 | Sandbox RPC contract | sandbox runtime + adapters | File operations, process execution, snapshots, tunnels, health, auth, request limits |
 | Sandbox attachment contract | `packages/engine` + providers | Lazy attachment, capabilities, provider registry, `sandbox_status` events, cold-attachment model hint, workspace survival |
@@ -301,6 +304,7 @@ interface CreateSessionOptions {
 interface SessionHandle {
   id: string;
   thread(key?: string): ThreadHandle;
+  threadById(id: string): ThreadHandle | null;
   prompt(content: PromptContent, opts?: PromptOptions): Promise<PromptReceipt>;
   resolveDecision(gateId: string, resolution: DecisionResolution): Promise<void>;
   withdrawDecision(gateId: string, reason: DecisionWithdrawReason): Promise<void>;
@@ -470,12 +474,13 @@ A session owns a sandbox instance, registered tools, roles, and configuration. I
 - Can spawn child sessions (single-threaded or multi-threaded)
 - Owns shared decision state used by its threads: pending decision gates, credentials, and child-session registry
 - Session-wide controls: `abort()` aborts all threads, `pause()`/`resume()` freeze/unfreeze all thread queues
+- Deleting a session cascade-terminates its children: sessions of purpose `child` whose parent is deleted are aborted, settled, and their sandboxes destroyed
 
 ### Thread
 
 A named conversation within a session. Each thread has its own message history (DAG-based), its own prompt queue, its own compaction state, and its own active model. Threads share the sandbox, tools, and roles from the parent session.
 
-- Created or retrieved via `session.thread(key)`
+- Created or retrieved via `session.thread(key)`; calling `thread(key)` on an archived thread reactivates it. `session.threadById(id)` looks a thread up by its durable id (e.g. a workflow's parked `threadId`), returning null when it doesn't exist.
 - `session.prompt()` is sugar for `session.thread('default').prompt()`
 - Each channel target naturally maps to a thread key: `web:default`, `slack:C123`, `telegram:456`, `thread:<orchestratorThreadId>`
 - Threads can also be created explicitly for focused work: `task:research`, `review:pr-42`
@@ -822,8 +827,9 @@ interface CredentialProvider {
 }
 
 interface Credential {
-  accessToken: string;
-  refreshToken?: string;
+  type: StoredCredential['type'];
+  /** The usable secret regardless of kind: accessToken for oauth2, apiKey for api_key, the bot token for bot_token, and so on. */
+  token: string;
   expiresAt?: number;
   scopes?: string[];
   metadata?: Record<string, unknown>;
@@ -840,7 +846,7 @@ interface SuspendedDecisionContext {
 }
 ```
 
-When a tool calls `credentials.request()` for a credential that doesn't exist, the engine pauses tool execution and emits a `decision_gate` event to the user. Execution resumes when the credential is provided. If the user does not respond within a configurable timeout (default 10 minutes), the request fails and the tool receives a structured credential error. Same pattern as tool approvals.
+`Credential` is a normalized shape: the CredentialProvider maps whatever `StoredCredential` kind is on file (oauth2 access token, API key, bot token, service account) into `token` — performing refresh where applicable — so tools never branch on credential kind. When a tool calls `credentials.request()` for a credential that doesn't exist, the engine pauses tool execution and emits a `decision_gate` event to the user. Execution resumes when the credential is provided. If the user does not respond before the gate expires (default 24 hours, configurable — see Decision Gates expiry defaults), the request fails and the tool receives a structured credential error. Same pattern as tool approvals.
 
 Approval-gated tools follow the same suspension model. A tool can return or throw a structured `approval_required` signal, which the engine converts into a `DecisionGate`, persists, emits, and resumes on resolution.
 
@@ -1266,9 +1272,9 @@ interface DecisionGateEntry {
   type: 'decision_gate';
   id: string;
   parentId: string | null;
-  timestamp: string;
+  createdAt: number;
   gate: DecisionGate;
-  resolvedAt?: string;
+  resolvedAt?: number;
   resolution?: DecisionResolution;
   withdrawnReason?: DecisionWithdrawReason;
 }
@@ -1279,6 +1285,8 @@ interface DecisionGateEntry {
 - `approval`: asks whether a tool or command may proceed. Required actions are `approve` and `deny` unless a custom action list is supplied.
 - `question`: asks the user for an answer. May include option actions or accept free text when `actions` is empty.
 - `credential_request`: asks the user to connect or re-authorize a service. Required context fields are `service`, `reason`, and optional `scopes`.
+
+**Expiry defaults:** `credential_request` gates default `expiresAt` to 24 hours — the user may need to be reached on another channel and complete an OAuth flow, so a minutes-scale default is guaranteed failure for anyone offline. `approval` and `question` gates default to 72 hours. All defaults are configurable per gate via `expiresAt`. Expiry emits the standard `decision_gate_expired` event and fails the suspended operation with a structured error.
 
 **Gate delivery contract:**
 
@@ -1413,6 +1421,8 @@ type EngineEvent =
 
 The engine does not know about WebSockets, SSE, or any transport. It emits events; the adapter decides delivery.
 
+Durable emission is the engine's own job: the engine appends events to the EventStream itself, with idempotent eventKeys (see EventStream). `Engine.onEvent` is an in-process tap invoked AFTER the durable append, for host-local concerns — client fan-out, metrics, logging. Adapters MUST NOT append engine events to the stream themselves; a second appender would double-emit and break eventKey idempotency.
+
 ### Client Event Contract
 
 Clients consume decision-gate events directly. Adapters may deliver these events over WebSocket or SSE, but payloads are identical.
@@ -1465,7 +1475,7 @@ Optional schema-validated output extraction. Any prompt or skill invocation can 
 Workflow execution (definition format, DAG interpretation, triggers, version history) lives outside the engine. Its portable execution substrate — a checkpointed interpreter over a minimal `RunHost` port — is specified in [`docs/specs/2026-07-11-workflow-run-host-design.md`](2026-07-11-workflow-run-host-design.md). The engine's obligation is the primitive set workflow steps consume, and it must be identical on both platforms:
 
 1. **Session creation** — `engine.createSession(...)` with `purpose: 'workflow'` and caller-supplied `id` for idempotent creation under step replay.
-2. **Durable prompt submission** — `thread.prompt(...)` returning a durable `queueItemId`. Idempotency comes from the submission contract (`dispatchId` derived from `workflow:{executionId}:{nodeId}[:{iteration}]`), not from workflow-step memoization. A replayed step re-submits with the same dispatchId and receives the original receipt.
+2. **Durable prompt submission** — `thread.prompt(...)` returning a durable `queueItemId`. Idempotency comes from the submission contract (`dispatchId` derived from `workflow:{runId}:{nodeId}[:{iteration}]`), not from workflow-step memoization. A replayed step re-submits with the same dispatchId and receives the original receipt.
 3. **Result-await** — `thread.awaitResult(queueItemId, { resultSchema })`. Replaces poll-until-idle loops: no status polling, no backoff tuning against step budgets, no divergent DO-vs-database transcript read paths. After a workflow instance hibernates and replays, it re-awaits the same submission id and gets the settled result.
 4. **Settled/idle events** — workflow-visible progress (`turn_end`, submission settlement, `queue_state`) is read from the durable event stream when a workflow needs observation finer than terminal results.
 5. **Transcript read** — `SessionStore.getEntries(...)` is the single history read path for all session kinds (interactive, orchestrator, workflow-spawned). Structured-output extraction and repair against a node's `outputSchema` may remain a workflow-layer concern layered over `awaitResult`.
@@ -1637,7 +1647,6 @@ interface SessionStore {
    * Fenced when called inside a claimed turn.
    */
   updateEntry(sessionId: string, threadId: string, entry: SessionEntry, fence?: WriteFence): Promise<void>;
-  saveQueueState(sessionId: string, threadId: string, queue: QueueState): Promise<void>;
 
   // === Submission lifecycle (durable execution) ===
   /**
@@ -1722,6 +1731,7 @@ interface SessionData {
   owner: Principal;
   /** Actor: the human whose action created or triggered the session. */
   userId: string;
+  /** Denormalized org context; MUST equal owner.id when owner.type === 'org'. Sessions are always org-scoped regardless of owner kind. */
   orgId: string;
   workspace: string;
   purpose: 'interactive' | 'orchestrator' | 'workflow' | 'child';
@@ -1729,6 +1739,7 @@ interface SessionData {
   sandboxId?: string;
   snapshotId?: string;
   parentSessionId?: string;
+  parentThreadId?: string;
   metadata?: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
@@ -1741,6 +1752,8 @@ interface ThreadData {
   status: 'active' | 'paused' | 'archived';
   activeLeafEntryId?: string;
   queueMode: QueueMode;
+  /** Persisted pause flag — the only stored piece of queue state; everything else in QueueState derives from durable queue items. */
+  paused?: boolean;
   model?: string;
   summary?: string;
   metadata?: Record<string, unknown>;
@@ -1748,6 +1761,12 @@ interface ThreadData {
   updatedAt: number;
 }
 
+/**
+ * QueueState is a DERIVED view, not a stored entity: computed from durable
+ * queue items plus ThreadData.paused. `collectBuffer` is the items with
+ * status 'collecting'; `blockedGateId` derives from the suspended turn.
+ * This is the shape used in `queue_state` events and API payloads.
+ */
 interface QueueState {
   threadId: string;
   mode: QueueMode;
@@ -1811,10 +1830,10 @@ type SessionEntry =
 
 **Data flow:** The engine writes through SessionStore during execution. The API layer reads through SessionStore for client queries (session lists, message history, etc.). Both hit the same underlying database. The engine is the writer, the API is the reader, the database is the shared state.
 
-Hot/cold storage tiering (e.g., DO SQLite as write-through cache for D1) is an implementation detail of the SessionStore, not a concern of the engine or API layer. The `flush()` method is called by the engine on session shutdown, giving the store a chance to drain any internal buffers.
+On Cloudflare, the SessionHostDO's embedded SQLite **is** the SessionStore: transactional CAS, zero-latency writes, and no subrequest-budget exposure (DO storage operations are not subrequests). An asynchronous projector mirrors summary rows — sessions, threads, settled-submission summaries — to D1 for cross-session queries (`listSessions`, admin views, org ceilings). The staleness rule is normative: every correctness-bearing read (reconciliation, `awaitResult`, gate resolution, claim state) reads the authoritative DO store; only cross-session listing and aggregate queries may read the D1 projection, which is eventually consistent. The `flush()` method is called by the engine on session shutdown, giving the store a chance to drain any internal buffers — on Cloudflare, pending projection writes.
 
 **Implementations:**
-- `D1SessionStore` — Cloudflare D1 via Drizzle
+- `DOSessionStore` — DO-embedded SQLite via Drizzle (Cloudflare), authoritative, with the async D1 projection described above
 - `PostgresSessionStore` — PostgreSQL via Drizzle
 - `InMemorySessionStore` — for tests and ephemeral agents
 
@@ -1824,20 +1843,22 @@ The engine schema owns these tables outright — they are the only storage the e
 
 | Table | Purpose | Key fields |
 |---|---|---|
-| `engine_sessions` | Canonical engine session state | `id`, `user_id`, `org_id`, `workspace`, `purpose`, `status`, `sandbox_id`, `snapshot_id`, `metadata`, timestamps |
+| `engine_sessions` | Canonical engine session state | `id`, `owner_type`, `owner_id` (indexed), `user_id`, `org_id`, `workspace`, `purpose`, `status`, `sandbox_id`, `snapshot_id`, `parent_session_id`, `parent_thread_id`, `metadata`, timestamps |
 | `engine_threads` | Thread metadata and active leaf | `id`, `session_id`, `key`, `status`, `active_leaf_entry_id`, `queue_mode`, `model`, `summary`, `metadata` |
 | `engine_entries` | DAG history | `id`, `session_id`, `thread_id`, `parent_id`, `queue_item_id` (indexed — the transcript↔submission linkage), `entry_type`, `role`, `stop_reason`, `content`, `parts`, `metadata`, `created_at` |
 | `engine_queue_items` | Durable submissions (per-thread queue + execution lifecycle) | `id`, `session_id`, `thread_id`, `dispatch_id` (unique per session when set), `status`, `outcome`, `error`, `mode`, `content`, `author`, `channel`, `reply_target`, `model`, `attempt_id`, `attempt_count`, `max_attempts`, `timeout_at`, `abort_requested_at`, `owner_id`, `lease_expires_at`, `metadata`, timestamps |
 | `engine_attempt_markers` | Durable evidence an attempt started (crash-recovery gating) | `item_id`, `attempt_id`, `created_at` — PK `(item_id, attempt_id)` |
-| `engine_events` | Offset-addressed durable event stream | `session_id`, `offset`, `thread_id`, `event_type`, `payload`, `created_at` — PK `(session_id, offset)` |
+| `engine_events` | Offset-addressed durable event stream — SQL-backed stores only (SQLite dev, Postgres on k8s). On Cloudflare the event log lives in per-session DO storage instead, satisfying the same EventStream contract without this table | `session_id`, `offset`, `thread_id`, `event_type`, `payload`, `created_at` — PK `(session_id, offset)` |
 | `engine_meta` | Store metadata | key/value; key `schema_version` stamped at creation |
 | `engine_decision_gates` | Pending and terminal gate state | `id`, `session_id`, `thread_id`, `type`, `status`, `title`, `body`, `actions`, `origin`, `context`, `resolution`, `expires_at`, timestamps |
 | `engine_decision_gate_refs` | Delivered channel refs | `id`, `gate_id`, `channel_type`, `ref`, `created_at`, `updated_at` |
-| `engine_suspended_turns` | Restart-safe blocked turn checkpoints | `session_id`, `thread_id`, `queue_item_id`, `gate_id`, `model`, `leaf_entry_id`, `tool_call_id`, `tool_name`, `tool_args`, `resume_key`, `attempt`, `created_at` |
+| `engine_suspended_turns` | Restart-safe blocked turn checkpoints | `session_id`, `thread_id`, `queue_item_id`, `gate_id`, `model`, `leaf_entry_id`, `tool_call_id`, `tool_name`, `tool_args`, `resume_key`, `ordinal`, `attempt`, `created_at` |
 | `engine_credentials` | Stored credentials when adapter uses engine schema | `id`, `owner_type`, `owner_id`, `service`, `credential_type`, `encrypted_data`, `scopes`, `expires_at`, timestamps |
 | `engine_oauth_states` | OAuth handshake state | `state`, `user_id`, `service`, `redirect_uri`, `code_verifier`, `metadata`, `expires_at` |
 
-Indexes are required on `(session_id, thread_id, created_at)` for entries, `(session_id, thread_id, status)` for queue items and gates, and `(owner_type, owner_id, service)` for credentials.
+Indexes are required on `(session_id, thread_id, created_at)` for entries, `(session_id, thread_id, status)` for queue items and gates, `(owner_type, owner_id)` for sessions, and `(owner_type, owner_id, service)` for credentials.
+
+Entries, gates, and suspended-turn checkpoints follow the session's retention: they are deleted with the session, and terminal sessions are archivable per org retention policy.
 
 ### EventStream
 
@@ -1891,7 +1912,7 @@ type Unsubscribe = () => void;
 **Retention:** a session's stream is truncatable after the session reaches a terminal status plus a configurable retention window. Truncation never removes events whose `queueItemId` references an unsettled submission — the linkage field is what makes this rule computable.
 
 **Implementations:**
-- `DOEventStream` — DO-storage-backed log with in-process fan-out (Cloudflare)
+- `DOEventStream` — the log lives in the SessionHostDO's own SQLite storage, co-located with the engine; fan-out to connected clients happens from that DO's WebSockets. There is no singleton event DO. (Cloudflare)
 - `PostgresEventStream` / `RedisEventStream` — table- or stream-backed log with pub/sub fan-out (Kubernetes)
 - `InMemoryEventStream` — array-backed (single-process, tests)
 
@@ -1912,7 +1933,7 @@ A transport has four responsibilities:
 webhook → verifySignature (raw bytes)
         → parseInbound (typed provider event)
         → conversationKey (stable identity)
-        → channel-binding resolution: key → { orgId, userId, sessionId, threadKey }
+        → channel-binding resolution: key → { owner: Principal, actorUserId?, sessionId, threadKey }
           (authorization check — is this conversation bound, and to whom?)
         → thread.prompt(SignalContent, { dispatchId: providerEventId, channel, author })
 ```
@@ -2076,7 +2097,7 @@ interface OAuthProviderConfig {
 
 The API layer collects these at startup to power the OAuth connection UI and callback handling.
 
-Credential lookup order is tool-defined but must be explicit. The default order is session-scoped credential, user credential, org credential. If no credential is found and the tool requires one, `CredentialProvider.request()` creates a `DecisionGate` of type `credential_request`.
+Credential lookup order is tool-defined but must be explicit. The default order is parameterized by the session's owner kind: **user-owned** sessions resolve session → user → org; **team-owned** sessions resolve session → team ONLY — never falling through to the acting user's personal credential; a missing team credential fails visibly (per the orchestrator spec's sourced-reference model) rather than silently borrowing a personal token; **org-owned** sessions resolve session → org. If no credential is found and the tool requires one, `CredentialProvider.request()` creates a `DecisionGate` of type `credential_request`.
 
 ## Schema and Migrations
 
@@ -2172,6 +2193,8 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `GET` | `/api/sessions/:sessionId/ws` | WebSocket stream for client events and optional prompt/control messages |
 | `GET` | `/api/sessions/:sessionId/tunnels` | Return sandbox tunnel URLs |
 | `POST` | `/api/sessions/:sessionId/snapshot` | Snapshot session sandbox and persist snapshot ID |
+| `GET` | `/api/sessions/:sessionId/blobs/:key` | Fetch a stored blob (attachments, artifacts) — authorized by session access |
+| `GET`/`POST` | `/api/admin/submissions...` | Operator surface (required for V1): list submissions with lifecycle state, force-settle a wedged submission, inspect leases |
 
 Prompt routes accept the same `PromptOptions` shape as the engine API. WebSocket prompt/control messages are optional conveniences over the same route semantics; they must not define separate behavior.
 
@@ -2180,20 +2203,29 @@ Prompt routes accept the same `PromptOptions` shape as the engine API. WebSocket
 ```
 Cloudflare Worker (Hono)
   ├── API routes (shared from packages/api/)
-  │     └── reads/writes via D1SessionStore
+  │     ├── cross-session queries → D1 projection (eventually consistent)
+  │     └── per-session reads/writes → SessionHostDO (authoritative)
   │
-  ├── WebSocket upgrade → subscribes to DOEventStream → relays to client
+  ├── WebSocket upgrade → forwarded to SessionHostDO (hibernatable client sockets)
   │
   └── Session operations → SessionHostDO
         │
-        SessionHostDO (thin shell, ~100 lines)
+        SessionHostDO (thin shell)
           ├── creates Engine instance on first request
-          ├── injects: D1SessionStore, ModalSandbox, DOEventStream, R2BlobStore
+          ├── injects: DOSessionStore (embedded SQLite), ModalSandbox, DOEventStream (same DO storage), R2BlobStore
+          ├── holds client WebSockets; fans events out from its own durable log
+          ├── multiplexes its single DO alarm across all timer consumers
           ├── forwards prompt/abort/pause/resume to engine
           └── engine runs agent loop, emits events, writes state
 ```
 
 The SessionHostDO is a thin shell. It creates an engine instance with CF provider implementations, forwards incoming requests, and uses DO hibernation so idle sessions don't consume compute. On wake, it restores the engine from SessionStore state.
+
+**Eviction and replay are the steady state, not a recovery edge case.** Every deploy evicts every DO, and a gate that stays pending for hours guarantees the hosting DO is evicted before resolution arrives. The restart-safe replay contract — reconciliation, suspended-turn checkpoints, deterministic gate identity — is therefore the normal execution model on Cloudflare, exercised many times a day, not a rare crash path. Consequence: the tool re-entrancy discipline (idempotent pre-gate prefixes; see the restart-safe tool suspension contract) is a mandatory audit item for every tool ported to the engine, not best-practice advice.
+
+**Alarm multiplexing.** A DO has one alarm. The SessionHostDO multiplexes it across every timer consumer — lease heartbeat, gate `expiresAt`, submission `timeoutAt`, collect windows — by re-arming to the minimum next deadline after every event. When the alarm fires, the host dispatches every due timer and re-arms to the new minimum. The alarm is also what re-drives interrupted submissions after eviction: the DO wakes on the next inbound request or its alarm, whichever comes first, and runs reconciliation.
+
+**Subrequest budget.** Because the SessionStore and EventStream live in the DO's own storage, per-turn persistence — entry appends, queue transitions, event appends, checkpoints — consumes none of the ~1000-subrequest budget; DO storage operations are not subrequests. The budget constrains only LLM fetches and sandbox RPCs, and a single turn's worth of both fits comfortably.
 
 ### Kubernetes Adapter (`packages/adapter-k8s/`)
 
@@ -2219,9 +2251,9 @@ The SessionPool manages engine instances in-process. Idle instances are evicted 
 
 | Interface | Cloudflare | Kubernetes |
 |---|---|---|
-| SessionStore | D1 via Drizzle | PostgreSQL via Drizzle |
+| SessionStore | DO-embedded SQLite + async D1 projection | PostgreSQL via Drizzle |
 | SandboxProvider | Modal SDK | Modal SDK / K8s Pod API |
-| EventStream | DO singleton | Redis pub/sub |
+| EventStream | per-session DO storage | Redis pub/sub |
 | BlobStore | R2 | S3 / MinIO |
 | CredentialStore | D1 (encrypted) | PostgreSQL (encrypted) |
 | Channel transports | Worker-integrated (Slack required for V1) | Service-integrated (Slack required for V1) |
@@ -2265,13 +2297,14 @@ export const tools: ToolDef[] = [
       base: Type.String(),
     }),
     execute: async (args, ctx) => {
-      const cred = await ctx.credentials.get('github');
+      let cred = await ctx.credentials.get('github');
       if (!cred) {
-        await ctx.credentials.request('github', 'Need GitHub access to create a PR');
+        // Opens a credential_request gate; resolves with the connected credential.
+        cred = await ctx.credentials.request('github', 'Need GitHub access to create a PR');
       }
       const res = await fetch(`https://api.github.com/repos/${args.repo}/pulls`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cred.accessToken}` },
+        headers: { Authorization: `Bearer ${cred.token}` },
         body: JSON.stringify(args),
       });
       const pr = await res.json();
@@ -2352,7 +2385,11 @@ interface RuntimeMetric {
     | 'decision_gate_wait'
     | 'sandbox_exec'
     | 'model_failover'
-    | 'compaction';
+    | 'compaction'
+    | 'reconciliation'
+    | 'lease_reclaim'
+    | 'settlement'
+    | 'attempt_replaced';
   sessionId: string;
   threadId?: string;
   durationMs?: number;
@@ -2371,7 +2408,10 @@ Required behavior:
 - Fatal session errors update session status to `error`, flush state, and prevent new prompts until restored or restarted.
 - Every model call emits token/cost metadata when available.
 - Every tool call emits duration and success/failure metadata.
+- Every reconciliation decision emits an event naming the branch taken (steps 1–7 of the decision tree) and its outcome.
 - Decision gates measure wait duration from creation to terminal state.
+- Audit events are the durable record of privileged actions — gate resolutions, credential access, admin operations — emitted through the EventStream with deterministic eventKeys.
+- An operator/admin API surface is required for V1: list submissions with their lifecycle state, force-settle a wedged submission, and inspect leases (see Required API Surface).
 - Logs may contain IDs and high-level errors, but must not contain secrets, OAuth tokens, command environment secrets, or full credential payloads.
 
 ## Conformance
