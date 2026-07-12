@@ -136,6 +136,19 @@ check("batch append: zombie batch lands zero rows", zombieBatch === 0 && zombieR
 const ownerBatch = fencedBatch(connB, "attempt-B", ["e7", "e8", "e9"]);
 check("batch append: owner batch lands all rows", ownerBatch === 3, `returned=${ownerBatch}`);
 
+// 6. Takeover rejected on wrong status: settle the row (single-statement CAS),
+// then attempt REPLACE_ATTEMPT with matching attempt + expired lease — must be
+// rejected because status != 'running'.
+const SETTLE = `
+  UPDATE submissions SET status = 'settled'
+  WHERE id = @id AND attempt_id = @attempt AND status = 'running'`;
+const settle = connB.prepare(SETTLE).run({ id: "sub1", attempt: "attempt-B" });
+check("settle: owner settles via CAS", settle.changes === 1, `changes=${settle.changes}`);
+const wrongStatus = connB.prepare(REPLACE_ATTEMPT).run({
+  id: "sub1", newAttempt: "attempt-C", oldAttempt: "attempt-B", lease: leaseA + 240_000, now: leaseA + 200_000,
+});
+check("takeover: rejected on wrong status (settled)", wrongStatus.changes === 0, `changes=${wrongStatus.changes}`);
+
 console.log("\n--- summary ---");
 for (const line of results) console.log(line);
 console.log(`db: ${dbPath}`);

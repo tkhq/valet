@@ -5,7 +5,7 @@ Script: `experiments/fencing-spike.ts` (rerunnable, no network).
 
 ## Verdict for Phase 1
 
-The fencing contract is fully expressible as single-statement CAS writes in better-sqlite3. All five properties (claim CAS, lease takeover CAS with rejection on unexpired/wrong-attempt/wrong-status, zombie heartbeat rejection, fenced single-row append, fenced multi-row append with all-or-nothing atomicity) verified on a single database file with two independent `Database` connections simulating crashed owner + reconciler. WAL mode + `busy_timeout` + synchronous transactions are essential: the database itself enforces the fencing constraints via WHERE clause conditions, and the `changes` return value (0 = no match, 1 = matched and written) provides the single-statement CAS semantics without needing explicit locks. No SERIALIZABLE or other elevated isolation mode required — NORMAL synchronous is sufficient because the WHERE conditions are checked as part of the UPDATE/INSERT, and multi-row batches are wrapped in `db.transaction()` to ensure atomicity (first fence rejection throws, rolling back all prior writes in the batch).
+The fencing contract is fully expressible as single-statement CAS writes in better-sqlite3. All five properties (claim CAS, lease takeover CAS with all three rejection legs tested — unexpired lease, wrong prior attempt, and wrong status against a settled row — zombie heartbeat rejection, fenced single-row append, fenced multi-row append with all-or-nothing atomicity) verified on a single database file with two independent `Database` connections simulating crashed owner + reconciler. WAL mode + `busy_timeout` + synchronous transactions are essential: the database itself enforces the fencing constraints via WHERE clause conditions, and the `changes` return value (0 = no match, 1 = matched and written) provides the single-statement CAS semantics without needing explicit locks. No SERIALIZABLE or other elevated isolation mode required — NORMAL synchronous is sufficient because the WHERE conditions are checked as part of the UPDATE/INSERT, and multi-row batches are wrapped in `db.transaction()` to ensure atomicity (first fence rejection throws, rolling back all prior writes in the batch).
 
 ## Canonical SQL idioms (copy into the Phase 1 store rewrite)
 
@@ -14,6 +14,7 @@ The fencing contract is fully expressible as single-statement CAS writes in bett
 - replaceSubmissionAttempt: `UPDATE submissions SET attempt_id = @newAttempt, lease_expires_at = @lease WHERE id = @id AND status = 'running' AND attempt_id = @oldAttempt AND lease_expires_at < @now`
 - fenced appendEntries (single row): `INSERT INTO entries (id, thread_id, queue_item_id, body) SELECT @entryId, @threadId, @itemId, @body WHERE EXISTS (SELECT 1 FROM submissions WHERE id = @itemId AND attempt_id = @attempt)`
 - fenced appendEntries (batch): fence re-checked per row inside one better-sqlite3 transaction; first rejection throws → full rollback. Confirmed: zombie batch attempted after takeover returns 0 rows landed (exception caught, transaction rolled back), owner batch lands all 3 rows.
+- settleSubmission: `UPDATE submissions SET status = 'settled' WHERE id = @id AND attempt_id = @attempt AND status = 'running'`
 
 ## Property results
 
@@ -21,6 +22,7 @@ The fencing contract is fully expressible as single-statement CAS writes in bett
 |---|---|
 | claim CAS, exactly one winner | PASS — A claims → changes=1; B re-claims same row → changes=0 |
 | takeover rejected: unexpired lease / wrong attempt | PASS — both rejections observed (changes=0 in both cases) |
+| takeover rejected: wrong status (settled row) | PASS — row settled via CAS (changes=1), then REPLACE_ATTEMPT with matching attempt + expired lease → changes=0 |
 | takeover succeeds after expiry | PASS — succeeds when lease_expires_at < @now AND attempt_id matches |
 | zombie heartbeat rejected | PASS — changes=0 after takeover |
 | zombie single append rejected (changes=0) | PASS — fence exists condition fails on stale attempt_id |
