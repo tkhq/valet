@@ -406,7 +406,7 @@ interface AwaitResultOptions {
 
 interface SubmissionResult {
   queueItemId: string;
-  outcome: 'completed' | 'failed' | 'aborted' | 'superseded';
+  outcome: 'completed' | 'failed' | 'aborted' | 'superseded' | 'merged';
   /** Final assistant message text for the turn(s) this submission drove. */
   text?: string;
   /** Present when resultSchema was supplied: validated structured output. */
@@ -414,6 +414,8 @@ interface SubmissionResult {
   error?: string;
 }
 ```
+
+**Result ownership:** every turn — including compaction auto-continue turns and post-gate-replay continuation turns — belongs to the submission whose queue item was active when the turn started, and every entry that turn produces carries that submission's `queueItemId` (see `BaseEntry.queueItemId`). `SubmissionResult.text` is the content of the last persisted assistant entry carrying this submission's `queueItemId` with `stopReason: 'end_turn'` — the transcript linkage is the mechanism, not a heuristic. Outcome `superseded` returns whatever partial assistant output persisted under the submission's `queueItemId` together with the outcome, so callers can distinguish a replaced turn from a completed one. Outcome `merged` delegates: `awaitResult` on a constituent of a collect-window merge resolves with the merged item's result (see Collect semantics).
 
 **Signal rendering:** signals are persisted as `MessageEntry` rows with `signal` metadata and rendered into LLM context as an XML envelope — `signalType` and each `attributes` entry become XML attributes, `body` is XML-escaped text content, `tagName` is the element name. `tagName` is regex-validated because it renders unescaped; `body` and attribute values are always escaped. Direct user prompts render as ordinary user messages.
 
@@ -506,6 +508,14 @@ interface BaseEntry {
   sessionId: string;
   threadId: string;
   parentId: string | null;
+  /**
+   * The durable submission that produced this entry. Set on every entry an
+   * active submission writes (user prompt rendering, assistant output, tool
+   * results, gates, compaction entries created inside a turn). This is the
+   * transcript↔submission linkage that reconciliation and awaitResult
+   * compute from; it is not optional decoration for turn-produced entries.
+   */
+  queueItemId?: string;
   createdAt: number;
   metadata?: Record<string, unknown>;
 }
@@ -513,6 +523,12 @@ interface BaseEntry {
 interface MessageEntry extends BaseEntry {
   type: 'message';
   role: 'user' | 'assistant' | 'tool' | 'system';
+  /**
+   * Persisted on the final assistant entry of a turn. 'end_turn' marks the
+   * turn's terminal assistant entry — the marker reconciliation step 1 and
+   * SubmissionResult.text resolution key off.
+   */
+  stopReason?: 'end_turn' | 'error' | 'abort';
   content: string;
   parts?: MessagePart[];
   author?: PromptAuthor;
@@ -1066,14 +1082,14 @@ Each thread owns its own prompt queue. Threads execute independently and concurr
 **Queue modes** (per-thread, switchable at runtime):
 
 - **Followup** (default) — prompts queue in FIFO order. When the current prompt completes, the next one starts. If the thread is idle, the prompt executes immediately.
-- **Steer** — new prompt aborts the in-flight prompt and starts immediately. Previous prompt's partial work remains in the thread history.
-- **Collect** — prompts buffer for a configurable window (default 5 seconds). When the window closes, all buffered prompts are concatenated into a single prompt and dispatched. If the thread is busy, the collected prompt enters the FIFO queue as normal.
+- **Steer** — the new prompt supersedes the in-flight prompt *and every queued item admitted before it* (all settle `superseded`), becoming the thread's new head. Superseded partial work remains in the thread history. See "Steer supersession is transactional" under Durable Execution.
+- **Collect** — prompts buffer for a configurable window (default 5 seconds). Buffered prompts are **durably admitted immediately** with status `collecting` (their `dispatchId` dedup applies at admission, so webhook retries are absorbed even mid-window). When the window closes, the engine creates one merged submission referencing the constituent ids and CAS-settles each constituent with outcome `merged` pointing at it; `awaitResult` on a constituent resolves with the merged item's result. `collecting` items are not claimable and do not block FIFO head-claim. A collect window whose deadline passed while the engine was down is flushed by reconciliation.
 
 **Prompt metadata:** Each prompt carries `threadId`, `channelType`, `channelId`, `authorId`, optional attachments, and optional model override.
 
 **Routing semantics:** Queueing is keyed by thread, not by transport. `channelType` / `channelId` are routing metadata used for attribution, reply delivery, and decision gate resolution. They do not create extra isolation beyond the owning thread.
 
-**Steer semantics:** `steer` aborts only the current turn on the targeted thread. It must not affect other active threads in the session. Partial work already emitted by the aborted turn remains in history.
+**Steer semantics:** `steer` supersedes work only on the targeted thread. It must not affect other active threads in the session. Partial work already emitted by superseded turns remains in history.
 
 **Collect semantics:** `collect` buffers by thread. Adapters may additionally preserve origin-channel metadata for each buffered prompt so the merged prompt can still attribute its constituent messages correctly.
 
@@ -1083,7 +1099,7 @@ Each thread owns its own prompt queue. Threads execute independently and concurr
 - `collect` — new prompts continue buffering and later queue behind the blocked turn.
 - `steer` — new prompt cancels the blocked turn and expires or withdraws the outstanding decision gate before starting immediately.
 
-The engine must never allow an old gate resolution to resume a turn that was already superseded by `steer`.
+The engine must never allow an old gate resolution to resume a turn that was already superseded by `steer`. This is guaranteed durably, not just in memory: steer stamps `supersededByItemId` transactionally at admission, and the reconciliation tree settles superseded items before it ever considers gate replay.
 
 **Persisted runtime state:** A thread with a pending decision gate remains the active processing item in queue state, but with a distinct suspended status. Thread-level queue state distinguishes `idle`, `queued`, `running`, `blocked_on_decision_gate`, and `paused`; item-level lifecycle (`queued` → `running` → `terminalizing` → `settled`, with `blocked_on_decision_gate` as a suspended running state) is defined by the durable submission contract below.
 
@@ -1092,9 +1108,9 @@ When a thread enters `blocked_on_decision_gate`, the engine persists a `Suspende
 - session ID / thread ID / active queue item ID
 - current model
 - active leaf message ID
-- pending gate ID (derived from `gate:${sessionId}:${threadId}:${queueItemId}:${resumeKey}`)
+- pending gate ID (derived from `gate:${sessionId}:${threadId}:${queueItemId}:${resumeKey}:${ordinal}`)
 - pending tool call ID, tool name, and original tool args (used to invoke the tool by name during replay)
-- the `resumeKey` the tool supplied (used to recompute the gate ID on replay and confirm a match)
+- the `resumeKey` the tool supplied plus the engine-assigned `ordinal` (used to recompute the gate ID on replay and confirm a match)
 
 On restore, the engine reloads the blocked thread, reloads the decision gate, and waits for either resolution, expiry, or cancellation. Once resolved, the engine reconstructs the turn from the checkpoint and re-drives execution.
 
@@ -1114,16 +1130,19 @@ A prompt accepted by the engine is a **submission**: a durable record with an ex
 #### Submission lifecycle
 
 ```
+collecting ─┐
+            ▼
 queued → running → terminalizing → settled
             ↑ ↓
   blocked_on_decision_gate
 ```
 
+- **collecting** — durably admitted into an open collect window. Not claimable and does not block FIFO head-claim; settles `merged` when the window closes (see Collect under queue modes).
 - **queued** — durably admitted, waiting its turn in the thread's FIFO. Admission is idempotent by `dispatchId` (same id + same payload → original receipt; same id + different payload → conflict).
-- **running** — claimed by exactly one engine instance via a compare-and-set transition, recording an `attemptId`, `ownerId`, and lease. Two concurrent claims for the same submission must never both succeed. Only the oldest unsettled submission of a thread is claimable (per-thread FIFO gating); `steer` supersedes it explicitly rather than jumping the queue.
+- **running** — claimed by exactly one engine instance via a compare-and-set transition, recording an `attemptId`, `ownerId`, and lease. Two concurrent claims for the same submission must never both succeed. Only the oldest non-superseded unsettled submission of a thread is claimable (per-thread FIFO gating); `steer` supersedes the items ahead of it rather than jumping the queue.
 - **blocked_on_decision_gate** — the claimed turn is suspended on a pending gate. The claim is retained; the lease continues to renew while the process holding it is alive.
 - **terminalizing** — the terminal outcome has been decided and durably reserved, but post-settlement repairs (transcript rest-state, gate withdrawal, event emission) may still be in flight.
-- **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, or `superseded` (replaced by a `steer` prompt). The first terminal write wins; later attempts to settle differently are conflicts.
+- **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, `superseded` (replaced by a `steer` prompt), or `merged` (absorbed into a collect-window merge). The first terminal write wins; later attempts to settle differently are conflicts.
 
 Durability parameters are per-submission with engine defaults: `maxAttempts` (default 10), `timeoutAt` (default admission + 1 hour), lease duration 30 seconds with heartbeat renewal.
 
@@ -1140,14 +1159,34 @@ Exactly one live engine instance owns a session at a time. How exclusivity is ac
 
 On engine startup, and whenever an expired lease is reclaimed, each unsettled submission passes through a fixed decision tree. Order matters and is normative:
 
-1. **Finished work settles first.** If the persisted transcript shows the turn completed (terminal assistant entry for this submission), settle `completed` unconditionally — retry budgets and timeouts never discard finished work.
+1. **Finished work settles first.** If a persisted assistant entry carries this submission's `queueItemId` with `stopReason: 'end_turn'`, settle `completed` unconditionally — retry budgets and timeouts never discard finished work. The transcript linkage is the test; there is no heuristic "looks finished" fallback.
 2. **Abort wins next.** If `abortRequestedAt` is set, settle `aborted`. A crash-interrupted abort is never resurrected as a retry.
-3. **Retry budget.** If `attemptCount >= maxAttempts`, settle `failed` with a retry-exhausted error.
-4. **Timeout.** If now ≥ `timeoutAt`, settle `failed` with a timeout error.
-5. **Blocked on a gate.** If the submission was `blocked_on_decision_gate` and a `SuspendedTurnState` checkpoint exists, re-arm the gate wait (or replay immediately if the gate resolved while the engine was down) per the restart-safe gate contract.
-6. **Otherwise, resume.** Atomically replace the attempt (CAS: new `attemptId`, incremented `attemptCount`, fresh lease) *before* appending any recovery output, then continue the turn from persisted history.
+3. **Supersession.** If `supersededByItemId` is set (stamped transactionally by a `steer` admission — see below), settle `superseded`. In particular, a gate resolution arriving for a superseded submission's gate is acknowledged but never resumes it, regardless of when the crash landed.
+4. **Blocked on a gate.** If the submission was `blocked_on_decision_gate` and a `SuspendedTurnState` checkpoint exists, re-arm the gate wait (or replay immediately if the gate resolved while the engine was down) per the restart-safe gate contract. **Gate-blocked submissions are exempt from `timeoutAt`** — the human-wait bound is the gate's own `expiresAt`, not the execution timeout; a submission must never fail by timeout while legitimately parked on a pending gate.
+5. **Retry budget.** If `attemptCount >= maxAttempts`, settle `failed` with a retry-exhausted error.
+6. **Timeout.** If now ≥ `timeoutAt`, settle `failed` with a timeout error.
+7. **Otherwise, resume.** Atomically replace the attempt (CAS: new `attemptId`, incremented `attemptCount`, fresh lease) *before* appending any recovery output. Then apply the same rest-state repair as terminalization: any trailing assistant `tool_call` part with no persisted result is updated in place to `status: 'error'` with an interrupted marker — never re-executed — because LLM providers reject a context containing an unanswered tool call. Only then continue the turn from persisted history.
 
 `abort()` stamps `abortRequestedAt` on unsettled submissions durably but is **not** itself a terminal transition — settlement always flows through the claim/reconcile path so a canonical terminal record exists even when abort races a crash.
+
+**Steer supersession is transactional.** A `steer` admission durably, in one step: admits the steer item, stamps `supersededByItemId` on the running item *and every queued item admitted before it* on that thread, and withdraws their pending gates (reason `steer`). The steer item is thereby the oldest non-superseded unsettled item and claims under the normal FIFO rule — steer never bypasses head-claim, it *redefines the head*. Superseded items settle `superseded` through the normal settlement path.
+
+#### Effect fencing
+
+Leases arbitrate who may *claim*; fencing arbitrates whose *writes land*. Every store write performed inside a claimed turn, every EventStream append, and every sandbox operation carries the writing attempt's identity, and the receiving side MUST reject writes from superseded attempts:
+
+```typescript
+interface WriteFence {
+  itemId: string;     // the claimed submission
+  attemptId: string;  // the attempt performing the write
+}
+```
+
+- `appendEntries`, `updateEntry`, `saveSuspendedTurn`/`clearSuspendedTurn`, `reserveSettlement`, and `finalizeSettlement` take a `WriteFence`; the store rejects the write with a structured stale-attempt error when the fence does not name the submission's current attempt. Admission, claim, and read methods need no fence.
+- EventStream appends carry the appending attempt alongside `BusEvent.queueItemId`; a superseded attempt's append is refused.
+- Sandbox operations are fenced by the attachment epoch (sandbox runtime spec) — the policy wrapper discards results from superseded epochs.
+
+A zombie owner — alive but slow past lease expiry, reclaimed by a successor — therefore cannot fork the transcript, double-emit events, or land stale side effects into session state: its first fenced write fails, which is its signal to stop. On Cloudflare the DO's single-writer execution makes stale writes rare in practice, but the fence is still recorded and checked so the store contract and its conformance suite are identical on every platform.
 
 #### Terminalization
 
@@ -1271,10 +1310,13 @@ The `DecisionGateEntry.id` should be the canonical DAG entry ID for the gate, wh
 The V1 derivation is:
 
 ```
-gateId = `gate:${sessionId}:${threadId}:${queueItemId}:${resumeKey}`
+gateId = `gate:${sessionId}:${threadId}:${queueItemId}:${resumeKey}:${ordinal}`
 ```
 
-`resumeKey` is **required** on `DecisionGateRequest` (not optional). Tool authors choose a key that uniquely identifies the suspension point given the tool's inputs — typically a function of the tool's args (e.g. `"github.create_pr:owner/repo:head→base"`). Two `requestDecision(...)` calls in the same active queue item with the same `resumeKey` open the same gate. Two calls with different `resumeKey`s open different gates. A replayed tool execution that reaches the same `requestDecision(...)` call site with the same args produces the same `resumeKey` and therefore the same `gateId`, which is how the short-circuit works.
+`resumeKey` is **required** on `DecisionGateRequest` (not optional). Tool authors choose a key that uniquely identifies the suspension point given the tool's inputs — typically a function of the tool's args (e.g. `"github.create_pr:owner/repo:head→base"`). The `ordinal` is engine-maintained per `(queueItemId, resumeKey)`, and it is what keeps crash-replay dedup from leaking into live execution:
+
+- **Live semantics:** a `requestDecision(...)` call whose `(resumeKey)` has no gate, or whose current gate is *pending*, uses the current ordinal (joining the pending gate). A call arriving after the current gate is **terminal** (resolved/expired/withdrawn) opens a **fresh gate with the next ordinal**. A model that retries an identical action after a denial — or after an approval — always gets a new human decision; a stored resolution is never silently reused for a genuinely new invocation.
+- **Replay semantics:** `SuspendedTurnState` records the ordinal, so a replayed execution reaching the same call site recomputes the same `(resumeKey, ordinal)` and matches the SAME persisted gate — the short-circuit works exactly as before.
 
 ```typescript
 interface DecisionGateRequest {
@@ -1408,7 +1450,7 @@ POST /api/sessions/:sessionId/decision-gates/:gateId/withdraw
 
 Adapters must include all pending decision gates in the initial connection payload so reconnecting clients can render outstanding approvals, questions, and credential requests without waiting for a replayed event.
 
-**Offset-based resume:** every delivered client event carries the durable stream `offset`. On (re)connect, a client supplies its last seen offset; the adapter replays durable events from that offset via `EventStream.read` and then switches to live delivery, deduplicating by offset at the boundary. A client with no offset receives `init` (metadata-only) and loads message history through the REST API; live-only delta events are never replayed — the persisted entries are their durable record.
+**Offset-based resume:** every delivered *durable* client event carries the durable stream `offset`. On (re)connect, a client supplies its last seen offset; the adapter replays durable events from that offset via `EventStream.read` and then switches to live delivery, deduplicating by offset at the boundary. A client with no offset receives `init` (metadata-only) and loads message history through the REST API. Live-only delta events carry **no offset** and are never replayed — the persisted entries are their durable record, and clients must not advance their resume offset on a delta.
 
 ### Structured Results
 
@@ -1429,6 +1471,8 @@ Workflow execution (definition format, DAG interpretation, triggers, version his
 5. **Transcript read** — `SessionStore.getEntries(...)` is the single history read path for all session kinds (interactive, orchestrator, workflow-spawned). Structured-output extraction and repair against a node's `outputSchema` may remain a workflow-layer concern layered over `awaitResult`.
 
 **Approvals — one pending-decision model, two resume targets.** An approval raised *inside* an engine session (a tool's decision gate) suspends a submission and resumes through `resolveDecision` → the submission lifecycle. An approval raised *by the workflow itself* (an approval node, a tool-policy hold) suspends the workflow instance and resumes through the workflow substrate's signal mechanism. Both surface to users as the same pending-decision record; the resolver dispatches on which durable waiter owns the pause. The engine owns the session-side target; the adapter owns workflow-instance signaling; the application layer owns the unified record and the stuck-approval sweep that recovers lost signals.
+
+**Settlement-driven signals are deterministic.** Cross-session signals emitted by a settling submission (`child.settled` to a parent, workflow-wake notifications) use dispatchIds derived from the settling item (`child.settled:{childSessionId}:{queueItemId}`) and are emitted **inside the idempotent finalization step**. A re-run finalization re-emits the same dispatchId — admission dedup absorbs it — and a crash before emission is repaired by re-running finalization. Freshly generated "unique per message" ids are wrong for settlement-driven signals: they defeat the dedup exactly when the emitter re-runs.
 
 ## Provider Interfaces
 
@@ -1583,14 +1627,16 @@ interface SessionStore {
   // === Engine writes ===
   saveSession(session: SessionData): Promise<void>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
-  appendEntries(sessionId: string, threadId: string, entries: SessionEntry[]): Promise<void>;
+  /** Fenced (see Effect fencing): rejects writes from a superseded attempt. */
+  appendEntries(sessionId: string, threadId: string, entries: SessionEntry[], fence: WriteFence): Promise<void>;
   /**
    * Replace an existing entry in place. Required so pruning during
    * compaction can persist tool-result elision; also useful for any
    * other in-place mutation (gate refs, attachment updates).
    * Throws NotFoundError if no entry with this id exists in (sessionId, threadId).
+   * Fenced when called inside a claimed turn.
    */
-  updateEntry(sessionId: string, threadId: string, entry: SessionEntry): Promise<void>;
+  updateEntry(sessionId: string, threadId: string, entry: SessionEntry, fence?: WriteFence): Promise<void>;
   saveQueueState(sessionId: string, threadId: string, queue: QueueState): Promise<void>;
 
   // === Submission lifecycle (durable execution) ===
@@ -1615,16 +1661,17 @@ interface SessionStore {
   listExpiredSubmissions(): Promise<QueueItem[]>;
   /** Stamp abortRequestedAt on all unsettled submissions in scope. First write wins; not terminal. */
   requestAbort(sessionId: string, threadId?: string): Promise<void>;
-  /** Two-phase settlement: reserve records the exact terminal outcome (running→terminalizing). */
-  reserveSettlement(sessionId: string, threadId: string, itemId: string, outcome: SubmissionOutcome): Promise<void>;
-  /** Finalize terminalizing→settled. Idempotent; safe to re-run after a crash. */
-  finalizeSettlement(sessionId: string, threadId: string, itemId: string): Promise<void>;
+  /** Two-phase settlement: reserve records the exact terminal outcome (running→terminalizing). Fenced. */
+  reserveSettlement(sessionId: string, threadId: string, itemId: string, outcome: SubmissionOutcome, fence: WriteFence): Promise<void>;
+  /** Finalize terminalizing→settled. Idempotent; safe to re-run after a crash. Fenced. */
+  finalizeSettlement(sessionId: string, threadId: string, itemId: string, fence: WriteFence): Promise<void>;
 
   saveDecisionGate(sessionId: string, threadId: string, gate: DecisionGate): Promise<void>;
   saveDecisionGateRef(sessionId: string, threadId: string, gateId: string, ref: { channelType: string; ref: DecisionGateRef }): Promise<void>;
   updateDecisionGateEntry(sessionId: string, threadId: string, gateId: string, patch: Partial<DecisionGateEntry>): Promise<void>;
-  saveSuspendedTurn(sessionId: string, threadId: string, suspended: SuspendedTurnState): Promise<void>;
-  clearSuspendedTurn(sessionId: string, threadId: string): Promise<void>;
+  /** Fenced: only the current attempt may write or clear its checkpoint. */
+  saveSuspendedTurn(sessionId: string, threadId: string, suspended: SuspendedTurnState, fence: WriteFence): Promise<void>;
+  clearSuspendedTurn(sessionId: string, threadId: string, fence: WriteFence): Promise<void>;
   updateSessionStatus(id: string, status: string, metadata?: Partial<SessionData>): Promise<void>;
   flush?(): Promise<void>;
 
@@ -1655,6 +1702,8 @@ interface SuspendedTurnState {
   toolName: string;
   toolArgs: Record<string, unknown>;
   resumeKey: string;
+  /** Engine-maintained per (queueItemId, resumeKey); replay matches the SAME gate via (resumeKey, ordinal). */
+  ordinal: number;
   attempt: number;
   createdAt: number;
 }
@@ -1722,12 +1771,16 @@ interface QueueItem {
   metadata?: Record<string, unknown>;
 
   // Durable execution lifecycle
-  status: 'queued' | 'running' | 'blocked_on_decision_gate' | 'terminalizing' | 'settled';
+  status: 'collecting' | 'queued' | 'running' | 'blocked_on_decision_gate' | 'terminalizing' | 'settled';
   outcome?: SubmissionOutcome;
+  /** Stamped transactionally by a steer admission; reconciliation settles the item 'superseded'. */
+  supersededByItemId?: string;
+  /** Set on constituents when a collect window closes; awaitResult delegates to this item. */
+  mergedIntoItemId?: string;
   attemptId?: string;
   attemptCount: number;
   maxAttempts: number;        // default 10
-  timeoutAt: number;          // default createdAt + 1h
+  timeoutAt: number;          // default createdAt + 1h; not enforced while blocked_on_decision_gate
   abortRequestedAt?: number;
   ownerId?: string;
   leaseExpiresAt?: number;
@@ -1745,7 +1798,7 @@ interface SubmissionClaim {
 }
 
 interface SubmissionOutcome {
-  outcome: 'completed' | 'failed' | 'aborted' | 'superseded';
+  outcome: 'completed' | 'failed' | 'aborted' | 'superseded' | 'merged';
   error?: string;
 }
 
@@ -1773,7 +1826,7 @@ The engine schema owns these tables outright — they are the only storage the e
 |---|---|---|
 | `engine_sessions` | Canonical engine session state | `id`, `user_id`, `org_id`, `workspace`, `purpose`, `status`, `sandbox_id`, `snapshot_id`, `metadata`, timestamps |
 | `engine_threads` | Thread metadata and active leaf | `id`, `session_id`, `key`, `status`, `active_leaf_entry_id`, `queue_mode`, `model`, `summary`, `metadata` |
-| `engine_entries` | DAG history | `id`, `session_id`, `thread_id`, `parent_id`, `entry_type`, `role`, `content`, `parts`, `metadata`, `created_at` |
+| `engine_entries` | DAG history | `id`, `session_id`, `thread_id`, `parent_id`, `queue_item_id` (indexed — the transcript↔submission linkage), `entry_type`, `role`, `stop_reason`, `content`, `parts`, `metadata`, `created_at` |
 | `engine_queue_items` | Durable submissions (per-thread queue + execution lifecycle) | `id`, `session_id`, `thread_id`, `dispatch_id` (unique per session when set), `status`, `outcome`, `error`, `mode`, `content`, `author`, `channel`, `reply_target`, `model`, `attempt_id`, `attempt_count`, `max_attempts`, `timeout_at`, `abort_requested_at`, `owner_id`, `lease_expires_at`, `metadata`, timestamps |
 | `engine_attempt_markers` | Durable evidence an attempt started (crash-recovery gating) | `item_id`, `attempt_id`, `created_at` — PK `(item_id, attempt_id)` |
 | `engine_events` | Offset-addressed durable event stream | `session_id`, `offset`, `thread_id`, `event_type`, `payload`, `created_at` — PK `(session_id, offset)` |
@@ -1792,8 +1845,13 @@ Engine events are an **offset-addressed durable log per session**, not a fire-an
 
 ```typescript
 interface EventStream {
-  /** Durably append and fan out to live subscribers. Returns the assigned offset. */
-  append(event: BusEvent): Promise<{ offset: string }>;
+  /**
+   * Durably append and fan out to live subscribers. Returns the assigned
+   * offset. `eventKey` is a caller-supplied idempotency key, unique per
+   * session: an append whose eventKey already exists is a no-op returning
+   * the original offset (appendOnce semantics).
+   */
+  append(event: BusEvent, eventKey: string): Promise<{ offset: string }>;
   /** Read durable events at or after fromOffset, in offset order. */
   read(sessionId: string, opts?: { fromOffset?: string; limit?: number }): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
   /** Live subscription. Delivery order matches offset order for a given session. */
@@ -1803,6 +1861,8 @@ interface EventStream {
 interface BusEvent {
   sessionId: string;
   threadId?: string;
+  /** The submission whose turn produced this event. Required for retention and truncation decisions. */
+  queueItemId?: string;
   userId?: string;
   event: EngineEvent;
   timestamp: number;
@@ -1822,9 +1882,13 @@ interface EventFilter {
 type Unsubscribe = () => void;
 ```
 
-**Delta handling:** high-frequency streaming events (`text_delta`) are live-only — they fan out to subscribers but are not durably appended (the durable record of streamed text is the persisted `MessageEntry`, delivered via `message_update`/`message_end`). All discrete events (message lifecycle, tool start/end, queue state, decision gates, status, errors) are durable. This keeps the log linear in conversation size rather than quadratic in streamed bytes.
+**Deterministic keys for re-runnable emitters:** any event emitted from an idempotent repair path — settlement events from re-runnable finalization, terminalization repairs — MUST use a deterministic eventKey (e.g. `settled:{queueItemId}`), so a repair re-run cannot double-emit. Events emitted once from live execution may use a fresh unique key.
 
-**Retention:** a session's stream is truncatable after the session reaches a terminal status plus a configurable retention window. Truncation never removes events for unsettled submissions.
+**Gap handling:** live fan-out transports may be lossy (Redis pub/sub is at-most-once). A subscriber that observes a live event whose offset is not contiguous with its last delivered offset MUST re-read the durable log from that offset before delivering — adapters using lossy fan-out are required to implement this refetch, which is what makes "delivery order matches offset order" true end-to-end rather than merely asserted.
+
+**Delta handling:** high-frequency streaming events (`text_delta`) are live-only — they fan out to subscribers but are not durably appended and **carry no offset** (the durable record of streamed text is the persisted `MessageEntry`, delivered via `message_update`/`message_end`). All discrete events (message lifecycle, tool start/end, queue state, decision gates, status, errors) are durable. This keeps the log linear in conversation size rather than quadratic in streamed bytes.
+
+**Retention:** a session's stream is truncatable after the session reaches a terminal status plus a configurable retention window. Truncation never removes events whose `queueItemId` references an unsettled submission — the linkage field is what makes this rule computable.
 
 **Implementations:**
 - `DOEventStream` — DO-storage-backed log with in-process fan-out (Cloudflare)
@@ -2315,8 +2379,8 @@ Required behavior:
 The prose in this spec defines intent; executable contract suites define conformance. The engine ships reusable test suites that any provider implementation must pass:
 
 - **SessionStore contract** — entity round-trips, `updateEntry` in-place transitions, entry/queue/gate persistence.
-- **Submission lifecycle contract** — idempotent admission, single-claim exclusivity, lease expiry and reclaim, attempt replacement, two-phase settlement, abort stamping, reconciliation outcomes.
+- **Submission lifecycle contract** — idempotent admission, single-claim exclusivity, lease expiry and reclaim, attempt replacement, **write-fence rejection of superseded attempts**, transactional steer supersession, collect-window durability and merge settlement, two-phase settlement, abort stamping, reconciliation outcomes (including gate-blocked timeout exemption).
 - **Restart-safe gate contract** — suspended-turn checkpointing, gate re-arming, deterministic gate identity on replay.
-- **EventStream contract** — monotonic offsets, replay-from-offset, live subscription ordering, idempotent append.
+- **EventStream contract** — monotonic offsets, replay-from-offset, live subscription ordering, eventKey-idempotent append, gap-refetch on lossy fan-out.
 
 A backend (SQLite, D1, PostgreSQL) is supported when its store passes these suites, not when it has been manually verified. New invariants added to this spec must land with a corresponding contract test in the same change.
