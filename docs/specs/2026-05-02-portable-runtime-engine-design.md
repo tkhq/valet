@@ -1198,6 +1198,8 @@ interface WriteFence {
 
 A zombie owner — alive but slow past lease expiry, reclaimed by a successor — therefore cannot fork the transcript, double-emit events, or land stale side effects into session state: its first fenced write fails, which is its signal to stop. On Cloudflare the DO's single-writer execution makes stale writes rare in practice, but the fence is still recorded and checked so the store contract and its conformance suite are identical on every platform.
 
+**Stuck-head alarm:** because FIFO head-claim means a crash-looping head submission blocks every queued item behind it, the engine emits an escalation-grade attention event when a submission's `attemptCount` crosses a threshold (default 3) or it remains unsettled past a wall-clock bound (default 15 minutes, gate-blocked time excluded) — routed through the application's attention router and visible on the operator submissions surface. A wedged thread must page someone before the 1-hour timeout silently fails it.
+
 #### Terminalization
 
 Before any submission settles on a terminal path (completion, failure, abort, supersession), the engine settles the transcript to a **deterministic rest state**:
@@ -1915,7 +1917,7 @@ type Unsubscribe = () => void;
 
 **Delta handling:** high-frequency streaming events (`text_delta`) are live-only — they fan out to subscribers but are not durably appended and **carry no offset** (the durable record of streamed text is the persisted `MessageEntry`, delivered via `message_update`/`message_end`). All discrete events (message lifecycle, tool start/end, queue state, decision gates, status, errors) are durable. This keeps the log linear in conversation size rather than quadratic in streamed bytes.
 
-**Retention:** a session's stream is truncatable after the session reaches a terminal status plus a configurable retention window. Truncation never removes events whose `queueItemId` references an unsettled submission — the linkage field is what makes this rule computable.
+**Retention:** a session's stream is truncatable after the session reaches a terminal status plus a configurable retention window. For **permanent sessions** (orchestrators never terminate), retention applies per submission instead: events whose `queueItemId` references a submission settled longer than the retention window ago are truncatable while the session lives — the transcript entries remain the durable record. Truncation never removes events whose `queueItemId` references an unsettled submission; the linkage field is what makes both rules computable.
 
 **Implementations:**
 - `DOEventStream` — the log lives in the SessionHostDO's own SQLite storage, co-located with the engine; fan-out to connected clients happens from that DO's WebSockets. There is no singleton event DO. (Cloudflare)
