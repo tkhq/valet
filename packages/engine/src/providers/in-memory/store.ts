@@ -236,8 +236,13 @@ export class InMemorySessionStore implements SessionStore {
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     const r = this.row(sessionId);
 
-    if (item.dispatchId) {
-      const existingId = r.dispatchIndex.get(item.dispatchId);
+    // Normalize an empty-string dispatchId to "absent" so it never dedups — the
+    // SQLite backend's partial unique index treats "" as a present value, so
+    // both backends must agree that "" means no idempotency key.
+    const dispatchId = item.dispatchId || undefined;
+
+    if (dispatchId) {
+      const existingId = r.dispatchIndex.get(dispatchId);
       if (existingId) {
         const existing = r.queueItems.get(existingId);
         if (existing) {
@@ -246,14 +251,14 @@ export class InMemorySessionStore implements SessionStore {
             return { item: { ...existing }, admitted: false, supersededItemIds: [] };
           }
           throw new ConflictError(
-            `dispatchId ${item.dispatchId} already admitted with different content`,
-            { dispatchId: item.dispatchId, existingItemId: existing.id },
+            `dispatchId ${dispatchId} already admitted with different content`,
+            { dispatchId, existingItemId: existing.id },
           );
         }
       }
     }
 
-    const stored: QueueItem = { ...item };
+    const stored: QueueItem = { ...item, dispatchId };
     r.queueItems.set(stored.id, stored);
     if (stored.dispatchId) {
       r.dispatchIndex.set(stored.dispatchId, stored.id);
@@ -283,7 +288,10 @@ export class InMemorySessionStore implements SessionStore {
   private threadItemsInOrder(r: SessionRow, threadId: string): QueueItem[] {
     return [...r.queueItems.values()]
       .filter((i) => i.threadId === threadId)
-      .sort((a, b) => a.createdAt - b.createdAt);
+      // Lexicographic id tiebreaker mirrors SQLite's `ORDER BY created_at, id`
+      // (CLAIM_SQL) so same-createdAt items claim in a deterministic order that
+      // matches across backends, regardless of Map insertion order.
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
 
   // Per-thread FIFO gating (spec: "Only the oldest non-superseded unsettled

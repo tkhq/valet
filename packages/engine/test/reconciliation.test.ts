@@ -23,6 +23,19 @@ import {
 
 // ── fixtures ────────────────────────────────────────────────────────
 
+/** Poll an async predicate until it holds or the timeout elapses. */
+async function waitForAsync(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 1500,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error("waitForAsync: timed out");
+}
+
 const NOW = 1_000_000;
 
 function item(overrides: Partial<QueueItem> = {}): QueueItem {
@@ -465,6 +478,7 @@ async function seedCrashedRunningTurn(
   opts: {
     supersededByItemId?: string;
     withGate?: boolean;
+    gateExpiresAt?: number;
   } = {},
 ): Promise<{ itemId: string; attemptId: string; callId: string }> {
   const now = Date.now();
@@ -568,6 +582,7 @@ async function seedCrashedRunningTurn(
       title: "ok?",
       actions: [],
       status: "pending",
+      expiresAt: opts.gateExpiresAt,
       createdAt: now,
       updatedAt: now,
     };
@@ -957,6 +972,120 @@ describe("reconciliation executor (integration)", () => {
     expect(withdrawn).toContain("steer");
 
     // No tool re-execution.
+    expect(spy.calls()).toBe(0);
+
+    faux.unregister();
+  });
+
+  it("restart with an already-expired pending gate terminalizes it and settles the turn (no permanent wedge)", async () => {
+    const store = new InMemorySessionStore();
+    const spy = spyTool();
+    // Gate whose expiresAt is already past at reconciliation time.
+    const { itemId } = await seedCrashedRunningTurn(store, {
+      withGate: true,
+      gateExpiresAt: Date.now() - 1000,
+    });
+
+    const faux = registerFauxProvider({ provider: "recon-gate-expired" });
+    faux.setResponses([fauxAssistantMessage("resumed after expiry")]);
+
+    const bus = new InMemoryEventBus();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({
+      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+
+    await engine.restoreSession({
+      sessionId: SESSION,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: faux.getModel(),
+        tools: [spy.def],
+      },
+    });
+
+    // The re-armed gate's expiry terminalization runs fire-and-forget; wait for
+    // the blocked item to reach a terminal, non-blocked state.
+    await waitForAsync(async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled");
+
+    const settled = await store.getQueueItem(SESSION, itemId);
+    expect(settled?.status).toBe("settled");
+    expect(settled?.outcome?.outcome).toBe("completed");
+
+    // Gate durably expired — not left pending.
+    const gate = await store.getDecisionGate(SESSION, "g-crash");
+    expect(gate?.status).toBe("expired");
+    expect(events.some((e) => e.event.type === "decision_gate_expired")).toBe(true);
+
+    // Suspended checkpoint cleared; block flag flipped off.
+    expect(await store.getSuspendedTurn(SESSION, THREAD)).toBeNull();
+
+    // No tool re-execution.
+    expect(spy.calls()).toBe(0);
+
+    // Thread head is unblocked: a subsequently admitted item gets claimed + settled.
+    faux.setResponses([fauxAssistantMessage("next turn")]);
+    const session = engine.getSession(SESSION);
+    if (!session) throw new Error("session missing");
+    const thread = await session.threadByKey("web:default");
+    if (!thread) throw new Error("thread missing");
+    const next = await thread.submitPrompt("another one", {});
+    await waitForAsync(
+      async () => (await store.getQueueItem(SESSION, next.queueItemId))?.status === "settled",
+    );
+    expect((await store.getQueueItem(SESSION, next.queueItemId))?.status).toBe("settled");
+
+    faux.unregister();
+  });
+
+  it("re-armed pending gate that expires AFTER restart terminalizes and settles the turn", async () => {
+    const store = new InMemorySessionStore();
+    const spy = spyTool();
+    // Gate expires shortly in the future — arms a real timer at reconcile time.
+    const { itemId } = await seedCrashedRunningTurn(store, {
+      withGate: true,
+      gateExpiresAt: Date.now() + 60,
+    });
+
+    const faux = registerFauxProvider({ provider: "recon-gate-expire-later" });
+    faux.setResponses([fauxAssistantMessage("resumed after late expiry")]);
+
+    const bus = new InMemoryEventBus();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({
+      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+
+    await engine.restoreSession({
+      sessionId: SESSION,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: faux.getModel(),
+        tools: [spy.def],
+      },
+    });
+
+    // Immediately after restart the gate is still pending (armed, not yet expired).
+    // Wait for the timer to fire and the terminalization to drive the turn to settle.
+    await waitForAsync(
+      async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled",
+      3000,
+    );
+
+    const settled = await store.getQueueItem(SESSION, itemId);
+    expect(settled?.status).toBe("settled");
+    expect(settled?.outcome?.outcome).toBe("completed");
+    const gate = await store.getDecisionGate(SESSION, "g-crash");
+    expect(gate?.status).toBe("expired");
+    expect(events.some((e) => e.event.type === "decision_gate_expired")).toBe(true);
     expect(spy.calls()).toBe(0);
 
     faux.unregister();

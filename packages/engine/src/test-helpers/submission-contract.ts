@@ -132,6 +132,19 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(resA.item.id).not.toBe(resB.item.id);
     });
 
+    it("empty-string dispatchId is treated as absent: both admit, no dedup", async () => {
+      // SQLite's partial unique index would treat "" as a present value; the
+      // in-memory guard would treat it as absent. Both backends must normalize
+      // "" to "no idempotency key" so a second "" admission never dedups.
+      const a = makeItem({ dispatchId: "", content: "same text" });
+      const b = makeItem({ dispatchId: "", content: "same text" });
+      const resA = await store.admitSubmission(SESSION_ID, THREAD_ID, a);
+      const resB = await store.admitSubmission(SESSION_ID, THREAD_ID, b);
+      expect(resA.admitted).toBe(true);
+      expect(resB.admitted).toBe(true);
+      expect(resA.item.id).not.toBe(resB.item.id);
+    });
+
     // --- Claim (CAS + FIFO head) ---
 
     it("claims the head: queued→running with attemptId/ownerId/lease, attemptCount=1", async () => {
@@ -186,6 +199,37 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       });
       expect(claimA).not.toBeNull();
       expect(claimA?.id).toBe(a.id);
+    });
+
+    it("same-createdAt items claim in id order (lexicographic tiebreaker), independent of insertion order", async () => {
+      // Insertion order (b then a) deliberately differs from id order (a < b) so
+      // a pure insertion/Map-order scan would pick the wrong head. Both backends
+      // must break the createdAt tie on id (SQLite: ORDER BY created_at, id).
+      const later = makeItem({ id: "q-zzz", createdAt: 500, updatedAt: 500 });
+      const earlier = makeItem({ id: "q-aaa", createdAt: 500, updatedAt: 500 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, later);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, earlier);
+
+      // The larger id is not the head — its claim is refused.
+      const claimLater = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: later.id,
+        attemptId: "att-z",
+        ownerId: "o",
+      });
+      expect(claimLater).toBeNull();
+
+      // The smaller id is the head — it claims.
+      const claimEarlier = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: earlier.id,
+        attemptId: "att-a",
+        ownerId: "o",
+      });
+      expect(claimEarlier).not.toBeNull();
+      expect(claimEarlier?.id).toBe(earlier.id);
     });
 
     it("a superseded queued item is skipped for head selection", async () => {

@@ -132,7 +132,10 @@ function queueItemInsertParams(
     id: item.id,
     sessionId,
     threadId,
-    dispatchId: item.dispatchId ?? null,
+    // Normalize an empty-string dispatchId to NULL so the partial unique index
+    // (WHERE dispatch_id IS NOT NULL) never dedups on "" — matching the
+    // in-memory backend, which treats "" as an absent idempotency key.
+    dispatchId: item.dispatchId || null,
     status: item.status,
     outcome: item.outcome?.outcome ?? null,
     error: item.outcome?.error ?? null,

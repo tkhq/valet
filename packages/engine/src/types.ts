@@ -585,7 +585,7 @@ export type EngineEvent =
       gateId: string;
       reason: DecisionWithdrawReason;
     }
-  | { type: "model_switched"; threadId: string; fromModel: string; toModel: string; reason: string }
+  | { type: "model_switched"; threadId?: string; fromModel: string; toModel: string; reason: string }
   | {
       type: "submission_settled";
       sessionId: string;

@@ -427,7 +427,7 @@ export class Session {
         type: "model_switched",
         // session scope — no threadId. Bridge / wire types treat the
         // missing threadId as "session-level switch".
-        threadId: undefined as unknown as string,
+        threadId: undefined,
         fromModel: before,
         toModel: next.id,
         reason,

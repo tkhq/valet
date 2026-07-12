@@ -6,7 +6,13 @@ import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from
 type PiModel = Model<Api>;
 import type { Session } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
-import { fromRequest, GateManager, shouldShortCircuit } from "./decision-gate.js";
+import {
+  fromRequest,
+  GateManager,
+  isDecisionGateExpired,
+  isDecisionGateWithdrawn,
+  shouldShortCircuit,
+} from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
 import { deriveQueueState, resolvePartialSubmissionText, resolveSubmissionText } from "./submission.js";
 import { NotFoundError, StaleAttemptError, TimeoutError } from "./errors.js";
@@ -692,17 +698,67 @@ export class Thread {
     this.blockedGateId = gate.id;
     this.gates
       .register(gate, () => {
-        // expiry handler: replay never runs for an expired gate
+        // Terminalization is driven off the promise rejection below (which the
+        // GateManager fires alongside this callback), so this stays a no-op.
       })
       .then((resolution) => {
         void this.replayBlocked({ suspended, resolution });
       })
       .catch((err) => {
+        // Expiry / withdrawal of a re-armed gate must reach the SAME terminal
+        // state as the live path: persist the gate's terminal status, flip the
+        // durable block back to running, clear the suspended checkpoint, and
+        // drive the turn to settlement. Otherwise the item stays
+        // blocked_on_decision_gate forever (the heartbeat renews its lease so
+        // the sweep never reclaims it and maybeEmitStuck excludes it), wedging
+        // the whole thread on every restart.
+        if (isDecisionGateExpired(err) || isDecisionGateWithdrawn(err)) {
+          void this.terminalizeReconciledGate(gate, err);
+          return;
+        }
         this.emitError(
           "replay_after_pending_gate_failed",
           err instanceof Error ? err.message : String(err),
         );
       });
+  }
+
+  /**
+   * Terminalize a re-armed gate that expired or was withdrawn after restart,
+   * then drive its suspended turn to settlement. Mirrors the live
+   * `requestDecision` expiry/withdrawal path (persist terminal gate status +
+   * DAG entry, emit `decision_gate_expired` for expiry) but, because there is
+   * no in-flight `runAgent` to rethrow into, uses `driveResumeToCompletion` to
+   * repair the dangling gate tool_call, flip the block, continue, and settle —
+   * matching what the live path's rethrow ultimately achieves.
+   */
+  private async terminalizeReconciledGate(gate: DecisionGate, err: unknown): Promise<void> {
+    const store = this.session.providers.store;
+    const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
+    const status: DecisionGate["status"] = reason ? "withdrawn" : "expired";
+    const terminal: DecisionGate = { ...gate, status, updatedAt: Date.now() };
+    await store.saveDecisionGate(this.session.id, this.id, terminal);
+    await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
+      gate: terminal,
+      ...(reason
+        ? { withdrawnReason: reason }
+        : { resolvedAt: new Date().toISOString() }),
+    });
+    if (!reason) {
+      await this.session.emit({
+        type: "decision_gate_expired",
+        threadId: this.id,
+        gateId: gate.id,
+      });
+    }
+    this.blockedGateId = undefined;
+
+    if (this.runningItem && this.fence) {
+      const message = reason
+        ? `decision gate withdrawn (${reason}) before resolution`
+        : "decision gate expired before resolution";
+      await this.driveResumeToCompletion(this.runningItem, message);
+    }
   }
 
   /**
@@ -1224,11 +1280,28 @@ export class Thread {
     this.session.ensureTimers();
     await this.emitQueueState();
 
+    await this.driveResumeToCompletion(replaced, "interrupted — result lost in restart");
+  }
+
+  /**
+   * Drive an interrupted turn we already own (`runningItem` + `fence` installed
+   * by the caller) to completion and settle it. Repairs the dangling tool_call
+   * to an error carrying `repairMessage`, clears any stale suspended-gate
+   * checkpoint, flips the durable block back to running, rehydrates the
+   * transcript, continues the agent so the model sees the repaired state, then
+   * settles normally. Shared by `resumeInterrupted` (step-7 resume) and the
+   * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
+   */
+  private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    const store = this.session.providers.store;
+    const fence = this.fence;
+    if (!fence) return;
+
     let turnFailed = false;
     let turnError: unknown;
     try {
       // Rest-state repair FIRST — before appending any recovery output.
-      await this.repairRestState(item, this.fence, "interrupted — result lost in restart");
+      await this.repairRestState(item, fence, repairMessage);
 
       // A resume reached from the blocked fall-through (gate expired/withdrawn/
       // missing while the engine was down) still has the suspended-turn
@@ -1236,13 +1309,13 @@ export class Thread {
       // dead gate.
       const staleSuspended = await store.getSuspendedTurn(this.session.id, this.id);
       if (staleSuspended && staleSuspended.queueItemId === item.id) {
-        await store.clearSuspendedTurn(this.session.id, this.id, this.fence);
+        await store.clearSuspendedTurn(this.session.id, this.id, fence);
       }
       // Same fall-through: flip the durable block back to running (strict
       // blocked→running toggle, done once) so the resumed turn can settle —
       // settleTurn refuses to settle a blocked item.
-      if (replaced.status === "blocked_on_decision_gate") {
-        await store.setSubmissionBlocked(this.session.id, this.id, item.id, false, this.fence);
+      if (item.status === "blocked_on_decision_gate") {
+        await store.setSubmissionBlocked(this.session.id, this.id, item.id, false, fence);
       }
 
       // Rehydrate from the repaired entries. entriesToAgentMessages answers
@@ -1268,7 +1341,7 @@ export class Thread {
     }
 
     try {
-      await this.settleTurn(replaced, turnFailed ? { error: turnError } : undefined);
+      await this.settleTurn(item, turnFailed ? { error: turnError } : undefined);
     } catch (err) {
       this.emitError("settlement_failed", err instanceof Error ? err.message : String(err));
       this.runningItem = null;
