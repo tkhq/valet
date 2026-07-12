@@ -1615,11 +1615,11 @@ Providers register in a registry keyed by `backend`; sessions select via `Sandbo
 
 Remote sandbox implementations expose an authenticated HTTP RPC surface to the adapter. The engine still calls the `Sandbox` TypeScript interface; this RPC is the required adapter-to-sandbox protocol for Modal and Kubernetes implementations.
 
-All requests include `Authorization: Bearer <sandbox-rpc-token>`. Tokens are scoped to one session and one sandbox ID. Paths are relative to the sandbox workspace unless explicitly absolute and allowed by adapter policy.
+All requests include `Authorization: Bearer <sandbox-rpc-token>`. Tokens are scoped to one session and one sandbox ID and embed the attachment epoch (sandbox runtime spec); requests bearing a superseded-epoch token are rejected. Paths are relative to the sandbox workspace unless explicitly absolute and allowed by adapter policy.
 
 | Method | Path | Request | Response |
 |---|---|---|---|
-| `GET` | `/health` | none | `{ ok: true, sandboxId, version }` |
+| `GET` | `/health` | none | `{ ok, sandboxId, version, profile, services?, workspace: { state } }` |
 | `GET` | `/files/stat?path=` | none | `{ isFile, isDirectory, size, mtimeMs }` |
 | `GET` | `/files/read?path=&encoding=utf8` | none | `{ content, encoding }` |
 | `GET` | `/files/read-binary?path=` | none | binary stream |
@@ -1628,11 +1628,14 @@ All requests include `Authorization: Bearer <sandbox-rpc-token>`. Tokens are sco
 | `GET` | `/files/list?path=` | none | `{ entries: Array<{ name, type, size }> }` |
 | `POST` | `/files/mkdir` | `{ path, recursive?: boolean }` | `{ ok: true }` |
 | `DELETE` | `/files` | `{ path, recursive?: boolean }` | `{ ok: true }` |
-| `POST` | `/exec` | `{ command, cwd?, env?, stdin?, timeout?, maxOutputBytes? }` | `ExecResult` |
+| `POST` | `/exec` | `{ command, cwd?, env?, stdin?, timeout?, maxOutputBytes?, mode?: 'job' }` | `ExecResult` \| `{ execId }` (job mode) |
+| `GET` | `/exec/:execId?offset=N` | none | `{ status: 'running' \| 'done' \| 'failed', exitCode?, output, nextOffset }` |
+| `DELETE` | `/exec/:execId` | none | `{ ok: true }` (cancel; two-tier cancellation contract) |
+| `PUT` | `/auth/keys` | JWKS key set | `{ ok: true }` (gateway JWT rotation; auth = RPC bearer) |
 | `POST` | `/snapshot` | none | `{ snapshotId }` |
 | `GET` | `/tunnels` | none | `{ tunnels: Record<string, string> }` |
 
-RPC implementations must enforce output limits, command timeouts, workspace path policy, and token validation. `exec` is non-interactive in V1; long-running interactive terminal sessions remain a sandbox UI concern exposed through tunnels, not an engine tool protocol.
+RPC implementations must enforce output limits, command timeouts, workspace path policy, and token/epoch validation. Sync `exec` is non-interactive; the engine's bash tool uses job mode past a timeout threshold (default 60s) so long execs survive intermediary idle timeouts (sandbox runtime spec, Long-Running Exec). Interactive terminal sessions remain a sandbox UI concern exposed through tunnels, not an engine tool protocol.
 
 ### SessionStore
 
@@ -2254,6 +2257,16 @@ K8s Service (Hono/Node)
 ```
 
 The SessionPool manages engine instances in-process. Idle instances are evicted after a timeout (equivalent to DO hibernation). Session affinity via K8s ingress routes requests for the same session to the same pod.
+
+### Local Host (development topology)
+
+The local development host is the Kubernetes shape at N=1 with local providers, and it is a first-class supported topology — every contract in this spec must hold on it, because it is where the conformance suites and the end-to-end dogfood run:
+
+- One Node process (`packages/api`): Hono routes + a single-process SessionPool.
+- `SqliteSessionStore` (better-sqlite3) as the authoritative store; `SqliteEventStream` over the same database as the durable, offset-addressed event log (in-process fan-out — the reference EventStream implementation).
+- `DockerSandbox` / `LocalSandbox` as in-process `Sandbox` implementations under the policy wrapper (no sandboxd required locally).
+- The same claim/lease/fence machinery runs even though there is exactly one owner — a locally killed-and-restarted process exercises the identical reconciliation paths the DO and pod hosts rely on. Kill-mid-turn recovery is a local test, not a production-only behavior.
+- Workflow runs use the same leased-worker RunHost in-process; channel ingress uses long-polling transports (e.g. Telegram) so no public webhook is needed.
 
 ### What Each Adapter Provides
 
