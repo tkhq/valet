@@ -6,11 +6,14 @@ import {
   primaryKey,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 
 export const engineSessions = sqliteTable(
   "engine_sessions",
   {
     id: text("id").primaryKey(),
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id").notNull(),
     userId: text("user_id").notNull(),
     orgId: text("org_id").notNull(),
     workspace: text("workspace").notNull(),
@@ -19,6 +22,7 @@ export const engineSessions = sqliteTable(
     sandboxId: text("sandbox_id"),
     snapshotId: text("snapshot_id"),
     parentSessionId: text("parent_session_id"),
+    parentThreadId: text("parent_thread_id"),
     /** Persisted session-default model id (e.g. "claude-haiku-4-5"). Null
      *  means "use the host's global default". Mutated via Session.setModel. */
     model: text("model"),
@@ -29,6 +33,7 @@ export const engineSessions = sqliteTable(
   (t) => [
     index("engine_sessions_user").on(t.userId),
     index("engine_sessions_status").on(t.status),
+    index("engine_sessions_owner").on(t.ownerType, t.ownerId),
   ],
 );
 
@@ -41,6 +46,8 @@ export const engineThreads = sqliteTable(
     status: text("status").notNull(),
     activeLeafEntryId: text("active_leaf_entry_id"),
     queueMode: text("queue_mode").notNull(),
+    /** Persisted pause flag — the only stored piece of queue state; the rest of QueueState derives from durable queue items. */
+    paused: integer("paused"),
     model: text("model"),
     summary: text("summary"),
     metadata: text("metadata"),
@@ -67,6 +74,10 @@ export const engineEntries = sqliteTable(
     author: text("author"),
     channel: text("channel"),
     model: text("model"),
+    /** The submission that produced this entry — the transcript↔submission linkage. */
+    queueItemId: text("queue_item_id"),
+    /** Persisted on the turn's final assistant entry. */
+    stopReason: text("stop_reason"),
     summary: text("summary"),
     coveredEntryIds: text("covered_entry_ids"),
     tokenCountBefore: integer("token_count_before"),
@@ -84,6 +95,7 @@ export const engineEntries = sqliteTable(
   (t) => [
     index("engine_entries_thread").on(t.sessionId, t.threadId, t.createdAt),
     index("engine_entries_gate").on(t.gateId),
+    index("engine_entries_queue_item").on(t.queueItemId),
   ],
 );
 
@@ -93,35 +105,53 @@ export const engineQueueItems = sqliteTable(
     id: text("id").primaryKey(),
     sessionId: text("session_id").notNull(),
     threadId: text("thread_id").notNull(),
+    /** Idempotent admission key. Unique per session when present. */
+    dispatchId: text("dispatch_id"),
     status: text("status").notNull(),
-    mode: text("mode").notNull(),
+    /** SubmissionOutcome.outcome — "completed" | "failed" | "aborted" | "superseded" | "merged". */
+    outcome: text("outcome"),
+    error: text("error"),
+    supersededByItemId: text("superseded_by_item_id"),
+    mergedIntoItemId: text("merged_into_item_id"),
     content: text("content").notNull(),
     author: text("author"),
     channel: text("channel"),
     replyTarget: text("reply_target"),
     model: text("model"),
+    role: text("role"),
     metadata: text("metadata"),
+    attemptId: text("attempt_id"),
+    attemptCount: integer("attempt_count").notNull(),
+    maxAttempts: integer("max_attempts").notNull(),
+    timeoutAt: integer("timeout_at").notNull(),
+    abortRequestedAt: integer("abort_requested_at"),
+    ownerId: text("owner_id"),
+    leaseExpiresAt: integer("lease_expires_at"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
-  (t) => [index("engine_queue_items_thread").on(t.sessionId, t.threadId, t.status)],
+  (t) => [
+    index("engine_queue_items_thread").on(t.sessionId, t.threadId, t.status),
+    uniqueIndex("engine_queue_items_dispatch")
+      .on(t.sessionId, t.dispatchId)
+      .where(sql`dispatch_id IS NOT NULL`),
+  ],
 );
 
-export const engineQueueState = sqliteTable(
-  "engine_queue_state",
+export const engineAttemptMarkers = sqliteTable(
+  "engine_attempt_markers",
   {
-    threadId: text("thread_id").notNull(),
-    sessionId: text("session_id").notNull(),
-    mode: text("mode").notNull(),
-    status: text("status").notNull(),
-    activeItemId: text("active_item_id"),
-    pending: text("pending").notNull(),
-    collectBuffer: text("collect_buffer"),
-    blockedGateId: text("blocked_gate_id"),
-    updatedAt: integer("updated_at").notNull(),
+    itemId: text("item_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    createdAt: integer("created_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.sessionId, t.threadId] })],
+  (t) => [primaryKey({ columns: [t.itemId, t.attemptId] })],
 );
+
+export const engineMeta = sqliteTable("engine_meta", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
 
 export const engineDecisionGates = sqliteTable(
   "engine_decision_gates",

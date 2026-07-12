@@ -38,11 +38,11 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       };
     }
 
-    function newThread(id = THREAD_ID): ThreadData {
+    function newThread(id = THREAD_ID, key = "web:default"): ThreadData {
       return {
         id,
         sessionId: SESSION_ID,
-        key: "web:default",
+        key,
         status: "active",
         queueMode: "followup",
         createdAt: 1,
@@ -707,7 +707,7 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
 
     it("requestAbort stamps abortRequestedAt on unsettled items in scope only; first write wins", async () => {
       const otherThreadId = "th-2";
-      await store.saveThread(SESSION_ID, newThread(otherThreadId));
+      await store.saveThread(SESSION_ID, newThread(otherThreadId, "web:other"));
       const a = makeItem();
       const settled = makeItem();
       const otherThread = makeItem({ threadId: otherThreadId });

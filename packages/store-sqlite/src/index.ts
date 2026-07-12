@@ -1,2 +1,2 @@
 export { SqliteSessionStore } from "./store.js";
-export { applyEngineMigrations } from "./migrate.js";
+export { applyEngineMigrations, ENGINE_SCHEMA_VERSION } from "./migrate.js";

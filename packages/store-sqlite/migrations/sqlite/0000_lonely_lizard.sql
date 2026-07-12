@@ -38,6 +38,8 @@ CREATE TABLE `engine_entries` (
 	`author` text,
 	`channel` text,
 	`model` text,
+	`queue_item_id` text,
+	`stop_reason` text,
 	`summary` text,
 	`covered_entry_ids` text,
 	`token_count_before` integer,
@@ -55,38 +57,54 @@ CREATE TABLE `engine_entries` (
 --> statement-breakpoint
 CREATE INDEX `engine_entries_thread` ON `engine_entries` (`session_id`,`thread_id`,`created_at`);--> statement-breakpoint
 CREATE INDEX `engine_entries_gate` ON `engine_entries` (`gate_id`);--> statement-breakpoint
+CREATE INDEX `engine_entries_queue_item` ON `engine_entries` (`queue_item_id`);--> statement-breakpoint
 CREATE TABLE `engine_queue_items` (
 	`id` text PRIMARY KEY NOT NULL,
 	`session_id` text NOT NULL,
 	`thread_id` text NOT NULL,
+	`dispatch_id` text,
 	`status` text NOT NULL,
-	`mode` text NOT NULL,
+	`outcome` text,
+	`error` text,
+	`superseded_by_item_id` text,
+	`merged_into_item_id` text,
 	`content` text NOT NULL,
 	`author` text,
 	`channel` text,
 	`reply_target` text,
 	`model` text,
+	`role` text,
 	`metadata` text,
+	`attempt_id` text,
+	`attempt_count` integer NOT NULL,
+	`max_attempts` integer NOT NULL,
+	`timeout_at` integer NOT NULL,
+	`abort_requested_at` integer,
+	`owner_id` text,
+	`lease_expires_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint
 CREATE INDEX `engine_queue_items_thread` ON `engine_queue_items` (`session_id`,`thread_id`,`status`);--> statement-breakpoint
-CREATE TABLE `engine_queue_state` (
-	`thread_id` text NOT NULL,
-	`session_id` text NOT NULL,
-	`mode` text NOT NULL,
-	`status` text NOT NULL,
-	`active_item_id` text,
-	`pending` text NOT NULL,
-	`collect_buffer` text,
-	`blocked_gate_id` text,
-	`updated_at` integer NOT NULL,
-	PRIMARY KEY(`session_id`, `thread_id`)
+CREATE UNIQUE INDEX `engine_queue_items_dispatch` ON `engine_queue_items` (`session_id`,`dispatch_id`) WHERE `dispatch_id` IS NOT NULL;--> statement-breakpoint
+CREATE TABLE `engine_attempt_markers` (
+	`item_id` text NOT NULL,
+	`attempt_id` text NOT NULL,
+	`created_at` integer NOT NULL,
+	PRIMARY KEY(`item_id`, `attempt_id`)
 );
 --> statement-breakpoint
+CREATE TABLE `engine_meta` (
+	`key` text PRIMARY KEY NOT NULL,
+	`value` text NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO `engine_meta` (`key`, `value`) VALUES ('schema_version', '1');--> statement-breakpoint
 CREATE TABLE `engine_sessions` (
 	`id` text PRIMARY KEY NOT NULL,
+	`owner_type` text NOT NULL,
+	`owner_id` text NOT NULL,
 	`user_id` text NOT NULL,
 	`org_id` text NOT NULL,
 	`workspace` text NOT NULL,
@@ -95,6 +113,7 @@ CREATE TABLE `engine_sessions` (
 	`sandbox_id` text,
 	`snapshot_id` text,
 	`parent_session_id` text,
+	`parent_thread_id` text,
 	`model` text,
 	`metadata` text,
 	`created_at` integer NOT NULL,
@@ -103,6 +122,7 @@ CREATE TABLE `engine_sessions` (
 --> statement-breakpoint
 CREATE INDEX `engine_sessions_user` ON `engine_sessions` (`user_id`);--> statement-breakpoint
 CREATE INDEX `engine_sessions_status` ON `engine_sessions` (`status`);--> statement-breakpoint
+CREATE INDEX `engine_sessions_owner` ON `engine_sessions` (`owner_type`,`owner_id`);--> statement-breakpoint
 CREATE TABLE `engine_suspended_turns` (
 	`session_id` text NOT NULL,
 	`thread_id` text NOT NULL,
@@ -127,6 +147,7 @@ CREATE TABLE `engine_threads` (
 	`status` text NOT NULL,
 	`active_leaf_entry_id` text,
 	`queue_mode` text NOT NULL,
+	`paused` integer,
 	`model` text,
 	`summary` text,
 	`metadata` text,

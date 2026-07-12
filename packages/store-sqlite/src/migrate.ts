@@ -6,6 +6,16 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
+ * Bumped whenever the engine schema (0000_lonely_lizard.sql) changes shape.
+ * Stamped into `engine_meta` by the migration itself; checked fail-loud on
+ * every open so a stale/foreign db file is rejected instead of silently
+ * misbehaving. Pre-1.0: there is only ever one schema generation, so any
+ * mismatch (including "older") means the db predates this migration set —
+ * delete `~/.valet/app.db` and let it recreate.
+ */
+export const ENGINE_SCHEMA_VERSION = "1";
+
+/**
  * Apply this package's sqlite migrations to an open better-sqlite3 connection.
  *
  * Tracks applied migrations in `__valet_engine_migrations` so re-runs across
@@ -13,6 +23,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * present but the tracker is empty (db pre-dates this change).
  */
 export function applyEngineMigrations(sqlite: Database.Database): void {
+  // Durability-premised subsystem (submission fencing/leases): FULL fsyncs on
+  // every commit. See packages/store-sqlite/experiments/FINDINGS-fencing.md.
+  sqlite.pragma("journal_mode = WAL");
+  sqlite.pragma("busy_timeout = 5000");
+  sqlite.pragma("synchronous = FULL");
+
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS __valet_engine_migrations (
       filename TEXT PRIMARY KEY,
@@ -66,5 +82,35 @@ export function applyEngineMigrations(sqlite: Database.Database): void {
       recordApplied.run(file, Date.now());
     });
     runMigration();
+  }
+
+  assertSchemaVersion(sqlite);
+}
+
+/**
+ * Fail loud rather than let a stale/foreign db file silently misbehave under
+ * the new CAS submission lifecycle. The backfill path above can mark
+ * migrations "applied" without actually running them (legacy db that
+ * predates `engine_meta`) — in that case the version row is simply absent,
+ * which this treats the same as a mismatch.
+ */
+function assertSchemaVersion(sqlite: Database.Database): void {
+  const metaTable = sqlite
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_meta'")
+    .get();
+  if (!metaTable) {
+    throw new Error(
+      "engine_meta table missing after migration — this db predates the submission-lifecycle schema. " +
+        "Pre-1.0: delete the db file (rm ~/.valet/app.db) and let it recreate.",
+    );
+  }
+  const row = sqlite
+    .prepare("SELECT value FROM engine_meta WHERE key = 'schema_version'")
+    .get() as { value: string } | undefined;
+  if (!row || row.value !== ENGINE_SCHEMA_VERSION) {
+    throw new Error(
+      `engine schema_version mismatch: found ${row?.value ?? "none"}, expected ${ENGINE_SCHEMA_VERSION}. ` +
+        "Pre-1.0: delete the db file (rm ~/.valet/app.db) and let it recreate.",
+    );
   }
 }

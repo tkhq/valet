@@ -16,6 +16,11 @@ export function parseJson<T>(value: string | null | undefined): T | undefined {
   return JSON.parse(value) as T;
 }
 
+/** Like parseJson, but for NOT NULL columns where the value is guaranteed present. */
+export function parseJsonRequired<T>(value: string): T {
+  return JSON.parse(value) as T;
+}
+
 export interface EntryRow {
   id: string;
   sessionId: string;
@@ -28,6 +33,8 @@ export interface EntryRow {
   author: string | null;
   channel: string | null;
   model: string | null;
+  queueItemId: string | null;
+  stopReason: string | null;
   summary: string | null;
   coveredEntryIds: string | null;
   tokenCountBefore: number | null;
@@ -56,6 +63,8 @@ export function entryToRow(entry: SessionEntry): EntryRow {
     author: null,
     channel: null,
     model: null,
+    queueItemId: entry.queueItemId ?? null,
+    stopReason: null,
     summary: null,
     coveredEntryIds: null,
     tokenCountBefore: null,
@@ -80,6 +89,7 @@ export function entryToRow(entry: SessionEntry): EntryRow {
         author: jsonOrNull(entry.author),
         channel: jsonOrNull(entry.channel),
         model: entry.model ?? null,
+        stopReason: entry.stopReason ?? null,
       };
     case "compaction":
       return {
@@ -126,8 +136,10 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         author: parseJson(row.author),
         channel: parseJson(row.channel),
         model: row.model ?? undefined,
+        stopReason: (row.stopReason as MessageEntry["stopReason"]) ?? undefined,
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        queueItemId: row.queueItemId ?? undefined,
       };
       return e;
     }
@@ -145,6 +157,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         fileContext: parseJson(row.fileContext),
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        queueItemId: row.queueItemId ?? undefined,
       };
       return e;
     }
@@ -160,6 +173,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         summary: row.summary ?? "",
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        queueItemId: row.queueItemId ?? undefined,
       };
       return e;
     }
@@ -182,6 +196,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
           (row.withdrawnReason as DecisionGateEntry["withdrawnReason"]) ?? undefined,
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
+        queueItemId: row.queueItemId ?? undefined,
       };
       return e;
     }
