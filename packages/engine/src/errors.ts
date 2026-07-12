@@ -55,3 +55,19 @@ export class ConflictError extends Error {
     this.name = "ConflictError";
   }
 }
+
+/**
+ * Thrown by `Thread.awaitResult` when `opts.timeoutMs` elapses before the
+ * submission (or, for a merged constituent, the item it delegates to)
+ * settles. The wait is purely observational — this error never disturbs the
+ * submission itself, which keeps running/settling on its own.
+ */
+export class TimeoutError extends Error {
+  constructor(
+    public readonly queueItemId: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`awaitResult timed out after ${timeoutMs}ms waiting for submission ${queueItemId}`);
+    this.name = "TimeoutError";
+  }
+}

@@ -3,6 +3,7 @@ import type {
   QueueMode,
   QueueState,
   QueueStatus,
+  SessionEntry,
   SubmissionOutcome,
   SuspendedTurnState,
 } from "./types.js";
@@ -149,4 +150,40 @@ export function decideReconciliation(item: QueueItem, ctx: ReconcileContext): Re
 
   // Step 7 — resume.
   return { kind: "resume" };
+}
+
+/**
+ * PURE — walks a thread's persisted entries and returns the content of the
+ * LAST assistant `MessageEntry` carrying `queueItemId` with
+ * `stopReason === "end_turn"` (spec ~422, `SubmissionResult.text`). Returns
+ * `undefined` when the submission's turn never reached a terminal
+ * end-of-turn entry (e.g. it was superseded mid-stream — use
+ * `resolvePartialSubmissionText` for that case).
+ */
+export function resolveSubmissionText(entries: SessionEntry[], queueItemId: string): string | undefined {
+  let text: string | undefined;
+  for (const e of entries) {
+    if (e.type === "message" && e.role === "assistant" && e.queueItemId === queueItemId && e.stopReason === "end_turn") {
+      text = e.content;
+    }
+  }
+  return text;
+}
+
+/**
+ * PURE — same walk as `resolveSubmissionText` but without the `stopReason`
+ * requirement: returns the content of the LAST assistant entry carrying
+ * `queueItemId`, regardless of how the turn ended. Used for the `superseded`
+ * outcome, whose interrupted turn's final assistant entry is persisted with
+ * `stopReason: "abort"` (spec ~422: "whatever partial assistant output
+ * persisted under the submission's queueItemId").
+ */
+export function resolvePartialSubmissionText(entries: SessionEntry[], queueItemId: string): string | undefined {
+  let text: string | undefined;
+  for (const e of entries) {
+    if (e.type === "message" && e.role === "assistant" && e.queueItemId === queueItemId) {
+      text = e.content;
+    }
+  }
+  return text;
 }

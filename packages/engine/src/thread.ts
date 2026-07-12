@@ -8,8 +8,8 @@ import type { Session } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import { fromRequest, GateManager, shouldShortCircuit } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
-import { deriveQueueState } from "./submission.js";
-import { StaleAttemptError } from "./errors.js";
+import { deriveQueueState, resolvePartialSubmissionText, resolveSubmissionText } from "./submission.js";
+import { NotFoundError, StaleAttemptError, TimeoutError } from "./errors.js";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -25,6 +25,7 @@ import {
   type SummarizeResult,
 } from "./compaction.js";
 import type {
+  AwaitResultOptions,
   CompactionEntry,
   DecisionGate,
   DecisionGateRequest,
@@ -42,12 +43,16 @@ import type {
   SessionEntry,
   SkillInvokeOptions,
   SubmissionOutcome,
+  SubmissionResult,
   SuspendedTurnState,
   ThreadData,
   ToolContext,
   ToolDef,
   WriteFence,
 } from "./types.js";
+
+/** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
+const MAX_MERGE_DELEGATION_DEPTH = 5;
 
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
@@ -2031,6 +2036,150 @@ export class Thread {
       code,
       error: message,
       recoverable: true,
+    });
+  }
+
+  /**
+   * Durable, resumable result observation (spec ~404, plan Task 6). Derives
+   * the result from durable state — never from the `submission_settled`
+   * event alone, since that emit is best-effort and can be lost. A settled
+   * submission returns immediately from the store; an unsettled one
+   * subscribes to the event as a wakeup and re-derives from the store once
+   * woken (or once more, defensively, on timeout/abort).
+   *
+   * `outcome: "merged"` delegates: recurses on `mergedIntoItemId`, bounded to
+   * `MAX_MERGE_DELEGATION_DEPTH` hops so a corrupt/cyclic linkage can never
+   * spin forever.
+   */
+  async awaitResult(queueItemId: string, opts: AwaitResultOptions = {}): Promise<SubmissionResult> {
+    if (opts.resultSchema) throw new Error("resultSchema lands in Phase 5");
+    return this.resolveResult(queueItemId, opts, 0);
+  }
+
+  private async resolveResult(
+    itemId: string,
+    opts: AwaitResultOptions,
+    depth: number,
+  ): Promise<SubmissionResult> {
+    if (depth > MAX_MERGE_DELEGATION_DEPTH) {
+      return {
+        queueItemId: itemId,
+        outcome: "failed",
+        error: `merge delegation depth exceeded ${MAX_MERGE_DELEGATION_DEPTH} hops`,
+      };
+    }
+    const store = this.session.providers.store;
+    let item = await store.getQueueItem(this.session.id, itemId);
+    if (!item) throw new NotFoundError("queue item", itemId);
+    if (item.status !== "settled") {
+      await this.waitForSettlement(itemId, opts);
+      item = await store.getQueueItem(this.session.id, itemId);
+      if (!item || item.status !== "settled") {
+        throw new Error(`queue item ${itemId} did not settle after wait`);
+      }
+    }
+    return this.buildResult(item, opts, depth);
+  }
+
+  private async buildResult(
+    item: QueueItem,
+    opts: AwaitResultOptions,
+    depth: number,
+  ): Promise<SubmissionResult> {
+    const outcome = item.outcome ?? { outcome: "failed", error: "settled without a recorded outcome" };
+    if (outcome.outcome === "merged") {
+      if (!item.mergedIntoItemId) {
+        return {
+          queueItemId: item.id,
+          outcome: "failed",
+          error: "merged submission is missing mergedIntoItemId",
+        };
+      }
+      return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
+    }
+    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId);
+    const text =
+      outcome.outcome === "superseded"
+        ? resolvePartialSubmissionText(entries, item.id)
+        : resolveSubmissionText(entries, item.id);
+    const result: SubmissionResult = { queueItemId: item.id, outcome: outcome.outcome, text };
+    if (outcome.error !== undefined) result.error = outcome.error;
+    return result;
+  }
+
+  /**
+   * Resolves once `itemId` settles, rejects on timeout/abort. Never mutates
+   * the submission — a timed-out or aborted wait leaves it running.
+   *
+   * The `submission_settled` event is a wakeup hint, not the source of
+   * truth: some settlement paths (e.g. a collect-window constituent settled
+   * via `settleUnclaimed` in `flushCollectWindow`) never publish it, and the
+   * event emit itself is best-effort. A low-frequency durable poll is the
+   * actual correctness mechanism; the event and the immediate post-subscribe
+   * re-check just make the common case resolve promptly instead of waiting
+   * out a poll tick.
+   */
+  private async waitForSettlement(itemId: string, opts: AwaitResultOptions): Promise<void> {
+    const store = this.session.providers.store;
+    await new Promise<void>((resolve, reject) => {
+      let done = false;
+      let unsubscribe: (() => void) | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let poll: ReturnType<typeof setInterval> | undefined;
+      let onAbort: (() => void) | undefined;
+
+      const cleanup = () => {
+        unsubscribe?.();
+        if (timer !== undefined) clearTimeout(timer);
+        if (poll !== undefined) clearInterval(poll);
+        if (onAbort && opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      };
+      const finish = (err?: Error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (err) reject(err);
+        else resolve();
+      };
+      const checkStore = () => {
+        void store.getQueueItem(this.session.id, itemId).then((current) => {
+          if (current?.status === "settled") finish();
+        });
+      };
+
+      unsubscribe = this.session.providers.bus.subscribe(
+        { sessionId: this.session.id, eventTypes: ["submission_settled"] },
+        (busEvent) => {
+          const event = busEvent.event;
+          if (event.type === "submission_settled" && event.queueItemId === itemId) checkStore();
+        },
+      );
+
+      // Race guard: the submission may have settled between the caller's
+      // last read and this subscribe call.
+      checkStore();
+
+      // Durable fallback: not every settlement path emits the event (e.g.
+      // collect-window constituents settle via settleUnclaimed with no
+      // event), so a poll is the only way to guarantee this promise
+      // eventually resolves against store truth.
+      poll = setInterval(checkStore, 50);
+      poll.unref?.();
+
+      const timeoutMs = opts.timeoutMs;
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => finish(new TimeoutError(itemId, timeoutMs)), timeoutMs);
+        timer.unref?.();
+      }
+
+      if (opts.signal) {
+        if (opts.signal.aborted) {
+          finish(new Error(`awaitResult aborted waiting for submission ${itemId}`));
+          return;
+        }
+        onAbort = () => finish(new Error(`awaitResult aborted waiting for submission ${itemId}`));
+        opts.signal.addEventListener("abort", onAbort);
+      }
     });
   }
 }

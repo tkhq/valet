@@ -1,5 +1,5 @@
 export * from "./types.js";
-export { NotFoundError, StaleAttemptError, ConflictError } from "./errors.js";
+export { NotFoundError, StaleAttemptError, ConflictError, TimeoutError } from "./errors.js";
 export {
   parseMarkdownArtifact,
   renderTemplate,
@@ -10,6 +10,8 @@ export {
 export {
   deriveQueueState,
   decideReconciliation,
+  resolveSubmissionText,
+  resolvePartialSubmissionText,
   type ReconcileAction,
   type ReconcileContext,
 } from "./submission.js";
