@@ -286,9 +286,14 @@ export class InMemorySessionStore implements SessionStore {
       .sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  // Per-thread FIFO gating (spec: "Only the oldest non-superseded unsettled
+  // submission of a thread is claimable"). The head is the oldest item that
+  // is neither settled nor collecting and has not been superseded; a
+  // running/blocked/terminalizing head blocks every later item in the
+  // thread from being claimed until it resolves.
   private runnableHead(r: SessionRow, threadId: string): QueueItem | undefined {
     return this.threadItemsInOrder(r, threadId).find(
-      (i) => i.status === "queued" && !i.supersededByItemId,
+      (i) => i.status !== "settled" && i.status !== "collecting" && !i.supersededByItemId,
     );
   }
 
@@ -299,7 +304,7 @@ export class InMemorySessionStore implements SessionStore {
     if (item.threadId !== claim.threadId) return null;
     if (item.status !== "queued") return null;
     const head = this.runnableHead(r, claim.threadId);
-    if (!head || head.id !== item.id) return null;
+    if (!head || head.id !== item.id || head.status !== "queued") return null;
 
     const now = Date.now();
     item.status = "running";

@@ -196,9 +196,14 @@ const CLAIM_SQL = `
   WHERE id = @itemId AND session_id = @sessionId AND thread_id = @threadId
     AND status = 'queued' AND superseded_by_item_id IS NULL
     AND id = (
+      -- Per-thread FIFO gating (spec: "Only the oldest non-superseded
+      -- unsettled submission of a thread is claimable"): the head is the
+      -- oldest item that is neither settled nor collecting and has not been
+      -- superseded. The outer status='queued' check then requires that head
+      -- to actually be the requested, still-queued item.
       SELECT id FROM engine_queue_items
       WHERE session_id = @sessionId AND thread_id = @threadId
-        AND status = 'queued' AND superseded_by_item_id IS NULL
+        AND status NOT IN ('settled', 'collecting') AND superseded_by_item_id IS NULL
       ORDER BY created_at ASC, id ASC
       LIMIT 1
     )

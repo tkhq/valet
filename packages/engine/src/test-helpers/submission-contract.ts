@@ -223,6 +223,104 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(claimB?.id).toBe(b.id);
     });
 
+    it("cannot claim the next item while the head is running", async () => {
+      const a = makeItem({ createdAt: 100, updatedAt: 100 });
+      const b = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, a);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, b);
+
+      const claimedA = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: a.id,
+        attemptId: "att-a",
+        ownerId: "o",
+      });
+      expect(claimedA?.status).toBe("running");
+
+      const claimB = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: b.id,
+        attemptId: "att-b",
+        ownerId: "o2",
+      });
+      expect(claimB).toBeNull();
+      expect((await store.getQueueItem(SESSION_ID, b.id))?.status).toBe("queued");
+    });
+
+    it("cannot claim while the head is blocked_on_decision_gate", async () => {
+      const a = makeItem({ createdAt: 100, updatedAt: 100 });
+      const b = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, a);
+
+      const claimedA = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: a.id,
+        attemptId: "att-a",
+        ownerId: "o",
+      });
+      const fence: WriteFence = { itemId: a.id, attemptId: claimedA!.attemptId! };
+      await store.setSubmissionBlocked(SESSION_ID, THREAD_ID, a.id, true, fence);
+      expect((await store.getQueueItem(SESSION_ID, a.id))?.status).toBe(
+        "blocked_on_decision_gate",
+      );
+
+      await store.admitSubmission(SESSION_ID, THREAD_ID, b);
+      const claimB = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: b.id,
+        attemptId: "att-b",
+        ownerId: "o2",
+      });
+      expect(claimB).toBeNull();
+      expect((await store.getQueueItem(SESSION_ID, b.id))?.status).toBe("queued");
+    });
+
+    it("cannot claim while the head is terminalizing", async () => {
+      const a = makeItem({ createdAt: 100, updatedAt: 100 });
+      const b = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, a);
+
+      const claimedA = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: a.id,
+        attemptId: "att-a",
+        ownerId: "o",
+      });
+      const fence: WriteFence = { itemId: a.id, attemptId: claimedA!.attemptId! };
+      await store.reserveSettlement(SESSION_ID, THREAD_ID, a.id, { outcome: "completed" }, fence);
+      expect((await store.getQueueItem(SESSION_ID, a.id))?.status).toBe("terminalizing");
+
+      await store.admitSubmission(SESSION_ID, THREAD_ID, b);
+      const claimB = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: b.id,
+        attemptId: "att-b",
+        ownerId: "o2",
+      });
+      expect(claimB).toBeNull();
+      expect((await store.getQueueItem(SESSION_ID, b.id))?.status).toBe("queued");
+
+      await store.finalizeSettlement(SESSION_ID, THREAD_ID, a.id, fence);
+      expect((await store.getQueueItem(SESSION_ID, a.id))?.status).toBe("settled");
+
+      const claimBAfter = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: b.id,
+        attemptId: "att-b2",
+        ownerId: "o3",
+      });
+      expect(claimBAfter).not.toBeNull();
+      expect(claimBAfter?.id).toBe(b.id);
+      expect(claimBAfter?.status).toBe("running");
+    });
+
     // --- Steer supersession (atomic) ---
 
     it("steer admission stamps supersededByItemId on prior unsettled items and returns their ids", async () => {
@@ -412,10 +510,14 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
     // --- Leases, markers, attempt replacement ---
 
     it("renewLeases extends leaseExpiresAt for owned items and skips replaced ones", async () => {
+      // b lives on a separate thread so claiming it isn't gated by a's
+      // running status (per-thread FIFO gating only applies within a thread).
+      const otherThreadId = "th-lease";
+      await store.saveThread(SESSION_ID, newThread(otherThreadId, "web:lease"));
       const a = makeItem();
-      const b = makeItem();
+      const b = makeItem({ threadId: otherThreadId });
       await store.admitSubmission(SESSION_ID, THREAD_ID, a);
-      await store.admitSubmission(SESSION_ID, THREAD_ID, b);
+      await store.admitSubmission(SESSION_ID, otherThreadId, b);
       const claimedA = await store.claimSubmission({
         sessionId: SESSION_ID,
         threadId: THREAD_ID,
@@ -426,7 +528,7 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       });
       await store.claimSubmission({
         sessionId: SESSION_ID,
-        threadId: THREAD_ID,
+        threadId: otherThreadId,
         itemId: b.id,
         attemptId: "att-b",
         ownerId: "owner-2",
@@ -434,9 +536,9 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       // Reclaim b's attempt away from owner-2 so owner-2's renew should skip it.
       await store.replaceSubmissionAttempt(
         SESSION_ID,
-        THREAD_ID,
+        otherThreadId,
         b.id,
-        { sessionId: SESSION_ID, threadId: THREAD_ID, itemId: b.id, attemptId: "att-b2", ownerId: "owner-3" },
+        { sessionId: SESSION_ID, threadId: otherThreadId, itemId: b.id, attemptId: "att-b2", ownerId: "owner-3" },
         { expectedAttemptId: "att-b" },
       );
 
@@ -452,10 +554,15 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
     });
 
     it("listExpiredSubmissions returns running items whose lease passed, not live ones", async () => {
+      // live lives on a separate thread so it can actually be claimed and
+      // running concurrently with expired (per-thread FIFO gating would
+      // otherwise block it while expired sits running-but-unrenewed).
+      const otherThreadId = "th-expiry";
+      await store.saveThread(SESSION_ID, newThread(otherThreadId, "web:expiry"));
       const expired = makeItem();
-      const live = makeItem();
+      const live = makeItem({ threadId: otherThreadId });
       await store.admitSubmission(SESSION_ID, THREAD_ID, expired);
-      await store.admitSubmission(SESSION_ID, THREAD_ID, live);
+      await store.admitSubmission(SESSION_ID, otherThreadId, live);
       await store.claimSubmission({
         sessionId: SESSION_ID,
         threadId: THREAD_ID,
@@ -466,7 +573,7 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       });
       await store.claimSubmission({
         sessionId: SESSION_ID,
-        threadId: THREAD_ID,
+        threadId: otherThreadId,
         itemId: live.id,
         attemptId: "att-2",
         ownerId: "o",
