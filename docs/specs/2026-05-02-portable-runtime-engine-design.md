@@ -423,6 +423,8 @@ interface SubmissionResult {
 
 **Signal rendering:** signals are persisted as `MessageEntry` rows with `signal` metadata and rendered into LLM context as an XML envelope — `signalType` and each `attributes` entry become XML attributes, `body` is XML-escaped text content, `tagName` is the element name. `tagName` is regex-validated because it renders unescaped; `body` and attribute values are always escaped. Direct user prompts render as ordinary user messages.
 
+**Internal signal admission (engine-stamped identity):** when a signal is admitted on behalf of another session (child settlement, cross-orchestrator messaging, workflow dispatch) rather than a verified channel webhook, the engine stamps the envelope with the sender's verified identity — `senderSessionId` and the sender's owner `Principal` — from the authenticated call context. Attributes may carry display context but can never override the stamped identity. The engine also maintains a `hopCount` on the envelope, incremented at each cross-orchestrator admission; admission is rejected when it exceeds the configured budget (the application layer sets the budget and the allowed sender→recipient edges — see the orchestrator spec's signal-authorization contract). Internal-signal `dispatchId`s are namespaced by the stamped sender session ID so senders cannot collide with or replay one another's ids.
+
 ```typescript
 interface MessageQuery {
   limit?: number;
@@ -488,6 +490,8 @@ A named conversation within a session. Each thread has its own message history (
 **Channel-aware thread identity:** A thread is the engine's concurrency and history boundary. Channel metadata is attached to prompts and messages, but channel transports do not define execution boundaries on their own. Multiple external channel targets may point at the same logical thread when the application intentionally converges them (for example, a Slack thread and the web UI both steering the same orchestrator thread).
 
 **Cross-thread visibility:** Threads can read messages from sibling threads via a built-in `thread_read` tool. The LLM can pull in context from another thread when it needs it, without paying the token cost of having it in context permanently. Cross-visibility also works across the session boundary: child session threads can read from parent threads, and parent threads can read child thread summaries.
+
+The reachability graph is closed and authorized at call time: a thread may read (a) sibling threads in its own session, (b) threads of its session's direct parent, and (c) threads of its session's direct children — nothing else. Each cross-session read re-checks the caller session's owner principal against the target session's access control at call time (the same per-query rule as memory scoping), so an arbitrary or prompt-injected session key never grants access, and membership loss cuts visibility immediately.
 
 **Thread controls:**
 - `thread.prompt(text, opts)` — submit a prompt
@@ -1904,6 +1908,8 @@ type Unsubscribe = () => void;
 ```
 
 **Deterministic keys for re-runnable emitters:** any event emitted from an idempotent repair path — settlement events from re-runnable finalization, terminalization repairs — MUST use a deterministic eventKey (e.g. `settled:{queueItemId}`), so a repair re-run cannot double-emit. Events emitted once from live execution may use a fresh unique key.
+
+**Access control:** stream access is session access. Adapters MUST authorize every `read` and `subscribe` against the target session's access control — the same owner-principal membership check that gates the session's API routes, re-evaluated per operation. Filters without a `sessionId` (cross-session firehoses) are internal operator surfaces only and are never exposed to clients; a client subscription is always scoped to sessions the caller can access.
 
 **Gap handling:** live fan-out transports may be lossy (Redis pub/sub is at-most-once). A subscriber that observes a live event whose offset is not contiguous with its last delivered offset MUST re-read the durable log from that offset before delivering — adapters using lossy fan-out are required to implement this refetch, which is what makes "delivery order matches offset order" true end-to-end rather than merely asserted.
 
