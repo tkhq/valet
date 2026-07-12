@@ -1,5 +1,6 @@
 import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
+import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type {
   CreateSessionOptions,
   CredentialOwner,
@@ -13,6 +14,7 @@ import type {
   PromptOptions,
   PromptReceipt,
   ProviderBundle,
+  QueueItem,
   QueueMode,
   RoleSpec,
   Sandbox,
@@ -96,6 +98,21 @@ export class Session {
    * re-kick every thread so missed wakeups can't strand queued work.
    */
   async sweepOnce(): Promise<void> {
+    // Reclaim expired leases: any running/blocked item of this session whose
+    // lease has lapsed is reconciled through the tree (Task 5 lease-expiry
+    // reclaim). QueueItem carries no sessionId, so we scan this session's own
+    // unsettled items and filter on the lease rather than the global
+    // listExpiredSubmissions scan — equivalent for one session, and avoids
+    // touching other sessions' work.
+    const now = Date.now();
+    const mine = await this.providers.store.listUnsettledSubmissions(this.id);
+    for (const item of mine) {
+      const claimed = item.status === "running" || item.status === "blocked_on_decision_gate";
+      const leaseExpired = item.leaseExpiresAt !== undefined && item.leaseExpiresAt < now;
+      if (claimed && leaseExpired) {
+        await this.reconcileItem(item);
+      }
+    }
     for (const t of this.threads.values()) {
       await t.checkCollectDeadline();
       await t.kick();
@@ -129,47 +146,126 @@ export class Session {
       const entries = await providers.store.getEntries(data.id, td.id);
       thread.rehydrateTranscript(entries);
     }
-    // Await each thread's resume step so callers can rely on pending gates
-    // being re-armed before they call resolveDecision. The actual replay
-    // (or wait for resolution) inside resumeBlockedThreadIfReady is still
-    // asynchronous — only the arming is awaited here.
-    for (const td of threadDatas) {
-      await session.resumeBlockedThreadIfReady(td.id);
-    }
+    // Startup reconciliation (Task 5): every unsettled submission passes through
+    // the normative decision tree. Awaited so callers can rely on gate re-arming
+    // (and settlement of finished/aborted/superseded/exhausted work) having been
+    // applied before they resolve gates or read queue state. The actual
+    // gate-replay / resume drive kicked off here is still asynchronous.
+    await session.reconcile();
     return session;
   }
 
   /**
-   * For a thread that was blocked on a decision gate when persisted, either
-   * re-arm a wait for the still-pending gate (so resolveDecision triggers
-   * replay) or — if the gate was already resolved while the engine was down —
-   * trigger replay immediately.
+   * Reconcile every unsettled submission of this session through the normative
+   * decision tree (spec §Reconciliation). Called on rehydrate and, for
+   * expired-lease items, from the sweep. Idempotent — re-running is safe.
    */
-  async resumeBlockedThreadIfReady(threadId: string): Promise<void> {
-    const thread = this.threads.get(threadId);
-    if (!thread) return;
-    const suspended = await this.providers.store.getSuspendedTurn(this.id, threadId);
-    if (!suspended) return;
-    const gate = await this.providers.store.getDecisionGate(this.id, suspended.gateId);
-    if (!gate) {
-      await this.providers.store.clearSuspendedTurn(this.id, threadId);
+  async reconcile(): Promise<void> {
+    const items = await this.providers.store.listUnsettledSubmissions(this.id);
+    for (const item of items) {
+      // startup: this instance is the definitive new owner (restoreSession's
+      // single-owner contract), so an unexpired prior lease is not evidence of a
+      // live attempt — reclaim eagerly. Fencing (fresh attemptId) makes a slow
+      // zombie's late writes fail, so eager takeover stays safe.
+      await this.reconcileItem(item, { startup: true });
+    }
+  }
+
+  /**
+   * Gather the ReconcileContext from the store, consult the pure decision
+   * function, and apply the resulting action via the owning Thread. Also
+   * observes the stuck-head condition for the attention signal.
+   */
+  private async reconcileItem(item: QueueItem, opts?: { startup?: boolean }): Promise<void> {
+    if (item.status === "settled") return;
+    const thread = this.threads.get(item.threadId);
+    if (!thread) return; // thread not hydrated — nothing to drive it with
+
+    const store = this.providers.store;
+
+    // A live in-process turn owns this item (we're actively running it): never
+    // yank it out from under ourselves via reconciliation.
+    if (thread.runningItemId() === item.id) return;
+
+    // Terminalizing: the outcome is already durably reserved — re-run the
+    // finalize half on the item's stored current attempt (never a fresh one).
+    if (item.status === "terminalizing") {
+      await thread.retryFinalize(item);
       return;
     }
-    if (gate.status === "resolved") {
-      const entries = await this.providers.store.getEntries(this.id, threadId);
-      const entry = entries.find(
-        (e) => e.type === "decision_gate" && e.gate.id === gate.id,
-      );
-      const resolution =
-        entry && entry.type === "decision_gate" ? entry.resolution : undefined;
-      if (!resolution) {
-        throw new Error(`gate ${gate.id} resolved but no resolution stored`);
-      }
-      void thread.replayBlocked({ suspended, resolution });
-    } else if (gate.status === "pending") {
-      thread.armPendingGateForRestart(gate, suspended);
+
+    const now = Date.now();
+    const entries = await store.getEntries(this.id, item.threadId);
+    const hasTerminalAssistantEntry = entries.some(
+      (e) =>
+        e.type === "message" &&
+        e.role === "assistant" &&
+        e.queueItemId === item.id &&
+        e.stopReason === "end_turn",
+    );
+    const markerLive = item.attemptId
+      ? await store.hasAttemptMarker(item.id, item.attemptId)
+      : false;
+    // On startup the prior owner is gone by contract, so its lease never counts
+    // as "live". On the sweep only already-expired-lease items reach here, so
+    // this is false there too — the guard's live-attempt branch is exercised by
+    // the pure tests, defensive here.
+    const leaseUnexpired =
+      !opts?.startup && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > now;
+    const suspended = await store.getSuspendedTurn(this.id, item.threadId);
+    let gateStatus: ReconcileContext["gateStatus"] = null;
+    if (suspended) {
+      const gate = await store.getDecisionGate(this.id, suspended.gateId);
+      gateStatus = gate?.status ?? null;
     }
-    // expired/withdrawn: nothing to do; the run already terminated.
+    const ctx: ReconcileContext = {
+      now,
+      hasTerminalAssistantEntry,
+      attemptLive: markerLive && leaseUnexpired,
+      suspended,
+      gateStatus,
+    };
+
+    this.maybeEmitStuck(item, now);
+
+    const action = decideReconciliation(item, ctx);
+    switch (action.kind) {
+      case "wait":
+        return;
+      case "settle":
+        await thread.settleReconciled(item, action.outcome, suspended);
+        return;
+      case "rearm_gate":
+        if (suspended) await thread.reconcileGate(item, suspended, "rearm");
+        return;
+      case "replay_gate":
+        if (suspended) await thread.reconcileGate(item, suspended, "replay");
+        return;
+      case "resume":
+        await thread.resumeInterrupted(item);
+        return;
+    }
+  }
+
+  /**
+   * Emit the stuck-head attention event (spec §Reconciliation) when an unsettled
+   * submission crosses the retry threshold or wall-clock bound. Gate-blocked
+   * items are excluded (their bound is the gate's own expiry). Once per
+   * observation pass — no dedup in Phase 1.
+   */
+  private maybeEmitStuck(item: QueueItem, now: number): void {
+    if (item.status === "blocked_on_decision_gate") return;
+    const ageMs = now - item.createdAt;
+    const stuck = item.attemptCount >= 3 || ageMs > 15 * 60_000;
+    if (!stuck) return;
+    void this.emit({
+      type: "submission_stuck",
+      sessionId: this.id,
+      threadId: item.threadId,
+      queueItemId: item.id,
+      attemptCount: item.attemptCount,
+      ageMs,
+    });
   }
 
   private attachThread(thread: Thread): void {

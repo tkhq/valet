@@ -36,10 +36,12 @@ const approvalTool: ToolDef<typeof approvalParams> = {
  *
  * Flow:
  * 1. Engine v1 prompts a tool that opens a gate, then "crashes".
- * 2. Engine v2 restoreSession()s on the same store, then resolves the
- *    gate.
- * 3. The agent replays the suspended tool, runs the continuation turn,
- *    and the result is persisted.
+ * 2. Engine v2 restoreSession()s on the same store — startup reconciliation
+ *    (Task 5) takes over the blocked submission under a fresh fenced attempt
+ *    and re-arms the pending gate — then resolves the gate.
+ * 3. The agent replays the suspended tool, runs the continuation turn, the
+ *    result is persisted, AND the submission settles `completed` (the resumed
+ *    turn no longer strands the item as permanently blocked).
  *
  * Stores that pass `runSessionStoreContract` should also pass this.
  */
@@ -142,6 +144,22 @@ export function runRestartSafeGatesContract(
 
       const finalGate = await store.getDecisionGate(SESSION_ID, gate.id);
       expect(finalGate?.status).toBe("resolved");
+
+      // The resumed submission settles `completed` — reconciliation owns a
+      // fresh fenced attempt for the suspended turn, so the item no longer
+      // stays permanently blocked after replay. Settlement lands just after the
+      // continuation's message_end (it runs post-waitForIdle), so poll for it.
+      if (suspended) {
+        const itemId = suspended.queueItemId;
+        const start = Date.now();
+        let item = await store.getQueueItem(SESSION_ID, itemId);
+        while (item?.status !== "settled" && Date.now() - start < 2000) {
+          await new Promise((r) => setTimeout(r, 10));
+          item = await store.getQueueItem(SESSION_ID, itemId);
+        }
+        expect(item?.status).toBe("settled");
+        expect(item?.outcome).toEqual({ outcome: "completed" });
+      }
 
       faux2.unregister();
     });

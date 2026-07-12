@@ -1,4 +1,11 @@
-import type { QueueItem, QueueMode, QueueState, QueueStatus } from "./types.js";
+import type {
+  QueueItem,
+  QueueMode,
+  QueueState,
+  QueueStatus,
+  SubmissionOutcome,
+  SuspendedTurnState,
+} from "./types.js";
 
 /**
  * Pure derivation of the wire `QueueState` from the durable submission rows.
@@ -49,4 +56,97 @@ export function deriveQueueState(
     collectBuffer: collectBuffer.length > 0 ? collectBuffer : undefined,
     blockedGateId,
   };
+}
+
+/**
+ * The action the reconciliation executor should take for one unsettled
+ * submission after a crash / lease-expiry. Produced by `decideReconciliation`,
+ * applied by the effectful executor in `Session`/`Thread`.
+ */
+export type ReconcileAction =
+  | { kind: "settle"; outcome: SubmissionOutcome } // steps 1,2,3,5,6
+  | { kind: "rearm_gate" } // step 4 (gate pending)
+  | { kind: "replay_gate" } // step 4 (gate resolved while down)
+  | { kind: "resume" } // step 7
+  | { kind: "wait" }; // live lease / fresh marker — not ours to touch
+
+/**
+ * Everything `decideReconciliation` needs beyond the item itself, gathered by
+ * the executor from the store. Kept as plain data so the decision function is
+ * pure and unit-testable with literal inputs (no mocks, no store).
+ */
+export interface ReconcileContext {
+  now: number;
+  /** True when a persisted assistant entry carries item.id with stopReason 'end_turn'. */
+  hasTerminalAssistantEntry: boolean;
+  /** True when engine_attempt_markers has a row for (item.id, item.attemptId) AND the lease is unexpired. */
+  attemptLive: boolean;
+  suspended: SuspendedTurnState | null;
+  gateStatus: "pending" | "resolved" | "expired" | "withdrawn" | null;
+}
+
+/**
+ * The normative reconciliation decision tree (spec §Reconciliation, ~1168).
+ * PURE — no store, no clock beyond `ctx.now`. Order matters and is asserted by
+ * the table tests; do not reorder.
+ *
+ * Step 0 (guards, executor-adjacent):
+ *   - `settled` → wait (already terminal; nothing to do)
+ *   - `collecting` → wait (the sweep's collect-flush owns it)
+ *   - `terminalizing` → wait (the executor re-runs finalization before ever
+ *     consulting this function; a stray terminalizing item just waits)
+ *   - `attemptLive` → wait (fresh marker + unexpired lease: may still be running)
+ *
+ * Steps 1-7 (spec order):
+ *   1. terminal assistant entry → settle completed (beats abort/retry/timeout)
+ *   2. abortRequestedAt → settle aborted
+ *   3. supersededByItemId → settle superseded
+ *   4. blocked_on_decision_gate + suspended: pending→rearm, resolved→replay;
+ *      expired/withdrawn/missing fall THROUGH to 5-7. Gate-blocked items are
+ *      EXEMPT from the step-6 timeout.
+ *   5. attemptCount >= maxAttempts → settle failed (retry budget exhausted)
+ *   6. now >= timeoutAt (and not gate-blocked) → settle failed (timed out)
+ *   7. otherwise → resume
+ */
+export function decideReconciliation(item: QueueItem, ctx: ReconcileContext): ReconcileAction {
+  // Step 0 — guards.
+  if (item.status === "settled") return { kind: "wait" };
+  if (item.status === "collecting") return { kind: "wait" };
+  if (item.status === "terminalizing") return { kind: "wait" };
+  if (ctx.attemptLive) return { kind: "wait" };
+
+  // Step 1 — finished work settles first, unconditionally.
+  if (ctx.hasTerminalAssistantEntry) return { kind: "settle", outcome: { outcome: "completed" } };
+
+  // Step 2 — abort wins next.
+  if (item.abortRequestedAt !== undefined) return { kind: "settle", outcome: { outcome: "aborted" } };
+
+  // Step 3 — supersession.
+  if (item.supersededByItemId !== undefined) {
+    return { kind: "settle", outcome: { outcome: "superseded" } };
+  }
+
+  const gateBlocked = item.status === "blocked_on_decision_gate";
+
+  // Step 4 — blocked on a gate with a checkpoint.
+  if (gateBlocked && ctx.suspended !== null) {
+    if (ctx.gateStatus === "pending") return { kind: "rearm_gate" };
+    if (ctx.gateStatus === "resolved") return { kind: "replay_gate" };
+    // expired / withdrawn / missing gate: fall through to 5-7 (the turn resumes
+    // and the model sees the gate's terminal state).
+  }
+
+  // Step 5 — retry budget exhausted.
+  if (item.attemptCount >= item.maxAttempts) {
+    return { kind: "settle", outcome: { outcome: "failed", error: "retry budget exhausted" } };
+  }
+
+  // Step 6 — timeout. Gate-blocked items are exempt (their bound is the gate's
+  // own expiry, not the execution timeout).
+  if (!gateBlocked && ctx.now >= item.timeoutAt) {
+    return { kind: "settle", outcome: { outcome: "failed", error: "timed out" } };
+  }
+
+  // Step 7 — resume.
+  return { kind: "resume" };
 }

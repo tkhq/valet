@@ -758,6 +758,13 @@ export class SqliteSessionStore implements SessionStore {
       .run();
   }
 
+  async hasAttemptMarker(itemId: string, attemptId: string): Promise<boolean> {
+    const row = this.sqlite
+      .prepare("SELECT 1 FROM engine_attempt_markers WHERE item_id = ? AND attempt_id = ? LIMIT 1")
+      .get(itemId, attemptId);
+    return row !== undefined;
+  }
+
   async renewLeases(ownerId: string, itemIds: string[]): Promise<void> {
     if (itemIds.length === 0) return;
     const now = Date.now();

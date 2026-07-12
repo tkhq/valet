@@ -541,9 +541,11 @@ export class Thread {
   }
 
   /**
-   * Re-run a suspended tool with seeded suspendedDecision, push its result
-   * onto the agent transcript, then continue the agent loop. Called by
-   * Session.resumeBlockedThreadIfReady when the gate has been resolved.
+   * Re-run a suspended tool with seeded suspendedDecision, push its result onto
+   * the agent transcript, continue the agent loop, then settle the resumed turn.
+   * Driven by `reconcileGate` (directly for a resolved gate, or via
+   * `armPendingGateForRestart` once a re-armed pending gate resolves). Runs
+   * under the fresh fenced attempt `reconcileGate` installed.
    */
   async replayBlocked(args: {
     suspended: SuspendedTurnState;
@@ -607,7 +609,12 @@ export class Thread {
         timestamp: Date.now(),
       },
     ];
-    await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id);
+    // Persist the replayed tool_call part as completed so terminalization's
+    // rest-state repair doesn't later rewrite it to an interrupted-error: the
+    // tool DID run to completion on replay (its result was pushed above), it
+    // just didn't flow through the agent loop's tool_execution_end.
+    await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
+    await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
     try {
       await this.agent.continue();
@@ -618,7 +625,58 @@ export class Thread {
         err instanceof Error ? err.message : String(err),
       );
     }
+    // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
+    // reconcileGate). Flip the durable block back to running first so
+    // settleTurn's terminal transition is legal, then settle normally.
+    if (this.fence && this.runningItem) {
+      const store = this.session.providers.store;
+      const fence = this.fence;
+      const settleItem = this.runningItem;
+      const current = await store.getQueueItem(this.session.id, settleItem.id);
+      if (current?.status === "blocked_on_decision_gate") {
+        await this.fencedWrite(() =>
+          store.setSubmissionBlocked(this.session.id, this.id, settleItem.id, false, fence),
+        );
+      }
+      try {
+        await this.settleTurn(settleItem);
+      } catch (err) {
+        this.emitError("settlement_failed", err instanceof Error ? err.message : String(err));
+      }
+      this.runningItem = null;
+      this.fence = undefined;
+      void this.kick();
+    }
     await this.emitQueueState();
+  }
+
+  /**
+   * Mark the persisted assistant tool_call part matching `toolCallId` as
+   * completed with the replayed result — a fenced in-place update mirroring the
+   * live tool_execution_end path.
+   */
+  private async persistReplayedToolResult(
+    toolCallId: string,
+    result: { content?: unknown; details?: unknown },
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const entries = await store.getEntries(this.session.id, this.id);
+    for (const e of entries) {
+      if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
+      const part = e.parts.find(
+        (p) => p.type === "tool_call" && p.callId === toolCallId,
+      );
+      if (part && part.type === "tool_call") {
+        part.status = "completed";
+        const structured =
+          result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+        part.result = { ...structured, text: renderToolResult(result) };
+        await this.fencedWrite(() =>
+          store.updateEntry(this.session.id, this.id, e, this.fence),
+        );
+        return;
+      }
+    }
   }
 
   /**
@@ -849,7 +907,7 @@ export class Thread {
    * the item's stored CURRENT attemptId (never cleared on terminal
    * transitions), so this is safe even after the in-memory fence is gone.
    */
-  private async retryFinalize(item: QueueItem): Promise<boolean> {
+  async retryFinalize(item: QueueItem): Promise<boolean> {
     const store = this.session.providers.store;
     const attemptId = item.attemptId;
     if (!attemptId) return false; // defensive: terminalizing items always carry one
@@ -949,7 +1007,11 @@ export class Thread {
    * part still marked `running` when the turn ends (interrupted mid-tool) is
    * rewritten to an error part — never re-executed. Fenced.
    */
-  private async repairRestState(item: QueueItem, fence: WriteFence): Promise<void> {
+  private async repairRestState(
+    item: QueueItem,
+    fence: WriteFence | undefined,
+    errorText: string = "interrupted",
+  ): Promise<void> {
     const store = this.session.providers.store;
     const entries = await store.getEntries(this.session.id, this.id);
     for (const e of entries) {
@@ -961,7 +1023,7 @@ export class Thread {
       for (const p of parts) {
         if (p.type === "tool_call" && p.status === "running") {
           p.status = "error";
-          p.error = "interrupted";
+          p.error = errorText;
           mutated = true;
         }
       }
@@ -969,6 +1031,236 @@ export class Thread {
         await store.updateEntry(this.session.id, this.id, e, fence);
       }
     }
+  }
+
+  private async emitSettled(itemId: string, outcome: SubmissionOutcome): Promise<void> {
+    await this.session.emit({
+      type: "submission_settled",
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: itemId,
+      outcome,
+    });
+  }
+
+  /**
+   * Reconciliation executor — settle branch (steps 1,2,3,5,6). Never-claimed
+   * items (still queued/collecting) settle via the fenceless `settleUnclaimed`
+   * CAS; claimed items (running/blocked) settle under a freshly-owned attempt so
+   * the two-phase reserve/finalize is fenced. Superseded items additionally
+   * withdraw their still-pending gate (carry-forward: steer-crash cleanup).
+   */
+  async settleReconciled(
+    item: QueueItem,
+    outcome: SubmissionOutcome,
+    suspended: SuspendedTurnState | null,
+  ): Promise<void> {
+    const store = this.session.providers.store;
+
+    if (item.status === "queued" || item.status === "collecting") {
+      const ok = await store.settleUnclaimed(this.session.id, this.id, item.id, outcome);
+      if (ok) {
+        await this.emitSettled(item.id, outcome);
+        await this.emitQueueState();
+      }
+      return;
+    }
+
+    // Claimed (running / blocked): own a fresh attempt so the settle is fenced.
+    const attemptId = uid("att");
+    const expectedAttemptId = item.attemptId;
+    if (!expectedAttemptId) return; // defensive: claimed items always carry one
+    const replaced = await store.replaceSubmissionAttempt(
+      this.session.id,
+      this.id,
+      item.id,
+      {
+        sessionId: this.session.id,
+        threadId: this.id,
+        itemId: item.id,
+        attemptId,
+        ownerId: this.session.ownerId,
+      },
+      { expectedAttemptId },
+    );
+    if (!replaced) return; // lost the CAS — a successor owns it now
+    const fence: WriteFence = { itemId: item.id, attemptId };
+
+    // Carry-forward: a crash between the steer supersession stamp and the gate
+    // withdrawal leaves a pending gate on the superseded item. Clean it up
+    // durably (reason 'steer') as part of settling it superseded.
+    if (outcome.outcome === "superseded" && suspended) {
+      const gate = await store.getDecisionGate(this.session.id, suspended.gateId);
+      if (gate && gate.status === "pending") {
+        const withdrawn: DecisionGate = { ...gate, status: "withdrawn", updatedAt: Date.now() };
+        await store.saveDecisionGate(this.session.id, this.id, withdrawn);
+        await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
+          gate: withdrawn,
+          withdrawnReason: "steer",
+        });
+        await this.session.emit({
+          type: "decision_gate_withdrawn",
+          threadId: this.id,
+          gateId: gate.id,
+          reason: "steer",
+        });
+      }
+    }
+
+    try {
+      await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
+      await this.repairRestState(item, fence);
+      if (suspended) await store.clearSuspendedTurn(this.session.id, this.id, fence);
+      await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
+    } catch (err) {
+      if (err instanceof StaleAttemptError) return; // successor owns it now
+      throw err;
+    }
+    await store.deleteAttemptMarker(item.id, attemptId);
+    await this.emitSettled(item.id, outcome);
+    await this.emitQueueState();
+  }
+
+  /**
+   * Reconciliation executor — gate branch (step 4). Takes over the blocked
+   * turn's attempt (fresh attemptId, this instance's ownerId) so the retained
+   * claim's lease renews under our heartbeat and the eventual replay's writes
+   * are fenced, then either re-arms the pending gate or replays the resolved
+   * one. Mirrors the pre-Task-5 `resumeBlockedThreadIfReady`, now attempt-owned.
+   */
+  async reconcileGate(
+    item: QueueItem,
+    suspended: SuspendedTurnState,
+    mode: "rearm" | "replay",
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const attemptId = uid("att");
+    const expectedAttemptId = item.attemptId;
+    if (!expectedAttemptId) return;
+    const replaced = await store.replaceSubmissionAttempt(
+      this.session.id,
+      this.id,
+      item.id,
+      {
+        sessionId: this.session.id,
+        threadId: this.id,
+        itemId: item.id,
+        attemptId,
+        ownerId: this.session.ownerId,
+      },
+      { expectedAttemptId },
+    );
+    if (!replaced) return; // lost the CAS
+    await store.insertAttemptMarker(item.id, attemptId);
+    this.runningItem = replaced;
+    this.fence = { itemId: item.id, attemptId };
+    this.staleFenceDetected = false;
+    this.session.ensureTimers();
+
+    const gate = await store.getDecisionGate(this.session.id, suspended.gateId);
+    if (!gate) {
+      // Gate vanished between the decision and here — nothing to re-arm.
+      this.runningItem = null;
+      this.fence = undefined;
+      return;
+    }
+
+    if (mode === "rearm") {
+      this.armPendingGateForRestart(gate, suspended);
+    } else {
+      const entries = await store.getEntries(this.session.id, this.id);
+      const entry = entries.find(
+        (e) => e.type === "decision_gate" && e.gate.id === gate.id,
+      );
+      const resolution = entry && entry.type === "decision_gate" ? entry.resolution : undefined;
+      if (!resolution) {
+        this.emitError("replay_missing_resolution", `gate ${gate.id} resolved but no resolution stored`);
+        this.runningItem = null;
+        this.fence = undefined;
+        return;
+      }
+      void this.replayBlocked({ suspended, resolution });
+    }
+    await this.emitQueueState();
+  }
+
+  /**
+   * Reconciliation executor — resume branch (step 7). Own a fresh attempt (CAS
+   * on the dead one), record the marker, repair the transcript rest-state
+   * FIRST (dangling tool_call parts → error, never re-executed — per the
+   * continuation contract, an honest error is the only safe injection), rehydrate
+   * the agent transcript, append synthetic toolResults for the interrupted
+   * calls so the trailing message is toolResult-convertible, then continue the
+   * turn and settle it normally.
+   */
+  async resumeInterrupted(item: QueueItem): Promise<void> {
+    const store = this.session.providers.store;
+    const attemptId = uid("att");
+    const expectedAttemptId = item.attemptId;
+    if (!expectedAttemptId) return;
+    const replaced = await store.replaceSubmissionAttempt(
+      this.session.id,
+      this.id,
+      item.id,
+      {
+        sessionId: this.session.id,
+        threadId: this.id,
+        itemId: item.id,
+        attemptId,
+        ownerId: this.session.ownerId,
+      },
+      { expectedAttemptId },
+    );
+    if (!replaced) return; // lost the CAS
+    await store.insertAttemptMarker(item.id, attemptId);
+    this.runningItem = replaced;
+    this.fence = { itemId: item.id, attemptId };
+    this.staleFenceDetected = false;
+    this.session.ensureTimers();
+    await this.emitQueueState();
+
+    let turnFailed = false;
+    let turnError: unknown;
+    try {
+      // Rest-state repair FIRST — before appending any recovery output.
+      await this.repairRestState(item, this.fence, "interrupted — result lost in restart");
+
+      const entries = await store.getEntries(this.session.id, this.id);
+      this.agent.state.messages = entriesToAgentMessages(entries, {
+        api: this.session.options.model.api,
+        provider: this.session.options.model.provider,
+        id: this.session.options.model.id,
+      });
+      this.agent.state.tools = this.buildTools();
+
+      // Append synthetic toolResults for the interrupted turn's tool calls so
+      // the trailing message satisfies the continuation contract (must be
+      // user/toolResult). Interrupted calls carry their error result; any
+      // completed-before-crash calls carry their persisted output.
+      const toolResults = resumeToolResults(entries, item.id);
+      if (toolResults.length > 0) {
+        this.agent.state.messages = [...this.agent.state.messages, ...toolResults];
+      }
+
+      await this.agent.continue();
+      await this.agent.waitForIdle();
+    } catch (err) {
+      turnFailed = true;
+      turnError = err;
+      this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
+    }
+
+    try {
+      await this.settleTurn(replaced, turnFailed ? { error: turnError } : undefined);
+    } catch (err) {
+      this.emitError("settlement_failed", err instanceof Error ? err.message : String(err));
+      this.runningItem = null;
+      this.fence = undefined;
+      return;
+    }
+    this.runningItem = null;
+    this.fence = undefined;
+    void this.kick();
   }
 
   /** Emit the derived `queue_state` event for this thread from durable rows. */
@@ -1795,6 +2087,62 @@ export function resolveModelId(spec: string): PiModel | undefined {
 
 // Back-compat alias used by applyRoleForTurn in this file.
 const resolveRoleModel = resolveModelId;
+
+/**
+ * Build synthetic `toolResult` AgentMessages for the tool calls of an
+ * interrupted turn's assistant entry, so a rehydrated transcript ending in
+ * unanswered tool_call blocks becomes toolResult-terminated (the continuation
+ * contract requires the trailing LLM message be user/toolResult). Interrupted
+ * (error) parts carry their error text; completed-before-crash parts carry
+ * their persisted output. The tool is NEVER re-executed — these results are
+ * pulled straight from persisted history.
+ */
+export function resumeToolResults(
+  entries: readonly SessionEntry[],
+  itemId: string,
+): AgentMessage[] {
+  let target: MessageEntry | undefined;
+  for (const e of entries) {
+    if (e.type !== "message" || e.role !== "assistant") continue;
+    if (e.queueItemId !== itemId) continue;
+    if (!e.parts?.some((p) => p.type === "tool_call")) continue;
+    target = e; // keep the last matching assistant entry
+  }
+  if (!target) return [];
+  const out: AgentMessage[] = [];
+  for (const p of target.parts ?? []) {
+    if (p.type !== "tool_call") continue;
+    const isError = p.status !== "completed";
+    const text = isError
+      ? p.error ?? "interrupted — result lost in restart"
+      : toolResultText(p.result);
+    out.push({
+      role: "toolResult",
+      toolCallId: p.callId,
+      toolName: p.toolName,
+      content: [{ type: "text", text }],
+      isError,
+      timestamp: Date.now(),
+    });
+  }
+  return out;
+}
+
+/** Extract readable text from a persisted tool_call `result` (any shape). */
+function toolResultText(result: unknown): string {
+  if (result && typeof result === "object") {
+    const r = result as { text?: unknown; content?: Array<{ type: string; text?: string }> };
+    if (typeof r.text === "string") return r.text;
+    if (Array.isArray(r.content)) {
+      return r.content
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("");
+    }
+    return JSON.stringify(result);
+  }
+  return String(result ?? "");
+}
 
 function findMostRecentCompaction(
   entries: readonly SessionEntry[],

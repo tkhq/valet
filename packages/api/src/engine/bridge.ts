@@ -256,6 +256,8 @@ export function busEventToWire(ev: BusEvent): WireEventDraft[] {
     case "task_end":
     // submission_settled is consumed in-process by awaitResult; no wire mapping.
     case "submission_settled":
+    // submission_stuck is an attention signal routed in Phase 4; no wire mapping yet.
+    case "submission_stuck":
       return [];
   }
 }

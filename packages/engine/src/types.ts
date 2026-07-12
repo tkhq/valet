@@ -592,6 +592,21 @@ export type EngineEvent =
       threadId: string;
       queueItemId: string;
       outcome: SubmissionOutcome;
+    }
+  | {
+      /**
+       * Stuck-head attention event (spec §Reconciliation, "Stuck-head alarm").
+       * Emitted once per observation pass when an unsettled submission crosses
+       * the retry threshold (attemptCount >= 3) or the wall-clock bound
+       * (age > 15min), gate-blocked items excluded. The attention router lands
+       * in Phase 4; Phase 1 just surfaces the signal.
+       */
+      type: "submission_stuck";
+      sessionId: string;
+      threadId: string;
+      queueItemId: string;
+      attemptCount: number;
+      ageMs: number;
     };
 
 export interface BusEvent {
@@ -706,6 +721,12 @@ export interface SessionStore {
   ): Promise<QueueItem | null>;
   insertAttemptMarker(itemId: string, attemptId: string): Promise<void>;
   deleteAttemptMarker(itemId: string, attemptId: string): Promise<void>;
+  /**
+   * True when an attempt marker row exists for (itemId, attemptId). Durable
+   * evidence that the attempt began executing; reconciliation uses it (with the
+   * lease) to tell "may still be running" from "safe to reclaim".
+   */
+  hasAttemptMarker(itemId: string, attemptId: string): Promise<boolean>;
   /** Renew leases for items this owner still owns; silently skips items whose attempt was replaced. */
   renewLeases(ownerId: string, itemIds: string[]): Promise<void>;
   listExpiredSubmissions(now: number): Promise<QueueItem[]>;

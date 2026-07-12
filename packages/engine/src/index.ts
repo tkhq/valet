@@ -7,6 +7,12 @@ export {
   loadSkillFromMarkdown,
   type ParsedArtifact,
 } from "./roles-skills/index.js";
+export {
+  deriveQueueState,
+  decideReconciliation,
+  type ReconcileAction,
+  type ReconcileContext,
+} from "./submission.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
 export { Thread } from "./thread.js";

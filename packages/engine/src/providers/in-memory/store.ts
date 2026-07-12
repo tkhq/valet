@@ -347,6 +347,10 @@ export class InMemorySessionStore implements SessionStore {
     this.attemptMarkers.delete(`${itemId}:${attemptId}`);
   }
 
+  async hasAttemptMarker(itemId: string, attemptId: string): Promise<boolean> {
+    return this.attemptMarkers.has(`${itemId}:${attemptId}`);
+  }
+
   async renewLeases(ownerId: string, itemIds: string[]): Promise<void> {
     const now = Date.now();
     const wanted = new Set(itemIds);
