@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { deriveQueueState } from "../src/submission.js";
-import type { QueueItem, SubmissionStatus } from "../src/types.js";
+import {
+  deriveQueueState,
+  resolvePartialSubmissionText,
+  resolveSubmissionText,
+} from "../src/submission.js";
+import type { MessageEntry, QueueItem, SessionEntry, SubmissionStatus } from "../src/types.js";
 
 const THREAD = "th-1";
 
@@ -129,5 +133,88 @@ describe("deriveQueueState (pure)", () => {
   it("mode passes through", () => {
     expect(deriveQueueState(THREAD, [], "collect", false).mode).toBe("collect");
     expect(deriveQueueState(THREAD, [], "steer", false).mode).toBe("steer");
+  });
+});
+
+let entrySeq = 1;
+function assistantEntry(
+  overrides: Partial<MessageEntry> & { content: string },
+): MessageEntry {
+  const n = entrySeq++;
+  return {
+    id: `e-${n}`,
+    sessionId: "sess-1",
+    threadId: THREAD,
+    parentId: null,
+    createdAt: 1_000 + n,
+    type: "message",
+    role: "assistant",
+    ...overrides,
+  };
+}
+
+describe("resolveSubmissionText / resolvePartialSubmissionText (pure)", () => {
+  it("two end_turn assistant entries with the same queueItemId → the LAST one's content wins", () => {
+    const entries: SessionEntry[] = [
+      assistantEntry({ content: "first", queueItemId: "q-1", stopReason: "end_turn" }),
+      assistantEntry({ content: "second", queueItemId: "q-1", stopReason: "end_turn" }),
+    ];
+    expect(resolveSubmissionText(entries, "q-1")).toBe("second");
+    expect(resolvePartialSubmissionText(entries, "q-1")).toBe("second");
+  });
+
+  it("interleaved entries from other queueItemIds and other roles are ignored", () => {
+    const entries: SessionEntry[] = [
+      assistantEntry({ content: "mine", queueItemId: "q-1", stopReason: "end_turn" }),
+      assistantEntry({ content: "other item", queueItemId: "q-2", stopReason: "end_turn" }),
+      assistantEntry({ content: "user text", queueItemId: "q-1", stopReason: "end_turn", role: "user" }),
+      {
+        id: "e-comp",
+        sessionId: "sess-1",
+        threadId: THREAD,
+        parentId: null,
+        createdAt: 9_999,
+        type: "compaction",
+        summary: "compacted",
+        coveredEntryIds: [],
+        tokenCountBefore: 10,
+        tokenCountAfter: 1,
+        queueItemId: "q-1",
+      },
+    ];
+    expect(resolveSubmissionText(entries, "q-1")).toBe("mine");
+    expect(resolvePartialSubmissionText(entries, "q-1")).toBe("mine");
+  });
+
+  it("entries without end_turn are ignored by resolveSubmissionText but honored by resolvePartialSubmissionText", () => {
+    const aborted: SessionEntry[] = [
+      assistantEntry({ content: "partial", queueItemId: "q-1", stopReason: "abort" }),
+    ];
+    expect(resolveSubmissionText(aborted, "q-1")).toBeUndefined();
+    expect(resolvePartialSubmissionText(aborted, "q-1")).toBe("partial");
+
+    const missingStop: SessionEntry[] = [
+      assistantEntry({ content: "no stop reason", queueItemId: "q-1" }),
+    ];
+    expect(resolveSubmissionText(missingStop, "q-1")).toBeUndefined();
+    expect(resolvePartialSubmissionText(missingStop, "q-1")).toBe("no stop reason");
+
+    // partial resolver still takes the LAST match, mixed stop reasons.
+    const mixed: SessionEntry[] = [
+      assistantEntry({ content: "finished", queueItemId: "q-1", stopReason: "end_turn" }),
+      assistantEntry({ content: "later abort", queueItemId: "q-1", stopReason: "abort" }),
+    ];
+    expect(resolveSubmissionText(mixed, "q-1")).toBe("finished");
+    expect(resolvePartialSubmissionText(mixed, "q-1")).toBe("later abort");
+  });
+
+  it("empty entries / no match returns undefined", () => {
+    expect(resolveSubmissionText([], "q-1")).toBeUndefined();
+    expect(resolvePartialSubmissionText([], "q-1")).toBeUndefined();
+    const otherOnly: SessionEntry[] = [
+      assistantEntry({ content: "other", queueItemId: "q-2", stopReason: "end_turn" }),
+    ];
+    expect(resolveSubmissionText(otherOnly, "q-1")).toBeUndefined();
+    expect(resolvePartialSubmissionText(otherOnly, "q-1")).toBeUndefined();
   });
 });

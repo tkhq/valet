@@ -13,8 +13,78 @@ import {
   TimeoutError,
   VirtualSandboxProvider,
   type BusEvent,
+  type MessageEntry,
+  type QueueItem,
+  type SessionStore,
 } from "../src/index.js";
 import { SqliteSessionStore, applyEngineMigrations } from "@valet/store-sqlite";
+
+let seedSeq = 1;
+function seedItem(threadId: string, id: string): QueueItem {
+  const createdAt = 1_000 + seedSeq++;
+  return {
+    id,
+    threadId,
+    content: `seed-${id}`,
+    status: "queued",
+    attemptCount: 0,
+    maxAttempts: 10,
+    timeoutAt: createdAt + 3_600_000,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
+/**
+ * Seed a chain of `mergedCount` merged items directly in the store —
+ * m0 → m1 → … → m(n-1) → terminal — with the terminal item settled
+ * `completed` and carrying a persisted end_turn assistant entry.
+ * Returns the ids in chain order (terminal last).
+ */
+async function seedMergeChain(
+  store: SessionStore,
+  sessionId: string,
+  threadId: string,
+  mergedCount: number,
+  terminalText: string,
+): Promise<string[]> {
+  const ids = [
+    ...Array.from({ length: mergedCount }, (_, i) => `m-${mergedCount}-${i}`),
+    `terminal-${mergedCount}`,
+  ];
+  for (const id of ids) {
+    await store.admitSubmission(sessionId, threadId, seedItem(threadId, id));
+  }
+  for (let i = 0; i < mergedCount; i++) {
+    const ok = await store.settleUnclaimed(
+      sessionId,
+      threadId,
+      ids[i],
+      { outcome: "merged" },
+      { mergedIntoItemId: ids[i + 1] },
+    );
+    if (!ok) throw new Error(`failed to seed merged item ${ids[i]}`);
+  }
+  const terminalId = ids[ids.length - 1];
+  const entry: MessageEntry = {
+    id: `entry-${terminalId}`,
+    sessionId,
+    threadId,
+    parentId: null,
+    createdAt: Date.now(),
+    type: "message",
+    role: "assistant",
+    content: terminalText,
+    queueItemId: terminalId,
+    stopReason: "end_turn",
+  };
+  await store.appendEntries(sessionId, threadId, [entry]);
+  const settled = await store.settleUnclaimed(sessionId, threadId, terminalId, {
+    outcome: "completed",
+  });
+  if (!settled) throw new Error(`failed to seed terminal item ${terminalId}`);
+  return ids;
+}
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -119,12 +189,62 @@ describe("Thread.awaitResult", () => {
     faux.unregister();
   });
 
+  it("merge chain of exactly MAX depth (5 hops) still resolves to the terminal result", async () => {
+    const faux = registerFauxProvider({ provider: "await-depth-ok" });
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread();
+
+    // 5 merged hops → the terminal item is read at delegation depth 5,
+    // exactly the bound — must resolve, not error.
+    const ids = await seedMergeChain(store, session.id, thread.id, 5, "deep-done");
+    const result = await thread.awaitResult(ids[0]);
+    expect(result).toEqual({
+      queueItemId: ids[ids.length - 1],
+      outcome: "completed",
+      text: "deep-done",
+    });
+
+    faux.unregister();
+  });
+
+  it("merge chain exceeding MAX depth returns an error-shaped result, not a hang or throw", async () => {
+    const faux = registerFauxProvider({ provider: "await-depth-exceeded" });
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread();
+
+    // 7 merged hops: delegation is cut at depth 6 (> 5), i.e. at the 7th
+    // item in the chain (index 6), before its terminal item is ever reached.
+    const ids = await seedMergeChain(store, session.id, thread.id, 7, "never-reached");
+    const result = await thread.awaitResult(ids[0]);
+    expect(result).toEqual({
+      queueItemId: ids[6],
+      outcome: "failed",
+      error: "merge delegation depth exceeded 5 hops",
+    });
+
+    faux.unregister();
+  });
+
   it("superseded returns outcome 'superseded' plus partial text", async () => {
     const faux = registerFauxProvider({ provider: "await-superseded", tokensPerSecond: 30 });
     const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
     faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("steer-done")]);
 
-    const { engine, events } = makeEngine();
+    const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
       userId: "u1",
       orgId: "o1",
@@ -140,8 +260,20 @@ describe("Thread.awaitResult", () => {
     const result = await session.thread().awaitResult(r1.queueItemId);
     expect(result.queueItemId).toBe(r1.queueItemId);
     expect(result.outcome).toBe("superseded");
-    expect(result.text).toBeDefined();
-    expect((result.text?.length ?? 0) > 0).toBe(true);
+
+    // End-to-end wiring proof: the content is nondeterministic (interrupted
+    // mid-stream), so compute the expected partial text from the persisted
+    // entries — the LAST assistant entry under the superseded item's own
+    // queueItemId, regardless of stopReason — and require an exact match.
+    const entries = await store.getEntries(session.id, session.thread().id);
+    const partials = entries.filter(
+      (e): e is MessageEntry =>
+        e.type === "message" && e.role === "assistant" && e.queueItemId === r1.queueItemId,
+    );
+    expect(partials.length).toBeGreaterThan(0);
+    const expectedText = partials[partials.length - 1].content;
+    expect(expectedText.length).toBeGreaterThan(0);
+    expect(result.text).toBe(expectedText);
 
     faux.unregister();
   });
