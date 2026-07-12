@@ -109,7 +109,8 @@ dev-opencode: docker-up ## Start OpenCode container
 
 dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	@echo "$(GREEN)Starting @valet/api on :8788$(NC)"
-	@if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required$(NC)"; exit 1; fi
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	cd packages/api && VALET_LOCAL_AUTH=1 PORT=8788 $(PNPM) run dev
 
 dev-web: ## Start the new web client (@valet/web) on :5173
@@ -121,7 +122,8 @@ dev-local: ## Start API + web together (greenfield agent-loop stack)
 	@make -j2 dev-api-node dev-web
 
 dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
-	@if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required$(NC)"; exit 1; fi
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	$(PNPM) --filter @valet/api dogfood
 
 # Manual kill-mid-turn recovery proof (Engine v2 Phase 1 exit criterion).
