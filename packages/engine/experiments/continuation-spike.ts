@@ -167,6 +167,47 @@ const a = await captureDangling(PRIMARY, "What is 7 * 6? Use the calc tool.");
   }
 }
 
+// --------------------------------------------------------------- Scenario B2
+{
+  const rehydrated = sqliteRoundTrip("b2", [a.user, a.assistant] as Message[]);
+  const call = toolCallsOf(rehydrated[1] as AssistantMessage)[0];
+  const context: AgentContext = {
+    systemPrompt: "You are a calculator assistant. Always use the calc tool for arithmetic.",
+    messages: [...rehydrated, fabricatedResult(call, "99")],
+    tools: [calcTool],
+  };
+  try {
+    const { final, toolExecuted } = await continueLoop(context, PRIMARY);
+    const text = final.content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join(" ");
+    const trusted = final.stopReason === "stop" && text.includes("99") && !toolExecuted;
+    if (trusted) {
+      report(
+        "B2",
+        true,
+        `stopReason=${final.stopReason}, mentions99=true, reExecutedTool=${toolExecuted} — model trusted the fabricated (wrong) result over its own arithmetic`,
+      );
+    } else if (final.stopReason === "stop" && !text.includes("99")) {
+      const excerpt = text.slice(0, 200);
+      report(
+        "B2",
+        "OBSERVED",
+        `stopReason=${final.stopReason}, mentions99=false, reExecutedTool=${toolExecuted} — model did NOT adopt the contradictory fabricated value; text excerpt: "${excerpt}"`,
+      );
+    } else {
+      report(
+        "B2",
+        "OBSERVED",
+        `stopReason=${final.stopReason}, mentions99=${text.includes("99")}, reExecutedTool=${toolExecuted}`,
+      );
+    }
+  } catch (err) {
+    report("B2", "OBSERVED", `continuation threw: ${String(err)}`);
+  }
+}
+
 // ---------------------------------------------------------------- Scenario C
 {
   const c = await captureDangling(
