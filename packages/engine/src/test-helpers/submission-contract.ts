@@ -105,6 +105,23 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       );
     });
 
+    it("mutating an admitted item's returned copy does not leak into store state", async () => {
+      const item = makeItem({ dispatchId: "dispatch-alias", content: "alias check" });
+      const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      expect(admitted.admitted).toBe(true);
+      admitted.item.status = "settled"; // mutate the returned object
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("queued");
+
+      // Same check on the admitted:false dedup path's returned item.
+      const dup = makeItem({ dispatchId: "dispatch-alias", content: "alias check" });
+      const deduped = await store.admitSubmission(SESSION_ID, THREAD_ID, dup);
+      expect(deduped.admitted).toBe(false);
+      deduped.item.status = "settled";
+      const reloaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(reloaded?.status).toBe("queued");
+    });
+
     it("items without dispatchId always admit", async () => {
       const a = makeItem({ content: "same text" });
       const b = makeItem({ content: "same text" });
@@ -602,6 +619,31 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       ).rejects.toThrow(ConflictError);
     });
 
+    it("re-reserving with the same outcome after terminalizing is an idempotent no-op", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "o",
+      });
+      const fence: WriteFence = { itemId: item.id, attemptId: claimed!.attemptId! };
+      await store.reserveSettlement(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" }, fence);
+      await expect(
+        store.reserveSettlement(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" }, fence),
+      ).resolves.toBeUndefined();
+      const reserved = await store.getQueueItem(SESSION_ID, item.id);
+      expect(reserved?.status).toBe("terminalizing");
+      expect(reserved?.outcome).toEqual({ outcome: "completed" });
+
+      await store.finalizeSettlement(SESSION_ID, THREAD_ID, item.id, fence);
+      const settled = await store.getQueueItem(SESSION_ID, item.id);
+      expect(settled?.status).toBe("settled");
+      expect(settled?.outcome).toEqual({ outcome: "completed" });
+    });
+
     it("settled items are excluded from listUnsettledSubmissions", async () => {
       const a = makeItem();
       const b = makeItem();
@@ -711,6 +753,30 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
 
       await store.setSubmissionBlocked(SESSION_ID, THREAD_ID, item.id, false, fence);
       expect((await store.getQueueItem(SESSION_ID, item.id))?.status).toBe("running");
+    });
+
+    it("setSubmissionBlocked refuses to resurrect a settled item (ConflictError)", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "o",
+      });
+      const fence: WriteFence = { itemId: item.id, attemptId: claimed!.attemptId! };
+      await store.reserveSettlement(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" }, fence);
+      await store.finalizeSettlement(SESSION_ID, THREAD_ID, item.id, fence);
+
+      // The fence still names the settling attempt, but the item is settled:
+      // a late blocked-toggle must not bring it back to a live status.
+      await expect(
+        store.setSubmissionBlocked(SESSION_ID, THREAD_ID, item.id, true, fence),
+      ).rejects.toThrow(ConflictError);
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("settled");
+      expect(loaded?.outcome).toEqual({ outcome: "completed" });
     });
   });
 }

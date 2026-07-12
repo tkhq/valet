@@ -243,7 +243,7 @@ export class InMemorySessionStore implements SessionStore {
         if (existing) {
           const sameContent = JSON.stringify(existing.content) === JSON.stringify(item.content);
           if (sameContent) {
-            return { item: existing, admitted: false, supersededItemIds: [] };
+            return { item: { ...existing }, admitted: false, supersededItemIds: [] };
           }
           throw new ConflictError(
             `dispatchId ${item.dispatchId} already admitted with different content`,
@@ -266,6 +266,10 @@ export class InMemorySessionStore implements SessionStore {
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;
+        // "Admitted before this one" is approximated by createdAt ordering;
+        // callers construct items with monotonic timestamps in practice, and
+        // Map insertion order (== admission order) breaks any tie the same
+        // way the SQL backends' insertion-ordered scan will.
         if (other.createdAt > stored.createdAt) continue;
         other.supersededByItemId = stored.id;
         other.updatedAt = Date.now();
@@ -273,7 +277,7 @@ export class InMemorySessionStore implements SessionStore {
       }
     }
 
-    return { item: stored, admitted: true, supersededItemIds };
+    return { item: { ...stored }, admitted: true, supersededItemIds };
   }
 
   private threadItemsInOrder(r: SessionRow, threadId: string): QueueItem[] {
@@ -390,6 +394,26 @@ export class InMemorySessionStore implements SessionStore {
     }
   }
 
+  /**
+   * Shared lookup for the fenced lifecycle methods: enforce the fence via
+   * checkFence, then resolve the target item, treating any identity mismatch
+   * (unknown item, wrong thread, fence naming a different item) as a stale
+   * write the same way the fence rejection is.
+   */
+  private fencedItem(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+  ): QueueItem {
+    this.checkFence(sessionId, fence);
+    const item = this.row(sessionId).queueItems.get(itemId);
+    if (!item || item.threadId !== threadId || item.id !== fence.itemId) {
+      throw new StaleAttemptError(fence.itemId, fence.attemptId, item?.attemptId);
+    }
+    return item;
+  }
+
   async reserveSettlement(
     sessionId: string,
     threadId: string,
@@ -397,14 +421,7 @@ export class InMemorySessionStore implements SessionStore {
     outcome: SubmissionOutcome,
     fence: WriteFence,
   ): Promise<void> {
-    const r = this.row(sessionId);
-    const item = r.queueItems.get(itemId);
-    if (!item || item.threadId !== threadId) {
-      throw new StaleAttemptError(fence.itemId, fence.attemptId, item?.attemptId);
-    }
-    if (item.attemptId !== fence.attemptId) {
-      throw new StaleAttemptError(fence.itemId, fence.attemptId, item.attemptId);
-    }
+    const item = this.fencedItem(sessionId, threadId, itemId, fence);
     if (item.status === "terminalizing" || item.status === "settled") {
       const sameOutcome = JSON.stringify(item.outcome) === JSON.stringify(outcome);
       if (sameOutcome) return; // idempotent re-reserve
@@ -425,15 +442,8 @@ export class InMemorySessionStore implements SessionStore {
     itemId: string,
     fence: WriteFence,
   ): Promise<void> {
-    const r = this.row(sessionId);
-    const item = r.queueItems.get(itemId);
-    if (!item || item.threadId !== threadId) {
-      throw new StaleAttemptError(fence.itemId, fence.attemptId, item?.attemptId);
-    }
+    const item = this.fencedItem(sessionId, threadId, itemId, fence);
     if (item.status === "settled") return; // idempotent
-    if (item.attemptId !== fence.attemptId) {
-      throw new StaleAttemptError(fence.itemId, fence.attemptId, item.attemptId);
-    }
     item.status = "settled";
     item.updatedAt = Date.now();
   }
@@ -465,13 +475,16 @@ export class InMemorySessionStore implements SessionStore {
     blocked: boolean,
     fence: WriteFence,
   ): Promise<void> {
-    const r = this.row(sessionId);
-    const item = r.queueItems.get(itemId);
-    if (!item || item.threadId !== threadId) {
-      throw new StaleAttemptError(fence.itemId, fence.attemptId, item?.attemptId);
-    }
-    if (item.attemptId !== fence.attemptId) {
-      throw new StaleAttemptError(fence.itemId, fence.attemptId, item.attemptId);
+    const item = this.fencedItem(sessionId, threadId, itemId, fence);
+    // Strict transition precondition: only running↔blocked_on_decision_gate.
+    // A settled/terminalizing item carrying its old attemptId must never be
+    // resurrected into a live status by a late blocked-toggle.
+    const expected: QueueItem["status"] = blocked ? "running" : "blocked_on_decision_gate";
+    if (item.status !== expected) {
+      throw new ConflictError(
+        `cannot set blocked=${blocked} on queue item ${itemId} in status '${item.status}' (requires '${expected}')`,
+        { itemId, status: item.status, blocked },
+      );
     }
     item.status = blocked ? "blocked_on_decision_gate" : "running";
     item.updatedAt = Date.now();
