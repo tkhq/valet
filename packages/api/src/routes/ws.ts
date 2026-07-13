@@ -5,13 +5,15 @@
  * wire event via the bridge, and pushes to the connected client. Adds a
  * monotonic per-session `seq` and a `ts` timestamp on the way out.
  *
- * v1 semantics:
+ * Semantics:
  *   - One subscriber = one socket = one session.
- *   - No replay buffer (yet). On reconnect, clients refetch via the REST
- *     /messages endpoint to recover state, then live events stream from
- *     "now" — `lastSeq` in the client hello is currently ignored.
+ *   - `init` is sent first, metadata-only. Thread history loads via REST.
+ *   - Resume: `?fromOffset=<offset>` replays durable events after that offset
+ *     before live delivery resumes. Durable frames carry a persistent
+ *     `offset`; ephemeral frames (text_delta) never do. Without the query
+ *     param the socket delivers live-only from "now".
  *   - Periodic ping every 30s; client should reply with `pong`. The server
- *     does not enforce idle timeout in v1.
+ *     does not enforce idle timeout.
  */
 import type { Hono } from "hono";
 import type { UpgradeWebSocket } from "hono/ws";
@@ -20,9 +22,11 @@ import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { busEventToWire, type WireEventDraft } from "../engine/bridge.js";
 import type { ClientFrame, WireEvent } from "../wire/types.js";
-import type { BusEvent } from "@valet/engine";
+import type { DeliveredBusEvent } from "@valet/engine";
 
 const PING_INTERVAL_MS = 30_000;
+/** Page size for durable replay reads on resume. */
+const REPLAY_PAGE_SIZE = 500;
 
 export function registerWsRoutes(
   app: Hono<AppEnv>,
@@ -34,6 +38,11 @@ export function registerWsRoutes(
       const sessionId = c.req.param("id");
       const providers = c.var.providers;
       const userId = c.var.user.id;
+      // Resume handshake: `?fromOffset=<offset>` replays durable events after
+      // that offset before live delivery. Empty/absent ⇒ live-only.
+      const rawFromOffset = c.req.query("fromOffset");
+      const fromOffset =
+        rawFromOffset !== undefined && rawFromOffset !== "" ? rawFromOffset : undefined;
 
       let seq = 0;
       let pingTimer: ReturnType<typeof setInterval> | undefined;
@@ -97,11 +106,10 @@ export function registerWsRoutes(
               },
             });
 
-            // Subscribe to the engine event stream for this session. The
-            // callback may receive a durable event carrying `offset`; ignored
-            // here (the full WS resume protocol is Task 5).
-            unsubscribe = providers.eventStream.subscribe({ sessionId }, (busEvent: BusEvent) => {
-              // Track active message id for delta tagging.
+            // Map one bus event → wire frames and push them. Durable events
+            // carry `offset`; we stamp it onto each frame so clients can
+            // resume. Ephemeral frames (text_delta) have no offset.
+            const emit = (busEvent: DeliveredBusEvent) => {
               if (busEvent.event.type === "message_start") {
                 activeMessageByThread.set(busEvent.event.threadId, busEvent.event.messageId);
               }
@@ -111,9 +119,56 @@ export function registerWsRoutes(
                   const filled = activeMessageByThread.get(draft.threadId);
                   if (filled) draft.messageId = filled;
                 }
+                if (busEvent.offset !== undefined) draft.offset = busEvent.offset;
                 send(ws, draft);
               }
+            };
+
+            // Subscribe to the engine event stream for this session. During a
+            // resume replay, live events are buffered so they can't jump ahead
+            // of (or duplicate) the durable events being replayed.
+            let replaying = fromOffset !== undefined;
+            const liveBuffer: DeliveredBusEvent[] = [];
+            unsubscribe = providers.eventStream.subscribe({ sessionId }, (busEvent: DeliveredBusEvent) => {
+              if (replaying) {
+                liveBuffer.push(busEvent);
+                return;
+              }
+              emit(busEvent);
             });
+
+            if (fromOffset !== undefined) {
+              // Replay durable events strictly after `fromOffset`, in pages,
+              // in order. Track the highest offset delivered so the live
+              // buffer can drop anything already replayed.
+              let lastReplayedSeq = Number(fromOffset);
+              if (!Number.isFinite(lastReplayedSeq)) lastReplayedSeq = 0;
+              let cursor = fromOffset;
+              for (;;) {
+                const { events, nextOffset } = await providers.eventStream.read(sessionId, {
+                  fromOffset: cursor,
+                  limit: REPLAY_PAGE_SIZE,
+                });
+                if (events.length === 0) break;
+                for (const stored of events) {
+                  emit(stored);
+                  lastReplayedSeq = Number(stored.offset);
+                }
+                cursor = nextOffset;
+                if (events.length < REPLAY_PAGE_SIZE) break;
+              }
+              // Flush buffered live events, dropping any at-or-below the last
+              // replayed offset (delivered exactly once). No `await` between
+              // here and clearing `replaying`, so nothing interleaves.
+              for (const buffered of liveBuffer) {
+                if (buffered.offset !== undefined && Number(buffered.offset) <= lastReplayedSeq) {
+                  continue;
+                }
+                emit(buffered);
+              }
+              liveBuffer.length = 0;
+              replaying = false;
+            }
 
             // Periodic keepalive.
             pingTimer = setInterval(() => {

@@ -410,6 +410,27 @@ export class InMemorySessionStore implements SessionStore {
     return [...r.queueItems.values()].filter((i) => i.status !== "settled").map((i) => ({ ...i }));
   }
 
+  async listSessionIdsWithUnsettledSubmissions(): Promise<string[]> {
+    const out: string[] = [];
+    for (const [sessionId, r] of this.rows) {
+      for (const item of r.queueItems.values()) {
+        if (item.status !== "settled") {
+          out.push(sessionId);
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  async listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]> {
+    const r = this.rows.get(sessionId);
+    if (!r) return [];
+    return [...r.queueItems.values()]
+      .filter((i) => i.status === "settled" && i.updatedAt < cutoff)
+      .map((i) => ({ ...i }));
+  }
+
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);

@@ -770,6 +770,10 @@ export interface SessionStore {
   renewLeases(ownerId: string, itemIds: string[]): Promise<void>;
   listExpiredSubmissions(now: number): Promise<QueueItem[]>;
   listUnsettledSubmissions(sessionId: string): Promise<QueueItem[]>;
+  /** Session ids that currently have at least one non-settled queue item. Used by eager boot restore. */
+  listSessionIdsWithUnsettledSubmissions(): Promise<string[]>;
+  /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
+  listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /** Stamp abortRequestedAt on unsettled submissions in scope. First write wins; NOT terminal. */
   requestAbort(sessionId: string, threadId?: string): Promise<void>;

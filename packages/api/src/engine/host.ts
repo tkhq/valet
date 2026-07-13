@@ -34,6 +34,9 @@ interface CacheEntry {
   session: Session;
 }
 
+/** Durable events for submissions settled longer ago than this are pruned on restore. */
+const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
 const SYSTEM_PROMPT =
   "You are a helpful coding assistant running inside a Docker sandbox. " +
   "Your workspace is /workspace (the only mounted directory). " +
@@ -116,7 +119,33 @@ export class EngineHost {
         });
 
     this.cache.set(sessionId, { engine, session });
+    // Retention: after a successful restore of an existing session, prune
+    // durable events for submissions that settled outside the retention
+    // window. Fire-and-forget — never block or fail the restore.
+    if (existing) this.pruneExpiredEvents(sessionId);
     return session;
+  }
+
+  /**
+   * Fire-and-forget prune of durable events belonging to submissions that
+   * settled before the retention cutoff. Errors are logged, never thrown.
+   */
+  private pruneExpiredEvents(sessionId: string): void {
+    const cutoff = Date.now() - EVENT_RETENTION_MS;
+    void (async () => {
+      try {
+        const settled = await this.opts.engineStore.listSettledSubmissionsBefore(sessionId, cutoff);
+        const ids = settled.map((i) => i.id);
+        if (ids.length > 0) await this.opts.eventStream.prune(sessionId, ids);
+      } catch (err) {
+        console.error(`event retention prune failed for session ${sessionId}:`, err);
+      }
+    })();
+  }
+
+  /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */
+  eventStream(): EventStream {
+    return this.opts.eventStream;
   }
 
   /** Tear down a single session: destroy engine + sandbox, drop the cache entry. */

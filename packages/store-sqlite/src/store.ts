@@ -827,6 +827,22 @@ export class SqliteSessionStore implements SessionStore {
     return rows.map(queueItemRowToItem);
   }
 
+  async listSessionIdsWithUnsettledSubmissions(): Promise<string[]> {
+    const rows = this.sqlite
+      .prepare(`SELECT DISTINCT session_id FROM engine_queue_items WHERE status != 'settled'`)
+      .all() as { session_id: string }[];
+    return rows.map((r) => r.session_id);
+  }
+
+  async listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]> {
+    const rows = this.sqlite
+      .prepare(
+        `SELECT * FROM engine_queue_items WHERE session_id = ? AND status = 'settled' AND updated_at < ?`,
+      )
+      .all(sessionId, cutoff) as QueueItemRow[];
+    return rows.map(queueItemRowToItem);
+  }
+
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const row = this.sqlite
       .prepare("SELECT * FROM engine_queue_items WHERE session_id = ? AND id = ?")

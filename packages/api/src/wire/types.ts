@@ -7,8 +7,9 @@
  * Stability rules:
  *   - REST request/response shapes are versioned implicitly by the route path.
  *   - WS frames have a discriminated `type`. Add new types; don't repurpose.
- *   - WS frames carry a monotonically-increasing `seq` (per session) so the
- *     client can dedupe on reconnect with `lastSeq`.
+ *   - WS frames carry a monotonically-increasing `seq` (per socket) for
+ *     client-side ordering. Durable frames also carry a persistent `offset`;
+ *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
 
 // ── Common ────────────────────────────────────────────────────────────────
@@ -224,12 +225,12 @@ export type WireEvent =
   // GET /messages?threadId=… (REST is the authoritative source for thread
   // history). Earlier versions sent the default thread's messages here, but
   // that wiped non-default-thread state on every WS reconnect.
-  | { seq: number; ts: number; type: "init"; session: SessionDetail }
-  | { seq: number; ts: number; type: "message_start"; threadId: string; messageId: string; role: MessageRole }
-  | { seq: number; ts: number; type: "text_delta"; threadId: string; messageId: string; delta: string }
+  | { seq: number; ts: number; offset?: string; type: "init"; session: SessionDetail }
+  | { seq: number; ts: number; offset?: string; type: "message_start"; threadId: string; messageId: string; role: MessageRole }
+  | { seq: number; ts: number; offset?: string; type: "text_delta"; threadId: string; messageId: string; delta: string }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "message_update";
       threadId: string;
       messageId: string;
@@ -238,7 +239,7 @@ export type WireEvent =
     }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "message_end";
       threadId: string;
       messageId: string;
@@ -246,7 +247,7 @@ export type WireEvent =
     }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "tool_start";
       threadId: string;
       toolName: string;
@@ -255,7 +256,7 @@ export type WireEvent =
     }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "tool_end";
       threadId: string;
       toolName: string;
@@ -265,21 +266,21 @@ export type WireEvent =
     }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "status";
       threadId: string;
       status: "idle" | "queued" | "thinking" | "tool_calling" | "streaming" | "blocked_on_decision_gate" | "error";
     }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "turn_end";
       threadId: string;
       reason: "end_turn" | "error" | "abort";
     }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "error";
       threadId?: string;
       code: string;
@@ -288,7 +289,7 @@ export type WireEvent =
     }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "model_switched";
       /** Present when scope === thread; absent for session-level switches. */
       threadId?: string;
@@ -296,34 +297,66 @@ export type WireEvent =
       toModel: string;
       reason: string;
     }
-  | { seq: number; ts: number; type: "decision_gate"; threadId: string; gate: DecisionGate }
+  | { seq: number; ts: number; offset?: string; type: "decision_gate"; threadId: string; gate: DecisionGate }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "decision_gate_resolved";
       threadId: string;
       gateId: string;
       resolution: DecisionResolution;
     }
-  | { seq: number; ts: number; type: "decision_gate_expired"; threadId: string; gateId: string }
+  | { seq: number; ts: number; offset?: string; type: "decision_gate_expired"; threadId: string; gateId: string }
   | {
       seq: number;
-      ts: number;
+      ts: number; offset?: string;
       type: "decision_gate_withdrawn";
       threadId: string;
       gateId: string;
       reason: DecisionWithdrawReason;
     }
-  | { seq: number; ts: number; type: "ping" };
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "queue.state";
+      sessionId: string;
+      threadId: string;
+      state: WireQueueState;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "submission.settled";
+      sessionId: string;
+      threadId: string;
+      queueItemId: string;
+      outcome: "completed" | "failed" | "aborted" | "superseded" | "merged";
+      error?: string;
+    }
+  | { seq: number; ts: number; offset?: string; type: "ping" };
 
 export type WireEventType = WireEvent["type"];
+
+/**
+ * Thin projection of the engine's `QueueState` for the wire. The full items
+ * live behind the admin REST surface; the live socket ships only id lists so
+ * the client can reconcile ordering without carrying prompt payloads.
+ */
+export interface WireQueueState {
+  mode: "followup" | "steer" | "collect";
+  status: "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
+  activeItemId?: string;
+  pendingIds: string[];
+  collectingIds: string[];
+  blockedGateId?: string;
+}
 
 // ── WebSocket: client → server frames ────────────────────────────────────
 
 export interface ClientHello {
   type: "subscribe";
-  /** If set, server replays buffered events with seq > lastSeq. */
-  lastSeq?: number;
 }
 
 export interface ClientPong {

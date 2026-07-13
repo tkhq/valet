@@ -256,6 +256,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "queue.state":
+    case "submission.settled":
+      // Queue-lifecycle frames. No dedicated reducer yet (the queue UI lands
+      // in a later task); bump seq and carry on so the switch stays
+      // exhaustive over the wire union.
+      return next;
+
     case "ping": {
       return next;
     }

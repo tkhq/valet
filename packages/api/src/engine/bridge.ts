@@ -1,5 +1,6 @@
 import type {
   BusEvent,
+  DeliveredBusEvent,
   DecisionGate as EngineDecisionGate,
   DecisionResolution as EngineDecisionResolution,
   MessagePart as EngineMessagePart,
@@ -96,7 +97,7 @@ export type WireEventDraft = WireEvent extends infer T
     : never
   : never;
 
-export function busEventToWire(ev: BusEvent): WireEventDraft[] {
+export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
   const e = ev.event;
   switch (e.type) {
     case "message_start":
@@ -246,16 +247,45 @@ export function busEventToWire(ev: BusEvent): WireEventDraft[] {
         },
       ];
 
-    // Out of agent-loop v1 scope — silently dropped. Future plans:
-    // compaction events, child-task events, queue state, thread lifecycle.
-    case "thread_start":
     case "queue_state":
+      // Project the engine's full QueueState to id lists — the live socket
+      // stays thin; the admin surface returns full items. sessionId comes
+      // from the envelope (the engine event only carries threadId + state).
+      return [
+        {
+          type: "queue.state",
+          sessionId: ev.sessionId,
+          threadId: e.threadId,
+          state: {
+            mode: e.state.mode,
+            status: e.state.status,
+            activeItemId: e.state.activeItemId,
+            pendingIds: e.state.pending.map((i) => i.id),
+            collectingIds: (e.state.collectBuffer ?? []).map((i) => i.id),
+            blockedGateId: e.state.blockedGateId,
+          },
+        },
+      ];
+
+    case "submission_settled":
+      return [
+        {
+          type: "submission.settled",
+          sessionId: e.sessionId,
+          threadId: e.threadId,
+          queueItemId: e.queueItemId,
+          outcome: e.outcome.outcome,
+          error: e.outcome.error,
+        },
+      ];
+
+    // Out of agent-loop v1 scope — silently dropped. Future plans:
+    // compaction events, child-task events, thread lifecycle.
+    case "thread_start":
     case "compaction_start":
     case "compaction_end":
     case "task_start":
     case "task_end":
-    // submission_settled is consumed in-process by awaitResult; no wire mapping.
-    case "submission_settled":
     // submission_stuck is an attention signal routed in Phase 4; no wire mapping yet.
     case "submission_stuck":
       return [];

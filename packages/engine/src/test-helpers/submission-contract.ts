@@ -936,5 +936,52 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded?.status).toBe("settled");
       expect(loaded?.outcome).toEqual({ outcome: "completed" });
     });
+
+    // --- Cross-session + retention listings ---
+
+    it("listSessionIdsWithUnsettledSubmissions returns only sessions with an unsettled item", async () => {
+      const OTHER = "sess-2";
+      const OTHER_THREAD = "th-other-1";
+      await store.saveSession(newSession({ id: OTHER }));
+      await store.saveThread(OTHER, {
+        ...newThread(OTHER_THREAD, "web:default"),
+        sessionId: OTHER,
+      });
+
+      const keepUnsettled = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, keepUnsettled);
+
+      const settleFully = makeItem({ threadId: OTHER_THREAD });
+      await store.admitSubmission(OTHER, OTHER_THREAD, settleFully);
+      const ok = await store.settleUnclaimed(OTHER, OTHER_THREAD, settleFully.id, {
+        outcome: "completed",
+      });
+      expect(ok).toBe(true);
+
+      const ids = await store.listSessionIdsWithUnsettledSubmissions();
+      expect(ids).toContain(SESSION_ID);
+      expect(ids).not.toContain(OTHER);
+    });
+
+    it("listSettledSubmissionsBefore returns only settled items older than the cutoff", async () => {
+      const settled = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, settled);
+      const ok = await store.settleUnclaimed(SESSION_ID, THREAD_ID, settled.id, {
+        outcome: "completed",
+      });
+      expect(ok).toBe(true);
+
+      const unsettled = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, unsettled);
+
+      const future = Date.now() + 10_000;
+      const past = Date.now() - 10_000;
+
+      const beforeFuture = await store.listSettledSubmissionsBefore(SESSION_ID, future);
+      expect(beforeFuture.map((i) => i.id)).toEqual([settled.id]);
+
+      const beforePast = await store.listSettledSubmissionsBefore(SESSION_ID, past);
+      expect(beforePast).toEqual([]);
+    });
   });
 }

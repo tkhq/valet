@@ -7,10 +7,52 @@
  * if required env vars are missing.
  */
 import { serve } from "@hono/node-server";
+import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createApp } from "./app.js";
 import { buildNodeProviders } from "./providers/node.js";
+import { agentSessions } from "./schema/index.js";
+import type { Providers } from "./providers/types.js";
+
+/**
+ * Eager restore of sessions with unsettled submissions. On boot the store may
+ * hold in-flight submissions from a previous process; materializing their
+ * engine sessions lets the claim loop pick the work back up. Per-session
+ * failures are isolated so one bad row can't stall the rest of the boot.
+ */
+async function restoreUnsettledSessions(providers: Providers): Promise<void> {
+  let restored = 0;
+  let ids: string[] = [];
+  try {
+    ids = await providers.engineStore.listSessionIdsWithUnsettledSubmissions();
+  } catch (err) {
+    console.error("boot restore: failed to list unsettled sessions:", err);
+    return;
+  }
+  for (const id of ids) {
+    const row = await providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, id))
+      .get();
+    if (!row) {
+      console.warn(`boot restore: skipping ${id} — no app session row`);
+      continue;
+    }
+    try {
+      await providers.engineHost.sessionFor(id, {
+        userId: row.userId,
+        orgId: row.orgId,
+        workspace: row.workspace,
+      });
+      restored++;
+    } catch (err) {
+      console.error(`boot restore: failed to restore session ${id}:`, err);
+    }
+  }
+  console.log(`boot restore: restored ${restored} sessions with unsettled submissions`);
+}
 
 const port = Number.parseInt(process.env.PORT ?? "8787", 10);
 const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
@@ -32,6 +74,10 @@ const providers = await buildNodeProviders({
   encryptionKey,
   anthropicApiKey,
 });
+
+// Eager boot restore: pick up any submissions left unsettled by a prior
+// process before we start accepting connections.
+await restoreUnsettledSessions(providers);
 
 const { app, injectWebSocket } = createApp(providers);
 
