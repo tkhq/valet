@@ -44,6 +44,29 @@ function isDockerExecTransportFailure(exitCode: number, stderr: string): boolean
 }
 
 /**
+ * A `docker rm -f` that kills a container while `docker exec` is attached
+ * does NOT surface as a daemon-level error message on stderr — confirmed by
+ * direct repro: the `docker exec` CLI process itself exits cleanly with
+ * code 137 (128 + SIGKILL) and empty stdout/stderr, indistinguishable at
+ * the child-process level from a command inside a *live* container that
+ * legitimately dies to a signal (e.g. `kill -9 $$`). `isDockerExecTransportFailure`'s
+ * stderr-regex check therefore never fires for this case, so container death
+ * silently gets reported as an ordinary non-zero command exit instead of
+ * degrading the attachment. `looksSignalKilled` flags the narrow band of
+ * exit codes (128 + signal number) worth the extra `docker inspect` round
+ * trip to disambiguate — ordinary command failures (1, 2, 127, ...) never
+ * pay for it.
+ */
+function looksSignalKilled(exitCode: number): boolean {
+  return exitCode > 128 && exitCode <= 128 + 64;
+}
+
+async function isContainerAlive(containerId: string): Promise<boolean> {
+  const result = await execProcess("docker", ["inspect", "-f", "{{.State.Running}}", containerId], {});
+  return result.exitCode === 0 && result.stdout.trim() === "true";
+}
+
+/**
  * DockerSandbox runs shell commands inside a long-running Docker container,
  * with the workspace bind-mounted from the host. Filesystem operations
  * (read/write/edit/stat/etc.) execute on the host against the mounted
@@ -219,6 +242,16 @@ export class DockerSandbox implements Sandbox {
     if (isDockerExecTransportFailure(result.exitCode, result.stderr)) {
       throw new Error(result.stderr.trim() || `docker exec failed (${result.exitCode})`);
     }
+    // Our own timeout SIGKILLs the docker CLI child directly (`timedOut`) —
+    // that's a normal timeout outcome, not container death. Otherwise, a
+    // signal-shaped exit code with no daemon error message on stderr is
+    // ambiguous (see looksSignalKilled) — confirm via `docker inspect`
+    // whether the container itself is still running before deciding.
+    if (!result.timedOut && looksSignalKilled(result.exitCode) && !(await isContainerAlive(this.containerId))) {
+      throw new Error(
+        `No such container: ${this.containerId} is no longer running (exec exited ${result.exitCode})`,
+      );
+    }
     return result;
   }
 
@@ -291,15 +324,24 @@ export class DockerSandbox implements Sandbox {
     });
     child.on("close", (code, sig) => {
       const exitCode = code ?? (sig ? 128 : 1);
-      if (isDockerExecTransportFailure(exitCode, stderrTail)) {
-        state.status = "failed";
-        state.transportError = new Error(stderrTail.trim() || `docker exec failed (${exitCode})`);
-      } else {
-        state.status = "done";
-        state.exitCode = exitCode;
-      }
-      resolveClosed();
-      scheduleEviction();
+      void (async () => {
+        if (isDockerExecTransportFailure(exitCode, stderrTail)) {
+          state.status = "failed";
+          state.transportError = new Error(stderrTail.trim() || `docker exec failed (${exitCode})`);
+        } else if (looksSignalKilled(exitCode) && !(await isContainerAlive(this.containerId))) {
+          // See the sync exec() comment: container-death mid-job-exec exits
+          // cleanly with a signal-shaped code and no stderr message.
+          state.status = "failed";
+          state.transportError = new Error(
+            `No such container: ${this.containerId} is no longer running (exec exited ${exitCode})`,
+          );
+        } else {
+          state.status = "done";
+          state.exitCode = exitCode;
+        }
+        resolveClosed();
+        scheduleEviction();
+      })();
     });
 
     return { execId };

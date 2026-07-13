@@ -176,7 +176,19 @@ export const bashTool = defineTool({
     // if execJob itself rejects with `[job_unsupported]`, fall back to sync
     // exec. Once execJob has succeeded (a job exists), never fall back —
     // the poll loop's errors propagate untouched.
-    const { execJob, pollJob, cancelJob } = ctx.sandbox;
+    //
+    // IMPORTANT: bind these off `ctx.sandbox` rather than destructuring bare
+    // references. `ctx.sandbox` is a real `PolicySandbox` class instance in
+    // production whose methods read `this.dispatch(...)` internally — a bare
+    // destructure (`const { execJob } = ctx.sandbox`) strips that binding and
+    // every job-mode call throws `Cannot read properties of undefined
+    // (reading 'dispatch')`. Every unit test in this area stubs `ctx.sandbox`
+    // as a plain object literal (methods with no `this` dependency), which is
+    // why this went undetected until an end-to-end test exercised a real
+    // PolicySandbox.
+    const execJob = ctx.sandbox.execJob?.bind(ctx.sandbox);
+    const pollJob = ctx.sandbox.pollJob?.bind(ctx.sandbox);
+    const cancelJob = ctx.sandbox.cancelJob?.bind(ctx.sandbox);
     if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
       let handle: ExecJobHandle | undefined;
       try {
