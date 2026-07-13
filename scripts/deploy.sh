@@ -8,15 +8,16 @@ NC='\033[0m'
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-# Require ENVIRONMENT to select which config file to source
-: "${ENVIRONMENT:?Set ENVIRONMENT (dev|prod). Usage: ENVIRONMENT=prod $0 [command]}"
+# Require ENVIRONMENT to select which config file to source. Any name works —
+# it just selects .env.deploy.<env> (dev, prod, test, a personal env, ...).
+: "${ENVIRONMENT:?Set ENVIRONMENT to the suffix of a .env.deploy.<env> config (e.g. dev, prod, test). Usage: ENVIRONMENT=dev $0 [command]}"
 
 DEPLOY_CONFIG=".env.deploy.${ENVIRONMENT}"
 if [ ! -f "$DEPLOY_CONFIG" ]; then
     # Migration hint for old .env.deploy users
     if [ -f .env.deploy ]; then
         echo -e "${RED}Found .env.deploy but ENVIRONMENT=${ENVIRONMENT} requires ${DEPLOY_CONFIG}${NC}"
-        echo "Rename .env.deploy to .env.deploy.dev (or .env.deploy.prod) to migrate."
+        echo "Rename .env.deploy to .env.deploy.<env> (e.g. .env.deploy.dev) to migrate."
     else
         echo -e "${RED}Config file not found: ${DEPLOY_CONFIG}${NC}"
         echo "Copy .env.deploy.example to ${DEPLOY_CONFIG} and set PROJECT_NAME."
@@ -40,6 +41,16 @@ MODAL_LABEL_PREFIX="${MODAL_LABEL_PREFIX:-${ENVIRONMENT}-}"
 ALLOWED_EMAILS="${ALLOWED_EMAILS:-}"
 MODAL_DEPLOY_CMD="${MODAL_DEPLOY_CMD:-uv run --project backend modal deploy}"
 API_PUBLIC_URL="${API_PUBLIC_URL:-}"
+# Modal workspace slug for endpoint URLs. Set this when deploying to a team
+# workspace: `modal profile current` returns the profile name, which is not
+# necessarily the workspace slug, so auto-discovery builds the wrong URL.
+MODAL_WORKSPACE="${MODAL_WORKSPACE:-}"
+# Modal profile to deploy with. Set in .env.deploy.<env> to pin the env to a
+# workspace; the config is sourced with set -a, so the modal CLI sees it.
+MODAL_PROFILE="${MODAL_PROFILE:-}"
+# Client build mode: production | development. Empty preserves the historical
+# default (production only when ENVIRONMENT=prod).
+CLIENT_BUILD_MODE="${CLIENT_BUILD_MODE:-}"
 
 # ─── Shared Helpers ──────────────────────────────────────────────────────────
 
@@ -79,6 +90,11 @@ _resolve_d1_id() {
 discover_modal_url() {
     local required="${1:-true}"
     if [ -z "${MODAL_BACKEND_URL:-}" ]; then
+        if [ -n "${MODAL_WORKSPACE}" ]; then
+            MODAL_BACKEND_URL="https://${MODAL_WORKSPACE}--${MODAL_LABEL_PREFIX}{label}.modal.run"
+            echo -e "${GREEN}✓ Modal (workspace: ${MODAL_WORKSPACE})${NC}"
+            return
+        fi
         if ! command -v modal >/dev/null 2>&1; then
             if [ "$required" = "true" ]; then
                 echo -e "${RED}modal CLI not found. Install: uv tool install modal${NC}"; exit 1
@@ -149,7 +165,12 @@ build_client() {
 
     build_commit_hash=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "unknown")
 
-    if [ "${ENVIRONMENT}" = "prod" ]; then
+    local client_mode="${CLIENT_BUILD_MODE}"
+    if [ -z "$client_mode" ]; then
+        if [ "${ENVIRONMENT}" = "prod" ]; then client_mode="production"; else client_mode="development"; fi
+    fi
+
+    if [ "$client_mode" = "production" ]; then
         build_version_tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
         if [ -z "${build_version_tag}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             build_version_tag="${GITHUB_REF_NAME:-}"
