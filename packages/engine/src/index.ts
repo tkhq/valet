@@ -5,6 +5,7 @@ export {
   ConflictError,
   TimeoutError,
   ValidationError,
+  PendingCapError,
   WorkspaceProvisioningError,
   SandboxSupersededError,
   SandboxUnavailableError,
@@ -21,9 +22,21 @@ export {
   decideReconciliation,
   resolveSubmissionText,
   resolvePartialSubmissionText,
+  validateSignalTagName,
+  renderSignalEnvelope,
+  namespaceInternalDispatchId,
+  countPendingForCap,
+  SIGNAL_HOP_BUDGET,
+  MAX_PENDING_PER_THREAD,
   type ReconcileAction,
   type ReconcileContext,
 } from "./submission.js";
+export {
+  serializePrincipal,
+  parsePrincipal,
+  orchestratorSessionId,
+  parseOrchestratorSessionId,
+} from "./principal.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
 export { Thread } from "./thread.js";

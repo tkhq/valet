@@ -30,6 +30,7 @@ export interface EntryRow {
   role: string | null;
   content: string | null;
   parts: string | null;
+  signal: string | null;
   author: string | null;
   channel: string | null;
   model: string | null;
@@ -60,6 +61,7 @@ export function entryToRow(entry: SessionEntry): EntryRow {
     role: null,
     content: null,
     parts: null,
+    signal: null,
     author: null,
     channel: null,
     model: null,
@@ -86,6 +88,7 @@ export function entryToRow(entry: SessionEntry): EntryRow {
         role: entry.role,
         content: entry.content,
         parts: jsonOrNull(entry.parts),
+        signal: jsonOrNull(entry.signal),
         author: jsonOrNull(entry.author),
         channel: jsonOrNull(entry.channel),
         model: entry.model ?? null,
@@ -133,6 +136,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         role: (row.role as MessageEntry["role"]) ?? "user",
         content: row.content ?? "",
         parts: parseJson(row.parts),
+        signal: parseJson(row.signal),
         author: parseJson(row.author),
         channel: parseJson(row.channel),
         model: row.model ?? undefined,

@@ -71,6 +71,8 @@ export const engineEntries = sqliteTable(
     role: text("role"),
     content: text("content"),
     parts: text("parts"),
+    /** `MessageEntry.signal` (JSON) — present only on user entries admitted from a `SignalContent` prompt. */
+    signal: text("signal"),
     author: text("author"),
     channel: text("channel"),
     model: text("model"),

@@ -14,8 +14,18 @@ import {
   shouldShortCircuit,
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
-import { deriveQueueState, resolvePartialSubmissionText, resolveSubmissionText } from "./submission.js";
-import { NotFoundError, StaleAttemptError, TimeoutError } from "./errors.js";
+import {
+  countPendingForCap,
+  deriveQueueState,
+  MAX_PENDING_PER_THREAD,
+  namespaceInternalDispatchId,
+  renderSignalEnvelope,
+  resolvePartialSubmissionText,
+  resolveSubmissionText,
+  SIGNAL_HOP_BUDGET,
+  validateSignalTagName,
+} from "./submission.js";
+import { NotFoundError, PendingCapError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -41,6 +51,7 @@ import type {
   MessagePart,
   MessageEntry,
   MessageQuery,
+  Principal,
   PromptAuthor,
   PromptContent,
   PromptOptions,
@@ -48,6 +59,7 @@ import type {
   QueueItem,
   QueueMode,
   SessionEntry,
+  SignalContent,
   SkillInvokeOptions,
   SubmissionOutcome,
   SubmissionResult,
@@ -233,14 +245,24 @@ export class Thread {
       return this.submitCollect(content, opts);
     }
 
-    const item = this.buildQueueItem(content, {
-      dispatchId: opts.dispatchId,
+    const prepared = this.prepareSubmissionContent(content, opts);
+
+    // Steer admissions are exempt from the pending-cap pre-check: the same
+    // atomic `admitSubmission({ steer: true })` call supersedes every prior
+    // unsettled item on the thread, so the count they'd leave behind is
+    // always ~0-1 regardless of how many were pending beforehand.
+    if (effectiveMode !== "steer") {
+      await this.enforcePendingCap();
+    }
+
+    const item = this.buildQueueItem(prepared.content, {
+      dispatchId: prepared.dispatchId,
       author: opts.author,
       channel: opts.channel,
       replyTarget: opts.replyTarget,
       model: opts.model,
       role: opts.role,
-      metadata: opts.metadata,
+      metadata: prepared.metadata,
     });
 
     const store = this.session.providers.store;
@@ -431,6 +453,64 @@ export class Thread {
       void this.kick();
     } finally {
       this.flushingCollect = false;
+    }
+  }
+
+  /**
+   * Validates + stamps a signal admission (plan decision 2/4). Non-signal
+   * content passes through untouched. For signal content: defaults/validates
+   * `tagName`, and — when `opts.internalSender` is set — enforces the hop
+   * budget, requires `dispatchId`, namespaces it by the sender session id,
+   * and stashes the stamped identity in `metadata.signalStamp` so `runItem`
+   * can carry it onto the persisted `MessageEntry.signal` (QueueItem has no
+   * dedicated field for it; `metadata` already flows through to the entry).
+   * Throws `ValidationError` on any admission-time violation.
+   */
+  private prepareSubmissionContent(
+    content: PromptContent,
+    opts: PromptOptions,
+  ): { content: PromptContent; dispatchId?: string; metadata?: Record<string, unknown> } {
+    if (!isSignalContent(content)) {
+      return { content, dispatchId: opts.dispatchId, metadata: opts.metadata };
+    }
+
+    const tagName = content.tagName ?? "signal";
+    validateSignalTagName(tagName);
+    const normalized: SignalContent = { ...content, tagName };
+
+    if (!opts.internalSender) {
+      return { content: normalized, dispatchId: opts.dispatchId, metadata: opts.metadata };
+    }
+
+    if (!opts.dispatchId) {
+      throw new ValidationError("internal signal admission requires opts.dispatchId");
+    }
+    const budget = this.session.options.signalHopBudget ?? SIGNAL_HOP_BUDGET;
+    const hopCount = (opts.internalSender.hopCount ?? 0) + 1;
+    if (hopCount > budget) {
+      throw new ValidationError(
+        `signal hop budget exceeded: hopCount ${hopCount} > budget ${budget}`,
+      );
+    }
+    const stamp: SignalStamp = {
+      senderSessionId: opts.internalSender.sessionId,
+      senderOwner: opts.internalSender.owner,
+      hopCount,
+    };
+    return {
+      content: normalized,
+      dispatchId: namespaceInternalDispatchId(opts.internalSender.sessionId, opts.dispatchId),
+      metadata: { ...(opts.metadata ?? {}), signalStamp: stamp },
+    };
+  }
+
+  /** Throws `PendingCapError` when the thread already holds `cap` unsettled, non-superseded items. */
+  private async enforcePendingCap(): Promise<void> {
+    const store = this.session.providers.store;
+    const items = await store.listUnsettledSubmissions(this.session.id);
+    const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
+    if (countPendingForCap(items, this.id) >= cap) {
+      throw new PendingCapError(this.id, cap);
     }
   }
 
@@ -1412,7 +1492,21 @@ export class Thread {
   }
 
   private async runItem(item: QueueItem): Promise<void> {
-    const text = promptText(item.content);
+    // Signal content persists as its raw body + `signal` metadata; the text
+    // the model actually sees this turn is the same rendered XML envelope
+    // `entriesToAgentMessages` would reconstruct on reload (single render
+    // function, two call sites).
+    let signalMeta: MessageEntry["signal"];
+    let text: string;
+    let entryContent: string;
+    if (isSignalContent(item.content)) {
+      signalMeta = buildSignalMeta(item.content, item.metadata);
+      text = renderSignalEnvelope(signalMeta, item.content.body);
+      entryContent = item.content.body;
+    } else {
+      text = promptText(item.content);
+      entryContent = text;
+    }
     this.aborted = false;
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
@@ -1434,7 +1528,8 @@ export class Thread {
       parentId: null,
       type: "message",
       role: "user",
-      content: text,
+      content: entryContent,
+      signal: signalMeta,
       author: item.author,
       channel: item.channel,
       metadata: item.metadata,
@@ -2440,7 +2535,53 @@ export class Thread {
 
 function promptText(content: PromptContent): string {
   if (typeof content === "string") return content;
+  if (isSignalContent(content)) return content.body;
   return content.text ?? "";
+}
+
+function isSignalContent(content: PromptContent): content is SignalContent {
+  return typeof content === "object" && content !== null && "kind" in content && content.kind === "signal";
+}
+
+/** Stamped internal-sender identity carried through `QueueItem.metadata.signalStamp` (no dedicated QueueItem field). */
+interface SignalStamp {
+  senderSessionId: string;
+  senderOwner: Principal;
+  hopCount: number;
+}
+
+function isPrincipalLike(value: unknown): value is Principal {
+  if (!value || typeof value !== "object") return false;
+  const rec = value as Record<string, unknown>;
+  return (
+    (rec.type === "user" || rec.type === "team" || rec.type === "org") && typeof rec.id === "string"
+  );
+}
+
+function readSignalStamp(metadata: Record<string, unknown> | undefined): SignalStamp | undefined {
+  const raw = metadata?.signalStamp;
+  if (!raw || typeof raw !== "object") return undefined;
+  const rec = raw as Record<string, unknown>;
+  if (typeof rec.senderSessionId !== "string") return undefined;
+  if (typeof rec.hopCount !== "number") return undefined;
+  if (!isPrincipalLike(rec.senderOwner)) return undefined;
+  return { senderSessionId: rec.senderSessionId, hopCount: rec.hopCount, senderOwner: rec.senderOwner };
+}
+
+/** Builds the `MessageEntry.signal` snapshot for a signal `QueueItem` at persistence time (runItem). */
+function buildSignalMeta(
+  content: SignalContent,
+  metadata: Record<string, unknown> | undefined,
+): NonNullable<MessageEntry["signal"]> {
+  const stamp = readSignalStamp(metadata);
+  return {
+    signalType: content.signalType,
+    attributes: content.attributes,
+    tagName: content.tagName ?? "signal",
+    senderSessionId: stamp?.senderSessionId,
+    senderOwner: stamp?.senderOwner,
+    hopCount: stamp?.hopCount,
+  };
 }
 
 /** Map a submission's live status onto the narrower PromptReceipt status. */
@@ -2571,9 +2712,10 @@ export function entriesToAgentMessages(
     if (activeCompaction?.covered.has(e.id)) continue;
 
     if (e.role === "user") {
+      const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
       out.push({
         role: "user",
-        content: [{ type: "text", text: e.content }],
+        content: [{ type: "text", text }],
         timestamp: e.createdAt,
       });
       continue;

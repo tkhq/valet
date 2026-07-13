@@ -69,6 +69,24 @@ export class ValidationError extends Error {
 }
 
 /**
+ * Thrown at admission when a thread already holds `cap` unsettled,
+ * non-superseded submissions. Steer admissions are exempt (they supersede
+ * the thread's pending items in the same atomic step, so they never grow
+ * the count) — see `Thread.submitPrompt`.
+ */
+export class PendingCapError extends Error {
+  readonly code = "pending_cap_exceeded";
+
+  constructor(
+    public readonly threadId: string,
+    public readonly cap: number,
+  ) {
+    super(`thread ${threadId} has reached its pending submission cap (${cap})`);
+    this.name = "PendingCapError";
+  }
+}
+
+/**
  * Thrown by `Thread.awaitResult` when `opts.timeoutMs` elapses before the
  * submission (or, for a merged constituent, the item it delegates to)
  * settles. The wait is purely observational — this error never disturbs the

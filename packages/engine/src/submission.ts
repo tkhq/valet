@@ -1,4 +1,5 @@
 import type {
+  MessageEntry,
   QueueItem,
   QueueMode,
   QueueState,
@@ -7,6 +8,69 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
 } from "./types.js";
+import { ValidationError } from "./errors.js";
+
+/** Default max stamped hopCount an internally-admitted signal may carry (Phase 4 decision 4). */
+export const SIGNAL_HOP_BUDGET = 3;
+
+/** Default max unsettled, non-superseded submissions a single thread may hold (Phase 4 decision 5). */
+export const MAX_PENDING_PER_THREAD = 20;
+
+const SIGNAL_TAG_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+
+/** Validates a `SignalContent.tagName` (or the default `'signal'`) at admission. */
+export function validateSignalTagName(tagName: string): void {
+  if (!SIGNAL_TAG_NAME_RE.test(tagName)) {
+    throw new ValidationError(
+      `invalid signal tagName "${tagName}": must match ${SIGNAL_TAG_NAME_RE.source}`,
+    );
+  }
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Renders a persisted signal `MessageEntry.signal` + its raw `body` into the
+ * XML envelope the model sees (spec §424, plan decision 3):
+ * `<{tagName} signalType="…" {attrKey}="…">{body}</{tagName}>` — `tagName`
+ * is never escaped (hence the admission-time regex check); `body` and every
+ * attribute value are XML-escaped. `signalType` always renders first;
+ * remaining attributes (user-supplied plus stamped `sender_session`/`hop`,
+ * which win over same-named user attributes) render in sorted key order.
+ */
+export function renderSignalEnvelope(
+  signal: NonNullable<MessageEntry["signal"]>,
+  body: string,
+): string {
+  const attrs: Record<string, string> = { ...(signal.attributes ?? {}) };
+  if (signal.senderSessionId !== undefined) attrs.sender_session = signal.senderSessionId;
+  if (signal.hopCount !== undefined) attrs.hop = String(signal.hopCount);
+
+  const rest = Object.keys(attrs)
+    .sort()
+    .map((key) => ` ${key}="${escapeXml(attrs[key])}"`)
+    .join("");
+
+  const tag = signal.tagName;
+  return `<${tag} signalType="${escapeXml(signal.signalType)}"${rest}>${escapeXml(body)}</${tag}>`;
+}
+
+/** Namespaces an internal signal's dispatchId by the stamped sender session id (plan decision 4). */
+export function namespaceInternalDispatchId(senderSessionId: string, dispatchId: string): string {
+  return `${senderSessionId}:${dispatchId}`;
+}
+
+/** Counts unsettled, non-superseded items on `threadId` — the per-thread pending-cap denominator. */
+export function countPendingForCap(items: readonly QueueItem[], threadId: string): number {
+  return items.filter((i) => i.threadId === threadId && i.supersededByItemId === undefined).length;
+}
 
 /**
  * Pure derivation of the wire `QueueState` from the durable submission rows.

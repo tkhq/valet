@@ -162,12 +162,32 @@ export interface AwaitResultOptions {
 
 // ── Prompts ────────────────────────────────────────────────────────
 
+/**
+ * A signal is an event the agent observes rather than a direct user→assistant
+ * message: a Slack thread reply, a GitHub issue comment, a webhook, a timer,
+ * or another session's settlement. External conversations are multi-party —
+ * the agent participates as one member — so sender identity and event
+ * metadata travel as flat string attributes, not as the message author.
+ */
+export interface SignalContent {
+  kind: "signal";
+  /** Namespaced event type, e.g. 'slack.message', 'github.issue_comment', 'child.settled'. */
+  signalType: string;
+  /** The event's text payload. Always a plain string; JSON-stringify structured payloads. */
+  body: string;
+  /** Flat, string-valued metadata: sender, external ids, timestamps, permalinks. */
+  attributes?: Record<string, string>;
+  /** XML envelope tag for model rendering. Must match /^[A-Za-z_][A-Za-z0-9_.-]*$/; defaults to 'signal'. */
+  tagName?: string;
+}
+
 export type PromptContent =
   | string
   | {
       text?: string;
       attachments?: PromptAttachment[];
-    };
+    }
+  | SignalContent;
 
 export type PromptAttachment =
   | { type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }
@@ -185,6 +205,16 @@ export interface PromptOptions {
   metadata?: Record<string, unknown>;
   /** Idempotent admission key. Re-submitting the same dispatchId returns the existing submission. */
   dispatchId?: string;
+  /**
+   * Set only by trusted host code (never by route handlers relaying raw
+   * client input) when admitting a signal on behalf of another session —
+   * child settlement, cross-orchestrator messaging, workflow dispatch. The
+   * engine stamps the envelope with this identity, increments/enforces the
+   * hop budget, and namespaces `dispatchId` by `sessionId` so senders can't
+   * collide with or replay one another's ids. Only meaningful when `content`
+   * is a `SignalContent`; `dispatchId` is required in that case.
+   */
+  internalSender?: { sessionId: string; owner: Principal; hopCount?: number };
 }
 
 export interface PromptReceipt {
@@ -234,6 +264,21 @@ export interface MessageEntry extends BaseEntry {
   model?: string;
   /** Persisted on the turn's final assistant entry. */
   stopReason?: "end_turn" | "error" | "abort";
+  /**
+   * Present when this user entry originated from a `SignalContent` prompt.
+   * `content` holds the raw (unescaped) body; rendering into LLM context
+   * wraps it in the XML envelope described here (see `renderSignalEnvelope`
+   * in submission.ts). `senderSessionId`/`senderOwner`/`hopCount` are set
+   * only for internally-stamped admissions (`PromptOptions.internalSender`).
+   */
+  signal?: {
+    signalType: string;
+    attributes?: Record<string, string>;
+    tagName: string;
+    senderSessionId?: string;
+    senderOwner?: Principal;
+    hopCount?: number;
+  };
 }
 
 export interface CompactionEntry extends BaseEntry {
@@ -970,6 +1015,10 @@ export interface CreateSessionOptions {
    */
   sandboxReadyTimeoutMs?: number;
   metadata?: Record<string, unknown>;
+  /** Max stamped hopCount an internally-admitted signal may carry. Default SIGNAL_HOP_BUDGET (3). */
+  signalHopBudget?: number;
+  /** Max unsettled, non-superseded submissions a single thread may hold. Default MAX_PENDING_PER_THREAD (20). */
+  maxPendingPerThread?: number;
 }
 
 export interface CompactionConfig {

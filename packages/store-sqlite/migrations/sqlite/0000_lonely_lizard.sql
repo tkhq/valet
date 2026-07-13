@@ -39,6 +39,7 @@ CREATE TABLE `engine_entries` (
 	`role` text,
 	`content` text,
 	`parts` text,
+	`signal` text,
 	`author` text,
 	`channel` text,
 	`model` text,
