@@ -87,6 +87,23 @@ function connect(url: string) {
 }
 
 describe("admin submissions surface", () => {
+  it("x-valet-test-user-id header is ignored when VALET_TEST_AUTH_HEADER is unset", async () => {
+    const api = await bootTestApi();
+    const prevFlag = process.env.VALET_TEST_AUTH_HEADER;
+    delete process.env.VALET_TEST_AUTH_HEADER;
+    try {
+      // With the header ignored, this request falls back to the default
+      // local (admin) identity, so an admin-only route should succeed
+      // rather than 403 as it would for the impersonated non-admin user.
+      const res = await fetch(`${api.baseUrl}/api/admin/submissions`, { headers: MEMBER_HEADERS });
+      expect(res.status).toBe(200);
+    } finally {
+      if (prevFlag === undefined) delete process.env.VALET_TEST_AUTH_HEADER;
+      else process.env.VALET_TEST_AUTH_HEADER = prevFlag;
+      await api.cleanup();
+    }
+  });
+
   it("non-admin user gets 403 on both routes", async () => {
     const api = await bootTestApi();
     try {

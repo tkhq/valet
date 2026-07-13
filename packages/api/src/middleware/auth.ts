@@ -22,14 +22,21 @@ export interface AuthUser {
  * integration tests can exercise role-gated routes (e.g. admin-only) without
  * a real auth provider. Ignored silently if the id doesn't resolve to a row.
  *
- * Set `VALET_LOCAL_AUTH=1` to opt in. Without it, every `/api/*` request 401s.
+ * Set `VALET_LOCAL_AUTH=1` to opt in to the stub-auth path at all. Without
+ * it, every `/api/*` request 401s.
+ *
+ * The impersonation header above is additionally gated behind
+ * `VALET_TEST_AUTH_HEADER=1` — a separate, narrower flag so that flipping on
+ * `VALET_LOCAL_AUTH` alone (e.g. on a shared dev/staging box) never also
+ * grants any-user impersonation. Only the API test bootstrap sets this var;
+ * it must never be added to the Makefile, `.env`, or any dev target.
  */
 export const authMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (process.env.VALET_LOCAL_AUTH !== "1") {
     return c.json({ error: "auth not configured (set VALET_LOCAL_AUTH=1)" }, 401);
   }
 
-  const testUserId = c.req.header("x-valet-test-user-id");
+  const testUserId = process.env.VALET_TEST_AUTH_HEADER === "1" ? c.req.header("x-valet-test-user-id") : undefined;
   if (testUserId) {
     const row = await c.var.providers.db.select().from(users).where(eq(users.id, testUserId)).get();
     if (row) {

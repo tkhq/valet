@@ -36,6 +36,10 @@ export interface TestApi {
 export async function bootTestApi(): Promise<TestApi> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
   process.env.VALET_LOCAL_AUTH = "1";
+  // Test-only: enables the `x-valet-test-user-id` impersonation header in
+  // authMiddleware. Never set this outside the test bootstrap (see
+  // packages/api/src/middleware/auth.ts).
+  process.env.VALET_TEST_AUTH_HEADER = "1";
 
   const sqlite = new Database(":memory:");
   sqlite.pragma("journal_mode = WAL");
