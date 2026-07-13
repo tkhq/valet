@@ -2,7 +2,7 @@ import { useState, type KeyboardEvent } from "react";
 import { Send } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useSendPrompt } from "~/api/queries";
-import { useStreamStore, type AgentStatus } from "~/stores/stream";
+import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 
 export function Composer({
   sessionId,
@@ -22,6 +22,7 @@ export function Composer({
   const [text, setText] = useState("");
   const send = useSendPrompt(sessionId);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
+  const queueState = useQueueStateForThread(sessionId, threadId);
 
   // Disable submit while engine is mid-turn or while we don't yet know the
   // active thread id. Prompts queue server-side, but the UX is clearer if
@@ -68,6 +69,7 @@ export function Composer({
       }}
       className="border-t border-[--border] p-3 bg-[--bg]"
     >
+      <QueueIndicator queueState={queueState} />
       <div className="flex gap-2 items-end">
         <Textarea
           value={text}
@@ -88,5 +90,30 @@ export function Composer({
         </Button>
       </div>
     </form>
+  );
+}
+
+/**
+ * Small text indicator above the composer for the thread's submission
+ * queue. `blocked_on_decision_gate` is intentionally NOT surfaced here —
+ * the `DecisionGateCard` already renders "agent paused" for that state, and
+ * showing it twice would be redundant.
+ */
+function QueueIndicator({
+  queueState,
+}: {
+  queueState: ReturnType<typeof useQueueStateForThread>;
+}) {
+  if (!queueState) return null;
+  const parts: string[] = [];
+  if (queueState.pendingIds.length > 0) {
+    parts.push(`${queueState.pendingIds.length} queued`);
+  }
+  if (queueState.status === "paused") {
+    parts.push("paused");
+  }
+  if (parts.length === 0) return null;
+  return (
+    <div className="mb-2 text-xs text-[--muted]">{parts.join(" • ")}</div>
   );
 }

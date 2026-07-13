@@ -8,9 +8,23 @@
  * granularity for free.
  */
 import { create } from "zustand";
-import type { DecisionGate, Message, MessagePart, WireEvent } from "@valet/api/wire";
+import type {
+  DecisionGate,
+  Message,
+  MessagePart,
+  WireEvent,
+  WireQueueState,
+} from "@valet/api/wire";
 
 export type ConnectionStatus = "idle" | "connecting" | "open" | "closed" | "error";
+
+/**
+ * Terminal outcome of a queued submission, stashed on the originating user
+ * message so the UI can render a badge. Set by the `submission.settled`
+ * reducer case; cleared (undefined) on `completed` — a clean run doesn't
+ * need a badge.
+ */
+export type SettledOutcome = "failed" | "aborted" | "superseded" | "merged";
 
 export type AgentStatus =
   | "idle"
@@ -21,21 +35,46 @@ export type AgentStatus =
   | "blocked_on_decision_gate"
   | "error";
 
+/**
+ * Client-local extension of the wire `Message` shape. `settledOutcome` is
+ * stashed here (not on the wire type) once a `submission.settled` frame
+ * resolves the turn that produced this user message; `queueItemId` is a
+ * forward-compat hook for when the REST layer starts exposing the engine's
+ * queue_item_id on user message rows (it does not today — see the reducer
+ * comment on `submission.settled` for the fallback this store uses instead).
+ */
+export interface StreamMessage extends Message {
+  settledOutcome?: SettledOutcome;
+  queueItemId?: string;
+}
+
 export interface SessionStreamState {
   /** Whether the WS is currently open. */
   conn: ConnectionStatus;
-  /** Highest wire seq we've seen for this session. */
-  lastSeq: number;
+  /**
+   * Highest durable `offset` seen for this session (16-digit zero-padded,
+   * lexicographic == numeric compare). `""` until the first offset-carrying
+   * frame arrives. `chunk`-style high-frequency frames (e.g. `text_delta`)
+   * never carry an offset and never advance this value. Replaces the old
+   * `lastSeq` dedupe — sockets don't guarantee `seq` continuity across a
+   * reconnect, but durable offsets do.
+   */
+  lastOffset: string;
   /** Engine-reported agent status; mirrors the wire `status` event. */
   agentStatus: AgentStatus;
   /** Live message list. Server `init` seeds it; wire events mutate it. */
-  messages: Message[];
+  messages: StreamMessage[];
   /**
    * Pending decision gates, keyed by gate id. Each gate carries its
    * `threadId`; the UI selector filters to the active thread so a gate
    * raised on thread A is not visible while the user views thread B.
    */
   pendingGates: Record<string, DecisionGate>;
+  /**
+   * Per-thread submission queue state, mirroring the wire `queue.state`
+   * frame. Drives the composer's "N queued" / paused indicator.
+   */
+  queueByThread: Record<string, WireQueueState>;
   /** Last error message from the wire (if any). Cleared on successful turn_end. */
   error?: { code: string; message: string };
 }
@@ -82,10 +121,11 @@ export interface StreamStore {
 
 const EMPTY: SessionStreamState = {
   conn: "idle",
-  lastSeq: 0,
+  lastOffset: "",
   agentStatus: "idle",
   messages: [],
   pendingGates: {},
+  queueByThread: {},
 };
 
 function ensure(state: StreamStore, sessionId: string): SessionStreamState {
@@ -95,14 +135,24 @@ function ensure(state: StreamStore, sessionId: string): SessionStreamState {
 /**
  * Apply one wire event to a session slice. Pure: returns a new slice or
  * the same one if nothing changed.
+ *
+ * Dedupe/ordering is offset-based, not seq-based: `seq` only orders frames
+ * within a single socket connection, but a reconnect resumes with
+ * `?fromOffset=` and replays durable frames that may re-send a seq the
+ * client already saw under the old connection. `offset` is the durable,
+ * monotonic key — frames at or behind `lastOffset` are dropped. `chunk`-like
+ * high-frequency frames (`text_delta`) never carry an offset and therefore
+ * never advance `lastOffset`, but they're still applied (not dropped) since
+ * they have no offset to compare against.
  */
 function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): SessionStreamState {
-  // Drop replays / out-of-order frames.
-  if (ev.seq <= slice.lastSeq) return slice;
+  // Drop durable replays / out-of-order frames. Frames without an offset
+  // (chunk-style) always pass this check.
+  if (ev.offset && ev.offset <= slice.lastOffset) return slice;
 
   const next: SessionStreamState = {
     ...slice,
-    lastSeq: ev.seq,
+    lastOffset: ev.offset && ev.offset > slice.lastOffset ? ev.offset : slice.lastOffset,
   };
 
   switch (ev.type) {
@@ -256,12 +306,46 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
-    case "queue.state":
-    case "submission.settled":
-      // Queue-lifecycle frames. No dedicated reducer yet (the queue UI lands
-      // in a later task); bump seq and carry on so the switch stays
-      // exhaustive over the wire union.
+    case "queue.state": {
+      next.queueByThread = { ...slice.queueByThread, [ev.threadId]: ev.state };
       return next;
+    }
+
+    case "submission.settled": {
+      // Mark the originating user message with a terminal badge.
+      //
+      // Matching: the wire event carries `queueItemId`, but REST message
+      // rows don't expose the engine's queue_item_id today (see
+      // `entryToMessage` in packages/api/src/routes/messages.ts) — the id
+      // on a `StreamMessage` is either the server-persisted entry id or our
+      // own optimistic `user-opt-*` id, neither of which equals
+      // `ev.queueItemId` in practice. We still check direct id equality
+      // first (forward-compatible if the API starts stamping
+      // `queueItemId` onto messages), then fall back to the most recent
+      // unsettled user message on the thread — a FIFO approximation, since
+      // the settled frame carries no content to content-match against.
+      const idx = (() => {
+        const direct = lastIndex(
+          slice.messages,
+          (m) => m.threadId === ev.threadId && (m as StreamMessage).queueItemId === ev.queueItemId,
+        );
+        if (direct >= 0) return direct;
+        return lastIndex(
+          slice.messages,
+          (m) =>
+            m.threadId === ev.threadId &&
+            m.role === "user" &&
+            (m as StreamMessage).settledOutcome === undefined,
+        );
+      })();
+      if (idx < 0) return next;
+      const m = slice.messages[idx] as StreamMessage;
+      const settledOutcome: SettledOutcome | undefined =
+        ev.outcome === "completed" ? undefined : ev.outcome;
+      const updated: StreamMessage = { ...m, settledOutcome };
+      next.messages = replaceAt(slice.messages, idx, updated);
+      return next;
+    }
 
     case "ping": {
       return next;
@@ -418,5 +502,16 @@ export function usePendingGateForThread(
       if (g.threadId === threadId) return g;
     }
     return undefined;
+  });
+}
+
+/** The submission queue state for a thread, or undefined if never reported. */
+export function useQueueStateForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): WireQueueState | undefined {
+  return useStreamStore((s) => {
+    if (!threadId) return undefined;
+    return s.bySession[sessionId]?.queueByThread[threadId];
   });
 }

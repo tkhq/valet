@@ -49,11 +49,12 @@ function summarizeForLog(ev: WireEvent): string {
   }
 }
 
-function wsUrl(sessionId: string): string {
+function wsUrl(sessionId: string, fromOffset: string | undefined): string {
   // Vite proxy upgrades /api → server, including WS (`ws: true`).
   // In production, the same /api path is served by the API directly.
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/api/sessions/${sessionId}/ws`;
+  const base = `${proto}//${window.location.host}/api/sessions/${sessionId}/ws`;
+  return fromOffset ? `${base}?fromOffset=${encodeURIComponent(fromOffset)}` : base;
 }
 
 export function useSessionWebSocket(sessionId: string) {
@@ -65,7 +66,16 @@ export function useSessionWebSocket(sessionId: string) {
   useEffect(() => {
     if (!sessionId) return;
     cancelled.current = false;
-    reset(sessionId);
+    // Fresh mount (no durable offset seen yet for this session) resets the
+    // slice and relies on REST to bootstrap history/gates. A resumed
+    // connection (lastOffset non-empty — either a reconnect within this
+    // mount's lifetime, or a remount that still has store state e.g. a
+    // route revisit) must NOT reset: state is continuous and the server
+    // replays the gap via `?fromOffset=`, so wiping here would cause a
+    // flash back to empty before replay refills it.
+    if (!useStreamStore.getState().bySession[sessionId]?.lastOffset) {
+      reset(sessionId);
+    }
     setConnection(sessionId, "connecting");
 
     let socket: WebSocket | null = null;
@@ -74,7 +84,8 @@ export function useSessionWebSocket(sessionId: string) {
 
     function open() {
       if (cancelled.current) return;
-      socket = new WebSocket(wsUrl(sessionId));
+      const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
+      socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined));
       socket.onopen = () => {
         retryDelay = INITIAL_RETRY_MS;
         setConnection(sessionId, "open");

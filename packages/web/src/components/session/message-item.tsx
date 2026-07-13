@@ -1,11 +1,12 @@
 import { Bot, User as UserIcon } from "lucide-react";
-import type { Message, MessagePart } from "@valet/api/wire";
+import type { MessagePart } from "@valet/api/wire";
+import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { cn } from "~/lib/cn";
 
-export function MessageItem({ message }: { message: Message }) {
+export function MessageItem({ message }: { message: StreamMessage }) {
   const isUser = message.role === "user";
   return (
     <article className={cn("group flex gap-3 px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
@@ -21,6 +22,7 @@ export function MessageItem({ message }: { message: Message }) {
           </span>
           <span>•</span>
           <span>{formatTime(message.createdAt)}</span>
+          {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
         </div>
         <div className="space-y-2">
           {message.parts.length === 0 && message.content && (
@@ -67,6 +69,33 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
         error={part.error}
       />
     </ToolShell>
+  );
+}
+
+/**
+ * Terminal-outcome badge for a queued submission, per Task 7 design point 4:
+ * superseded/merged read as muted (the turn was cleanly folded away by a
+ * later prompt); failed/aborted read as a subtle failure signal.
+ */
+function SettledBadge({ outcome }: { outcome: SettledOutcome }) {
+  const isFailure = outcome === "failed" || outcome === "aborted";
+  const label =
+    outcome === "superseded"
+      ? "superseded"
+      : outcome === "merged"
+        ? "merged into next"
+        : outcome;
+  return (
+    <span
+      className={cn(
+        "rounded px-1.5 py-0.5 text-[10px] font-medium",
+        isFailure
+          ? "bg-danger-500/10 text-danger-600 dark:text-danger-400"
+          : "bg-neutral-200/70 text-[--muted] dark:bg-neutral-800/70",
+      )}
+    >
+      {label}
+    </span>
   );
 }
 

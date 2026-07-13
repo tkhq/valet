@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import type { Message } from "@valet/api/wire";
+import type { StreamMessage } from "~/stores/stream";
 import { MessageItem } from "./message-item";
 
 /**
@@ -24,7 +24,7 @@ export function MessageList({
   messages,
   threadId,
 }: {
-  messages: Message[];
+  messages: StreamMessage[];
   threadId?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
