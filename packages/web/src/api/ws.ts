@@ -5,7 +5,7 @@
  * Connection state and ingest live in `~/stores/stream`; this hook only
  * owns the socket lifecycle.
  */
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import type { WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
 
@@ -61,11 +61,15 @@ export function useSessionWebSocket(sessionId: string) {
   const setConnection = useStreamStore((s) => s.setConnection);
   const ingest = useStreamStore((s) => s.ingest);
   const reset = useStreamStore((s) => s.reset);
-  const cancelled = useRef(false);
 
   useEffect(() => {
     if (!sessionId) return;
-    cancelled.current = false;
+    // Per-effect-run cancellation flag. Must be a closure local, NOT a
+    // shared ref: under StrictMode's double effect run, a shared ref gets
+    // re-armed to false by the second run, letting the first run's closed
+    // socket schedule a zombie reconnect — two live sockets, duplicated
+    // chunk rendering.
+    let cancelled = false;
     // Fresh mount (no durable offset seen yet for this session) resets the
     // slice and relies on REST to bootstrap history/gates. A resumed
     // connection (lastOffset non-empty — either a reconnect within this
@@ -83,7 +87,7 @@ export function useSessionWebSocket(sessionId: string) {
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
     function open() {
-      if (cancelled.current) return;
+      if (cancelled) return;
       const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
       socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined));
       socket.onopen = () => {
@@ -108,7 +112,7 @@ export function useSessionWebSocket(sessionId: string) {
         setConnection(sessionId, "error");
       };
       socket.onclose = () => {
-        if (cancelled.current) return;
+        if (cancelled) return;
         setConnection(sessionId, "closed");
         retryTimer = setTimeout(open, retryDelay);
         retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
@@ -118,7 +122,7 @@ export function useSessionWebSocket(sessionId: string) {
     open();
 
     return () => {
-      cancelled.current = true;
+      cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
       socket?.close();
     };

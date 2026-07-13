@@ -102,7 +102,7 @@ export const api = {
   ) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${sessionId}/decisions/${gateId}/resolve`,
+      `/sessions/${sessionId}/decisions/${encodeURIComponent(gateId)}/resolve`,
       body,
     ),
   withdrawDecision: (
@@ -112,7 +112,7 @@ export const api = {
   ) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${sessionId}/decisions/${gateId}/withdraw`,
+      `/sessions/${sessionId}/decisions/${encodeURIComponent(gateId)}/withdraw`,
       body,
     ),
 };

@@ -62,7 +62,12 @@ function SessionPage() {
   const setPendingGates = useStreamStore((s) => s.setPendingGates);
   useEffect(() => {
     if (!decisionsQ.data) return;
-    setPendingGates(sessionId, decisionsQ.data.gates);
+    // GET /decisions returns pending + recent terminal gates; only pending
+    // ones belong in the card store.
+    setPendingGates(
+      sessionId,
+      decisionsQ.data.gates.filter((g) => g.status === "pending"),
+    );
   }, [sessionId, decisionsQ.data, setPendingGates]);
 
   const pendingGate = usePendingGateForThread(sessionId, activeThreadId);
