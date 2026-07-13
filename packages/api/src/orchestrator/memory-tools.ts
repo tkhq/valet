@@ -81,6 +81,23 @@ async function memoryErrorResult(res: Response): Promise<ToolResult> {
   return { text: `[memory_error] ${message}` };
 }
 
+/** Shared fetch wrapper for all five `mem_*` tools: guarantees a
+ * `[memory_error] …` `ToolResult` instead of a throw for *any* failure
+ * mode — non-2xx responses (via `memoryErrorResult`) as well as
+ * network-level failures (ECONNREFUSED, DNS errors, timeouts, etc.) that
+ * `fetch` itself rejects with. `onOk` only ever sees a `res.ok` response. */
+async function memoryRequest(url: URL, init: RequestInit, onOk: (res: Response) => Promise<ToolResult>): Promise<ToolResult> {
+  let res: Response;
+  try {
+    res = await fetch(url, init);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { text: `[memory_error] ${message}` };
+  }
+  if (!res.ok) return memoryErrorResult(res);
+  return onOk(res);
+}
+
 function formatWarnings(warnings: unknown): string {
   if (!Array.isArray(warnings) || warnings.length === 0) return "";
   const lines = warnings.filter((w): w is string => typeof w === "string").map((w) => `⚠ ${w}`);
@@ -88,15 +105,24 @@ function formatWarnings(warnings: unknown): string {
 }
 
 interface WriteResultBody {
-  file?: { path?: string; version?: number };
+  file: { path: string; version?: number };
   warnings?: unknown;
 }
 
+/** Runtime-narrows a write-response body instead of a bare `as` cast:
+ * only the fields actually read (`file.path`, `file.version`) are
+ * checked, per the "validated-pick, not a blind cast" convention. */
+function asWriteResultBody(body: unknown): WriteResultBody | null {
+  if (!isRecord(body) || !isRecord(body.file) || typeof body.file.path !== "string") return null;
+  const version = typeof body.file.version === "number" ? body.file.version : undefined;
+  return { file: { path: body.file.path, version }, warnings: body.warnings };
+}
+
 async function relayWriteResult(res: Response, verb: string): Promise<ToolResult> {
-  if (!res.ok) return memoryErrorResult(res);
-  const body = (await parseJsonBody(res)) as WriteResultBody | null;
-  const path = body?.file?.path ?? "";
-  const version = body?.file?.version;
+  const rawBody = await parseJsonBody(res);
+  const body = asWriteResultBody(rawBody);
+  const path = body?.file.path ?? "";
+  const version = body?.file.version;
   const versionNote = version !== undefined ? ` (v${version})` : "";
   return { text: `${verb} ${path}${versionNote}${formatWarnings(body?.warnings)}` };
 }
@@ -153,23 +179,26 @@ export const memWriteTool = defineTool({
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
-    const res = await fetch(url, {
-      method: "PUT",
-      headers: memoryHeaders(cfg, owner, ctx.userId, true),
-      body: JSON.stringify({
-        path: args.path,
-        content: args.content,
-        type: args.type,
-        description: args.description,
-        tags: args.tags,
-        resource: args.resource,
-        sensitivity: args.sensitivity,
-        origin: args.origin,
-        expires: args.expires,
-        pinned: args.pinned,
-      }),
-    });
-    return relayWriteResult(res, "wrote");
+    return memoryRequest(
+      url,
+      {
+        method: "PUT",
+        headers: memoryHeaders(cfg, owner, ctx.userId, true),
+        body: JSON.stringify({
+          path: args.path,
+          content: args.content,
+          type: args.type,
+          description: args.description,
+          tags: args.tags,
+          resource: args.resource,
+          sensitivity: args.sensitivity,
+          origin: args.origin,
+          expires: args.expires,
+          pinned: args.pinned,
+        }),
+      },
+      (res) => relayWriteResult(res, "wrote"),
+    );
   },
 });
 
@@ -189,12 +218,15 @@ export const memPatchTool = defineTool({
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory/patch", cfg.apiBaseUrl);
-    const res = await fetch(url, {
-      method: "POST",
-      headers: memoryHeaders(cfg, owner, ctx.userId, true),
-      body: JSON.stringify({ path: args.path, oldString: args.oldString, newString: args.newString }),
-    });
-    return relayWriteResult(res, "patched");
+    return memoryRequest(
+      url,
+      {
+        method: "POST",
+        headers: memoryHeaders(cfg, owner, ctx.userId, true),
+        body: JSON.stringify({ path: args.path, oldString: args.oldString, newString: args.newString }),
+      },
+      (res) => relayWriteResult(res, "patched"),
+    );
   },
 });
 
@@ -203,6 +235,13 @@ export const memPatchTool = defineTool({
 interface ReadResultBody {
   kind?: string;
   rendered?: string;
+}
+
+function asReadResultBody(body: unknown): ReadResultBody | null {
+  if (!isRecord(body)) return null;
+  const kind = typeof body.kind === "string" ? body.kind : undefined;
+  const rendered = typeof body.rendered === "string" ? body.rendered : undefined;
+  return { kind, rendered };
 }
 
 export const memReadTool = defineTool({
@@ -218,10 +257,10 @@ export const memReadTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
     url.searchParams.set("path", args.path);
-    const res = await fetch(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) });
-    if (!res.ok) return memoryErrorResult(res);
-    const body = (await parseJsonBody(res)) as ReadResultBody | null;
-    return { text: body?.rendered ?? "" };
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async (res) => {
+      const body = asReadResultBody(await parseJsonBody(res));
+      return { text: body?.rendered ?? "" };
+    });
   },
 });
 
@@ -236,6 +275,24 @@ interface SearchResultRow {
 
 interface SearchResultBody {
   results?: SearchResultRow[];
+}
+
+function asSearchResultRow(v: unknown): SearchResultRow | null {
+  if (!isRecord(v)) return null;
+  if (typeof v.path !== "string") return null;
+  return {
+    path: v.path,
+    title: typeof v.title === "string" ? v.title : "",
+    description: typeof v.description === "string" ? v.description : "",
+    type: typeof v.type === "string" ? v.type : "",
+  };
+}
+
+function asSearchResultBody(body: unknown): SearchResultBody | null {
+  if (!isRecord(body)) return null;
+  if (!Array.isArray(body.results)) return { results: undefined };
+  const results = body.results.map(asSearchResultRow).filter((r): r is SearchResultRow => r !== null);
+  return { results };
 }
 
 export const memSearchTool = defineTool({
@@ -253,16 +310,16 @@ export const memSearchTool = defineTool({
     const url = new URL("/api/memory/search", cfg.apiBaseUrl);
     url.searchParams.set("q", args.query);
     if (args.limit !== undefined) url.searchParams.set("limit", String(args.limit));
-    const res = await fetch(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) });
-    if (!res.ok) return memoryErrorResult(res);
-    const body = (await parseJsonBody(res)) as SearchResultBody | null;
-    const results = body?.results ?? [];
-    if (results.length === 0) return { text: `(no memory results for "${args.query}")` };
-    const lines = results.map((r) => {
-      const desc = r.description ? ` — ${r.description}` : "";
-      return `[${r.type}] ${r.path}${desc}`;
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async (res) => {
+      const body = asSearchResultBody(await parseJsonBody(res));
+      const results = body?.results ?? [];
+      if (results.length === 0) return { text: `(no memory results for "${args.query}")` };
+      const lines = results.map((r) => {
+        const desc = r.description ? ` — ${r.description}` : "";
+        return `[${r.type}] ${r.path}${desc}`;
+      });
+      return { text: lines.join("\n") };
     });
-    return { text: lines.join("\n") };
   },
 });
 
@@ -278,9 +335,9 @@ export const memRmTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
     url.searchParams.set("path", args.path);
-    const res = await fetch(url, { method: "DELETE", headers: memoryHeaders(cfg, owner, ctx.userId, false) });
-    if (!res.ok) return memoryErrorResult(res);
-    return { text: `removed ${args.path}` };
+    return memoryRequest(url, { method: "DELETE", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async () => ({
+      text: `removed ${args.path}`,
+    }));
   },
 });
 

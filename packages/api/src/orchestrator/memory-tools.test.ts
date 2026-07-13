@@ -74,6 +74,17 @@ describe("mem_* tools: apiBaseUrl/internalToken not configured", () => {
   });
 });
 
+describe("mem_* tools: network-level failure", () => {
+  it("mem_read against an unreachable port returns [memory_error] instead of throwing", async () => {
+    const ctx = makeCtx({
+      config: { apiBaseUrl: "http://127.0.0.1:1", internalToken: "t" },
+      owner: { type: "user", id: "local-user" },
+    });
+    const result = await memReadTool.execute({ path: "notes/a.md" }, ctx);
+    expect(result.text).toMatch(/^\[memory_error\]/);
+  });
+});
+
 describe("mem_* tools: real HTTP round trip", () => {
   it("mem_write creates a file, then mem_read reads it back", async () => {
     api = await bootTestApi();
