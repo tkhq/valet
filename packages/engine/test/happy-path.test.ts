@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@mariozechner/pi-ai";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
@@ -11,12 +11,12 @@ import {
 
 function makeEngine() {
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const sandboxProvider = new VirtualSandboxProvider();
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
   const engine = new Engine({
-    providers: { store, bus, sandboxProvider },
+    providers: { store, stream: bus, sandboxProvider },
   });
   return { engine, store, bus, events, sandboxProvider };
 }
@@ -180,7 +180,76 @@ describe("engine: single-thread happy path", () => {
 
     faux.unregister();
   });
+
+  it("durably appends the turn's lifecycle events (offset-ordered, no text_delta, submission-linked)", async () => {
+    const faux = registerFauxProvider({ provider: "happy-durable" });
+    faux.setResponses([fauxAssistantMessage("durable hello")]);
+
+    const { engine, bus, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const receipt = await session.prompt("say hi");
+    await waitForStatus(events, receipt.threadId, "idle");
+    // The settlement emit races the idle status; wait for it in the log.
+    await waitForAsync(async () => {
+      const { events: log } = await bus.read(session.id);
+      return log.some((e) => e.event.type === "submission_settled");
+    });
+
+    const { events: log } = await bus.read(session.id);
+
+    // Offsets are 16-char zero-padded and strictly increasing in read order.
+    for (const e of log) {
+      expect(e.offset).toMatch(/^\d{16}$/);
+    }
+    const offsets = log.map((e) => e.offset);
+    expect([...offsets].sort()).toEqual(offsets);
+
+    // No text_delta ever lands in the durable log — it's ephemeral only.
+    expect(log.some((e) => e.event.type === "text_delta")).toBe(false);
+    // ...but the live subscriber DID see text_delta (ephemeral fan-out).
+    expect(events.some((e) => e.event.type === "text_delta")).toBe(true);
+
+    // Lifecycle backbone appears in offset order.
+    const typeOrder = log.map((e) => e.event.type);
+    const idx = (t: string) => typeOrder.indexOf(t);
+    expect(idx("message_start")).toBeGreaterThanOrEqual(0);
+    expect(idx("message_end")).toBeGreaterThan(idx("message_start"));
+    expect(idx("turn_end")).toBeGreaterThan(idx("message_end"));
+    expect(idx("submission_settled")).toBeGreaterThan(idx("turn_end"));
+
+    // Every turn lifecycle event carries the receipt's queueItemId.
+    const turnScoped = log.filter((e) =>
+      ["message_start", "message_end", "turn_end", "status"].includes(e.event.type),
+    );
+    expect(turnScoped.length).toBeGreaterThan(0);
+    for (const e of turnScoped) {
+      expect(e.queueItemId).toBe(receipt.queueItemId);
+    }
+
+    // The settlement envelope is submission-linked.
+    const settled = log.find((e) => e.event.type === "submission_settled");
+    expect(settled?.queueItemId).toBe(receipt.queueItemId);
+    expect(settled?.offset).toMatch(/^\d{16}$/);
+
+    faux.unregister();
+  });
 });
+
+async function waitForAsync(predicate: () => Promise<boolean>, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error("waitForAsync: timed out");
+}
 
 async function waitForStatus(events: BusEvent[], threadId: string, status: string, timeoutMs = 2000): Promise<void> {
   const start = Date.now();

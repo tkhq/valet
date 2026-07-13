@@ -14,7 +14,7 @@ import {
 import { SqliteSessionStore } from "@valet/store-sqlite";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   VirtualSandboxProvider,
   type MessageEntry,
   type ToolDef,
@@ -129,9 +129,9 @@ describe("kill-mid-turn recovery (cross-process SIGKILL, exit criterion)", () =>
 
         const sqlite = new Database(dbPath);
         const store = new SqliteSessionStore(drizzle(sqlite));
-        const bus = new InMemoryEventBus();
+        const bus = new InMemoryEventStream();
         const engine = new Engine({
-          providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+          providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
         });
 
         const session = await engine.restoreSession({

@@ -7,7 +7,7 @@ import {
 import {
   decideReconciliation,
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
@@ -16,6 +16,7 @@ import {
   type QueueItem,
   type ReconcileContext,
   type SessionStore,
+  type SubmissionOutcome,
   type SuspendedTurnState,
   type ToolDef,
   type WriteFence,
@@ -637,11 +638,11 @@ describe("reconciliation executor (integration)", () => {
     const faux = registerFauxProvider({ provider: "recon-resume" });
     faux.setResponses([fauxAssistantMessage("resumed and done")]);
 
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const events: BusEvent[] = [];
     bus.subscribe({}, (e) => events.push(e));
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
 
     await engine.restoreSession({
@@ -798,9 +799,9 @@ describe("reconciliation executor (integration)", () => {
     const faux = registerFauxProvider({ provider: "recon-multiround" });
     faux.setResponses([fauxAssistantMessage("multi-round resumed")]);
 
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
     await engine.restoreSession({
       sessionId: SESSION,
@@ -847,9 +848,9 @@ describe("reconciliation executor (integration)", () => {
     const faux = registerFauxProvider({ provider: "recon-sweep" });
     faux.setResponses([fauxAssistantMessage("swept and done")]);
 
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
     const session = await engine.createSession({
       id: "sess-sweep",
@@ -940,13 +941,13 @@ describe("reconciliation executor (integration)", () => {
     const faux = registerFauxProvider({ provider: "recon-superseded" });
     faux.setResponses([fauxAssistantMessage("steer turn")]);
 
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const withdrawn: string[] = [];
     bus.subscribe({}, (e) => {
       if (e.event.type === "decision_gate_withdrawn") withdrawn.push(e.event.reason);
     });
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
 
     await engine.restoreSession({
@@ -989,11 +990,11 @@ describe("reconciliation executor (integration)", () => {
     const faux = registerFauxProvider({ provider: "recon-gate-expired" });
     faux.setResponses([fauxAssistantMessage("resumed after expiry")]);
 
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const events: BusEvent[] = [];
     bus.subscribe({}, (e) => events.push(e));
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
 
     await engine.restoreSession({
@@ -1054,11 +1055,11 @@ describe("reconciliation executor (integration)", () => {
     const faux = registerFauxProvider({ provider: "recon-gate-expire-later" });
     faux.setResponses([fauxAssistantMessage("resumed after late expiry")]);
 
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const events: BusEvent[] = [];
     bus.subscribe({}, (e) => events.push(e));
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
 
     await engine.restoreSession({
@@ -1087,6 +1088,157 @@ describe("reconciliation executor (integration)", () => {
     expect(gate?.status).toBe("expired");
     expect(events.some((e) => e.event.type === "decision_gate_expired")).toBe(true);
     expect(spy.calls()).toBe(0);
+
+    faux.unregister();
+  });
+});
+
+// ── durable submission_settled: deterministic keys + appendOnce ──────
+//
+// Every settlement path emits `submission_settled` keyed `settled:{itemId}`.
+// The unique key makes any double-emission across restart/reconcile paths a
+// no-op, so the durable log holds exactly one settled event per item even when
+// the settling operation (or a redundant reconcile) runs twice.
+
+function makeLive() {
+  const store = new InMemorySessionStore();
+  const stream = new InMemoryEventStream();
+  const events: BusEvent[] = [];
+  stream.subscribe({}, (e) => events.push(e));
+  const engine = new Engine({
+    providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() },
+  });
+  return { engine, store, stream, events };
+}
+
+async function settledEventsFor(
+  stream: InMemoryEventStream,
+  sessionId: string,
+  itemId: string,
+): Promise<Array<{ outcome: SubmissionOutcome; offset: string; queueItemId?: string }>> {
+  const { events } = await stream.read(sessionId);
+  return events
+    .filter((e) => e.event.type === "submission_settled" && e.queueItemId === itemId)
+    .map((e) => {
+      if (e.event.type !== "submission_settled") throw new Error("unreachable");
+      return { outcome: e.event.outcome, offset: e.offset, queueItemId: e.queueItemId };
+    });
+}
+
+describe("durable submission_settled events", () => {
+  it("emits exactly one settled event for an aborted queued item; re-emit under the same key is a no-op", async () => {
+    const faux = registerFauxProvider({ provider: "settled-abort" });
+    faux.setResponses([fauxAssistantMessage("first-done"), fauxAssistantMessage("second-done")]);
+
+    const { engine, store, stream } = makeLive();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("first");
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r1.queueItemId))?.status === "settled",
+    );
+    await session.pause();
+    const r2 = await session.thread().submitPrompt("second", {});
+    expect((await store.getQueueItem(session.id, r2.queueItemId))?.status).toBe("queued");
+
+    await session.abort();
+
+    const settled = await settledEventsFor(stream, session.id, r2.queueItemId);
+    expect(settled).toHaveLength(1);
+    expect(settled[0].outcome).toEqual({ outcome: "aborted" });
+    expect(settled[0].offset).toMatch(/^\d{16}$/);
+
+    // appendOnce: a redundant reconcile emitting the same deterministic key
+    // (`settled:{id}`) must not add a second row.
+    await session.emit(
+      {
+        type: "submission_settled",
+        sessionId: session.id,
+        threadId: session.thread().id,
+        queueItemId: r2.queueItemId,
+        outcome: { outcome: "aborted" },
+      },
+      { eventKey: `settled:${r2.queueItemId}`, queueItemId: r2.queueItemId },
+    );
+    const after = await settledEventsFor(stream, session.id, r2.queueItemId);
+    expect(after).toHaveLength(1);
+    expect(after[0].offset).toBe(settled[0].offset);
+
+    faux.unregister();
+  });
+
+  it("emits exactly one merged settled event per collect constituent", async () => {
+    const faux = registerFauxProvider({ provider: "settled-collect" });
+    faux.setResponses([fauxAssistantMessage("merged-done")]);
+
+    const { engine, store, stream } = makeLive();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      queueMode: "collect",
+      collectWindowMs: 60,
+    });
+
+    const r1 = await session.thread().submitPrompt("one", {});
+    const r2 = await session.thread().submitPrompt("two", {});
+
+    await waitForAsync(
+      async () =>
+        (await store.getQueueItem(session.id, r1.queueItemId))?.outcome?.outcome === "merged" &&
+        (await store.getQueueItem(session.id, r2.queueItemId))?.outcome?.outcome === "merged",
+    );
+
+    for (const id of [r1.queueItemId, r2.queueItemId]) {
+      const settled = await settledEventsFor(stream, session.id, id);
+      expect(settled).toHaveLength(1);
+      expect(settled[0].outcome).toEqual({ outcome: "merged" });
+    }
+
+    faux.unregister();
+  });
+
+  it("emits exactly one superseded settled event for a steered item", async () => {
+    const faux = registerFauxProvider({ provider: "settled-steer", tokensPerSecond: 30 });
+    const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("steer-done")]);
+
+    const { engine, store, stream, events } = makeLive();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("original");
+    await waitForAsync(async () => events.some((e) => e.event.type === "text_delta"));
+    const r2 = await session.thread().submitPrompt("steer-in", { queueMode: "steer" });
+
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r1.queueItemId))?.outcome?.outcome === "superseded",
+    );
+
+    const settled = await settledEventsFor(stream, session.id, r1.queueItemId);
+    expect(settled).toHaveLength(1);
+    expect(settled[0].outcome).toEqual({ outcome: "superseded" });
+    expect(settled[0].offset).toMatch(/^\d{16}$/);
+
+    // The steer item itself settles completed — exactly one settled event.
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r2.queueItemId))?.status === "settled",
+    );
+    const steerSettled = await settledEventsFor(stream, session.id, r2.queueItemId);
+    expect(steerSettled).toHaveLength(1);
 
     faux.unregister();
   });

@@ -11,7 +11,7 @@ import { describe, it, expect } from "vitest";
 import { registerFauxProvider } from "@mariozechner/pi-ai";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
   builtinTools,
@@ -20,9 +20,9 @@ import { listThreadsTool } from "../src/builtin-tools/index.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const sandboxProvider = new VirtualSandboxProvider();
-  const engine = new Engine({ providers: { store, bus, sandboxProvider } });
+  const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
   return { engine, store };
 }
 

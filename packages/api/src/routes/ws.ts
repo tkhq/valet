@@ -97,8 +97,10 @@ export function registerWsRoutes(
               },
             });
 
-            // Subscribe to the engine event bus for this session.
-            unsubscribe = providers.eventBus.subscribe({ sessionId }, (busEvent: BusEvent) => {
+            // Subscribe to the engine event stream for this session. The
+            // callback may receive a durable event carrying `offset`; ignored
+            // here (the full WS resume protocol is Task 5).
+            unsubscribe = providers.eventStream.subscribe({ sessionId }, (busEvent: BusEvent) => {
               // Track active message id for delta tagging.
               if (busEvent.event.type === "message_start") {
                 activeMessageByThread.set(busEvent.event.threadId, busEvent.event.messageId);

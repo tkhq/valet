@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@mariozechner/pi-ai";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
@@ -15,11 +15,11 @@ import {
 
 function makeEngine() {
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const sandboxProvider = new VirtualSandboxProvider();
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
-  const engine = new Engine({ providers: { store, bus, sandboxProvider } });
+  const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
   return { engine, store, events };
 }
 
@@ -400,9 +400,9 @@ describe("queue: settlement resilience", () => {
     faux.setResponses([fauxAssistantMessage("a-done"), fauxAssistantMessage("b-done")]);
 
     const store = new FlakyFinalizeStore();
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
     const session = await engine.createSession({
       userId: "u1",
@@ -458,9 +458,9 @@ describe("queue: settlement resilience", () => {
     faux.setResponses([fauxAssistantMessage("never-used"), fauxAssistantMessage("second-ok")]);
 
     const store = new DiskFullOnceStore();
-    const bus = new InMemoryEventBus();
+    const bus = new InMemoryEventStream();
     const engine = new Engine({
-      providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
     const session = await engine.createSession({
       userId: "u1",

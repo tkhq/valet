@@ -20,7 +20,7 @@ import {
 import {
   builtinTools,
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
@@ -64,11 +64,11 @@ function setup(): SetupResult {
   cleanups.push(() => opusFaux.unregister());
 
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const sandboxProvider = new VirtualSandboxProvider();
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
-  const engine = new Engine({ providers: { store, bus, sandboxProvider } });
+  const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
 
   // Pull the registry-shaped Model — its `.id` is "claude-haiku-4-5",
   // which matches what setModel resolves against. The faux's own

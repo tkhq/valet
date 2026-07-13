@@ -5,7 +5,7 @@ import {
 } from "@mariozechner/pi-ai";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
@@ -14,11 +14,11 @@ import {
 
 function makeEngine() {
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const sandboxProvider = new VirtualSandboxProvider();
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
-  const engine = new Engine({ providers: { store, bus, sandboxProvider } });
+  const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
   return { engine, store, bus, events };
 }
 

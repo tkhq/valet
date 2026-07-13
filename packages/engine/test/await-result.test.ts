@@ -8,7 +8,7 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } fro
 import { Type } from "typebox";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   TimeoutError,
   VirtualSandboxProvider,
@@ -88,11 +88,11 @@ async function seedMergeChain(
 
 function makeEngine() {
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const sandboxProvider = new VirtualSandboxProvider();
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
-  const engine = new Engine({ providers: { store, bus, sandboxProvider } });
+  const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
   return { engine, store, bus, events };
 }
 
@@ -367,9 +367,9 @@ describe("Thread.awaitResult", () => {
     const sqliteA = new Database(dbPath);
     applyEngineMigrations(sqliteA);
     const storeA = new SqliteSessionStore(drizzle(sqliteA));
-    const busA = new InMemoryEventBus();
+    const busA = new InMemoryEventStream();
     const engineA = new Engine({
-      providers: { store: storeA, bus: busA, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store: storeA, stream: busA, sandboxProvider: new VirtualSandboxProvider() },
     });
     const sessionA = await engineA.createSession({
       id: "sess-resume-1",
@@ -388,9 +388,9 @@ describe("Thread.awaitResult", () => {
 
     const sqliteB = new Database(dbPath);
     const storeB = new SqliteSessionStore(drizzle(sqliteB));
-    const busB = new InMemoryEventBus();
+    const busB = new InMemoryEventStream();
     const engineB = new Engine({
-      providers: { store: storeB, bus: busB, sandboxProvider: new VirtualSandboxProvider() },
+      providers: { store: storeB, stream: busB, sandboxProvider: new VirtualSandboxProvider() },
     });
     const sessionB = await engineB.restoreSession({
       sessionId: "sess-resume-1",

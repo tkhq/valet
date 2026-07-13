@@ -17,10 +17,9 @@ import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 import {
   InMemoryCredentialStore,
-  InMemoryEventBus,
   VirtualSandboxProvider,
 } from "@valet/engine";
-import { SqliteSessionStore, applyEngineMigrations } from "@valet/store-sqlite";
+import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -66,14 +65,14 @@ export async function bootTestApi(): Promise<TestApi> {
   const engineDb = drizzle(sqlite);
   const engineStore = new SqliteSessionStore(engineDb);
   const sandboxProvider = new VirtualSandboxProvider();
-  const eventBus = new InMemoryEventBus();
+  const eventStream = new SqliteEventStream(sqlite);
   const engineCredentials = new InMemoryCredentialStore();
   const blobs = new FsBlobStore(blobsRoot);
 
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
-    eventBus,
+    eventStream,
     engineCredentials,
     blobs,
     anthropicApiKey: ANTHROPIC_API_KEY,
@@ -85,7 +84,7 @@ export async function bootTestApi(): Promise<TestApi> {
     encryptionKey: "test-key",
     engineStore,
     sandboxProvider,
-    eventBus,
+    eventStream,
     engineCredentials,
     engineHost,
   };

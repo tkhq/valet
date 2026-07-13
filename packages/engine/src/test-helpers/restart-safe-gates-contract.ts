@@ -7,7 +7,7 @@ import {
 } from "@mariozechner/pi-ai";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   VirtualSandboxProvider,
   type BusEvent,
   type DecisionGate,
@@ -61,8 +61,8 @@ export function runRestartSafeGatesContract(
         }),
       ]);
 
-      const bus1 = new InMemoryEventBus();
-      const engine1 = new Engine({ providers: { store, bus: bus1, sandboxProvider } });
+      const bus1 = new InMemoryEventStream();
+      const engine1 = new Engine({ providers: { store, stream: bus1, sandboxProvider } });
       const SESSION_ID = `sess-restart-${name}`;
       const session1 = await engine1.createSession({
         id: SESSION_ID,
@@ -99,10 +99,10 @@ export function runRestartSafeGatesContract(
       const faux2 = registerFauxProvider({ provider: `restart-${name}-2` });
       faux2.setResponses([fauxAssistantMessage("all done after restart")]);
 
-      const bus2 = new InMemoryEventBus();
+      const bus2 = new InMemoryEventStream();
       const events2: BusEvent[] = [];
       bus2.subscribe({}, (e) => events2.push(e));
-      const engine2 = new Engine({ providers: { store, bus: bus2, sandboxProvider } });
+      const engine2 = new Engine({ providers: { store, stream: bus2, sandboxProvider } });
       const session2 = await engine2.restoreSession({
         sessionId: SESSION_ID,
         options: {

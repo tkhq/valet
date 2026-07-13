@@ -3,7 +3,7 @@ import {
   Engine,
   type BlobStore,
   type CredentialStore,
-  type EventBus,
+  type EventStream,
   type SandboxProvider,
   type Session,
   type SessionStore,
@@ -12,7 +12,7 @@ import {
 export interface EngineHostOpts {
   engineStore: SessionStore;
   sandboxProvider: SandboxProvider;
-  eventBus: EventBus;
+  eventStream: EventStream;
   engineCredentials: CredentialStore;
   blobs?: BlobStore;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
@@ -85,7 +85,7 @@ export class EngineHost {
     const engine = new Engine({
       providers: {
         store: this.opts.engineStore,
-        bus: this.opts.eventBus,
+        stream: this.opts.eventStream,
         credentials: this.opts.engineCredentials,
         sandboxProvider: this.opts.sandboxProvider,
         blobs: this.opts.blobs,

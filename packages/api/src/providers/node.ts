@@ -2,12 +2,9 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import {
-  InMemoryCredentialStore,
-  InMemoryEventBus,
-} from "@valet/engine";
+import { InMemoryCredentialStore } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
-import { SqliteSessionStore, applyEngineMigrations } from "@valet/store-sqlite";
+import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
 import { FsBlobStore } from "./blob-fs.js";
@@ -83,13 +80,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const engineStore = new SqliteSessionStore(engineDb);
   const blobs = new FsBlobStore(opts.blobsRoot);
   const sandboxProvider = new DockerSandboxProvider();
-  const eventBus = new InMemoryEventBus();
+  // Durable event log over the same better-sqlite3 handle the store uses.
+  const eventStream = new SqliteEventStream(sqlite);
   const engineCredentials = new InMemoryCredentialStore();
 
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
-    eventBus,
+    eventStream,
     engineCredentials,
     blobs,
     anthropicApiKey: opts.anthropicApiKey,
@@ -101,7 +99,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     encryptionKey: opts.encryptionKey,
     engineStore,
     sandboxProvider,
-    eventBus,
+    eventStream,
     engineCredentials,
     engineHost,
   };

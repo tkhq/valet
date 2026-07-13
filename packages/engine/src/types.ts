@@ -629,11 +629,6 @@ export type DeliveredBusEvent = BusEvent & { offset?: string };
 
 export type Unsubscribe = () => void;
 
-export interface EventBus {
-  publish(event: BusEvent): Promise<void>;
-  subscribe(filter: EventFilter, callback: (event: BusEvent) => void): Unsubscribe;
-}
-
 export interface EventFilter {
   sessionId?: string;
   userId?: string;
@@ -910,7 +905,7 @@ export interface RestoreSessionOptions {
 
 export interface ProviderBundle {
   store: SessionStore;
-  bus: EventBus;
+  stream: EventStream;
   blobs?: BlobStore;
   credentials?: CredentialStore;
   sandboxProvider?: SandboxProvider;

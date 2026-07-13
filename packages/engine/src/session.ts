@@ -2,6 +2,7 @@ import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type {
+  BusEvent,
   CreateSessionOptions,
   CredentialOwner,
   CredentialProvider,
@@ -28,6 +29,21 @@ import type {
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
+}
+
+/** Options for {@link Session.emit}. */
+export interface EmitOptions {
+  /**
+   * Idempotency key for the durable append; defaults to `uid("ev")`.
+   * Re-runnable paths (settlement, gate lifecycle) pass a deterministic key so
+   * a double-emission across restart/reconcile paths dedupes to a single row.
+   */
+  eventKey?: string;
+  /**
+   * Submission linkage for retention. Threads pass their running/settling item
+   * id so retention can truncate a session's log per submission.
+   */
+  queueItemId?: string;
 }
 
 export class Session {
@@ -436,14 +452,30 @@ export class Session {
     return { fromModel: before, toModel: next.id };
   }
 
-  async emit(event: EngineEvent): Promise<void> {
-    await this.providers.bus.publish({
+  async emit(event: EngineEvent, opts?: EmitOptions): Promise<void> {
+    const busEvent: BusEvent = {
       sessionId: this.id,
       threadId: "threadId" in event ? (event.threadId as string | undefined) : undefined,
+      queueItemId: opts?.queueItemId,
       userId: this.options.userId,
       event,
       timestamp: Date.now(),
-    });
+    };
+    // text_delta is the high-frequency streaming plane — never durable.
+    if (event.type === "text_delta") {
+      this.providers.stream.publishEphemeral(busEvent);
+      return;
+    }
+    // Events are the wakeup/UX plane; the store is truth. A durable append
+    // failure on a non-critical path must not kill the turn — log and continue.
+    try {
+      await this.providers.stream.append(busEvent, opts?.eventKey ?? uid("ev"));
+    } catch (err) {
+      console.error(
+        `[engine] event append failed (session=${this.id}, type=${event.type}):`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   }
 
   // ── credential provider for tools ───────────────────────────────

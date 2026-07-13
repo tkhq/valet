@@ -1,7 +1,7 @@
 import type {
   BlobStore,
   CredentialStore,
-  EventBus,
+  EventStream,
   SandboxProvider,
   SessionStore,
 } from "@valet/engine";
@@ -22,7 +22,7 @@ export interface Providers {
   // Engine-side providers — same family that @valet/engine consumes.
   engineStore: SessionStore;
   sandboxProvider: SandboxProvider;
-  eventBus: EventBus;
+  eventStream: EventStream;
   engineCredentials: CredentialStore;
 
   // Per-process Engine cache. Lives only on the server, not in engine.

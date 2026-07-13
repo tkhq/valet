@@ -5,7 +5,7 @@ import {
   pluginCatalogTools,
   Engine,
   InMemoryCredentialStore,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
   type ActionPlugin,
@@ -75,12 +75,12 @@ function makeMockPlugin(): {
 
 function makeEngine() {
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const credentials = new InMemoryCredentialStore();
   const sandboxProvider = new VirtualSandboxProvider();
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
-  const engine = new Engine({ providers: { store, bus, credentials, sandboxProvider } });
+  const engine = new Engine({ providers: { store, stream: bus, credentials, sandboxProvider } });
   return { engine, events, credentials };
 }
 

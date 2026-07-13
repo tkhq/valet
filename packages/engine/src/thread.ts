@@ -176,12 +176,15 @@ export class Thread {
       // replay code paths short-circuit before the requestDecision
       // continuation; doing it here means the store is consistent for both.
       void this.persistGateResolution(gateId, resolution);
-      void this.session.emit({
-        type: "decision_gate_resolved",
-        threadId: this.id,
-        gateId,
-        resolution,
-      });
+      void this.session.emit(
+        {
+          type: "decision_gate_resolved",
+          threadId: this.id,
+          gateId,
+          resolution,
+        },
+        { eventKey: `gate:${gateId}:resolved` },
+      );
     }
     return ok;
   }
@@ -209,12 +212,15 @@ export class Thread {
   withdrawDecision(gateId: string, reason: DecisionWithdrawReason): boolean {
     const ok = this.gates.withdraw(gateId, reason);
     if (ok) {
-      void this.session.emit({
-        type: "decision_gate_withdrawn",
-        threadId: this.id,
-        gateId,
-        reason,
-      });
+      void this.session.emit(
+        {
+          type: "decision_gate_withdrawn",
+          threadId: this.id,
+          gateId,
+          reason,
+        },
+        { eventKey: `gate:${gateId}:withdrawn` },
+      );
     }
     return ok;
   }
@@ -288,6 +294,7 @@ export class Thread {
     }
     for (const id of supersededItemIds) {
       await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
+      await this.emitSettled(id, { outcome: "superseded" });
     }
     if (runningSuperseded) {
       await this.agent.waitForIdle();
@@ -417,6 +424,7 @@ export class Thread {
           { outcome: "merged" },
           { mergedIntoItemId: admittedMerged.id },
         );
+        await this.emitSettled(constituent.id, { outcome: "merged" });
       }
       await this.emitQueueState();
       void this.kick();
@@ -521,6 +529,7 @@ export class Thread {
       if (it.threadId !== this.id) continue;
       if (it.status === "queued" || it.status === "collecting") {
         await store.settleUnclaimed(this.session.id, this.id, it.id, { outcome: "aborted" });
+        await this.emitSettled(it.id, { outcome: "aborted" });
       }
     }
     await this.emitQueueState();
@@ -713,7 +722,12 @@ export class Thread {
         // the sweep never reclaims it and maybeEmitStuck excludes it), wedging
         // the whole thread on every restart.
         if (isDecisionGateExpired(err) || isDecisionGateWithdrawn(err)) {
-          void this.terminalizeReconciledGate(gate, err);
+          this.terminalizeReconciledGate(gate, err).catch((e) =>
+            this.emitError(
+              "terminalize_reconciled_gate_failed",
+              e instanceof Error ? e.message : String(e),
+            ),
+          );
           return;
         }
         this.emitError(
@@ -745,11 +759,14 @@ export class Thread {
         : { resolvedAt: new Date().toISOString() }),
     });
     if (!reason) {
-      await this.session.emit({
-        type: "decision_gate_expired",
-        threadId: this.id,
-        gateId: gate.id,
-      });
+      await this.session.emit(
+        {
+          type: "decision_gate_expired",
+          threadId: this.id,
+          gateId: gate.id,
+        },
+        { eventKey: `gate:${gate.id}:expired` },
+      );
     }
     this.blockedGateId = undefined;
 
@@ -902,6 +919,7 @@ export class Thread {
       // `aborted` without ever running it, rather than claiming it.
       if (head.abortRequestedAt !== undefined) {
         await store.settleUnclaimed(this.session.id, this.id, head.id, { outcome: "aborted" });
+        await this.emitSettled(head.id, { outcome: "aborted" });
         await this.emitQueueState();
         continue;
       }
@@ -984,13 +1002,7 @@ export class Thread {
       return false;
     }
     await store.deleteAttemptMarker(item.id, attemptId);
-    await this.session.emit({
-      type: "submission_settled",
-      sessionId: this.session.id,
-      threadId: this.id,
-      queueItemId: item.id,
-      outcome: item.outcome ?? { outcome: "completed" },
-    });
+    await this.emitSettled(item.id, item.outcome ?? { outcome: "completed" });
     await this.emitQueueState();
     return true;
   }
@@ -1028,13 +1040,7 @@ export class Thread {
       throw err;
     }
     await store.deleteAttemptMarker(item.id, fence.attemptId);
-    await this.session.emit({
-      type: "submission_settled",
-      sessionId: this.session.id,
-      threadId: this.id,
-      queueItemId: item.id,
-      outcome,
-    });
+    await this.emitSettled(item.id, outcome);
     await this.emitQueueState();
   }
 
@@ -1095,13 +1101,20 @@ export class Thread {
   }
 
   private async emitSettled(itemId: string, outcome: SubmissionOutcome): Promise<void> {
-    await this.session.emit({
-      type: "submission_settled",
-      sessionId: this.session.id,
-      threadId: this.id,
-      queueItemId: itemId,
-      outcome,
-    });
+    // Deterministic eventKey `settled:{itemId}`: every settlement path (fenced
+    // two-phase, retryFinalize, reconciliation, and the fenceless
+    // settleUnclaimed sites) routes through here, so a double-emission across
+    // restart/reconcile paths dedupes to exactly one durable row per item.
+    await this.session.emit(
+      {
+        type: "submission_settled",
+        sessionId: this.session.id,
+        threadId: this.id,
+        queueItemId: itemId,
+        outcome,
+      },
+      { eventKey: `settled:${itemId}`, queueItemId: itemId },
+    );
   }
 
   /**
@@ -1159,12 +1172,15 @@ export class Thread {
           gate: withdrawn,
           withdrawnReason: "steer",
         });
-        await this.session.emit({
-          type: "decision_gate_withdrawn",
-          threadId: this.id,
-          gateId: gate.id,
-          reason: "steer",
-        });
+        await this.session.emit(
+          {
+            type: "decision_gate_withdrawn",
+            threadId: this.id,
+            gateId: gate.id,
+            reason: "steer",
+          },
+          { eventKey: `gate:${gate.id}:withdrawn` },
+        );
       }
     }
 
@@ -1357,7 +1373,10 @@ export class Thread {
   private async emitQueueState(): Promise<void> {
     const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
     const state = deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
-    await this.session.emit({ type: "queue_state", threadId: this.id, state });
+    await this.session.emit(
+      { type: "queue_state", threadId: this.id, state },
+      { queueItemId: this.runningItem?.id },
+    );
   }
 
   private async runItem(item: QueueItem): Promise<void> {
@@ -1587,7 +1606,10 @@ export class Thread {
     if (head.length === 0) return;
 
     // Step 3: summarize.
-    await session.emit({ type: "compaction_start", threadId: this.id });
+    await session.emit(
+      { type: "compaction_start", threadId: this.id },
+      { queueItemId: this.runningItem?.id },
+    );
     let summaryResult: SummarizeResult;
     try {
       const previousSummary = findMostRecentCompaction(entries)?.summary;
@@ -1598,7 +1620,10 @@ export class Thread {
         previousSummary,
       });
     } catch (err) {
-      await session.emit({ type: "compaction_end", threadId: this.id });
+      await session.emit(
+        { type: "compaction_end", threadId: this.id },
+        { queueItemId: this.runningItem?.id },
+      );
       throw err;
     }
 
@@ -1628,7 +1653,10 @@ export class Thread {
       id: session.options.model.id,
     });
 
-    await session.emit({ type: "compaction_end", threadId: this.id });
+    await session.emit(
+      { type: "compaction_end", threadId: this.id },
+      { queueItemId: this.runningItem?.id },
+    );
 
     // Step 6: auto-continue (proactive only). Inject a synthetic user
     // message tagged with metadata.compaction_continue so client UIs can
@@ -1804,12 +1832,18 @@ export class Thread {
             ),
           );
         }
-        await session.emit({
-          type: "status",
-          threadId: this.id,
-          status: "blocked_on_decision_gate",
-        });
-        await session.emit({ type: "decision_gate", threadId: this.id, gate });
+        await session.emit(
+          {
+            type: "status",
+            threadId: this.id,
+            status: "blocked_on_decision_gate",
+          },
+          { queueItemId: runningItemId },
+        );
+        await session.emit(
+          { type: "decision_gate", threadId: this.id, gate },
+          { eventKey: `gate:${gate.id}:pending`, queueItemId: runningItemId },
+        );
 
         try {
           const resolution = await this.gates.register(gate, async (gateId) => {
@@ -1819,7 +1853,10 @@ export class Thread {
               gateId,
               { resolvedAt: new Date().toISOString(), gate: { ...gate, status: "expired" } },
             );
-            await session.emit({ type: "decision_gate_expired", threadId: this.id, gateId });
+            await session.emit(
+              { type: "decision_gate_expired", threadId: this.id, gateId },
+              { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
+            );
           });
           // Mark gate resolved in store and update DAG entry
           const resolved: DecisionGate = { ...gate, status: "resolved", updatedAt: Date.now() };
@@ -1909,8 +1946,14 @@ export class Thread {
   private async handleAgentEvent(event: AgentEvent): Promise<void> {
     switch (event.type) {
       case "agent_start":
-        await this.session.emit({ type: "thread_start", threadId: this.id });
-        await this.session.emit({ type: "status", threadId: this.id, status: "thinking" });
+        await this.session.emit(
+          { type: "thread_start", threadId: this.id },
+          { queueItemId: this.runningItem?.id },
+        );
+        await this.session.emit(
+          { type: "status", threadId: this.id, status: "thinking" },
+          { queueItemId: this.runningItem?.id },
+        );
         break;
       case "message_start": {
         if (event.message.role === "assistant") {
@@ -1918,12 +1961,15 @@ export class Thread {
           this.currentAssistantParts = [];
           this.currentToolCalls.clear();
           this.currentAssistantEntry = undefined;
-          await this.session.emit({
-            type: "message_start",
-            threadId: this.id,
-            messageId: this.currentAssistantMessageId,
-            role: "assistant",
-          });
+          await this.session.emit(
+            {
+              type: "message_start",
+              threadId: this.id,
+              messageId: this.currentAssistantMessageId,
+              role: "assistant",
+            },
+            { queueItemId: this.runningItem?.id },
+          );
         }
         break;
       }
@@ -1988,29 +2034,38 @@ export class Thread {
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).
           this.currentAssistantEntry = entry;
-          await this.session.emit({
-            type: "message_end",
-            threadId: this.id,
-            messageId: entry.id,
-            reason:
-              event.message.stopReason === "aborted"
-                ? "abort"
-                : event.message.stopReason === "error"
-                ? "error"
-                : "end_turn",
-          });
+          await this.session.emit(
+            {
+              type: "message_end",
+              threadId: this.id,
+              messageId: entry.id,
+              reason:
+                event.message.stopReason === "aborted"
+                  ? "abort"
+                  : event.message.stopReason === "error"
+                  ? "error"
+                  : "end_turn",
+            },
+            { queueItemId: this.runningItem?.id },
+          );
         }
         break;
       }
       case "tool_execution_start":
         this.toolCtxOverlay.gateId = undefined;
-        await this.session.emit({
-          type: "tool_start",
-          threadId: this.id,
-          tool: event.toolName,
-          args: event.args ?? {},
-        });
-        await this.session.emit({ type: "status", threadId: this.id, status: "tool_calling" });
+        await this.session.emit(
+          {
+            type: "tool_start",
+            threadId: this.id,
+            tool: event.toolName,
+            args: event.args ?? {},
+          },
+          { queueItemId: this.runningItem?.id },
+        );
+        await this.session.emit(
+          { type: "status", threadId: this.id, status: "tool_calling" },
+          { queueItemId: this.runningItem?.id },
+        );
         break;
       case "tool_execution_end": {
         const part = this.currentToolCalls.get(event.toolCallId);
@@ -2040,13 +2095,16 @@ export class Thread {
             this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
           );
         }
-        await this.session.emit({
-          type: "tool_end",
-          threadId: this.id,
-          tool: event.toolName,
-          result: resultText,
-          isError: event.isError,
-        });
+        await this.session.emit(
+          {
+            type: "tool_end",
+            threadId: this.id,
+            tool: event.toolName,
+            result: resultText,
+            isError: event.isError,
+          },
+          { queueItemId: this.runningItem?.id },
+        );
         break;
       }
       case "turn_end": {
@@ -2065,13 +2123,16 @@ export class Thread {
           };
         }
         if (errorMessage) {
-          await this.session.emit({
-            type: "error",
-            threadId: this.id,
-            code: stopReason ?? "agent_error",
-            error: errorMessage,
-            recoverable: stopReason !== "error",
-          });
+          await this.session.emit(
+            {
+              type: "error",
+              threadId: this.id,
+              code: stopReason ?? "agent_error",
+              error: errorMessage,
+              recoverable: stopReason !== "error",
+            },
+            { queueItemId: this.runningItem?.id },
+          );
         }
         const reason: "end_turn" | "error" | "abort" =
           stopReason === "aborted"
@@ -2079,8 +2140,14 @@ export class Thread {
             : stopReason === "error"
             ? "error"
             : "end_turn";
-        await this.session.emit({ type: "turn_end", threadId: this.id, reason });
-        await this.session.emit({ type: "status", threadId: this.id, status: "idle" });
+        await this.session.emit(
+          { type: "turn_end", threadId: this.id, reason },
+          { queueItemId: this.runningItem?.id },
+        );
+        await this.session.emit(
+          { type: "status", threadId: this.id, status: "idle" },
+          { queueItemId: this.runningItem?.id },
+        );
         break;
       }
       default:
@@ -2225,7 +2292,7 @@ export class Thread {
         });
       };
 
-      unsubscribe = this.session.providers.bus.subscribe(
+      unsubscribe = this.session.providers.stream.subscribe(
         { sessionId: this.session.id, eventTypes: ["submission_settled"] },
         (busEvent) => {
           const event = busEvent.event;

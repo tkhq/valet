@@ -3,7 +3,7 @@
  * End-to-end smoke REPL for @valet/engine.
  *
  * Wires up:
- *   - InMemorySessionStore + InMemoryEventBus
+ *   - InMemorySessionStore + InMemoryEventStream
  *   - VirtualSandbox (default) or LocalSandbox (real host filesystem + shell)
  *   - The engine's built-in tools (read/write/edit/bash/thread_read)
  *   - A real Anthropic model via pi-ai (defaults to claude-haiku-4-5)
@@ -46,7 +46,7 @@ import {
   pluginCatalogTools,
   Engine,
   InMemoryCredentialStore,
-  InMemoryEventBus,
+  InMemoryEventStream,
   InMemorySessionStore,
   loadRoleFromMarkdown,
   VirtualSandboxProvider,
@@ -104,7 +104,7 @@ function loadPluginTools(): ToolDef[] {
 
 async function buildSession(): Promise<{
   session: Session;
-  bus: InMemoryEventBus;
+  bus: InMemoryEventStream;
   defaultRoleName?: string;
 }> {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -139,7 +139,7 @@ async function buildSession(): Promise<{
       : baseModel;
 
   const store = new InMemorySessionStore();
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const credentials = new InMemoryCredentialStore();
   const sandboxProvider: SandboxProvider =
     SANDBOX_KIND === "local"
@@ -148,7 +148,7 @@ async function buildSession(): Promise<{
         ? new DockerSandboxProvider()
         : new VirtualSandboxProvider();
   const engine = new Engine({
-    providers: { store, bus, credentials, sandboxProvider },
+    providers: { store, stream: bus, credentials, sandboxProvider },
   });
 
   const userId = "repl-user";
@@ -206,7 +206,7 @@ async function buildSession(): Promise<{
   return { session, bus, defaultRoleName };
 }
 
-function subscribePrinter(bus: InMemoryEventBus): void {
+function subscribePrinter(bus: InMemoryEventStream): void {
   bus.subscribe({}, (e: BusEvent) => {
     const ev = e.event;
     switch (ev.type) {
@@ -258,7 +258,7 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max) + `…(+${s.length - max} chars)`;
 }
 
-async function waitForIdle(bus: InMemoryEventBus, threadId: string): Promise<void> {
+async function waitForIdle(bus: InMemoryEventStream, threadId: string): Promise<void> {
   return new Promise((resolve) => {
     const unsub = bus.subscribe({}, (e) => {
       if (

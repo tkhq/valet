@@ -20,7 +20,6 @@ export { Session } from "./session.js";
 export { Thread } from "./thread.js";
 export {
   InMemoryBlobStore,
-  InMemoryEventBus,
   InMemoryEventStream,
   InMemoryCredentialStore,
   InMemorySessionStore,

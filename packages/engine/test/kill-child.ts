@@ -29,7 +29,7 @@ import {
 import { SqliteSessionStore, applyEngineMigrations } from "@valet/store-sqlite";
 import {
   Engine,
-  InMemoryEventBus,
+  InMemoryEventStream,
   VirtualSandboxProvider,
   type ToolDef,
 } from "../src/index.js";
@@ -44,9 +44,9 @@ async function main(): Promise<void> {
   const sqlite = new Database(dbPath);
   applyEngineMigrations(sqlite);
   const store = new SqliteSessionStore(drizzle(sqlite));
-  const bus = new InMemoryEventBus();
+  const bus = new InMemoryEventStream();
   const engine = new Engine({
-    providers: { store, bus, sandboxProvider: new VirtualSandboxProvider() },
+    providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
   });
 
   // Same provider NAME as the parent so the persisted model id resolves in both
