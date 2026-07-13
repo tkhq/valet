@@ -44,6 +44,20 @@ function isDockerExecTransportFailure(exitCode: number, stderr: string): boolean
 }
 
 /**
+ * True when the failure is a genuine `docker` CLI / daemon-level error —
+ * exit 125/126 (docker CLI usage/exec-setup failure) or a stderr message
+ * that actually comes from the daemon ("Error response from daemon: ...").
+ * These are trustworthy without a liveness check. Everything else that
+ * merely matches CONTAINER_DEATH_PATTERN (e.g. a `curl` inside the user's
+ * own command printing "Connection refused" to stderr) is only a
+ * *candidate* — confirm real container death via `isContainerAlive`
+ * before treating it as a transport failure.
+ */
+function isGenuineDockerCliFailure(exitCode: number, stderr: string): boolean {
+  return exitCode === 125 || exitCode === 126 || /^Error response from daemon:/i.test(stderr.trim());
+}
+
+/**
  * A `docker rm -f` that kills a container while `docker exec` is attached
  * does NOT surface as a daemon-level error message on stderr — confirmed by
  * direct repro: the `docker exec` CLI process itself exits cleanly with
@@ -239,15 +253,31 @@ export class DockerSandbox implements Sandbox {
     // the PolicySandbox wrapper's degradation path (which only fires on
     // rejections) actually triggers. A command-level non-zero exit inside a
     // live container still resolves normally.
+    //
+    // CONTAINER_DEATH_PATTERN also matches plausible *user command* stderr
+    // (a `curl` to a down port prints "Connection refused") — a match alone
+    // is not proof the container is dead. Genuine daemon/CLI failures
+    // (isGenuineDockerCliFailure) are trusted outright; everything else is
+    // confirmed against the live container state before rejecting.
     if (isDockerExecTransportFailure(result.exitCode, result.stderr)) {
-      throw new Error(result.stderr.trim() || `docker exec failed (${result.exitCode})`);
-    }
-    // Our own timeout SIGKILLs the docker CLI child directly (`timedOut`) —
-    // that's a normal timeout outcome, not container death. Otherwise, a
-    // signal-shaped exit code with no daemon error message on stderr is
-    // ambiguous (see looksSignalKilled) — confirm via `docker inspect`
-    // whether the container itself is still running before deciding.
-    if (!result.timedOut && looksSignalKilled(result.exitCode) && !(await isContainerAlive(this.containerId))) {
+      if (
+        isGenuineDockerCliFailure(result.exitCode, result.stderr) ||
+        !(await isContainerAlive(this.containerId))
+      ) {
+        throw new Error(result.stderr.trim() || `docker exec failed (${result.exitCode})`);
+      }
+      // Container confirmed alive: the regex match was the user's own
+      // command output, not transport failure — resolve normally below.
+    } else if (
+      !result.timedOut &&
+      looksSignalKilled(result.exitCode) &&
+      !(await isContainerAlive(this.containerId))
+    ) {
+      // Our own timeout SIGKILLs the docker CLI child directly (`timedOut`)
+      // — that's a normal timeout outcome, not container death. Otherwise, a
+      // signal-shaped exit code with no daemon error message on stderr is
+      // ambiguous (see looksSignalKilled) — confirm via `docker inspect`
+      // whether the container itself is still running before deciding.
       throw new Error(
         `No such container: ${this.containerId} is no longer running (exec exited ${result.exitCode})`,
       );
@@ -325,22 +355,43 @@ export class DockerSandbox implements Sandbox {
     child.on("close", (code, sig) => {
       const exitCode = code ?? (sig ? 128 : 1);
       void (async () => {
-        if (isDockerExecTransportFailure(exitCode, stderrTail)) {
+        try {
+          // See the sync exec() comment: CONTAINER_DEATH_PATTERN alone is
+          // only a candidate — confirm real death via isContainerAlive
+          // before rejecting, unless it's a genuine daemon/CLI-level error.
+          if (isDockerExecTransportFailure(exitCode, stderrTail)) {
+            if (
+              isGenuineDockerCliFailure(exitCode, stderrTail) ||
+              !(await isContainerAlive(this.containerId))
+            ) {
+              state.status = "failed";
+              state.transportError = new Error(stderrTail.trim() || `docker exec failed (${exitCode})`);
+            } else {
+              state.status = "done";
+              state.exitCode = exitCode;
+            }
+          } else if (looksSignalKilled(exitCode) && !(await isContainerAlive(this.containerId))) {
+            // Container-death mid-job-exec exits cleanly with a
+            // signal-shaped code and no stderr message.
+            state.status = "failed";
+            state.transportError = new Error(
+              `No such container: ${this.containerId} is no longer running (exec exited ${exitCode})`,
+            );
+          } else {
+            state.status = "done";
+            state.exitCode = exitCode;
+          }
+        } catch (err) {
+          // isContainerAlive (an `execProcess` invocation of `docker
+          // inspect`) can itself reject. Without this catch, that becomes
+          // an unhandled rejection and resolveClosed() never runs —
+          // cancelJob's `await state.closed` hangs forever.
           state.status = "failed";
-          state.transportError = new Error(stderrTail.trim() || `docker exec failed (${exitCode})`);
-        } else if (looksSignalKilled(exitCode) && !(await isContainerAlive(this.containerId))) {
-          // See the sync exec() comment: container-death mid-job-exec exits
-          // cleanly with a signal-shaped code and no stderr message.
-          state.status = "failed";
-          state.transportError = new Error(
-            `No such container: ${this.containerId} is no longer running (exec exited ${exitCode})`,
-          );
-        } else {
-          state.status = "done";
-          state.exitCode = exitCode;
+          state.transportError = err instanceof Error ? err : new Error(String(err));
+        } finally {
+          resolveClosed();
+          scheduleEviction();
         }
-        resolveClosed();
-        scheduleEviction();
       })();
     });
 

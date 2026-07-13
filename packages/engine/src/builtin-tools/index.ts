@@ -6,12 +6,24 @@ import type { ExecJobHandle, JobPoll, MessageQuery, ToolContext, ToolDef, ToolRe
  * Bash job-mode constants (spec decision 10, verbatim values):
  *   - JOB_MODE_THRESHOLD_MS: timeoutMs above this triggers job mode when the
  *     sandbox supports it.
- *   - JOB_POLL_INTERVAL_MS: poll cadence while a job is running.
+ *   - JOB_POLL_INTERVAL_MS: steady-state poll cadence once the warm-up ramp
+ *     (JOB_POLL_WARMUP_MS) is exhausted.
  *   - BASH_DEFAULT_TIMEOUT_S: default `timeout` param value, in seconds.
  */
 export const JOB_MODE_THRESHOLD_MS = 60_000;
 export const JOB_POLL_INTERVAL_MS = 2_000;
 export const BASH_DEFAULT_TIMEOUT_S = 120;
+
+/**
+ * Poll-wait warm-up ramp (spec decision 10, amended at final review): the
+ * first poll is always immediate, then successive waits climb this ramp
+ * before settling into the JOB_POLL_INTERVAL_MS steady state. With
+ * BASH_DEFAULT_TIMEOUT_S (120s) above JOB_MODE_THRESHOLD_MS, default bash
+ * always takes job mode — a flat 2s interval would put a ~2s floor on every
+ * short command's latency. The ramp keeps that floor close to zero for
+ * commands that finish in one of the first few polls.
+ */
+export const JOB_POLL_WARMUP_MS = [100, 250, 500, 1000];
 
 function isJobUnsupported(err: unknown): boolean {
   return err instanceof Error && err.message.startsWith("[job_unsupported]");
@@ -26,18 +38,19 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       res();
       return;
     }
-    const t = setTimeout(res, ms);
+    let onAbort: (() => void) | undefined;
+    const t = setTimeout(() => {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      res();
+    }, ms);
     const unrefable = t as { unref?: () => void };
     if (typeof unrefable.unref === "function") unrefable.unref();
     if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(t);
-          res();
-        },
-        { once: true },
-      );
+      onAbort = () => {
+        clearTimeout(t);
+        res();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
     }
   });
 }
@@ -79,6 +92,7 @@ async function pollJobToCompletion(
   const deadline = Date.now() + timeoutMs;
   let offset = 0;
   let output = "";
+  let pollCount = 0;
 
   for (;;) {
     if (ctx.signal.aborted) {
@@ -91,6 +105,7 @@ async function pollJobToCompletion(
     }
 
     const poll = await pollJob(execId, offset);
+    pollCount++;
     output += poll.output;
     offset = poll.nextOffset;
 
@@ -102,7 +117,11 @@ async function pollJobToCompletion(
       return { text: `${output}\n[job failed]` };
     }
 
-    await sleep(JOB_POLL_INTERVAL_MS, ctx.signal);
+    // Warm-up ramp: first poll is immediate (no sleep before it, above),
+    // successive waits climb JOB_POLL_WARMUP_MS before settling into the
+    // JOB_POLL_INTERVAL_MS steady state.
+    const waitMs = JOB_POLL_WARMUP_MS[pollCount - 1] ?? JOB_POLL_INTERVAL_MS;
+    await sleep(waitMs, ctx.signal);
   }
 }
 

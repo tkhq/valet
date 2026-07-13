@@ -135,6 +135,49 @@ describeDocker("DockerSandbox", () => {
     await expect(sb.exec("echo hi")).rejects.toThrow(/No such container|is not running/i);
   });
 
+  it("a command whose OWN stderr matches the container-death regex (e.g. curl 'Connection refused') resolves normally in a live container", async () => {
+    // CONTAINER_DEATH_PATTERN includes /Connection refused/i and
+    // /is not running/i, which are also plausible things for a user's own
+    // command to print on stderr (e.g. curl hitting a closed port). A
+    // regex match alone must not be treated as transport failure — the
+    // liveness check (isContainerAlive) has to confirm real death first.
+    const sb = await makeSandbox();
+    try {
+      const r = await sb.exec(
+        'sh -c \'echo "curl: (7) Failed to connect: Connection refused" >&2; exit 7\'',
+      );
+      expect(r.exitCode).toBe(7);
+      expect(r.stderr).toContain("Connection refused");
+      // Container must still be alive — this was never a transport failure.
+      const status = await provider.status(sb.id);
+      expect(status.state).toBe("ready");
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: a job whose OWN stderr matches the container-death regex completes normally, container stays alive", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob(
+        'sh -c \'echo "curl: (7) Failed to connect: Connection refused" >&2; exit 7\'',
+      );
+      let offset = 0;
+      let poll = await sb.pollJob(execId, offset);
+      for (let i = 0; i < 100 && poll.status === "running"; i++) {
+        offset = poll.nextOffset;
+        await new Promise((r) => setTimeout(r, 50));
+        poll = await sb.pollJob(execId, offset);
+      }
+      expect(poll.status).toBe("done");
+      expect(poll.exitCode).toBe(7);
+      const status = await provider.status(sb.id);
+      expect(status.state).toBe("ready");
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
   it("job-mode: execJob/pollJob round-trips output and exitCode", async () => {
     const sb = await makeSandbox();
     try {

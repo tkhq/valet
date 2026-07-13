@@ -14,6 +14,7 @@ import {
   bashTool,
   JOB_MODE_THRESHOLD_MS,
   JOB_POLL_INTERVAL_MS,
+  JOB_POLL_WARMUP_MS,
   BASH_DEFAULT_TIMEOUT_S,
 } from "../src/builtin-tools/index.js";
 import { SandboxSupersededError, SandboxUnavailableError } from "../src/errors.js";
@@ -69,6 +70,7 @@ describe("bash tool: constants", () => {
     expect(JOB_MODE_THRESHOLD_MS).toBe(60_000);
     expect(JOB_POLL_INTERVAL_MS).toBe(2_000);
     expect(BASH_DEFAULT_TIMEOUT_S).toBe(120);
+    expect(JOB_POLL_WARMUP_MS).toEqual([100, 250, 500, 1000]);
   });
 });
 
@@ -155,10 +157,39 @@ describe("bash tool: job-mode poll loop", () => {
       };
       const ctx = makeCtx(sandbox);
       const resultPromise = execute({ command: "loop", timeout: 61 }, ctx);
-      await vi.advanceTimersByTimeAsync(JOB_POLL_INTERVAL_MS * 3);
+      // Warm-up ramp: wait 100ms after poll 1, 250ms after poll 2 — well
+      // under the old flat JOB_POLL_INTERVAL_MS*3 (6s).
+      await vi.advanceTimersByTimeAsync(JOB_POLL_WARMUP_MS[0] + JOB_POLL_WARMUP_MS[1]);
       const result = await resultPromise;
       expect(sandbox.pollJob).toHaveBeenCalledTimes(3);
       expect((result as { text: string }).text).toBe("tick0\ntick1\ntick2\n\n[exit 3]");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("completes on the second poll after ~100ms of the warm-up ramp, not the 2s steady-state interval", async () => {
+    vi.useFakeTimers();
+    try {
+      const polls: JobPoll[] = [
+        { status: "running", output: "tick0\n", nextOffset: 6 },
+        { status: "done", exitCode: 0, output: "tick1\n", nextOffset: 12 },
+      ];
+      let call = 0;
+      const sandbox: FakeSandbox = {
+        id: "sb-warmup",
+        execJob: vi.fn(async (): Promise<ExecJobHandle> => ({ execId: "job-warmup" })),
+        pollJob: vi.fn(async (): Promise<JobPoll> => polls[call++]),
+        cancelJob: vi.fn(async () => {}),
+      };
+      const ctx = makeCtx(sandbox);
+      const resultPromise = execute({ command: "quick", timeout: 61 }, ctx);
+      // Only the first warm-up step (100ms) elapses — far short of the 2s
+      // steady-state interval — and the job still completes.
+      await vi.advanceTimersByTimeAsync(JOB_POLL_WARMUP_MS[0]);
+      const result = await resultPromise;
+      expect(sandbox.pollJob).toHaveBeenCalledTimes(2);
+      expect((result as { text: string }).text).toBe("tick0\ntick1\n");
     } finally {
       vi.useRealTimers();
     }
