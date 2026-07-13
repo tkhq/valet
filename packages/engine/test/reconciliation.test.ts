@@ -1248,3 +1248,184 @@ describe("durable submission_settled events", () => {
     faux.unregister();
   });
 });
+
+// ── crash-mid-collect: split-turn degraded-not-corrupt (Phase 1 carry-forward) ──
+//
+// The collect-window flush is: admit ONE merged item, then settle each
+// collecting constituent `merged` pointing at it. A crash between those steps
+// leaves the merged item created and SOME constituents settled while the rest
+// stay `collecting`. On restart the sweep's collect-flush owns the survivors and
+// creates a SECOND merged item for them — a split turn. This is degraded (the
+// two merged turns overlap in content) but NOT corrupt: every original
+// constituent settles `merged` exactly once with exactly one mergedIntoItemId,
+// both merged turns settle, and nothing is lost or double-run at the queue level.
+
+/**
+ * Hand-craft the mid-flush crash state directly in the store (no process kill
+ * needed): three collecting constituents past their deadline, a first merged
+ * item admitted `queued`, and only the FIRST constituent settled `merged` into
+ * it — the exact intermediate the flush leaves behind when it dies partway.
+ */
+async function seedMidFlushCollect(store: SessionStore): Promise<{
+  constituentIds: [string, string, string];
+  firstMergedId: string;
+}> {
+  const now = Date.now();
+  await store.saveSession({
+    id: SESSION,
+    owner: { type: "user", id: "u1" },
+    userId: "u1",
+    orgId: "o1",
+    workspace: "/",
+    purpose: "interactive",
+    status: "running",
+    createdAt: now,
+    updatedAt: now,
+  });
+  await store.saveThread(SESSION, {
+    id: THREAD,
+    sessionId: SESSION,
+    key: "web:default",
+    status: "active",
+    queueMode: "collect",
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const deadline = now - 1000; // window already elapsed
+  const constituentIds: [string, string, string] = ["c1", "c2", "c3"];
+  for (let i = 0; i < constituentIds.length; i++) {
+    await store.admitSubmission(SESSION, THREAD, {
+      id: constituentIds[i],
+      threadId: THREAD,
+      content: `part ${i + 1}`,
+      status: "collecting",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: now + 3_600_000,
+      metadata: { collectDeadline: deadline },
+      createdAt: now + i,
+      updatedAt: now + i,
+    });
+  }
+
+  // The flush's first durable write: the merged item (queued), carrying all
+  // three constituent ids in its metadata.
+  const firstMergedId = "m1";
+  await store.admitSubmission(SESSION, THREAD, {
+    id: firstMergedId,
+    threadId: THREAD,
+    content: "[1] part 1\n\n[2] part 2\n\n[3] part 3",
+    status: "queued",
+    attemptCount: 0,
+    maxAttempts: 10,
+    timeoutAt: now + 3_600_000,
+    metadata: { collect: { constituentIds } },
+    createdAt: now + 10,
+    updatedAt: now + 10,
+  });
+
+  // Only the FIRST constituent got settled before the crash.
+  const ok = await store.settleUnclaimed(
+    SESSION,
+    THREAD,
+    constituentIds[0],
+    { outcome: "merged" },
+    { mergedIntoItemId: firstMergedId },
+  );
+  if (!ok) throw new Error("seed: settleUnclaimed(c1) failed");
+
+  return { constituentIds, firstMergedId };
+}
+
+describe("crash-mid-collect split-turn recovery", () => {
+  it("survivors flush into a SECOND merged item; every constituent settles merged once, both merged turns settle, nothing lost/double-run", async () => {
+    const store = new InMemorySessionStore();
+    const { constituentIds, firstMergedId } = await seedMidFlushCollect(store);
+    const [c1, c2, c3] = constituentIds;
+
+    // ── Intermediate store shape BEFORE reconciling: prove we're actually at the
+    //    mid-flush crash point (first merged item queued, c1 merged, rest collecting). ──
+    expect((await store.getQueueItem(SESSION, firstMergedId))?.status).toBe("queued");
+    const c1Mid = await store.getQueueItem(SESSION, c1);
+    expect(c1Mid?.status).toBe("settled");
+    expect(c1Mid?.outcome).toEqual({ outcome: "merged" });
+    expect(c1Mid?.mergedIntoItemId).toBe(firstMergedId);
+    expect((await store.getQueueItem(SESSION, c2))?.status).toBe("collecting");
+    expect((await store.getQueueItem(SESSION, c3))?.status).toBe("collecting");
+
+    const faux = registerFauxProvider({ provider: "recon-collect-crash" });
+    // Both merged turns run to completion — one response each (plus slack).
+    faux.setResponses([
+      fauxAssistantMessage("first merged done"),
+      fauxAssistantMessage("second merged done"),
+      fauxAssistantMessage("extra"),
+    ]);
+
+    const bus = new InMemoryEventStream();
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.restoreSession({
+      sessionId: SESSION,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: faux.getModel(),
+        tools: [],
+      },
+    });
+
+    // The sweep's collect-flush owns the surviving constituents (reconcile leaves
+    // `collecting` items to it) and kicks the queued merged work.
+    await session.sweepOnce();
+
+    const constituentStates = async () =>
+      Promise.all([c1, c2, c3].map((id) => store.getQueueItem(SESSION, id)));
+
+    // Wait for every original constituent to settle merged and both merged turns
+    // to settle.
+    await waitForAsync(async () => {
+      const originals = await constituentStates();
+      if (!originals.every((i) => i?.status === "settled" && i.outcome?.outcome === "merged")) {
+        return false;
+      }
+      const targets = new Set(originals.map((i) => i?.mergedIntoItemId));
+      if (targets.size !== 2) return false;
+      const mergedTurns = await Promise.all(
+        [...targets].map((t) => (t ? store.getQueueItem(SESSION, t) : Promise.resolve(null))),
+      );
+      return mergedTurns.every((m) => m?.status === "settled");
+    }, 3000);
+
+    // Every original constituent settled `merged` with EXACTLY ONE mergedIntoItemId.
+    const originals = await constituentStates();
+    for (const it of originals) {
+      expect(it?.status).toBe("settled");
+      expect(it?.outcome).toEqual({ outcome: "merged" });
+      expect(typeof it?.mergedIntoItemId).toBe("string");
+    }
+
+    // A SECOND merged item was created (the split turn). c1 → m1; c2, c3 → m2.
+    const mergedTargets = new Set(originals.map((i) => i?.mergedIntoItemId));
+    expect(mergedTargets.has(firstMergedId)).toBe(true);
+    expect(mergedTargets.size).toBe(2);
+    const secondMergedId = [...mergedTargets].find((t) => t !== firstMergedId);
+    expect(secondMergedId).toBeTruthy();
+    if (!secondMergedId) throw new Error("no second merged item");
+
+    // Both merged turns exist as distinct items and settled completed — nothing
+    // lost, nothing double-run (each merged item ran exactly once).
+    for (const mid of [firstMergedId, secondMergedId]) {
+      const m = await store.getQueueItem(SESSION, mid);
+      expect(m?.status).toBe("settled");
+      expect(m?.outcome?.outcome).toBe("completed");
+      expect(typeof m?.metadata?.collect).toBe("object");
+    }
+    expect(firstMergedId).not.toBe(secondMergedId);
+
+    faux.unregister();
+  });
+});

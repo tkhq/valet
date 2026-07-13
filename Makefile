@@ -138,6 +138,24 @@ dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
 #      interrupted tool call repaired to an "interrupted — result lost in
 #      restart" error followed by the model's recovery — with NO duplicated tool
 #      side effect. This is a human-visible pass, not a CI gate.
+#
+# Manual kill-mid-gate recovery proof (Engine v2 Phase 2 exit criterion).
+# The automated cross-process SIGKILL test lives at
+# packages/engine/test/kill-mid-gate.test.ts. To reproduce it by hand against a
+# real Anthropic + Docker stack:
+#   1. make dev-local            # API :8788 + web :5173 (needs ANTHROPIC_API_KEY + Docker)
+#   2. In the web UI, send a prompt that triggers an approval decision gate
+#      (a tool that calls requestDecision). Wait until the gate shows PENDING and
+#      the turn is parked waiting on your approval.
+#   3. While the gate is pending, kill the API process:  kill -9 <api pid>
+#   4. Restart:  make dev-local
+#   5. Confirm on reload: the browser resumes from its last event offset with NO
+#      refetch flash, and the SAME pending gate is still shown (reconciliation
+#      re-armed it — no duplicate/twin gate).
+#   6. Resolve the gate from the web UI (approve). Confirm the suspended turn
+#      replays and completes via the durable event log — the tool result and the
+#      model's continuation stream in, and the submission settles completed. This
+#      is a human-visible pass, not a CI gate.
 
 # ==========================================
 # Database Operations
