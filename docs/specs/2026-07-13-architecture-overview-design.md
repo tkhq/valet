@@ -55,5 +55,5 @@ The overview must avoid making undocumented precision claims such as exhaustive 
 
 - Run Mintlify's documentation validation if available in the repository.
 - Confirm internal links point to pages listed in `docs/docs.json`.
-- Build or preview the docs site when the local tooling supports it, confirming the Mermaid diagram renders without clipping or syntax errors.
+- Build or preview the docs site when the local tooling supports it, confirming the responsive MDX system map is readable on desktop and narrow layouts.
 - Run the repository's relevant static checks after the Markdown change.
