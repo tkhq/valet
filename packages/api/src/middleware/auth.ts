@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { users } from "../schema/index.js";
 import type { AppEnv } from "../env.js";
+import { isValidInternalToken } from "../lib/internal-auth.js";
 
 export interface AuthUser {
   id: string;
@@ -30,8 +31,21 @@ export interface AuthUser {
  * `VALET_LOCAL_AUTH` alone (e.g. on a shared dev/staging box) never also
  * grants any-user impersonation. Only the API test bootstrap sets this var;
  * it must never be added to the Makefile, `.env`, or any dev target.
+ *
+ * Internal-token bypass (decision 15): a request carrying a valid
+ * `x-valet-internal` token (constant-time compared — see
+ * `lib/internal-auth.ts`) skips the `VALET_LOCAL_AUTH` gate entirely and
+ * falls straight through to the route without `c.var.user` being set —
+ * only the memory routes accept this header this phase, and they derive
+ * their owner tuple from `x-valet-owner`/`x-valet-actor` instead of the
+ * session user.
  */
 export const authMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+    await next();
+    return;
+  }
+
   if (process.env.VALET_LOCAL_AUTH !== "1") {
     return c.json({ error: "auth not configured (set VALET_LOCAL_AUTH=1)" }, 401);
   }
