@@ -154,6 +154,32 @@ export const switchModelTool = defineTool({
   },
 });
 
+export const askApprovalTool = defineTool({
+  name: "ask_approval",
+  description:
+    "Ask the user for an explicit approval before proceeding with an action. " +
+    "Blocks until the user approves or denies (or the gate expires). Use for " +
+    "irreversible or sensitive steps the user should sign off on.",
+  parameters: Type.Object({
+    title: Type.String({ description: "Short question, e.g. 'Delete the staging database?'" }),
+    body: Type.Optional(Type.String({ description: "Details the user needs to decide." })),
+  }),
+  execute: async (args, ctx) => {
+    const resolution = await ctx.requestDecision({
+      type: "approval",
+      title: args.title,
+      body: args.body,
+      resumeKey: `ask_approval:${args.title}`,
+    });
+    return {
+      text:
+        resolution.actionId === "approve"
+          ? `approved: ${args.title}`
+          : `denied: ${args.title}`,
+    };
+  },
+});
+
 export const builtinTools: ToolDef[] = [
   readTool,
   writeTool,
@@ -162,4 +188,5 @@ export const builtinTools: ToolDef[] = [
   threadReadTool,
   listThreadsTool,
   switchModelTool,
+  askApprovalTool,
 ];
