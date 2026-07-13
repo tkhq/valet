@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@mariozechner/pi-ai";
 import {
   Engine,
+  GATE_EXPIRY_DEFAULT_MS,
   InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
@@ -9,6 +10,7 @@ import {
   type DecisionGate,
   type ToolDef,
 } from "../src/index.js";
+import { fromRequest } from "../src/decision-gate.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -17,7 +19,7 @@ function makeEngine() {
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
   const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
-  return { engine, store, events };
+  return { engine, store, bus, events };
 }
 
 /** A tool whose execute() requests a decision and returns its result text. */
@@ -261,5 +263,237 @@ describe("decision gates: steer cancels pending gate", () => {
     expect(s?.outcome).toEqual({ outcome: "completed" });
 
     faux.unregister();
+  });
+});
+
+describe("decision gates: ordinal defaults (fromRequest)", () => {
+  it("assigns a per-type default expiry when the request omits expiresAt", () => {
+    const before = Date.now();
+    const approval = fromRequest(
+      { type: "approval", title: "a", resumeKey: "k" },
+      { sessionId: "s", threadId: "t", queueItemId: "q", resumeKey: "k", ordinal: 0 },
+    );
+    const credential = fromRequest(
+      { type: "credential_request", title: "c", resumeKey: "k" },
+      { sessionId: "s", threadId: "t", queueItemId: "q", resumeKey: "k", ordinal: 0 },
+    );
+    const after = Date.now();
+
+    expect(approval.expiresAt).toBeGreaterThanOrEqual(before + GATE_EXPIRY_DEFAULT_MS.approval);
+    expect(approval.expiresAt).toBeLessThanOrEqual(after + GATE_EXPIRY_DEFAULT_MS.approval);
+    expect(credential.expiresAt).toBeGreaterThanOrEqual(
+      before + GATE_EXPIRY_DEFAULT_MS.credential_request,
+    );
+    expect(credential.expiresAt).toBeLessThanOrEqual(
+      after + GATE_EXPIRY_DEFAULT_MS.credential_request,
+    );
+    expect(approval.ordinal).toBe(0);
+    expect(approval.id).toBe("gate:s:t:q:k:0");
+  });
+
+  it("honours an explicit expiresAt over the default", () => {
+    const explicit = Date.now() + 1234;
+    const gate = fromRequest(
+      { type: "approval", title: "a", resumeKey: "k", expiresAt: explicit },
+      { sessionId: "s", threadId: "t", queueItemId: "q", resumeKey: "k", ordinal: 2 },
+    );
+    expect(gate.expiresAt).toBe(explicit);
+    expect(gate.id).toBe("gate:s:t:q:k:2");
+  });
+});
+
+describe("decision gates: retry after denial mints a fresh ordinal", () => {
+  it("a second requestDecision with the same resumeKey opens gate :1 while :0 stays resolved", async () => {
+    const faux = registerFauxProvider({ provider: "gate-retry" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("retry_thing", {}, { id: "tcR" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("all settled"),
+    ]);
+
+    // Tool asks twice under the SAME resumeKey: a denial triggers a retry.
+    const retryTool: ToolDef = {
+      name: "retry_thing",
+      description: "asks twice under one resumeKey",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const r1 = await ctx.requestDecision({
+          type: "approval",
+          title: "first",
+          resumeKey: "rk",
+        });
+        if (r1.actionId === "deny") {
+          const r2 = await ctx.requestDecision({
+            type: "approval",
+            title: "retry",
+            resumeKey: "rk",
+          });
+          return { text: `second=${r2.actionId}` };
+        }
+        return { text: "approved first" };
+      },
+    };
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [retryTool],
+    });
+
+    void session.prompt("go");
+
+    await waitFor(() => events.filter((e) => e.event.type === "decision_gate").length >= 1);
+    const gate0: DecisionGate = (
+      events.find((e) => e.event.type === "decision_gate")!.event as { gate: DecisionGate }
+    ).gate;
+    expect(gate0.id.endsWith(":0")).toBe(true);
+    expect(gate0.ordinal).toBe(0);
+
+    // Deny gate 0 → the tool retries and opens a fresh gate.
+    await session.resolveDecision(gate0.id, {
+      actionId: "deny",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    await waitFor(
+      () => events.filter((e) => e.event.type === "decision_gate").length >= 2,
+      3000,
+    );
+    const gate1: DecisionGate = (
+      events.filter((e) => e.event.type === "decision_gate")[1].event as { gate: DecisionGate }
+    ).gate;
+    expect(gate1.id).not.toBe(gate0.id);
+    expect(gate1.id.endsWith(":1")).toBe(true);
+    expect(gate1.ordinal).toBe(1);
+
+    // Gate 0 stays terminal (resolved) — the retry did not mutate it.
+    expect((await store.getDecisionGate(session.id, gate0.id))?.status).toBe("resolved");
+
+    // Approve gate 1 → the turn completes.
+    await session.resolveDecision(gate1.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+    await waitFor(() =>
+      events.some((e) => e.event.type === "status" && e.event.status === "idle"),
+    );
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: durable expiry sweep", () => {
+  it("sweepOnce expires a lapsed pending gate whose in-process timer was lost", async () => {
+    const store = new InMemorySessionStore();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const SID = "sess-sweep";
+
+    // A tool that opens a gate with a far-future expiry, so no live timer fires
+    // during the test — only the sweep (after we rewrite the deadline) can.
+    const farTool: ToolDef = {
+      name: "do_thing",
+      description: "gate with a far-future deadline",
+      parameters: Type.Object({ arg: Type.String() }),
+      execute: async (args, ctx) => {
+        const r = await ctx.requestDecision({
+          type: "approval",
+          title: "ok?",
+          resumeKey: `do_thing:${args.arg}`,
+          expiresAt: Date.now() + 3_600_000,
+        });
+        return { text: `did ${r.actionId}` };
+      },
+    };
+
+    const faux1 = registerFauxProvider({ provider: "gate-sweep-1" });
+    faux1.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tc1" })], {
+        stopReason: "toolUse",
+      }),
+    ]);
+    const bus1 = new InMemoryEventStream();
+    const engine1 = new Engine({ providers: { store, stream: bus1, sandboxProvider } });
+    await engine1.createSession({
+      id: SID,
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux1.getModel(),
+      tools: [farTool],
+    });
+
+    const gate = await new Promise<DecisionGate>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("gate timeout")), 2000);
+      const unsub = bus1.subscribe({}, (e) => {
+        if (e.event.type === "decision_gate") {
+          clearTimeout(t);
+          unsub();
+          resolve(e.event.gate);
+        }
+      });
+      void engine1.getSession(SID)!.prompt("go");
+    });
+    const suspended = await store.getSuspendedTurn(SID, gate.threadId);
+    expect(suspended?.queueItemId).toBeDefined();
+    faux1.unregister();
+
+    // Restore into a second engine: reconciliation re-arms the pending gate
+    // with its far-future timer, so nothing expires it on its own.
+    const faux2 = registerFauxProvider({ provider: "gate-sweep-2" });
+    faux2.setResponses([fauxAssistantMessage("done after expiry")]);
+    const bus2 = new InMemoryEventStream();
+    const events2: BusEvent[] = [];
+    bus2.subscribe({}, (e) => events2.push(e));
+    const engine2 = new Engine({ providers: { store, stream: bus2, sandboxProvider } });
+    const session2 = await engine2.restoreSession({
+      sessionId: SID,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: faux2.getModel(),
+        tools: [farTool],
+      },
+    });
+
+    // The deadline lapses: rewrite the persisted gate's expiresAt into the past.
+    const stored = await store.getDecisionGate(SID, gate.id);
+    await store.saveDecisionGate(SID, gate.threadId, {
+      ...stored!,
+      expiresAt: Date.now() - 1,
+    });
+
+    // One sweep pass runs the durable backstop.
+    await session2.sweepOnce();
+
+    // Gate row becomes expired and the expiry event is emitted for this gate.
+    await waitForAsync(
+      async () => (await store.getDecisionGate(SID, gate.id))?.status === "expired",
+      3000,
+    );
+    expect(
+      events2.some(
+        (e) => e.event.type === "decision_gate_expired" && e.event.gateId === gate.id,
+      ),
+    ).toBe(true);
+
+    // The blocked submission terminalizes (no longer stranded on the gate).
+    const itemId = suspended!.queueItemId;
+    await waitForAsync(
+      async () => (await store.getQueueItem(SID, itemId))?.status === "settled",
+      3000,
+    );
+    expect((await store.getQueueItem(SID, itemId))?.status).toBe("settled");
+
+    faux2.unregister();
   });
 });

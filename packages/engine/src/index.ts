@@ -45,6 +45,8 @@ export {
   DecisionGateConflictError,
   isDecisionGateWithdrawn,
   isDecisionGateExpired,
+  GATE_EXPIRY_DEFAULT_MS,
+  deterministicGateId,
 } from "./decision-gate.js";
 export {
   estimateTokens,

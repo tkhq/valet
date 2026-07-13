@@ -130,6 +130,10 @@ export class Session {
       }
     }
     for (const t of this.threads.values()) {
+      // Durable expiry backstop for pending decision gates whose in-process
+      // timer was lost (e.g. across restart). Runs before the kick so an
+      // expired gate terminalizes and unblocks the thread's queued work.
+      await t.sweepExpiredGates();
       await t.checkCollectDeadline();
       await t.kick();
     }

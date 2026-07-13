@@ -12,6 +12,9 @@ CREATE TABLE `engine_decision_gates` (
 	`id` text PRIMARY KEY NOT NULL,
 	`session_id` text NOT NULL,
 	`thread_id` text NOT NULL,
+	`queue_item_id` text NOT NULL,
+	`resume_key` text NOT NULL,
+	`ordinal` integer NOT NULL,
 	`type` text NOT NULL,
 	`status` text NOT NULL,
 	`title` text NOT NULL,
@@ -26,6 +29,7 @@ CREATE TABLE `engine_decision_gates` (
 );
 --> statement-breakpoint
 CREATE INDEX `engine_decision_gates_thread` ON `engine_decision_gates` (`session_id`,`thread_id`,`status`);--> statement-breakpoint
+CREATE INDEX `engine_decision_gates_resume` ON `engine_decision_gates` (`session_id`,`thread_id`,`queue_item_id`,`resume_key`);--> statement-breakpoint
 CREATE TABLE `engine_entries` (
 	`id` text PRIMARY KEY NOT NULL,
 	`session_id` text NOT NULL,
@@ -149,6 +153,7 @@ CREATE TABLE `engine_suspended_turns` (
 	`tool_name` text NOT NULL,
 	`tool_args` text NOT NULL,
 	`resume_key` text NOT NULL,
+	`ordinal` integer NOT NULL,
 	`attempt` integer NOT NULL,
 	`created_at` integer NOT NULL,
 	PRIMARY KEY(`session_id`, `thread_id`)

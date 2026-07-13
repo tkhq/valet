@@ -738,6 +738,37 @@ export class Thread {
   }
 
   /**
+   * Durable expiry backstop (Task 4). For each pending gate whose deadline has
+   * lapsed: if it is armed in this process's GateManager, fire the live expiry
+   * path (`expire` rejects the waiter → the requestDecision / re-arm handler
+   * persists the terminal status and drives settlement). If it is NOT armed
+   * (a lost in-process timer — e.g. a re-armed row whose waiter never attached),
+   * re-arm through `reconcileGate`: the fresh fenced attempt registers the
+   * already-past gate, which self-expires immediately and terminalizes.
+   * Complements the low-latency in-memory `setTimeout` in `GateManager.register`.
+   */
+  async sweepExpiredGates(): Promise<void> {
+    const store = this.session.providers.store;
+    const now = Date.now();
+    const gates = await store.listDecisionGates(this.session.id, this.id);
+    for (const gate of gates) {
+      if (gate.status !== "pending") continue;
+      if (gate.expiresAt === undefined || gate.expiresAt > now) continue;
+      if (this.gates.isPending(gate.id)) {
+        this.gates.expire(gate.id);
+        continue;
+      }
+      // Not armed: a live turn (if any) owns the thread — leave it be.
+      if (this.runningItem) continue;
+      const suspended = await store.getSuspendedTurn(this.session.id, this.id);
+      if (!suspended || suspended.gateId !== gate.id) continue;
+      const item = await store.getQueueItem(this.session.id, suspended.queueItemId);
+      if (!item) continue;
+      await this.reconcileGate(item, suspended, "rearm");
+    }
+  }
+
+  /**
    * Terminalize a re-armed gate that expired or was withdrawn after restart,
    * then drive its suspended turn to settlement. Mirrors the live
    * `requestDecision` expiry/withdrawal path (persist terminal gate status +
@@ -1763,6 +1794,22 @@ export class Thread {
           this.suspendedDecisionForReplay = undefined; // one-shot
           return sc.resolution;
         }
+        // Ordinal resolution: reuse a still-pending gate for this
+        // (queueItemId, resumeKey) — JOIN it rather than open a duplicate — or,
+        // once the latest is terminal, mint a fresh gate at ordinal+1 (a retried
+        // action after a human decision gets a fresh decision). Null → ordinal 0.
+        const latestGate = await session.providers.store.getLatestGateForResume(
+          session.id,
+          this.id,
+          gateCtx.queueItemId,
+          req.resumeKey,
+        );
+        const joiningPending = latestGate?.status === "pending";
+        const ordinal = latestGate
+          ? joiningPending
+            ? latestGate.ordinal
+            : latestGate.ordinal + 1
+          : 0;
         // Fence captured for the whole suspend/resume cycle of this claimed
         // turn. Undefined only on the replay path, which short-circuits above.
         const fence = this.fence;
@@ -1779,21 +1826,25 @@ export class Thread {
             throw new Error(`turn superseded: stale write fence for item ${runningItemId}`);
           }
         };
-        const gate = fromRequest(req, gateCtx);
-        await session.providers.store.saveDecisionGate(session.id, this.id, gate);
-        const gateEntry: SessionEntry = {
-          id: uid("e"),
-          sessionId: session.id,
-          threadId: this.id,
-          parentId: null,
-          type: "decision_gate",
-          gate,
-          queueItemId: runningItemId,
-          createdAt: Date.now(),
-        };
-        await fencedGateWrite(() =>
-          session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
-        );
+        // When joining a still-pending gate the durable row + DAG entry already
+        // exist, so reuse them; only re-arm the wait and re-checkpoint below.
+        const gate = joiningPending && latestGate ? latestGate : fromRequest(req, { ...gateCtx, ordinal });
+        if (!joiningPending) {
+          await session.providers.store.saveDecisionGate(session.id, this.id, gate);
+          const gateEntry: SessionEntry = {
+            id: uid("e"),
+            sessionId: session.id,
+            threadId: this.id,
+            parentId: null,
+            type: "decision_gate",
+            gate,
+            queueItemId: runningItemId,
+            createdAt: Date.now(),
+          };
+          await fencedGateWrite(() =>
+            session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
+          );
+        }
 
         // checkpoint the suspended turn — use real toolName + toolArgs so
         // restoreSession can replay this exact tool call.
@@ -1811,6 +1862,7 @@ export class Thread {
               toolName,
               toolArgs,
               resumeKey: req.resumeKey ?? gate.id,
+              ordinal: gate.ordinal,
               attempt: 1,
               createdAt: Date.now(),
             },

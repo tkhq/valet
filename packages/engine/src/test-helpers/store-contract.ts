@@ -244,6 +244,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         id: "g-1",
         sessionId: "sess-1",
         threadId: "th-1",
+        queueItemId: "q-1",
+        resumeKey: "rk",
+        ordinal: 0,
         type: "approval",
         status: "pending",
         title: "ok?",
@@ -311,6 +314,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         id: "g-1",
         sessionId: "sess-1",
         threadId: "th-1",
+        queueItemId: "q-1",
+        resumeKey: "rk",
+        ordinal: 0,
         type: "approval",
         status: "pending",
         title: "x",
@@ -323,6 +329,53 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(list).toHaveLength(1);
       const single = await store.getDecisionGate("sess-1", "g-1");
       expect(single?.title).toBe("x");
+    });
+
+    it("getLatestGateForResume returns the highest ordinal for a (queueItem, resumeKey)", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const base = {
+        sessionId: "sess-1",
+        threadId: "th-1",
+        type: "approval" as const,
+        status: "resolved" as const,
+        title: "x",
+        actions: [],
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const g0: DecisionGate = {
+        ...base,
+        id: "gate:sess-1:th-1:q-1:rk:0",
+        queueItemId: "q-1",
+        resumeKey: "rk",
+        ordinal: 0,
+      };
+      const g1: DecisionGate = {
+        ...base,
+        id: "gate:sess-1:th-1:q-1:rk:1",
+        queueItemId: "q-1",
+        resumeKey: "rk",
+        ordinal: 1,
+      };
+      // A gate for a different resumeKey must not leak into the lookup.
+      const other: DecisionGate = {
+        ...base,
+        id: "gate:sess-1:th-1:q-1:other:0",
+        queueItemId: "q-1",
+        resumeKey: "other",
+        ordinal: 0,
+      };
+      await store.saveDecisionGate("sess-1", "th-1", g0);
+      await store.saveDecisionGate("sess-1", "th-1", g1);
+      await store.saveDecisionGate("sess-1", "th-1", other);
+
+      const latest = await store.getLatestGateForResume("sess-1", "th-1", "q-1", "rk");
+      expect(latest?.id).toBe("gate:sess-1:th-1:q-1:rk:1");
+      expect(latest?.ordinal).toBe(1);
+
+      const none = await store.getLatestGateForResume("sess-1", "th-1", "q-1", "missing");
+      expect(none).toBeNull();
     });
 
     it("saveSuspendedTurn + getSuspendedTurn + clearSuspendedTurn", async () => {
@@ -338,6 +391,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         toolName: "do_thing",
         toolArgs: { arg: "x" },
         resumeKey: "do_thing:x",
+        ordinal: 0,
         attempt: 1,
         createdAt: 1,
       };
@@ -357,6 +411,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         id: "g-1",
         sessionId: "sess-1",
         threadId: "th-1",
+        queueItemId: "q-1",
+        resumeKey: "rk",
+        ordinal: 0,
         type: "approval",
         status: "pending",
         title: "x",

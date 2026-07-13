@@ -16,10 +16,11 @@ import type {
  * `DecisionGateExpiredError`. Tools should let these errors propagate so the
  * agent loop ends the turn cleanly.
  *
- * Restart-safe re-entrancy is a follow-up: when SuspendedTurnState is reloaded
- * from a persistent store, the tool will be re-invoked from scratch with
- * ctx.suspendedDecision populated, and this manager's first call will short-
- * circuit to return the stored resolution. Not implemented yet.
+ * Restart-safe re-entrancy: when SuspendedTurnState is reloaded from a
+ * persistent store (reconcileGate/armPendingGateForRestart/replayBlocked in
+ * thread.ts), the tool is re-invoked from scratch with ctx.suspendedDecision
+ * populated, and this manager's first call short-circuits (shouldShortCircuit)
+ * to return the stored resolution without opening a second gate.
  */
 export class DecisionGateWithdrawnError extends Error {
   constructor(public readonly gateId: string, public readonly reason: DecisionWithdrawReason) {
@@ -137,13 +138,29 @@ export interface GateContext {
   resumeKey: string;
 }
 
-export function deterministicGateId(ctx: GateContext): string {
-  return `gate:${ctx.sessionId}:${ctx.threadId}:${ctx.queueItemId}:${ctx.resumeKey}`;
+/** Default expiry windows per gate type; every gate gets an expiresAt. */
+export const GATE_EXPIRY_DEFAULT_MS = {
+  approval: 72 * 60 * 60 * 1000,
+  question: 72 * 60 * 60 * 1000,
+  credential_request: 24 * 60 * 60 * 1000,
+} as const;
+
+/** Prefix shared by every gate for a (queueItemId, resumeKey) pair, across ordinals. */
+export function gateIdPrefix(ctx: GateContext): string {
+  return `gate:${ctx.sessionId}:${ctx.threadId}:${ctx.queueItemId}:${ctx.resumeKey}:`;
+}
+
+export function deterministicGateId(ctx: GateContext & { ordinal: number }): string {
+  return `${gateIdPrefix(ctx)}${ctx.ordinal}`;
 }
 
 /**
  * Returns whether the engine should short-circuit `requestDecision` and
  * return a stored resolution from a replayed tool execution.
+ *
+ * The replay checkpoint carries a single gate id for this suspension point;
+ * matching on the (sessionId, threadId, queueItemId, resumeKey) prefix ties the
+ * re-run tool call to that gate without re-deriving the ordinal.
  *
  * Pure function — kept testable in isolation from Thread/Agent timing.
  */
@@ -153,13 +170,15 @@ export function shouldShortCircuit(args: {
 }): { match: true; resolution: DecisionResolution } | { match: false } {
   const { ctx, suspendedDecision } = args;
   if (!suspendedDecision) return { match: false };
-  const expectedId = deterministicGateId(ctx);
-  if (suspendedDecision.gateId !== expectedId) return { match: false };
+  if (!suspendedDecision.gateId.startsWith(gateIdPrefix(ctx))) return { match: false };
   if (!suspendedDecision.resolution) return { match: false };
   return { match: true, resolution: suspendedDecision.resolution };
 }
 
-export function fromRequest(req: DecisionGateRequest, gateCtx: GateContext): DecisionGate {
+export function fromRequest(
+  req: DecisionGateRequest,
+  gateCtx: GateContext & { ordinal: number },
+): DecisionGate {
   if (!req.resumeKey) {
     throw new Error(
       "DecisionGateRequest.resumeKey is required for restart-safe gates. " +
@@ -171,6 +190,9 @@ export function fromRequest(req: DecisionGateRequest, gateCtx: GateContext): Dec
     id: deterministicGateId(gateCtx),
     sessionId: gateCtx.sessionId,
     threadId: gateCtx.threadId,
+    queueItemId: gateCtx.queueItemId,
+    resumeKey: gateCtx.resumeKey,
+    ordinal: gateCtx.ordinal,
     type: req.type,
     title: req.title,
     body: req.body,
@@ -182,7 +204,7 @@ export function fromRequest(req: DecisionGateRequest, gateCtx: GateContext): Dec
             { id: "deny", label: "Deny", style: "danger" },
           ]
         : []),
-    expiresAt: req.expiresAt,
+    expiresAt: req.expiresAt ?? now + GATE_EXPIRY_DEFAULT_MS[req.type],
     status: "pending",
     context: req.context,
     origin: req.origin,

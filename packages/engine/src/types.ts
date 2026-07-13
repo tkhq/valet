@@ -421,6 +421,16 @@ export interface DecisionGate {
   id: string;
   sessionId: string;
   threadId: string;
+  /** The queue item whose turn opened this gate. Part of the ordinal identity. */
+  queueItemId: string;
+  /** Stable per-suspension-point key supplied by the tool. Part of the ordinal identity. */
+  resumeKey: string;
+  /**
+   * Monotonic retry counter for a (queueItemId, resumeKey) pair. Replay reuses
+   * the same ordinal (joins the same persisted gate); a retried action after a
+   * terminal decision gets ordinal+1 (a fresh human decision).
+   */
+  ordinal: number;
   type: DecisionGateType;
   title: string;
   body?: string;
@@ -466,6 +476,8 @@ export interface SuspendedTurnState {
   toolName: string;
   toolArgs: Record<string, unknown>;
   resumeKey: string;
+  /** The gate's ordinal at checkpoint time — replay reconstructs the gate id from (resumeKey, ordinal). */
+  ordinal: number;
   attempt: number;
   createdAt: number;
 }
@@ -809,6 +821,13 @@ export interface SessionStore {
   ): Promise<SessionEntry[]>;
   listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]>;
   getDecisionGate(sessionId: string, gateId: string): Promise<DecisionGate | null>;
+  /** Latest gate (any status) for a (queueItemId, resumeKey) pair, or null. */
+  getLatestGateForResume(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+    resumeKey: string,
+  ): Promise<DecisionGate | null>;
   getSuspendedTurn(sessionId: string, threadId: string): Promise<SuspendedTurnState | null>;
   deleteSession(id: string): Promise<void>;
 }

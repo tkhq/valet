@@ -215,6 +215,21 @@ export class InMemorySessionStore implements SessionStore {
     return this.row(sessionId).gates.get(gateId) ?? null;
   }
 
+  async getLatestGateForResume(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+    resumeKey: string,
+  ): Promise<DecisionGate | null> {
+    const prefix = `gate:${sessionId}:${threadId}:${queueItemId}:${resumeKey}:`;
+    const matches = [...this.row(sessionId).gates.values()].filter(
+      (g) => g.threadId === threadId && g.id.startsWith(prefix),
+    );
+    if (matches.length === 0) return null;
+    matches.sort((a, b) => b.ordinal - a.ordinal);
+    return { ...matches[0] };
+  }
+
   async getSuspendedTurn(
     sessionId: string,
     threadId: string,

@@ -159,6 +159,9 @@ export const engineDecisionGates = sqliteTable(
     id: text("id").primaryKey(),
     sessionId: text("session_id").notNull(),
     threadId: text("thread_id").notNull(),
+    queueItemId: text("queue_item_id").notNull(),
+    resumeKey: text("resume_key").notNull(),
+    ordinal: integer("ordinal").notNull(),
     type: text("type").notNull(),
     status: text("status").notNull(),
     title: text("title").notNull(),
@@ -171,7 +174,15 @@ export const engineDecisionGates = sqliteTable(
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
-  (t) => [index("engine_decision_gates_thread").on(t.sessionId, t.threadId, t.status)],
+  (t) => [
+    index("engine_decision_gates_thread").on(t.sessionId, t.threadId, t.status),
+    index("engine_decision_gates_resume").on(
+      t.sessionId,
+      t.threadId,
+      t.queueItemId,
+      t.resumeKey,
+    ),
+  ],
 );
 
 export const engineDecisionGateRefs = sqliteTable(
@@ -221,6 +232,7 @@ export const engineSuspendedTurns = sqliteTable(
     toolName: text("tool_name").notNull(),
     toolArgs: text("tool_args").notNull(),
     resumeKey: text("resume_key").notNull(),
+    ordinal: integer("ordinal").notNull(),
     attempt: integer("attempt").notNull(),
     createdAt: integer("created_at").notNull(),
   },

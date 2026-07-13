@@ -522,6 +522,7 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
         toolName: "do_thing",
         toolArgs: {},
         resumeKey: "do_thing",
+        ordinal: 0,
         attempt: 1,
         createdAt: Date.now(),
       };

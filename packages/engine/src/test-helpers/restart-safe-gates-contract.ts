@@ -87,12 +87,16 @@ export function runRestartSafeGatesContract(
       });
 
       expect(gate.status).toBe("pending");
+      // First gate for this (queueItem, resumeKey) is ordinal 0.
+      expect(gate.ordinal).toBe(0);
+      expect(gate.id.endsWith(":0")).toBe(true);
       const persistedGates = await store.listDecisionGates(SESSION_ID);
       expect(persistedGates).toHaveLength(1);
       const suspended = await store.getSuspendedTurn(SESSION_ID, gate.threadId);
       expect(suspended?.toolName).toBe("do_thing");
       expect(suspended?.toolArgs).toEqual({ arg: "x" });
       expect(suspended?.resumeKey).toBe("do_thing:x");
+      expect(suspended?.ordinal).toBe(0);
 
       faux1.unregister();
 
@@ -144,6 +148,12 @@ export function runRestartSafeGatesContract(
 
       const finalGate = await store.getDecisionGate(SESSION_ID, gate.id);
       expect(finalGate?.status).toBe("resolved");
+
+      // Replay matched the SAME persisted gate — no ordinal-1 twin was minted on
+      // restore (replay reconstructs the id from the checkpoint, not "latest").
+      const allGates = await store.listDecisionGates(SESSION_ID);
+      expect(allGates).toHaveLength(1);
+      expect(allGates[0]?.id).toBe(gate.id);
 
       // The resumed submission settles `completed` — reconciliation owns a
       // fresh fenced attempt for the suspended turn, so the item no longer

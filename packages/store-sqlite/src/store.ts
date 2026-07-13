@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { and, eq, asc } from "drizzle-orm";
+import { and, eq, asc, desc } from "drizzle-orm";
 import {
   engineSessions,
   engineThreads,
@@ -387,6 +387,9 @@ export class SqliteSessionStore implements SessionStore {
         id: gate.id,
         sessionId,
         threadId,
+        queueItemId: gate.queueItemId,
+        resumeKey: gate.resumeKey,
+        ordinal: gate.ordinal,
         type: gate.type,
         status: gate.status,
         title: gate.title,
@@ -492,6 +495,7 @@ export class SqliteSessionStore implements SessionStore {
           toolName: s.toolName,
           toolArgs: JSON.stringify(s.toolArgs),
           resumeKey: s.resumeKey,
+          ordinal: s.ordinal,
           attempt: s.attempt,
           createdAt: s.createdAt,
         })
@@ -506,6 +510,7 @@ export class SqliteSessionStore implements SessionStore {
             toolName: s.toolName,
             toolArgs: JSON.stringify(s.toolArgs),
             resumeKey: s.resumeKey,
+            ordinal: s.ordinal,
             attempt: s.attempt,
           },
         })
@@ -630,6 +635,29 @@ export class SqliteSessionStore implements SessionStore {
     return row ? rowToGate(row) : null;
   }
 
+  async getLatestGateForResume(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+    resumeKey: string,
+  ): Promise<DecisionGate | null> {
+    const row = this.db
+      .select()
+      .from(engineDecisionGates)
+      .where(
+        and(
+          eq(engineDecisionGates.sessionId, sessionId),
+          eq(engineDecisionGates.threadId, threadId),
+          eq(engineDecisionGates.queueItemId, queueItemId),
+          eq(engineDecisionGates.resumeKey, resumeKey),
+        ),
+      )
+      .orderBy(desc(engineDecisionGates.ordinal))
+      .limit(1)
+      .get();
+    return row ? rowToGate(row) : null;
+  }
+
   async getSuspendedTurn(
     sessionId: string,
     threadId: string,
@@ -656,6 +684,7 @@ export class SqliteSessionStore implements SessionStore {
       toolName: row.toolName,
       toolArgs: parseJson(row.toolArgs) ?? {},
       resumeKey: row.resumeKey,
+      ordinal: row.ordinal,
       attempt: row.attempt,
       createdAt: row.createdAt,
     };
@@ -972,6 +1001,9 @@ function rowToGate(row: typeof engineDecisionGates.$inferSelect): DecisionGate {
     id: row.id,
     sessionId: row.sessionId,
     threadId: row.threadId,
+    queueItemId: row.queueItemId,
+    resumeKey: row.resumeKey,
+    ordinal: row.ordinal,
     type: row.type as DecisionGate["type"],
     status: row.status as DecisionGate["status"],
     title: row.title,
