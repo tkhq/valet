@@ -132,6 +132,14 @@ adminRouter.post("/submissions/:sessionId/:itemId/force-settle", async (c) => {
       await live.withdrawDecision(gate.id, "cancel");
       const withdrawn: DecisionGate = { ...gate, status: "withdrawn", updatedAt: Date.now() };
       await engineStore.saveDecisionGate(sessionId, gate.threadId, withdrawn);
+      // Mirror the engine's own terminal-gate-transition sites (e.g.
+      // Thread.terminalizeReconciledGate / steer-supersession cleanup): the
+      // `decision_gate` DAG entry must be re-stamped whenever the gate row
+      // transitions, or the entry stays stuck on its pre-withdrawal status.
+      await engineStore.updateDecisionGateEntry(sessionId, gate.threadId, gate.id, {
+        gate: withdrawn,
+        withdrawnReason: "cancel",
+      });
       // Deterministic eventKey dedupes against Thread.withdrawDecision's own
       // emit in the live-waiter case, so clients see a single frame.
       await eventStream.append(

@@ -250,21 +250,36 @@ describe("admin submissions surface", () => {
       // dangling row a live blocked turn would otherwise leave behind.
       const now = Date.now();
       const gateId = `gate:${sessionId}:${threadId}:q-gate:approve:0`;
-      await engineStore.saveDecisionGate(sessionId, threadId, {
+      const pendingGate = {
         id: gateId,
         sessionId,
         threadId,
         queueItemId: "q-gate",
         resumeKey: "approve",
         ordinal: 0,
-        type: "approval",
+        type: "approval" as const,
         title: "Proceed?",
         actions: [{ id: "approve", label: "Approve" }],
-        status: "pending",
+        status: "pending" as const,
         expiresAt: now + 72 * 60 * 60 * 1000,
         createdAt: now,
         updatedAt: now,
-      });
+      };
+      await engineStore.saveDecisionGate(sessionId, threadId, pendingGate);
+      // Also seed the DAG's `decision_gate` entry — the row that must be
+      // re-stamped when the gate is withdrawn, or it stays stuck "pending".
+      await engineStore.appendEntries(sessionId, threadId, [
+        {
+          id: "e-gate",
+          sessionId,
+          threadId,
+          parentId: null,
+          type: "decision_gate",
+          gate: pendingGate,
+          queueItemId: "q-gate",
+          createdAt: now,
+        },
+      ]);
 
       const c = connect(`${api.wsUrl}/api/sessions/${sessionId}/ws?fromOffset=0`);
       await c.waitFor((f) => f.type === "init");
@@ -286,6 +301,16 @@ describe("admin submissions surface", () => {
       // The durable gate row is now terminal, not left PENDING for the sweep.
       const gate = await engineStore.getDecisionGate(sessionId, gateId);
       expect(gate?.status).toBe("withdrawn");
+
+      // The DAG's decision_gate entry must be re-stamped too, or the
+      // persisted transcript stays stuck on the pre-withdrawal "pending"
+      // gate status forever (persistence-shape divergence).
+      const entries = await engineStore.getEntries(sessionId, threadId);
+      const gateEntry = entries.find(
+        (e): e is typeof e & { type: "decision_gate" } => e.type === "decision_gate" && e.id === "e-gate",
+      );
+      expect(gateEntry?.gate.status).toBe("withdrawn");
+      expect(gateEntry?.withdrawnReason).toBe("cancel");
     } finally {
       await api.cleanup();
     }
