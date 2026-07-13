@@ -96,6 +96,16 @@ export class SandboxAttachment {
     return this._sandbox?.id;
   }
 
+  /**
+   * The backend's declared cold-start estimate (`SandboxCapabilities.coldStartEstimateMs`),
+   * exposed so callers building a cold-turn hint (spec decision 7) don't need
+   * their own handle on the provider. `forSandbox` attachments have no
+   * provider and report `undefined`.
+   */
+  get coldStartEstimateMs(): number | undefined {
+    return this.estimateMs;
+  }
+
   currentEpoch(): number {
     return this._epoch;
   }

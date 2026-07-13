@@ -1417,6 +1417,12 @@ export class Thread {
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
 
+    // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
+    // start of the claimed turn, in parallel with the LLM call — never at
+    // session-create time. Fire-and-forget; tool ops that touch the
+    // sandbox await readiness themselves via PolicySandbox.
+    this.session.attachment.warm();
+
     // Persist user message entry. QueueItem.metadata flows through onto the
     // entry so synthetic flags like compaction_continue survive into the DAG
     // for client UIs and for later restoration.
@@ -1454,6 +1460,11 @@ export class Thread {
     // Apply role overlay (system-prompt overlay + optional model override) for
     // this one turn. Restored unconditionally in finally.
     const roleOverlay = this.applyRoleForTurn(item);
+    // Cold-attachment hint (spec decision 7), applied AFTER the role overlay
+    // so the two compose (role text, then hint). Restored unconditionally in
+    // finally, before the role restore, so both idioms nest correctly
+    // whether or not a role was applied this turn.
+    const coldHintPrompt = this.applyColdHintForTurn();
     try {
       try {
         await this.runAgent(text);
@@ -1475,12 +1486,34 @@ export class Thread {
         }
       }
     } finally {
+      this.restoreColdHintAfterTurn(coldHintPrompt);
       this.restoreRoleAfterTurn(roleOverlay);
       // Restore the agent's baseline model so the next turn picks up any
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
       this.agent.state.model = baselineModel;
     }
+  }
+
+  /**
+   * Cold-attachment model hint (spec decision 7): when the sandbox
+   * attachment isn't ready at turn start, appends a hint to the
+   * (role-overlaid) system prompt telling the model filesystem/shell tools
+   * will wait. Returns the pre-hint prompt so the caller can restore it
+   * unconditionally in the turn's finally, regardless of whether a role was
+   * also applied this turn.
+   */
+  private applyColdHintForTurn(): string {
+    const preHintPrompt = this.agent.state.systemPrompt;
+    if (this.session.attachment.state === "ready") return preHintPrompt;
+    const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
+    const hint = `\n\n[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`;
+    this.agent.state.systemPrompt = preHintPrompt + hint;
+    return preHintPrompt;
+  }
+
+  private restoreColdHintAfterTurn(preHintPrompt: string): void {
+    this.agent.state.systemPrompt = preHintPrompt;
   }
 
   private applyRoleForTurn(item: QueueItem): RoleOverlay {

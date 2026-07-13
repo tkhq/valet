@@ -24,6 +24,9 @@ describe("LocalSandbox: filesystem", () => {
 
   it("resolves relative paths against the workspace cwd", async () => {
     const sb = new LocalSandbox("test", tmp);
+    // Parent-creation on write is now the PolicySandbox wrapper's job
+    // (spec decision 3), not the provider's — create the parent explicitly.
+    await mkdir(join(tmp, "a", "b"), { recursive: true });
     await sb.writeFile("a/b/c.txt", "deep");
     expect(await readFile(join(tmp, "a", "b", "c.txt"), "utf8")).toBe("deep");
   });

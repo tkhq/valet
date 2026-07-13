@@ -1,6 +1,7 @@
 import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
+import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type {
   BusEvent,
   CreateSessionOptions,
@@ -51,6 +52,7 @@ export class Session {
   readonly providers: ProviderBundle;
   readonly options: CreateSessionOptions;
   readonly sandbox: Sandbox;
+  readonly attachment: SandboxAttachment;
   readonly builtinTools: ToolDef[] = builtinTools;
   /**
    * Opaque per-instance owner id for lease ownership. Claims taken by this
@@ -68,13 +70,42 @@ export class Session {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(id: string, options: CreateSessionOptions, providers: ProviderBundle, sandbox: Sandbox) {
+  constructor(
+    id: string,
+    options: CreateSessionOptions,
+    providers: ProviderBundle,
+    sandbox: Sandbox,
+    attachment: SandboxAttachment,
+  ) {
     this.id = id;
     this.options = options;
     this.providers = providers;
     this.sandbox = sandbox;
+    this.attachment = attachment;
     for (const role of options.roles ?? []) this.roles.set(role.name, role);
     for (const skill of options.skills ?? []) this.skills.set(skill.name, skill);
+    // sandbox_status emissions (spec decision 8): deterministic eventKey so
+    // re-provision loops / re-emits dedupe to a single durable row per
+    // epoch+state. Emit failures must never throw into the attachment —
+    // Session.emit already log-and-continues, and onStatus listeners are
+    // isolated by the attachment itself.
+    this.attachment.onStatus((status: AttachmentStatus) => {
+      // "detached" is never actually emitted by SandboxAttachment (its
+      // status callbacks only fire from doProvision/destroy), but the type
+      // includes it — narrow it away so the assignment to EngineEvent's
+      // (slightly different) state union type-checks.
+      if (status.state === "detached") return;
+      void this.emit(
+        {
+          type: "sandbox_status",
+          sandboxId: status.sandboxId,
+          state: status.state,
+          epoch: status.epoch,
+          estimateMs: status.estimateMs,
+        },
+        { eventKey: `sandbox:${status.epoch}:${status.state}` },
+      );
+    });
   }
 
   // ── durable-execution timers ────────────────────────────────────
@@ -173,8 +204,9 @@ export class Session {
     options: CreateSessionOptions,
     providers: ProviderBundle,
     sandbox: Sandbox,
+    attachment: SandboxAttachment,
   ): Promise<Session> {
-    const session = new Session(data.id, options, providers, sandbox);
+    const session = new Session(data.id, options, providers, sandbox, attachment);
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -410,7 +442,7 @@ export class Session {
       this.sweepTimer = null;
     }
     await Promise.all([...this.threads.values()].map((t) => t.abort()));
-    if (this.sandbox.destroy) await this.sandbox.destroy();
+    await this.attachment.destroy();
     await this.providers.store.deleteSession(this.id);
   }
 
@@ -433,7 +465,7 @@ export class Session {
       workspace: this.options.workspace,
       purpose: this.options.purpose ?? "interactive",
       status: "running",
-      sandboxId: this.sandbox.id,
+      sandboxId: this.attachment.sandboxId,
       parentThreadId: this.options.parentThreadId,
       model: this.options.model.id,
       createdAt: Date.now(),

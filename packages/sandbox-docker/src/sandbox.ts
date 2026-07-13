@@ -121,15 +121,14 @@ export class DockerSandbox implements Sandbox {
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    const target = this.resolveHostPath(path);
-    await fs.mkdir(dirname(target), { recursive: true });
-    await fs.writeFile(target, content, "utf8");
+    // No pre-write mkdir: the PolicySandbox wrapper owns write-with-
+    // parent-creation (attempt write, mkdir parent + retry once on
+    // rejection) — see spec decision 3.
+    await fs.writeFile(this.resolveHostPath(path), content, "utf8");
   }
 
   async writeBinary(path: string, data: Uint8Array): Promise<void> {
-    const target = this.resolveHostPath(path);
-    await fs.mkdir(dirname(target), { recursive: true });
-    await fs.writeFile(target, data);
+    await fs.writeFile(this.resolveHostPath(path), data);
   }
 
   async readdir(path: string): Promise<string[]> {
@@ -188,11 +187,6 @@ export class DockerSandbox implements Sandbox {
       // already gone
     }
   }
-}
-
-function dirname(p: string): string {
-  const idx = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-  return idx <= 0 ? "/" : p.slice(0, idx);
 }
 
 interface ExecProcessOpts {

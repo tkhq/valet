@@ -1,5 +1,7 @@
 import { VirtualSandboxProvider } from "./providers/sandbox/virtual.js";
 import { Session } from "./session.js";
+import { SandboxAttachment } from "./sandbox/attachment.js";
+import { PolicySandbox } from "./sandbox/policy.js";
 import type {
   CreateSessionOptions,
   EngineOptions,
@@ -25,8 +27,8 @@ export class Engine {
     const id = opts.id ?? uid("sess");
     if (this.sessions.has(id)) return this.sessions.get(id)!;
 
-    const sandbox = await this.materializeSandbox(opts.sandbox);
-    const session = new Session(id, opts, this.opts.providers, sandbox);
+    const { attachment, sandbox } = await this.materializeSandbox(opts.sandbox, opts.sandboxReadyTimeoutMs);
+    const session = new Session(id, opts, this.opts.providers, sandbox, attachment);
     this.sessions.set(id, session);
 
     await this.opts.providers.store.saveSession(await session.toData());
@@ -38,12 +40,16 @@ export class Engine {
     if (cached) return cached;
     const data = await this.opts.providers.store.getSession(args.sessionId);
     if (!data) throw new Error(`session not found: ${args.sessionId}`);
-    const sandbox = await this.materializeSandbox(args.options.sandbox);
+    const { attachment, sandbox } = await this.materializeSandbox(
+      args.options.sandbox,
+      args.options.sandboxReadyTimeoutMs,
+    );
     const session = await Session.rehydrate(
       data,
       { ...args.options, id: args.sessionId },
       this.opts.providers,
       sandbox,
+      attachment,
     );
     this.sessions.set(args.sessionId, session);
     return session;
@@ -59,13 +65,27 @@ export class Engine {
     this.sessions.delete(sessionId);
   }
 
+  /**
+   * Builds the {@link SandboxAttachment} + {@link PolicySandbox} pair for a
+   * session (spec decision 5). A concrete `Sandbox` arg produces a
+   * ready-at-epoch-1 attachment (`SandboxAttachment.forSandbox`); a
+   * `SandboxCreateOpts` (or undefined) produces a `detached` attachment over
+   * the configured provider — `provider.create` is never awaited here.
+   * Neither `createSession` nor `restoreSession` warms it; the first claimed
+   * turn does (`Thread.runTurn`).
+   */
   private async materializeSandbox(
     arg: Sandbox | SandboxCreateOpts | undefined,
-  ): Promise<Sandbox> {
+    readyTimeoutMs: number | undefined,
+  ): Promise<{ attachment: SandboxAttachment; sandbox: Sandbox }> {
+    let attachment: SandboxAttachment;
     if (arg && typeof (arg as Sandbox).readFile === "function") {
-      return arg as Sandbox;
+      attachment = SandboxAttachment.forSandbox(arg as Sandbox);
+    } else {
+      const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
+      attachment = new SandboxAttachment(provider, (arg ?? {}) as SandboxCreateOpts);
     }
-    const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
-    return provider.create((arg ?? {}) as SandboxCreateOpts);
+    const sandbox = new PolicySandbox(attachment, { readyTimeoutMs });
+    return { attachment, sandbox };
   }
 }
