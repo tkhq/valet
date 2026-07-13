@@ -33,6 +33,7 @@
     "@valet/store-sqlite": "workspace:*",
     "drizzle-orm": "^0.45.1",
     "hono": "^4.3.0",
+    "typebox": "^1.1.24",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
