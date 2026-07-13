@@ -100,7 +100,22 @@ CREATE TABLE `engine_meta` (
 	`value` text NOT NULL
 );
 --> statement-breakpoint
-INSERT INTO `engine_meta` (`key`, `value`) VALUES ('schema_version', '1');--> statement-breakpoint
+INSERT INTO `engine_meta` (`key`, `value`) VALUES ('schema_version', '2');--> statement-breakpoint
+CREATE TABLE `engine_events` (
+	`session_id` text NOT NULL,
+	`seq` integer NOT NULL,
+	`event_key` text NOT NULL,
+	`thread_id` text,
+	`queue_item_id` text,
+	`user_id` text,
+	`event_type` text NOT NULL,
+	`payload` text NOT NULL,
+	`timestamp` integer NOT NULL,
+	PRIMARY KEY (`session_id`, `seq`)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `engine_events_event_key` ON `engine_events` (`session_id`,`event_key`);--> statement-breakpoint
+CREATE INDEX `engine_events_queue_item` ON `engine_events` (`session_id`,`queue_item_id`);--> statement-breakpoint
 CREATE TABLE `engine_sessions` (
 	`id` text PRIMARY KEY NOT NULL,
 	`owner_type` text NOT NULL,

@@ -187,6 +187,27 @@ export const engineDecisionGateRefs = sqliteTable(
   (t) => [index("engine_decision_gate_refs_gate").on(t.gateId)],
 );
 
+export const engineEvents = sqliteTable(
+  "engine_events",
+  {
+    sessionId: text("session_id").notNull(),
+    seq: integer("seq").notNull(),
+    eventKey: text("event_key").notNull(),
+    threadId: text("thread_id"),
+    queueItemId: text("queue_item_id"),
+    userId: text("user_id"),
+    eventType: text("event_type").notNull(),
+    /** JSON: the full EngineEvent. */
+    payload: text("payload").notNull(),
+    timestamp: integer("timestamp").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.sessionId, t.seq] }),
+    uniqueIndex("engine_events_event_key").on(t.sessionId, t.eventKey),
+    index("engine_events_queue_item").on(t.sessionId, t.queueItemId),
+  ],
+);
+
 export const engineSuspendedTurns = sqliteTable(
   "engine_suspended_turns",
   {

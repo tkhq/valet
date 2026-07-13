@@ -10,6 +10,7 @@ import {
   engineDecisionGateRefs,
   engineSuspendedTurns,
   engineAttemptMarkers,
+  engineEvents,
 } from "./schema.js";
 import { ConflictError, NotFoundError, StaleAttemptError } from "@valet/engine";
 import type {
@@ -687,7 +688,7 @@ export class SqliteSessionStore implements SessionStore {
           }
         }
       });
-      run();
+      run.immediate();
     } catch (err) {
       if (item.dispatchId && isUniqueConstraintError(err)) {
         const existingRow = this.sqlite
@@ -850,7 +851,7 @@ export class SqliteSessionStore implements SessionStore {
         )
         .run(outcome.outcome, outcome.error ?? null, Date.now(), itemId);
     });
-    run();
+    run.immediate();
   }
 
   async finalizeSettlement(
@@ -866,7 +867,7 @@ export class SqliteSessionStore implements SessionStore {
         .prepare(`UPDATE engine_queue_items SET status = 'settled', updated_at = ? WHERE id = ?`)
         .run(Date.now(), itemId);
     });
-    run();
+    run.immediate();
   }
 
   async settleUnclaimed(
@@ -909,7 +910,7 @@ export class SqliteSessionStore implements SessionStore {
         .prepare(`UPDATE engine_queue_items SET status = ?, updated_at = ? WHERE id = ?`)
         .run(nextStatus, Date.now(), itemId);
     });
-    run();
+    run.immediate();
   }
 
   async deleteSession(id: string): Promise<void> {
@@ -922,6 +923,7 @@ export class SqliteSessionStore implements SessionStore {
       this.db.delete(engineDecisionGates).where(eq(engineDecisionGates.sessionId, id)).run();
       this.db.delete(engineSuspendedTurns).where(eq(engineSuspendedTurns.sessionId, id)).run();
       this.db.delete(engineThreads).where(eq(engineThreads.sessionId, id)).run();
+      this.db.delete(engineEvents).where(eq(engineEvents.sessionId, id)).run();
       this.db.delete(engineSessions).where(eq(engineSessions.id, id)).run();
     });
     run();

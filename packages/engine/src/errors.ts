@@ -57,6 +57,18 @@ export class ConflictError extends Error {
 }
 
 /**
+ * Thrown when caller-supplied input fails a basic shape/format check before
+ * it ever reaches storage — e.g. an `EventStream.read` `fromOffset` that
+ * isn't a safe-integer decimal string.
+ */
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ValidationError";
+  }
+}
+
+/**
  * Thrown by `Thread.awaitResult` when `opts.timeoutMs` elapses before the
  * submission (or, for a merged constituent, the item it delegates to)
  * settles. The wait is purely observational — this error never disturbs the

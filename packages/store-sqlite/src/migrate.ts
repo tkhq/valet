@@ -13,7 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * mismatch (including "older") means the db predates this migration set —
  * delete `~/.valet/app.db` and let it recreate.
  */
-export const ENGINE_SCHEMA_VERSION = "1";
+export const ENGINE_SCHEMA_VERSION = "2";
 
 /**
  * Apply this package's sqlite migrations to an open better-sqlite3 connection.
