@@ -126,7 +126,7 @@ export class VirtualSandbox implements Sandbox {
 
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
     const cwd = opts?.cwd ?? this.cwd;
-    const out = await runVirtualCommand(this, command, cwd);
+    const out = await runVirtualCommand(this, command, cwd, opts?.env);
     if (opts?.maxOutputBytes && out.stdout.length > opts.maxOutputBytes) {
       return { ...out, stdout: out.stdout.slice(0, opts.maxOutputBytes), truncated: true };
     }
@@ -171,7 +171,12 @@ export class VirtualSandbox implements Sandbox {
   }
 }
 
-async function runVirtualCommand(sb: VirtualSandbox, command: string, cwd: string): Promise<ExecResult> {
+async function runVirtualCommand(
+  sb: VirtualSandbox,
+  command: string,
+  cwd: string,
+  env?: Record<string, string>,
+): Promise<ExecResult> {
   // Strip "sh -c '...'" wrapping
   const shMatch = command.match(/^\s*(?:bash|sh)\s+-c\s+(['"])([\s\S]*)\1\s*$/);
   const inner = shMatch ? shMatch[2] : command;
@@ -183,7 +188,11 @@ async function runVirtualCommand(sb: VirtualSandbox, command: string, cwd: strin
 
   const echoMatch = trimmed.match(/^echo\s+(.*)$/);
   if (echoMatch) {
-    const arg = echoMatch[1].replace(/^['"]|['"]$/g, "");
+    let arg = echoMatch[1].replace(/^['"]|['"]$/g, "");
+    // Minimal $VAR expansion against the per-request env — just enough to
+    // exercise "env injected on this exec, gone on the next" in tests.
+    const varMatch = arg.match(/^\$(\w+)$/);
+    if (varMatch) arg = env?.[varMatch[1]] ?? "";
     return ok(arg + "\n");
   }
 

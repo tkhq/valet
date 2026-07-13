@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, posix, resolve } from "node:path";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -142,7 +142,10 @@ export class DockerSandbox implements Sandbox {
       }
       return p; // best-effort; only exists if the host path exists in the container
     }
-    return p; // relative paths are resolved against the container's cwd (= containerWorkspace)
+    // Relative paths resolve against the container workspace. Callers that
+    // use this as a --workdir argument need an absolute container path —
+    // docker exec rejects a relative one.
+    return posix.join(this.containerWorkspace, p);
   }
 
   async readFile(path: string): Promise<string> {
