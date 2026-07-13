@@ -53,7 +53,7 @@ function wsUrl(sessionId: string, fromOffset: string | undefined): string {
   // Vite proxy upgrades /api → server, including WS (`ws: true`).
   // In production, the same /api path is served by the API directly.
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const base = `${proto}//${window.location.host}/api/sessions/${sessionId}/ws`;
+  const base = `${proto}//${window.location.host}/api/sessions/${encodeURIComponent(sessionId)}/ws`;
   return fromOffset ? `${base}?fromOffset=${encodeURIComponent(fromOffset)}` : base;
 }
 

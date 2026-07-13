@@ -13,11 +13,12 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AddressInfo } from "node:net";
+import { createServer, type AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 import {
   InMemoryCredentialStore,
   VirtualSandboxProvider,
+  type SandboxProvider,
 } from "@valet/engine";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
@@ -33,7 +34,30 @@ export interface TestApi {
   cleanup(): Promise<void>;
 }
 
-export async function bootTestApi(): Promise<TestApi> {
+export interface BootTestApiOpts {
+  /** Override the default `VirtualSandboxProvider` — e.g. a create-counting
+   * wrapper that proves a code path never provisions a sandbox. */
+  sandboxProvider?: SandboxProvider;
+}
+
+/** Grabs a free ephemeral port by briefly binding and releasing a socket. A
+ * small race exists between release and the real `serve()` call below, but
+ * it's the same pattern node test harnesses commonly use — `EngineHost`
+ * needs its `apiBaseUrl` before `createApp`/`serve` can hand back the port
+ * `serve({ port: 0 })` would otherwise assign, so a pre-allocated port is
+ * the only order that works here. */
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, () => {
+      const port = (srv.address() as AddressInfo).port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
   process.env.VALET_LOCAL_AUTH = "1";
   // Test-only: enables the `x-valet-test-user-id` impersonation header in
@@ -92,10 +116,16 @@ export async function bootTestApi(): Promise<TestApi> {
   const db = buildAppDb(sqlite);
   const engineDb = drizzle(sqlite);
   const engineStore = new SqliteSessionStore(engineDb);
-  const sandboxProvider = new VirtualSandboxProvider();
+  const sandboxProvider = opts.sandboxProvider ?? new VirtualSandboxProvider();
   const eventStream = new SqliteEventStream(sqlite);
   const engineCredentials = new InMemoryCredentialStore();
   const blobs = new FsBlobStore(blobsRoot);
+
+  // Pre-allocate the port: EngineHost needs `apiBaseUrl` at construction
+  // time, before `serve()` (below) would otherwise hand back a `port: 0`
+  // assignment. See `getFreePort`'s comment for the tradeoff.
+  const port = await getFreePort();
+  const apiBaseUrl = `http://127.0.0.1:${port}`;
 
   const engineHost = new EngineHost({
     engineStore,
@@ -104,6 +134,8 @@ export async function bootTestApi(): Promise<TestApi> {
     engineCredentials,
     blobs,
     anthropicApiKey: ANTHROPIC_API_KEY,
+    db,
+    apiBaseUrl,
   });
 
   const providers: Providers = {
@@ -118,11 +150,10 @@ export async function bootTestApi(): Promise<TestApi> {
   };
 
   const { app, injectWebSocket } = createApp(providers);
-  const server = serve({ fetch: app.fetch, port: 0 });
+  const server = serve({ fetch: app.fetch, port });
   injectWebSocket(server);
 
   await new Promise<void>((resolve) => server.on("listening", () => resolve()));
-  const port = (server.address() as AddressInfo).port;
 
   return {
     baseUrl: `http://localhost:${port}`,

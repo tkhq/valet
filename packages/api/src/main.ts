@@ -76,6 +76,7 @@ const providers = await buildNodeProviders({
   blobsRoot,
   encryptionKey,
   anthropicApiKey,
+  apiBaseUrl: `http://127.0.0.1:${port}`,
 });
 
 // Eager boot restore: pick up any submissions left unsettled by a prior

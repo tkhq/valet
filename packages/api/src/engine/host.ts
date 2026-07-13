@@ -1,13 +1,29 @@
 import { getModel, type Model } from "@mariozechner/pi-ai";
+import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   Engine,
+  orchestratorSessionId,
   type BlobStore,
   type CredentialStore,
   type EventStream,
+  type Principal,
   type SandboxProvider,
   type Session,
   type SessionStore,
 } from "@valet/engine";
+import type { AppDb } from "../lib/drizzle.js";
+import { orchestratorIdentities } from "../schema/index.js";
+import { internalToken } from "../lib/internal-auth.js";
+import { orchestratorPersona } from "../orchestrator/persona.js";
+import { buildMemoryTools } from "../orchestrator/memory-tools.js";
+import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
+import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
+import { journalCompactionHook } from "../orchestrator/compaction.js";
+import type { MemoryScope } from "../services/memory.js";
 
 export interface EngineHostOpts {
   engineStore: SessionStore;
@@ -21,6 +37,20 @@ export interface EngineHostOpts {
   defaultModelId?: string;
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
+  /**
+   * The app db handle — needed only by `orchestratorSessionFor` (memory
+   * snapshot assembly, journal bootstrap, the compaction hook, and the
+   * `orchestrator_identities` upsert). Regular `sessionFor` sessions never
+   * touch it.
+   */
+  db?: AppDb;
+  /**
+   * This process's own base URL (e.g. `http://127.0.0.1:${port}`), handed
+   * to orchestrator sessions as `toolConfig.apiBaseUrl` so the `mem_*`
+   * tools can reach the memory HTTP routes (decision 15). Required for
+   * `orchestratorSessionFor`.
+   */
+  apiBaseUrl?: string;
 }
 
 export interface SessionMeta {
@@ -141,6 +171,131 @@ export class EngineHost {
         console.error(`event retention prune failed for session ${sessionId}:`, err);
       }
     })();
+  }
+
+  /**
+   * Resolve (or lazily create) the well-known orchestrator session for
+   * `principal` (Phase 4 decision 17). Wakes instantly and sandbox-less: the
+   * sandbox is a `SandboxCreateOpts` template, never a pre-created/warm
+   * sandbox — cold attachment is the orchestrator's steady state.
+   *
+   * `CreateSessionOptions` is reconstructed from configuration on every
+   * wake (persona, memory snapshot, tools, toolConfig), not from whatever
+   * was persisted at creation time, per the orchestrator spec's "instant
+   * wake" section — so a restored session gets a freshly-assembled snapshot
+   * and today's journal, same as a brand-new one.
+   */
+  async orchestratorSessionFor(principal: Principal, meta: { actorUserId: string; orgId: string }): Promise<Session> {
+    const sessionId = orchestratorSessionId(principal);
+    const cached = this.cache.get(sessionId);
+    if (cached) return cached.session;
+    const pending = this.inflight.get(sessionId);
+    if (pending) return pending;
+
+    const promise = this.buildOrchestratorSession(sessionId, principal, meta).finally(() => {
+      this.inflight.delete(sessionId);
+    });
+    this.inflight.set(sessionId, promise);
+    return promise;
+  }
+
+  private async buildOrchestratorSession(
+    sessionId: string,
+    principal: Principal,
+    meta: { actorUserId: string; orgId: string },
+  ): Promise<Session> {
+    if (!this.opts.db) {
+      throw new Error("EngineHost: orchestratorSessionFor requires opts.db");
+    }
+    if (!this.opts.apiBaseUrl) {
+      throw new Error("EngineHost: orchestratorSessionFor requires opts.apiBaseUrl");
+    }
+    const db = this.opts.db;
+    const apiBaseUrl = this.opts.apiBaseUrl;
+
+    const workspace = join(homedir(), ".valet", "orchestrator", `${principal.type}-${principal.id}`);
+    await mkdir(workspace, { recursive: true });
+
+    const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId };
+    await ensureTodayJournal(db, scope);
+    const snapshotContent = await assembleMemorySnapshot(db, scope);
+
+    const model = this.resolveModel();
+    const queueMode = principal.type === "user" ? "steer" : "followup";
+
+    const sessionOptions = {
+      userId: meta.actorUserId,
+      orgId: meta.orgId,
+      workspace,
+      purpose: "orchestrator" as const,
+      owner: principal,
+      queueMode: queueMode as "steer" | "followup",
+      sandbox: { workspace, image: this.opts.defaultImage },
+      model,
+      systemPrompt: orchestratorPersona(principal),
+      tools: buildMemoryTools(),
+      toolConfig: { apiBaseUrl, internalToken: internalToken() },
+      systemContext: [{ name: "memory-snapshot", content: snapshotContent, order: 10 }],
+      compactionHooks: [journalCompactionHook(db, scope)],
+    };
+
+    const engine = new Engine({
+      providers: {
+        store: this.opts.engineStore,
+        stream: this.opts.eventStream,
+        credentials: this.opts.engineCredentials,
+        sandboxProvider: this.opts.sandboxProvider,
+        blobs: this.opts.blobs,
+      },
+    });
+
+    const existing = await this.opts.engineStore.getSession(sessionId);
+    const session = existing
+      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      : await engine.createSession({ id: sessionId, ...sessionOptions });
+
+    this.cache.set(sessionId, { engine, session });
+    if (existing) this.pruneExpiredEvents(sessionId);
+
+    await this.ensureOrchestratorIdentity(db, principal, meta.orgId, sessionId);
+
+    return session;
+  }
+
+  /** Upserts the `orchestrator_identities` row on first creation of a
+   * principal's orchestrator (decision 17/20) — a no-op past the first
+   * successful wake since the unique index on (org, ownerType, ownerId)
+   * never changes for a durable, never-rotated orchestrator identity. */
+  private async ensureOrchestratorIdentity(
+    db: AppDb,
+    principal: Principal,
+    orgId: string,
+    sessionId: string,
+  ): Promise<void> {
+    const existing = await db
+      .select()
+      .from(orchestratorIdentities)
+      .where(
+        and(
+          eq(orchestratorIdentities.orgId, orgId),
+          eq(orchestratorIdentities.ownerType, principal.type),
+          eq(orchestratorIdentities.ownerId, principal.id),
+        ),
+      )
+      .get();
+    if (existing) return;
+
+    await db
+      .insert(orchestratorIdentities)
+      .values({
+        id: randomUUID(),
+        orgId,
+        ownerType: principal.type,
+        ownerId: principal.id,
+        sessionId,
+        createdAt: Date.now(),
+      })
+      .run();
   }
 
   /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */

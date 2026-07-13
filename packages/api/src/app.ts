@@ -19,6 +19,7 @@ import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
 import { memoryRouter } from "./routes/memory.js";
+import { orchestratorRouter } from "./routes/orchestrator.js";
 import { registerWsRoutes } from "./routes/ws.js";
 
 export interface CreatedApp {
@@ -55,6 +56,7 @@ export function createApp(providers: Providers): CreatedApp {
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);
+  app.route("/api/orchestrator", orchestratorRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)

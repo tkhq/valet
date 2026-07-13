@@ -11,6 +11,7 @@ import type {
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  EnsureOrchestratorResponse,
   GetSessionResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
@@ -60,22 +61,33 @@ export const api = {
 
   // sessions
   listSessions: () => request<ListSessionsResponse>("GET", "/sessions"),
-  getSession: (id: string) => request<GetSessionResponse>("GET", `/sessions/${id}`),
+  getSession: (id: string) =>
+    request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   createSession: (body: CreateSessionRequest) =>
     request<CreateSessionResponse>("POST", "/sessions", body),
-  deleteSession: (id: string) => request<{ ok: true }>("DELETE", `/sessions/${id}`),
+  deleteSession: (id: string) =>
+    request<{ ok: true }>("DELETE", `/sessions/${encodeURIComponent(id)}`),
   patchSession: (id: string, body: PatchSessionRequest) =>
-    request<PatchSessionResponse>("PATCH", `/sessions/${id}`, body),
+    request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
+
+  // orchestrator (session ids contain colons — always encoded above too, but
+  // this entry point never touches a raw id itself, only ensures one exists)
+  ensureOrchestrator: () =>
+    request<EnsureOrchestratorResponse>("POST", "/orchestrator"),
 
   // threads + messages (session-scoped)
   listThreads: (sessionId: string) =>
-    request<ListThreadsResponse>("GET", `/sessions/${sessionId}/threads`),
+    request<ListThreadsResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/threads`),
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>
-    request<CreateThreadResponse>("POST", `/sessions/${sessionId}/threads`, body),
+    request<CreateThreadResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/threads`,
+      body,
+    ),
   patchThread: (sessionId: string, threadId: string, body: PatchThreadRequest) =>
     request<PatchThreadResponse>(
       "PATCH",
-      `/sessions/${sessionId}/threads/${threadId}`,
+      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}`,
       body,
     ),
   listMessages: (
@@ -87,14 +99,24 @@ export const api = {
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     if (opts?.threadId) qs.set("threadId", opts.threadId);
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListMessagesResponse>("GET", `/sessions/${sessionId}/messages${tail}`);
+    return request<ListMessagesResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
+    );
   },
   sendPrompt: (sessionId: string, body: SendPromptRequest) =>
-    request<SendPromptResponse>("POST", `/sessions/${sessionId}/messages`, body),
+    request<SendPromptResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/messages`,
+      body,
+    ),
 
   // decision gates
   listDecisions: (sessionId: string) =>
-    request<ListDecisionsResponse>("GET", `/sessions/${sessionId}/decisions`),
+    request<ListDecisionsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/decisions`,
+    ),
   resolveDecision: (
     sessionId: string,
     gateId: string,
@@ -102,7 +124,7 @@ export const api = {
   ) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${sessionId}/decisions/${encodeURIComponent(gateId)}/resolve`,
+      `/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(gateId)}/resolve`,
       body,
     ),
   withdrawDecision: (
@@ -112,7 +134,7 @@ export const api = {
   ) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${sessionId}/decisions/${encodeURIComponent(gateId)}/withdraw`,
+      `/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(gateId)}/withdraw`,
       body,
     ),
 };

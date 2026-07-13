@@ -22,6 +22,12 @@ export interface NodeProviderOpts {
    * actually run; leave undefined for read-only routes.
    */
   anthropicApiKey?: string;
+  /**
+   * This process's own base URL, handed to `EngineHost` for orchestrator
+   * sessions' `toolConfig.apiBaseUrl` (Phase 4 decision 15/17). Required
+   * for `orchestratorSessionFor`; regular sessions don't need it.
+   */
+  apiBaseUrl?: string;
 }
 
 export const LOCAL_USER = {
@@ -91,6 +97,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     blobs,
     anthropicApiKey: opts.anthropicApiKey,
+    db,
+    apiBaseUrl: opts.apiBaseUrl,
   });
 
   return {

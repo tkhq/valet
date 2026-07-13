@@ -64,6 +64,19 @@ export interface ListSessionsResponse {
 export type CreateSessionResponse = SessionDetail;
 export type GetSessionResponse = SessionDetail;
 
+// ── REST: orchestrator ────────────────────────────────────────────────────
+
+/** POST /api/orchestrator — ensures the caller's orchestrator session exists. */
+export interface EnsureOrchestratorResponse {
+  sessionId: string;
+}
+
+/** GET /api/orchestrator — probes without creating. */
+export interface GetOrchestratorResponse {
+  sessionId: string;
+  exists: boolean;
+}
+
 // ── REST: threads ─────────────────────────────────────────────────────────
 
 export interface ThreadSummary {

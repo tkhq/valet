@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { ChevronDown, Plus } from "lucide-react";
+import { ChevronDown, Plus, Sparkles } from "lucide-react";
 import type { SessionDetail, SessionSummary } from "@valet/api/wire";
 import { useSession, useSessions } from "~/api/queries";
 import {
@@ -39,6 +39,14 @@ export function TopNav({ onNewSession }: { onNewSession: () => void }) {
       </Link>
 
       <SessionPicker currentSession={session.data} />
+
+      <Link
+        to="/orchestrator"
+        className="flex items-center gap-1.5 rounded px-2 py-1 text-sm text-[--muted] hover:bg-neutral-100 hover:text-[--fg] dark:hover:bg-neutral-900"
+      >
+        <Sparkles className="h-3.5 w-3.5" aria-hidden />
+        <span>Assistant</span>
+      </Link>
 
       <div className="flex-1" />
 
