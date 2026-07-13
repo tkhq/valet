@@ -775,6 +775,24 @@ export interface SessionStore {
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
+  /**
+   * All unsettled submissions across sessions (operator surface). Unlike
+   * `QueueItem` elsewhere (always accessed via an already-known sessionId),
+   * these carry `sessionId` explicitly since callers have no other way to
+   * tell which session each cross-session result belongs to.
+   */
+  listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]>;
+  /**
+   * Operator escape hatch: CAS any non-settled status → settled with the given
+   * outcome; deletes attempt markers. Throws ConflictError if already settled,
+   * NotFoundError if the item doesn't exist.
+   */
+  forceSettle(
+    sessionId: string,
+    itemId: string,
+    outcome: "failed" | "aborted",
+    error?: string,
+  ): Promise<QueueItem>;
   /** Stamp abortRequestedAt on unsettled submissions in scope. First write wins; NOT terminal. */
   requestAbort(sessionId: string, threadId?: string): Promise<void>;
   /** Fenced two-phase settlement for claimed turns: running|blocked→terminalizing, recording the outcome. */

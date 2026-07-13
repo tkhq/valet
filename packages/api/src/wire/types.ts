@@ -364,3 +364,52 @@ export interface ClientPong {
 }
 
 export type ClientFrame = ClientHello | ClientPong;
+
+// ── REST: admin ──────────────────────────────────────────────────────────
+//
+// Operator surface for inspecting/repairing submission lifecycle state
+// across sessions. Admin-only (role === "admin"). Lifecycle-only — no
+// `content` field, since prompt bodies may hold user data.
+
+export type AdminSubmissionStatus =
+  | "collecting"
+  | "queued"
+  | "running"
+  | "blocked_on_decision_gate"
+  | "terminalizing"
+  | "settled";
+
+export interface AdminSubmission {
+  id: string;
+  sessionId: string;
+  threadId: string;
+  status: AdminSubmissionStatus;
+  outcome?: "completed" | "failed" | "aborted" | "superseded" | "merged";
+  error?: string;
+  attemptId?: string;
+  attemptCount: number;
+  maxAttempts: number;
+  ownerId?: string;
+  leaseExpiresAt?: number;
+  /** `leaseExpiresAt != null && leaseExpiresAt < now`, computed server-side. */
+  leaseExpired: boolean;
+  timeoutAt: number;
+  abortRequestedAt?: number;
+  supersededByItemId?: string;
+  mergedIntoItemId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListAdminSubmissionsResponse {
+  submissions: AdminSubmission[];
+}
+
+export interface ForceSettleRequest {
+  outcome: "failed" | "aborted";
+  error?: string;
+}
+
+export interface ForceSettleResponse {
+  submission: AdminSubmission;
+}

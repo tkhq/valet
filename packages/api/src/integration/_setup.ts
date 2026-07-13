@@ -58,6 +58,18 @@ export async function bootTestApi(): Promise<TestApi> {
       "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
     )
     .run("local-org", "local-user", "admin");
+  // Non-admin identity for role-gated route tests. Select it via the
+  // `x-valet-test-user-id` header (see authMiddleware).
+  sqlite
+    .prepare(
+      "INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run("test-member", "member@dev", "Test Member", "member", now);
+  sqlite
+    .prepare(
+      "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
+    )
+    .run("local-org", "test-member", "member");
 
   const blobsRoot = mkdtempSync(join(tmpdir(), "valet-itest-blobs-"));
 

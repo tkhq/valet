@@ -850,6 +850,43 @@ export class SqliteSessionStore implements SessionStore {
     return row ? queueItemRowToItem(row) : null;
   }
 
+  async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
+    const rows = this.sqlite
+      .prepare(`SELECT * FROM engine_queue_items WHERE status != 'settled'`)
+      .all() as QueueItemRow[];
+    return rows.map((row) => ({ ...queueItemRowToItem(row), sessionId: row.session_id }));
+  }
+
+  async forceSettle(
+    sessionId: string,
+    itemId: string,
+    outcome: "failed" | "aborted",
+    error?: string,
+  ): Promise<QueueItem> {
+    const now = Date.now();
+    const run = this.sqlite.transaction(() => {
+      const result = this.sqlite
+        .prepare(
+          `UPDATE engine_queue_items SET status = 'settled', outcome = ?, error = ?, updated_at = ?
+           WHERE session_id = ? AND id = ? AND status != 'settled'`,
+        )
+        .run(outcome, error ?? null, now, sessionId, itemId);
+      if (result.changes === 0) {
+        const existing = this.sqlite
+          .prepare("SELECT * FROM engine_queue_items WHERE session_id = ? AND id = ?")
+          .get(sessionId, itemId) as QueueItemRow | undefined;
+        if (!existing) throw new NotFoundError("queue item", { sessionId, itemId });
+        throw new ConflictError(`queue item ${itemId} is already settled`, { sessionId, itemId });
+      }
+      this.sqlite.prepare("DELETE FROM engine_attempt_markers WHERE item_id = ?").run(itemId);
+    });
+    run.immediate();
+    const row = this.sqlite
+      .prepare("SELECT * FROM engine_queue_items WHERE session_id = ? AND id = ?")
+      .get(sessionId, itemId) as QueueItemRow;
+    return queueItemRowToItem(row);
+  }
+
   async requestAbort(sessionId: string, threadId?: string): Promise<void> {
     const now = Date.now();
     if (threadId) {

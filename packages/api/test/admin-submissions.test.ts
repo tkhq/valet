@@ -1,0 +1,192 @@
+/**
+ * Admin submissions surface — GET /api/admin/submissions and
+ * POST /api/admin/submissions/:sessionId/:itemId/force-settle.
+ *
+ * Drives a real `createApp` (via bootTestApi). Submissions are seeded
+ * directly against `providers.engineStore` (bypassing a real agent turn) so
+ * these tests exercise the store contract + route wiring without an
+ * Anthropic key.
+ */
+import { describe, it, expect } from "vitest";
+import type { QueueItem } from "@valet/engine";
+import { bootTestApi } from "../src/integration/_setup.js";
+import type { CreateSessionResponse, WireEvent } from "../src/wire/types.js";
+import type { AdminSubmission, ForceSettleResponse, ListAdminSubmissionsResponse } from "../src/wire/types.js";
+
+const ADMIN_HEADERS = { "Content-Type": "application/json" };
+const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
+
+async function createSession(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: ADMIN_HEADERS,
+    body: JSON.stringify({ workspace: "/tmp" }),
+  });
+  expect(res.status).toBe(201);
+  const { id } = (await res.json()) as CreateSessionResponse;
+  return id;
+}
+
+/** Force-materializes the engine session + default thread, returning the thread id. */
+async function ensureEngineThread(baseUrl: string, sessionId: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/threads`);
+  expect(res.status).toBe(200);
+  const { threads } = (await res.json()) as { threads: { id: string }[] };
+  return threads[0].id;
+}
+
+function makeItem(id: string, threadId: string, overrides: Partial<QueueItem> = {}): QueueItem {
+  const now = Date.now();
+  return {
+    id,
+    threadId,
+    content: "hello",
+    status: "queued",
+    attemptCount: 0,
+    maxAttempts: 10,
+    timeoutAt: now + 3_600_000,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function connect(url: string) {
+  const ws = new WebSocket(url);
+  const frames: WireEvent[] = [];
+  const listeners = new Set<(f: WireEvent) => void>();
+  ws.onmessage = (ev) => {
+    const data = typeof ev.data === "string" ? ev.data : ev.data.toString();
+    const f = JSON.parse(data) as WireEvent;
+    frames.push(f);
+    for (const l of listeners) l(f);
+  };
+  return {
+    frames,
+    waitFor(pred: (f: WireEvent) => boolean, timeoutMs = 4_000): Promise<WireEvent> {
+      return new Promise<WireEvent>((resolve, reject) => {
+        for (const f of frames) if (pred(f)) return resolve(f);
+        const timer = setTimeout(() => {
+          listeners.delete(check);
+          reject(new Error(`waitFor timed out; frame types seen: ${JSON.stringify(frames.map((f) => f.type))}`));
+        }, timeoutMs);
+        const check = (f: WireEvent) => {
+          if (pred(f)) {
+            clearTimeout(timer);
+            listeners.delete(check);
+            resolve(f);
+          }
+        };
+        listeners.add(check);
+      });
+    },
+    close() {
+      ws.close();
+    },
+  };
+}
+
+describe("admin submissions surface", () => {
+  it("non-admin user gets 403 on both routes", async () => {
+    const api = await bootTestApi();
+    try {
+      const sessionId = await createSession(api.baseUrl);
+      const threadId = await ensureEngineThread(api.baseUrl, sessionId);
+      await api.providers.engineStore.admitSubmission(sessionId, threadId, makeItem("q1", threadId));
+
+      const listRes = await fetch(`${api.baseUrl}/api/admin/submissions`, { headers: MEMBER_HEADERS });
+      expect(listRes.status).toBe(403);
+
+      const settleRes = await fetch(
+        `${api.baseUrl}/api/admin/submissions/${sessionId}/q1/force-settle`,
+        { method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ outcome: "failed" }) },
+      );
+      expect(settleRes.status).toBe(403);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("admin lists a wedged (lease-expired) submission with leaseExpired: true", async () => {
+    const api = await bootTestApi();
+    try {
+      const sessionId = await createSession(api.baseUrl);
+      const threadId = await ensureEngineThread(api.baseUrl, sessionId);
+      const { engineStore } = api.providers;
+      await engineStore.admitSubmission(sessionId, threadId, makeItem("q-wedged", threadId));
+      await engineStore.claimSubmission({
+        sessionId,
+        threadId,
+        itemId: "q-wedged",
+        attemptId: "att-1",
+        ownerId: "owner-1",
+        leaseDurationMs: -1_000, // already-expired lease
+      });
+
+      const res = await fetch(`${api.baseUrl}/api/admin/submissions`, { headers: ADMIN_HEADERS });
+      expect(res.status).toBe(200);
+      const { submissions } = (await res.json()) as ListAdminSubmissionsResponse;
+      const wedged = submissions.find((s) => s.id === "q-wedged");
+      expect(wedged).toBeDefined();
+      expect(wedged?.sessionId).toBe(sessionId);
+      expect(wedged?.status).toBe("running");
+      expect(wedged?.leaseExpired).toBe(true);
+      expect((wedged as AdminSubmission & { content?: unknown }).content).toBeUndefined();
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("force-settle returns 200 + settled item, and a submission.settled frame reaches a connected WS client; repeat force-settle -> 409", async () => {
+    const api = await bootTestApi();
+    try {
+      const sessionId = await createSession(api.baseUrl);
+      const threadId = await ensureEngineThread(api.baseUrl, sessionId);
+      const { engineStore } = api.providers;
+      await engineStore.admitSubmission(sessionId, threadId, makeItem("q-force", threadId));
+      await engineStore.claimSubmission({
+        sessionId,
+        threadId,
+        itemId: "q-force",
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+
+      const c = connect(`${api.wsUrl}/api/sessions/${sessionId}/ws?fromOffset=0`);
+      await c.waitFor((f) => f.type === "init");
+
+      const res = await fetch(
+        `${api.baseUrl}/api/admin/submissions/${sessionId}/q-force/force-settle`,
+        {
+          method: "POST",
+          headers: ADMIN_HEADERS,
+          body: JSON.stringify({ outcome: "failed", error: "operator killed it" }),
+        },
+      );
+      expect(res.status).toBe(200);
+      const { submission } = (await res.json()) as ForceSettleResponse;
+      expect(submission.status).toBe("settled");
+      expect(submission.outcome).toBe("failed");
+      expect(submission.error).toBe("operator killed it");
+
+      const settledFrame = await c.waitFor((f) => f.type === "submission.settled");
+      expect((settledFrame as { queueItemId: string }).queueItemId).toBe("q-force");
+      expect((settledFrame as { outcome: string }).outcome).toBe("failed");
+      c.close();
+
+      const repeat = await fetch(
+        `${api.baseUrl}/api/admin/submissions/${sessionId}/q-force/force-settle`,
+        {
+          method: "POST",
+          headers: ADMIN_HEADERS,
+          body: JSON.stringify({ outcome: "aborted" }),
+        },
+      );
+      expect(repeat.status).toBe(409);
+      const err = (await repeat.json()) as { error: string; code: string };
+      expect(err.code).toBe("conflict");
+    } finally {
+      await api.cleanup();
+    }
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { ConflictError, StaleAttemptError } from "../errors.js";
+import { ConflictError, NotFoundError, StaleAttemptError } from "../errors.js";
 import type {
   MessageEntry,
   QueueItem,
@@ -982,6 +982,86 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
 
       const beforePast = await store.listSettledSubmissionsBefore(SESSION_ID, past);
       expect(beforePast).toEqual([]);
+    });
+
+    // --- Operator surface ---
+
+    it("listAllUnsettledSubmissions spans sessions and excludes settled", async () => {
+      const OTHER = "sess-3";
+      const OTHER_THREAD = "th-other-2";
+      await store.saveSession(newSession({ id: OTHER }));
+      await store.saveThread(OTHER, { ...newThread(OTHER_THREAD, "web:default"), sessionId: OTHER });
+
+      const unsettledHere = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, unsettledHere);
+
+      const settledHere = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, settledHere);
+      await store.settleUnclaimed(SESSION_ID, THREAD_ID, settledHere.id, { outcome: "superseded" });
+
+      const unsettledOther = makeItem({ threadId: OTHER_THREAD });
+      await store.admitSubmission(OTHER, OTHER_THREAD, unsettledOther);
+
+      const all = await store.listAllUnsettledSubmissions();
+      const ids = all.map((i) => i.id);
+      expect(ids).toContain(unsettledHere.id);
+      expect(ids).toContain(unsettledOther.id);
+      expect(ids).not.toContain(settledHere.id);
+
+      const here = all.find((i) => i.id === unsettledHere.id);
+      const other = all.find((i) => i.id === unsettledOther.id);
+      expect(here?.sessionId).toBe(SESSION_ID);
+      expect(other?.sessionId).toBe(OTHER);
+    });
+
+    it("forceSettle on a running item settles it, clears markers, and fences off the old attempt", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "o",
+      });
+      await store.insertAttemptMarker(item.id, "att-1");
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
+
+      const settled = await store.forceSettle(SESSION_ID, item.id, "failed", "operator killed it");
+      expect(settled.status).toBe("settled");
+      expect(settled.outcome).toEqual({ outcome: "failed", error: "operator killed it" });
+
+      // Markers gone.
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
+
+      // A follow-up claim on the settled item is a no-op (nothing left to claim).
+      const reclaimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-2",
+        ownerId: "o2",
+      });
+      expect(reclaimed).toBeNull();
+
+      // The zombie attempt's own write self-fences: the item is already
+      // settled with a different outcome than the zombie is about to reserve,
+      // so its write is rejected (ConflictError) rather than resurrecting it.
+      const staleFence: WriteFence = { itemId: item.id, attemptId: claimed!.attemptId! };
+      await expect(
+        store.reserveSettlement(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" }, staleFence),
+      ).rejects.toThrow(ConflictError);
+    });
+
+    it("forceSettle twice throws ConflictError", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.forceSettle(SESSION_ID, item.id, "aborted");
+      await expect(store.forceSettle(SESSION_ID, item.id, "aborted")).rejects.toThrow(ConflictError);
+    });
+
+    it("forceSettle on a missing item throws NotFoundError", async () => {
+      await expect(store.forceSettle(SESSION_ID, "nope", "failed")).rejects.toThrow(NotFoundError);
     });
   });
 }

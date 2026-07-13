@@ -437,6 +437,38 @@ export class InMemorySessionStore implements SessionStore {
     return item ? { ...item } : null;
   }
 
+  async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
+    const out: (QueueItem & { sessionId: string })[] = [];
+    for (const [sessionId, r] of this.rows) {
+      for (const item of r.queueItems.values()) {
+        if (item.status !== "settled") out.push({ ...item, sessionId });
+      }
+    }
+    return out;
+  }
+
+  async forceSettle(
+    sessionId: string,
+    itemId: string,
+    outcome: "failed" | "aborted",
+    error?: string,
+  ): Promise<QueueItem> {
+    const r = this.row(sessionId);
+    const item = r.queueItems.get(itemId);
+    if (!item) throw new NotFoundError("queue item", { sessionId, itemId });
+    if (item.status === "settled") {
+      throw new ConflictError(`queue item ${itemId} is already settled`, { sessionId, itemId });
+    }
+    item.status = "settled";
+    item.outcome = { outcome, error };
+    item.updatedAt = Date.now();
+    const prefix = `${itemId}:`;
+    for (const key of this.attemptMarkers) {
+      if (key.startsWith(prefix)) this.attemptMarkers.delete(key);
+    }
+    return { ...item };
+  }
+
   async requestAbort(sessionId: string, threadId?: string): Promise<void> {
     const r = this.row(sessionId);
     const now = Date.now();
