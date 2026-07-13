@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
   registerFauxProvider,
@@ -1427,5 +1427,65 @@ describe("crash-mid-collect split-turn recovery", () => {
     expect(firstMergedId).not.toBe(secondMergedId);
 
     faux.unregister();
+  });
+});
+
+describe("sweep interval rejection guard", () => {
+  it("swallows a transient store error on the tick and keeps sweeping", async () => {
+    // Phase 2 grew sweepOnce to include store reads + fenced gate writes. A
+    // transient store error (SQLITE_BUSY) on a 5s tick must NOT surface as an
+    // unhandled rejection that can kill the process — the interval wrapper
+    // catches + logs, and the next tick still runs.
+    const store = new InMemorySessionStore();
+    const faux = registerFauxProvider({ provider: "recon-sweep-guard" });
+    faux.setResponses([fauxAssistantMessage("noop")]);
+    const bus = new InMemoryEventStream();
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      id: "sess-sweep-guard",
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    await session.ensureDefaultThread();
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const listSpy = vi.spyOn(store, "listUnsettledSubmissions");
+    // First tick's listUnsettledSubmissions rejects; later ticks succeed.
+    listSpy.mockRejectedValueOnce(new Error("SQLITE_BUSY: database is locked"));
+
+    // Surface any unhandled rejection as a test failure.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    vi.useFakeTimers();
+    try {
+      session.ensureTimers();
+      // First sweep tick — listUnsettledSubmissions throws, wrapper catches.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[engine] sweep failed"),
+        expect.stringContaining("SQLITE_BUSY"),
+      );
+      const callsAfterFirst = listSpy.mock.calls.length;
+      expect(callsAfterFirst).toBeGreaterThanOrEqual(1);
+      // Second tick — the store recovered; sweep runs again cleanly.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(listSpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    } finally {
+      vi.useRealTimers();
+      await session.destroy();
+      process.off("unhandledRejection", onUnhandled);
+      errSpy.mockRestore();
+      listSpy.mockRestore();
+      faux.unregister();
+    }
+
+    expect(unhandled).toEqual([]);
   });
 });

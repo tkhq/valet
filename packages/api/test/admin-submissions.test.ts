@@ -206,4 +206,88 @@ describe("admin submissions surface", () => {
       await api.cleanup();
     }
   });
+
+  it("force-settle rejects a non-string error field with 400", async () => {
+    const api = await bootTestApi();
+    try {
+      const sessionId = await createSession(api.baseUrl);
+      const threadId = await ensureEngineThread(api.baseUrl, sessionId);
+      await api.providers.engineStore.admitSubmission(sessionId, threadId, makeItem("q-bad", threadId));
+
+      const res = await fetch(
+        `${api.baseUrl}/api/admin/submissions/${sessionId}/q-bad/force-settle`,
+        {
+          method: "POST",
+          headers: ADMIN_HEADERS,
+          body: JSON.stringify({ outcome: "failed", error: { not: "a string" } }),
+        },
+      );
+      expect(res.status).toBe(400);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("force-settle of a live gate-blocked submission withdraws its pending gate + emits decision_gate_withdrawn", async () => {
+    const api = await bootTestApi();
+    try {
+      const sessionId = await createSession(api.baseUrl);
+      // ensureEngineThread materializes the engine session into the host cache
+      // (isLive === true), so the force-settle route drives the live-session
+      // gate-withdrawal branch.
+      const threadId = await ensureEngineThread(api.baseUrl, sessionId);
+      const { engineStore } = api.providers;
+      await engineStore.admitSubmission(sessionId, threadId, makeItem("q-gate", threadId));
+      await engineStore.claimSubmission({
+        sessionId,
+        threadId,
+        itemId: "q-gate",
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+
+      // Seed a PENDING decision gate referencing the claimed submission — the
+      // dangling row a live blocked turn would otherwise leave behind.
+      const now = Date.now();
+      const gateId = `gate:${sessionId}:${threadId}:q-gate:approve:0`;
+      await engineStore.saveDecisionGate(sessionId, threadId, {
+        id: gateId,
+        sessionId,
+        threadId,
+        queueItemId: "q-gate",
+        resumeKey: "approve",
+        ordinal: 0,
+        type: "approval",
+        title: "Proceed?",
+        actions: [{ id: "approve", label: "Approve" }],
+        status: "pending",
+        expiresAt: now + 72 * 60 * 60 * 1000,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const c = connect(`${api.wsUrl}/api/sessions/${sessionId}/ws?fromOffset=0`);
+      await c.waitFor((f) => f.type === "init");
+
+      const res = await fetch(
+        `${api.baseUrl}/api/admin/submissions/${sessionId}/q-gate/force-settle`,
+        {
+          method: "POST",
+          headers: ADMIN_HEADERS,
+          body: JSON.stringify({ outcome: "aborted" }),
+        },
+      );
+      expect(res.status).toBe(200);
+
+      const withdrawnFrame = await c.waitFor((f) => f.type === "decision_gate_withdrawn");
+      expect((withdrawnFrame as { gateId: string }).gateId).toBe(gateId);
+      c.close();
+
+      // The durable gate row is now terminal, not left PENDING for the sweep.
+      const gate = await engineStore.getDecisionGate(sessionId, gateId);
+      expect(gate?.status).toBe("withdrawn");
+    } finally {
+      await api.cleanup();
+    }
+  });
 });

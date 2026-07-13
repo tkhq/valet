@@ -31,16 +31,19 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
     return;
   }
   for (const id of ids) {
-    const row = await providers.db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.id, id))
-      .get();
-    if (!row) {
-      console.warn(`boot restore: skipping ${id} — no app session row`);
-      continue;
-    }
     try {
+      // Keep the per-session app-row lookup INSIDE the try: a lookup that
+      // rejects (bad row, transient store error) must isolate to this one
+      // session, not abort the whole restore pass and crash-loop boot.
+      const row = await providers.db
+        .select()
+        .from(agentSessions)
+        .where(eq(agentSessions.id, id))
+        .get();
+      if (!row) {
+        console.warn(`boot restore: skipping ${id} — no app session row`);
+        continue;
+      }
       await providers.engineHost.sessionFor(id, {
         userId: row.userId,
         orgId: row.orgId,
@@ -76,8 +79,12 @@ const providers = await buildNodeProviders({
 });
 
 // Eager boot restore: pick up any submissions left unsettled by a prior
-// process before we start accepting connections.
-await restoreUnsettledSessions(providers);
+// process before we start accepting connections. A restore failure must
+// never prevent `serve` — any unexpected rejection is logged and boot
+// continues so a single bad row can't crash-loop the process.
+await restoreUnsettledSessions(providers).catch((err) => {
+  console.error("boot restore: unexpected failure (continuing to serve):", err);
+});
 
 const { app, injectWebSocket } = createApp(providers);
 

@@ -9,10 +9,8 @@
  *   POST /api/admin/submissions/:sessionId/:itemId/force-settle → CAS force-settle a wedged submission
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
-import { ConflictError, NotFoundError, type QueueItem } from "@valet/engine";
+import { ConflictError, NotFoundError, type DecisionGate, type QueueItem } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
 import type {
   AdminSubmission,
   ForceSettleRequest,
@@ -72,7 +70,7 @@ adminRouter.get("/submissions", async (c) => {
 // ── Force-settle ─────────────────────────────────────────────────────────
 
 adminRouter.post("/submissions/:sessionId/:itemId/force-settle", async (c) => {
-  const { db, engineStore, eventStream, engineHost } = c.var.providers;
+  const { engineStore, eventStream, engineHost } = c.var.providers;
   const sessionId = c.req.param("sessionId");
   const itemId = c.req.param("itemId");
 
@@ -84,6 +82,9 @@ adminRouter.post("/submissions/:sessionId/:itemId/force-settle", async (c) => {
   }
   if (body.outcome !== "failed" && body.outcome !== "aborted") {
     return c.json({ error: "outcome must be 'failed' or 'aborted'" }, 400);
+  }
+  if (body.error !== undefined && typeof body.error !== "string") {
+    return c.json({ error: "error must be a string when present" }, 400);
   }
 
   let settled: QueueItem;
@@ -112,16 +113,42 @@ adminRouter.post("/submissions/:sessionId/:itemId/force-settle", async (c) => {
     `settled:${itemId}`,
   );
 
-  // Nudge a live in-memory session so any wedged claim loop / awaiter
-  // reconciles against the now-settled store state.
-  if (engineHost.isLive(sessionId)) {
-    const row = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).get();
-    if (row) {
-      await engineHost.sessionFor(sessionId, {
-        userId: row.userId,
-        orgId: row.orgId,
-        workspace: row.workspace,
-      });
+  // Unwedge a live gate-blocked session: withdraw every PENDING decision gate
+  // that references the now force-settled submission. `sessionFor` alone is a
+  // no-op on a cache hit — a live session keeps its in-memory GateManager
+  // waiter (the blocked tool) and a dangling PENDING gate row until the
+  // 24-72h expiry sweep. Withdrawing here rejects the waiter (turn ends), and
+  // the superseded attempt's next fenced write self-fences, so it can't
+  // resurrect the gate. We match on the persisted gate's `queueItemId` field
+  // rather than parsing gate ids.
+  const live = engineHost.liveSession(sessionId);
+  if (live) {
+    const gates = await engineStore.listDecisionGates(sessionId);
+    for (const gate of gates) {
+      if (gate.queueItemId !== itemId || gate.status !== "pending") continue;
+      // Reject the in-memory tool waiter if this process holds it (no-op
+      // otherwise). Session/Thread.withdrawDecision only emits when a live
+      // waiter exists, so we durably terminalize + notify below regardless.
+      await live.withdrawDecision(gate.id, "cancel");
+      const withdrawn: DecisionGate = { ...gate, status: "withdrawn", updatedAt: Date.now() };
+      await engineStore.saveDecisionGate(sessionId, gate.threadId, withdrawn);
+      // Deterministic eventKey dedupes against Thread.withdrawDecision's own
+      // emit in the live-waiter case, so clients see a single frame.
+      await eventStream.append(
+        {
+          sessionId,
+          threadId: gate.threadId,
+          queueItemId: itemId,
+          timestamp: Date.now(),
+          event: {
+            type: "decision_gate_withdrawn",
+            threadId: gate.threadId,
+            gateId: gate.id,
+            reason: "cancel",
+          },
+        },
+        `gate:${gate.id}:withdrawn`,
+      );
     }
   }
 

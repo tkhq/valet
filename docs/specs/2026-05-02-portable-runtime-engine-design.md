@@ -1195,7 +1195,7 @@ interface WriteFence {
 ```
 
 - `appendEntries`, `updateEntry`, `saveSuspendedTurn`/`clearSuspendedTurn`, `reserveSettlement`, and `finalizeSettlement` take a `WriteFence`; the store rejects the write with a structured stale-attempt error when the fence does not name the submission's current attempt. Admission, claim, and read methods need no fence.
-- EventStream appends carry the appending attempt alongside `BusEvent.queueItemId`; a superseded attempt's append is refused.
+- EventStream appends carry the appending attempt alongside `BusEvent.queueItemId`; a superseded attempt's append is refused. [Implementation status (Phase 2): live-execution event appends are **not yet attempt-fenced** — deterministic eventKeys already protect the re-runnable settlement/gate events, so a zombie cannot double-emit those. Fencing of live-execution appends is deferred; tracked in the Phase 2 plan's spec-coverage notes and carried in the local-e2e roadmap.]
 - Sandbox operations are fenced by the attachment epoch (sandbox runtime spec) — the policy wrapper discards results from superseded epochs.
 
 A zombie owner — alive but slow past lease expiry, reclaimed by a successor — therefore cannot fork the transcript, double-emit events, or land stale side effects into session state: its first fenced write fails, which is its signal to stop. On Cloudflare the DO's single-writer execution makes stale writes rare in practice, but the fence is still recorded and checked so the store contract and its conformance suite are identical on every platform.
@@ -1909,7 +1909,7 @@ The engine schema owns these tables outright — they are the only storage the e
 | `engine_entries` | DAG history | `id`, `session_id`, `thread_id`, `parent_id`, `queue_item_id` (indexed — the transcript↔submission linkage), `entry_type`, `role`, `stop_reason`, `content`, `parts`, `metadata`, `created_at` |
 | `engine_queue_items` | Durable submissions (per-thread queue + execution lifecycle) | `id`, `session_id`, `thread_id`, `dispatch_id` (unique per session when set), `status`, `outcome`, `error`, `mode`, `content`, `author`, `channel`, `reply_target`, `model`, `attempt_id`, `attempt_count`, `max_attempts`, `timeout_at`, `abort_requested_at`, `owner_id`, `lease_expires_at`, `metadata`, timestamps |
 | `engine_attempt_markers` | Durable evidence an attempt started (crash-recovery gating) | `item_id`, `attempt_id`, `created_at` — PK `(item_id, attempt_id)` |
-| `engine_events` | Offset-addressed durable event stream — SQL-backed stores only (SQLite dev, Postgres on k8s). On Cloudflare the event log lives in per-session DO storage instead, satisfying the same EventStream contract without this table | `session_id`, `offset`, `thread_id`, `event_type`, `payload`, `created_at` — PK `(session_id, offset)` |
+| `engine_events` | Offset-addressed durable event stream — SQL-backed stores only (SQLite dev, Postgres on k8s). On Cloudflare the event log lives in per-session DO storage instead, satisfying the same EventStream contract without this table | `session_id`, `seq` (INTEGER, exposed as a zero-padded offset string), `event_key`, `thread_id`, `queue_item_id`, `user_id`, `event_type`, `payload`, `timestamp` — PK `(session_id, seq)`, UNIQUE `(session_id, event_key)` (appendOnce idempotency), INDEX `(session_id, queue_item_id)` (per-submission retention prune) |
 | `engine_meta` | Store metadata | key/value; key `schema_version` stamped at creation |
 | `engine_decision_gates` | Pending and terminal gate state | `id`, `session_id`, `thread_id`, `type`, `status`, `title`, `body`, `actions`, `origin`, `context`, `resolution`, `expires_at`, timestamps |
 | `engine_decision_gate_refs` | Delivered channel refs | `id`, `gate_id`, `channel_type`, `ref`, `created_at`, `updated_at` |
@@ -1934,7 +1934,7 @@ interface EventStream {
    * the original offset (appendOnce semantics).
    */
   append(event: BusEvent, eventKey: string): Promise<{ offset: string }>;
-  /** Read durable events at or after fromOffset, in offset order. */
+  /** Read durable events strictly after `fromOffset` (exclusive), in offset order. */
   read(sessionId: string, opts?: { fromOffset?: string; limit?: number }): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
   /** Live subscription. Delivery order matches offset order for a given session. */
   subscribe(filter: EventFilter, callback: (event: StoredBusEvent) => void): Unsubscribe;

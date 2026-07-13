@@ -321,7 +321,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
-case "submission.settled": {
+    case "submission.settled": {
       // Mark the originating user message with a terminal badge.
       //
       // Matching: prefer an exact `queueItemId` match — REST rows carry the

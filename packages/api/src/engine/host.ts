@@ -170,6 +170,16 @@ export class EngineHost {
     return this.cache.has(sessionId);
   }
 
+  /**
+   * The live in-memory Session for an id, or null if not cached. Unlike
+   * `sessionFor`, this never builds/restores — callers use it to act on a
+   * session's in-process state (GateManager waiters, running items) that only
+   * exists while the session is live.
+   */
+  liveSession(sessionId: string): Session | null {
+    return this.cache.get(sessionId)?.session ?? null;
+  }
+
   private resolveModel(): Model<any> {
     const id = this.opts.defaultModelId ?? "claude-haiku-4-5";
     // pi-ai's getModel is typed against its compile-time MODELS table; we

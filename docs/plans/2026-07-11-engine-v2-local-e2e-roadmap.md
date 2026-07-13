@@ -66,6 +66,7 @@
 - Policy wrapper: epoch tagging, lazy attachment (cold handle, first-op await, `workspace_provisioning` structured error), two-tier cancellation, `sandbox_status` events, cold-attachment model hint.
 - `sandbox-docker` under the wrapper; job-mode exec for >60s commands (in-process equivalent of the sandboxd job contract); attachment re-provision with epoch supersession test (simulate a hung container).
 - Sandbox provider conformance suite (runs against docker + local + virtual).
+- Carried from Phase 2: fenced EventStream appends for live-execution events (spec ~§1198) — deterministic eventKeys protect the re-runnable settlement/gate events today; attempt-fencing the remaining live appends closes the zombie double-emit gap.
 
 **Exit criteria:** a session prompt gets first tokens before the container is running; a 3-minute `sleep && echo` exec completes via job mode; killing the container mid-exec produces a structured retryable tool error and a background re-provision, never a session error.
 

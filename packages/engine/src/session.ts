@@ -89,13 +89,29 @@ export class Session {
     if (this.destroyed) return;
     if (this.heartbeatTimer === null) {
       this.heartbeatTimer = setInterval(() => {
-        void this.heartbeatOnce();
+        // A transient store error inside the tick must not become an
+        // unhandled rejection that kills the process — log and let the next
+        // interval retry. Same idiom as the emit-append failure path.
+        this.heartbeatOnce().catch((err) => {
+          console.error(
+            `[engine] heartbeat failed (session=${this.id}):`,
+            err instanceof Error ? err.message : String(err),
+          );
+        });
       }, 10_000);
       this.heartbeatTimer.unref?.();
     }
     if (this.sweepTimer === null) {
       this.sweepTimer = setInterval(() => {
-        void this.sweepOnce();
+        // sweepOnce grew store reads + fenced gate writes (sweepExpiredGates);
+        // a SQLITE_BUSY on a 5s tick must not crash the process. Swallow +
+        // log so the next sweep still runs.
+        this.sweepOnce().catch((err) => {
+          console.error(
+            `[engine] sweep failed (session=${this.id}):`,
+            err instanceof Error ? err.message : String(err),
+          );
+        });
       }, 5_000);
       this.sweepTimer.unref?.();
     }
