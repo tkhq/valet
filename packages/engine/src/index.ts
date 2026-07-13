@@ -34,6 +34,16 @@ export {
   InMemorySessionStore,
 } from "./providers/in-memory/index.js";
 export { VirtualSandbox, VirtualSandboxProvider } from "./providers/sandbox/virtual.js";
+export {
+  SandboxAttachment,
+  type AttachmentState,
+  type AttachmentStatus,
+} from "./sandbox/attachment.js";
+export {
+  PolicySandbox,
+  SANDBOX_READY_TIMEOUT_MS,
+  type PolicySandboxOptions,
+} from "./sandbox/policy.js";
 // SqliteSessionStore lives in @valet/store-sqlite.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
