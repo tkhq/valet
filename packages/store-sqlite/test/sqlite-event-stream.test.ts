@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,12 +8,23 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runEventStreamContract } from "@valet/engine/test-helpers";
 import { ValidationError } from "@valet/engine";
+import type { QueueItem } from "@valet/engine";
 import { applyEngineMigrations } from "../src/migrate.js";
 import { SqliteEventStream } from "../src/event-stream.js";
+import { SqliteSessionStore } from "../src/store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(__dirname, "..");
 const APPEND_CHILD = join(__dirname, "append-child.ts");
+
+// The contract suite's fence cases call ctx.factory() once, then
+// fenceFixture.seed() immediately after, within the same `it`. This closure
+// tracks the store built over the most recently created sqlite handle so
+// seed() writes land in the same database the freshly-created stream reads.
+let currentStore: SqliteSessionStore | undefined;
+
+const FENCE_SESSION = "fence-sess";
+const FENCE_THREAD = "fence-thread";
 
 /** Spawns append-child.ts and resolves with its exit info once it exits. */
 function spawnAppendChild(
@@ -38,7 +50,57 @@ runEventStreamContract("SqliteEventStream", {
   factory: () => {
     const sqlite = new Database(":memory:");
     applyEngineMigrations(sqlite);
+    currentStore = new SqliteSessionStore(drizzle(sqlite));
     return new SqliteEventStream(sqlite);
+  },
+  fenceFixture: {
+    seed: async (itemId: string) => {
+      const store = currentStore;
+      if (!store) throw new Error("fenceFixture.seed called before factory()");
+      const now = Date.now();
+      await store.saveSession({
+        id: FENCE_SESSION,
+        owner: { type: "user", id: "u1" },
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        purpose: "interactive",
+        status: "running",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await store.saveThread(FENCE_SESSION, {
+        id: FENCE_THREAD,
+        sessionId: FENCE_SESSION,
+        key: "web:default",
+        status: "active",
+        queueMode: "followup",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const admitItem: QueueItem = {
+        id: itemId,
+        threadId: FENCE_THREAD,
+        content: "seed submission",
+        status: "queued",
+        attemptCount: 0,
+        maxAttempts: 10,
+        timeoutAt: now + 3_600_000,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await store.admitSubmission(FENCE_SESSION, FENCE_THREAD, admitItem);
+      const attemptId = `att-${itemId}`;
+      const claimed = await store.claimSubmission({
+        sessionId: FENCE_SESSION,
+        threadId: FENCE_THREAD,
+        itemId,
+        attemptId,
+        ownerId: "owner-1",
+      });
+      if (!claimed) throw new Error("fenceFixture.seed: claim failed");
+      return { currentAttemptId: attemptId };
+    },
   },
 });
 

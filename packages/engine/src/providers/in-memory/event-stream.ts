@@ -1,3 +1,4 @@
+import { StaleAttemptError } from "../../errors.js";
 import type {
   BusEvent,
   DeliveredBusEvent,
@@ -5,11 +6,21 @@ import type {
   EventStream,
   StoredBusEvent,
   Unsubscribe,
+  WriteFence,
 } from "../../types.js";
 
 interface Subscription {
   filter: EventFilter;
   callback: (event: DeliveredBusEvent) => void;
+}
+
+export interface InMemoryEventStreamOpts {
+  /**
+   * Decision 12: sync fence validation, typically `store.isCurrentAttempt`.
+   * When absent, fenced appends are accepted unconditionally — validation
+   * requires wiring a fenceCheck (documented on EventStream.append).
+   */
+  fenceCheck?: (fence: WriteFence) => boolean;
 }
 
 function matches(filter: EventFilter, event: BusEvent): boolean {
@@ -29,7 +40,13 @@ export class InMemoryEventStream implements EventStream {
   private counters = new Map<string, number>();
   private subs = new Set<Subscription>();
 
-  async append(event: BusEvent, eventKey: string): Promise<{ offset: string }> {
+  constructor(private readonly opts?: InMemoryEventStreamOpts) {}
+
+  async append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }> {
+    if (fence && this.opts?.fenceCheck && !this.opts.fenceCheck(fence)) {
+      throw new StaleAttemptError(fence.itemId, fence.attemptId, undefined);
+    }
+
     let keys = this.keyToOffset.get(event.sessionId);
     if (!keys) {
       keys = new Map();

@@ -2,6 +2,7 @@ import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
+import { StaleAttemptError } from "./errors.js";
 import type {
   BusEvent,
   CreateSessionOptions,
@@ -25,6 +26,7 @@ import type {
   SkillSource,
   ThreadData,
   ToolDef,
+  WriteFence,
 } from "./types.js";
 
 let nextId = 1;
@@ -45,6 +47,15 @@ export interface EmitOptions {
    * id so retention can truncate a session's log per submission.
    */
   queueItemId?: string;
+  /**
+   * Decision 12: attempt fence for live-execution events emitted inside a
+   * claimed turn. When present, a superseded/zombie attempt's append is
+   * rejected with StaleAttemptError — which `emit` rethrows (unlike every
+   * other append failure) so the caller's in-flight turn stops. Fence-less
+   * emits (the default — settlement, gate lifecycle, queue_state, and
+   * anything outside a claimed attempt) NEVER reject on append failure.
+   */
+  fence?: WriteFence;
 }
 
 export class Session {
@@ -520,9 +531,16 @@ export class Session {
     }
     // Events are the wakeup/UX plane; the store is truth. A durable append
     // failure on a non-critical path must not kill the turn — log and continue.
+    // EXCEPTION (decision 12): a fenced append that rejects with
+    // StaleAttemptError means a superseded/zombie attempt tried to land a
+    // live-execution event — that's the attempt's stop signal, so it
+    // rethrows. Every other failure (including a fenced append that fails
+    // for some other reason) stays log-and-continue; a fence-less emit never
+    // rejects.
     try {
-      await this.providers.stream.append(busEvent, opts?.eventKey ?? uid("ev"));
+      await this.providers.stream.append(busEvent, opts?.eventKey ?? uid("ev"), opts?.fence);
     } catch (err) {
+      if (err instanceof StaleAttemptError) throw err;
       console.error(
         `[engine] event append failed (session=${this.id}, type=${event.type}):`,
         err instanceof Error ? err.message : String(err),

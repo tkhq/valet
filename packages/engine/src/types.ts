@@ -707,8 +707,16 @@ export interface EventStream {
    * Durably append and fan out to live subscribers. `eventKey` is unique per
    * session: an append whose eventKey already exists is a no-op returning the
    * original offset (appendOnce).
+   *
+   * CHANGED (decision 12): optional `fence`. When provided, the
+   * implementation MUST verify `fence.attemptId` is the queue item's current
+   * attempt and reject with `StaleAttemptError` otherwise — closing the
+   * zombie double-emit gap for live-execution events from a superseded
+   * attempt. Fence-less appends (the default) are unaffected and always
+   * accepted by fence logic (implementations that haven't wired a fence
+   * check MUST also accept fenced appends — validation requires wiring).
    */
-  append(event: BusEvent, eventKey: string): Promise<{ offset: string }>;
+  append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }>;
   /** Read durable events with offset > fromOffset (exclusive), in offset order. */
   read(
     sessionId: string,

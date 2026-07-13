@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { StaleAttemptError } from "../errors.js";
 import type { BusEvent, DeliveredBusEvent, EngineEvent, EventStream, QueueState } from "../index.js";
 
 const idleQueueState = (threadId: string): QueueState => ({
@@ -10,6 +11,21 @@ const idleQueueState = (threadId: string): QueueState => ({
 
 export interface EventStreamContractContext {
   factory: () => Promise<EventStream> | EventStream;
+  /**
+   * Decision 12 (attempt-fenced appends). When present, the suite exercises
+   * `append(event, key, fence)` against a real queue item so both backends
+   * prove the same fence semantics.
+   *
+   * `seed(itemId)` must leave a queue item identified by `itemId` durably
+   * claimed by some attempt and return that attempt's id as
+   * `currentAttemptId`. The suite derives a guaranteed-stale id as
+   * `${currentAttemptId}-stale` rather than accepting a caller-supplied
+   * stale id, so sqlite fixtures (which admit+claim through the real store
+   * and don't control the generated attemptId) don't need to predict it.
+   */
+  fenceFixture?: {
+    seed: (itemId: string) => Promise<{ currentAttemptId: string }>;
+  };
 }
 
 function ev(sessionId: string, overrides: Partial<BusEvent> = {}): BusEvent {
@@ -188,5 +204,51 @@ export function runEventStreamContract(name: string, ctx: EventStreamContractCon
       const { events } = await stream.read("sess-1", { fromOffset: offsets[1] });
       expect(events.map((e) => e.timestamp)).toEqual([2, 3, 4]);
     });
+
+    if (ctx.fenceFixture) {
+      const { seed } = ctx.fenceFixture;
+
+      it("append with a fence naming the current attempt succeeds", async () => {
+        const stream = await ctx.factory();
+        const itemId = "fence-item-ok";
+        const { currentAttemptId } = await seed(itemId);
+
+        const { offset } = await stream.append(ev("sess-1", { queueItemId: itemId }), "fence-ok-key", {
+          itemId,
+          attemptId: currentAttemptId,
+        });
+
+        const { events } = await stream.read("sess-1");
+        expect(events.map((e) => e.offset)).toContain(offset);
+      });
+
+      it("append with a stale attemptId rejects StaleAttemptError and appends nothing", async () => {
+        const stream = await ctx.factory();
+        const itemId = "fence-item-stale";
+        const { currentAttemptId } = await seed(itemId);
+        const staleAttemptId = `${currentAttemptId}-stale`;
+
+        await expect(
+          stream.append(ev("sess-1", { queueItemId: itemId }), "fence-stale-key", {
+            itemId,
+            attemptId: staleAttemptId,
+          }),
+        ).rejects.toBeInstanceOf(StaleAttemptError);
+
+        const { events } = await stream.read("sess-1");
+        expect(events.some((e) => e.queueItemId === itemId)).toBe(false);
+      });
+
+      it("fence-less append is unaffected by fencing", async () => {
+        const stream = await ctx.factory();
+        const itemId = "fence-item-unfenced";
+        await seed(itemId);
+
+        const { offset } = await stream.append(ev("sess-1", { queueItemId: itemId }), "fence-unfenced-key");
+
+        const { events } = await stream.read("sess-1");
+        expect(events.map((e) => e.offset)).toContain(offset);
+      });
+    }
   });
 }

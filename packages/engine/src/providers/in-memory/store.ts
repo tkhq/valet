@@ -437,6 +437,19 @@ export class InMemorySessionStore implements SessionStore {
     return item ? { ...item } : null;
   }
 
+  /**
+   * Sync fence check for wiring into InMemoryEventStream's fenceCheck opt
+   * (decision 12). Item ids are unique across sessions (uid-based), so this
+   * searches every row rather than requiring a sessionId.
+   */
+  isCurrentAttempt(itemId: string, attemptId: string): boolean {
+    for (const r of this.rows.values()) {
+      const item = r.queueItems.get(itemId);
+      if (item) return item.attemptId === attemptId;
+    }
+    return false;
+  }
+
   async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
     const out: (QueueItem & { sessionId: string })[] = [];
     for (const [sessionId, r] of this.rows) {

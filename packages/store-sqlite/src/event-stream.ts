@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { ValidationError } from "@valet/engine";
+import { StaleAttemptError, ValidationError } from "@valet/engine";
 import type {
   BusEvent,
   DeliveredBusEvent,
@@ -7,6 +7,7 @@ import type {
   EventStream,
   StoredBusEvent,
   Unsubscribe,
+  WriteFence,
 } from "@valet/engine";
 
 interface Subscription {
@@ -80,8 +81,17 @@ export class SqliteEventStream implements EventStream {
 
   constructor(private readonly sqlite: Database.Database) {}
 
-  async append(event: BusEvent, eventKey: string): Promise<{ offset: string }> {
+  async append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }> {
     const appendTxn = this.sqlite.transaction(() => {
+      if (fence) {
+        const row = this.sqlite
+          .prepare("SELECT attempt_id FROM engine_queue_items WHERE id = ?")
+          .get(fence.itemId) as { attempt_id: string | null } | undefined;
+        if (!row || row.attempt_id !== fence.attemptId) {
+          throw new StaleAttemptError(fence.itemId, fence.attemptId, row?.attempt_id ?? undefined);
+        }
+      }
+
       const existing = this.sqlite.prepare(SELECT_BY_KEY_SQL).get(event.sessionId, eventKey) as
         | { seq: number }
         | undefined;

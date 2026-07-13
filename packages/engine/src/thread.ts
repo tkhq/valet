@@ -4,7 +4,7 @@ import { getModel, isContextOverflow } from "@mariozechner/pi-ai";
 import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@mariozechner/pi-ai";
 
 type PiModel = Model<Api>;
-import type { Session } from "./session.js";
+import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
   fromRequest,
@@ -37,6 +37,7 @@ import type {
   DecisionGateRequest,
   DecisionResolution,
   DecisionWithdrawReason,
+  EngineEvent,
   MessagePart,
   MessageEntry,
   MessageQuery,
@@ -1917,7 +1918,7 @@ export class Thread {
             ),
           );
         }
-        await session.emit(
+        await this.fencedEmit(
           {
             type: "status",
             threadId: this.id,
@@ -2035,7 +2036,7 @@ export class Thread {
           { type: "thread_start", threadId: this.id },
           { queueItemId: this.runningItem?.id },
         );
-        await this.session.emit(
+        await this.fencedEmit(
           { type: "status", threadId: this.id, status: "thinking" },
           { queueItemId: this.runningItem?.id },
         );
@@ -2046,7 +2047,7 @@ export class Thread {
           this.currentAssistantParts = [];
           this.currentToolCalls.clear();
           this.currentAssistantEntry = undefined;
-          await this.session.emit(
+          await this.fencedEmit(
             {
               type: "message_start",
               threadId: this.id,
@@ -2119,7 +2120,7 @@ export class Thread {
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).
           this.currentAssistantEntry = entry;
-          await this.session.emit(
+          await this.fencedEmit(
             {
               type: "message_end",
               threadId: this.id,
@@ -2138,7 +2139,7 @@ export class Thread {
       }
       case "tool_execution_start":
         this.toolCtxOverlay.gateId = undefined;
-        await this.session.emit(
+        await this.fencedEmit(
           {
             type: "tool_start",
             threadId: this.id,
@@ -2147,7 +2148,7 @@ export class Thread {
           },
           { queueItemId: this.runningItem?.id },
         );
-        await this.session.emit(
+        await this.fencedEmit(
           { type: "status", threadId: this.id, status: "tool_calling" },
           { queueItemId: this.runningItem?.id },
         );
@@ -2180,7 +2181,7 @@ export class Thread {
             this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
           );
         }
-        await this.session.emit(
+        await this.fencedEmit(
           {
             type: "tool_end",
             threadId: this.id,
@@ -2208,7 +2209,7 @@ export class Thread {
           };
         }
         if (errorMessage) {
-          await this.session.emit(
+          await this.fencedEmit(
             {
               type: "error",
               threadId: this.id,
@@ -2225,11 +2226,11 @@ export class Thread {
             : stopReason === "error"
             ? "error"
             : "end_turn";
-        await this.session.emit(
+        await this.fencedEmit(
           { type: "turn_end", threadId: this.id, reason },
           { queueItemId: this.runningItem?.id },
         );
-        await this.session.emit(
+        await this.fencedEmit(
           { type: "status", threadId: this.id, status: "idle" },
           { queueItemId: this.runningItem?.id },
         );
@@ -2248,6 +2249,29 @@ export class Thread {
   private async fencedWrite(fn: () => Promise<void>): Promise<void> {
     try {
       await fn();
+    } catch (err) {
+      if (err instanceof StaleAttemptError) {
+        this.staleFenceDetected = true;
+        this.emitError("stale_fence", `turn superseded for item ${err.itemId}`);
+        if (this.agent.state.isStreaming) this.agent.abort();
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Emit a live-execution event under the turn's write fence (decision 12).
+   * `Session.emit` rethrows `StaleAttemptError` for a fenced append — this
+   * wrapper is the site that actually absorbs it, mirroring `fencedWrite`:
+   * mark the turn stale, abort the agent if still streaming, and swallow.
+   * A rethrow here would otherwise escape as an unhandled rejection since
+   * `handleAgentEvent` runs from a fire-and-forget `agent.subscribe`
+   * callback with no caller to catch it.
+   */
+  private async fencedEmit(event: EngineEvent, opts: Omit<EmitOptions, "fence"> = {}): Promise<void> {
+    try {
+      await this.session.emit(event, { ...opts, fence: this.fence });
     } catch (err) {
       if (err instanceof StaleAttemptError) {
         this.staleFenceDetected = true;
