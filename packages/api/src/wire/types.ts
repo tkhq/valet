@@ -344,6 +344,15 @@ export type WireEvent =
       outcome: "completed" | "failed" | "aborted" | "superseded" | "merged";
       error?: string;
     }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "sandbox.status";
+      state: string;
+      epoch: number;
+      estimateMs?: number;
+    }
   | { seq: number; ts: number; offset?: string; type: "ping" };
 
 export type WireEventType = WireEvent["type"];

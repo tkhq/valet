@@ -238,6 +238,74 @@ describe("stream store reducer", () => {
     expect(Object.keys(slice.pendingGates)).toEqual(["gate-1"]);
     expect(slice.lastOffset).toBe(offset(6));
   });
+
+  it("applies sandbox.status updates", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "sandbox.status",
+      state: "provisioning",
+      epoch: 1,
+      estimateMs: 8000,
+    });
+    let slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.sandbox).toEqual({ state: "provisioning", epoch: 1 });
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "sandbox.status",
+      state: "ready",
+      epoch: 1,
+    });
+    slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.sandbox).toEqual({ state: "ready", epoch: 1 });
+  });
+
+  it("drops a sandbox.status event whose epoch regresses relative to the stored one", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "sandbox.status",
+      state: "ready",
+      epoch: 2,
+    });
+    // A later-offset frame reporting a lower epoch — e.g. a stale
+    // re-provision-loop replay — must not clobber the newer epoch's state.
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "sandbox.status",
+      state: "error",
+      epoch: 1,
+    });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.sandbox).toEqual({ state: "ready", epoch: 2 });
+    // The offset still advances — this is an epoch-level drop, not an
+    // offset-level one.
+    expect(slice.lastOffset).toBe(offset(2));
+  });
+
+  it("clears sandbox status on reset()", () => {
+    const { ingest, reset: resetSession } = useStreamStore.getState();
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "sandbox.status",
+      state: "ready",
+      epoch: 1,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].sandbox).toBeDefined();
+    resetSession(SESSION);
+    expect(useStreamStore.getState().bySession[SESSION].sandbox).toBeUndefined();
+  });
 });
 
 describe("store default slice", () => {

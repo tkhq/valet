@@ -11,10 +11,12 @@ export function SessionHeader({
   session,
   agentStatus,
   conn,
+  sandbox,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
   conn: ConnectionStatus;
+  sandbox?: { state: string; epoch: number };
 }) {
   const navigate = useNavigate();
   const del = useDeleteSession();
@@ -48,6 +50,7 @@ export function SessionHeader({
             />
           </span>
         </Tooltip>
+        <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
         <AgentStatusBadge status={agentStatus} />
         <Tooltip content="Delete session">
@@ -76,6 +79,33 @@ function ConnectionBadge({ conn }: { conn: ConnectionStatus }) {
   };
   const { label, variant } = map[conn];
   return <Badge variant={variant}>{label}</Badge>;
+}
+
+/**
+ * Ambient workspace-sandbox indicator: a dot + short label, not a full
+ * `Badge` — this is a background signal, not something the user acts on.
+ * Renders nothing until the first `sandbox.status` frame arrives (absent =
+ * unknown, not "detached") to avoid layout shift / a misleading state.
+ */
+function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: number } }) {
+  if (!sandbox) return null;
+  const map: Record<string, { dot: string; label: string }> = {
+    provisioning: { dot: "bg-amber-500", label: "workspace provisioning…" },
+    ready: { dot: "bg-success-500", label: "workspace ready" },
+    idle: { dot: "bg-success-500", label: "workspace idle" },
+    snapshotting: { dot: "bg-amber-500", label: "workspace snapshotting…" },
+    released: { dot: "bg-neutral-400", label: "workspace released" },
+    error: { dot: "bg-danger-500", label: "workspace error" },
+  };
+  const entry = map[sandbox.state];
+  if (!entry) return null;
+  return (
+    <Tooltip content={entry.label}>
+      <span className="inline-flex items-center gap-1.5 px-1" aria-label={entry.label}>
+        <span className={cn("h-1.5 w-1.5 rounded-full", entry.dot)} />
+      </span>
+    </Tooltip>
+  );
 }
 
 function AgentStatusBadge({ status }: { status: AgentStatus }) {

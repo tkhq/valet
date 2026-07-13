@@ -77,6 +77,14 @@ export interface SessionStreamState {
   queueByThread: Record<string, WireQueueState>;
   /** Last error message from the wire (if any). Cleared on successful turn_end. */
   error?: { code: string; message: string };
+  /**
+   * Ambient sandbox attachment status, mirroring the wire `sandbox.status`
+   * frame. Session-scoped (no threadId). Undefined until the first event
+   * arrives — absent means "unknown", not "detached". Epoch-gated: a frame
+   * whose `epoch` is behind the currently stored epoch is a stale replay
+   * and is dropped (see `reduce`'s `sandbox.status` case).
+   */
+  sandbox?: { state: string; epoch: number };
 }
 
 export interface StreamStore {
@@ -355,6 +363,16 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         ev.outcome === "completed" ? undefined : ev.outcome;
       const updated: StreamMessage = { ...m, settledOutcome };
       next.messages = replaceAt(slice.messages, idx, updated);
+      return next;
+    }
+
+    case "sandbox.status": {
+      // Replay safety: an event whose epoch regresses relative to what we
+      // already hold is a stale re-provision-loop replay (or an
+      // out-of-order resume frame) — drop it rather than clobber a newer
+      // attachment's status with an older one's.
+      if (slice.sandbox && ev.epoch < slice.sandbox.epoch) return next;
+      next.sandbox = { state: ev.state, epoch: ev.epoch };
       return next;
     }
 

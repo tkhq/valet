@@ -212,4 +212,30 @@ describe("busEventToWire", () => {
       },
     ]);
   });
+
+  it("forwards sandbox_status with estimateMs passthrough", () => {
+    const out = busEventToWire(
+      ev({
+        type: "sandbox_status",
+        sandboxId: "sb1",
+        state: "provisioning",
+        epoch: 2,
+        estimateMs: 8000,
+      }),
+    );
+    expect(out).toEqual([
+      { type: "sandbox.status", state: "provisioning", epoch: 2, estimateMs: 8000 },
+    ]);
+  });
+
+  it("forwards sandbox_status without estimateMs", () => {
+    const out = busEventToWire(
+      ev({
+        type: "sandbox_status",
+        state: "ready",
+        epoch: 1,
+      }),
+    );
+    expect(out).toEqual([{ type: "sandbox.status", state: "ready", epoch: 1, estimateMs: undefined }]);
+  });
 });
