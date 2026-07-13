@@ -15,7 +15,6 @@ import {
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
 import {
-  countPendingForCap,
   deriveQueueState,
   MAX_PENDING_PER_THREAD,
   namespaceInternalDispatchId,
@@ -23,9 +22,10 @@ import {
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
+  validateSignalAttributeKeys,
   validateSignalTagName,
 } from "./submission.js";
-import { NotFoundError, PendingCapError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
+import { NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -247,14 +247,6 @@ export class Thread {
 
     const prepared = this.prepareSubmissionContent(content, opts);
 
-    // Steer admissions are exempt from the pending-cap pre-check: the same
-    // atomic `admitSubmission({ steer: true })` call supersedes every prior
-    // unsettled item on the thread, so the count they'd leave behind is
-    // always ~0-1 regardless of how many were pending beforehand.
-    if (effectiveMode !== "steer") {
-      await this.enforcePendingCap();
-    }
-
     const item = this.buildQueueItem(prepared.content, {
       dispatchId: prepared.dispatchId,
       author: opts.author,
@@ -265,12 +257,20 @@ export class Thread {
       metadata: prepared.metadata,
     });
 
+    // Steer admissions are exempt from the pending cap: the same atomic
+    // `admitSubmission({ steer: true })` call supersedes every prior
+    // unsettled item on the thread in the same transaction, so the count
+    // they'd leave behind is always ~0-1 regardless of how many were pending
+    // beforehand. For every other mode, the cap is enforced by the store
+    // INSIDE the admission transaction (opts.maxPending) rather than via a
+    // separate pre-check, so concurrent admissions can't race past it.
     const store = this.session.providers.store;
+    const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
     const { item: admitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" ? { steer: true } : undefined,
+      effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
     );
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
@@ -471,11 +471,15 @@ export class Thread {
     opts: PromptOptions,
   ): { content: PromptContent; dispatchId?: string; metadata?: Record<string, unknown> } {
     if (!isSignalContent(content)) {
+      if (opts.internalSender) {
+        throw new ValidationError("internalSender is only valid for signal content");
+      }
       return { content, dispatchId: opts.dispatchId, metadata: opts.metadata };
     }
 
     const tagName = content.tagName ?? "signal";
     validateSignalTagName(tagName);
+    validateSignalAttributeKeys(content.attributes);
     const normalized: SignalContent = { ...content, tagName };
 
     if (!opts.internalSender) {
@@ -502,16 +506,6 @@ export class Thread {
       dispatchId: namespaceInternalDispatchId(opts.internalSender.sessionId, opts.dispatchId),
       metadata: { ...(opts.metadata ?? {}), signalStamp: stamp },
     };
-  }
-
-  /** Throws `PendingCapError` when the thread already holds `cap` unsettled, non-superseded items. */
-  private async enforcePendingCap(): Promise<void> {
-    const store = this.session.providers.store;
-    const items = await store.listUnsettledSubmissions(this.session.id);
-    const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
-    if (countPendingForCap(items, this.id) >= cap) {
-      throw new PendingCapError(this.id, cap);
-    }
   }
 
   private buildQueueItem(
@@ -1532,7 +1526,12 @@ export class Thread {
       signal: signalMeta,
       author: item.author,
       channel: item.channel,
-      metadata: item.metadata,
+      // signalStamp (when present) has already been lifted into `signal`
+      // above; stripping it here avoids duplicating the sender stamp into
+      // the persisted entry's metadata (and onto the wire) a second time.
+      // Built as a fresh object so the queue item's own stored metadata is
+      // never mutated.
+      metadata: stripSignalStamp(item.metadata),
       queueItemId: item.id,
       createdAt: Date.now(),
     };
@@ -2566,6 +2565,21 @@ function readSignalStamp(metadata: Record<string, unknown> | undefined): SignalS
   if (typeof rec.hopCount !== "number") return undefined;
   if (!isPrincipalLike(rec.senderOwner)) return undefined;
   return { senderSessionId: rec.senderSessionId, hopCount: rec.hopCount, senderOwner: rec.senderOwner };
+}
+
+/**
+ * Returns `metadata` with the `signalStamp` key removed, without mutating
+ * the input. Used when persisting the user `MessageEntry`: the stamp has
+ * already been lifted into `entry.signal` by `buildSignalMeta`, so leaving
+ * it in `entry.metadata` too would duplicate the sender stamp into the
+ * persisted entry (and onto the wire).
+ */
+function stripSignalStamp(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!metadata || !("signalStamp" in metadata)) return metadata;
+  const { signalStamp: _signalStamp, ...rest } = metadata;
+  return rest;
 }
 
 /** Builds the `MessageEntry.signal` snapshot for a signal `QueueItem` at persistence time (runItem). */

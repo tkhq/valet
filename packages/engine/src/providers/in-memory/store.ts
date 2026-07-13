@@ -1,4 +1,5 @@
-import { ConflictError, NotFoundError, StaleAttemptError } from "../../errors.js";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError } from "../../errors.js";
+import { countPendingForCap } from "../../submission.js";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -249,7 +250,7 @@ export class InMemorySessionStore implements SessionStore {
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean },
+    opts?: { steer?: boolean; maxPending?: number },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     const r = this.row(sessionId);
 
@@ -272,6 +273,19 @@ export class InMemorySessionStore implements SessionStore {
             { dispatchId, existingItemId: existing.id },
           );
         }
+      }
+    }
+
+    // Pending-cap enforcement (in-process JS has no true concurrency within
+    // this synchronous section, but the check still lives here — between
+    // dispatchId dedup resolution and the actual insert — so this store's
+    // admission semantics mirror the sqlite backend's in-transaction check
+    // exactly: idempotent replays never trip the cap, and the count reflects
+    // state as of immediately before this item lands.
+    if (opts?.maxPending !== undefined) {
+      const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled");
+      if (countPendingForCap(unsettled, threadId) >= opts.maxPending) {
+        throw new PendingCapError(threadId, opts.maxPending);
       }
     }
 

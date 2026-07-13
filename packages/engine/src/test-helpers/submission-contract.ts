@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { ConflictError, NotFoundError, StaleAttemptError } from "../errors.js";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError } from "../errors.js";
 import type {
   MessageEntry,
   QueueItem,
@@ -143,6 +143,73 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(resA.admitted).toBe(true);
       expect(resB.admitted).toBe(true);
       expect(resA.item.id).not.toBe(resB.item.id);
+    });
+
+    // --- Pending cap (opts.maxPending, enforced inside admitSubmission's transaction) ---
+
+    it("admission at the cap throws PendingCapError; a slot below the cap admits", async () => {
+      const a = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 2 });
+      expect(a.admitted).toBe(true);
+      const b = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 2 });
+      expect(b.admitted).toBe(true);
+
+      // Thread now holds 2 unsettled, non-superseded items == cap: rejected.
+      await expect(
+        store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 2 }),
+      ).rejects.toThrow(PendingCapError);
+
+      // Settling one item frees a slot; the next admission under the cap succeeds.
+      const ok = await store.settleUnclaimed(SESSION_ID, THREAD_ID, a.item.id, { outcome: "completed" });
+      expect(ok).toBe(true);
+      const c = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 2 });
+      expect(c.admitted).toBe(true);
+    });
+
+    it("superseded items don't count toward the pending cap", async () => {
+      const a = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 100, updatedAt: 100 }));
+      const b = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 200, updatedAt: 200 }));
+      expect(a.admitted && b.admitted).toBe(true);
+
+      // Steer supersedes both prior items in the same atomic admission.
+      const s = await store.admitSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        makeItem({ createdAt: 300, updatedAt: 300 }),
+        { steer: true },
+      );
+      expect(s.supersededItemIds.sort()).toEqual([a.item.id, b.item.id].sort());
+
+      // Only `s` counts now (a and b are superseded) — two more admissions
+      // fit under a cap of 3 before the cap trips.
+      const d = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 3 });
+      expect(d.admitted).toBe(true);
+      const e = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 3 });
+      expect(e.admitted).toBe(true);
+      await expect(
+        store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 3 }),
+      ).rejects.toThrow(PendingCapError);
+    });
+
+    it("an idempotent replay at the cap dedups instead of throwing PendingCapError", async () => {
+      const first = await store.admitSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        makeItem({ dispatchId: "d-cap", content: "same" }),
+        { maxPending: 1 },
+      );
+      expect(first.admitted).toBe(true);
+
+      // Thread is already at the cap (1 unsettled item); a fresh admission
+      // would be rejected, but replaying the same dispatchId + content must
+      // still dedup and return the existing item instead of throwing.
+      const replay = await store.admitSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        makeItem({ dispatchId: "d-cap", content: "same" }),
+        { maxPending: 1 },
+      );
+      expect(replay.admitted).toBe(false);
+      expect(replay.item.id).toBe(first.item.id);
     });
 
     // --- Claim (CAS + FIFO head) ---

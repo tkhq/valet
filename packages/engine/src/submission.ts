@@ -27,6 +27,26 @@ export function validateSignalTagName(tagName: string): void {
   }
 }
 
+/**
+ * Validates every key of a `SignalContent.attributes` map at admission,
+ * against the same charset `tagName` is held to. `renderSignalEnvelope`
+ * writes attribute keys into the XML envelope unescaped (only values are
+ * escaped) — an attacker-controlled key like `x"><inject` would otherwise
+ * break out of the attribute and inject arbitrary markup into what the model
+ * reads. Rejecting bad keys here, at admission, keeps the renderer's
+ * "keys are trusted" invariant true everywhere downstream.
+ */
+export function validateSignalAttributeKeys(attributes: Record<string, string> | undefined): void {
+  if (!attributes) return;
+  for (const key of Object.keys(attributes)) {
+    if (!SIGNAL_TAG_NAME_RE.test(key)) {
+      throw new ValidationError(
+        `invalid signal attribute key "${key}": must match ${SIGNAL_TAG_NAME_RE.source}`,
+      );
+    }
+  }
+}
+
 function escapeXml(value: string): string {
   return value
     .replace(/&/g, "&amp;")

@@ -23,6 +23,7 @@ export {
   resolveSubmissionText,
   resolvePartialSubmissionText,
   validateSignalTagName,
+  validateSignalAttributeKeys,
   renderSignalEnvelope,
   namespaceInternalDispatchId,
   countPendingForCap,

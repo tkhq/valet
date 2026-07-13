@@ -12,7 +12,7 @@ import {
   engineAttemptMarkers,
   engineEvents,
 } from "./schema.js";
-import { ConflictError, NotFoundError, StaleAttemptError } from "@valet/engine";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError } from "@valet/engine";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -226,9 +226,15 @@ const REPLACE_ATTEMPT_SQL = `
     AND attempt_id = @expectedAttemptId
 `;
 
-function isUniqueConstraintError(err: unknown): err is InstanceType<typeof Database.SqliteError> {
-  return err instanceof Database.SqliteError && err.code === "SQLITE_CONSTRAINT_UNIQUE";
-}
+// Pending-cap denominator (mirrors countPendingForCap's semantics applied to
+// an already-unsettled item list): unsettled, non-superseded items of the
+// thread. Read inside admitSubmission's own BEGIN IMMEDIATE transaction so
+// the count-then-insert is atomic against concurrent admissions.
+const PENDING_COUNT_SQL = `
+  SELECT COUNT(*) as count FROM engine_queue_items
+  WHERE session_id = ? AND thread_id = ?
+    AND status != 'settled' AND superseded_by_item_id IS NULL
+`;
 
 export class SqliteSessionStore implements SessionStore {
   private readonly sqlite: Database.Database;
@@ -696,45 +702,63 @@ export class SqliteSessionStore implements SessionStore {
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean },
+    opts?: { steer?: boolean; maxPending?: number },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     const supersededItemIds: string[] = [];
-    try {
-      const run = this.sqlite.transaction(() => {
-        this.sqlite.prepare(INSERT_QUEUE_ITEM_SQL).run(queueItemInsertParams(sessionId, threadId, item));
-        if (opts?.steer) {
-          const candidates = this.sqlite
-            .prepare(STEER_CANDIDATES_SQL)
-            .all(sessionId, threadId, item.id, item.createdAt) as { id: string }[];
-          if (candidates.length > 0) {
-            const placeholders = candidates.map(() => "?").join(",");
-            this.sqlite
-              .prepare(
-                `UPDATE engine_queue_items SET superseded_by_item_id = ?, updated_at = ? WHERE id IN (${placeholders})`,
-              )
-              .run(item.id, Date.now(), ...candidates.map((c) => c.id));
-            supersededItemIds.push(...candidates.map((c) => c.id));
-          }
-        }
-      });
-      run.immediate();
-    } catch (err) {
-      if (item.dispatchId && isUniqueConstraintError(err)) {
+    // dispatchId idempotency is resolved by an upfront SELECT rather than an
+    // insert-then-catch-unique-violation: both the dedup check and the
+    // pending-cap check (below) must run, and agree, inside the SAME
+    // BEGIN IMMEDIATE transaction as the insert — an idempotent replay must
+    // never trip the cap just because it counts itself, and a fresh
+    // admission's cap check must never race a concurrent one. `.immediate()`
+    // takes the write lock before any of this runs, so the whole
+    // dedup-check → cap-check → insert sequence is atomic.
+    const run = this.sqlite.transaction((): QueueItem | null => {
+      if (item.dispatchId) {
         const existingRow = this.sqlite
           .prepare("SELECT * FROM engine_queue_items WHERE session_id = ? AND dispatch_id = ?")
           .get(sessionId, item.dispatchId) as QueueItemRow | undefined;
-        if (!existingRow) throw err;
-        const existingItem = queueItemRowToItem(existingRow);
-        const sameContent = JSON.stringify(existingItem.content) === JSON.stringify(item.content);
-        if (sameContent) {
-          return { item: existingItem, admitted: false, supersededItemIds: [] };
+        if (existingRow) {
+          const existingItem = queueItemRowToItem(existingRow);
+          const sameContent = JSON.stringify(existingItem.content) === JSON.stringify(item.content);
+          if (sameContent) return existingItem;
+          throw new ConflictError(
+            `dispatchId ${item.dispatchId} already admitted with different content`,
+            { dispatchId: item.dispatchId, existingItemId: existingItem.id },
+          );
         }
-        throw new ConflictError(
-          `dispatchId ${item.dispatchId} already admitted with different content`,
-          { dispatchId: item.dispatchId, existingItemId: existingItem.id },
-        );
       }
-      throw err;
+
+      if (opts?.maxPending !== undefined) {
+        const countRow = this.sqlite.prepare(PENDING_COUNT_SQL).get(sessionId, threadId) as {
+          count: number;
+        };
+        if (countRow.count >= opts.maxPending) {
+          throw new PendingCapError(threadId, opts.maxPending);
+        }
+      }
+
+      this.sqlite.prepare(INSERT_QUEUE_ITEM_SQL).run(queueItemInsertParams(sessionId, threadId, item));
+      if (opts?.steer) {
+        const candidates = this.sqlite
+          .prepare(STEER_CANDIDATES_SQL)
+          .all(sessionId, threadId, item.id, item.createdAt) as { id: string }[];
+        if (candidates.length > 0) {
+          const placeholders = candidates.map(() => "?").join(",");
+          this.sqlite
+            .prepare(
+              `UPDATE engine_queue_items SET superseded_by_item_id = ?, updated_at = ? WHERE id IN (${placeholders})`,
+            )
+            .run(item.id, Date.now(), ...candidates.map((c) => c.id));
+          supersededItemIds.push(...candidates.map((c) => c.id));
+        }
+      }
+      return null;
+    });
+
+    const deduped = run.immediate();
+    if (deduped) {
+      return { item: deduped, admitted: false, supersededItemIds: [] };
     }
     return { item: { ...item }, admitted: true, supersededItemIds };
   }

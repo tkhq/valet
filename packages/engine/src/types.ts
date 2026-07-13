@@ -844,12 +844,20 @@ export interface SessionStore {
    * throws ConflictError. steer:true additionally stamps supersededByItemId
    * on every unsettled item of the thread admitted before this one, in the
    * same atomic step, and returns their ids.
+   *
+   * opts.maxPending, when set, enforces the per-thread pending cap INSIDE
+   * this call's own transaction: the store counts the thread's unsettled,
+   * non-superseded items (idempotent replays excluded — they're resolved
+   * before the count) and throws PendingCapError when that count is already
+   * >= maxPending. Doing the check and the insert in one transaction is what
+   * closes the TOCTOU window a separate pre-check would leave open under
+   * concurrent admissions.
    */
   admitSubmission(
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean },
+    opts?: { steer?: boolean; maxPending?: number },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }>;
   /**
    * CAS queued→running. Succeeds only when itemId is the thread's runnable

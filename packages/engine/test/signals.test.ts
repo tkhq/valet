@@ -272,6 +272,118 @@ describe("SignalContent admission", () => {
     faux.unregister();
   });
 
+  it("rejects an attribute key that would break out of the XML envelope", async () => {
+    const faux = registerFauxProvider({ provider: "sig8" });
+    faux.setResponses([fauxAssistantMessage("unused")]);
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    await expect(
+      session.prompt({
+        kind: "signal",
+        signalType: "x",
+        body: "y",
+        attributes: { 'x"><inject': "foo" },
+      } satisfies SignalContent),
+    ).rejects.toThrow(ValidationError);
+
+    faux.unregister();
+  });
+
+  it("valid, stamped attribute keys still render normally after the admission-time key check", async () => {
+    const faux = registerFauxProvider({ provider: "sig9" });
+    faux.setResponses([fauxAssistantMessage("ok")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread("web:default");
+
+    const receipt = await thread.submitPrompt(
+      {
+        kind: "signal",
+        signalType: "s",
+        body: "b",
+        attributes: { sender: "alice", channel: "C1" },
+      } satisfies SignalContent,
+      { dispatchId: "d-valid-attrs" },
+    );
+    await waitForStatus(events, receipt.threadId, "idle");
+
+    const entries = await session.readEntries("web:default");
+    const userEntry = entries.find((e) => e.type === "message" && e.role === "user") as MessageEntry;
+    const xml = renderSignalEnvelope(userEntry.signal!, userEntry.content);
+    expect(xml).toBe(`<signal signalType="s" channel="C1" sender="alice">b</signal>`);
+
+    faux.unregister();
+  });
+
+  it("rejects internalSender on non-signal content", async () => {
+    const faux = registerFauxProvider({ provider: "sig10" });
+    faux.setResponses([fauxAssistantMessage("unused")]);
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    await expect(
+      session.thread("web:default").submitPrompt("plain text", {
+        dispatchId: "d-non-signal",
+        internalSender: { sessionId: "sess-Z", owner: { type: "user", id: "u-z" } },
+      }),
+    ).rejects.toThrow(ValidationError);
+
+    faux.unregister();
+  });
+
+  it("strips signalStamp from the persisted entry's metadata (only entry.signal carries it)", async () => {
+    const faux = registerFauxProvider({ provider: "sig11" });
+    faux.setResponses([fauxAssistantMessage("ok")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread("web:default");
+
+    const receipt = await thread.submitPrompt(
+      { kind: "signal", signalType: "s", body: "b" } satisfies SignalContent,
+      {
+        dispatchId: "d-stamp-strip",
+        internalSender: { sessionId: "sess-strip", owner: { type: "user", id: "u-s" }, hopCount: 0 },
+      },
+    );
+    await waitForStatus(events, receipt.threadId, "idle");
+
+    const entries = await session.readEntries("web:default");
+    const userEntry = entries.find((e) => e.type === "message" && e.role === "user") as MessageEntry;
+    expect(userEntry.signal).toMatchObject({
+      senderSessionId: "sess-strip",
+      senderOwner: { type: "user", id: "u-s" },
+      hopCount: 1,
+    });
+    expect(userEntry.metadata?.signalStamp).toBeUndefined();
+
+    faux.unregister();
+  });
+
   it("stamped sender_session attribute wins over a colliding user-supplied attribute", async () => {
     const faux = registerFauxProvider({ provider: "sig7" });
     faux.setResponses([fauxAssistantMessage("ok")]);
