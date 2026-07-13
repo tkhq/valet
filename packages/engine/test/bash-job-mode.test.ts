@@ -16,16 +16,48 @@ import {
   JOB_POLL_INTERVAL_MS,
   BASH_DEFAULT_TIMEOUT_S,
 } from "../src/builtin-tools/index.js";
-import { SandboxUnavailableError } from "../src/errors.js";
-import type { ExecJobHandle, ExecResult, JobPoll, Sandbox, ToolContext } from "../src/types.js";
+import { SandboxSupersededError, SandboxUnavailableError } from "../src/errors.js";
+import type {
+  Credential,
+  CredentialProvider,
+  DecisionGateRequest,
+  DecisionResolution,
+  ExecJobHandle,
+  ExecResult,
+  JobPoll,
+  MessageQuery,
+  Sandbox,
+  SessionEntry,
+  ToolContext,
+} from "../src/types.js";
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
 
-function makeCtx(sandbox: FakeSandbox, signal: AbortSignal = new AbortController().signal) {
+const stubCredentials: CredentialProvider = {
+  get: async (): Promise<Credential | null> => null,
+  request: async (): Promise<Credential> => {
+    throw new Error("not implemented in test stub");
+  },
+};
+
+function makeCtx(sandbox: FakeSandbox, signal: AbortSignal = new AbortController().signal): ToolContext {
   return {
-    sandbox,
+    userId: "u1",
+    orgId: "o1",
+    sessionId: "s1",
+    threadId: "t1",
+    credentials: stubCredentials,
+    // FakeSandbox is intentionally partial — tests only stub the methods
+    // they exercise (exec/execJob/pollJob/cancelJob).
+    sandbox: sandbox as Sandbox,
+    requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
+      throw new Error("not implemented in test stub");
+    },
     signal,
-  } as unknown as Parameters<typeof bashTool.execute>[1];
+    threadRead: async (_key: string, _opts?: MessageQuery): Promise<SessionEntry[]> => [],
+    listThreads: async () => [],
+    setModel: async ({ model }: { model: string }) => ({ fromModel: model, toModel: model }),
+  };
 }
 
 async function execute(args: { command: string; timeout?: number }, ctx: ToolContext) {
@@ -185,5 +217,47 @@ describe("bash tool: job-mode poll loop", () => {
       SandboxUnavailableError,
     );
     expect(sandbox.cancelJob).not.toHaveBeenCalled();
+  });
+
+  it("ctx.signal abort: a cancelJob rejection is swallowed and the abort error still surfaces", async () => {
+    const controller = new AbortController();
+    let pollCount = 0;
+    const sandbox: FakeSandbox = {
+      id: "sb-9",
+      execJob: vi.fn(async (): Promise<ExecJobHandle> => ({ execId: "job-6" })),
+      pollJob: vi.fn(async (): Promise<JobPoll> => {
+        pollCount++;
+        if (pollCount === 1) controller.abort(new Error("cancelled by user"));
+        return { status: "running", output: "", nextOffset: 0 };
+      }),
+      cancelJob: vi.fn(async () => {
+        throw new SandboxUnavailableError(new Error("No such container"));
+      }),
+    };
+    const ctx = makeCtx(sandbox, controller.signal);
+    await expect(execute({ command: "sleep 999", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
+    expect(sandbox.cancelJob).toHaveBeenCalledWith("job-6");
+  });
+
+  it("deadline exceeded: a cancelJob rejection is swallowed and the timeout result still returns", async () => {
+    vi.useFakeTimers();
+    try {
+      const sandbox: FakeSandbox = {
+        id: "sb-10",
+        execJob: vi.fn(async (): Promise<ExecJobHandle> => ({ execId: "job-7" })),
+        pollJob: vi.fn(async (): Promise<JobPoll> => ({ status: "running", output: "", nextOffset: 0 })),
+        cancelJob: vi.fn(async () => {
+          throw new SandboxSupersededError(2);
+        }),
+      };
+      const ctx = makeCtx(sandbox);
+      const resultPromise = execute({ command: "sleep 999", timeout: 61 }, ctx);
+      await vi.advanceTimersByTimeAsync(61_000 + JOB_POLL_INTERVAL_MS * 2);
+      const result = await resultPromise;
+      expect(sandbox.cancelJob).toHaveBeenCalledWith("job-7");
+      expect((result as { text: string }).text).toContain("timed out");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

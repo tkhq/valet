@@ -48,6 +48,22 @@ function abortErrorFrom(signal: AbortSignal): Error {
 }
 
 /**
+ * Best-effort job cancellation: the sandbox may already be gone
+ * (SandboxUnavailableError) or the exec superseded (SandboxSupersededError)
+ * by the time we try to cancel it. Either way, cancellation failing must
+ * not mask the abort error / timeout result we're about to surface — swallow
+ * it and move on.
+ */
+async function bestEffortCancel(cancelJob: (execId: string) => Promise<void>, execId: string): Promise<void> {
+  try {
+    await cancelJob(execId);
+  } catch {
+    // Cancellation is best-effort; the caller's abort/timeout result takes
+    // precedence over any error the sandbox raises while cancelling.
+  }
+}
+
+/**
  * Poll a job-mode exec to completion, accumulating output across polls
  * (spec decision 10). Deadline exceeded or `ctx.signal` abort both cancel
  * the job first; a poll rejection (sandbox degradation) propagates
@@ -66,11 +82,11 @@ async function pollJobToCompletion(
 
   for (;;) {
     if (ctx.signal.aborted) {
-      await cancelJob(execId);
+      await bestEffortCancel(cancelJob, execId);
       throw abortErrorFrom(ctx.signal);
     }
     if (Date.now() >= deadline) {
-      await cancelJob(execId);
+      await bestEffortCancel(cancelJob, execId);
       return { text: `${output}\n[timed out after ${Math.round(timeoutMs / 1000)}s]` };
     }
 
