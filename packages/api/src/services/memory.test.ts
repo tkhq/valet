@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import Database from "better-sqlite3";
+import { ValidationError } from "@valet/shared";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "./teams.js";
@@ -256,6 +257,11 @@ describe("memory service", () => {
 
       const results = await searchFiles(db, scopeFor("u1"), { query: "uniquesearchterm" });
       expect(results.map((r) => r.path)).toContain(`team:${team.id}/notes/findme.md`);
+    });
+
+    it("rejects a malformed FTS5 query (unbalanced quote) with ValidationError instead of throwing raw SqliteError", async () => {
+      const scope = scopeFor("u1");
+      await expect(searchFiles(db, scope, { query: '"foo' })).rejects.toThrow(ValidationError);
     });
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
-import { exportFiles, importFiles, readFile, writeFile, type MemoryScope } from "./memory.js";
+import { exportFiles, importFiles, readFile, searchFiles, writeFile, type MemoryScope } from "./memory.js";
 
 function seedUser(db: AppDb, id: string, orgId: string) {
   db.insert(users)
@@ -133,6 +133,27 @@ describe("memory import/export", () => {
     if (read.kind !== "file") throw new Error("expected file");
     expect(read.file.sensitivity).toBe("private");
     expect(read.file.origin).toBe("imported");
+  });
+
+  it("untrusted import ignores an embedded valet.expires (even in the past) and leaves expires NULL", async () => {
+    const scope = scopeFor("u1");
+    const doc = [
+      "---",
+      'type: "note"',
+      "valet:",
+      '  expires: "2000-01-01T00:00:00.000Z"',
+      "---",
+      "",
+      "content that should never expire since the import is untrusted",
+    ].join("\n");
+    await importFiles(db, scope, { files: { "notes/untrusted-expires.md": doc }, trusted: false });
+
+    const read = await readFile(db, scope, "notes/untrusted-expires.md");
+    if (read.kind !== "file") throw new Error("expected file");
+    expect(read.file.expires).toBeNull();
+
+    const results = await searchFiles(db, scope, { query: "untrusted" });
+    expect(results.map((r) => r.path)).toContain("notes/untrusted-expires.md");
   });
 
   it("remaps lib/ and reserved basenames instead of rejecting, and reports the remap", async () => {

@@ -14,6 +14,7 @@
  * this phase), relevance boosting, shareable-export filtering, reranking,
  * and tag-similarity hints.
  */
+import { SqliteError } from "better-sqlite3";
 import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
@@ -590,18 +591,26 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
   );
   const ownerClause = sql.join(ownerConditions, sql` OR `);
 
-  const rows = db.all<RawSearchRow>(sql`
-    SELECT mf.path as path, mf.title as title, mf.description as description, mf.type as type,
-           mf.owner_type as owner_type, mf.owner_id as owner_id,
-           bm25(memory_files_fts, 5, 10, 8, 6, 1) as rank
-    FROM memory_files_fts
-    JOIN memory_files mf ON mf.rowid = memory_files_fts.rowid
-    WHERE memory_files_fts MATCH ${params.query}
-      AND (${ownerClause})
-      AND (mf.expires IS NULL OR mf.expires > ${now})
-    ORDER BY rank
-    LIMIT ${limit}
-  `);
+  let rows: RawSearchRow[];
+  try {
+    rows = db.all<RawSearchRow>(sql`
+      SELECT mf.path as path, mf.title as title, mf.description as description, mf.type as type,
+             mf.owner_type as owner_type, mf.owner_id as owner_id,
+             bm25(memory_files_fts, 5, 10, 8, 6, 1) as rank
+      FROM memory_files_fts
+      JOIN memory_files mf ON mf.rowid = memory_files_fts.rowid
+      WHERE memory_files_fts MATCH ${params.query}
+        AND (${ownerClause})
+        AND (mf.expires IS NULL OR mf.expires > ${now})
+      ORDER BY rank
+      LIMIT ${limit}
+    `);
+  } catch (err) {
+    if (err instanceof SqliteError && err.code === "SQLITE_ERROR") {
+      throw new ValidationError(`invalid search query: ${err.message}`);
+    }
+    throw err;
+  }
 
   const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}`, o.prefix]));
 
@@ -757,8 +766,8 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
     const sensitivity = params.trusted ? (parsed.valet.sensitivity ?? existing?.sensitivity ?? "private") : "private";
     const origin = params.trusted ? (parsed.valet.origin ?? existing?.origin ?? "") : "imported";
 
-    let expires: number | null = existing?.expires ?? null;
-    if (parsed.valet.expires) {
+    let expires: number | null = params.trusted ? (existing?.expires ?? null) : null;
+    if (params.trusted && parsed.valet.expires) {
       const t = Date.parse(parsed.valet.expires);
       if (!Number.isNaN(t)) expires = t;
     }
