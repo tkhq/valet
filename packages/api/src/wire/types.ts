@@ -136,6 +136,15 @@ export interface Message {
   content: string;
   parts: MessagePart[];
   createdAt: number;
+  /**
+   * The submission (engine queue item) that produced this entry —
+   * transcript↔submission linkage. Populated from the engine's
+   * `BaseEntry.queueItemId` for REST-fetched rows; the web client also
+   * stamps this on optimistic user messages once `POST /messages` returns
+   * (its `messageId` is the queue item id). Drives exact matching of
+   * `submission.settled` events to the originating user message.
+   */
+  queueItemId?: string;
 }
 
 export interface ListMessagesResponse {

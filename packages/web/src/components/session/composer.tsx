@@ -22,6 +22,7 @@ export function Composer({
   const [text, setText] = useState("");
   const send = useSendPrompt(sessionId);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
+  const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
 
   // Disable submit while engine is mid-turn or while we don't yet know the
@@ -39,9 +40,14 @@ export function Composer({
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
     // the server's persisted copy.
-    addUserMessage(sessionId, t, threadId);
+    const localId = addUserMessage(sessionId, t, threadId);
     try {
-      await send.mutateAsync({ text: t, threadId });
+      const res = await send.mutateAsync({ text: t, threadId });
+      // `messageId` on the response is the engine's queue item id (see
+      // POST /:id/messages). Stamping it closes the linkage so
+      // `submission.settled` can match this exact message instead of
+      // falling back to a recency heuristic.
+      setMessageQueueItemId(sessionId, localId, res.messageId);
     } catch (err) {
       // Restore the draft on failure so the user can retry. The optimistic
       // message stays visible — they can see what they sent + retry; on the

@@ -8,7 +8,7 @@
  */
 import { describe, expect, it, beforeEach } from "vitest";
 import type { WireEvent } from "@valet/api/wire";
-import { useStreamStore, useSessionStream } from "./stream";
+import { useStreamStore } from "./stream";
 
 const SESSION = "sess-1";
 const THREAD = "thread-1";
@@ -137,7 +137,65 @@ describe("stream store reducer", () => {
     expect(msg?.settledOutcome).toBe("failed");
   });
 
-  it("does not duplicate a pending gate when the same gate is replayed at a lower offset", () => {
+  it("matches submission.settled to the exact queueItemId, not the most recently sent message", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+
+    // Two unsettled prompts queued back to back: A first, then B.
+    const idA = addUserMessage(SESSION, "prompt A", THREAD);
+    setMessageQueueItemId(SESSION, idA, "q-a");
+    const idB = addUserMessage(SESSION, "prompt B", THREAD);
+    setMessageQueueItemId(SESSION, idB, "q-b");
+
+    // A settles (superseded) — even though B is the more recently sent
+    // unsettled message, the exact queueItemId match must badge A.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-a",
+      outcome: "superseded",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    const msgA = slice.messages.find((m) => m.id === idA);
+    const msgB = slice.messages.find((m) => m.id === idB);
+    expect(msgA?.settledOutcome).toBe("superseded");
+    expect(msgB?.settledOutcome).toBeUndefined();
+  });
+
+  it("badges nothing when the queueItemId doesn't match any message and multiple messages are unsettled", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+
+    const idA = addUserMessage(SESSION, "prompt A", THREAD);
+    setMessageQueueItemId(SESSION, idA, "q-a");
+    const idB = addUserMessage(SESSION, "prompt B", THREAD);
+    setMessageQueueItemId(SESSION, idB, "q-b");
+
+    // Settled event references a queueItemId that doesn't match any known
+    // message (e.g. linkage never landed). With two candidates unsettled,
+    // the recency heuristic is ambiguous — neither should be badged.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-unknown",
+      outcome: "superseded",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    const msgA = slice.messages.find((m) => m.id === idA);
+    const msgB = slice.messages.find((m) => m.id === idB);
+    expect(msgA?.settledOutcome).toBeUndefined();
+    expect(msgB?.settledOutcome).toBeUndefined();
+  });
+
+  it("does not duplicate a pending gate when the same gate is redelivered at a higher offset", () => {
     const { ingest } = useStreamStore.getState();
     const gate = {
       id: "gate-1",
@@ -160,13 +218,17 @@ describe("stream store reducer", () => {
       threadId: THREAD,
       gate,
     });
-    // Replay at a lower offset (e.g. a reconnect resent an earlier frame
-    // before the live boundary) — should not create a duplicate entry, and
-    // in fact should be dropped entirely since offset <= lastOffset.
+    // A lower-offset replay is trivially dropped by the offset check before
+    // it ever reaches the pendingGates merge — that path doesn't exercise
+    // the merge logic at all. What actually needs coverage is a *fresh*
+    // delivery of the same gateId at a HIGHER offset (e.g. the engine
+    // re-emits the still-pending gate on reconnect/replay past the last
+    // seen offset) — this must still land as exactly one entry keyed by
+    // gateId, not append a duplicate.
     ingest(SESSION, {
-      seq: 5,
+      seq: 6,
       ts: Date.now(),
-      offset: offset(3),
+      offset: offset(6),
       type: "decision_gate",
       threadId: THREAD,
       gate,
@@ -174,16 +236,17 @@ describe("stream store reducer", () => {
 
     const slice = useStreamStore.getState().bySession[SESSION];
     expect(Object.keys(slice.pendingGates)).toEqual(["gate-1"]);
+    expect(slice.lastOffset).toBe(offset(6));
   });
 });
 
-describe("useSessionStream selector", () => {
+describe("store default slice", () => {
   beforeEach(reset);
 
-  it("returns the EMPTY default slice with lastOffset='' for an unknown session", () => {
-    // Not a component, but the selector fn is a pure closure over getState;
-    // call it via the store's underlying implementation directly is not
-    // exposed, so just assert the store default slice shape via getState.
+  it("has no entry in bySession for an unknown session (EMPTY is synthesized on read)", () => {
+    // `useSessionStream` is a React hook (wraps useStreamStore + a
+    // selector) and can't be invoked outside a component render; this
+    // exercises the same underlying state it reads from instead.
     const slice = useStreamStore.getState().bySession["nope"];
     expect(slice).toBeUndefined();
   });

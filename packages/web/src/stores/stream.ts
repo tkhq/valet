@@ -95,6 +95,16 @@ export interface StreamStore {
    */
   addUserMessage(sessionId: string, text: string, threadId: string): string;
   /**
+   * Stamp the queue item id onto an existing message (typically the
+   * optimistic user message `addUserMessage` just created) once the
+   * `POST /messages` response resolves. `SendPromptResponse.messageId` is
+   * the engine's queue item id — closing this linkage lets
+   * `submission.settled` match the exact originating message instead of
+   * falling back to a recency heuristic. No-op if the message isn't found
+   * (e.g. it was already reconciled away by a REST snapshot).
+   */
+  setMessageQueueItemId(sessionId: string, messageId: string, queueItemId: string): void;
+  /**
    * Replace the messages for a single thread with a fresh REST snapshot.
    * Other threads' messages stay put. Optimistic messages for the same
    * thread are kept *unless* the new snapshot already contains a user
@@ -311,35 +321,36 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
-    case "submission.settled": {
+case "submission.settled": {
       // Mark the originating user message with a terminal badge.
       //
-      // Matching: the wire event carries `queueItemId`, but REST message
-      // rows don't expose the engine's queue_item_id today (see
-      // `entryToMessage` in packages/api/src/routes/messages.ts) — the id
-      // on a `StreamMessage` is either the server-persisted entry id or our
-      // own optimistic `user-opt-*` id, neither of which equals
-      // `ev.queueItemId` in practice. We still check direct id equality
-      // first (forward-compatible if the API starts stamping
-      // `queueItemId` onto messages), then fall back to the most recent
-      // unsettled user message on the thread — a FIFO approximation, since
-      // the settled frame carries no content to content-match against.
+      // Matching: prefer an exact `queueItemId` match — REST rows carry the
+      // engine's queue_item_id via `entryToMessage`
+      // (packages/api/src/routes/messages.ts), and the web client stamps it
+      // onto optimistic messages once `POST /messages` resolves (see
+      // `setMessageQueueItemId`). Only when no message carries a matching
+      // `queueItemId` do we fall back to a recency heuristic — and even
+      // then, ONLY when there is exactly one unsettled user message on the
+      // thread. With two or more candidates the heuristic is ambiguous
+      // (queued prompt A vs. B), so we drop the event rather than badge the
+      // wrong message.
       const idx = (() => {
         const direct = lastIndex(
           slice.messages,
-          (m) => m.threadId === ev.threadId && (m as StreamMessage).queueItemId === ev.queueItemId,
+          (m) => m.threadId === ev.threadId && m.queueItemId === ev.queueItemId,
         );
         if (direct >= 0) return direct;
-        return lastIndex(
-          slice.messages,
-          (m) =>
-            m.threadId === ev.threadId &&
-            m.role === "user" &&
-            (m as StreamMessage).settledOutcome === undefined,
-        );
+        const unsettled: number[] = [];
+        for (let i = 0; i < slice.messages.length; i++) {
+          const m = slice.messages[i];
+          if (m.threadId === ev.threadId && m.role === "user" && m.settledOutcome === undefined) {
+            unsettled.push(i);
+          }
+        }
+        return unsettled.length === 1 ? unsettled[0] : -1;
       })();
       if (idx < 0) return next;
-      const m = slice.messages[idx] as StreamMessage;
+      const m = slice.messages[idx];
       const settledOutcome: SettledOutcome | undefined =
         ev.outcome === "completed" ? undefined : ev.outcome;
       const updated: StreamMessage = { ...m, settledOutcome };
@@ -425,6 +436,20 @@ export const useStreamStore = create<StreamStore>((set) => ({
     });
     return id;
   },
+
+  setMessageQueueItemId: (sessionId, messageId, queueItemId) =>
+    set((state) => {
+      const slice = ensure(state, sessionId);
+      const idx = slice.messages.findIndex((m) => m.id === messageId);
+      if (idx < 0) return state;
+      const updated: StreamMessage = { ...slice.messages[idx], queueItemId };
+      return {
+        bySession: {
+          ...state.bySession,
+          [sessionId]: { ...slice, messages: replaceAt(slice.messages, idx, updated) },
+        },
+      };
+    }),
 
   setThreadMessages: (sessionId, threadId, freshMessages) =>
     set((state) => {

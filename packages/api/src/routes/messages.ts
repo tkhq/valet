@@ -63,6 +63,7 @@ function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): M
     content: e.content,
     parts,
     createdAt: Number.isFinite(created) ? created : Date.now(),
+    queueItemId: e.queueItemId,
   };
 }
 
