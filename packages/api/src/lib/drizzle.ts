@@ -12,6 +12,19 @@ import { fileURLToPath } from "node:url";
  */
 export type AppDb = BetterSQLite3Database<Record<string, never>>;
 
+/**
+ * The transaction handle Drizzle's better-sqlite3 driver passes to
+ * `db.transaction(tx => ...)` callbacks. Derived from `AppDb["transaction"]`
+ * (rather than importing the internal `BetterSQLiteTransaction` class name)
+ * so services that need to run reads + writes atomically can type their
+ * helpers to accept either `AppDb` or this transaction handle without a
+ * type assertion.
+ */
+export type AppTx = Parameters<AppDb["transaction"]>[0] extends (tx: infer T) => unknown ? T : never;
+
+/** Either a top-level `AppDb` handle or an in-flight transaction on one. */
+export type AppQueryable = AppDb | AppTx;
+
 export function buildAppDb(sqlite: Database.Database): AppDb {
   return drizzle(sqlite, { casing: "snake_case" });
 }

@@ -97,6 +97,8 @@ sessionsRouter.post("/", async (c) => {
       workspace: body.workspace,
       title: body.title ?? null,
       status: "active",
+      ownerType: "user",
+      ownerId: user.id,
       createdAt: now,
       updatedAt: now,
     })

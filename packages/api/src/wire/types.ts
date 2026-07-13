@@ -431,3 +431,44 @@ export interface ForceSettleRequest {
 export interface ForceSettleResponse {
   submission: AdminSubmission;
 }
+
+// ── REST: teams ──────────────────────────────────────────────────────────
+//
+// Org's membership structure (orchestrator spec, "Identity"). Every route is
+// org-membership-gated — no cross-org access. No teams UI this phase; these
+// shapes exist for the service/route layer and future web work.
+
+export type TeamRole = "admin" | "member";
+
+export interface TeamSummary {
+  id: string;
+  orgId: string;
+  name: string;
+  createdAt: number;
+}
+
+export interface TeamMemberSummary {
+  userId: string;
+  role: TeamRole;
+}
+
+export interface ListTeamsResponse {
+  teams: TeamSummary[];
+}
+
+export interface CreateTeamRequest {
+  name: string;
+}
+
+export interface CreateTeamResponse {
+  team: TeamSummary;
+}
+
+export interface AddTeamMemberRequest {
+  userId: string;
+  role: TeamRole;
+}
+
+export interface SetTeamMemberRoleRequest {
+  role: TeamRole;
+}
