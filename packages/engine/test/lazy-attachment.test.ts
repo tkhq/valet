@@ -402,4 +402,79 @@ describe("lazy sandbox attachment integration", () => {
 
     faux.unregister();
   });
+
+  it("8. warmSandboxOnClaim:false — no-tool turn triggers zero creates and no cold hint", async () => {
+    const faux = registerFauxProvider({ provider: "lazy8" });
+    const capturedPrompts: (string | undefined)[] = [];
+    const captureStep = (text: string) => async (context: Context) => {
+      capturedPrompts.push(context.systemPrompt);
+      return fauxAssistantMessage(text);
+    };
+    faux.setResponses([captureStep("no tools here")]);
+
+    const provider = new FakeProvider();
+    const { engine, events } = makeEngine(provider);
+
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      systemPrompt: "base system prompt",
+      warmSandboxOnClaim: false,
+    });
+    expect(provider.createCalls).toBe(0);
+
+    const receipt = await session.prompt("say hi");
+    await waitForStatus(events, receipt.threadId, "idle");
+
+    expect(provider.createCalls).toBe(0);
+    expect(session.attachment.state).not.toBe("ready");
+    expect(capturedPrompts[0]).not.toContain("[workspace status]");
+
+    faux.unregister();
+  });
+
+  it("9. warmSandboxOnClaim:false — a turn whose tool reads a file still lazily provisions and succeeds", async () => {
+    const faux = registerFauxProvider({ provider: "lazy9" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("read", { path: "/note.txt" }, { id: "tc1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("read it"),
+    ]);
+
+    const provider = new FakeProvider();
+    const d = provider.nextDeferred();
+    const { engine, events } = makeEngine(provider);
+
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      warmSandboxOnClaim: false,
+    });
+    expect(provider.createCalls).toBe(0);
+
+    const sb = makeFakeSandbox("sb-1");
+    await sb.writeFile("/note.txt", "hello from sandbox");
+    setTimeout(() => d.resolve(sb), 100);
+
+    const receipt = await session.prompt("read the note");
+    await waitForStatus(events, receipt.threadId, "idle");
+
+    expect(provider.createCalls).toBe(1);
+
+    const entries = await session.readEntries("web:default");
+    const assistant = entries.find((e) => e.type === "message" && e.role === "assistant" && e.queueItemId === receipt.queueItemId);
+    if (assistant?.type !== "message") throw new Error("unreachable");
+    const toolCallPart = assistant.parts?.find((p) => p.type === "tool_call");
+    if (toolCallPart?.type !== "tool_call") throw new Error("unreachable");
+    expect(toolCallPart.status).toBe("completed");
+    const resultObj = toolCallPart.result as { text?: unknown };
+    expect(resultObj.text).toContain("hello from sandbox");
+
+    faux.unregister();
+  });
 });

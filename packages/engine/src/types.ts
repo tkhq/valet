@@ -1066,6 +1066,18 @@ export interface CreateSessionOptions {
    * and never blocks compaction or later hooks (Phase 4 decision 9).
    */
   compactionHooks?: CompactionHook[];
+  /**
+   * Whether `Thread.runTurn` fire-and-forgets `session.attachment.warm()` at
+   * the start of every claimed turn (spec decision 5's default warm-on-claim
+   * behavior). Default: true. Set to false for sessions that must stay
+   * sandbox-less until a turn actually touches the filesystem/shell — e.g.
+   * API-shaped orchestrator sessions (see docs/specs/2026-07-11-orchestrator-engine-design.md,
+   * "Sandbox-less by default"). The lazy `PolicySandbox` attachment still
+   * provisions on first sandbox-touching tool op regardless of this flag;
+   * this only controls the proactive warm kick and its cold-start system
+   * prompt hint.
+   */
+  warmSandboxOnClaim?: boolean;
 }
 
 /**

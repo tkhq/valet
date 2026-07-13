@@ -1509,8 +1509,13 @@ export class Thread {
     // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
     // start of the claimed turn, in parallel with the LLM call — never at
     // session-create time. Fire-and-forget; tool ops that touch the
-    // sandbox await readiness themselves via PolicySandbox.
-    this.session.attachment.warm();
+    // sandbox await readiness themselves via PolicySandbox. Sessions opted
+    // out via `warmSandboxOnClaim: false` (e.g. orchestrators) stay
+    // sandbox-less until a turn's tool actually touches the filesystem —
+    // the lazy PolicySandbox attachment provisions on that first touch.
+    if (this.session.options.warmSandboxOnClaim !== false) {
+      this.session.attachment.warm();
+    }
 
     // Persist user message entry. QueueItem.metadata flows through onto the
     // entry so synthetic flags like compaction_continue survive into the DAG
@@ -1597,10 +1602,16 @@ export class Thread {
    * will wait. Returns the pre-hint prompt so the caller can restore it
    * unconditionally in the turn's finally, regardless of whether a role was
    * also applied this turn.
+   *
+   * Skipped entirely for `warmSandboxOnClaim: false` sessions while the
+   * attachment isn't ready: nothing is provisioning in that case (no warm()
+   * kick happened this turn), so a "provisioning" hint would be false. The
+   * lazy attachment contract covers first touch silently instead.
    */
   private applyColdHintForTurn(): string {
     const preHintPrompt = this.agent.state.systemPrompt;
     if (this.session.attachment.state === "ready") return preHintPrompt;
+    if (this.session.options.warmSandboxOnClaim === false) return preHintPrompt;
     const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
     const hint = `\n\n[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`;
     this.agent.state.systemPrompt = preHintPrompt + hint;

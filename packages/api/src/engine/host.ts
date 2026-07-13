@@ -258,6 +258,12 @@ export class EngineHost {
       // this method to reassemble it.
       systemContext: [{ name: "memory-snapshot", content: snapshotContent, order: 10 }],
       compactionHooks: [journalCompactionHook(db, scope)],
+      // Orchestrator sessions are sandbox-less by default (orchestrator
+      // spec, "Sandbox-less by default"): the sandbox must provision only
+      // when a turn actually touches the filesystem, via the lazy
+      // PolicySandbox attachment's first-touch contract — never a
+      // proactive warm-on-claim kick just because a turn was claimed.
+      warmSandboxOnClaim: false,
     };
 
     const engine = new Engine({
