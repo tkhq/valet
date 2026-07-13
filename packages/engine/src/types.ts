@@ -319,7 +319,7 @@ export interface ToolContext {
   sandbox: Sandbox;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
-  suspendedDecision?: { gateId: string; resolution?: DecisionResolution };
+  suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
   signal: AbortSignal;
   threadRead: (key: string, opts?: MessageQuery) => Promise<SessionEntry[]>;
   /**

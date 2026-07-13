@@ -378,6 +378,53 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(none).toBeNull();
     });
 
+    it("getLatestGateForResume does not collide on colon-prefixed resumeKeys", async () => {
+      // resumeKeys may themselves contain ':' — a resumeKey like "read:/x" is
+      // a colon-prefix of "read:/x:confirm". A gate lookup must match the
+      // resumeKey field exactly, not via a startsWith on the derived id.
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const base = {
+        sessionId: "sess-1",
+        threadId: "th-1",
+        queueItemId: "q-1",
+        type: "approval" as const,
+        status: "resolved" as const,
+        title: "x",
+        actions: [],
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const longer: DecisionGate = {
+        ...base,
+        id: "gate:sess-1:th-1:q-1:read:/x:confirm:0",
+        resumeKey: "read:/x:confirm",
+        ordinal: 0,
+      };
+      await store.saveDecisionGate("sess-1", "th-1", longer);
+
+      // The shorter resumeKey has no gate saved yet — a prefix match would
+      // incorrectly return `longer` here.
+      const shortLookup = await store.getLatestGateForResume("sess-1", "th-1", "q-1", "read:/x");
+      expect(shortLookup).toBeNull();
+
+      const shorter: DecisionGate = {
+        ...base,
+        id: "gate:sess-1:th-1:q-1:read:/x:0",
+        resumeKey: "read:/x",
+        ordinal: 0,
+      };
+      await store.saveDecisionGate("sess-1", "th-1", shorter);
+
+      const shortLookup2 = await store.getLatestGateForResume("sess-1", "th-1", "q-1", "read:/x");
+      expect(shortLookup2?.id).toBe("gate:sess-1:th-1:q-1:read:/x:0");
+      expect(shortLookup2?.resumeKey).toBe("read:/x");
+
+      const longLookup = await store.getLatestGateForResume("sess-1", "th-1", "q-1", "read:/x:confirm");
+      expect(longLookup?.id).toBe("gate:sess-1:th-1:q-1:read:/x:confirm:0");
+      expect(longLookup?.resumeKey).toBe("read:/x:confirm");
+    });
+
     it("saveSuspendedTurn + getSuspendedTurn + clearSuspendedTurn", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

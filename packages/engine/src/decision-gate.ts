@@ -166,11 +166,18 @@ export function deterministicGateId(ctx: GateContext & { ordinal: number }): str
  */
 export function shouldShortCircuit(args: {
   ctx: GateContext;
-  suspendedDecision: { gateId: string; resolution?: DecisionResolution } | undefined;
+  suspendedDecision:
+    | { gateId: string; ordinal: number; resolution?: DecisionResolution }
+    | undefined;
 }): { match: true; resolution: DecisionResolution } | { match: false } {
   const { ctx, suspendedDecision } = args;
   if (!suspendedDecision) return { match: false };
-  if (!suspendedDecision.gateId.startsWith(gateIdPrefix(ctx))) return { match: false };
+  // Exact match on the fully-derived id (including ordinal), not a prefix
+  // check — resumeKeys may contain ':' and be colon-prefixes of one another
+  // (e.g. "read:/x" vs "read:/x:confirm"), so prefix matching can join the
+  // wrong gate.
+  const expectedGateId = deterministicGateId({ ...ctx, ordinal: suspendedDecision.ordinal });
+  if (suspendedDecision.gateId !== expectedGateId) return { match: false };
   if (!suspendedDecision.resolution) return { match: false };
   return { match: true, resolution: suspendedDecision.resolution };
 }

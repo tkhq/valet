@@ -119,7 +119,7 @@ export class Thread {
   private currentAssistantEntry: MessageEntry | undefined;
   private toolCtxOverlay: { gateId?: string } = {};
   private suspendedDecisionForReplay:
-    | { gateId: string; resolution?: DecisionResolution }
+    | { gateId: string; ordinal: number; resolution?: DecisionResolution }
     | undefined;
   /** Token usage from the most recent assistant message, captured at turn_end. */
   private lastAssistantUsage:
@@ -555,7 +555,7 @@ export class Thread {
    * resumeKey, the engine returns the stored resolution immediately.
    */
   setReplayContext(
-    ctx: { gateId: string; resolution?: DecisionResolution } | undefined,
+    ctx: { gateId: string; ordinal: number; resolution?: DecisionResolution } | undefined,
   ): void {
     this.suspendedDecisionForReplay = ctx;
   }
@@ -581,10 +581,10 @@ export class Thread {
       );
       return;
     }
-    this.setReplayContext({ gateId: suspended.gateId, resolution });
+    this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resolution });
     // The deterministic gate ID is derived from
-    // (sessionId, threadId, queueItemId, resumeKey). During replay, the
-    // tool's requestDecision call recomputes this from the active queue
+    // (sessionId, threadId, queueItemId, resumeKey, ordinal). During replay,
+    // the tool's requestDecision call recomputes this from the active queue
     // item — so we must mirror the original queueItemId here, otherwise
     // the short-circuit won't match and the tool will try to open a
     // brand-new gate.

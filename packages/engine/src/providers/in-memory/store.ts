@@ -221,9 +221,11 @@ export class InMemorySessionStore implements SessionStore {
     queueItemId: string,
     resumeKey: string,
   ): Promise<DecisionGate | null> {
-    const prefix = `gate:${sessionId}:${threadId}:${queueItemId}:${resumeKey}:`;
     const matches = [...this.row(sessionId).gates.values()].filter(
-      (g) => g.threadId === threadId && g.id.startsWith(prefix),
+      (g) =>
+        g.threadId === threadId &&
+        g.queueItemId === queueItemId &&
+        g.resumeKey === resumeKey,
     );
     if (matches.length === 0) return null;
     matches.sort((a, b) => b.ordinal - a.ordinal);
