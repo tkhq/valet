@@ -43,15 +43,15 @@ flowchart TB
     Worker --> R2
     Worker <--> Plugins
     Worker --> Workflows
-    Workflows --> Events
-    Events --> Session
+    Workflows --> Session
     Session <--> D1
+    Session --> Events
+    Events --> Web
     Session --> Modal
     Modal --> sandbox
     Session <--> Runner
     Runner <--> Agent
     Agent <--> Workspace
-    Runner <--> Plugins
     Session --> Web
     Session --> Channels
 ```
