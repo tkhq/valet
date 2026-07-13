@@ -94,6 +94,15 @@ export class Session {
    * trust `SessionStore.getSession(id).parentSessionId` as durable truth.
    */
   private parentSessionId: string | undefined;
+  /**
+   * Parent thread id (Phase 4 decision 11/16), mirrored from
+   * `options.parentThreadId`. Mutable for the same reason `parentSessionId`
+   * is: `rehydrate` restores it from persisted `SessionData` when the
+   * host's restore-time options don't re-supply it, so a child session's
+   * thread linkage isn't stomped back to undefined on the next
+   * `toData()`/save after a generic restore.
+   */
+  private parentThreadId: string | undefined;
   /** Indexed copies of options.roles / options.skills for fast lookup. */
   readonly roles = new Map<string, RoleSpec>();
   readonly skills = new Map<string, SkillSource>();
@@ -117,6 +126,7 @@ export class Session {
     this.attachment = attachment;
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.parentSessionId = options.parentSessionId;
+    this.parentThreadId = options.parentThreadId;
     for (const role of options.roles ?? []) this.roles.set(role.name, role);
     for (const skill of options.skills ?? []) this.skills.set(skill.name, skill);
     // sandbox_status emissions (spec decision 8): deterministic eventKey so
@@ -250,6 +260,7 @@ export class Session {
     // still wins.
     if (options.owner === undefined) session.principal = data.owner;
     if (options.parentSessionId === undefined) session.parentSessionId = data.parentSessionId;
+    if (options.parentThreadId === undefined) session.parentThreadId = data.parentThreadId;
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -515,7 +526,7 @@ export class Session {
       status: "running",
       sandboxId: this.attachment.sandboxId,
       parentSessionId: this.parentSessionId,
-      parentThreadId: this.options.parentThreadId,
+      parentThreadId: this.parentThreadId,
       model: this.options.model.id,
       createdAt: Date.now(),
       updatedAt: Date.now(),

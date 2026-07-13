@@ -202,7 +202,7 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     faux.unregister();
   });
 
-  it("parentSessionId persists via toData and survives a restore that doesn't re-supply it", async () => {
+  it("parentSessionId/parentThreadId persist via toData and survive a restore that doesn't re-supply them", async () => {
     const { engine, store, bus } = makeEngine();
     const faux = registerFauxProvider({ provider: "svc3b" });
     faux.setResponses([fauxAssistantMessage("hi")]);
@@ -219,12 +219,14 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
       parentThreadId: "th-parent-1",
     });
     expect((await child.toData()).parentSessionId).toBe("sess-parent-1");
+    expect((await child.toData()).parentThreadId).toBe("th-parent-1");
     await store.saveSession(await child.toData());
 
     // A restart-style restore whose options don't re-supply
-    // parentSessionId (the app's generic sessionFor chokepoint never does)
-    // must still see the persisted linkage — this is what the signal edge
-    // ACL (parent <-> child) reads directly off the store.
+    // parentSessionId/parentThreadId (the app's generic sessionFor
+    // chokepoint never does) must still see the persisted linkage — this
+    // is what the signal edge ACL (parent <-> child) reads directly off
+    // the store.
     const restartedEngine = new Engine({
       providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
     });
@@ -239,6 +241,7 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
       },
     });
     expect((await restored.toData()).parentSessionId).toBe("sess-parent-1");
+    expect((await restored.toData()).parentThreadId).toBe("th-parent-1");
 
     faux.unregister();
   });

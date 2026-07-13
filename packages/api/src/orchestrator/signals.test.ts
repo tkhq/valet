@@ -176,6 +176,52 @@ describe("admitSignal edge ACL", () => {
     expect(rows[0]?.reason).toBe("edge_denied");
   });
 
+  it("a dead engine thread id does not get-or-create a phantom thread; denied and drop-logged", async () => {
+    api = await bootTestApi();
+    const parent = await api.providers.engineHost.sessionFor("parent-3", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await api.providers.engineHost.childSessionFor("child-3", {
+      parentSessionId: "parent-3",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+
+    // Shaped like an engine thread id (th-<ts36>-<counter36>) but never
+    // minted on the parent session — threadById returns null for it. Before
+    // the fix, resolveThread's `?? session.thread(threadKey)` fallback would
+    // get-or-create a new thread KEYED by this id string and the signal
+    // would land there invisibly instead of being denied.
+    const deadThreadId = "th-0-nonexistent";
+
+    await expect(
+      admitSignal(deps(api), {
+        from: { sessionId: "child-3", owner: { type: "user", id: "local-user" } },
+        to: "parent-3",
+        threadKey: deadThreadId,
+        content: { kind: "signal", signalType: "child.settled", body: "done" },
+        dispatchId: "d-dead-thread",
+      }),
+    ).rejects.toThrow(SignalEdgeDeniedError);
+
+    expect(parent.threadById(deadThreadId)).toBeNull();
+
+    const rows = await api.providers.db
+      .select()
+      .from(eventDropLog)
+      .where(eq(eventDropLog.conversationKey, "d-dead-thread"))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.reason).toBe("edge_denied");
+    expect(rows[0]?.detail).toContain(deadThreadId);
+  });
+
   it("unrelated sessions (no parent/child, no orchestrator edge) are denied", async () => {
     api = await bootTestApi();
     await api.providers.engineHost.sessionFor("solo-a", {

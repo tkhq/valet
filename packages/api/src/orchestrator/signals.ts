@@ -152,11 +152,45 @@ async function authorizeEdge(
 }
 
 /**
+ * Shape of an engine-minted thread id — `th-<base36 timestamp>-<base36
+ * counter>`, from `uid("th")` in `packages/engine/src/session.ts` (used at
+ * the `thread()` get-or-create call site). Thread KEYS (e.g.
+ * `signal:{senderId}`) never collide with this shape, so it's a reliable
+ * discriminator between "caller handed us an id" and "caller handed us a
+ * key" — see module doc.
+ */
+const ENGINE_THREAD_ID_RE = /^th-[0-9a-z]+-[0-9a-z]+$/;
+
+/**
  * Resolves `threadKey` against a live session — id first, then key
  * (get-or-create). See module doc for why both shapes are accepted.
+ *
+ * If `threadKey` looks like an engine thread id (see `ENGINE_THREAD_ID_RE`)
+ * but `threadById` can't find it, the thread is gone (or the id was never
+ * valid) — falling through to `session.thread()` would silently
+ * get-or-create a phantom thread KEYED by the id string, and the signal
+ * would land on a thread nobody is reading. Drop-log and deny instead of
+ * doing that. Only bare keys (not shaped like an id) hit the
+ * get-or-create path.
  */
-function resolveThread(session: Session, threadKey: string): Thread {
-  return session.threadById(threadKey) ?? session.thread(threadKey);
+async function resolveThread(
+  deps: AdmitSignalDeps,
+  args: AdmitSignalArgs,
+  session: Session,
+  toData: SessionData,
+): Promise<Thread> {
+  const byId = session.threadById(args.threadKey);
+  if (byId) return byId;
+  if (ENGINE_THREAD_ID_RE.test(args.threadKey)) {
+    await writeDropLog(deps.db, {
+      orgId: toData.orgId,
+      reason: "edge_denied",
+      conversationKey: args.dispatchId,
+      detail: `thread not found: to=${args.to} threadId=${args.threadKey}`,
+    });
+    throw new SignalEdgeDeniedError(args.from.sessionId, args.to, "thread not found");
+  }
+  return session.thread(args.threadKey);
 }
 
 /**
@@ -173,7 +207,7 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
     orgId: toData.orgId,
     workspace: toData.workspace,
   });
-  const thread = resolveThread(session, args.threadKey);
+  const thread = await resolveThread(deps, args, session, toData);
 
   try {
     return await thread.submitPrompt(args.content, {
