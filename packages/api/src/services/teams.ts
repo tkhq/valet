@@ -11,10 +11,11 @@
  * hook — see the comment on `assertNoTeamOwnedWorkflows` below.
  */
 import { randomUUID } from "node:crypto";
+import { SqliteError } from "better-sqlite3";
 import { and, eq } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { teamMembers, teams, type TeamRow } from "../schema/index.js";
+import { orgMembers, teamMembers, teams, type TeamRow } from "../schema/index.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -48,6 +49,22 @@ export class NotTeamMemberError extends NotFoundError {
   }
 }
 
+/** Thrown when adding a user who isn't a member of the team's org. */
+export class NotOrgMemberError extends NotFoundError {
+  constructor(orgId: string, userId: string) {
+    super("org member", `${orgId}/${userId}`);
+  }
+}
+
+/** True when a sqlite unique-constraint violation fired on `teams_org_name`. */
+function isTeamNameUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof SqliteError &&
+    err.code === "SQLITE_CONSTRAINT_UNIQUE" &&
+    err.message.includes("teams_org_name")
+  );
+}
+
 function newTeamId(): string {
   return `team_${randomUUID()}`;
 }
@@ -79,23 +96,34 @@ export interface CreateTeamOptions {
   creatorUserId: string;
 }
 
-/** Creates a team; the creator is auto-admitted as its first admin. */
+/**
+ * Creates a team; the creator is auto-admitted as its first admin. The
+ * name-conflict check runs inside the same transaction as the insert (plus
+ * a belt-and-suspenders catch on the `teams_org_name` unique constraint) so
+ * two concurrent creates of the same name can't both pass the pre-check and
+ * race into a raw 500 — the loser always sees `TeamNameConflictError`.
+ */
 export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<TeamRow> {
-  const existing = db
-    .select()
-    .from(teams)
-    .where(and(eq(teams.orgId, opts.orgId), eq(teams.name, opts.name)))
-    .get();
-  if (existing) throw new TeamNameConflictError(opts.orgId, opts.name);
-
   const id = newTeamId();
   const now = Date.now();
   const row: TeamRow = { id, orgId: opts.orgId, name: opts.name, createdAt: now };
 
-  db.transaction((tx) => {
-    tx.insert(teams).values(row).run();
-    tx.insert(teamMembers).values({ teamId: id, userId: opts.creatorUserId, role: "admin" }).run();
-  });
+  try {
+    db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(teams)
+        .where(and(eq(teams.orgId, opts.orgId), eq(teams.name, opts.name)))
+        .get();
+      if (existing) throw new TeamNameConflictError(opts.orgId, opts.name);
+
+      tx.insert(teams).values(row).run();
+      tx.insert(teamMembers).values({ teamId: id, userId: opts.creatorUserId, role: "admin" }).run();
+    });
+  } catch (err) {
+    if (isTeamNameUniqueViolation(err)) throw new TeamNameConflictError(opts.orgId, opts.name);
+    throw err;
+  }
 
   return row;
 }
@@ -106,10 +134,22 @@ export interface AddMemberOptions {
   role: TeamRole;
 }
 
-/** Adds a member to a team. Adding an existing member updates their role. */
+/**
+ * Adds a member to a team. Adding an existing member updates their role.
+ * Rejects with `NotOrgMemberError` if the target user isn't a member of the
+ * team's org — otherwise any org member could add an arbitrary (or
+ * cross-org) userId onto a team.
+ */
 export async function addMember(db: AppDb, opts: AddMemberOptions): Promise<void> {
   const team = db.select().from(teams).where(eq(teams.id, opts.teamId)).get();
   if (!team) throw new NotFoundError("team", opts.teamId);
+
+  const targetOrgMember = db
+    .select()
+    .from(orgMembers)
+    .where(and(eq(orgMembers.orgId, team.orgId), eq(orgMembers.userId, opts.userId)))
+    .get();
+  if (!targetOrgMember) throw new NotOrgMemberError(team.orgId, opts.userId);
 
   db.transaction((tx) => {
     const existing = getMember(tx, opts.teamId, opts.userId);

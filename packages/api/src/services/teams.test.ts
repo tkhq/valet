@@ -1,13 +1,14 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { orgs, users } from "../schema/index.js";
+import { orgMembers, orgs, teams, users } from "../schema/index.js";
 import {
   addMember,
   createTeam,
   deleteTeam,
   LastAdminError,
   listTeamsForUser,
+  NotOrgMemberError,
   NotTeamMemberError,
   removeMember,
   setRole,
@@ -18,6 +19,7 @@ function seedUser(db: AppDb, id: string, orgId: string) {
   db.insert(users)
     .values({ id, email: `${id}@x.test`, name: id, role: "member", createdAt: Date.now() })
     .run();
+  db.insert(orgMembers).values({ orgId, userId: id, role: "member" }).run();
 }
 
 describe("teams service", () => {
@@ -139,5 +141,34 @@ describe("teams service", () => {
 
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(0);
+  });
+
+  it("addMember rejects a userId with no org_members row in the team's org", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await expect(addMember(db, { teamId: team.id, userId: "no-such-user", role: "member" })).rejects.toThrow(
+      NotOrgMemberError,
+    );
+  });
+
+  it("addMember rejects a userId that belongs to a different org", async () => {
+    db.insert(orgs).values({ id: "org2", name: "Org2", createdAt: Date.now() }).run();
+    seedUser(db, "u9", "org2");
+
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await expect(addMember(db, { teamId: team.id, userId: "u9", role: "member" })).rejects.toThrow(
+      NotOrgMemberError,
+    );
+  });
+
+  it("createTeam still reports a conflict when a row was inserted outside the service's own check", async () => {
+    // Inserts directly (bypassing createTeam's pre-check) to simulate a
+    // conflicting row appearing between an out-of-band check and the
+    // transaction — the `teams_org_name` unique index is the real backstop,
+    // and a violation must map to TeamNameConflictError, not a raw 500.
+    db.insert(teams).values({ id: "team_preexisting", orgId, name: "Platform", createdAt: Date.now() }).run();
+
+    await expect(createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" })).rejects.toThrow(
+      TeamNameConflictError,
+    );
   });
 });

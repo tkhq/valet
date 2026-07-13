@@ -74,6 +74,18 @@ export async function bootTestApi(): Promise<TestApi> {
       "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
     )
     .run("local-org", "test-member", "member");
+  // A second org admin, distinct from `local-user`, for tests exercising the
+  // org-admin recovery path on a team they aren't a member of.
+  sqlite
+    .prepare(
+      "INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run("test-admin", "admin@dev", "Test Admin", "admin", now);
+  sqlite
+    .prepare(
+      "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
+    )
+    .run("local-org", "test-admin", "admin");
 
   const blobsRoot = mkdtempSync(join(tmpdir(), "valet-itest-blobs-"));
 

@@ -209,8 +209,10 @@ export const userNotificationPreferences = sqliteTable(
 //
 // Durable record of every event/signal rejected by routing or admission
 // policy (orchestrator spec, "Policy drops are never invisible"). Reasons
-// this phase: hop_budget | edge_denied | pending_cap | child_cap |
-// org_ceiling | unlinked | non_member | unbound | trigger_mode_filtered.
+// this phase (Phase 4): hop_budget | edge_denied | pending_cap | child_cap |
+// org_ceiling. Phase 6 adds routing-specific reasons (unlinked bindings,
+// non-member senders, unbound conversations, trigger-mode filtering) once
+// channel routing lands.
 
 export const eventDropLog = sqliteTable(
   "event_drop_log",

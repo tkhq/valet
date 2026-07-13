@@ -11,12 +11,20 @@
  * Org-membership-gated: every route requires the team to belong to the
  * caller's org (`c.var.user.orgId`) — cross-org teams 404 rather than 403,
  * so a caller can't distinguish "not your org" from "doesn't exist".
+ *
+ * Mutation-gated: DELETE /:id and the three /members routes additionally
+ * require the caller to be a team admin of *that* team, or an org admin
+ * (a deliberate recovery path so org admins can always untangle a team even
+ * if they're not on it). A caller who fails that check gets 404, same as a
+ * caller outside the org — existence-hiding applies to authz, not just org
+ * membership.
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import { teams, type TeamRow } from "../schema/index.js";
+import type { AuthUser } from "../middleware/auth.js";
+import { teamMembers, teams, type TeamRow } from "../schema/index.js";
 import {
   addMember,
   createTeam,
@@ -72,6 +80,27 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
   return row;
 }
 
+/**
+ * Gates the four mutation routes (delete team, add/set-role/remove member):
+ * the caller must be a team admin of `teamId`, or an org admin. Org admin is
+ * a deliberate recovery path (e.g. the team's last admin left the org) —
+ * not a general-purpose bypass, so keep it narrow and don't extend it to
+ * plain org membership.
+ */
+async function canMutateTeam(
+  db: AppEnv["Variables"]["providers"]["db"],
+  teamId: string,
+  user: AuthUser,
+): Promise<boolean> {
+  if (user.role === "admin") return true;
+  const member = await db
+    .select()
+    .from(teamMembers)
+    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, user.id)))
+    .get();
+  return member?.role === "admin";
+}
+
 // ── List ──────────────────────────────────────────────────────────────────
 
 teamsRouter.get("/", async (c) => {
@@ -121,6 +150,7 @@ teamsRouter.delete("/:id", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
 
   try {
     await deleteTeam(db, { teamId: id });
@@ -141,6 +171,7 @@ teamsRouter.post("/:id/members", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
 
   let body: AddTeamMemberRequest;
   try {
@@ -175,6 +206,7 @@ teamsRouter.patch("/:id/members/:userId", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
 
   let body: SetTeamMemberRoleRequest;
   try {
@@ -206,6 +238,7 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canMutateTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
 
   try {
     await removeMember(db, { teamId: id, userId: targetUserId });
