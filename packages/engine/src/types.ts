@@ -362,6 +362,8 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /** Verbatim passthrough of `CreateSessionOptions.toolConfig` (Phase 4 decision 7). */
+  config?: Record<string, unknown>;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
@@ -1027,7 +1029,50 @@ export interface CreateSessionOptions {
   signalHopBudget?: number;
   /** Max unsettled, non-superseded submissions a single thread may hold. Default MAX_PENDING_PER_THREAD (20). */
   maxPendingPerThread?: number;
+  /**
+   * Ordered fragments assembled into the agent's system prompt once at
+   * construction (Phase 4 decision 6): `base systemPrompt + "\n\n" +
+   * fragments sorted by (order ?? 100, name)`. Landed BEFORE per-turn role
+   * overlays and the cold-sandbox hint — final composition is
+   * base → systemContext → role overlay → cold hint. This is a deliberate
+   * deviation from the portable-runtime spec's "after role overlays"
+   * ordering; do not "fix" it back.
+   */
+  systemContext?: Array<{ name: string; content: string; order?: number }>;
+  /**
+   * Host-supplied, session-scoped config surfaced verbatim as
+   * `ToolContext.config` inside every tool execution (Phase 4 decision 7).
+   * Opaque to the engine — e.g. an internal API base URL / token for
+   * app-level tools like `mem_*`.
+   */
+  toolConfig?: Record<string, unknown>;
+  /**
+   * Who this session belongs to. Defaults to `{ type: 'user', id: userId }`
+   * (today's behavior) when omitted (Phase 4 decision 8). Persisted via
+   * `Session.toData().owner`; a restored session preserves its persisted
+   * owner even if the host's restore-time options omit it.
+   */
+  owner?: Principal;
+  /**
+   * Hooks run in order after a successful compaction (summary entry
+   * persisted), each individually try/caught — a throwing hook is logged
+   * and never blocks compaction or later hooks (Phase 4 decision 9).
+   */
+  compactionHooks?: CompactionHook[];
 }
+
+/**
+ * Fires after `Thread.compactThread` persists a compaction summary.
+ * `mode` mirrors the modes `compactThread` itself accepts: the engine's
+ * two automatic triggers (`proactive`, `reactive`) plus `manual`, for a
+ * host- or tool-initiated compaction pass outside the normal turn loop.
+ */
+export type CompactionHook = (args: {
+  sessionId: string;
+  threadId: string;
+  mode: "proactive" | "reactive" | "manual";
+  summary: string;
+}) => Promise<void>;
 
 export interface CompactionConfig {
   /** Master switch. Default: true. */

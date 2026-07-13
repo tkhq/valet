@@ -13,6 +13,7 @@ import type {
   DecisionWithdrawReason,
   EngineEvent,
   MessageQuery,
+  Principal,
   PromptContent,
   PromptOptions,
   PromptReceipt,
@@ -72,6 +73,15 @@ export class Session {
    * heartbeat stops touching it.
    */
   readonly ownerId = uid("owner");
+  /**
+   * Who this session belongs to (Phase 4 decision 8). Defaults from
+   * `options.owner`, falling back to `{ type: 'user', id: options.userId }`.
+   * Mutable (not derived fresh from `options` on every read) so
+   * `rehydrate` can restore a persisted owner the host's restore-time
+   * options didn't re-supply, without that persisted value being stomped
+   * back to the default on the session's next `toData()`/save.
+   */
+  private principal: Principal;
   /** Indexed copies of options.roles / options.skills for fast lookup. */
   readonly roles = new Map<string, RoleSpec>();
   readonly skills = new Map<string, SkillSource>();
@@ -93,6 +103,7 @@ export class Session {
     this.providers = providers;
     this.sandbox = sandbox;
     this.attachment = attachment;
+    this.principal = options.owner ?? { type: "user", id: options.userId };
     for (const role of options.roles ?? []) this.roles.set(role.name, role);
     for (const skill of options.skills ?? []) this.skills.set(skill.name, skill);
     // sandbox_status emissions (spec decision 8): deterministic eventKey so
@@ -218,6 +229,13 @@ export class Session {
     attachment: SandboxAttachment,
   ): Promise<Session> {
     const session = new Session(data.id, options, providers, sandbox, attachment);
+    // The host's restore-time options usually don't re-supply `owner` (it's
+    // not something callers round-trip through CreateSessionOptions on
+    // every restart) — preserve the persisted value in that case rather
+    // than falling back to the user-owned default computed in the
+    // constructor. An explicit options.owner (host re-asserting ownership)
+    // still wins.
+    if (options.owner === undefined) session.principal = data.owner;
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -467,10 +485,15 @@ export class Session {
     return t.readEntries(opts);
   }
 
+  /** Owning principal (Phase 4 decision 8). See `principal` field doc. */
+  get owner(): Principal {
+    return this.principal;
+  }
+
   async toData(): Promise<SessionData> {
     return {
       id: this.id,
-      owner: { type: "user", id: this.options.userId },
+      owner: this.principal,
       userId: this.options.userId,
       orgId: this.options.orgId,
       workspace: this.options.workspace,

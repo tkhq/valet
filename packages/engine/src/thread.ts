@@ -1720,7 +1720,7 @@ export class Thread {
    * CompactionEntry. Persist DAG updates and rewrite agent.state.messages
    * so the next turn sees a smaller context.
    */
-  async compactThread(opts: { mode: "proactive" | "reactive" }): Promise<void> {
+  async compactThread(opts: { mode: "proactive" | "reactive" | "manual" }): Promise<void> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return;
     const session = this.session;
@@ -1817,6 +1817,26 @@ export class Thread {
       { queueItemId: this.runningItem?.id },
     );
 
+    // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each
+    // individually try/caught — a throwing hook is logged via emitError and
+    // never blocks a later hook or the rest of compaction (auto-continue
+    // below still runs even if every hook throws).
+    for (const hook of session.options.compactionHooks ?? []) {
+      try {
+        await hook({
+          sessionId: session.id,
+          threadId: this.id,
+          mode: opts.mode,
+          summary: summaryResult.summary,
+        });
+      } catch (err) {
+        this.emitError(
+          "compaction_hook_failed",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
     // Step 6: auto-continue (proactive only). Inject a synthetic user
     // message tagged with metadata.compaction_continue so client UIs can
     // hide it. Admitted as a durable submission so the claim loop picks it up
@@ -1857,7 +1877,7 @@ export class Thread {
     const agent = new Agent({
       initialState: {
         model: this.session.options.model,
-        systemPrompt: this.session.options.systemPrompt ?? "",
+        systemPrompt: this.buildBaseSystemPrompt(),
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
@@ -1869,6 +1889,31 @@ export class Thread {
     });
     agent.subscribe((event, _signal) => this.handleAgentEvent(event));
     return agent;
+  }
+
+  /**
+   * Base system prompt = `options.systemPrompt` + ordered `systemContext`
+   * fragments, sorted by `(order ?? 100, name)` (Phase 4 decision 6). Baked
+   * in once at agent construction so it sits BEFORE the per-turn role
+   * overlay (`applyRoleForTurn`) and cold-sandbox hint
+   * (`applyColdHintForTurn`), both of which append to
+   * `agent.state.systemPrompt` on top of whatever this returns. Final
+   * composition: base → systemContext → role overlay → cold hint — a
+   * deliberate deviation from the portable-runtime spec's "after role
+   * overlays" ordering; do not "fix" it.
+   */
+  private buildBaseSystemPrompt(): string {
+    const base = this.session.options.systemPrompt ?? "";
+    const fragments = this.session.options.systemContext ?? [];
+    if (fragments.length === 0) return base;
+    const sorted = [...fragments].sort((a, b) => {
+      const orderA = a.order ?? 100;
+      const orderB = b.order ?? 100;
+      if (orderA !== orderB) return orderA - orderB;
+      return a.name.localeCompare(b.name);
+    });
+    const fragmentText = sorted.map((f) => f.content).join("\n\n");
+    return base ? `${base}\n\n${fragmentText}` : fragmentText;
   }
 
   private buildTools(): AgentTool[] {
@@ -1897,6 +1942,7 @@ export class Thread {
       cwd: session.options.workspace,
       credentials: session.credentialProvider(),
       sandbox: session.sandbox,
+      config: session.options.toolConfig,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
