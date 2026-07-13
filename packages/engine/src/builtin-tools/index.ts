@@ -1,6 +1,15 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
-import type { ExecJobHandle, JobPoll, MessageQuery, ToolContext, ToolDef, ToolResult } from "../types.js";
+import type {
+  ChildSpawner,
+  ExecJobHandle,
+  JobPoll,
+  MessageQuery,
+  SpawnChildRequest,
+  ToolContext,
+  ToolDef,
+  ToolResult,
+} from "../types.js";
 
 /**
  * Bash job-mode constants (spec decision 10, verbatim values):
@@ -347,6 +356,52 @@ export const askApprovalTool = defineTool({
   },
 });
 
+export const taskTool = defineTool({
+  name: "task",
+  description:
+    "Spawn a child session to work on a task in the background (fire-and-" +
+    "forget — this call does not wait for the child to finish). The " +
+    "parent thread receives a `child.settled` signal with the child's " +
+    "result once it completes. Unavailable inside child sessions " +
+    "(depth-limited to one level).",
+  parameters: Type.Object({
+    prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
+    title: Type.Optional(Type.String()),
+    repo: Type.Optional(Type.String({ description: "Clone URL or org/repo; interpretation is host policy." })),
+    branch: Type.Optional(Type.String()),
+    model: Type.Optional(Type.String()),
+  }),
+  execute: async (args, ctx) => {
+    // ctx.config is `Record<string, unknown>` (verbatim toolConfig
+    // passthrough, Phase 4 decision 7) — a spawner-shaped value is only
+    // known by convention, hence the typeof guard before the single
+    // sanctioned cast.
+    const rawSpawner = ctx.config?.childSpawner;
+    if (typeof rawSpawner !== "function") {
+      return { text: "[task_unavailable] this session cannot spawn child sessions" };
+    }
+    const spawner = rawSpawner as ChildSpawner; // narrowed by typeof check above
+
+    const req: SpawnChildRequest = {
+      prompt: args.prompt,
+      title: args.title,
+      repo: args.repo,
+      branch: args.branch,
+      model: args.model,
+    };
+    const owner = ctx.owner ?? { type: "user", id: ctx.userId };
+    const result = await spawner(req, {
+      parentSessionId: ctx.sessionId,
+      parentThreadId: ctx.threadId,
+      actorUserId: ctx.userId,
+      owner,
+    });
+    return {
+      text: `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
+    };
+  },
+});
+
 export const builtinTools: ToolDef[] = [
   readTool,
   writeTool,
@@ -356,4 +411,5 @@ export const builtinTools: ToolDef[] = [
   listThreadsTool,
   switchModelTool,
   askApprovalTool,
+  taskTool,
 ];

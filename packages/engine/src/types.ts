@@ -364,6 +364,13 @@ export interface ToolContext {
   sandbox: Sandbox;
   /** Verbatim passthrough of `CreateSessionOptions.toolConfig` (Phase 4 decision 7). */
   config?: Record<string, unknown>;
+  /**
+   * Ownership principal of the session this tool call is running in
+   * (`Session.owner`). Not part of the original ToolContext surface; added
+   * for the `task` built-in (Phase 4 decision 10) so a `ChildSpawner` can be
+   * called with the correct owner without threading it through toolConfig.
+   */
+  owner?: Principal;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
@@ -1104,6 +1111,33 @@ export interface CompactionConfig {
    */
   autoContinue?: boolean;
 }
+
+// ── Child spawning (`task` built-in, Phase 4 decision 10) ──────────
+
+/** Request payload for the `task` built-in tool. `repo` interpretation is host policy. */
+export interface SpawnChildRequest {
+  prompt: string;
+  title?: string;
+  repo?: string;
+  branch?: string;
+  model?: string;
+}
+
+export interface SpawnChildResult {
+  childSessionId: string;
+  queueItemId: string;
+}
+
+/**
+ * Host-injected child-session factory, surfaced to the `task` tool via
+ * `toolConfig.childSpawner`. Its absence is the engine's depth limit: child
+ * sessions get no spawner in their own toolConfig, so `task` calls inside a
+ * child session fall through to `[task_unavailable]`.
+ */
+export type ChildSpawner = (
+  req: SpawnChildRequest,
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
+) => Promise<SpawnChildResult>;
 
 /**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,

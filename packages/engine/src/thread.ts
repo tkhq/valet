@@ -1943,6 +1943,7 @@ export class Thread {
       credentials: session.credentialProvider(),
       sandbox: session.sandbox,
       config: session.options.toolConfig,
+      owner: session.owner,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
