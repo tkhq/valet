@@ -5,7 +5,7 @@ import type {
   JobPoll,
   Sandbox,
 } from "../types.js";
-import { SandboxSupersededError, SandboxUnavailableError, WorkspaceProvisioningError } from "../errors.js";
+import { SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
 import type { SandboxAttachment } from "./attachment.js";
 
 /** Default `CreateSessionOptions.sandboxReadyTimeoutMs` (spec decision 6). */
@@ -165,15 +165,10 @@ export class PolicySandbox implements Sandbox {
   private async dispatch<T>(op: (sandbox: Sandbox) => Promise<T>, opts?: DispatchOptions): Promise<T> {
     if (opts?.signal?.aborted) throw this.abortError(opts.signal);
 
-    let ready: { sandbox: Sandbox; epoch: number };
-    try {
-      ready = await this.attachment.ensureReady({ timeoutMs: this.readyTimeoutMs, signal: opts?.signal });
-    } catch (err) {
-      if (err instanceof WorkspaceProvisioningError) throw err;
-      throw err;
-    }
-
-    const { sandbox, epoch } = ready;
+    const { sandbox, epoch } = await this.attachment.ensureReady({
+      timeoutMs: this.readyTimeoutMs,
+      signal: opts?.signal,
+    });
     let result: T;
     try {
       result = await op(sandbox);

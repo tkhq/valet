@@ -361,4 +361,25 @@ describe("SandboxAttachment", () => {
     attachment.warm(); // no-op: no provider to reprovision with
     expect(attachment.state).toBe("error");
   });
+
+  it("14. a throwing onStatus listener does not break the ready transition: ensureReady still resolves, state stays ready", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 1000 });
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    attachment.onStatus(() => {
+      throw new Error("listener boom");
+    });
+
+    const d = provider.nextDeferred();
+    const opPromise = wrapper.readFile("/x.txt");
+    setTimeout(() => d.resolve(makeFakeSandbox("sb-1")), 10);
+
+    await expect(opPromise).resolves.toBe("content");
+    expect(attachment.state).toBe("ready");
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
+  });
 });

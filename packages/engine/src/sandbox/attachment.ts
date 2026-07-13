@@ -161,7 +161,7 @@ export class SandboxAttachment {
         this.waiters.delete(waiter);
         waiter.reject(new WorkspaceProvisioningError(opts.timeoutMs));
       }, opts.timeoutMs);
-      (timer as unknown as { unref?: () => void }).unref?.();
+      timer.unref?.();
 
       const onAbort = () => {
         this.waiters.delete(waiter);
@@ -298,6 +298,12 @@ export class SandboxAttachment {
       epoch: this._epoch,
       estimateMs: this.estimateMs,
     };
-    for (const cb of this.listeners) cb(status);
+    for (const cb of this.listeners) {
+      try {
+        cb(status);
+      } catch (err) {
+        console.error("SandboxAttachment: onStatus listener threw", err);
+      }
+    }
   }
 }
