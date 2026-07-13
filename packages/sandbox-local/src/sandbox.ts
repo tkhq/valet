@@ -1,15 +1,32 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type {
+  ExecJobHandle,
   ExecOpts,
   ExecResult,
+  JobPoll,
   Sandbox,
   SandboxCapabilities,
   SandboxCreateOpts,
   SandboxProvider,
   SandboxStatus,
 } from "@valet/engine";
+
+/** 5-minute backstop eviction for job entries nobody polls to completion
+ * (spec decision 9). Primary eviction is on first poll observing terminal
+ * status; this timer is just a leak guard. */
+const JOB_EVICTION_BACKSTOP_MS = 5 * 60 * 1000;
+
+interface LocalJobState {
+  status: "running" | "done" | "failed";
+  exitCode?: number;
+  output: string;
+  child: ChildProcess;
+  /** Resolves once the child has actually exited (close/error fired). */
+  closed: Promise<void>;
+  evictTimer?: NodeJS.Timeout;
+}
 
 /**
  * LocalSandbox is for development and testing. It runs FS ops via
@@ -27,6 +44,8 @@ import type {
 export class LocalSandbox implements Sandbox {
   readonly id: string;
   readonly workspace: string;
+  private jobs = new Map<string, LocalJobState>();
+  private nextJobId = 1;
 
   constructor(id: string, workspace: string) {
     this.id = id;
@@ -98,6 +117,92 @@ export class LocalSandbox implements Sandbox {
 
   async destroy(): Promise<void> {
     // No-op: we don't own the host filesystem.
+  }
+
+  /**
+   * Job-mode exec (spec decision 9): spawn the same child-process path as
+   * sync exec, but detached from the request — execJob returns as soon as
+   * the child is spawned; stdout+stderr interleave into one capped buffer
+   * that pollJob reads incrementally by offset.
+   */
+  async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
+    const execId = `job-${this.nextJobId++}`;
+    const cwd = opts?.cwd ? this.resolvePath(opts.cwd) : this.workspace;
+    const env = { ...process.env, ...(opts?.env ?? {}) };
+    const limit = opts?.maxOutputBytes;
+
+    const child = spawn(command, {
+      cwd,
+      env,
+      shell: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((res) => {
+      resolveClosed = res;
+    });
+    const state: LocalJobState = { status: "running", output: "", child, closed };
+    this.jobs.set(execId, state);
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    const appendOutput = (chunk: string) => {
+      if (limit && state.output.length >= limit) return;
+      state.output += chunk;
+      if (limit && state.output.length > limit) state.output = state.output.slice(0, limit);
+    };
+    child.stdout?.on("data", appendOutput);
+    child.stderr?.on("data", appendOutput);
+
+    if (opts?.stdin !== undefined) child.stdin?.write(opts.stdin);
+    child.stdin?.end();
+
+    const scheduleEviction = () => {
+      const t = setTimeout(() => this.jobs.delete(execId), JOB_EVICTION_BACKSTOP_MS);
+      const unrefable = t as { unref?: () => void };
+      if (typeof unrefable.unref === "function") unrefable.unref();
+      state.evictTimer = t;
+    };
+
+    child.on("error", () => {
+      state.status = "failed";
+      resolveClosed();
+      scheduleEviction();
+    });
+    child.on("close", (code, sig) => {
+      state.status = "done";
+      state.exitCode = code ?? (sig ? 128 + signalToInt(sig) : 1);
+      resolveClosed();
+      scheduleEviction();
+    });
+
+    return { execId };
+  }
+
+  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+    const state = this.jobs.get(execId);
+    if (!state) return { status: "failed", output: "", nextOffset: offset };
+
+    const output = state.output.slice(offset);
+    const nextOffset = state.output.length;
+    const result: JobPoll = { status: state.status, output, nextOffset };
+    if (state.status === "done") result.exitCode = state.exitCode;
+
+    if (state.status !== "running") {
+      // Evict on first poll that observes a terminal status (decision 9);
+      // the eviction timer is then redundant for this job.
+      if (state.evictTimer) clearTimeout(state.evictTimer);
+      this.jobs.delete(execId);
+    }
+    return result;
+  }
+
+  async cancelJob(execId: string): Promise<void> {
+    const state = this.jobs.get(execId);
+    if (!state) return;
+    state.child.kill("SIGKILL");
+    await state.closed;
   }
 }
 

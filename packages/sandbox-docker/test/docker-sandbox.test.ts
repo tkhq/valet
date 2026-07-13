@@ -122,6 +122,65 @@ describeDocker("DockerSandbox", () => {
     }
   });
 
+  it("exec against a removed container rejects instead of resolving a normal ExecResult", async () => {
+    const sb = await makeSandbox();
+    // Remove the container out from under the sandbox handle, then try to
+    // exec against it. `docker exec` on a gone container fails at the
+    // docker-CLI level ("No such container") with a non-zero exit — that
+    // must surface as a rejection (transport failure) so PolicySandbox's
+    // degradation path fires, not as a normal ExecResult with a non-zero
+    // exitCode (which would be indistinguishable from the user's command
+    // itself failing).
+    await provider.destroy(sb.id);
+    await expect(sb.exec("echo hi")).rejects.toThrow(/No such container|is not running/i);
+  });
+
+  it("job-mode: execJob/pollJob round-trips output and exitCode", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("echo hello");
+      let offset = 0;
+      let output = "";
+      let poll = await sb.pollJob(execId, offset);
+      while (poll.status === "running") {
+        output += poll.output;
+        offset = poll.nextOffset;
+        await new Promise((r) => setTimeout(r, 50));
+        poll = await sb.pollJob(execId, offset);
+      }
+      output += poll.output;
+      expect(poll.status).toBe("done");
+      expect(poll.exitCode).toBe(0);
+      expect(output).toContain("hello");
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: execJob against an already-removed container rejects on poll (transport failure, not a normal terminal poll)", async () => {
+    const sb = await makeSandbox();
+    // Remove the container before kicking off the job — execJob is
+    // fire-and-forget (it doesn't await the spawned docker exec), so the
+    // "No such container" failure only surfaces once the detached process
+    // closes and pollJob observes it. That must reject, not resolve with
+    // a normal terminal JobPoll.
+    await provider.destroy(sb.id);
+    const { execId } = await sb.execJob("echo hi");
+
+    let rejected = false;
+    for (let i = 0; i < 100 && !rejected; i++) {
+      try {
+        await sb.pollJob(execId, 0);
+      } catch (err) {
+        rejected = true;
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toMatch(/No such container|is not running/i);
+      }
+      if (!rejected) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(rejected).toBe(true);
+  });
+
   it("times out long-running commands", async () => {
     const sb = await makeSandbox();
     try {

@@ -1,6 +1,94 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
-import type { ToolDef, MessageQuery } from "../types.js";
+import type { ExecJobHandle, JobPoll, MessageQuery, ToolContext, ToolDef, ToolResult } from "../types.js";
+
+/**
+ * Bash job-mode constants (spec decision 10, verbatim values):
+ *   - JOB_MODE_THRESHOLD_MS: timeoutMs above this triggers job mode when the
+ *     sandbox supports it.
+ *   - JOB_POLL_INTERVAL_MS: poll cadence while a job is running.
+ *   - BASH_DEFAULT_TIMEOUT_S: default `timeout` param value, in seconds.
+ */
+export const JOB_MODE_THRESHOLD_MS = 60_000;
+export const JOB_POLL_INTERVAL_MS = 2_000;
+export const BASH_DEFAULT_TIMEOUT_S = 120;
+
+function isJobUnsupported(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith("[job_unsupported]");
+}
+
+/** setTimeout that resolves early (never rejects) on abort, so the poll
+ * loop's top-of-iteration signal check fires promptly instead of waiting
+ * out the full interval. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((res) => {
+    if (signal?.aborted) {
+      res();
+      return;
+    }
+    const t = setTimeout(res, ms);
+    const unrefable = t as { unref?: () => void };
+    if (typeof unrefable.unref === "function") unrefable.unref();
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(t);
+          res();
+        },
+        { once: true },
+      );
+    }
+  });
+}
+
+function abortErrorFrom(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  return reason instanceof Error ? reason : new Error("aborted");
+}
+
+/**
+ * Poll a job-mode exec to completion, accumulating output across polls
+ * (spec decision 10). Deadline exceeded or `ctx.signal` abort both cancel
+ * the job first; a poll rejection (sandbox degradation) propagates
+ * untouched so the structured error reaches the model.
+ */
+async function pollJobToCompletion(
+  ctx: ToolContext,
+  pollJob: (execId: string, offset: number) => Promise<JobPoll>,
+  cancelJob: (execId: string) => Promise<void>,
+  execId: string,
+  timeoutMs: number,
+): Promise<ToolResult> {
+  const deadline = Date.now() + timeoutMs;
+  let offset = 0;
+  let output = "";
+
+  for (;;) {
+    if (ctx.signal.aborted) {
+      await cancelJob(execId);
+      throw abortErrorFrom(ctx.signal);
+    }
+    if (Date.now() >= deadline) {
+      await cancelJob(execId);
+      return { text: `${output}\n[timed out after ${Math.round(timeoutMs / 1000)}s]` };
+    }
+
+    const poll = await pollJob(execId, offset);
+    output += poll.output;
+    offset = poll.nextOffset;
+
+    if (poll.status === "done") {
+      const exitNote = poll.exitCode !== undefined && poll.exitCode !== 0 ? `\n[exit ${poll.exitCode}]` : "";
+      return { text: `${output}${exitNote}` };
+    }
+    if (poll.status === "failed") {
+      return { text: `${output}\n[job failed]` };
+    }
+
+    await sleep(JOB_POLL_INTERVAL_MS, ctx.signal);
+  }
+}
 
 /**
  * Helper that preserves the schema's static type through the ToolDef so
@@ -51,10 +139,42 @@ export const editTool = defineTool({
 
 export const bashTool = defineTool({
   name: "bash",
-  description: "Execute a shell command in the sandbox.",
-  parameters: Type.Object({ command: Type.String() }),
+  description:
+    "Execute a shell command in the sandbox. `timeout` (seconds, default " +
+    `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
+    "run; commands with an effective timeout beyond 60s automatically run " +
+    "in job mode (poll-based, non-blocking on the transport) when the " +
+    "sandbox supports it.",
+  parameters: Type.Object({
+    command: Type.String(),
+    timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),
+  }),
   execute: async (args, ctx) => {
-    const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal });
+    const timeoutMs = (args.timeout ?? BASH_DEFAULT_TIMEOUT_S) * 1000;
+
+    // Mode selection (spec decision 10). NOTE: `ctx.sandbox` is normally a
+    // PolicySandbox, whose execJob/pollJob/cancelJob are ALWAYS defined
+    // (they throw a `[job_unsupported]` error internally when the raw
+    // sandbox lacks the capability) — so `typeof ... === "function"` can't
+    // be used to detect support. Instead: past the threshold, try job mode;
+    // if execJob itself rejects with `[job_unsupported]`, fall back to sync
+    // exec. Once execJob has succeeded (a job exists), never fall back —
+    // the poll loop's errors propagate untouched.
+    const { execJob, pollJob, cancelJob } = ctx.sandbox;
+    if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
+      let handle: ExecJobHandle | undefined;
+      try {
+        handle = await execJob(args.command, { signal: ctx.signal });
+      } catch (err) {
+        if (!isJobUnsupported(err)) throw err;
+        // Underlying sandbox doesn't support job mode — fall through to sync exec.
+      }
+      if (handle) {
+        return pollJobToCompletion(ctx, pollJob, cancelJob, handle.execId, timeoutMs);
+      }
+    }
+
+    const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
     const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
     return { text: `${result.stdout}${result.stderr}${exitNote}` };
   },

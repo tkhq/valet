@@ -2,14 +2,46 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type {
+  ExecJobHandle,
   ExecOpts,
   ExecResult,
+  JobPoll,
   Sandbox,
   SandboxCapabilities,
   SandboxCreateOpts,
   SandboxProvider,
   SandboxStatus,
 } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN } from "@valet/engine";
+
+/** 5-minute backstop eviction for job entries nobody polls to completion
+ * (spec decision 9). Primary eviction is on first poll observing terminal
+ * status; this timer is just a leak guard. */
+const JOB_EVICTION_BACKSTOP_MS = 5 * 60 * 1000;
+
+interface DockerJobState {
+  status: "running" | "done" | "failed";
+  exitCode?: number;
+  output: string;
+  child: ChildProcess;
+  /** Set when the close/error signature indicates a `docker exec` transport
+   * failure (dead container) rather than the command's own exit — pollJob
+   * rejects with this instead of returning a normal terminal JobPoll. */
+  transportError?: Error;
+  closed: Promise<void>;
+  evictTimer?: NodeJS.Timeout;
+}
+
+/**
+ * True when a `docker exec`-level failure occurred (container dead/gone),
+ * as opposed to the user's command inside a live container exiting
+ * non-zero on its own. Only meaningful for the *docker exec* invocation —
+ * never applied to `docker run`/`rm`/`inspect`, whose own failures are
+ * handled separately.
+ */
+function isDockerExecTransportFailure(exitCode: number, stderr: string): boolean {
+  return exitCode !== 0 && CONTAINER_DEATH_PATTERN.test(stderr);
+}
 
 /**
  * DockerSandbox runs shell commands inside a long-running Docker container,
@@ -67,6 +99,8 @@ export class DockerSandbox implements Sandbox {
   readonly containerId: string;
   readonly containerWorkspace: string;
   readonly image: string;
+  private jobs = new Map<string, DockerJobState>();
+  private nextJobId = 1;
 
   constructor(id: string, opts: DockerSandboxOptions) {
     this.id = id;
@@ -151,7 +185,7 @@ export class DockerSandbox implements Sandbox {
     });
   }
 
-  async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
+  private execArgs(command: string, opts?: ExecOpts): string[] {
     const cwd = opts?.cwd ? this.resolveContainerPath(opts.cwd) : this.containerWorkspace;
     const args = ["exec"];
     args.push("--workdir", cwd);
@@ -162,13 +196,27 @@ export class DockerSandbox implements Sandbox {
     }
     if (opts?.stdin !== undefined) args.push("--interactive");
     args.push(this.containerId, "sh", "-c", command);
+    return args;
+  }
 
-    return execProcess("docker", args, {
+  async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
+    const result = await execProcess("docker", this.execArgs(command, opts), {
       timeout: opts?.timeout,
       signal: opts?.signal,
       stdin: opts?.stdin,
       maxOutputBytes: opts?.maxOutputBytes,
     });
+    // `docker exec` itself failing (dead/removed/stopped container) surfaces
+    // as a normal non-zero exit from the docker CLI — indistinguishable at
+    // the child-process level from the user's own command failing. Detect
+    // the docker-CLI failure signature and reject instead of resolving, so
+    // the PolicySandbox wrapper's degradation path (which only fires on
+    // rejections) actually triggers. A command-level non-zero exit inside a
+    // live container still resolves normally.
+    if (isDockerExecTransportFailure(result.exitCode, result.stderr)) {
+      throw new Error(result.stderr.trim() || `docker exec failed (${result.exitCode})`);
+    }
+    return result;
   }
 
   async snapshot(): Promise<string> {
@@ -186,6 +234,104 @@ export class DockerSandbox implements Sandbox {
     } catch {
       // already gone
     }
+  }
+
+  /**
+   * Job-mode exec (spec decision 9): spawn the same `docker exec` path as
+   * sync exec, but detached from the request; stdout+stderr interleave into
+   * one capped buffer that pollJob reads incrementally by offset.
+   */
+  async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
+    const execId = `job-${this.nextJobId++}`;
+    const limit = opts?.maxOutputBytes;
+
+    const child = spawn("docker", this.execArgs(command, opts), {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((res) => {
+      resolveClosed = res;
+    });
+    const state: DockerJobState = { status: "running", output: "", child, closed };
+    this.jobs.set(execId, state);
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    let stderrTail = "";
+    const appendOutput = (chunk: string, isStderr: boolean) => {
+      if (isStderr) {
+        stderrTail = (stderrTail + chunk).slice(-4096);
+      }
+      if (limit && state.output.length >= limit) return;
+      state.output += chunk;
+      if (limit && state.output.length > limit) state.output = state.output.slice(0, limit);
+    };
+    child.stdout?.on("data", (chunk: string) => appendOutput(chunk, false));
+    child.stderr?.on("data", (chunk: string) => appendOutput(chunk, true));
+
+    if (opts?.stdin !== undefined) child.stdin?.write(opts.stdin);
+    child.stdin?.end();
+
+    const scheduleEviction = () => {
+      const t = setTimeout(() => this.jobs.delete(execId), JOB_EVICTION_BACKSTOP_MS);
+      const unrefable = t as { unref?: () => void };
+      if (typeof unrefable.unref === "function") unrefable.unref();
+      state.evictTimer = t;
+    };
+
+    child.on("error", (err) => {
+      state.status = "failed";
+      state.transportError = err;
+      resolveClosed();
+      scheduleEviction();
+    });
+    child.on("close", (code, sig) => {
+      const exitCode = code ?? (sig ? 128 : 1);
+      if (isDockerExecTransportFailure(exitCode, stderrTail)) {
+        state.status = "failed";
+        state.transportError = new Error(stderrTail.trim() || `docker exec failed (${exitCode})`);
+      } else {
+        state.status = "done";
+        state.exitCode = exitCode;
+      }
+      resolveClosed();
+      scheduleEviction();
+    });
+
+    return { execId };
+  }
+
+  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+    const state = this.jobs.get(execId);
+    if (!state) return { status: "failed", output: "", nextOffset: offset };
+
+    if (state.status !== "running" && state.transportError) {
+      // Docker-CLI-level failure (dead container), not a command outcome:
+      // reject like `exec()` does, so the PolicySandbox degradation path
+      // fires instead of treating this as a normal terminal job state.
+      if (state.evictTimer) clearTimeout(state.evictTimer);
+      this.jobs.delete(execId);
+      throw state.transportError;
+    }
+
+    const output = state.output.slice(offset);
+    const nextOffset = state.output.length;
+    const result: JobPoll = { status: state.status, output, nextOffset };
+    if (state.status === "done") result.exitCode = state.exitCode;
+
+    if (state.status !== "running") {
+      if (state.evictTimer) clearTimeout(state.evictTimer);
+      this.jobs.delete(execId);
+    }
+    return result;
+  }
+
+  async cancelJob(execId: string): Promise<void> {
+    const state = this.jobs.get(execId);
+    if (!state) return;
+    state.child.kill("SIGKILL");
+    await state.closed;
   }
 }
 

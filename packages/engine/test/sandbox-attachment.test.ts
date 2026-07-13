@@ -22,6 +22,9 @@ function makeFakeSandbox(id: string): Sandbox & {
   readFile: ReturnType<typeof vi.fn>;
   writeFile: ReturnType<typeof vi.fn>;
   mkdir: ReturnType<typeof vi.fn>;
+  execJob: ReturnType<typeof vi.fn>;
+  pollJob: ReturnType<typeof vi.fn>;
+  cancelJob: ReturnType<typeof vi.fn>;
 } {
   return {
     id,
@@ -34,6 +37,14 @@ function makeFakeSandbox(id: string): Sandbox & {
     mkdir: vi.fn(async (_path: string) => {}),
     rm: vi.fn(async (_path: string) => {}),
     exec: vi.fn(async (_command: string) => ({ stdout: "", stderr: "", exitCode: 0 })),
+    execJob: vi.fn(async (_command: string) => ({ execId: "job-1" })),
+    pollJob: vi.fn(async (_execId: string, offset: number) => ({
+      status: "done" as const,
+      exitCode: 0,
+      output: "",
+      nextOffset: offset,
+    })),
+    cancelJob: vi.fn(async (_execId: string) => {}),
   };
 }
 
@@ -185,6 +196,50 @@ describe("SandboxAttachment", () => {
     expect(attachment.currentEpoch()).toBe(2);
 
     // Re-provision completes.
+    const sb2 = makeFakeSandbox("sb-2");
+    const nextOp = wrapper.readFile("/y.txt");
+    d2.resolve(sb2);
+    await expect(nextOp).resolves.toBe("content");
+    expect(attachment.state).toBe("ready");
+    expect(attachment.currentEpoch()).toBe(2);
+
+    const provisioningEpoch2Index = statuses.findIndex((s) => s.state === "provisioning" && s.epoch === 2);
+    const readyEpoch2Index = statuses.findIndex((s) => s.state === "ready" && s.epoch === 2);
+    expect(provisioningEpoch2Index).toBeGreaterThanOrEqual(0);
+    expect(readyEpoch2Index).toBeGreaterThan(provisioningEpoch2Index);
+  });
+
+  it("5b. job op awaits readiness: execJob completes once create resolves; state ready, epoch 1", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
+    const d = provider.nextDeferred();
+
+    const opPromise = wrapper.execJob("sleep 100");
+    setTimeout(() => d.resolve(makeFakeSandbox("sb-1")), 50);
+
+    await expect(opPromise).resolves.toEqual({ execId: "job-1" });
+    expect(attachment.state).toBe("ready");
+    expect(attachment.currentEpoch()).toBe(1);
+  });
+
+  it("5c. pollJob transport failure degrades + reprovisions", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
+    const statuses = collectStatuses(attachment);
+
+    const sb1 = makeFakeSandbox("sb-1");
+    provider.nextDeferred().resolve(sb1);
+    await wrapper.readFile("/x.txt");
+    expect(attachment.currentEpoch()).toBe(1);
+
+    const d2 = provider.nextDeferred();
+    sb1.pollJob.mockRejectedValueOnce(new Error("No such container abc"));
+    await expect(wrapper.pollJob("job-1", 0)).rejects.toBeInstanceOf(SandboxUnavailableError);
+    expect(attachment.state).toBe("provisioning");
+    expect(attachment.currentEpoch()).toBe(2);
+
     const sb2 = makeFakeSandbox("sb-2");
     const nextOp = wrapper.readFile("/y.txt");
     d2.resolve(sb2);

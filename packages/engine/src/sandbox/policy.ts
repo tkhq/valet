@@ -20,7 +20,7 @@ const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
  * re-provision; anything else (ENOENT, EISDIR, non-zero exit, ...) rethrows
  * untouched as a normal command/filesystem outcome.
  */
-const CONTAINER_DEATH_PATTERN = /No such container|is not running|Connection refused|socket hang up/i;
+export const CONTAINER_DEATH_PATTERN = /No such container|is not running|Connection refused|socket hang up/i;
 
 function isTransportError(err: unknown): boolean {
   return err instanceof Error && CONTAINER_DEATH_PATTERN.test(err.message);

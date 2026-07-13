@@ -42,12 +42,23 @@ export {
 export {
   PolicySandbox,
   SANDBOX_READY_TIMEOUT_MS,
+  CONTAINER_DEATH_PATTERN,
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
 // SqliteSessionStore lives in @valet/store-sqlite.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
-export { builtinTools, readTool, writeTool, editTool, bashTool, threadReadTool } from "./builtin-tools/index.js";
+export {
+  builtinTools,
+  readTool,
+  writeTool,
+  editTool,
+  bashTool,
+  threadReadTool,
+  JOB_MODE_THRESHOLD_MS,
+  JOB_POLL_INTERVAL_MS,
+  BASH_DEFAULT_TIMEOUT_S,
+} from "./builtin-tools/index.js";
 export {
   pluginCatalogTools,
   type ActionPlugin,
