@@ -1,0 +1,207 @@
+---
+title: Architecture
+description: A guided map of how Valet turns a request into isolated agent work and returns the result.
+---
+
+Valet has one clear job: receive work, coordinate a session, run the agent in an isolated workspace, and return the result where the work began. Start with that path; use the links below when you need a subsystem's exact contract.
+
+## System overview
+
+<div className="valet-architecture-map">
+  <div className="valet-architecture-map-heading">
+    <span className="valet-eyebrow">One request, three boundaries</span>
+    <p>Read left to right for the happy path. The return path carries messages, status, and artifacts back to the person or automation that started the work.</p>
+  </div>
+
+  <div className="valet-architecture-flow" role="img" aria-label="A request moves from people and automations through Valet's session coordinator to an isolated agent workspace, then streams results back to where the request started.">
+    <article className="valet-architecture-stage valet-architecture-stage-start">
+      <span className="valet-architecture-stage-number">01</span>
+      <span className="valet-architecture-stage-label">Start work</span>
+      <h3>People and automations</h3>
+      <p>Work can begin in the product, a channel, or an automation.</p>
+      <div className="valet-architecture-chips">
+        <span>Web app</span>
+        <span>Slack</span>
+        <span>Telegram</span>
+        <span>Workflow</span>
+      </div>
+    </article>
+
+    <div className="valet-architecture-connector" aria-hidden="true">
+      <span>authenticate<br />and route</span>
+      <i>→</i>
+    </div>
+
+    <article className="valet-architecture-stage valet-architecture-stage-control">
+      <span className="valet-architecture-stage-number">02</span>
+      <span className="valet-architecture-stage-label">Coordinate</span>
+      <h3>Valet control plane</h3>
+      <p>The Worker chooses the session. Its coordinator owns live state, queues work, and keeps durable records in sync.</p>
+      <div className="valet-architecture-components">
+        <span>Cloudflare Worker</span>
+        <span>SessionAgent DO</span>
+        <span>D1 and R2</span>
+      </div>
+    </article>
+
+    <div className="valet-architecture-connector" aria-hidden="true">
+      <span>start or wake<br />a workspace</span>
+      <i>→</i>
+    </div>
+
+    <article className="valet-architecture-stage valet-architecture-stage-execute">
+      <span className="valet-architecture-stage-number">03</span>
+      <span className="valet-architecture-stage-label">Execute</span>
+      <h3>Isolated agent workspace</h3>
+      <p>Modal provides the sandbox. Runner connects the live session to OpenCode and local developer tools.</p>
+      <div className="valet-architecture-components">
+        <span>Modal sandbox</span>
+        <span>Valet Runner</span>
+        <span>OpenCode and tools</span>
+      </div>
+    </article>
+
+  </div>
+
+  <div className="valet-architecture-return">
+    <span className="valet-architecture-return-mark" aria-hidden="true">←</span>
+    <div>
+      <strong>Results return to the source.</strong>
+      <span>Structured messages, progress, approvals, and artifacts stream through the session coordinator to the web app or channel that started the work.</span>
+    </div>
+  </div>
+</div>
+
+<Tip>
+  This is deliberately a reader's map, not a wiring diagram. It shows the
+  boundaries and handoffs that explain the system; the pages below own the
+  detailed protocols, storage, and lifecycle rules.
+</Tip>
+
+## Follow the concern you are changing
+
+<CardGroup cols={3}>
+  <Card
+    title="A session's life"
+    icon="messages-square"
+    href="/engineering/session-lifecycle"
+    arrow="true"
+  >
+    Creation, live state, prompt queues, hibernation, restore, and termination.
+  </Card>
+  <Card
+    title="The running workspace"
+    icon="container"
+    href="/engineering/sandbox-lifecycle"
+    arrow="true"
+  >
+    Sandbox topology, boot, persistence, gateway access, and image composition.
+  </Card>
+  <Card
+    title="Live updates"
+    icon="radio"
+    href="/engineering/real-time-streaming"
+    arrow="true"
+  >
+    Client and Runner WebSockets, structured events, reconnection, and channel
+    routing.
+  </Card>
+</CardGroup>
+
+Those three pages trace the request in the same order as the system map: **session → workspace → results**.
+
+## Boundaries that keep the system legible
+
+<Columns cols={2}>
+  <Card
+    title="Live coordination"
+    icon="workflow"
+    href="/engineering/session-lifecycle"
+    arrow="true"
+  >
+    `SessionAgentDO` is the source of truth for connected users, runner
+    availability, queued prompts, and in-flight streamed work. It asks the
+    backend to create or restore a sandbox when work needs one.
+  </Card>
+  <Card
+    title="Durable state and access"
+    icon="shield-check"
+    href="/engineering/auth-access-internals"
+    arrow="true"
+  >
+    D1 stores durable application records and R2 stores artifacts. The Worker
+    authenticates callers, enforces session access, and issues scoped
+    credentials for workspace-facing services.
+  </Card>
+  <Card
+    title="Sandboxed execution"
+    icon="terminal-square"
+    href="/engineering/runner-and-opencode"
+    arrow="true"
+  >
+    Runner bridges the session protocol to OpenCode. The agent works against a
+    real repository and developer tools inside the isolated sandbox.
+  </Card>
+  <Card
+    title="Controlled extension"
+    icon="plug-zap"
+    href="/engineering/integration-system"
+    arrow="true"
+  >
+    Plugins add tools, channels, skills, and personas. Integration actions
+    execute through Valet's policy-controlled Worker path—not directly inside
+    the sandbox.
+  </Card>
+</Columns>
+
+## Continue by question
+
+<CardGroup cols={2}>
+  <Card
+    title="How does automation start and finish?"
+    icon="play"
+    href="/engineering/workflow-execution"
+    arrow="true"
+  >
+    Read Workflow Execution for triggers, versions, the interpreter, approvals,
+    and execution records.
+  </Card>
+  <Card
+    title="How does Valet coordinate work across channels?"
+    icon="bot"
+    href="/engineering/orchestrator-runtime"
+    arrow="true"
+  >
+    Read Orchestrator Runtime for persistent coordinators, memory, mailbox,
+    channel routing, and child sessions.
+  </Card>
+  <Card
+    title="How do plugins become agent capabilities?"
+    icon="blocks"
+    href="/engineering/plugin-system"
+    arrow="true"
+  >
+    Read Plugin System for registries, content delivery, actions, channels,
+    skills, personas, and tools.
+  </Card>
+  <Card
+    title="Why was an action allowed, held, or denied?"
+    icon="scale"
+    href="/engineering/policy-engine"
+    arrow="true"
+  >
+    Read Policy Engine for policy precedence, approval prompts, overrides, audit
+    records, and failure behavior.
+  </Card>
+  <Card
+    title="Who can access a session or workspace?"
+    icon="key-round"
+    href="/engineering/auth-access-internals"
+    arrow="true"
+  >
+    Read Auth and Access Internals for OAuth, app tokens, organization gates,
+    share links, and workspace JWTs.
+  </Card>
+</CardGroup>
+
+For deployment, threat boundaries, and configuration, continue to [Security model](/security-model), [Deployment](/deployment), [Environment variables](/environment-variables), and [Project structure](/project-structure).

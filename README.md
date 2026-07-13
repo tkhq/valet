@@ -164,7 +164,7 @@ See `CLAUDE.md` → *Debugging with Cloudflare Observability* for query patterns
 - **[OAuth Setup](docs/oauth-setup.md)** — GitHub and Google OAuth configuration for dev and production
 - **[Environment Variables](docs/environment-variables.md)** — Full reference for all config vars across packages
 - **[API Reference](docs/api-reference.md)** — Complete endpoint documentation
-- **[Architecture Deep Dive](docs/architecture.md)** — Request flows, auth model, sandbox internals
+- **[Architecture](docs/architecture.mdx)** — System overview and links to focused engineering references
 - **[Deployment Guide](docs/deployment.md)** — Production deployment, secrets management, image rebuilds
 - **[Project Structure](docs/project-structure.md)** — Detailed source tree walkthrough
 
