@@ -87,6 +87,13 @@ await restoreUnsettledSessions(providers).catch((err) => {
   console.error("boot restore: unexpected failure (continuing to serve):", err);
 });
 
+// Re-arm every unsettled child_watches row (Phase 4 decision 11) — the
+// restart-mid-child-run survival mechanism. Alongside restoreUnsettledSessions
+// above; a failure here must likewise never block boot.
+await providers.childWatcher.rearm().catch((err) => {
+  console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
+});
+
 const { app, injectWebSocket } = createApp(providers);
 
 const server = serve({ fetch: app.fetch, port }, (info) => {

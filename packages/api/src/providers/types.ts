@@ -7,6 +7,7 @@ import type {
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
+import type { ChildWatcher } from "../orchestrator/children.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -27,4 +28,6 @@ export interface Providers {
 
   // Per-process Engine cache. Lives only on the server, not in engine.
   engineHost: EngineHost;
+  /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
+  childWatcher: ChildWatcher;
 }

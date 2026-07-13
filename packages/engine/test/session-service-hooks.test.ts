@@ -202,6 +202,47 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     faux.unregister();
   });
 
+  it("parentSessionId persists via toData and survives a restore that doesn't re-supply it", async () => {
+    const { engine, store, bus } = makeEngine();
+    const faux = registerFauxProvider({ provider: "svc3b" });
+    faux.setResponses([fauxAssistantMessage("hi")]);
+
+    const child = await engine.createSession({
+      id: "sess-child-1",
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      purpose: "child",
+      parentSessionId: "sess-parent-1",
+      parentThreadId: "th-parent-1",
+    });
+    expect((await child.toData()).parentSessionId).toBe("sess-parent-1");
+    await store.saveSession(await child.toData());
+
+    // A restart-style restore whose options don't re-supply
+    // parentSessionId (the app's generic sessionFor chokepoint never does)
+    // must still see the persisted linkage — this is what the signal edge
+    // ACL (parent <-> child) reads directly off the store.
+    const restartedEngine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const restored = await restartedEngine.restoreSession({
+      sessionId: "sess-child-1",
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/workspace",
+        sandbox: {},
+        model: faux.getModel(),
+      },
+    });
+    expect((await restored.toData()).parentSessionId).toBe("sess-parent-1");
+
+    faux.unregister();
+  });
+
   it("compaction hooks fire in order with the summary after a manual compaction; a throwing hook does not fail compaction", async () => {
     const { engine, events } = makeEngine();
     const faux = registerFauxProvider({ provider: "svc5" });

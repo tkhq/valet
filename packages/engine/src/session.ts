@@ -82,6 +82,18 @@ export class Session {
    * back to the default on the session's next `toData()`/save.
    */
   private principal: Principal;
+  /**
+   * Parent session id (Phase 4 decision 11/16), mirrored from
+   * `options.parentSessionId`. Mutable for the same reason `principal` is:
+   * `rehydrate` restores it from persisted `SessionData` when the host's
+   * restore-time options don't re-supply it (hosts route ordinary restores
+   * through generic `{ userId, orgId, workspace }` options — see
+   * `EngineHost.sessionFor` — so a child session's linkage would otherwise
+   * be lost on the very first restart). This is what makes the app-layer
+   * signal edge ACL (`packages/api/src/orchestrator/signals.ts`) able to
+   * trust `SessionStore.getSession(id).parentSessionId` as durable truth.
+   */
+  private parentSessionId: string | undefined;
   /** Indexed copies of options.roles / options.skills for fast lookup. */
   readonly roles = new Map<string, RoleSpec>();
   readonly skills = new Map<string, SkillSource>();
@@ -104,6 +116,7 @@ export class Session {
     this.sandbox = sandbox;
     this.attachment = attachment;
     this.principal = options.owner ?? { type: "user", id: options.userId };
+    this.parentSessionId = options.parentSessionId;
     for (const role of options.roles ?? []) this.roles.set(role.name, role);
     for (const skill of options.skills ?? []) this.skills.set(skill.name, skill);
     // sandbox_status emissions (spec decision 8): deterministic eventKey so
@@ -236,6 +249,7 @@ export class Session {
     // constructor. An explicit options.owner (host re-asserting ownership)
     // still wins.
     if (options.owner === undefined) session.principal = data.owner;
+    if (options.parentSessionId === undefined) session.parentSessionId = data.parentSessionId;
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -500,6 +514,7 @@ export class Session {
       purpose: this.options.purpose ?? "interactive",
       status: "running",
       sandboxId: this.attachment.sandboxId,
+      parentSessionId: this.parentSessionId,
       parentThreadId: this.options.parentThreadId,
       model: this.options.model.id,
       createdAt: Date.now(),

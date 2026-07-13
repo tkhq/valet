@@ -9,6 +9,7 @@ import {
   orchestratorSessionId,
   parseOrchestratorSessionId,
   type BlobStore,
+  type ChildSpawner,
   type CredentialStore,
   type EventStream,
   type Principal,
@@ -52,6 +53,14 @@ export interface EngineHostOpts {
    * `orchestratorSessionFor`.
    */
   apiBaseUrl?: string;
+  /**
+   * Injected into every orchestrator session's `toolConfig.childSpawner`
+   * (Phase 4 decision 10/17). Absent in tests that don't need `task` to
+   * work; regular (non-orchestrator) sessions never receive it — only
+   * orchestrators spawn children, and children themselves never do
+   * (depth limit 1, decision 10) since `childSessionFor` never sets it.
+   */
+  childSpawner?: ChildSpawner;
 }
 
 export interface SessionMeta {
@@ -250,7 +259,11 @@ export class EngineHost {
       model,
       systemPrompt: orchestratorPersona(principal),
       tools: buildMemoryTools(),
-      toolConfig: { apiBaseUrl, internalToken: internalToken() },
+      toolConfig: {
+        apiBaseUrl,
+        internalToken: internalToken(),
+        ...(this.opts.childSpawner ? { childSpawner: this.opts.childSpawner } : {}),
+      },
       // Assembled once, here, at wake time — not per-turn. This snapshot is
       // frozen for the cached session's lifetime; the only way to see a
       // fresher snapshot is a cache eviction (session destroy/restart),
@@ -362,8 +375,8 @@ export class EngineHost {
     return this.cache.get(sessionId)?.session ?? null;
   }
 
-  private resolveModel(): Model<any> {
-    const id = this.opts.defaultModelId ?? "claude-haiku-4-5";
+  private resolveModel(overrideId?: string): Model<any> {
+    const id = overrideId ?? this.opts.defaultModelId ?? "claude-haiku-4-5";
     // pi-ai's getModel is typed against its compile-time MODELS table; we
     // accept user-configurable ids and cast at the boundary. The engine
     // accepts Model<any> so the api-level type stays open.
@@ -374,5 +387,83 @@ export class EngineHost {
       );
     }
     return model;
+  }
+
+  /**
+   * Resolve (or lazily create) a child session (Phase 4 decision 10/11).
+   * Purpose 'child', linked to its parent via `parentSessionId`/
+   * `parentThreadId`. Deliberately gets NO `toolConfig.childSpawner` — the
+   * `task` tool's absence-of-spawner contract is the engine's depth limit
+   * (children can't spawn grandchildren).
+   */
+  async childSessionFor(
+    childSessionId: string,
+    opts: {
+      parentSessionId: string;
+      parentThreadId: string;
+      actorUserId: string;
+      orgId: string;
+      owner: Principal;
+      workspace: string;
+      modelId?: string;
+    },
+  ): Promise<Session> {
+    const cached = this.cache.get(childSessionId);
+    if (cached) return cached.session;
+    const pending = this.inflight.get(childSessionId);
+    if (pending) return pending;
+
+    const promise = this.buildChildSession(childSessionId, opts).finally(() => {
+      this.inflight.delete(childSessionId);
+    });
+    this.inflight.set(childSessionId, promise);
+    return promise;
+  }
+
+  private async buildChildSession(
+    childSessionId: string,
+    opts: {
+      parentSessionId: string;
+      parentThreadId: string;
+      actorUserId: string;
+      orgId: string;
+      owner: Principal;
+      workspace: string;
+      modelId?: string;
+    },
+  ): Promise<Session> {
+    const model = this.resolveModel(opts.modelId);
+
+    const sessionOptions = {
+      userId: opts.actorUserId,
+      orgId: opts.orgId,
+      workspace: opts.workspace,
+      purpose: "child" as const,
+      owner: opts.owner,
+      parentSessionId: opts.parentSessionId,
+      parentThreadId: opts.parentThreadId,
+      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage },
+      model,
+      systemPrompt: SYSTEM_PROMPT,
+    };
+
+    const engine = new Engine({
+      providers: {
+        store: this.opts.engineStore,
+        stream: this.opts.eventStream,
+        credentials: this.opts.engineCredentials,
+        sandboxProvider: this.opts.sandboxProvider,
+        blobs: this.opts.blobs,
+      },
+    });
+
+    const existing = await this.opts.engineStore.getSession(childSessionId);
+    const session = existing
+      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
+      : await engine.createSession({ id: childSessionId, ...sessionOptions });
+
+    this.cache.set(childSessionId, { engine, session });
+    if (existing) this.pruneExpiredEvents(childSessionId);
+    return session;
   }
 }

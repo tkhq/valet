@@ -18,11 +18,13 @@ import { serve } from "@hono/node-server";
 import {
   InMemoryCredentialStore,
   VirtualSandboxProvider,
+  type ChildSpawner,
   type SandboxProvider,
 } from "@valet/engine";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
+import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { createApp } from "../app.js";
 import type { Providers } from "../providers/types.js";
@@ -127,6 +129,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const port = await getFreePort();
   const apiBaseUrl = `http://127.0.0.1:${port}`;
 
+  // Same circular-construction indirection as providers/node.ts — see its
+  // comment. Test callers that want to unit-test the spawner/watcher
+  // directly still can (they're plain exported functions/classes); this
+  // wiring only matters for exercising `task` through a real orchestrator.
+  let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -136,7 +143,16 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     anthropicApiKey: ANTHROPIC_API_KEY,
     db,
     apiBaseUrl,
+    childSpawner: (req, ctx) => {
+      if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+      return spawnerRef(req, ctx);
+    },
   });
+  // Child workspaces under the test tmp dir (cleaned up with it) instead of
+  // the real ~/.valet/children.
+  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(blobsRoot, "children") };
+  const childWatcher = new ChildWatcher(childrenDeps);
+  spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 
   const providers: Providers = {
     db,
@@ -147,6 +163,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventStream,
     engineCredentials,
     engineHost,
+    childWatcher,
   };
 
   const { app, injectWebSocket } = createApp(providers);

@@ -2,11 +2,12 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { InMemoryCredentialStore } from "@valet/engine";
+import { InMemoryCredentialStore, type ChildSpawner } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
+import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { FsBlobStore } from "./blob-fs.js";
 import type { Providers } from "./types.js";
 
@@ -90,6 +91,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const eventStream = new SqliteEventStream(sqlite);
   const engineCredentials = new InMemoryCredentialStore();
 
+  // Circular construction: EngineHost needs the ChildSpawner at construction
+  // time (it's baked into every orchestrator session's toolConfig), but the
+  // spawner itself needs the EngineHost (to create the child session) and
+  // the ChildWatcher (to arm settlement watching). Break the cycle with a
+  // one-slot indirection — `spawnerRef` is filled in immediately after
+  // `engineHost` exists, before any orchestrator session can actually wake
+  // and try to call `task`.
+  let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -99,7 +108,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     anthropicApiKey: opts.anthropicApiKey,
     db,
     apiBaseUrl: opts.apiBaseUrl,
+    childSpawner: (req, ctx) => {
+      if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+      return spawnerRef(req, ctx);
+    },
   });
+
+  const childWatcher = new ChildWatcher({ db, engineHost, engineStore });
+  spawnerRef = buildChildSpawner({ db, engineHost, engineStore }, childWatcher);
 
   return {
     db,
@@ -110,5 +126,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     eventStream,
     engineCredentials,
     engineHost,
+    childWatcher,
   };
 }
