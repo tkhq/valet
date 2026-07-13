@@ -17,6 +17,7 @@ import { eq } from "drizzle-orm";
 import { VirtualSandboxProvider, type Sandbox, type SandboxCreateOpts, type SandboxProvider } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { driveTurn } from "./_test-utils.js";
+import { EngineHost } from "../engine/host.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { agentSessions, orchestratorIdentities } from "../schema/index.js";
 import type { EnsureOrchestratorResponse, GetOrchestratorResponse } from "../wire/types.js";
@@ -111,6 +112,55 @@ describe("api integration: orchestrator lifecycle", () => {
     // Persona lands as the session systemPrompt.
     expect(session?.options.systemPrompt).toContain("personal assistant");
     expect(session?.options.systemPrompt).toContain("mem_search");
+  });
+
+  it("restoring an orchestrator id through the generic sessionFor chokepoint still wakes the full orchestrator config", async () => {
+    api = await bootTestApi();
+
+    // Create the orchestrator via the real ensure path first (so an engine
+    // row + identity row exist to restore from).
+    const ensureRes = await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" });
+    expect(ensureRes.status).toBe(200);
+    const { sessionId } = (await ensureRes.json()) as EnsureOrchestratorResponse;
+
+    // Simulate boot restore: a *second* EngineHost, sharing the same
+    // stores/db, with a cold in-process cache. `main.ts`'s boot-restore
+    // loop (and messages.ts/ws.ts/sessions.ts) all call plain `sessionFor`
+    // with generic { userId, orgId, workspace } — never
+    // `orchestratorSessionFor` directly — so the regression this guards
+    // against is `sessionFor` rehydrating an orchestrator id through the
+    // generic `buildSession` path (no persona/snapshot/mem tools/steer).
+    const restoreHost = new EngineHost({
+      engineStore: api.providers.engineStore,
+      sandboxProvider: api.providers.sandboxProvider,
+      eventStream: api.providers.eventStream,
+      engineCredentials: api.providers.engineCredentials,
+      blobs: api.providers.blobs,
+      db: api.providers.db,
+      apiBaseUrl: api.baseUrl,
+    });
+
+    try {
+      const restored = await restoreHost.sessionFor(sessionId, {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/irrelevant-for-orchestrator-ids",
+      });
+
+      expect(restored.options.queueMode).toBe("steer");
+      expect(restored.options.purpose).toBe("orchestrator");
+      expect(restored.options.owner).toEqual({ type: "user", id: "local-user" });
+
+      const fragments = restored.options.systemContext ?? [];
+      expect(fragments.find((f) => f.name === "memory-snapshot")).toBeDefined();
+
+      const toolNames = (restored.options.tools ?? []).map((t) => t.name);
+      expect(toolNames).toEqual(
+        expect.arrayContaining(["mem_write", "mem_patch", "mem_read", "mem_search", "mem_rm"]),
+      );
+    } finally {
+      await restoreHost.destroyAll();
+    }
   });
 });
 

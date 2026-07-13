@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   Engine,
   orchestratorSessionId,
+  parseOrchestratorSessionId,
   type BlobStore,
   type CredentialStore,
   type EventStream,
@@ -100,6 +101,21 @@ export class EngineHost {
    * a new engine session and persist it via the store.
    */
   async sessionFor(sessionId: string, meta: SessionMeta): Promise<Session> {
+    // Orchestrator ids must always wake through `orchestratorSessionFor` so
+    // they get persona/memory-snapshot/mem_* tools/queueMode reconstructed
+    // from configuration, never the generic `buildSession` path. Every
+    // caller of `sessionFor` (messages.ts, ws.ts, sessions.ts, boot
+    // restore) can be handed an orchestrator session id, so this dispatch
+    // lives here rather than being duplicated at each call site. Delegating
+    // before touching `this.cache`/`this.inflight` is deliberate:
+    // `orchestratorSessionFor` does its own cache/inflight bookkeeping
+    // against the *same* maps (keyed by the same `sessionId`), so checking
+    // here first would just be a redundant, and potentially stale, read.
+    const principal = parseOrchestratorSessionId(sessionId);
+    if (principal) {
+      return this.orchestratorSessionFor(principal, { actorUserId: meta.userId, orgId: meta.orgId });
+    }
+
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
@@ -221,7 +237,7 @@ export class EngineHost {
     const snapshotContent = await assembleMemorySnapshot(db, scope);
 
     const model = this.resolveModel();
-    const queueMode = principal.type === "user" ? "steer" : "followup";
+    const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
 
     const sessionOptions = {
       userId: meta.actorUserId,
@@ -229,12 +245,17 @@ export class EngineHost {
       workspace,
       purpose: "orchestrator" as const,
       owner: principal,
-      queueMode: queueMode as "steer" | "followup",
+      queueMode,
       sandbox: { workspace, image: this.opts.defaultImage },
       model,
       systemPrompt: orchestratorPersona(principal),
       tools: buildMemoryTools(),
       toolConfig: { apiBaseUrl, internalToken: internalToken() },
+      // Assembled once, here, at wake time — not per-turn. This snapshot is
+      // frozen for the cached session's lifetime; the only way to see a
+      // fresher snapshot is a cache eviction (session destroy/restart),
+      // which forces the next `orchestratorSessionFor` call back through
+      // this method to reassemble it.
       systemContext: [{ name: "memory-snapshot", content: snapshotContent, order: 10 }],
       compactionHooks: [journalCompactionHook(db, scope)],
     };
