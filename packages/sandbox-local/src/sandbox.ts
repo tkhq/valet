@@ -5,6 +5,7 @@ import type {
   ExecOpts,
   ExecResult,
   Sandbox,
+  SandboxCapabilities,
   SandboxCreateOpts,
   SandboxProvider,
   SandboxStatus,
@@ -223,8 +224,13 @@ export interface LocalSandboxCreateOpts extends SandboxCreateOpts {
 }
 
 export class LocalSandboxProvider implements SandboxProvider {
+  readonly backend = "local";
   private sandboxes = new Map<string, LocalSandbox>();
   private nextId = 1;
+
+  capabilities(): SandboxCapabilities {
+    return { snapshot: "none", persistentWorkspace: true, tunnels: false, warmPool: false, coldStartEstimateMs: 0 };
+  }
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     const workspace = opts.workspace;
@@ -259,7 +265,7 @@ export class LocalSandboxProvider implements SandboxProvider {
 
   async status(id: string): Promise<SandboxStatus> {
     return this.sandboxes.has(id)
-      ? { id, state: "running", startedAt: Date.now() }
-      : { id, state: "stopped" };
+      ? { id, state: "ready", startedAt: Date.now() }
+      : { id, state: "released" };
   }
 }

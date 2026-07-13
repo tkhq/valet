@@ -50,10 +50,10 @@ describeDocker("DockerSandbox", () => {
     expect(sb.id.startsWith("dsb-")).toBe(true);
     expect(sb.containerId.length).toBeGreaterThan(8);
     const status = await provider.status(sb.id);
-    expect(status.state).toBe("running");
+    expect(status.state).toBe("ready");
     await provider.destroy(sb.id);
     const stopped = await provider.status(sb.id);
-    expect(stopped.state).toBe("stopped");
+    expect(stopped.state).toBe("released");
   });
 
   it("filesystem ops execute against the host bind-mount", async () => {
@@ -212,5 +212,30 @@ describeDocker("DockerSandbox", () => {
     const file = join(tmp, "not-a-dir.txt");
     await writeFile(file, "x");
     await expect(provider.create({ workspace: file })).rejects.toThrow(/not a directory/);
+  });
+
+  it("backend is 'docker'", () => {
+    expect(provider.backend).toBe("docker");
+  });
+
+  it("capabilities() returns the decision-1 docker values", () => {
+    expect(provider.capabilities()).toEqual({
+      snapshot: "filesystem",
+      persistentWorkspace: true,
+      tunnels: false,
+      warmPool: false,
+      coldStartEstimateMs: 8000,
+    });
+  });
+
+  it("status() of a live container is 'ready', of an absent one is 'released'", async () => {
+    const sb = await provider.create({ workspace: tmp });
+    try {
+      expect((await provider.status(sb.id)).state).toBe("ready");
+    } finally {
+      await provider.destroy(sb.id);
+    }
+    expect((await provider.status(sb.id)).state).toBe("released");
+    expect((await provider.status("does-not-exist")).state).toBe("released");
   });
 });

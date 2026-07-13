@@ -163,4 +163,31 @@ describe("LocalSandboxProvider", () => {
     const restored = await provider.restore(sb.id);
     expect(restored).toBe(sb);
   });
+
+  it("backend is 'local'", () => {
+    const provider = new LocalSandboxProvider();
+    expect(provider.backend).toBe("local");
+  });
+
+  it("capabilities() returns the decision-1 local values", () => {
+    const provider = new LocalSandboxProvider();
+    expect(provider.capabilities()).toEqual({
+      snapshot: "none",
+      persistentWorkspace: true,
+      tunnels: false,
+      warmPool: false,
+      coldStartEstimateMs: 0,
+    });
+  });
+
+  it("status() of a live sandbox is 'ready'", async () => {
+    const provider = new LocalSandboxProvider();
+    const sb = await provider.create({ workspace: tmp });
+    expect((await provider.status(sb.id)).state).toBe("ready");
+  });
+
+  it("status() of an absent sandbox is 'released'", async () => {
+    const provider = new LocalSandboxProvider();
+    expect((await provider.status("does-not-exist")).state).toBe("released");
+  });
 });

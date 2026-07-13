@@ -1,5 +1,14 @@
 export * from "./types.js";
-export { NotFoundError, StaleAttemptError, ConflictError, TimeoutError, ValidationError } from "./errors.js";
+export {
+  NotFoundError,
+  StaleAttemptError,
+  ConflictError,
+  TimeoutError,
+  ValidationError,
+  WorkspaceProvisioningError,
+  SandboxSupersededError,
+  SandboxUnavailableError,
+} from "./errors.js";
 export {
   parseMarkdownArtifact,
   renderTemplate,

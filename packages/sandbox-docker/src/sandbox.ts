@@ -5,6 +5,7 @@ import type {
   ExecOpts,
   ExecResult,
   Sandbox,
+  SandboxCapabilities,
   SandboxCreateOpts,
   SandboxProvider,
   SandboxStatus,
@@ -284,8 +285,19 @@ function execProcess(
 // ── Provider ──────────────────────────────────────────────────────
 
 export class DockerSandboxProvider implements SandboxProvider {
+  readonly backend = "docker";
   private sandboxes = new Map<string, DockerSandbox>();
   private nextId = 1;
+
+  capabilities(): SandboxCapabilities {
+    return {
+      snapshot: "filesystem",
+      persistentWorkspace: true,
+      tunnels: false,
+      warmPool: false,
+      coldStartEstimateMs: 8000,
+    };
+  }
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     const dockerOpts = opts as DockerSandboxCreateOpts;
@@ -367,16 +379,16 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   async status(id: string): Promise<SandboxStatus> {
     const sb = this.sandboxes.get(id);
-    if (!sb) return { id, state: "stopped" };
+    if (!sb) return { id, state: "released" };
     const inspect = await execProcess(
       "docker",
       ["inspect", "-f", "{{.State.Running}}", sb.containerId],
       {},
     );
-    if (inspect.exitCode !== 0) return { id, state: "stopped" };
+    if (inspect.exitCode !== 0) return { id, state: "released" };
     return inspect.stdout.trim() === "true"
-      ? { id, state: "running", startedAt: Date.now() }
-      : { id, state: "stopped" };
+      ? { id, state: "ready", startedAt: Date.now() }
+      : { id, state: "released" };
   }
 }
 

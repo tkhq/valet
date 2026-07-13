@@ -501,6 +501,27 @@ export interface ExecResult {
   truncated?: boolean;
 }
 
+/**
+ * Result of a job-mode exec kickoff (decision 9). `execId` identifies the
+ * job for subsequent pollJob/cancelJob calls.
+ */
+export interface ExecJobHandle {
+  execId: string;
+}
+
+/**
+ * Incremental poll result for a job-mode exec (decision 9). `output` is the
+ * slice of combined stdout+stderr since `offset` — callers accumulate by
+ * re-polling with `nextOffset`. `status: "failed"` means job infrastructure
+ * failure (e.g. lost the process); a non-zero exit code is a normal `"done"`.
+ */
+export interface JobPoll {
+  status: "running" | "done" | "failed";
+  exitCode?: number;
+  output: string;
+  nextOffset: number;
+}
+
 export interface Sandbox {
   id: string;
   readFile(path: string): Promise<string>;
@@ -515,6 +536,11 @@ export interface Sandbox {
   snapshot?(): Promise<string>;
   tunnels?(): Promise<Record<string, string>>;
   destroy?(): Promise<void>;
+  /** Job-mode exec (decision 9). Optional — providers that support long-running,
+   * detached commands implement all three of execJob/pollJob/cancelJob. */
+  execJob?(command: string, opts?: ExecOpts): Promise<ExecJobHandle>;
+  pollJob?(execId: string, offset: number): Promise<JobPoll>;
+  cancelJob?(execId: string): Promise<void>;
 }
 
 export interface SandboxCreateOpts {
@@ -526,14 +552,29 @@ export interface SandboxCreateOpts {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Static description of what a sandbox backend can do (decision 1). Used by
+ * the attachment/policy layer to decide on cold-start hints, snapshot
+ * strategy, etc. — not a runtime probe, a fixed per-backend constant.
+ */
+export interface SandboxCapabilities {
+  snapshot: "memory" | "filesystem" | "none";
+  persistentWorkspace: boolean;
+  tunnels: boolean;
+  warmPool: boolean;
+  coldStartEstimateMs?: number;
+}
+
 export interface SandboxStatus {
   id: string;
-  state: "creating" | "running" | "stopped" | "error";
+  state: "provisioning" | "ready" | "idle" | "snapshotting" | "released" | "error";
   startedAt?: number;
   error?: string;
 }
 
 export interface SandboxProvider {
+  readonly backend: string;
+  capabilities(): SandboxCapabilities;
   create(opts: SandboxCreateOpts): Promise<Sandbox>;
   restore(id: string): Promise<Sandbox>;
   destroy(id: string): Promise<void>;
@@ -619,6 +660,20 @@ export type EngineEvent =
       queueItemId: string;
       attemptCount: number;
       ageMs: number;
+    }
+  | {
+      /**
+       * Sandbox attachment lifecycle signal (spec §Sandbox Attachment,
+       * decision 8). Session-scoped, no threadId. Emitted on provisioning,
+       * ready, error, and released transitions with a deterministic
+       * `sandbox:{epoch}:{state}` eventKey — idempotent under re-provision
+       * loops.
+       */
+      type: "sandbox_status";
+      sandboxId?: string;
+      state: "provisioning" | "ready" | "idle" | "snapshotting" | "released" | "error";
+      epoch: number;
+      estimateMs?: number;
     };
 
 export interface BusEvent {
@@ -900,6 +955,12 @@ export interface CreateSessionOptions {
   systemPrompt?: string;
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;
+  /**
+   * Max time (ms) a tool op will wait for the sandbox attachment to become
+   * ready before failing with WorkspaceProvisioningError. Default: 60_000
+   * (SANDBOX_READY_TIMEOUT_MS, defined in sandbox/policy.ts).
+   */
+  sandboxReadyTimeoutMs?: number;
   metadata?: Record<string, unknown>;
 }
 

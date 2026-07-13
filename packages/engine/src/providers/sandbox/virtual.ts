@@ -1,4 +1,14 @@
-import type { ExecOpts, ExecResult, Sandbox, SandboxCreateOpts, SandboxProvider, SandboxStatus } from "../../types.js";
+import type {
+  ExecJobHandle,
+  ExecOpts,
+  ExecResult,
+  JobPoll,
+  Sandbox,
+  SandboxCapabilities,
+  SandboxCreateOpts,
+  SandboxProvider,
+  SandboxStatus,
+} from "../../types.js";
 
 interface FsEntry {
   type: "file" | "dir";
@@ -35,6 +45,8 @@ export class VirtualSandbox implements Sandbox {
   readonly id: string;
   private fs = new Map<string, FsEntry>();
   private cwd = "/";
+  private jobs = new Map<string, JobPoll>();
+  private nextJobId = 1;
 
   constructor(id: string) {
     this.id = id;
@@ -132,6 +144,31 @@ export class VirtualSandbox implements Sandbox {
   async destroy(): Promise<void> {
     this.fs.clear();
   }
+
+  /**
+   * Trivial job mode for the virtual sandbox: there's no real async
+   * detachment to model, so execJob just runs the command inline and
+   * stores the completed result under a fresh execId. pollJob/cancelJob
+   * operate on that stored terminal state.
+   */
+  async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
+    const execId = `job-${this.nextJobId++}`;
+    const result = await this.exec(command, opts);
+    const output = result.stdout + result.stderr;
+    this.jobs.set(execId, { status: "done", exitCode: result.exitCode, output, nextOffset: output.length });
+    return { execId };
+  }
+
+  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+    const job = this.jobs.get(execId);
+    if (!job) return { status: "failed", output: "", nextOffset: offset };
+    return { ...job, output: job.output.slice(offset) };
+  }
+
+  async cancelJob(execId: string): Promise<void> {
+    const job = this.jobs.get(execId);
+    if (job) this.jobs.set(execId, { ...job, status: "failed" });
+  }
 }
 
 async function runVirtualCommand(sb: VirtualSandbox, command: string, cwd: string): Promise<ExecResult> {
@@ -186,8 +223,13 @@ function ok(stdout: string): ExecResult {
 // ── Provider ──────────────────────────────────────────────────────
 
 export class VirtualSandboxProvider implements SandboxProvider {
+  readonly backend = "virtual";
   private sandboxes = new Map<string, VirtualSandbox>();
   private nextId = 1;
+
+  capabilities(): SandboxCapabilities {
+    return { snapshot: "none", persistentWorkspace: false, tunnels: false, warmPool: false, coldStartEstimateMs: 0 };
+  }
 
   async create(_opts: SandboxCreateOpts): Promise<Sandbox> {
     const id = `vsb-${this.nextId++}`;
@@ -210,7 +252,7 @@ export class VirtualSandboxProvider implements SandboxProvider {
 
   async status(id: string): Promise<SandboxStatus> {
     return this.sandboxes.has(id)
-      ? { id, state: "running", startedAt: Date.now() }
-      : { id, state: "stopped" };
+      ? { id, state: "ready", startedAt: Date.now() }
+      : { id, state: "released" };
   }
 }

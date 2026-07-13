@@ -83,3 +83,55 @@ export class TimeoutError extends Error {
     this.name = "TimeoutError";
   }
 }
+
+/**
+ * Thrown by `PolicySandbox` when a tool op's wait for `SandboxAttachment`
+ * readiness exceeds `sandboxReadyTimeoutMs`. Not degradation — the
+ * attachment keeps trying to provision in the background; this error just
+ * means the caller's op gave up waiting.
+ */
+export class WorkspaceProvisioningError extends Error {
+  readonly code = "workspace_provisioning";
+
+  constructor(public readonly timeoutMs: number) {
+    super(
+      `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms; the workspace is still provisioning in the background — retry shortly.`,
+    );
+    this.name = "WorkspaceProvisioningError";
+  }
+}
+
+/**
+ * Thrown by `PolicySandbox` when an op's underlying raw call resolved
+ * successfully, but its epoch was superseded by a re-provision before the
+ * result could be returned. The result is discarded — never returned to
+ * the caller.
+ */
+export class SandboxSupersededError extends Error {
+  readonly code = "sandbox_superseded";
+
+  constructor(public readonly epoch?: number) {
+    super(
+      `[sandbox_superseded] the operation completed against a sandbox epoch that has since been replaced; its result was discarded. Retry the operation.`,
+    );
+    this.name = "SandboxSupersededError";
+  }
+}
+
+/**
+ * Thrown by `PolicySandbox` when a raw op rejects with a transport-level
+ * failure (container death, connection loss) — as opposed to a normal
+ * command-level or filesystem error, which rethrows untouched. The
+ * attachment degrades and re-provisions in the background; `cause` carries
+ * the original rejection.
+ */
+export class SandboxUnavailableError extends Error {
+  readonly code = "sandbox_unavailable";
+
+  constructor(public readonly cause?: unknown) {
+    super(
+      `[sandbox_unavailable] sandbox connection lost mid-operation; the command may or may not have run. The workspace is re-provisioning in the background — retry shortly.`,
+    );
+    this.name = "SandboxUnavailableError";
+  }
+}
