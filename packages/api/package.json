@@ -31,6 +31,7 @@
     "@valet/sandbox-docker": "workspace:*",
     "@valet/shared": "workspace:*",
     "@valet/store-sqlite": "workspace:*",
+    "@valet/workflow": "workspace:*",
     "drizzle-orm": "^0.45.1",
     "hono": "^4.3.0",
     "typebox": "^1.1.24",

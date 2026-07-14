@@ -215,6 +215,14 @@ export interface WorkflowStore {
    * `attempt` fences as `completeCheckpoint` (rejects a lower-attempt
    * write against an existing higher-attempt intent row, and rejects if
    * the write's `attempt` is lower than the run's current `attempt`).
+   *
+   * Consumption itself is also fenced: if the signal is already consumed,
+   * this call is idempotent (resolves without error) when `consumedBy`
+   * matches the recorded consumption exactly (same attempt replaying its
+   * own write), and otherwise throws `WorkflowFenceError` — an
+   * already-consumed signal can never be consumed a second time by a
+   * different node/iteration/attempt, even one with a currently-valid
+   * (non-stale) attempt.
    */
   consumeSignalAndCheckpoint(
     signalId: string,

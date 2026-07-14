@@ -180,6 +180,24 @@ export function describeOwnershipContract(makeStore: () => Promise<WorkflowStore
       expect(run?.waitingOn).toEqual([]);
     });
 
+    it('beginTerminalize is fenced by attempt: a stale attempt cannot terminalize over a run reclaimed by a newer attempt', async () => {
+      const store = await setup();
+      const first = await store.claimRun(RUN_ID, 'owner-1', -1_000);
+      if (!first) throw new Error('expected first claim to succeed');
+      // Reclaim: the first owner's lease has already expired.
+      const second = await store.claimRun(RUN_ID, 'owner-2', 30_000);
+      if (!second) throw new Error('expected second claim (reclaim) to succeed');
+      expect(second.attempt).toBe(first.attempt + 1);
+
+      // The zombie (stale attempt) tries to begin terminalizing after losing ownership.
+      await expect(store.beginTerminalize(RUN_ID, first.attempt, 'completed')).rejects.toThrow(WorkflowFenceError);
+
+      const run = await store.getRun(RUN_ID);
+      expect(run?.status).toBe('running'); // unaffected by the rejected stale write
+      expect(run?.ownerId).toBe('owner-2');
+      expect(run?.attempt).toBe(second.attempt);
+    });
+
     it('settleRun is idempotent: a repeated call with the same outcome is harmless and the outcome stays stable', async () => {
       const store = await setup();
       const claimed = await store.claimRun(RUN_ID, 'owner-1', 30_000);

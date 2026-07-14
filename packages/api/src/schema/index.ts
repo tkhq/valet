@@ -303,6 +303,113 @@ export const memoryFiles = sqliteTable(
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
 );
 
+// ─── Workflows (engine v2 Phase 5) ──────────────────────────────────────────
+//
+// App-side persistence for the `@valet/workflow` run host (plan decision
+// 17). `workflow_runs` is the durable `WorkflowRun` row (park state +
+// ownership + immutable-at-start params/definition snapshot);
+// `workflow_checkpoints`/`workflow_signals` back the `WorkflowStore` port's
+// checkpoint and signal contracts exactly (`packages/api/src/workflows/
+// sqlite-store.ts` implements the port over these three tables plus
+// `workflow_definitions`). JSON columns (`definition`, `params`,
+// `waiting_on`, `result`, `effects`, `payload`, `consumed_by`) are
+// JSON.stringify'd text — no native JSON column type in this sqlite setup.
+
+export const workflowDefinitions = sqliteTable(
+  "workflow_definitions",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    name: text("name").notNull(),
+    definition: text("definition").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId)],
+);
+
+export const workflowRuns = sqliteTable(
+  "workflow_runs",
+  {
+    id: text("id").primaryKey(),
+    workflowId: text("workflow_id").notNull(),
+    definitionVersionId: text("definition_version_id").notNull(),
+    definition: text("definition").notNull(),
+    params: text("params").notNull(),
+    status: text("status", {
+      enum: ["pending", "running", "parked", "terminalizing", "settled"],
+    })
+      .notNull()
+      .default("pending"),
+    outcome: text("outcome", { enum: ["completed", "failed", "cancelled"] }),
+    waitingOn: text("waiting_on").notNull().default("[]"),
+    wakeAt: integer("wake_at"),
+    wakeRequested: integer("wake_requested").notNull().default(0),
+    // Named `lease_owner_id` (not `owner_id`) to avoid clashing with the
+    // principal-ownership `owner_type`/`owner_id` columns below (plan
+    // decision 17).
+    leaseOwnerId: text("lease_owner_id"),
+    leaseExpiresAt: integer("lease_expires_at"),
+    attempt: integer("attempt").notNull().default(0),
+    // Principal ownership, resolved from the parent `workflow_definitions`
+    // row by the API layer (Task 10) — the `WorkflowStore` port's
+    // `createRun(runId, params, ...)` doesn't carry owner info (`RunParams`
+    // has no owner fields), so `createRun` writes these defaults, matching
+    // `agent_sessions`' pre-owner-column backfill convention; the route
+    // handler that starts a run sets the real values in the same insert
+    // path once it resolves the workflow's owner.
+    ownerType: text("owner_type").notNull().default("user"),
+    ownerId: text("owner_id").notNull().default(""),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    index("workflow_runs_status_updated").on(t.status, t.updatedAt),
+    index("workflow_runs_workflow").on(t.workflowId),
+  ],
+);
+
+export const workflowCheckpoints = sqliteTable(
+  "workflow_checkpoints",
+  {
+    runId: text("run_id").notNull(),
+    nodeId: text("node_id").notNull(),
+    iteration: integer("iteration").notNull().default(0),
+    attempt: integer("attempt").notNull(),
+    status: text("status", {
+      enum: ["intent", "completed", "failed", "skipped"],
+    }).notNull(),
+    result: text("result"),
+    effects: text("effects"),
+    error: text("error"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.runId, t.nodeId, t.iteration] }),
+    index("workflow_checkpoints_run").on(t.runId),
+  ],
+);
+
+export const workflowSignals = sqliteTable(
+  "workflow_signals",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    runId: text("run_id").notNull(),
+    signalId: text("signal_id").notNull(),
+    signalType: text("signal_type").notNull(),
+    payload: text("payload"),
+    createdAt: integer("created_at").notNull(),
+    consumedAt: integer("consumed_at"),
+    consumedBy: text("consumed_by"),
+  },
+  (t) => [
+    uniqueIndex("workflow_signals_run_signal").on(t.runId, t.signalId),
+    index("workflow_signals_run").on(t.runId),
+  ],
+);
+
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -321,3 +428,7 @@ export type EventDropLogRow = typeof eventDropLog.$inferSelect;
 export type ChannelBindingRow = typeof channelBindings.$inferSelect;
 export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
+export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
+export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
+export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
+export type WorkflowSignalRow = typeof workflowSignals.$inferSelect;

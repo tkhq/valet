@@ -183,4 +183,65 @@ CREATE TABLE `users` (
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);
+CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);--> statement-breakpoint
+CREATE TABLE `workflow_checkpoints` (
+	`run_id` text NOT NULL,
+	`node_id` text NOT NULL,
+	`iteration` integer DEFAULT 0 NOT NULL,
+	`attempt` integer NOT NULL,
+	`status` text NOT NULL,
+	`result` text,
+	`effects` text,
+	`error` text,
+	`created_at` integer NOT NULL,
+	PRIMARY KEY(`run_id`, `node_id`, `iteration`)
+);
+--> statement-breakpoint
+CREATE INDEX `workflow_checkpoints_run` ON `workflow_checkpoints` (`run_id`);--> statement-breakpoint
+CREATE TABLE `workflow_definitions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`org_id` text NOT NULL,
+	`owner_type` text NOT NULL,
+	`owner_id` text NOT NULL,
+	`name` text NOT NULL,
+	`definition` text NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX `workflow_definitions_owner` ON `workflow_definitions` (`org_id`,`owner_type`,`owner_id`);--> statement-breakpoint
+CREATE TABLE `workflow_runs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`workflow_id` text NOT NULL,
+	`definition_version_id` text NOT NULL,
+	`definition` text NOT NULL,
+	`params` text NOT NULL,
+	`status` text DEFAULT 'pending' NOT NULL,
+	`outcome` text,
+	`waiting_on` text DEFAULT '[]' NOT NULL,
+	`wake_at` integer,
+	`wake_requested` integer DEFAULT 0 NOT NULL,
+	`lease_owner_id` text,
+	`lease_expires_at` integer,
+	`attempt` integer DEFAULT 0 NOT NULL,
+	`owner_type` text DEFAULT 'user' NOT NULL,
+	`owner_id` text DEFAULT '' NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX `workflow_runs_status_updated` ON `workflow_runs` (`status`,`updated_at`);--> statement-breakpoint
+CREATE INDEX `workflow_runs_workflow` ON `workflow_runs` (`workflow_id`);--> statement-breakpoint
+CREATE TABLE `workflow_signals` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`run_id` text NOT NULL,
+	`signal_id` text NOT NULL,
+	`signal_type` text NOT NULL,
+	`payload` text,
+	`created_at` integer NOT NULL,
+	`consumed_at` integer,
+	`consumed_by` text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `workflow_signals_run_signal` ON `workflow_signals` (`run_id`,`signal_id`);--> statement-breakpoint
+CREATE INDEX `workflow_signals_run` ON `workflow_signals` (`run_id`);
