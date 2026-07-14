@@ -7,7 +7,7 @@
  * both the good plugins and a quarantine list for anything that failed —
  * a bad third-party plugin package must never crash boot.
  */
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateValetPlugin, type ValetPlugin } from "@valet/engine";
@@ -79,17 +79,26 @@ async function findPackageDirs(
   const out: Array<{ pkgName: string; pkgDir: string }> = [];
 
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    // pnpm installs packages as symlinks into the .pnpm store, and
+    // Dirent.isDirectory() is false for symlinks — so candidates must be
+    // gated on isSymbolicLink() as well, then confirmed via stat() (which
+    // follows the link) before being treated as a directory.
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    const entryPath = join(searchPath, entry.name);
+    if (!(await isDirectory(entryPath))) continue;
+
     if (entry.name.startsWith("@")) {
-      const scopeDir = join(searchPath, entry.name);
+      const scopeDir = entryPath;
       const scoped = await safeReaddir(scopeDir);
       for (const s of scoped) {
-        if (!s.isDirectory()) continue;
-        out.push({ pkgName: `${entry.name}/${s.name}`, pkgDir: join(scopeDir, s.name) });
+        if (!s.isDirectory() && !s.isSymbolicLink()) continue;
+        const scopedPath = join(scopeDir, s.name);
+        if (!(await isDirectory(scopedPath))) continue;
+        out.push({ pkgName: `${entry.name}/${s.name}`, pkgDir: scopedPath });
       }
       continue;
     }
-    out.push({ pkgName: entry.name, pkgDir: join(searchPath, entry.name) });
+    out.push({ pkgName: entry.name, pkgDir: entryPath });
   }
 
   return out;
@@ -97,11 +106,23 @@ async function findPackageDirs(
 
 async function safeReaddir(
   dir: string,
-): Promise<Array<{ name: string; isDirectory: () => boolean }>> {
+): Promise<Array<{ name: string; isDirectory: () => boolean; isSymbolicLink: () => boolean }>> {
   try {
     return await readdir(dir, { withFileTypes: true });
   } catch {
     return [];
+  }
+}
+
+/** Resolves symlinks (via stat) to determine whether `path` is a directory.
+ * A dangling symlink causes stat to reject — treated as "not a directory"
+ * rather than thrown. */
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    const s = await stat(path);
+    return s.isDirectory();
+  } catch {
+    return false;
   }
 }
 

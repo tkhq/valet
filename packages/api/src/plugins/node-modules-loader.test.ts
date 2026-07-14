@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm, copyFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, copyFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -126,6 +126,65 @@ describe("loadNodeModulesPlugins", () => {
     await writeFile(
       join(pkgDir, "package.json"),
       JSON.stringify({ name: "not-a-plugin", version: "0.0.1" }, null, 2),
+    );
+
+    const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+
+    expect(result.plugins).toEqual([]);
+    expect(result.quarantined).toEqual([]);
+  });
+
+  it("loads a plugin package reachable only via a symlink (pnpm layout)", async () => {
+    // pnpm installs real package contents in a content-addressed store and
+    // symlinks them into node_modules. Build the real dir OUTSIDE the
+    // scanned search path, then symlink it in, to reproduce that layout.
+    const storeRoot = await mkdtemp(join(tmpdir(), "valet-nm-store-"));
+    try {
+      await writePackage(storeRoot, "symlinked-plugin", {
+        entryContent: `export default { name: "symlinked-plugin", version: "1.0.0" };\n`,
+      });
+      await symlink(
+        join(storeRoot, "symlinked-plugin"),
+        join(root, "symlinked-plugin"),
+        "dir",
+      );
+
+      const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+
+      expect(result.quarantined).toEqual([]);
+      expect(result.plugins.map((p) => p.name)).toEqual(["symlinked-plugin"]);
+    } finally {
+      await rm(storeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("loads a scoped plugin package reachable only via a symlink (pnpm layout)", async () => {
+    const storeRoot = await mkdtemp(join(tmpdir(), "valet-nm-store-scope-"));
+    try {
+      await writePackage(storeRoot, "@scope/symlinked-plugin", {
+        entryContent: `export default { name: "scoped-symlinked-plugin", version: "1.0.0" };\n`,
+      });
+      await mkdir(join(root, "@scope"), { recursive: true });
+      await symlink(
+        join(storeRoot, "@scope", "symlinked-plugin"),
+        join(root, "@scope", "symlinked-plugin"),
+        "dir",
+      );
+
+      const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+
+      expect(result.quarantined).toEqual([]);
+      expect(result.plugins.map((p) => p.name)).toEqual(["scoped-symlinked-plugin"]);
+    } finally {
+      await rm(storeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips a dangling symlink without throwing or quarantining", async () => {
+    await symlink(
+      join(root, "does-not-exist"),
+      join(root, "dangling-plugin"),
+      "dir",
     );
 
     const result = await loadNodeModulesPlugins({ searchPaths: [root] });
