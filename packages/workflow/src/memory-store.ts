@@ -46,38 +46,47 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     definitionVersionId: string,
   ): Promise<WorkflowRun> {
     const existing = this.runs.get(runId);
-    if (existing) return existing;
+    if (existing) return structuredClone(existing);
     const now = this.clock();
     const run: WorkflowRun = {
       runId,
       status: 'pending',
       waitingOn: [],
       updatedAt: now,
-      params,
-      definition,
+      params: structuredClone(params),
+      definition: structuredClone(definition),
       definitionVersionId,
       attempt: 0,
       wakeRequested: false,
       createdAt: now,
     };
     this.runs.set(runId, run);
-    return run;
+    return structuredClone(run);
   }
 
   async getRun(runId: string): Promise<WorkflowRun | null> {
-    return this.runs.get(runId) ?? null;
+    const run = this.runs.get(runId);
+    return run ? structuredClone(run) : null;
   }
 
   async claimRun(runId: string, ownerId: string, leaseMs: number): Promise<{ attempt: number } | null> {
     const run = this.runs.get(runId);
     if (!run) return null;
-    if (run.status !== 'pending' && run.status !== 'parked') return null;
+    const now = this.clock();
+    const leaseExpired = run.leaseExpiresAt !== undefined && run.leaseExpiresAt <= now;
+    const claimable =
+      run.status === 'pending' ||
+      run.status === 'parked' ||
+      ((run.status === 'running' || run.status === 'terminalizing') && leaseExpired);
+    if (!claimable) return null;
     run.attempt += 1;
-    run.status = 'running';
+    // `terminalizing` runs stay `terminalizing` on reclaim — the new owner
+    // resumes terminal cleanup rather than re-entering the run body.
+    if (run.status !== 'terminalizing') run.status = 'running';
     run.ownerId = ownerId;
-    run.leaseExpiresAt = this.clock() + leaseMs;
+    run.leaseExpiresAt = now + leaseMs;
     run.wakeRequested = false;
-    run.updatedAt = this.clock();
+    run.updatedAt = now;
     return { attempt: run.attempt };
   }
 
@@ -96,6 +105,10 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     run.waitingOn = waitingOn;
     run.wakeAt = wakeAt;
     run.wakeRequested = false;
+    // A parked run is unowned — clear the lease so it doesn't look like an
+    // expired-lease-reclaimable running/terminalizing run.
+    run.ownerId = undefined;
+    run.leaseExpiresAt = undefined;
     run.updatedAt = this.clock();
   }
 
@@ -135,19 +148,40 @@ export class InMemoryWorkflowStore implements WorkflowStore {
   async listRunnable(now: number, limit: number): Promise<WorkflowRun[]> {
     const out: WorkflowRun[] = [];
     for (const run of this.runs.values()) {
+      const expiredLease = run.leaseExpiresAt !== undefined && run.leaseExpiresAt <= now;
+      if (run.status === 'running' || run.status === 'terminalizing') {
+        // Only a crashed owner's expired lease makes an in-flight run
+        // runnable again; a live lease means someone still owns it.
+        if (!expiredLease) continue;
+        out.push(structuredClone(run));
+        if (out.length >= limit) break;
+        continue;
+      }
       if (run.status !== 'pending' && run.status !== 'parked') continue;
       const wakeRequested = run.wakeRequested;
       const dueTimer = run.wakeAt !== undefined && run.wakeAt <= now;
-      const expiredLease = run.leaseExpiresAt !== undefined && run.leaseExpiresAt <= now;
       if (wakeRequested || dueTimer || expiredLease) {
-        out.push(run);
+        out.push(structuredClone(run));
         if (out.length >= limit) break;
       }
     }
     return out;
   }
 
+  /**
+   * Fences a checkpoint/signal-consume write against the run's current
+   * `attempt` — catches a zombie writer (its lease was reclaimed) creating
+   * a brand-new row for a nodeId with no prior row to CAS against.
+   */
+  private checkRunAttemptForWrite(runId: string, attempt: number): void {
+    const run = this.mustRun(runId);
+    if (attempt < run.attempt) {
+      throw new WorkflowFenceError(runId, attempt, run.attempt);
+    }
+  }
+
   async putIntent(cp: NodeCheckpoint): Promise<void> {
+    this.checkRunAttemptForWrite(cp.runId, cp.attempt);
     const key = checkpointKey(cp.runId, cp.nodeId, cp.iteration);
     const existing = this.checkpoints.get(key);
     if (existing) {
@@ -159,7 +193,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
         throw new WorkflowFenceError(cp.runId, cp.attempt, existing.attempt);
       }
     }
-    this.checkpoints.set(key, { ...cp, status: 'intent' });
+    this.checkpoints.set(key, structuredClone({ ...cp, status: 'intent' }));
   }
 
   async completeCheckpoint(
@@ -169,6 +203,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     attempt: number,
     terminal: NodeCheckpoint,
   ): Promise<void> {
+    this.checkRunAttemptForWrite(runId, attempt);
     const key = checkpointKey(runId, nodeId, iteration);
     const existing = this.checkpoints.get(key);
     if (existing && existing.status !== 'intent') {
@@ -179,22 +214,23 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     if (existing && existing.attempt > attempt) {
       throw new WorkflowFenceError(runId, attempt, existing.attempt);
     }
-    this.checkpoints.set(key, terminal);
+    this.checkpoints.set(key, structuredClone(terminal));
   }
 
   async getCheckpoints(runId: string): Promise<NodeCheckpoint[]> {
     const out: NodeCheckpoint[] = [];
     for (const cp of this.checkpoints.values()) {
-      if (cp.runId === runId) out.push(cp);
+      if (cp.runId === runId) out.push(structuredClone(cp));
     }
     return out;
   }
 
   async insertSignal(signal: RunSignal): Promise<RunSignal> {
     const existing = this.signals.get(signal.signalId);
-    if (existing) return existing;
-    this.signals.set(signal.signalId, signal);
-    return signal;
+    if (existing) return structuredClone(existing);
+    const stored = structuredClone(signal);
+    this.signals.set(signal.signalId, stored);
+    return structuredClone(stored);
   }
 
   async consumeSignalAndCheckpoint(
@@ -212,15 +248,22 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       if (same) return; // idempotent replay of the same consume+checkpoint write
       throw new WorkflowFenceError(checkpoint.runId, consumedBy.attempt, signal.consumedBy?.attempt ?? -1);
     }
+    this.checkRunAttemptForWrite(checkpoint.runId, checkpoint.attempt);
     // Atomic in-process: both writes land together, or (on the checkpoint
     // write throwing) neither does — the signal write below only commits
     // after the checkpoint write succeeds.
     const key = checkpointKey(checkpoint.runId, checkpoint.nodeId, checkpoint.iteration);
     const existingCp = this.checkpoints.get(key);
     if (existingCp && existingCp.status !== 'intent' && existingCp.attempt !== checkpoint.attempt) {
+      // Terminal row already present: first terminal write wins.
       throw new WorkflowFenceError(checkpoint.runId, checkpoint.attempt, existingCp.attempt);
     }
-    this.checkpoints.set(key, checkpoint);
+    if (existingCp && existingCp.status === 'intent' && existingCp.attempt > checkpoint.attempt) {
+      // A live higher-attempt intent must not be overwritten by a
+      // lower-attempt (zombie) terminal write.
+      throw new WorkflowFenceError(checkpoint.runId, checkpoint.attempt, existingCp.attempt);
+    }
+    this.checkpoints.set(key, structuredClone(checkpoint));
     signal.consumedAt = this.clock();
     signal.consumedBy = consumedBy;
   }
@@ -230,7 +273,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     for (const signal of this.signals.values()) {
       if (signal.runId !== runId) continue;
       if (opts?.unconsumed && signal.consumedAt !== undefined) continue;
-      out.push(signal);
+      out.push(structuredClone(signal));
     }
     return out;
   }

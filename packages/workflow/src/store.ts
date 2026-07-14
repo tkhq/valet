@@ -112,16 +112,28 @@ export interface WorkflowStore {
 
   /**
    * CAS `pending|parked → running`, recording `ownerId` and a lease expiring
-   * in `leaseMs`, and incrementing the run's `attempt`. Returns the new
+   * in `leaseMs`, and incrementing the run's `attempt`. Also succeeds for a
+   * `running` or `terminalizing` run whose lease has expired (crashed
+   * owner) — this is the reclaim path for a dead worker. A reclaimed
+   * `terminalizing` run stays `terminalizing` (the new owner resumes
+   * terminal cleanup; its status is not reset to `running`); a reclaimed
+   * `running` run is re-claimed as `running`. Both cases still bump
+   * `attempt` and replace `ownerId`/`leaseExpiresAt`. Returns the new
    * attempt on success, `null` if the run does not exist or is not in a
-   * claimable status.
+   * claimable status (a `running`/`terminalizing` run with a live lease is
+   * not claimable).
    */
   claimRun(runId: string, ownerId: string, leaseMs: number): Promise<{ attempt: number } | null>;
 
   /** Renew the lease for the current owner/attempt. No-op (returns false) if the run isn't held by `ownerId`. */
   heartbeat(runId: string, ownerId: string, leaseMs: number): Promise<boolean>;
 
-  /** Persist park state: `running → parked` with the accumulated `waitingOn`, fenced by `attempt`. */
+  /**
+   * Persist park state: `running → parked` with the accumulated
+   * `waitingOn`, fenced by `attempt`. A parked run is unowned — this clears
+   * `ownerId`/`leaseExpiresAt` so a stale lease can't make the parked run
+   * look expired-lease-reclaimable.
+   */
   parkRun(runId: string, attempt: number, waitingOn: RunWaitCondition[], wakeAt?: number): Promise<void>;
 
   /** Mark the run as needing a wake pass regardless of its current waitingOn conditions. */
@@ -136,15 +148,27 @@ export interface WorkflowStore {
   /** `terminalizing → settled`. Idempotent: calling again with the same outcome is a no-op. */
   settleRun(runId: string, outcome: 'completed' | 'failed' | 'cancelled'): Promise<void>;
 
-  /** Runs that are wake-requested, have a due timer, or have an expired lease. */
+  /**
+   * Runs that are wake-requested, have a due timer, or have an expired
+   * lease. The expired-lease case includes `pending`/`parked` runs as well
+   * as `running`/`terminalizing` runs whose lease has expired (crashed
+   * owner) — those are listed so a new worker can reclaim them via
+   * `claimRun`. A `running`/`terminalizing` run with a live lease is never
+   * included.
+   */
   listRunnable(now: number, limit: number): Promise<WorkflowRun[]>;
 
   /**
    * Insert a checkpoint in `intent` status, or CAS-replace an existing
    * `intent` row whose `attempt` is lower than `cp.attempt` (higher attempt
-   * wins). Rejects with `WorkflowFenceError` if a terminal row already
-   * exists for this key, or if an existing `intent` row's attempt is >=
-   * `cp.attempt`.
+   * wins); an existing `intent` row with `attempt` equal to `cp.attempt` is
+   * also overwritten (an executor re-writing its own intent, e.g. to add
+   * receipt effects, is not a conflict). Rejects with `WorkflowFenceError`
+   * if a terminal row already exists for this key, if an existing `intent`
+   * row's attempt is greater than `cp.attempt`, or — the run-level fence —
+   * if `cp.attempt` is lower than the run's current `attempt` (catches a
+   * zombie writer creating a brand-new row with no prior row to CAS
+   * against).
    */
   putIntent(cp: NodeCheckpoint): Promise<void>;
 
@@ -154,7 +178,9 @@ export interface WorkflowStore {
    * `skipped`, carrying `result`/`error`/`effects`). Terminal rows are
    * immutable: if a terminal row already exists, this is a no-op if it was
    * written by the same attempt (idempotent replay) and throws
-   * `WorkflowFenceError` for a stale attempt's late write.
+   * `WorkflowFenceError` for a stale attempt's late write. Also throws
+   * `WorkflowFenceError` — the run-level fence — if `attempt` is lower
+   * than the run's current `attempt`.
    */
   completeCheckpoint(
     runId: string,
@@ -172,7 +198,10 @@ export interface WorkflowStore {
   /**
    * Atomically CAS `consumedAt` on the signal (only if currently
    * unconsumed) and write the terminal checkpoint — both succeed or
-   * neither does.
+   * neither does. Subject to the same checkpoint-row and run-level
+   * `attempt` fences as `completeCheckpoint` (rejects a lower-attempt
+   * write against an existing higher-attempt intent row, and rejects if
+   * the write's `attempt` is lower than the run's current `attempt`).
    */
   consumeSignalAndCheckpoint(
     signalId: string,

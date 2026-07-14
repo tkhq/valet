@@ -65,7 +65,10 @@ export function describeCheckpointContract(makeStore: () => Promise<WorkflowStor
       const store = await makeStore();
       const first = await store.createRun(RUN_ID, runParams({ input: { a: 1 } }), { n: 1 }, 'v1');
       const second = await store.createRun(RUN_ID, runParams({ input: { a: 2 } }), { n: 2 }, 'v2');
-      expect(second).toBe(first);
+      // A serializing (e.g. sqlite-backed) store returns a freshly
+      // deserialized object each call — assert value equality, not
+      // reference identity.
+      expect(second).toEqual(first);
       expect(second.params.input).toEqual({ a: 1 });
       expect(second.definitionVersionId).toBe('v1');
 
@@ -184,5 +187,125 @@ export function describeCheckpointContract(makeStore: () => Promise<WorkflowStor
       const [cp] = await store.getCheckpoints(RUN_ID);
       expect(cp.status).toBe('skipped');
     });
+
+    it('a same-attempt putIntent overwrites the existing intent row (executor re-writing its own intent)', async () => {
+      const store = await setup();
+      await store.putIntent(intent({ attempt: 1, effects: { round: 1 } }));
+      await store.putIntent(intent({ attempt: 1, effects: { round: 2 } }));
+
+      const [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.attempt).toBe(1);
+      expect(cp.effects).toEqual({ round: 2 });
+    });
+
+    it('mutating a returned checkpoint does not affect the stored state', async () => {
+      const store = await setup();
+      await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ result: { count: 1 } }));
+
+      const [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.result).toEqual({ count: 1 });
+      if (!isCountResult(cp.result)) throw new Error('expected a { count } result');
+      cp.result.count = 999;
+
+      const [reread] = await store.getCheckpoints(RUN_ID);
+      expect(reread.result).toEqual({ count: 1 });
+    });
+
+    it('a zombie putIntent for a fresh nodeId with attempt below the run\'s current attempt is rejected', async () => {
+      const store = await setup();
+      const firstClaim = await store.claimRun(RUN_ID, 'owner-1', 30_000);
+      if (!firstClaim) throw new Error('expected first claim to succeed');
+      await store.parkRun(RUN_ID, firstClaim.attempt, []);
+      const secondClaim = await store.claimRun(RUN_ID, 'owner-2', 30_000);
+      if (!secondClaim) throw new Error('expected second claim to succeed');
+      expect(secondClaim.attempt).toBe(firstClaim.attempt + 1);
+
+      // The zombie (attempt 1) tries to write a brand-new node's row after
+      // losing ownership — there's no existing row for it to CAS against,
+      // so only the run-level fence catches this.
+      await expect(
+        store.putIntent(intent({ nodeId: 'node-fresh', attempt: firstClaim.attempt })),
+      ).rejects.toThrow(WorkflowFenceError);
+    });
+
+    it('a zombie completeCheckpoint for a fresh nodeId with attempt below the run\'s current attempt is rejected', async () => {
+      const store = await setup();
+      const firstClaim = await store.claimRun(RUN_ID, 'owner-1', 30_000);
+      if (!firstClaim) throw new Error('expected first claim to succeed');
+      await store.parkRun(RUN_ID, firstClaim.attempt, []);
+      const secondClaim = await store.claimRun(RUN_ID, 'owner-2', 30_000);
+      if (!secondClaim) throw new Error('expected second claim to succeed');
+      expect(secondClaim.attempt).toBe(firstClaim.attempt + 1);
+
+      await expect(
+        store.completeCheckpoint(
+          RUN_ID,
+          'node-fresh',
+          0,
+          firstClaim.attempt,
+          terminal({ nodeId: 'node-fresh', attempt: firstClaim.attempt }),
+        ),
+      ).rejects.toThrow(WorkflowFenceError);
+    });
+
+    it('claimRun reclaims a running run whose lease has expired, bumping attempt and keeping it running', async () => {
+      const store = await setup();
+      // Negative leaseMs backdates leaseExpiresAt into the past, simulating
+      // a crashed owner without depending on real wall-clock time passing.
+      const claimed = await store.claimRun(RUN_ID, 'owner-1', -1_000);
+      expect(claimed).toEqual({ attempt: 1 });
+
+      const runnable = await store.listRunnable(Date.now(), 10);
+      expect(runnable.map((r) => r.runId)).toContain(RUN_ID);
+
+      const reclaimed = await store.claimRun(RUN_ID, 'owner-2', 30_000);
+      expect(reclaimed).toEqual({ attempt: 2 });
+      const run = await store.getRun(RUN_ID);
+      expect(run?.status).toBe('running');
+      expect(run?.ownerId).toBe('owner-2');
+    });
+
+    it('claimRun does not reclaim a running run whose lease is still live, and listRunnable excludes it', async () => {
+      const store = await setup();
+      const claimed = await store.claimRun(RUN_ID, 'owner-1', 60_000);
+      expect(claimed).toEqual({ attempt: 1 });
+
+      const runnable = await store.listRunnable(Date.now(), 10);
+      expect(runnable.map((r) => r.runId)).not.toContain(RUN_ID);
+
+      const reclaimed = await store.claimRun(RUN_ID, 'owner-2', 30_000);
+      expect(reclaimed).toBeNull();
+    });
+
+    it('claimRun reclaims an expired-lease terminalizing run and keeps it terminalizing', async () => {
+      const store = await setup();
+      const claimed = await store.claimRun(RUN_ID, 'owner-1', -1_000);
+      if (!claimed) throw new Error('expected initial claim to succeed');
+      await store.beginTerminalize(RUN_ID, claimed.attempt, 'completed');
+
+      const runnable = await store.listRunnable(Date.now(), 10);
+      expect(runnable.map((r) => r.runId)).toContain(RUN_ID);
+
+      const reclaimed = await store.claimRun(RUN_ID, 'owner-2', 30_000);
+      expect(reclaimed).toEqual({ attempt: 2 });
+      const run = await store.getRun(RUN_ID);
+      expect(run?.status).toBe('terminalizing');
+      expect(run?.ownerId).toBe('owner-2');
+    });
+
+    it('parkRun clears the lease so a parked run is not later mistaken for an expired-lease running run', async () => {
+      const store = await setup();
+      const claimed = await store.claimRun(RUN_ID, 'owner-1', 1_000);
+      if (!claimed) throw new Error('expected claim to succeed');
+      await store.parkRun(RUN_ID, claimed.attempt, []);
+
+      // Long after the original (now-cleared) lease would have expired.
+      const runnable = await store.listRunnable(Date.now() + 60_000, 10);
+      expect(runnable.map((r) => r.runId)).not.toContain(RUN_ID);
+    });
   });
+}
+
+function isCountResult(value: unknown): value is { count: number } {
+  return typeof value === 'object' && value !== null && 'count' in value;
 }
