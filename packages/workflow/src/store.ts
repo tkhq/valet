@@ -159,6 +159,19 @@ export interface WorkflowStore {
   listRunnable(now: number, limit: number): Promise<WorkflowRun[]>;
 
   /**
+   * Runs with status `parked`, oldest-`updatedAt` first, up to `limit`. This
+   * is the durable enumeration source for a host's lost-wake sweep: unlike
+   * `listRunnable` (which is filtered to wake-requested/due-timer/expired
+   * -lease), `listParked` surfaces every parked run so the sweep can
+   * independently evaluate its own wake sources — unconsumed signals,
+   * settled submissions, uncheckpointed consumption — against each one.
+   * Critically, this includes a run parked before the current process
+   * started: the sweep must not depend on any host-local, in-memory record
+   * of which runs exist, since a freshly-restarted host has none.
+   */
+  listParked(limit: number): Promise<WorkflowRun[]>;
+
+  /**
    * Insert a checkpoint in `intent` status, or CAS-replace an existing
    * `intent` row whose `attempt` is lower than `cp.attempt` (higher attempt
    * wins); an existing `intent` row with `attempt` equal to `cp.attempt` is

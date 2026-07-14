@@ -321,6 +321,40 @@ export function describeRunHostContract(makeFixture: MakeRunHostFixture): void {
       }
     });
 
+    it('stopHost gates out late wakes: a wake() call after shutdown triggers no new drive', async () => {
+      const { host, store, engine } = await makeFixture();
+      // Keep the submission unsettled so the run parks and stays parked
+      // (rather than racing to completion via the default-settled fake's
+      // background waiter) — this leaves a background submission waiter
+      // hanging, mirroring the case the gating in `spawnSubmissionWaiter`
+      // exists for.
+      engine.setSettled(false);
+      host.startHost();
+      try {
+        await host.start('run-stop-gate', runParams(), sessionDefinition());
+        await waitFor(async () => (await store.getRun('run-stop-gate'))?.status === 'parked');
+
+        const callsBefore = engine.calls.length;
+        const checkpointsBefore = await store.getCheckpoints('run-stop-gate');
+
+        await host.stopHost();
+
+        // Both a direct `wake()` call and (implicitly) the now-hanging
+        // background submission waiter must be no-ops post-stop: neither
+        // `pollOnce` nor a new drive may run.
+        await host.wake('run-stop-gate');
+        await sleep(50);
+
+        expect(engine.calls.length).toBe(callsBefore);
+        const checkpointsAfter = await store.getCheckpoints('run-stop-gate');
+        expect(checkpointsAfter).toEqual(checkpointsBefore);
+        const run = await store.getRun('run-stop-gate');
+        expect(run?.status).toBe('parked');
+      } finally {
+        await host.stopHost();
+      }
+    });
+
     it('pinned requirement: an approval timeout with no signal ever arriving settles via the host\'s own timer machinery', async () => {
       const { host, store, clock } = await makeFixture();
       host.startHost();
@@ -385,25 +419,62 @@ export function describeRunHostContract(makeFixture: MakeRunHostFixture): void {
       }
     });
 
-    it('expired-lease reclaim re-drives the run without duplicate engine dispatch', async () => {
+    it('expired-lease reclaim re-drives a mid-crash attempt without duplicate engine dispatch', async () => {
+      // The dishonest version of this test claims a run through the store
+      // before it was ever driven — the "dead worker" never dispatched
+      // anything, so a single-dispatch assertion is trivially true no
+      // matter what the reclaim path does. The real guarantee this test
+      // must exercise: an attempt that got as far as dispatching to the
+      // engine and persisting the intent checkpoint's receipt, then
+      // crashed *before* parking (so the run is left `running` with a
+      // lease that goes on to expire, not `parked` — `parkRun` clears
+      // ownership, so a parked run is never lease-reclaimable in the first
+      // place). A fresh claim redriving that node must read the persisted
+      // receipt and skip straight to polling settlement, never re-issuing
+      // `createSession`/`prompt`.
       const { host, store, engine } = await makeFixture();
-      // Simulate a dead worker: claim directly through the store (bypassing
-      // the host entirely) with an already-negative lease, so the run looks
-      // like a crashed owner's abandoned claim the moment it's created.
-      await store.createRun('run-reclaim', runParams(), sessionDefinition(), 'v1');
-      const deadClaim = await store.claimRun('run-reclaim', 'dead-worker', -1);
+      const runId = 'run-reclaim';
+      const definition = sessionDefinition();
+      await store.createRun(runId, runParams(), definition, 'v1');
+
+      // Attempt 1: claim with an already-expired lease (simulating "claimed,
+      // then the owner died before its first heartbeat"), then perform
+      // exactly the dispatch + intent-persist a real `executeSession` would
+      // do on its way to a `submission` park — but crash (stop, in this
+      // fake) before calling `store.parkRun`.
+      const deadClaim = await store.claimRun(runId, 'dead-worker', -1);
       expect(deadClaim).not.toBeNull();
+      const attempt = deadClaim?.attempt as number;
+      const sessionId = `wf:${runId}:s`;
+      const dispatchId = `workflow:${runId}:s`;
+      await engine.createSession({ id: sessionId, purpose: 'workflow' });
+      const receipt = await engine.prompt(sessionId, 'do the thing', { dispatchId });
+      await store.putIntent({
+        runId,
+        nodeId: 's',
+        iteration: 0,
+        status: 'intent',
+        attempt,
+        createdAt: Date.now(),
+        effects: { sessionId, receipt, repairAttempted: false },
+      });
+      // The trigger node ('t') never got its checkpoint written either —
+      // the real interpreter will pick it up fresh on the reclaim drive,
+      // same as any restart. That's fine: it's not a dispatch source.
 
       host.startHost();
       try {
-        // Whether the reclaimed drive parks or races straight to completion
-        // (the fake engine settles instantly by default) is immaterial —
-        // what matters is that the reclaim dispatched to the engine exactly
-        // once, never twice.
-        await waitFor(async () => engine.calls.some((c) => c.kind === 'createSession'), { timeoutMs: 3_000 });
+        // The expired lease (status `running`, no live owner) makes this
+        // run visible to `listRunnable` on the very next poll — no
+        // `wake()`/`start()` call needed, exactly like a real crash
+        // recovery. Whether the reclaimed drive parks or races straight to
+        // completion (the fake engine settles instantly by default) is
+        // immaterial — what matters is that the *reclaim* dispatched to the
+        // engine zero additional times.
+        await waitFor(async () => (await store.getRun(runId))?.status !== 'running', { timeoutMs: 3_000 });
         await sleep(30); // let any (incorrect) duplicate dispatch land before asserting
-        const createCalls = engine.calls.filter((c) => c.kind === 'createSession');
-        expect(createCalls).toHaveLength(1);
+        expect(engine.calls.filter((c) => c.kind === 'createSession')).toHaveLength(1);
+        expect(engine.calls.filter((c) => c.kind === 'prompt')).toHaveLength(1);
       } finally {
         await host.stopHost();
       }
@@ -445,6 +516,45 @@ export function describeRunHostContract(makeFixture: MakeRunHostFixture): void {
           await waitFor(async () => (await store.getRun('run-sweep-signal'))?.status === 'settled', { timeoutMs: 3_000 });
           const run = await store.getRun('run-sweep-signal');
           expect(run?.outcome).toBe('completed');
+        } finally {
+          await host.stopHost();
+        }
+      });
+
+      it('wakes a run parked purely on a submission wait (no signal wait) when an unconsumed cancel signal is lost', async () => {
+        // Regression for finding M2: the sweep's unconsumed-signal check
+        // used to bail out early whenever `waitingOn` contained no `signal`
+        // wait at all, which meant a cancel written while a run is parked
+        // only on a `submission` wait (the common case — `terminate()`
+        // during an in-flight session prompt) was invisible to the sweep.
+        // Here the signal is inserted directly via the store, bypassing
+        // `host.terminate()`'s own explicit wake, to simulate exactly the
+        // "wake was lost" case the sweep exists to cover; the submission is
+        // left unsettled so only the sweep — not the settled-submission
+        // wake source, not the background waiter — can be what notices.
+        const { host, store, engine, clock } = await makeFixture({ pollMs: 100_000, sweepMs: 20 });
+        engine.setSettled(false);
+        host.startHost();
+        try {
+          await host.start('run-sweep-cancel', runParams(), sessionDefinition());
+          await waitFor(async () => (await store.getRun('run-sweep-cancel'))?.status === 'parked');
+          const parked = await store.getRun('run-sweep-cancel');
+          expect(parked?.waitingOn.some((w) => w.kind === 'signal')).toBe(false);
+          expect(parked?.waitingOn.some((w) => w.kind === 'submission')).toBe(true);
+
+          await store.insertSignal({
+            runId: 'run-sweep-cancel',
+            signalId: 'cancel',
+            signalType: 'cancel',
+            createdAt: clock.now(),
+          });
+
+          await waitFor(async () => (await store.getRun('run-sweep-cancel'))?.status === 'settled', {
+            timeoutMs: 3_000,
+          });
+          const run = await store.getRun('run-sweep-cancel');
+          expect(run?.outcome).toBe('cancelled');
+          expect(engine.calls.some((c) => c.kind === 'abort')).toBe(true);
         } finally {
           await host.stopHost();
         }

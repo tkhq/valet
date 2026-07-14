@@ -4,6 +4,7 @@ import { describeRunHostContract, makeRunHostFixtureEngine, type RunHostFixture,
 import { LocalRunHost } from './local-host.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
 import type { RunParams } from './store.js';
+import type { SessionNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
 
 // ─── Test helpers (crashAt test only — the shared suite covers everything else) ─
@@ -30,6 +31,18 @@ function simpleDefinition(): WorkflowDefinition {
       { id: 'e', type: 'stop' },
     ],
     edges: [{ from: 't', to: 'e' }],
+  };
+}
+
+function sessionDefinition(): WorkflowDefinition {
+  const node: SessionNode = { id: 's', type: 'session', mode: 'start', prompt: 'do the thing' };
+  return {
+    version: 'dag/v1',
+    nodes: [{ id: 't', type: 'trigger' }, node, { id: 'e', type: 'stop' }],
+    edges: [
+      { from: 't', to: 's' },
+      { from: 's', to: 'e' },
+    ],
   };
 }
 
@@ -125,6 +138,75 @@ describe('LocalRunHost crashAt "terminalizing"', () => {
       expect(run?.outcome).toBe('completed');
     } finally {
       await freshHost.stopHost();
+    }
+  });
+});
+
+// ─── Restart case: a run parked on a submission wait before the process ─────
+// ─── crashed, re-armed by a fresh process's sweep with zero prior knowledge ─
+
+describe('LocalRunHost sweep survives a process restart', () => {
+  it('wakes a run parked on a submission wait that a fresh host never start()ed or wake()d', async () => {
+    // This is the finding-1 regression verbatim: the sweep used to
+    // enumerate a host-local `knownRunIds` set, populated only by
+    // start/wake/scheduleWake/terminate — empty for a brand-new process.
+    // A run parked on a submission wait before a crash was therefore never
+    // re-armed after restart (no wakeAt, no wakeRequested, no lease — it's
+    // invisible to `listRunnable`, and the old sweep never even looked at
+    // it). The fix drives the sweep off `store.listParked(...)` instead,
+    // which has no notion of "process instance" at all.
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const runId = 'run-restart';
+
+    // Host A: drive the run to a parked submission wait, then shut down —
+    // simulating the process that started the run crashing (or just
+    // stopping) before the submission ever settled.
+    const engineA = makeRunHostFixtureEngine();
+    engineA.setSettled(false);
+    const hostA = new LocalRunHost({
+      store,
+      engine: engineA,
+      clock: clock.now,
+      pollMs: 10,
+      sweepMs: 100_000, // sweep disabled on host A — irrelevant to this test
+      leaseMs: 2_000,
+      heartbeatMs: 300,
+    });
+    hostA.startHost();
+    try {
+      await hostA.start(runId, runParams(), sessionDefinition());
+      await waitFor(async () => (await store.getRun(runId))?.status === 'parked');
+      const parked = await store.getRun(runId);
+      expect(parked?.waitingOn.some((w) => w.kind === 'submission')).toBe(true);
+    } finally {
+      await hostA.stopHost();
+    }
+
+    // A fresh host, fresh engine, sharing only the durable store — no
+    // in-memory knowledge of `run-restart` whatsoever. The engine now
+    // reports the submission settled (the crash didn't take the real
+    // engine-side work with it). Crucially: no `start()`/`wake()` call is
+    // ever made for this run — only `startHost()`'s sweep loop can be what
+    // notices and re-arms it.
+    const engineB = makeRunHostFixtureEngine();
+    engineB.setSettled(true);
+    const hostB = new LocalRunHost({
+      store,
+      engine: engineB,
+      clock: clock.now,
+      pollMs: 100_000, // poll disabled — only the sweep may act
+      sweepMs: 20,
+      leaseMs: 2_000,
+      heartbeatMs: 300,
+    });
+    hostB.startHost();
+    try {
+      await waitFor(async () => (await store.getRun(runId))?.status === 'settled', 3_000);
+      const run = await store.getRun(runId);
+      expect(run?.outcome).toBe('completed');
+    } finally {
+      await hostB.stopHost();
     }
   });
 });

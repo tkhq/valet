@@ -168,6 +168,12 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     return out;
   }
 
+  async listParked(limit: number): Promise<WorkflowRun[]> {
+    const parked = [...this.runs.values()].filter((run) => run.status === 'parked');
+    parked.sort((a, b) => a.updatedAt - b.updatedAt);
+    return parked.slice(0, limit).map((run) => structuredClone(run));
+  }
+
   /**
    * Fences a checkpoint/signal-consume write against the run's current
    * `attempt` — catches a zombie writer (its lease was reclaimed) creating

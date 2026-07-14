@@ -19,20 +19,22 @@
  * needs to resolve from a workflow-definitions table before calling
  * `start`, e.g. `packages/api`'s route handler in Task 10).
  *
- * ## Sweep enumeration: host-known run ids
+ * ## Sweep enumeration: store-driven, not host-local
  *
- * `WorkflowStore` has no "list all parked runs" method — `listRunnable`
- * only surfaces runs matching its own narrow wake-requested/due-timer/
- * expired-lease criteria, which is exactly the set the lost-wake sweep
- * exists to go *beyond* (unconsumed signals and settled submissions are
- * invisible to `listRunnable` by design — the store has no notion of
- * either). `LocalRunHost` tracks every runId it has ever `start()`ed or
- * been asked to `wake`/`scheduleWake`/`terminate` in an in-memory
- * `knownRunIds` set and sweeps exactly those. For the single-process
- * reference host (the only host this phase ships) this is complete: every
- * run in the system was started through this same host instance. A
- * multi-instance deployment would need either a store-level "list parked"
- * method or a shared registry — out of scope for the local host.
+ * The sweep is the durable backstop for every wake — including a run that
+ * parked on a submission wait, then the process crashed and restarted
+ * before it ever saw that run. A host-local record of "runs I've seen"
+ * (e.g. an in-memory set populated on `start`/`wake`/`scheduleWake`/
+ * `terminate`) is empty after a restart, so it can never be the sweep's
+ * enumeration source — that would leave exactly the run a lost-wake sweep
+ * exists to protect permanently un-swept. Instead the sweep enumerates via
+ * `store.listParked(...)`, the store's durable "every parked run" query
+ * (`listRunnable` is unsuitable: it's filtered to its own narrow
+ * wake-requested/due-timer/expired-lease criteria, which is exactly what
+ * the sweep exists to go *beyond* — unconsumed signals and settled
+ * submissions are invisible to `listRunnable` by design). This makes the
+ * sweep correct for a freshly-restarted process with zero in-memory state,
+ * which is the whole point of a durable backstop.
  *
  * ## Worker loop
  *
@@ -44,7 +46,8 @@
  *     write through the store, then a direct `pollOnce()` call), so the 1s
  *     interval is a floor on staleness, not the primary delivery path.
  *   - **sweep** (`sweepMs`, default 15s, spec bound ≤60s): the lost-wake
- *     backstop over `knownRunIds` — see "Sweep enumeration" above.
+ *     backstop, enumerated via `store.listParked` — see "Sweep enumeration"
+ *     above.
  *
  * `stopHost()` clears both interval timers and awaits every in-flight
  * drive so a caller can shut down cleanly without a drive being cut off
@@ -113,14 +116,16 @@ export class LocalRunHost implements RunHost {
   private readonly exit: (code: number) => never;
 
   private readonly ownerId = `local-${Math.random().toString(36).slice(2)}-${Date.now()}`;
-  /** Every runId this host has ever been asked to start/wake/scheduleWake/terminate — the sweep's enumeration set. */
-  private readonly knownRunIds = new Set<string>();
   /** Dedupe key `${runId}:${queueItemId}` — one background waiter per submission wait, even across re-parks. */
   private readonly submissionWaiters = new Set<string>();
+  /** In-flight background submission-waiter promises. Tracked so `stopHost` can drop them without awaiting an unbounded wait. */
+  private readonly waiterPromises = new Set<Promise<void>>();
   /** RunIds currently claimed and being driven by this host — concurrency accounting + double-claim guard. */
   private readonly inFlight = new Set<string>();
   /** In-flight drive promises, awaited by `stopHost` for clean shutdown. */
   private readonly activeDrives = new Set<Promise<void>>();
+  /** How many parked runs a single sweep pass enumerates via `store.listParked`. */
+  private readonly sweepBatchLimit = 1_000;
 
   private pollTimer?: ReturnType<typeof setInterval>;
   private sweepTimer?: ReturnType<typeof setInterval>;
@@ -146,25 +151,25 @@ export class LocalRunHost implements RunHost {
   // ─── RunHost port ────────────────────────────────────────────────────────
 
   async start(runId: string, params: RunParams, definition: unknown): Promise<void> {
-    this.knownRunIds.add(runId);
+    if (!this.running) return;
     await this.store.createRun(runId, params, definition, params.definitionVersionId);
     await this.wake(runId);
   }
 
   async wake(runId: string): Promise<void> {
-    this.knownRunIds.add(runId);
+    if (!this.running) return;
     await this.store.requestWake(runId);
     this.nudge();
   }
 
   async scheduleWake(runId: string, at: number): Promise<void> {
-    this.knownRunIds.add(runId);
+    if (!this.running) return;
     await this.store.scheduleWake(runId, at);
     this.nudge();
   }
 
   async terminate(runId: string): Promise<void> {
-    this.knownRunIds.add(runId);
+    if (!this.running) return;
     await this.store.insertSignal({
       runId,
       signalId: 'cancel',
@@ -193,15 +198,23 @@ export class LocalRunHost implements RunHost {
     this.pollTimer = undefined;
     this.sweepTimer = undefined;
     await Promise.all([...this.activeDrives]);
+    // Background submission waiters aren't cancellable (they're awaiting a
+    // third-party promise), but they're now gated on `running` and can no
+    // longer trigger a drive — drop them from tracking rather than await an
+    // unbounded external wait during shutdown.
+    this.waiterPromises.clear();
+    this.submissionWaiters.clear();
   }
 
   // ─── Poll loop ───────────────────────────────────────────────────────────
 
   private nudge(): void {
+    if (!this.running) return;
     void this.pollOnce();
   }
 
   private async pollOnce(): Promise<void> {
+    if (!this.running) return;
     if (this.polling) {
       this.pollAgain = true;
       return;
@@ -210,6 +223,7 @@ export class LocalRunHost implements RunHost {
     try {
       do {
         this.pollAgain = false;
+        if (!this.running) break;
         const capacity = this.concurrency - this.inFlight.size;
         if (capacity <= 0) break;
         const runnable = await this.store.listRunnable(this.clock(), capacity);
@@ -291,9 +305,16 @@ export class LocalRunHost implements RunHost {
     const key = `${runId}:${wait.queueItemId}`;
     if (this.submissionWaiters.has(key)) return;
     this.submissionWaiters.add(key);
-    this.engine
+    const p = this.engine
       .awaitResult(wait.sessionId, wait.threadId, wait.queueItemId)
-      .then(() => this.wake(runId))
+      .then(() => {
+        // Gate on `running`: after `stopHost()`, a waiter that resolves
+        // must not trigger a new drive. `wake()` already no-ops when
+        // `!running`, but checking here too avoids even the wasted
+        // store round-trip a no-op `wake()` call would still make.
+        if (!this.running) return;
+        return this.wake(runId);
+      })
       .catch(() => {
         // Best-effort: a waiter failure (e.g. the engine handle went away)
         // is not fatal — the lost-wake sweep's `isSettled` check is the
@@ -301,25 +322,25 @@ export class LocalRunHost implements RunHost {
       })
       .finally(() => {
         this.submissionWaiters.delete(key);
+        this.waiterPromises.delete(p);
       });
+    this.waiterPromises.add(p);
   }
 
   // ─── Lost-wake sweep ─────────────────────────────────────────────────────
 
   private async sweepOnce(): Promise<void> {
     const now = this.clock();
-    for (const runId of [...this.knownRunIds]) {
-      const run = await this.store.getRun(runId);
-      if (!run || run.status !== 'parked') continue;
-
+    const parked = await this.store.listParked(this.sweepBatchLimit);
+    for (const run of parked) {
       let shouldWake = false;
 
-      if (await this.hasDueTimerWait(run.waitingOn, now)) shouldWake = true;
-      if (!shouldWake && (await this.hasUnconsumedMatchingSignal(runId, run.waitingOn))) shouldWake = true;
+      if (this.hasDueTimerWait(run.waitingOn, now)) shouldWake = true;
+      if (!shouldWake && (await this.hasUnconsumedCancelOrMatchingSignal(run.runId, run.waitingOn))) shouldWake = true;
       if (!shouldWake && (await this.hasSettledSubmissionWait(run.waitingOn))) shouldWake = true;
-      if (!shouldWake && (await this.reconcileUncheckpointedConsumption(runId))) shouldWake = true;
+      if (!shouldWake && (await this.reconcileUncheckpointedConsumption(run.runId))) shouldWake = true;
 
-      if (shouldWake) await this.wake(runId);
+      if (shouldWake) await this.wake(run.runId);
     }
   }
 
@@ -331,11 +352,18 @@ export class LocalRunHost implements RunHost {
     return false;
   }
 
-  private async hasUnconsumedMatchingSignal(runId: string, waitingOn: RunWaitCondition[]): Promise<boolean> {
-    const signalWaits = waitingOn.filter((w): w is Extract<RunWaitCondition, { kind: 'signal' }> => w.kind === 'signal');
-    if (signalWaits.length === 0) return false;
+  /**
+   * An unconsumed `cancel` signal must wake the run regardless of what it's
+   * currently `waitingOn` — a `terminate()` call can land while a run is
+   * parked purely on a `submission` wait (no `signal` wait present at all),
+   * and that cancel still needs to reach cancellation reconciliation via the
+   * sweep if the direct `wake()` from `terminate()` was lost. A non-cancel
+   * signal only matters if it matches one of the run's own signal waits.
+   */
+  private async hasUnconsumedCancelOrMatchingSignal(runId: string, waitingOn: RunWaitCondition[]): Promise<boolean> {
     const unconsumed = await this.store.listSignals(runId, { unconsumed: true });
     if (unconsumed.length === 0) return false;
+    const signalWaits = waitingOn.filter((w): w is Extract<RunWaitCondition, { kind: 'signal' }> => w.kind === 'signal');
     return unconsumed.some((s) => s.signalType === 'cancel' || signalWaits.some((w) => w.signalType === s.signalType));
   }
 
@@ -357,10 +385,11 @@ export class LocalRunHost implements RunHost {
    */
   private async reconcileUncheckpointedConsumption(runId: string): Promise<boolean> {
     const signals = await this.store.listSignals(runId);
+    if (signals.every((s) => s.consumedAt === undefined || !s.consumedBy)) return false;
+    const checkpoints = await this.store.getCheckpoints(runId);
     let voided = false;
     for (const signal of signals) {
       if (signal.consumedAt === undefined || !signal.consumedBy) continue;
-      const checkpoints = await this.store.getCheckpoints(runId);
       const cp = checkpoints.find(
         (c) => c.nodeId === signal.consumedBy?.nodeId && c.iteration === signal.consumedBy?.iteration,
       );
