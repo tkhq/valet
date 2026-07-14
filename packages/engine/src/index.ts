@@ -84,6 +84,14 @@ export {
   type PluginCatalogOptions,
 } from "./plugin-catalog.js";
 export {
+  validateValetPlugin,
+  type ValetPlugin,
+  type CredentialDeclaration,
+  type TriggerDef,
+  type VerifiedEvent,
+  type PluginValidationIssue,
+} from "./valet-plugin.js";
+export {
   GateManager,
   DecisionGateWithdrawnError,
   DecisionGateExpiredError,
