@@ -14,14 +14,29 @@ afterEach(async () => {
 
 // `@xyflow/react` (Task 9's editor canvas) measures nodes/viewport via
 // `ResizeObserver` and reads transforms via `DOMMatrixReadOnly` — neither
-// exists in jsdom. Minimal shims: xyflow only needs ResizeObserver to not
-// throw on mount (component tests don't assert on measured layout), and
-// only needs DOMMatrixReadOnly's constructor to exist (it's used to derive
-// pane transforms, never asserted against here).
+// exists in jsdom. Minimal shims: xyflow needs ResizeObserver's `observe`
+// callback to actually fire once (even with jsdom's zero-size layout) so
+// nodes flip to "measured" and edges — including their labels — get drawn;
+// without this, edge/label assertions silently find nothing. Only needs
+// DOMMatrixReadOnly's constructor to exist (it's used to derive pane
+// transforms, never asserted against here).
 if (typeof document !== "undefined") {
   if (typeof globalThis.ResizeObserver === "undefined") {
-    class ResizeObserverShim {
-      observe() {}
+    class ResizeObserverShim implements ResizeObserver {
+      #callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback;
+      }
+      observe(target: Element) {
+        // jsdom never lays elements out, so every dimension here is zero.
+        // xyflow reads `entry.target` (node id lookup) and, for the pane's
+        // own resize observer, `entry.contentRect.{width,height}` — a
+        // zeroed DOMRectReadOnly is a real object satisfying that read, not
+        // a stand-in for layout data we don't have.
+        const contentRect = new DOMRect(0, 0, 0, 0);
+        const entry = { target, contentRect } as ResizeObserverEntry;
+        queueMicrotask(() => this.#callback([entry], this));
+      }
       unobserve() {}
       disconnect() {}
     }
@@ -34,5 +49,30 @@ if (typeof document !== "undefined") {
       constructor(_init?: string) {}
     }
     globalThis.DOMMatrixReadOnly = DOMMatrixReadOnlyShim as typeof DOMMatrixReadOnly;
+  }
+
+  // jsdom never runs layout, so `offsetWidth`/`offsetHeight` are always 0.
+  // xyflow's node-measurement pass (`getDimensions` in @xyflow/system) treats
+  // a zero width/height as "not yet measured" and leaves the node (and any
+  // edge attached to it) hidden forever — the ResizeObserver firing above
+  // isn't enough on its own. Stub a fixed, plausible node size so nodes
+  // flip to measured and edges/labels actually render in these tests.
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+    configurable: true,
+    get: () => 150,
+  });
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get: () => 40,
+  });
+
+  // Edge labels ("when" badges) measure their own text via SVG's `getBBox`,
+  // which jsdom doesn't implement at all (not even as a zero-returning
+  // stub) and throws instead. A fixed box is enough for the label to mount.
+  if (typeof SVGElement !== "undefined" && !("getBBox" in SVGElement.prototype)) {
+    Object.defineProperty(SVGElement.prototype, "getBBox", {
+      configurable: true,
+      value: () => ({ x: 0, y: 0, width: 40, height: 14 }),
+    });
   }
 }

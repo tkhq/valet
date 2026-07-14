@@ -22,9 +22,11 @@ import {
   Background,
   Controls,
   ReactFlow,
+  applyEdgeChanges,
   applyNodeChanges,
   type Connection,
   type Edge,
+  type EdgeChange,
   type NodeChange,
   type Viewport,
 } from "@xyflow/react";
@@ -42,6 +44,39 @@ export interface CanvasProps {
   onSelectNode: (nodeId: string | null) => void;
   onSelectEdge: (edgeId: string | null) => void;
   onViewportChange?: (viewport: FlowViewport) => void;
+  onRemoveNode?: (nodeId: string) => void;
+  onRemoveEdge?: (edgeId: string) => void;
+}
+
+/**
+ * Pure change-routing so remove/position/selection semantics are testable
+ * without going through xyflow's onNodesChange prop plumbing (jsdom can't
+ * cleanly fire real drag/delete gestures). `setNodes` is left to the caller
+ * so xyflow keeps owning array identity during a drag; this function only
+ * decides which callbacks a given batch of changes should trigger.
+ */
+export function routeNodeChanges(
+  changes: NodeChange<FlowXyNode>[],
+  callbacks: {
+    onNodePositionChange: (nodeId: string, position: FlowPosition) => void;
+    onRemoveNode?: (nodeId: string) => void;
+  },
+): void {
+  for (const change of changes) {
+    if (change.type === "position" && change.position && change.dragging === false) {
+      callbacks.onNodePositionChange(change.id, change.position);
+    } else if (change.type === "remove") {
+      callbacks.onRemoveNode?.(change.id);
+    }
+  }
+}
+
+export function routeEdgeChanges(changes: EdgeChange<Edge>[], callbacks: { onRemoveEdge?: (edgeId: string) => void }): void {
+  for (const change of changes) {
+    if (change.type === "remove") {
+      callbacks.onRemoveEdge?.(change.id);
+    }
+  }
 }
 
 function toXyNodes(flow: WorkflowFlowState, errorNodeIds: ReadonlySet<string>): FlowXyNode[] {
@@ -67,6 +102,10 @@ function toXyEdges(flow: WorkflowFlowState): Edge[] {
     target: edge.target,
     sourceHandle: edge.sourceHandle,
     label: edge.data.when,
+    labelStyle: { fill: "var(--ink)", fontSize: 11 },
+    labelBgStyle: { fill: "var(--paper)", stroke: "var(--line)" },
+    labelBgPadding: [4, 2],
+    labelBgBorderRadius: 4,
   }));
 }
 
@@ -78,6 +117,8 @@ export function Canvas({
   onSelectNode,
   onSelectEdge,
   onViewportChange,
+  onRemoveNode,
+  onRemoveEdge,
 }: CanvasProps) {
   const errors = errorNodeIds ?? EMPTY_ERROR_SET;
   const [nodes, setNodes] = useState<FlowXyNode[]>(() => toXyNodes(flow, errors));
@@ -98,11 +139,12 @@ export function Canvas({
 
   function handleNodesChange(changes: NodeChange<FlowXyNode>[]) {
     setNodes((current) => applyNodeChanges(changes, current));
-    for (const change of changes) {
-      if (change.type === "position" && change.position && change.dragging === false) {
-        onNodePositionChange(change.id, change.position);
-      }
-    }
+    routeNodeChanges(changes, { onNodePositionChange, onRemoveNode });
+  }
+
+  function handleEdgesChange(changes: EdgeChange<Edge>[]) {
+    setEdges((current) => applyEdgeChanges(changes, current));
+    routeEdgeChanges(changes, { onRemoveEdge });
   }
 
   function handleConnect(connection: Connection) {
@@ -124,6 +166,7 @@ export function Canvas({
         edges={edges}
         nodeTypes={nodeTypes}
         onNodesChange={handleNodesChange}
+        onEdgesChange={handleEdgesChange}
         onConnect={handleConnect}
         onNodeClick={(_event, node) => onSelectNode(node.id)}
         onEdgeClick={(_event, edge) => onSelectEdge(edge.id)}
