@@ -2,5 +2,6 @@
 // Scans packages/plugin-*/plugin.yaml for `v2: true` (skipping `enabled: false`).
 import type { ValetPlugin } from "@valet/engine";
 import plugin0 from "@valet/plugin-github/plugin";
+import plugin1 from "@valet/plugin-gmail/plugin";
 
-export const bundledPlugins: ValetPlugin[] = [plugin0];
+export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1];
