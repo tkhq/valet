@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
-import type { ChildSpawner, Principal } from "@valet/engine";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
@@ -12,10 +13,38 @@ import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { SqliteCredentialStore } from "../plugins/credential-store.js";
+import { assemblePlugins } from "../plugins/assemble.js";
+import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
+import { bundledPlugins } from "../plugins/registry.gen.js";
 import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { FsBlobStore } from "./blob-fs.js";
 import type { Providers } from "./types.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// packages/api/src/providers -> packages/api
+const apiPkgRoot = resolve(__dirname, "../..");
+// packages/api -> repo root
+const repoRoot = resolve(apiPkgRoot, "../..");
+
+/**
+ * Parses the `VALET_PLUGINS` env var: `allow:pkg1,pkg2` / `deny:pkg1` /
+ * unset (no filtering). Format mirrors what the node_modules loader's
+ * `allowlist`/`denylist` options expect.
+ */
+export function parseValetPluginsEnv(
+  value: string | undefined,
+): { allowlist?: string[]; denylist?: string[] } {
+  if (!value) return {};
+  const [mode, rest] = value.split(":", 2);
+  const names = (rest ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (mode === "allow") return { allowlist: names };
+  if (mode === "deny") return { denylist: names };
+  return {};
+}
 
 export interface NodeProviderOpts {
   /** Path to the sqlite file holding both app + engine schemas. */
@@ -41,6 +70,14 @@ export interface NodeProviderOpts {
    * the host calls `process.exit(137)` right after `beginTerminalize`.
    */
   workflowCrashAt?: "terminalizing";
+  /**
+   * Test-only override for the assembled plugin set. When provided, no
+   * node_modules scan runs and `assemblePlugins` is called with only this
+   * one source: `assemblePlugins([[...plugins]])`. When absent (the normal
+   * boot path), plugins are `assemblePlugins([bundledPlugins,
+   * nodeModulesResult.plugins])`.
+   */
+  plugins?: ValetPlugin[];
 }
 
 export const LOCAL_USER = {
@@ -109,6 +146,23 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db as AppDb & { $client: Database.Database },
     deriveSecretKey(opts.encryptionKey),
   );
+
+  // Plugin loading (plugin-system-v2 plan Task 4): tests supply `opts.plugins`
+  // directly and skip the node_modules scan entirely; the normal boot path
+  // assembles the bundled registry with whatever's discovered on disk.
+  const { allowlist, denylist } = parseValetPluginsEnv(process.env.VALET_PLUGINS);
+  const { plugins, actionPluginByService } = opts.plugins
+    ? assemblePlugins([[...opts.plugins]])
+    : assemblePlugins([
+        bundledPlugins,
+        (
+          await loadNodeModulesPlugins({
+            searchPaths: [resolve(apiPkgRoot, "node_modules"), resolve(repoRoot, "node_modules")],
+            allowlist,
+            denylist,
+          })
+        ).plugins,
+      ]);
 
   // Circular construction: EngineHost needs the ChildSpawner at construction
   // time (it's baked into every orchestrator session's toolConfig), but the
@@ -198,5 +252,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     childWatcher,
     workflowStore,
     workflowRunHost,
+    plugins,
+    actionPluginByService,
   };
 }

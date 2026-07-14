@@ -682,7 +682,7 @@ bootstrap-secrets: ## Set required worker secrets (interactive)
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)
 
 generate-registries: ## Generate auto-discovered plugin registry files
-	@cd packages/worker && bun scripts/generate-plugin-registry.ts
+	@pnpm tsx scripts/generate-v2-registry.ts
 
 release: ## Full idempotent release: install, build, push image, deploy all
 	@echo "$(GREEN)========================================$(NC)"

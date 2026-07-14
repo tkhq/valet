@@ -1,0 +1,104 @@
+/**
+ * Plugin assembly (plugin-system-v2 plan Task 4).
+ *
+ * `assemblePlugins` flattens loader outputs (bundled registry, node_modules
+ * scan, test overrides — one array per source, in priority order) into the
+ * final plugin set a session/host uses. Loaders can legitimately return the
+ * same plugin twice (e.g. a workspace plugin symlinked into node_modules AND
+ * present in the bundled registry) — the earlier source wins, silently.
+ * What must never collide is two DIFFERENT plugins claiming the same action
+ * service; that's a real configuration error and throws loudly with both
+ * plugin names named.
+ *
+ * `pluginSessionExtras` turns an assembled plugin set into the pieces a
+ * session needs (tools/skills/roles) — see its own doc comment for the
+ * per-call cache-freshness constraint.
+ */
+import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
+import type { RoleSpec, SkillSource, ToolDef } from "@valet/engine";
+
+export interface AssembledPlugins {
+  plugins: ValetPlugin[];
+  actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+}
+
+/**
+ * Flattens loader outputs (in priority order — earlier sources win) into
+ * one deduped plugin set, plus a service→plugin index for Task 6's
+ * ActionInvoker.
+ *
+ * Dedupe rule: a plugin `name` seen more than once (whether within one
+ * source or across sources) keeps only the FIRST occurrence — this is
+ * expected when a workspace plugin is discoverable via more than one
+ * loader, so it is not an error.
+ *
+ * Collision rule: two DIFFERENT plugin names that each declare an
+ * `ActionPlugin` for the same `service` IS an error (ambiguous routing for
+ * that service's credentials and catalog entries) — throws naming both
+ * plugins.
+ *
+ * Within a single source, two plugins sharing a `name` is a hard error (the
+ * loader that produced them is broken); across sources it's the expected
+ * dedupe case above and is not an error.
+ */
+export function assemblePlugins(sources: ValetPlugin[][]): AssembledPlugins {
+  const plugins: ValetPlugin[] = [];
+  const seenNames = new Set<string>();
+  const actionPluginByService = new Map<
+    string,
+    { plugin: ValetPlugin; actionPlugin: ActionPlugin }
+  >();
+
+  for (const source of sources) {
+    const seenInSource = new Set<string>();
+    for (const plugin of source) {
+      if (seenInSource.has(plugin.name)) {
+        throw new Error(`duplicate plugin name "${plugin.name}" within a single plugin source`);
+      }
+      seenInSource.add(plugin.name);
+
+      if (seenNames.has(plugin.name)) continue;
+      seenNames.add(plugin.name);
+      plugins.push(plugin);
+
+      for (const actionPlugin of plugin.actions ?? []) {
+        const existing = actionPluginByService.get(actionPlugin.service);
+        if (existing && existing.plugin.name !== plugin.name) {
+          throw new Error(
+            `plugin service collision: "${actionPlugin.service}" is claimed by both ` +
+              `"${existing.plugin.name}" and "${plugin.name}"`,
+          );
+        }
+        actionPluginByService.set(actionPlugin.service, { plugin, actionPlugin });
+      }
+    }
+  }
+
+  return { plugins, actionPluginByService };
+}
+
+export interface PluginSessionExtras {
+  tools: ToolDef[];
+  skills: SkillSource[];
+  roles: RoleSpec[];
+}
+
+/**
+ * Builds the session-facing extras (tools/skills/roles) from an assembled
+ * plugin set.
+ *
+ * IMPORTANT: this builds a FRESH `pluginCatalogTools({ plugins })` result on
+ * every call — never hoist/cache the returned `tools` array in module
+ * scope. `pluginCatalogTools`'s dynamic-action-resolution TTL cache
+ * (`resolveActions`) lives on the `Catalog` instance it returns, i.e. it is
+ * per-call/per-session state. Caching the tools array across sessions would
+ * leak one session's dynamically-resolved actions (and their TTL clock)
+ * into every other session sharing the plugin set.
+ */
+export function pluginSessionExtras(plugins: ValetPlugin[]): PluginSessionExtras {
+  const actionPlugins = plugins.flatMap((p) => p.actions ?? []);
+  const tools = actionPlugins.length > 0 ? pluginCatalogTools({ plugins: actionPlugins }) : [];
+  const skills = plugins.flatMap((p) => p.skills ?? []);
+  const roles = plugins.flatMap((p) => p.roles ?? []);
+  return { tools, skills, roles };
+}

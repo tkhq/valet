@@ -19,6 +19,7 @@ import {
   VirtualSandboxProvider,
   type ChildSpawner,
   type SandboxProvider,
+  type ValetPlugin,
 } from "@valet/engine";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
@@ -28,6 +29,7 @@ import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { SqliteCredentialStore } from "../plugins/credential-store.js";
+import { assemblePlugins } from "../plugins/assemble.js";
 import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { createApp } from "../app.js";
@@ -51,6 +53,9 @@ export interface BootTestApiOpts {
    * the poll/sweep loops.
    */
   workflowRunHost?: RunHost;
+  /** Plugin set for the assembled `Providers.plugins`/`actionPluginByService`
+   * — tests never scan node_modules; default `[]`. */
+  plugins?: ValetPlugin[];
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -182,6 +187,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // caller-supplied stub owns its own lifecycle (or has none).
   if (!opts.workflowRunHost) workflowRunHost.startHost();
 
+  const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
+
   const providers: Providers = {
     db,
     blobs,
@@ -194,6 +201,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     childWatcher,
     workflowStore,
     workflowRunHost,
+    plugins,
+    actionPluginByService,
   };
 
   const { app, injectWebSocket } = createApp(providers);
