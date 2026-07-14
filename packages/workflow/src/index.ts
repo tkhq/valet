@@ -30,3 +30,16 @@ export { parseDurationMs } from './dag/duration.js';
 
 export { validateWorkflowDefinition } from './dag/validate.js';
 export type { ValidationResult } from './dag/validate.js';
+
+export { WorkflowFenceError } from './store.js';
+export type {
+  NodeCheckpoint,
+  RunParams,
+  RunParkState,
+  RunSignal,
+  RunWaitCondition,
+  WorkflowRun,
+  WorkflowStore,
+} from './store.js';
+
+export { InMemoryWorkflowStore } from './memory-store.js';
