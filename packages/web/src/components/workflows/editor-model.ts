@@ -380,7 +380,12 @@ export function duplicateNode(definition: WorkflowDefinition, nodeId: string): A
   if (!node || node.type === 'trigger') return null;
 
   const id = createNodeId(node.type, definition.nodes.map((n) => n.id));
-  const clone = { ...node, id };
+  // A foreach's nested body carries its own id, which must stay unique
+  // across ALL foreach bodies (validator rule) — a shallow clone would
+  // alias the original's body id. Re-key it off the new foreach id, the
+  // same `{id}-body` convention NODE_META's default factory uses.
+  const clone =
+    node.type === 'foreach' ? { ...node, id, body: { ...node.body, id: `${id}-body` } } : { ...node, id };
   const sourcePosition = definition.ui?.nodes?.[nodeId]?.position ?? { x: 0, y: 0 };
   const position = { x: sourcePosition.x + 40, y: sourcePosition.y + 40 };
 

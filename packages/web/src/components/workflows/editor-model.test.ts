@@ -319,6 +319,24 @@ describe('addNode / removeNode / duplicateNode / updateNode', () => {
     expect(duplicateNode(baseDefinition(), 'trigger')).toBeNull();
   });
 
+  it('duplicating a foreach re-keys the nested body id (cross-foreach uniqueness)', () => {
+    const base = baseDefinition();
+    const added = addNode(base, 'foreach');
+    const result = duplicateNode(added.definition, added.nodeId);
+    expect(result).not.toBeNull();
+    if (!result) return;
+    const dup = result.definition.nodes.find((n) => n.id === result.nodeId);
+    expect(dup?.type).toBe('foreach');
+    if (dup?.type !== 'foreach') return;
+    expect(dup.body.id).toBe(`${result.nodeId}-body`);
+    // The whole point: no cross-foreach body-id collision. The default
+    // factory's empty `items` is the ONLY acceptable complaint.
+    const validation = validateWorkflowDefinition(result.definition);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) return;
+    expect(validation.errors.every((e) => e.includes('foreach.items must be a non-empty string'))).toBe(true);
+  });
+
   it('updates fields on an existing node while pinning id and type', () => {
     const definition = baseDefinition();
     const next = updateNode(definition, 'start', { values: { ok: false }, id: 'ignored', type: 'llm' });
