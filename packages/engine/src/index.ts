@@ -76,6 +76,8 @@ export {
 } from "./builtin-tools/index.js";
 export {
   pluginCatalogTools,
+  prepareActionArgs,
+  RESOLVE_TTL_MS,
   type ActionPlugin,
   type ApprovalMode,
   type PluginAction,

@@ -1,6 +1,8 @@
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
 import type {
+  CredentialProvider,
   RiskLevel,
   ToolAttachment,
   ToolContext,
@@ -91,10 +93,53 @@ export interface ActionPlugin {
    * low/medium → allow; high/critical → require_approval.
    */
   defaultApprovalMode?: ApprovalMode;
+  /**
+   * Dynamic action discovery seam for MCP-proxy-style plugins whose action
+   * list isn't known statically (e.g. depends on what an upstream MCP
+   * server advertises for the connected credential). MUST be idempotent —
+   * the catalog may call it repeatedly (subject to the TTL cache) — and MAY
+   * throw; callers (list_tools/call_tool) turn a throw into a warning or
+   * error string rather than propagating it to the LLM turn. Called with a
+   * credential provider scoped to this plugin's `credentialService` (or
+   * `service` when unset), matching the scoping `call_tool` gives to
+   * `execute`.
+   */
+  resolveActions?: (ctx: { credentials: CredentialProvider }) => Promise<PluginAction[]>;
 }
 
 export interface PluginCatalogOptions {
   plugins: ActionPlugin[];
+  /** Clock used for the dynamic-action-resolution TTL cache. Default: Date.now. */
+  clock?: () => number;
+}
+
+/** TTL for the dynamic `resolveActions` cache, keyed per plugin service. */
+export const RESOLVE_TTL_MS = 300_000;
+
+/**
+ * Applies TypeBox `Value.Default` to a cloned copy of `params`, then
+ * validates the result against `schema`. Returns the defaulted+validated
+ * args on success, or a compact error string (first 3 Value.Errors paths)
+ * on failure. Used by `call_tool` to validate LLM-supplied params before
+ * they reach a plugin action's `execute` body, and reused by Task 6's
+ * ActionInvoker for the same purpose outside the catalog flow.
+ */
+export function prepareActionArgs(
+  schema: TSchema,
+  params: Record<string, unknown> | undefined,
+): { ok: true; args: Record<string, unknown> } | { ok: false; error: string } {
+  // Value.Default's return type is `unknown` by design (see typebox docs) —
+  // callers are expected to Check before use, which we do immediately below.
+  const withDefaults = Value.Default(schema, structuredClone(params ?? {})) as Record<
+    string,
+    unknown
+  >;
+  if (Value.Check(schema, withDefaults)) {
+    return { ok: true, args: withDefaults };
+  }
+  const errors = [...Value.Errors(schema, withDefaults)].slice(0, 3);
+  const detail = errors.map((e) => `${e.instancePath || "/"}: ${e.message}`).join("; ");
+  return { ok: false, error: detail || "params did not match the schema" };
 }
 
 // ── Public API ────────────────────────────────────────────────────
@@ -104,7 +149,8 @@ export interface PluginCatalogOptions {
  * assembled from every ActionPlugin in `opts.plugins`.
  */
 export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
-  const catalog = buildCatalog(opts.plugins);
+  const now = opts.clock ?? Date.now;
+  const catalog = buildCatalog(opts.plugins, now);
   return [makeListTool(catalog), makeCallTool(catalog)];
 }
 
@@ -116,14 +162,44 @@ interface CatalogEntry {
   action: PluginAction;
 }
 
+interface ResolvedDynamic {
+  entries: CatalogEntry[];
+  byId: Map<string, CatalogEntry>;
+  fetchedAt: number;
+}
+
 interface Catalog {
   entries: CatalogEntry[];
   byId: Map<string, CatalogEntry>;
+  /** Plugins with a `resolveActions` seam, resolved on demand (not eagerly at catalog build). */
+  dynamicPlugins: ActionPlugin[];
+  /** TTL cache of resolved dynamic actions, keyed by plugin service. */
+  resolved: Map<string, ResolvedDynamic>;
+  now: () => number;
 }
 
-function buildCatalog(plugins: ActionPlugin[]): Catalog {
+function buildEntries(
+  service: string,
+  plugin: ActionPlugin,
+  actions: PluginAction[],
+): { entries: CatalogEntry[]; byId: Map<string, CatalogEntry> } {
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
+  for (const action of actions) {
+    const entry: CatalogEntry = { service, plugin, action };
+    entries.push(entry);
+    const fqid = action.id.includes(".") ? action.id : `${service}.${action.id}`;
+    byId.set(fqid, entry);
+    // Allow a bare id lookup when unambiguous.
+    if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);
+  }
+  return { entries, byId };
+}
+
+function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
+  const entries: CatalogEntry[] = [];
+  const byId = new Map<string, CatalogEntry>();
+  const dynamicPlugins: ActionPlugin[] = [];
   for (const plugin of plugins) {
     for (const action of plugin.actions) {
       const entry: CatalogEntry = { service: plugin.service, plugin, action };
@@ -133,8 +209,37 @@ function buildCatalog(plugins: ActionPlugin[]): Catalog {
       // Allow a bare id lookup when unambiguous.
       if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);
     }
+    if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId };
+  return { entries, byId, dynamicPlugins, resolved: new Map(), now };
+}
+
+/**
+ * Resolve (with TTL caching) the dynamic action set for one plugin.
+ * Throws propagate to the caller — list_tools turns them into a warning,
+ * call_tool turns them into an error-text tool result.
+ */
+async function resolveDynamic(
+  catalog: Catalog,
+  plugin: ActionPlugin,
+  ctx: ToolContext,
+): Promise<ResolvedDynamic> {
+  const now = catalog.now();
+  const cached = catalog.resolved.get(plugin.service);
+  if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) {
+    return cached;
+  }
+  // resolveActions is guaranteed present on every entry of dynamicPlugins.
+  const resolveActions = plugin.resolveActions;
+  if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
+  const credentialService = plugin.credentialService ?? plugin.service;
+  const actions = await resolveActions({
+    credentials: scopedCredentialProvider(ctx, credentialService),
+  });
+  const built = buildEntries(plugin.service, plugin, actions);
+  const result: ResolvedDynamic = { ...built, fetchedAt: now };
+  catalog.resolved.set(plugin.service, result);
+  return result;
 }
 
 // ── list_tools ───────────────────────────────────────────────────
@@ -172,26 +277,47 @@ function makeListTool(catalog: Catalog): ToolDef {
       const limit = clamp(a.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
       const q = a.query?.toLowerCase();
 
+      const matchesQuery = (action: PluginAction): boolean =>
+        !q ||
+        action.id.toLowerCase().includes(q) ||
+        action.name.toLowerCase().includes(q) ||
+        action.description.toLowerCase().includes(q);
+
       let entries = catalog.entries;
       if (a.service) entries = entries.filter((e) => e.service === a.service);
-      if (q) {
-        entries = entries.filter((e) => {
-          const action = e.action;
-          return (
-            action.id.toLowerCase().includes(q) ||
-            action.name.toLowerCase().includes(q) ||
-            action.description.toLowerCase().includes(q)
-          );
-        });
+      if (q) entries = entries.filter((e) => matchesQuery(e.action));
+
+      const warnings: Array<{ service: string; reason: string }> = [];
+
+      // Merge in dynamic (resolveActions-backed) plugins whose service
+      // passes the filter. Discovery failures become warnings, not throws.
+      const dynamicServicesConsidered = new Set<string>();
+      for (const plugin of catalog.dynamicPlugins) {
+        if (a.service && plugin.service !== a.service) continue;
+        dynamicServicesConsidered.add(plugin.service);
+        try {
+          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+          const dynEntries = q
+            ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
+            : resolvedDyn.entries;
+          entries = entries.concat(dynEntries);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          warnings.push({ service: plugin.service, reason: `action discovery failed: ${message}` });
+        }
       }
 
       // Per-service auth warnings: probe each represented service's
       // credentials and report missing ones so the LLM can ask the user.
+      // Covers both statically- and dynamically-sourced services, including
+      // dynamic-only services whose discovery failed above.
       const services = new Set(entries.map((e) => e.service));
-      const warnings: Array<{ service: string; reason: string }> = [];
+      for (const service of dynamicServicesConsidered) services.add(service);
       for (const service of services) {
         const credService =
-          catalog.entries.find((e) => e.service === service)?.plugin.credentialService ?? service;
+          catalog.entries.find((e) => e.service === service)?.plugin.credentialService ??
+          catalog.dynamicPlugins.find((p) => p.service === service)?.credentialService ??
+          service;
         const cred = await ctx.credentials.get(credService);
         if (!cred) warnings.push({ service, reason: "no credential connected" });
       }
@@ -250,7 +376,23 @@ function makeCallTool(catalog: Catalog): ToolDef {
         params?: Record<string, unknown>;
         summary: string;
       };
-      const entry = catalog.byId.get(a.tool_id);
+      let entry = catalog.byId.get(a.tool_id);
+      if (!entry) {
+        const dotIdx = a.tool_id.indexOf(".");
+        if (dotIdx > 0) {
+          const prefix = a.tool_id.slice(0, dotIdx);
+          const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
+          if (plugin) {
+            try {
+              const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+              entry = resolvedDyn.byId.get(a.tool_id);
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              return { text: `error resolving ${prefix} tools: ${message}` };
+            }
+          }
+        }
+      }
       if (!entry) {
         return {
           text: `unknown tool_id: "${a.tool_id}". Use list_tools to find available actions.`,
@@ -279,6 +421,14 @@ function makeCallTool(catalog: Catalog): ToolDef {
         }
       }
 
+      // Validate (and apply schema defaults to) LLM-supplied params before
+      // they reach the plugin action's execute body — closes the gap where
+      // unvalidated params flowed straight into plugin code.
+      const prepared = prepareActionArgs(entry.action.parameters, a.params);
+      if (!prepared.ok) {
+        return { text: `invalid params for ${a.tool_id}: ${prepared.error}` };
+      }
+
       // Build the plugin action context. credentialService routing is
       // per-plugin; the action sees the same ToolContext shape plus
       // actionId/service/summary, with credentials defaulting to the
@@ -295,7 +445,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
       let result: PluginActionResult;
       try {
         result = await entry.action.execute(
-          (a.params ?? {}) as Static<typeof entry.action.parameters>,
+          prepared.args as Static<typeof entry.action.parameters>,
           actionCtx,
         );
       } catch (err) {

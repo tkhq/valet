@@ -3,6 +3,8 @@ import { Type } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
 import {
   pluginCatalogTools,
+  prepareActionArgs,
+  RESOLVE_TTL_MS,
   Engine,
   InMemoryCredentialStore,
   InMemoryEventStream,
@@ -10,9 +12,15 @@ import {
   VirtualSandboxProvider,
   type ActionPlugin,
   type BusEvent,
+  type Credential,
+  type CredentialProvider,
+  type DecisionResolution,
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  type Sandbox,
+  type SessionEntry,
+  type ToolContext,
 } from "../src/index.js";
 
 function makeMockPlugin(): {
@@ -447,5 +455,211 @@ describe("pluginCatalogTools: call_tool", () => {
     ).toContain("did not approve");
 
     faux.unregister();
+  });
+});
+
+// ── Direct-invocation ctx helper (mirrors task-tool.test.ts / bash-job-mode.test.ts) ──
+
+type FakeSandbox = Partial<Sandbox> & { id: string };
+
+const stubCredentials: CredentialProvider = {
+  get: async (): Promise<Credential | null> => null,
+  request: async (): Promise<Credential> => {
+    throw new Error("not implemented in test stub");
+  },
+};
+
+function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
+  const sandbox: FakeSandbox = { id: "sb-1" };
+  return {
+    userId: "u1",
+    orgId: "o1",
+    sessionId: "s1",
+    threadId: "t1",
+    credentials: stubCredentials,
+    sandbox: sandbox as Sandbox,
+    requestDecision: async (): Promise<DecisionResolution> => {
+      throw new Error("not implemented in test stub");
+    },
+    signal: new AbortController().signal,
+    threadRead: async (): Promise<SessionEntry[]> => [],
+    listThreads: async () => [],
+    setModel: async ({ model }: { model: string }) => ({ fromModel: model, toModel: model }),
+    ...overrides,
+  };
+}
+
+function makeDynamicPlugin(
+  service: string,
+  resolveActions: ActionPlugin["resolveActions"],
+): ActionPlugin {
+  return { service, actions: [], resolveActions };
+}
+
+describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
+  it("list_tools merges resolveActions results with static actions", async () => {
+    const { plugin: staticPlugin } = makeMockPlugin();
+    const dynamicAction: PluginAction = {
+      id: "notion.search_pages",
+      name: "Search Pages",
+      description: "Search Notion pages.",
+      riskLevel: "low",
+      parameters: Type.Object({ query: Type.String() }),
+      execute: async () => ({ success: true, data: { pages: [] } }),
+    };
+    const dynamicPlugin = makeDynamicPlugin("notion", async () => [dynamicAction]);
+
+    const [listTool] = pluginCatalogTools({ plugins: [staticPlugin, dynamicPlugin] });
+    const result = await listTool.execute({}, makeCtx());
+    const payload = JSON.parse(result.text) as { tools: Array<{ tool_id: string }> };
+    const ids = payload.tools.map((t) => t.tool_id).sort();
+    expect(ids).toEqual([
+      "github.create_issue",
+      "github.delete_repo",
+      "github.get_issue",
+      "notion.search_pages",
+    ]);
+  });
+
+  it("resolveActions failure surfaces a warning without throwing, static tools still listed", async () => {
+    const { plugin: staticPlugin } = makeMockPlugin();
+    const dynamicPlugin = makeDynamicPlugin("notion", async () => {
+      throw new Error("upstream 500");
+    });
+
+    const [listTool] = pluginCatalogTools({ plugins: [staticPlugin, dynamicPlugin] });
+    const result = await listTool.execute({}, makeCtx());
+    const payload = JSON.parse(result.text) as {
+      tools: Array<{ tool_id: string }>;
+      warnings?: Array<{ service: string; reason: string }>;
+    };
+    expect(payload.tools.map((t) => t.tool_id).sort()).toEqual([
+      "github.create_issue",
+      "github.delete_repo",
+      "github.get_issue",
+    ]);
+    const warning = payload.warnings?.find((w) => w.service === "notion");
+    expect(warning?.reason).toMatch(/action discovery failed/);
+  });
+
+  it("caches resolveActions within RESOLVE_TTL_MS and refetches after it elapses", async () => {
+    let now = 1_000_000;
+    let calls = 0;
+    const dynamicAction: PluginAction = {
+      id: "notion.search_pages",
+      name: "Search Pages",
+      description: "Search Notion pages.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    const dynamicPlugin = makeDynamicPlugin("notion", async () => {
+      calls++;
+      return [dynamicAction];
+    });
+
+    const [listTool] = pluginCatalogTools({
+      plugins: [dynamicPlugin],
+      clock: () => now,
+    });
+
+    await listTool.execute({}, makeCtx());
+    expect(calls).toBe(1);
+
+    await listTool.execute({}, makeCtx());
+    expect(calls).toBe(1);
+
+    now += RESOLVE_TTL_MS + 1;
+    await listTool.execute({}, makeCtx());
+    expect(calls).toBe(2);
+  });
+
+  it("call_tool resolves and executes a dynamic-only tool_id", async () => {
+    let executed: unknown;
+    const dynamicAction: PluginAction = {
+      id: "notion.search_pages",
+      name: "Search Pages",
+      description: "Search Notion pages.",
+      riskLevel: "low",
+      parameters: Type.Object({ query: Type.String() }),
+      execute: async (args) => {
+        executed = args;
+        return { success: true, data: { ok: true } };
+      },
+    };
+    const dynamicPlugin = makeDynamicPlugin("notion", async () => [dynamicAction]);
+
+    const [, callTool] = pluginCatalogTools({ plugins: [dynamicPlugin] });
+    const result = await callTool.execute(
+      { tool_id: "notion.search_pages", params: { query: "roadmap" }, summary: "search" },
+      makeCtx(),
+    );
+    expect(executed).toEqual({ query: "roadmap" });
+    expect(result.text).toContain("ok");
+  });
+});
+
+describe("pluginCatalogTools: call_tool param validation", () => {
+  it("rejects params that fail the schema and does not call execute", async () => {
+    let executeCalled = false;
+    const plugin: ActionPlugin = {
+      service: "test",
+      actions: [
+        {
+          id: "test.needs_num",
+          name: "Needs Num",
+          description: "requires a number",
+          riskLevel: "low",
+          parameters: Type.Object({ n: Type.Number() }),
+          execute: async () => {
+            executeCalled = true;
+            return { success: true, data: {} };
+          },
+        },
+      ],
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute(
+      { tool_id: "test.needs_num", params: { n: "not a number" }, summary: "bad call" },
+      makeCtx(),
+    );
+    expect(result.text).toContain("invalid params for test.needs_num");
+    expect(executeCalled).toBe(false);
+  });
+
+  it("applies TypeBox default annotations before execute", async () => {
+    let received: unknown;
+    const plugin: ActionPlugin = {
+      service: "test",
+      actions: [
+        {
+          id: "test.with_default",
+          name: "With Default",
+          description: "has a defaulted param",
+          riskLevel: "low",
+          parameters: Type.Object({ n: Type.Optional(Type.Number({ default: 25 })) }),
+          execute: async (args) => {
+            received = args;
+            return { success: true, data: {} };
+          },
+        },
+      ],
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    await callTool.execute(
+      { tool_id: "test.with_default", params: {}, summary: "use default" },
+      makeCtx(),
+    );
+    expect(received).toEqual({ n: 25 });
+  });
+});
+
+describe("prepareActionArgs", () => {
+  it("does not mutate the caller's params object when applying defaults", () => {
+    const schema = Type.Object({ n: Type.Optional(Type.Number({ default: 25 })) });
+    const params = {};
+    const result = prepareActionArgs(schema, params);
+    expect(result.ok).toBe(true);
+    expect(params).toEqual({});
   });
 });
