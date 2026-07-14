@@ -244,7 +244,7 @@ async function handleOutcome<TDispatched, TSettled>(
 }
 
 /** Shared repair-prompt text for both `session` and `orchestrator` — schema + validation error, requesting corrected JSON only. */
-export function buildRepairPrompt(schema: Record<string, unknown>, validationError: string | undefined): string {
+function buildRepairPrompt(schema: Record<string, unknown>, validationError: string | undefined): string {
   const errorText = validationError ?? 'result did not match the schema';
   return [
     'Your previous response did not match the required JSON schema.',

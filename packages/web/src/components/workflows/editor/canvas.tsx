@@ -1,9 +1,9 @@
 /**
  * The composed xyflow canvas surface (plan decision 10, canvas half).
  *
- * Deliberately "dumb": it owns no workflow state. The parent (Task 10's
- * inspector container, Task 11's route) owns an `EditorModel` and passes
- * down its current `toFlow()` snapshot plus an `errorNodeIds` set derived
+ * Deliberately "dumb": it owns no workflow state. The parent (`editor.tsx`)
+ * owns the `WorkflowDefinition` via the editor-model's pure functions and
+ * passes down its current `toFlow()` snapshot plus an `errorNodeIds` set derived
  * from `validate()`. Local xyflow node/edge arrays exist only so dragging
  * feels smooth (xyflow needs to own the array identity during a drag
  * gesture); every drag-end and connect immediately calls back up into the

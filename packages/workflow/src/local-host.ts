@@ -286,13 +286,17 @@ export class LocalRunHost implements RunHost {
             : undefined,
       });
       await this.afterPark(runId, park);
-    } catch {
+    } catch (err) {
       // Any failure here — a `WorkflowFenceError` from a superseded attempt,
       // a genuine executor error, or (decision 20) the crash hook's thrown
-      // `exit` — is swallowed. The lease is abandoned as-is; either the
-      // sweep, a future poll's expired-lease reclaim, or an external wake
-      // will pick the run back up. There is nothing safe to do with the
-      // error here that the next claim attempt doesn't already handle.
+      // `exit` — abandons the lease as-is; either the sweep, a future poll's
+      // expired-lease reclaim, or an external wake will pick the run back
+      // up. Retry-via-reclaim is the durability posture, but the error must
+      // NOT be silent: a deterministic throw (bad deps wiring, contract
+      // violation) turns into an invisible infinite retry loop otherwise —
+      // exactly the failure mode that made the orchestrator wake-path bug
+      // cost a debugging session.
+      console.error(`workflow drive failed for ${runId} (lease abandoned; will be reclaimed):`, err);
     } finally {
       clearInterval(heartbeat);
     }
