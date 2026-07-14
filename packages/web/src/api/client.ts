@@ -7,21 +7,28 @@
  * auth lands we'll wire token storage here.
  */
 import type {
+  CancelWorkflowRunResponse,
   CreateSessionRequest,
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  CreateWorkflowRequest,
+  CreateWorkflowResponse,
   EnsureOrchestratorResponse,
   GetMemoryTreeResponse,
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
   GetSessionResponse,
+  GetWorkflowResponse,
+  GetWorkflowRunResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
+  ListWorkflowRunsResponse,
+  ListWorkflowsResponse,
   MeResponse,
   PatchOrchestratorInfoRequest,
   PatchOrchestratorInfoResponse,
@@ -30,9 +37,15 @@ import type {
   PatchThreadRequest,
   PatchThreadResponse,
   ResolveDecisionRequest,
+  ResolveWorkflowApprovalRequest,
+  ResolveWorkflowApprovalResponse,
   SendPromptRequest,
   SendPromptResponse,
   SetNotificationPreferenceRequest,
+  StartWorkflowRunRequest,
+  StartWorkflowRunResponse,
+  UpdateWorkflowRequest,
+  UpdateWorkflowResponse,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
 import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
@@ -180,6 +193,40 @@ export const api = {
     request<ListNotificationPreferencesResponse>("GET", "/notifications/preferences"),
   setNotificationPreference: (body: SetNotificationPreferenceRequest) =>
     request<{ ok: true }>("PUT", "/notifications/preferences", body),
+
+  // workflows (engine v2 Phase 5 decision 19)
+  listWorkflows: () => request<ListWorkflowsResponse>("GET", "/workflows"),
+  getWorkflow: (id: string) =>
+    request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
+  createWorkflow: (body: CreateWorkflowRequest) =>
+    request<CreateWorkflowResponse>("POST", "/workflows", body),
+  updateWorkflow: (id: string, body: UpdateWorkflowRequest) =>
+    request<UpdateWorkflowResponse>("PUT", `/workflows/${encodeURIComponent(id)}`, body),
+  startWorkflowRun: (id: string, body: StartWorkflowRunRequest = {}) =>
+    request<StartWorkflowRunResponse>(
+      "POST",
+      `/workflows/${encodeURIComponent(id)}/runs`,
+      body,
+    ),
+  listWorkflowRuns: (id: string) =>
+    request<ListWorkflowRunsResponse>("GET", `/workflows/${encodeURIComponent(id)}/runs`),
+  getWorkflowRun: (runId: string) =>
+    request<GetWorkflowRunResponse>("GET", `/workflows/runs/${encodeURIComponent(runId)}`),
+  resolveWorkflowApproval: (
+    runId: string,
+    nodeId: string,
+    body: ResolveWorkflowApprovalRequest,
+  ) =>
+    request<ResolveWorkflowApprovalResponse>(
+      "POST",
+      `/workflows/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(nodeId)}`,
+      body,
+    ),
+  cancelWorkflowRun: (runId: string) =>
+    request<CancelWorkflowRunResponse>(
+      "POST",
+      `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
+    ),
 };
 
 export { ApiError };
