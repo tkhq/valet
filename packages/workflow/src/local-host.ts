@@ -227,6 +227,9 @@ export class LocalRunHost implements RunHost {
         const capacity = this.concurrency - this.inFlight.size;
         if (capacity <= 0) break;
         const runnable = await this.store.listRunnable(this.clock(), capacity);
+        // Re-check after the await: stopHost may have run while suspended,
+        // and a drive started past this point would escape its Promise.all.
+        if (!this.running) break;
         for (const run of runnable) {
           if (this.inFlight.has(run.runId)) continue;
           this.claimAndDrive(run.runId);
