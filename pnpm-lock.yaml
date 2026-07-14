@@ -38,6 +38,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/plugin-github':
+        specifier: workspace:*
+        version: link:../plugin-github
       '@valet/sandbox-docker':
         specifier: workspace:*
         version: link:../sandbox-docker

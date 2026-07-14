@@ -5,9 +5,16 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "valet": {
+    "plugin": "./dist/plugin.js"
+  },
   "exports": {
     "./actions": "./src/actions/index.ts",
-    "./repo": "./src/repo.ts"
+    "./repo": "./src/repo.ts",
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    }
   },
   "scripts": {
     "build": "tsc",
