@@ -410,6 +410,34 @@ describe('validateWorkflowDefinition', () => {
       }
     });
 
+    it('rejects two foreach nodes sharing the same body id, naming both foreach nodes', () => {
+      const definition: WorkflowDefinition = JSON.parse(
+        JSON.stringify({
+          version: 'dag/v1',
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            { id: 'loop-a', type: 'foreach', items: '${trigger.data.items}', body: { id: 'body', type: 'set', values: {} } },
+            { id: 'loop-b', type: 'foreach', items: '${trigger.data.items}', body: { id: 'body', type: 'set', values: {} } },
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'loop-a' },
+            { from: 'loop-a', to: 'loop-b' },
+            { from: 'loop-b', to: 'stop' },
+          ],
+        }),
+      );
+      const result = validateWorkflowDefinition(definition);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some(
+            (e) => e.includes(JSON.stringify('body')) && e.includes('loop-a') && e.includes('loop-b'),
+          ),
+        ).toBe(true);
+      }
+    });
+
     it('validates the body node\'s own type-specific rules, naming the foreach and body', () => {
       const result = validateWorkflowDefinition(
         foreachDefinition({ body: { id: 'loop-body', type: 'llm', model: '', prompt: 'x' } }),

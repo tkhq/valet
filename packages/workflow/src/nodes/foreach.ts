@@ -61,11 +61,14 @@
  *     known: already-terminal iterations keep their real status, and every
  *     other iteration (still `intent`/in-flight, or never reached) is
  *     recorded as `{status:'skipped'}`. The foreach node itself is marked
- *     `failed`. Any body iterations left parked are NOT actively aborted
- *     by this executor (`engine.abort` is only ever called by the
- *     interpreter's cancel/terminate paths, which never see these
- *     sub-run-level submissions) — they are simply abandoned; the run
- *     settles `failed` without waiting on them.
+ *     `failed`. Body iterations left in-flight (this pass's `waitingOn`,
+ *     or an earlier pass's still-`intent` checkpoint the break never
+ *     revisited) are aborted best-effort by this executor itself
+ *     (`session`/`orchestrator` bodies persist a `{sessionId,
+ *     receipt:{threadId, queueItemId}}` effects shape this reads back for
+ *     `engine.abort`) before returning failed — the interpreter's
+ *     cancel/terminate paths never see these sub-run-level submissions, so
+ *     nothing else would ever abort them.
  *
  * ─── Aggregate result ────────────────────────────────────────────────────
  * Once every item (0..count-1) has a terminal outcome for this pass (i.e.
@@ -238,6 +241,37 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
   }
 
   if (failure !== undefined) {
+    // Best-effort: abort every body submission left in-flight because of
+    // this failure — both ones this pass just parked (`waitingOn`) and
+    // ones that were already parked from an earlier pass and never got
+    // revisited this pass because the fail-mode break happened at a lower
+    // index (see module doc's "Any body iterations left parked" note,
+    // updated by this fix). Must run BEFORE the placeholder-fill loop
+    // below, which would otherwise erase the "never resolved this pass"
+    // signal `results[i] === undefined` relies on. Deduped by
+    // sessionId+threadId; a throw from any single abort must not mask the
+    // failure this executor is about to return.
+    const abortTargets = new Map<string, { sessionId: string; threadId: string }>();
+    for (const wait of waitingOn) {
+      if (wait.kind !== 'submission') continue;
+      abortTargets.set(`${wait.sessionId}:${wait.threadId}`, { sessionId: wait.sessionId, threadId: wait.threadId });
+    }
+    for (let i = 0; i < items.length; i++) {
+      if (results[i] !== undefined) continue; // resolved this pass, or already terminal from an earlier pass
+      const cp = bodyCheckpoints.get(i);
+      if (cp === undefined || cp.status !== 'intent') continue;
+      const target = extractSubmissionTarget(cp);
+      if (target === undefined) continue; // no receipt persisted yet (or a non-submission body type)
+      abortTargets.set(`${target.sessionId}:${target.threadId}`, target);
+    }
+    for (const target of abortTargets.values()) {
+      try {
+        await args.engine.abort(target.sessionId, target.threadId);
+      } catch {
+        // Best-effort: the failure outcome below is authoritative regardless.
+      }
+    }
+
     for (let i = 0; i < results.length; i++) {
       if (results[i] === undefined) results[i] = { status: 'skipped' };
     }
@@ -303,6 +337,24 @@ async function loadBodyCheckpoints(
     if (cp.nodeId === bodyId) byIteration.set(cp.iteration, cp);
   }
   return byIteration;
+}
+
+/**
+ * Reads a `session`/`orchestrator` body checkpoint's persisted submission
+ * receipt (`submission-node.ts`'s `{ sessionId, receipt: { threadId,
+ * queueItemId } }` effects shape) — the coordinates `engine.abort` needs.
+ * Returns `undefined` for a body checkpoint that hasn't dispatched yet (no
+ * receipt persisted this attempt) or belongs to a non-submission body type
+ * (`set`/`llm`/`tool`), neither of which has anything to abort.
+ */
+function extractSubmissionTarget(cp: NodeCheckpoint): { sessionId: string; threadId: string } | undefined {
+  const effects = cp.effects;
+  if (!effects || typeof effects.sessionId !== 'string') return undefined;
+  const receipt = effects.receipt;
+  if (!receipt || typeof receipt !== 'object') return undefined;
+  const threadId = (receipt as Record<string, unknown>).threadId;
+  if (typeof threadId !== 'string') return undefined;
+  return { sessionId: effects.sessionId, threadId };
 }
 
 function itemResultFromTerminalCheckpoint(cp: NodeCheckpoint, onItemError: 'fail' | 'skip' | 'collect'): ForeachItemResult {

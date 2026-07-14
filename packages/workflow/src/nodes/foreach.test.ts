@@ -96,10 +96,12 @@ interface Submission {
 function makeSessionEngine(): {
   engine: WorkflowEngineDeps;
   promptCalls: Array<{ dispatchId: string; sessionId: string }>;
+  abortCalls: Array<{ sessionId: string; threadId: string }>;
   settle: (queueItemId: string, result: Omit<SubmissionResult, 'queueItemId'>) => void;
 } {
   const subsByDispatch = new Map<string, Submission>();
   const promptCalls: Array<{ dispatchId: string; sessionId: string }> = [];
+  const abortCalls: Array<{ sessionId: string; threadId: string }> = [];
   let counter = 0;
 
   function findByQueueItem(queueItemId: string): Submission | undefined {
@@ -129,7 +131,9 @@ function makeSessionEngine(): {
       return { ...sub.result, queueItemId };
     },
     isSettled: async (_sessionId, queueItemId) => findByQueueItem(queueItemId)?.settled ?? false,
-    abort: async () => {},
+    abort: async (sessionId, threadId) => {
+      abortCalls.push({ sessionId, threadId });
+    },
     llmComplete: async () => {
       throw new Error('llmComplete not exercised by this fixture');
     },
@@ -144,6 +148,7 @@ function makeSessionEngine(): {
   return {
     engine,
     promptCalls,
+    abortCalls,
     settle: (queueItemId, result) => {
       const sub = findByQueueItem(queueItemId);
       if (!sub) throw new Error(`unknown queueItemId ${queueItemId}`);
@@ -317,16 +322,16 @@ describe('executeForeach: concurrency 2 with session bodies', () => {
   });
 });
 
-// ─── 6. onItemError 'fail': first failure fails the foreach; in-flight left as-is ─
+// ─── 6. onItemError 'fail': first failure fails the foreach; orphaned in-flight sibling is aborted ─
 
 describe('executeForeach: onItemError "fail"', () => {
-  it('fails the foreach on the first failed iteration, leaving an in-flight sibling parked and un-aborted', async () => {
+  it('fails the foreach on the first failed iteration and aborts the still in-flight sibling', async () => {
     const store = new InMemoryWorkflowStore();
     const clock = makeClock();
     const items = ['a', 'b'];
     const sessionBody: SessionNode = { id: 'body', type: 'session', mode: 'start', prompt: 'handle {{item}}' };
     const definition = foreachDefinition({ items: '{{trigger.data.items}}', body: sessionBody, concurrency: 2, onItemError: 'fail' });
-    const { engine, settle } = makeSessionEngine();
+    const { engine, settle, abortCalls } = makeSessionEngine();
 
     await store.createRun('run-6', runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { items }, metadata: {} } }), definition, 'v1');
     const attempt1 = await claimAttempt(store, 'run-6');
@@ -346,12 +351,14 @@ describe('executeForeach: onItemError "fail"', () => {
     const result = byNode.get('loop')?.result as { items: Array<{ status: string; error?: string }> };
     expect(result.items[1]?.status).toBe('failed');
     expect(result.items[1]?.error).toBe('boom');
-    // Item 0 was never resolved — its body checkpoint is still 'intent' (left to ride/settle,
-    // never actively aborted by this executor).
+    // Item 0 was never resolved — its body checkpoint is still 'intent' — but the
+    // foreach itself aborted the orphaned in-flight submission best-effort before failing.
     const bodyCps = new Map((await store.getCheckpoints('run-6')).filter((cp) => cp.nodeId === 'body').map((cp) => [cp.iteration, cp]));
     expect(bodyCps.get(0)?.status).toBe('intent');
+    expect(abortCalls).toEqual([{ sessionId: 'wf:run-6:body', threadId: 'thread-1' }]);
   });
 });
+
 
 // ─── 7. onItemError 'skip' ────────────────────────────────────────────────────
 
@@ -564,5 +571,111 @@ describe('executeForeach: direct-call contract', () => {
     const cps = await store.getCheckpoints('run-11');
     const loopCp = cps.find((cp) => cp.nodeId === 'loop' && cp.iteration === 0);
     expect(loopCp?.status).toBe('completed');
+  });
+});
+
+// ─── 13/14. Item-0 body failure must not leak into run-level failure dominance ─
+//
+// A foreach body's checkpoints land at iteration 0 too (item 0), keyed by the
+// body's own node id. Before this fix, the interpreter's failure-dominance
+// scans (`sawFailure`/`anyFailed`) read ALL iteration-0 checkpoints regardless
+// of nodeId, so an item-0 body failure under a non-'fail' policy (where the
+// foreach itself still completes) incorrectly forced the whole run to settle
+// 'failed'.
+
+describe('executeForeach: item-0 body failure does not leak into run-level failure dominance (onItemError "skip")', () => {
+  it('foreach completes AND the run settles completed', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const items = ['bad', 'ok'];
+    const llmBody: LlmNode = { id: 'body', type: 'llm', model: 'haiku', prompt: 'process {{item}}' };
+    const definition = foreachDefinition({ items: '{{trigger.data.items}}', body: llmBody, onItemError: 'skip' });
+    const { engine } = makeLlmEngine({ responses: [new Error('item 0 exploded'), { text: 'fine' }] });
+
+    await store.createRun(
+      'run-13',
+      runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { items }, metadata: {} } }),
+      definition,
+      'v1',
+    );
+    const attempt = await claimAttempt(store, 'run-13');
+    const park = await driveUntilPark('run-13', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+
+    const byNode = new Map((await store.getCheckpoints('run-13')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('loop')?.status).toBe('completed');
+    // The item-0 body checkpoint itself really is 'failed' — the leak this
+    // fix closes is that status propagating into the run's own outcome.
+    const bodyCp0 = (await store.getCheckpoints('run-13')).find((cp) => cp.nodeId === 'body' && cp.iteration === 0);
+    expect(bodyCp0?.status).toBe('failed');
+  });
+});
+
+describe('executeForeach: item-0 body failure does not leak into run-level failure dominance (onItemError "collect")', () => {
+  it('foreach completes AND the run settles completed', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const items = ['bad', 'ok'];
+    const llmBody: LlmNode = { id: 'body', type: 'llm', model: 'haiku', prompt: 'process {{item}}' };
+    const definition = foreachDefinition({ items: '{{trigger.data.items}}', body: llmBody, onItemError: 'collect' });
+    const { engine } = makeLlmEngine({ responses: [new Error('item 0 exploded'), { text: 'fine' }] });
+
+    await store.createRun(
+      'run-14',
+      runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { items }, metadata: {} } }),
+      definition,
+      'v1',
+    );
+    const attempt = await claimAttempt(store, 'run-14');
+    const park = await driveUntilPark('run-14', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+
+    const byNode = new Map((await store.getCheckpoints('run-14')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('loop')?.status).toBe('completed');
+    const bodyCp0 = (await store.getCheckpoints('run-14')).find((cp) => cp.nodeId === 'body' && cp.iteration === 0);
+    expect(bodyCp0?.status).toBe('failed');
+  });
+});
+
+// ─── 15. A downstream node's template context does not see foreach body rows ─
+
+describe('executeForeach: downstream template context does not leak foreach body checkpoints', () => {
+  it('nodes.<body.id> is not visible outside the foreach (renders as the template-spec null, not the leaked body output)', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const items = ['a', 'b'];
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'loop', type: 'foreach', items: '{{trigger.data.items}}', body: setBody },
+        { id: 'summary', type: 'set', values: { leaked: '{{nodes.body}}' } },
+        { id: 'e', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 't', to: 'loop' },
+        { from: 'loop', to: 'summary' },
+        { from: 'summary', to: 'e' },
+      ],
+    };
+
+    await store.createRun(
+      'run-15',
+      runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { items }, metadata: {} } }),
+      definition,
+      'v1',
+    );
+    const attempt = await claimAttempt(store, 'run-15');
+    const park = await driveUntilPark('run-15', attempt, { store, engine: unusedEngine(), clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+
+    const byNode = new Map((await store.getCheckpoints('run-15')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('summary')?.result).toEqual({ leaked: null });
   });
 });

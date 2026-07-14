@@ -70,10 +70,13 @@ export interface InterpreterDeps {
 
 /**
  * The interpreter always drives the definition's own nodes at iteration 0
- * — a `foreach` body's checkpoints (keyed at iteration > 0) are owned and
- * driven entirely by the `foreach` executor itself (`nodes/foreach.ts`),
- * never by this wave loop, since a body's node id never appears in
- * `definition.nodes`.
+ * — a `foreach` body's checkpoints are ALSO written at iteration 0 (item 0
+ * lands there), keyed by the body's own node id, which never appears in
+ * `definition.nodes`. `loadCheckpoints` filters to definition-node ids so
+ * this wave loop, the failure-dominance scans, and `buildTemplateContext`
+ * never see body rows; the `foreach` executor reads its own body
+ * checkpoints directly via `store.getCheckpoints` and is unaffected by
+ * this filter.
  */
 const ITERATION = 0;
 
@@ -103,7 +106,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
     // third-party lib" case, but it's the one place the store's `unknown`
     // boundary meets a type this package owns end-to-end.
     const definition = run.definition as WorkflowDefinition;
-    const cpAll = await loadCheckpoints(store, runId);
+    const cpAll = await loadCheckpoints(store, runId, definition);
     const signals = await store.listSignals(runId, { unconsumed: true });
 
     const cancelSignal = signals.find((s) => s.signalType === 'cancel');
@@ -186,7 +189,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
     // future executor that returns `completed` without writing its
     // checkpoint (or otherwise fails to move a node off `intent`/absent)
     // would otherwise spin this loop forever.
-    const cpAfterWave = await loadCheckpoints(store, runId);
+    const cpAfterWave = await loadCheckpoints(store, runId, definition);
     const madeProgress = runnable.some((node) => {
       const cp = cpAfterWave.get(node.id);
       return cp !== undefined && cp.status !== 'intent';
@@ -356,11 +359,26 @@ function requireExecutor<T>(executor: T | undefined, node: WorkflowNode): T {
 
 // ─── Checkpoint indexing ─────────────────────────────────────────────────────
 
-async function loadCheckpoints(store: WorkflowStore, runId: string): Promise<Map<string, NodeCheckpoint>> {
+/**
+ * Loads the run's iteration-0 checkpoints, scoped to node ids that appear
+ * in `definition.nodes`. A `foreach` body's checkpoints also land at
+ * iteration 0 (item 0), keyed by the body's own node id — filtering to
+ * definition-node ids here keeps that body state out of every downstream
+ * consumer (failure-dominance scans, `buildTemplateContext`, the runnable
+ * computation) in one place, rather than requiring each consumer to
+ * re-derive the same filter.
+ */
+async function loadCheckpoints(
+  store: WorkflowStore,
+  runId: string,
+  definition: WorkflowDefinition,
+): Promise<Map<string, NodeCheckpoint>> {
+  const definitionNodeIds = new Set(definition.nodes.map((n) => n.id));
   const checkpoints = await store.getCheckpoints(runId);
   const byNode = new Map<string, NodeCheckpoint>();
   for (const cp of checkpoints) {
     if (cp.iteration !== ITERATION) continue;
+    if (!definitionNodeIds.has(cp.nodeId)) continue;
     byNode.set(cp.nodeId, cp);
   }
   return byNode;

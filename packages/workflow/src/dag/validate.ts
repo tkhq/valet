@@ -118,7 +118,32 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Vali
     }
   }
 
+  validateForeachBodyIdUniqueness(definition, errors);
+
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
+/**
+ * A foreach body id must be unique not just against `definition.nodes`
+ * (checked per-node in `validateForeachNode`) but against every OTHER
+ * foreach's body id too — two foreach nodes sharing a body id would have
+ * their checkpoints collide at `(runId, body.id, i)`, silently merging
+ * both foreaches' per-item state.
+ */
+function validateForeachBodyIdUniqueness(definition: WorkflowDefinition, errors: string[]): void {
+  const foreachIdsByBodyId = new Map<string, string[]>();
+  for (const node of definition.nodes) {
+    if (node.type !== 'foreach') continue;
+    const owners = foreachIdsByBodyId.get(node.body.id) ?? [];
+    owners.push(node.id);
+    foreachIdsByBodyId.set(node.body.id, owners);
+  }
+  for (const [bodyId, owners] of foreachIdsByBodyId) {
+    if (owners.length < 2) continue;
+    errors.push(
+      `foreach.body id ${JSON.stringify(bodyId)} is used by multiple foreach nodes: ${owners.map((id) => JSON.stringify(id)).join(', ')}`,
+    );
+  }
 }
 
 /**
