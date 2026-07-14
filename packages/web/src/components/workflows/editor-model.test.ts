@@ -1,0 +1,494 @@
+import { describe, expect, it } from 'vitest';
+import { validateWorkflowDefinition, type WorkflowDefinition } from '@valet/workflow';
+import {
+  ADDABLE_NODE_TYPES,
+  EditorModel,
+  LAYOUT_COLUMN_GAP,
+  LAYOUT_ROW_GAP,
+  NODE_META,
+  addNode,
+  applyAutoLayout,
+  autoLayout,
+  connect,
+  createDefaultWorkflowDefinition,
+  createEdgeId,
+  createNodeId,
+  duplicateNode,
+  flowEdgeToWorkflowEdge,
+  fromFlow,
+  removeNode,
+  setNodePosition,
+  setViewport,
+  toFlow,
+  updateEdge,
+  updateNode,
+  workflowEdgeToFlowEdge,
+  type WorkflowFlowState,
+} from './editor-model';
+
+function baseDefinition(): WorkflowDefinition {
+  return {
+    version: 'dag/v1',
+    nodes: [
+      { id: 'trigger', type: 'trigger' },
+      { id: 'start', type: 'set', values: { ok: true } },
+      {
+        id: 'branch',
+        type: 'if',
+        conditions: [{ left: '{{nodes.start.data.ok}}', dataType: 'boolean', operation: 'equals', right: true }],
+      },
+      { id: 'done', type: 'stop', outcome: 'success', message: 'Finished' },
+    ],
+    edges: [
+      { from: 'trigger', to: 'start' },
+      { from: 'start', to: 'branch' },
+      { from: 'branch', to: 'done', fromOutput: 'true' },
+    ],
+    ui: {
+      nodes: {
+        trigger: { position: { x: -260, y: 0 } },
+        start: { position: { x: 0, y: 0 } },
+        branch: { position: { x: 260, y: 0 } },
+        done: { position: { x: 520, y: -120 } },
+      },
+      viewport: { x: 1, y: 2, zoom: 0.75 },
+    },
+  };
+}
+
+describe('createNodeId', () => {
+  it('finds the first unused numeric suffix for a node type', () => {
+    expect(createNodeId('llm', [])).toBe('llm-1');
+    expect(createNodeId('llm', ['llm-1'])).toBe('llm-2');
+    expect(createNodeId('llm', ['llm-1', 'llm-2', 'llm-4'])).toBe('llm-3');
+  });
+});
+
+describe('NODE_META default nodes', () => {
+  it('produces a defaultNode for every addable type plus trigger', () => {
+    const types = Object.keys(NODE_META).sort();
+    expect(types).toEqual(
+      ['approval', 'foreach', 'if', 'llm', 'orchestrator', 'session', 'set', 'stop', 'tool', 'trigger', 'wait'].sort(),
+    );
+  });
+
+  it('trigger, set, if, wait, approval, session, stop default nodes validate with zero errors', () => {
+    const noErrorTypes = ['trigger', 'set', 'if', 'wait', 'approval', 'session', 'stop'] as const;
+    for (const type of noErrorTypes) {
+      const node = type === 'trigger' ? NODE_META.trigger.defaultNode('trigger') : NODE_META[type].defaultNode('x');
+      const definition: WorkflowDefinition = {
+        version: 'dag/v1',
+        nodes: type === 'trigger' ? [node] : [{ id: 'trigger', type: 'trigger' }, node],
+        edges: type === 'trigger' ? [] : [{ from: 'trigger', to: 'x' }],
+      };
+      const result = validateWorkflowDefinition(definition);
+      expect(result, `${type} should validate cleanly`).toEqual({ ok: true });
+    }
+  });
+
+  it('llm default node fails validation on empty model and prompt only', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.llm.defaultNode('x')],
+      edges: [{ from: 'trigger', to: 'x' }],
+    };
+    const result = validateWorkflowDefinition(definition);
+    expect(result).toEqual({
+      ok: false,
+      errors: [
+        'node "x": llm.model must be a non-empty string',
+        'node "x": llm.prompt must be a non-empty string',
+      ],
+    });
+  });
+
+  it('orchestrator default node fails validation on empty prompt only', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.orchestrator.defaultNode('x')],
+      edges: [{ from: 'trigger', to: 'x' }],
+    };
+    expect(validateWorkflowDefinition(definition)).toEqual({
+      ok: false,
+      errors: ['node "x": orchestrator.prompt must be a non-empty string'],
+    });
+  });
+
+  it('tool default node fails validation on empty service and action only', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.tool.defaultNode('x')],
+      edges: [{ from: 'trigger', to: 'x' }],
+    };
+    expect(validateWorkflowDefinition(definition)).toEqual({
+      ok: false,
+      errors: [
+        'node "x": tool.service must be a non-empty string',
+        'node "x": tool.action must be a non-empty string',
+      ],
+    });
+  });
+
+  it('foreach default node fails validation on empty items only (body is a valid empty set node)', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.foreach.defaultNode('loop')],
+      edges: [{ from: 'trigger', to: 'loop' }],
+    };
+    expect(validateWorkflowDefinition(definition)).toEqual({
+      ok: false,
+      errors: ['node "loop": foreach.items must be a non-empty string'],
+    });
+  });
+});
+
+describe('toFlow / fromFlow round trip', () => {
+  it('converts a dag/v1 definition to flow nodes and edges with saved positions and viewport', () => {
+    const definition = baseDefinition();
+    const flow = toFlow(definition);
+
+    expect(flow.viewport).toEqual({ x: 1, y: 2, zoom: 0.75 });
+    expect(flow.nodes.find((n) => n.id === 'trigger')).toMatchObject({
+      id: 'trigger',
+      type: 'workflow',
+      position: { x: -260, y: 0 },
+      deletable: false,
+      data: { nodeType: 'trigger', label: 'Trigger' },
+    });
+    expect(flow.nodes.find((n) => n.id === 'branch')).toMatchObject({
+      id: 'branch',
+      position: { x: 260, y: 0 },
+      data: { nodeType: 'if', label: 'If', sourceOutputs: ['true', 'false'] },
+    });
+    expect(flow.nodes.find((n) => n.id === 'start')!.data.sourceOutputs).toBeUndefined();
+  });
+
+  it('labels fromOutput edges leaving if/approval nodes with the source handle', () => {
+    const flow = toFlow(baseDefinition());
+    const branchEdge = flow.edges.find((e) => e.source === 'branch');
+    expect(branchEdge).toMatchObject({
+      id: 'branch:true->done',
+      source: 'branch',
+      sourceHandle: 'true',
+      target: 'done',
+      data: { fromOutput: 'true' },
+    });
+    const plainEdge = flow.edges.find((e) => e.source === 'trigger');
+    expect(plainEdge).toMatchObject({ id: 'trigger->start', data: {} });
+  });
+
+  it('fills in auto-layout positions for nodes with no saved ui position', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'start', type: 'set', values: {} },
+      ],
+      edges: [{ from: 'trigger', to: 'start' }],
+    };
+    const flow = toFlow(definition);
+    expect(flow.nodes.find((n) => n.id === 'trigger')!.position).toEqual({ x: 0, y: 0 });
+    expect(flow.nodes.find((n) => n.id === 'start')!.position).toEqual({ x: LAYOUT_COLUMN_GAP, y: 0 });
+  });
+
+  it('round-trips flow state back to a dag/v1 definition preserving node payloads and ui', () => {
+    const definition = baseDefinition();
+    const flow = toFlow(definition);
+    const roundTripped = fromFlow(flow);
+
+    expect(roundTripped.version).toBe('dag/v1');
+    expect(roundTripped.nodes).toEqual(definition.nodes);
+    expect(new Set(roundTripped.edges)).toEqual(new Set(definition.edges));
+    expect(roundTripped.ui?.viewport).toEqual(definition.ui?.viewport);
+    for (const node of definition.nodes) {
+      expect(roundTripped.ui?.nodes[node.id]?.position).toEqual(definition.ui?.nodes[node.id]?.position);
+    }
+  });
+
+  it('workflowEdgeToFlowEdge / flowEdgeToWorkflowEdge are inverses', () => {
+    const edge = { from: 'a', to: 'b', fromOutput: 'false' as const, when: '{{true}}' };
+    expect(flowEdgeToWorkflowEdge(workflowEdgeToFlowEdge(edge))).toEqual(edge);
+  });
+
+  it('createEdgeId includes the fromOutput branch when present', () => {
+    expect(createEdgeId('a', 'b')).toBe('a->b');
+    expect(createEdgeId('a', 'b', 'true')).toBe('a:true->b');
+  });
+});
+
+describe('connect', () => {
+  it('appends a plain edge between two existing nodes', () => {
+    const definition = baseDefinition();
+    const result = connect(definition, { source: 'start', target: 'done' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.definition.edges).toContainEqual({ from: 'start', to: 'done' });
+  });
+
+  it('infers fromOutput from the source handle for if/approval sources', () => {
+    const definition = baseDefinition();
+    const result = connect(definition, { source: 'branch', target: 'start', sourceHandle: 'false' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.definition.edges).toContainEqual({ from: 'branch', to: 'start', fromOutput: 'false' });
+  });
+
+  it('rejects a sourceHandle from a non if/approval node', () => {
+    const definition = baseDefinition();
+    const result = connect(definition, { source: 'start', target: 'done', sourceHandle: 'true' });
+    expect(result).toEqual({
+      ok: false,
+      error: 'fromOutput handles are only valid on "if" or "approval" sources, not "set"',
+    });
+  });
+
+  it('rejects self-edges', () => {
+    const definition = baseDefinition();
+    expect(connect(definition, { source: 'start', target: 'start' })).toEqual({
+      ok: false,
+      error: 'cannot connect a node to itself',
+    });
+  });
+
+  it('rejects edges into the trigger node (single root)', () => {
+    const definition = baseDefinition();
+    expect(connect(definition, { source: 'start', target: 'trigger' })).toEqual({
+      ok: false,
+      error: 'the trigger node cannot have incoming edges',
+    });
+  });
+
+  it('rejects unknown source/target ids', () => {
+    const definition = baseDefinition();
+    expect(connect(definition, { source: 'nope', target: 'start' })).toEqual({
+      ok: false,
+      error: 'unknown source node "nope"',
+    });
+    expect(connect(definition, { source: 'start', target: 'nope' })).toEqual({
+      ok: false,
+      error: 'unknown target node "nope"',
+    });
+  });
+
+  it('is idempotent for an already-existing edge', () => {
+    const definition = baseDefinition();
+    const result = connect(definition, { source: 'trigger', target: 'start' });
+    expect(result).toEqual({ ok: true, definition });
+  });
+});
+
+describe('addNode / removeNode / duplicateNode / updateNode', () => {
+  it('adds a node with a unique id and default payload from NODE_META', () => {
+    const definition = baseDefinition();
+    const { definition: next, nodeId } = addNode(definition, 'llm');
+    expect(nodeId).toBe('llm-1');
+    expect(next.nodes.find((n) => n.id === nodeId)).toEqual({ id: 'llm-1', type: 'llm', model: '', prompt: '' });
+    expect(next.ui?.nodes[nodeId]).toBeDefined();
+  });
+
+  it('does not offer trigger as an addable type', () => {
+    expect(ADDABLE_NODE_TYPES).not.toContain('trigger');
+    expect(ADDABLE_NODE_TYPES).toHaveLength(10);
+  });
+
+  it('removes a node and cascades its edges, leaving the trigger untouched', () => {
+    const definition = baseDefinition();
+    const next = removeNode(definition, 'branch');
+    expect(next.nodes.map((n) => n.id)).toEqual(['trigger', 'start', 'done']);
+    expect(next.edges).toEqual([{ from: 'trigger', to: 'start' }]);
+    expect(next.ui?.nodes.branch).toBeUndefined();
+  });
+
+  it('refuses to remove the trigger node', () => {
+    const definition = baseDefinition();
+    expect(removeNode(definition, 'trigger')).toBe(definition);
+  });
+
+  it('duplicates a node with a new unique id and offset position, but not its edges', () => {
+    const definition = baseDefinition();
+    const result = duplicateNode(definition, 'start');
+    expect(result).not.toBeNull();
+    if (!result) return;
+    expect(result.nodeId).toBe('set-1');
+    expect(result.definition.nodes.find((n) => n.id === 'set-1')).toEqual({ id: 'set-1', type: 'set', values: { ok: true } });
+    expect(result.definition.edges).toEqual(definition.edges);
+    expect(result.definition.ui?.nodes['set-1']?.position).toEqual({ x: 40, y: 40 });
+  });
+
+  it('refuses to duplicate the trigger node', () => {
+    expect(duplicateNode(baseDefinition(), 'trigger')).toBeNull();
+  });
+
+  it('updates fields on an existing node while pinning id and type', () => {
+    const definition = baseDefinition();
+    const next = updateNode(definition, 'start', { values: { ok: false }, id: 'ignored', type: 'llm' });
+    expect(next.nodes.find((n) => n.id === 'start')).toEqual({ id: 'start', type: 'set', values: { ok: false } });
+  });
+});
+
+describe('updateEdge', () => {
+  it('patches when/fromOutput on the matching edge only', () => {
+    const definition = baseDefinition();
+    const next = updateEdge(definition, { from: 'branch', to: 'done', fromOutput: 'true' }, { when: '{{x}}' });
+    expect(next.edges.find((e) => e.from === 'branch' && e.to === 'done')).toEqual({
+      from: 'branch',
+      to: 'done',
+      fromOutput: 'true',
+      when: '{{x}}',
+    });
+    expect(next.edges.find((e) => e.from === 'trigger')).toEqual({ from: 'trigger', to: 'start' });
+  });
+
+  it('clears fromOutput when patched to undefined explicitly', () => {
+    const definition = baseDefinition();
+    const next = updateEdge(definition, { from: 'branch', to: 'done', fromOutput: 'true' }, { fromOutput: undefined });
+    expect(next.edges.find((e) => e.from === 'branch' && e.to === 'done')).toEqual({ from: 'branch', to: 'done' });
+  });
+});
+
+describe('position and viewport persistence', () => {
+  it('writes a node position into definition.ui.nodes', () => {
+    const definition = baseDefinition();
+    const next = setNodePosition(definition, 'start', { x: 99, y: 5 });
+    expect(next.ui?.nodes.start.position).toEqual({ x: 99, y: 5 });
+    expect(next.ui?.nodes.branch.position).toEqual(definition.ui?.nodes.branch.position);
+  });
+
+  it('is a no-op for an unknown node id', () => {
+    const definition = baseDefinition();
+    expect(setNodePosition(definition, 'nope', { x: 1, y: 1 })).toBe(definition);
+  });
+
+  it('writes the viewport into definition.ui.viewport', () => {
+    const definition = baseDefinition();
+    const next = setViewport(definition, { x: 5, y: 6, zoom: 2 });
+    expect(next.ui?.viewport).toEqual({ x: 5, y: 6, zoom: 2 });
+    expect(next.ui?.nodes).toEqual(definition.ui?.nodes);
+  });
+});
+
+describe('autoLayout (BFS depth layering)', () => {
+  it('lays out a linear chain by depth, one column per hop', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+        { id: 'b', type: 'set', values: {} },
+      ],
+      edges: [
+        { from: 'trigger', to: 'a' },
+        { from: 'a', to: 'b' },
+      ],
+    };
+    expect(autoLayout(definition)).toEqual({
+      trigger: { x: 0, y: 0 },
+      a: { x: LAYOUT_COLUMN_GAP, y: 0 },
+      b: { x: LAYOUT_COLUMN_GAP * 2, y: 0 },
+    });
+  });
+
+  it('stacks parallel branches within the same depth by row', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'branch', type: 'if', conditions: [] },
+        { id: 'a', type: 'stop', outcome: 'success' },
+        { id: 'b', type: 'stop', outcome: 'failure' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'branch' },
+        { from: 'branch', to: 'a', fromOutput: 'true' },
+        { from: 'branch', to: 'b', fromOutput: 'false' },
+      ],
+    };
+    expect(autoLayout(definition)).toEqual({
+      trigger: { x: 0, y: 0 },
+      branch: { x: LAYOUT_COLUMN_GAP, y: 0 },
+      a: { x: LAYOUT_COLUMN_GAP * 2, y: 0 },
+      b: { x: LAYOUT_COLUMN_GAP * 2, y: LAYOUT_ROW_GAP },
+    });
+  });
+
+  it('places disconnected nodes deterministically instead of colliding at the origin', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+        { id: 'orphan', type: 'set', values: {} },
+      ],
+      edges: [{ from: 'trigger', to: 'a' }],
+    };
+    const positions = autoLayout(definition);
+    expect(positions.trigger).toEqual({ x: 0, y: 0 });
+    expect(positions.orphan).toEqual({ x: 0, y: LAYOUT_ROW_GAP });
+    expect(positions.orphan).not.toEqual(positions.a);
+  });
+
+  it('is deterministic: the same definition always produces the same positions', () => {
+    const definition = baseDefinition();
+    const first = autoLayout(definition);
+    const second = autoLayout(structuredClone(definition));
+    expect(first).toEqual(second);
+  });
+
+  it('applyAutoLayout overwrites every saved position but keeps the viewport', () => {
+    const definition = baseDefinition();
+    const next = applyAutoLayout(definition);
+    expect(next.ui?.viewport).toEqual(definition.ui?.viewport);
+    expect(next.ui?.nodes.trigger.position).toEqual({ x: 0, y: 0 });
+    expect(Object.keys(next.ui?.nodes ?? {})).toEqual(['trigger', 'start', 'branch', 'done']);
+  });
+});
+
+describe('EditorModel', () => {
+  it('starts clean and marks dirty on the first mutation', () => {
+    const model = new EditorModel(baseDefinition());
+    expect(model.dirty).toBe(false);
+    model.setNodePosition('start', { x: 1, y: 1 });
+    expect(model.dirty).toBe(true);
+  });
+
+  it('markSaved resets the dirty flag', () => {
+    const model = new EditorModel(baseDefinition());
+    model.addNode('llm');
+    expect(model.dirty).toBe(true);
+    model.markSaved();
+    expect(model.dirty).toBe(false);
+  });
+
+  it('does not mark dirty for a no-op connect (duplicate edge)', () => {
+    const model = new EditorModel(baseDefinition());
+    const result = model.connect({ source: 'trigger', target: 'start' });
+    expect(result.ok).toBe(true);
+    expect(model.dirty).toBe(false);
+  });
+
+  it('exposes add/remove/duplicate/update/connect/validate through the wrapper and serializes the final definition', () => {
+    const model = new EditorModel(createDefaultWorkflowDefinition());
+    const llmId = model.addNode('llm');
+    model.connect({ source: 'trigger', target: llmId });
+    model.updateNode(llmId, { model: 'claude-haiku-4-5', prompt: 'Summarize {{trigger.data.text}}' });
+
+    expect(model.validate()).toEqual({ ok: true });
+
+    const dupId = model.duplicateNode(llmId);
+    expect(dupId).not.toBeNull();
+    model.removeNode(dupId as string);
+
+    const serialized = model.serialize();
+    expect(serialized.nodes.find((n) => n.id === llmId)).toMatchObject({ model: 'claude-haiku-4-5' });
+    expect(serialized.nodes.some((n) => n.id === dupId)).toBe(false);
+    expect(model.dirty).toBe(true);
+  });
+
+  it('toFlow reflects the live definition', () => {
+    const model = new EditorModel(baseDefinition());
+    const flow: WorkflowFlowState = model.toFlow();
+    expect(flow.nodes).toHaveLength(4);
+    model.removeNode('done');
+    expect(model.toFlow().nodes).toHaveLength(3);
+  });
+});

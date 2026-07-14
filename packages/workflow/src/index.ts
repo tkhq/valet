@@ -1,4 +1,11 @@
-export type { WorkflowDefinition, WorkflowInputDefinition, WorkflowPolicy, WorkflowEdge, WorkflowTriggerPayload } from './dag/shape.js';
+export type {
+  WorkflowDefinition,
+  WorkflowInputDefinition,
+  WorkflowPolicy,
+  WorkflowEdge,
+  WorkflowEditorState,
+  WorkflowTriggerPayload,
+} from './dag/shape.js';
 export type {
   WorkflowNode,
   DagNodeType,
@@ -10,6 +17,11 @@ export type {
   ApprovalNode,
   SessionNode,
   StopNode,
+  ForeachNode,
+  ForeachBodyNode,
+  LlmNode,
+  OrchestratorNode,
+  ToolNode,
 } from './dag/nodes.js';
 
 export {
