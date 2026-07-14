@@ -29,8 +29,8 @@ function MemoryDocPage() {
   }
 
   return (
-    <div className="flex flex-1 min-h-0">
-      <aside className="w-72 shrink-0 border-r border-line">
+    <div className="flex flex-1 min-h-0 flex-col md:flex-row">
+      <aside className="h-64 shrink-0 border-b border-line overflow-y-auto md:h-auto md:w-72 md:border-b-0 md:border-r">
         <MemorySearchPane activePath={path} onSelect={onSelect} />
       </aside>
       <main className="flex-1 min-h-0 overflow-y-auto">

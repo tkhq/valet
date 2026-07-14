@@ -127,6 +127,6 @@ function QueueIndicator({
   }
   if (parts.length === 0) return null;
   return (
-    <div className="mb-2 text-xs text-[--muted]">{parts.join(" • ")}</div>
+    <div className="mb-2 text-xs text-muted">{parts.join(" • ")}</div>
   );
 }

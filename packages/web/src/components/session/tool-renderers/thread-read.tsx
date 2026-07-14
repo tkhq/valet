@@ -108,16 +108,16 @@ export const threadReadRenderer: ToolRenderer = {
       <ToolBody className="px-0 py-0">
         {key && (
           <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center gap-2">
-            <span className="text-[--muted]">reading from</span>
+            <span className="text-muted">reading from</span>
             <span className="font-mono text-[--fg]/95">{key}</span>
           </div>
         )}
         {status === "running" ? (
-          <div className="px-3 py-2 text-[11px] text-[--muted] italic font-mono">scanning thread…</div>
+          <div className="px-3 py-2 text-[11px] text-muted italic font-mono">scanning thread…</div>
         ) : parsed && parsed.length > 0 ? (
           <ThreadExcerpts messages={parsed} />
         ) : parsed && parsed.length === 0 ? (
-          <div className="px-3 py-3 text-[11px] text-[--muted] italic">
+          <div className="px-3 py-3 text-[11px] text-muted italic">
             (thread is empty)
           </div>
         ) : (
@@ -142,7 +142,7 @@ function ThreadExcerpts({ messages }: { messages: ParsedMessage[] }) {
         <button
           type="button"
           onClick={() => setShowAll(true)}
-          className="block w-full text-center mb-2 text-[11px] text-[--muted] hover:text-[--fg] py-1 rounded hover:bg-neutral-100 dark:hover:bg-neutral-900/60"
+          className="block w-full text-center mb-2 text-[11px] text-muted hover:text-[--fg] py-1 rounded hover:bg-ink-wash"
         >
           ↑ show {hidden} earlier {hidden === 1 ? "message" : "messages"}
         </button>
@@ -166,12 +166,12 @@ function ThreadExcerpts({ messages }: { messages: ParsedMessage[] }) {
                 {m.role}
               </span>
               {m.meta && (
-                <span className="text-[10px] text-[--muted]/80">{m.meta}</span>
+                <span className="text-[10px] text-muted/80">{m.meta}</span>
               )}
             </div>
             <div className="text-[12px] text-[--fg]/90 leading-snug whitespace-pre-wrap line-clamp-4">
               {m.content || (
-                <span className="italic text-[--muted]">(empty)</span>
+                <span className="italic text-muted">(empty)</span>
               )}
             </div>
           </li>

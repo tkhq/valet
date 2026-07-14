@@ -13,7 +13,7 @@
     /* Legacy surface variables, now aliased onto the calm-companion tokens
        (theme.css) instead of the old gray/blue scale — this repaints every
        existing `bg-[--bg]` / `text-[--fg]` / `border-[--border]` /
-       `text-[--muted]` usage app-wide without a per-component restyle. */
+       `text-muted` usage app-wide without a per-component restyle. */
     --bg: var(--paper);
     --fg: var(--ink);
     --border: var(--line);

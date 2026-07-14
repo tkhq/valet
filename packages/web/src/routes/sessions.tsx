@@ -6,11 +6,11 @@ import { Button, Spinner } from "~/components/primitives";
 import { NewSessionDialog } from "~/components/new-session-dialog";
 
 /**
- * Stub `/sessions` list (Task 3). Full standalone-only filtering + card
- * layout land in Task 4 (decision 1/8) — for now this keeps the "Sessions"
- * nav link and the "New session" action (moved out of the top nav per
- * decision 9/assistant-first IA) working against the existing session
- * list.
+ * `/sessions` — the standalone-only list (decision 1/8). Filtering happens
+ * server-side in `GET /api/sessions` (excludes orchestrator ids and any id
+ * present in `child_watches.child_session_id`) — this route just renders
+ * what it gets. Hosts the "Sessions" nav link and the "New session" action
+ * (moved out of the top nav per decision 9/assistant-first IA).
  */
 export const Route = createFileRoute("/sessions")({
   component: SessionsPage,
@@ -52,7 +52,7 @@ function SessionsPage() {
                 <Link
                   to="/sessions/$sessionId"
                   params={{ sessionId: s.id }}
-                  className="flex flex-col gap-0.5 rounded border border-line bg-paper px-4 py-3 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                  className="flex flex-col gap-0.5 rounded border border-line bg-paper px-4 py-3 hover:bg-ink-wash"
                 >
                   <span className="text-sm font-medium text-ink truncate">
                     {s.title || "Untitled session"}

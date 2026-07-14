@@ -3,8 +3,11 @@ import { cn } from "~/lib/cn";
 
 /**
  * Three-zone app shell: a top nav, a left sidebar, and the main content
- * outlet. Sidebar fixed-width on desktop; mobile drawer is out of scope —
- * agent-loop UX is desktop-first.
+ * outlet. Sidebar is fixed-width from `md` up; below that it collapses
+ * (hidden, not an overlay drawer) so the main content — the chat
+ * transcript, the memory doc pane, etc — gets the full narrow viewport.
+ * A mobile drawer/toggle to reach the collapsed sidebar is out of scope for
+ * this pass.
  */
 export function AppShell({
   topNav,
@@ -26,7 +29,7 @@ export function AppShell({
       {topNav}
       <div className="flex-1 flex min-h-0">
         {sidebar != null && (
-          <aside className="w-60 shrink-0 border-r border-[--border] flex flex-col">
+          <aside className="hidden md:flex w-60 shrink-0 border-r border-[--border] flex-col">
             {sidebar}
           </aside>
         )}

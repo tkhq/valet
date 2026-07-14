@@ -99,7 +99,7 @@ export function SessionView({
 
   if (session.isLoading) {
     return (
-      <div className="flex-1 grid place-items-center text-sm text-[--muted]">
+      <div className="flex-1 grid place-items-center text-sm text-muted">
         <Spinner /> Loading session…
       </div>
     );
@@ -108,7 +108,7 @@ export function SessionView({
     return (
       <div className="flex-1 grid place-items-center text-center text-sm text-danger-500 p-8">
         Failed to load session
-        <div className="text-xs text-[--muted] mt-1">{(session.error as Error)?.message}</div>
+        <div className="text-xs text-muted mt-1">{(session.error as Error)?.message}</div>
       </div>
     );
   }

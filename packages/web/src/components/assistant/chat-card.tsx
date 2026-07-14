@@ -34,6 +34,7 @@ export function ChatCard() {
   const messages = recentMessages(live ? stream.messages : (messagesQ.data?.messages ?? []));
 
   const [text, setText] = useState("");
+  const [sendError, setSendError] = useState(false);
   const send = useSendPrompt(sessionId ?? "");
   const navigate = useNavigate();
 
@@ -41,11 +42,13 @@ export function ChatCard() {
     const t = text.trim();
     if (!t || !sessionId || send.isPending) return;
     setText("");
+    setSendError(false);
     try {
       await send.mutateAsync({ text: t });
       navigate({ to: "/chat" });
     } catch (err) {
       setText(t);
+      setSendError(true);
       console.error("failed to send:", err);
     }
   }
@@ -82,6 +85,15 @@ export function ChatCard() {
           </div>
         ))}
       </div>
+
+      {sendError && (
+        <div className="px-4 pt-2 text-xs text-danger-500">
+          Couldn't send that message.{" "}
+          <button type="button" className="underline" onClick={() => void submit()}>
+            Retry
+          </button>
+        </div>
+      )}
 
       <form
         onSubmit={(e) => {

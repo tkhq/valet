@@ -172,7 +172,7 @@ function TreeRow({
         "flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-sm truncate",
         isActive
           ? "bg-moss/10 font-medium text-moss"
-          : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
+          : "text-ink hover:bg-ink-wash",
       )}
       style={{ paddingLeft: 20 + depth * 12 }}
     >

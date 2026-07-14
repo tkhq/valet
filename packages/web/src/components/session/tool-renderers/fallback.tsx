@@ -71,7 +71,7 @@ export const fallbackRenderer: ToolRenderer = {
         )}
 
         {status === "running" && (
-          <div className="px-3 py-2 text-[11px] text-[--muted] italic font-mono">
+          <div className="px-3 py-2 text-[11px] text-muted italic font-mono">
             running…
           </div>
         )}
@@ -125,7 +125,7 @@ function SectionLabel({
         "text-[9px] uppercase tracking-[0.12em] font-semibold mb-1.5",
         tone === "danger"
           ? "text-danger-600 dark:text-danger-500"
-          : "text-[--muted]",
+          : "text-muted",
       )}
     >
       {children}
@@ -138,7 +138,7 @@ function KeyValueTable({ entries }: { entries: [string, unknown][] }) {
     <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-[12px]">
       {entries.map(([k, v]) => (
         <div key={k} className="contents">
-          <dt className="text-[--muted] font-mono whitespace-nowrap pt-[2px]">{k}</dt>
+          <dt className="text-muted font-mono whitespace-nowrap pt-[2px]">{k}</dt>
           <dd className="min-w-0 font-mono">
             <ValueCell value={v} />
           </dd>
@@ -149,8 +149,8 @@ function KeyValueTable({ entries }: { entries: [string, unknown][] }) {
 }
 
 function ValueCell({ value }: { value: unknown }) {
-  if (value === null) return <span className="text-[--muted]/70">null</span>;
-  if (value === undefined) return <span className="text-[--muted]/70">—</span>;
+  if (value === null) return <span className="text-muted/70">null</span>;
+  if (value === undefined) return <span className="text-muted/70">—</span>;
   if (typeof value === "boolean") {
     return (
       <span
@@ -158,7 +158,7 @@ function ValueCell({ value }: { value: unknown }) {
           "inline-flex items-center px-1 py-[1px] rounded text-[10px] font-medium uppercase tracking-wider",
           value
             ? "bg-success-500/15 text-success-700 dark:text-success-500"
-            : "bg-neutral-200/70 dark:bg-neutral-800 text-[--muted]",
+            : "bg-neutral-200/70 dark:bg-neutral-800 text-muted",
         )}
       >
         {String(value)}
@@ -204,7 +204,7 @@ function CollapsedText({
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="ml-1.5 text-[11px] text-[--muted] hover:text-[--fg] underline-offset-2 hover:underline"
+          className="ml-1.5 text-[11px] text-muted hover:text-[--fg] underline-offset-2 hover:underline"
         >
           {expanded ? "less" : "more"}
         </button>
@@ -226,7 +226,7 @@ function CollapsedJson({ value }: { value: unknown }) {
       <button
         type="button"
         onClick={() => setExpanded(true)}
-        className="text-[11px] text-[--muted] hover:text-[--fg] underline-offset-2 hover:underline"
+        className="text-[11px] text-muted hover:text-[--fg] underline-offset-2 hover:underline"
       >
         {Array.isArray(value)
           ? `[${(value as unknown[]).length} items]`

@@ -51,6 +51,12 @@ export default {
         line: "var(--line)",
         moss: "var(--moss)",
         amber: "var(--amber)",
+        // Pre-mixed hover/press washes — see the opacity-modifier-trap
+        // comment in `theme.css` for why these exist instead of
+        // `bg-ink/10`-style opacity modifiers on the tokens above.
+        "ink-wash": "var(--ink-wash)",
+        "ink-wash-strong": "var(--ink-wash-strong)",
+        "moss-wash": "var(--moss-wash)",
       },
       fontFamily: {
         sans: [

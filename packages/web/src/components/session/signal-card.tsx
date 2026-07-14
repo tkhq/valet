@@ -84,7 +84,7 @@ function ChildSettledCard({
       <button
         type="button"
         onClick={() => onOpenChild(childId)}
-        className="block w-full text-left hover:bg-neutral-100/60 dark:hover:bg-neutral-900/40 rounded-md transition-colors"
+        className="block w-full text-left hover:bg-ink-wash rounded-md transition-colors"
       >
         {body}
       </button>
@@ -95,7 +95,7 @@ function ChildSettledCard({
     <Link
       to="/sessions/$sessionId"
       params={{ sessionId: childId }}
-      className="block hover:bg-neutral-100/60 dark:hover:bg-neutral-900/40 rounded-md transition-colors"
+      className="block hover:bg-ink-wash rounded-md transition-colors"
     >
       {body}
     </Link>

@@ -70,7 +70,7 @@ export const editRenderer: ToolRenderer = {
           </div>
         )}
         {status === "running" ? (
-          <div className="px-3 py-2 text-[11px] text-[--muted] italic font-mono">editing…</div>
+          <div className="px-3 py-2 text-[11px] text-muted italic font-mono">editing…</div>
         ) : (
           <div className="font-mono text-[12px] leading-[1.55] py-1">
             <pre className="whitespace-pre overflow-x-auto">

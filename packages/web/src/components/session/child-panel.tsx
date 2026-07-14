@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { SessionView } from "./session-view";
 
 /**
@@ -8,6 +8,11 @@ import { SessionView } from "./session-view";
  * Implemented by mounting `SessionView` with `variant="panel"`; the panel
  * itself owns the fixed-position chrome (~480px, full-height, hairline
  * border). Closing returns to the assistant with no navigation.
+ *
+ * `top-[--nav-height]` shares the nav's height token (`theme.css`) instead
+ * of a hardcoded `top-14`, so the two can't drift apart. Below `sm` the
+ * panel becomes a full-width overlay (there's no room for a docked ~480px
+ * rail on a phone-sized viewport).
  */
 export function ChildPanel({
   childId,
@@ -16,19 +21,55 @@ export function ChildPanel({
   childId: string;
   onClose: () => void;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // Minimal focus trap: keep Tab from leaving the panel while it's open.
+      if (e.key === "Tab") {
+        const panel = panelRef.current;
+        if (!panel) return;
+        const focusable = panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  // Focus the panel on open, restore focus to whatever triggered it on close.
+  useEffect(() => {
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus();
+    return () => {
+      previouslyFocused.current?.focus?.();
+    };
+  }, []);
+
   return (
     <div
+      ref={panelRef}
       role="dialog"
+      aria-modal="true"
       aria-label="Child session"
-      className="fixed top-14 bottom-0 right-0 z-40 flex w-[480px] flex-col border-l border-line bg-paper shadow-lg"
+      tabIndex={-1}
+      className="fixed top-[--nav-height] bottom-0 right-0 z-40 flex w-full sm:w-[480px] flex-col border-l border-line bg-paper shadow-lg outline-none"
     >
       <SessionView sessionId={childId} variant="panel" onClose={onClose} />
     </div>

@@ -50,7 +50,7 @@ export function NewSessionDialog({
             placeholder={DEFAULT_WORKSPACE}
             autoFocus
           />
-          <p className="text-xs text-[--muted]">
+          <p className="text-xs text-muted">
             Absolute path on this host. Will be created if missing.
           </p>
         </div>

@@ -33,12 +33,12 @@ export function SessionHeader({
   }
 
   return (
-    <header className="border-b border-[--border] px-4 py-3 flex items-center gap-3">
+    <header className="border-b border-line bg-paper px-4 py-3 flex items-center gap-3">
       <div className="min-w-0">
-        <div className="text-sm font-semibold tracking-tight truncate">
+        <div className="text-sm font-semibold tracking-tight truncate text-ink">
           {session.title || "Untitled session"}
         </div>
-        <div className="text-xs text-[--muted] font-mono truncate">{session.workspace}</div>
+        <div className="text-xs text-muted font-mono truncate">{session.workspace}</div>
       </div>
       <div className="ml-auto flex items-center gap-2">
         <Tooltip content="Session-default model. Threads inherit unless overridden.">
@@ -114,7 +114,9 @@ function AgentStatusBadge({ status }: { status: AgentStatus }) {
     status === "error" ? "danger" : status === "thinking" || status === "tool_calling" ? "accent" : "neutral";
   return (
     <Badge variant={variant} className={cn("inline-flex items-center gap-1.5")}>
-      {status !== "queued" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />}
+      {status !== "queued" && (
+        <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" />
+      )}
       {status.replace("_", " ")}
     </Badge>
   );

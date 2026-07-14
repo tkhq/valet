@@ -98,14 +98,14 @@ export function DecisionGateCard({
           onClick={cancel}
           disabled={busy}
           aria-label="Cancel and dismiss"
-          className="text-[--muted] hover:text-[--fg] disabled:opacity-50 -mr-1 mt-0.5"
+          className="text-muted hover:text-[--fg] disabled:opacity-50 -mr-1 mt-0.5"
         >
           <X className="h-4 w-4" />
         </button>
       </header>
 
       {gate.body && (
-        <div className="px-3.5 pb-2 text-xs text-[--muted] whitespace-pre-wrap">
+        <div className="px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap">
           {gate.body}
         </div>
       )}

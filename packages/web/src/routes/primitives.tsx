@@ -43,7 +43,7 @@ function Primitives() {
       <main className="min-h-full p-8 max-w-3xl mx-auto space-y-8">
         <header>
           <h1 className="text-xl font-semibold tracking-tight">Primitives</h1>
-          <p className="text-sm text-[--muted]">
+          <p className="text-sm text-muted">
             Internal showcase. Components are intentional wrappers over Radix.
           </p>
         </header>
@@ -80,7 +80,7 @@ function Primitives() {
             <CardHeader>
               <CardTitle>Session: dogfood</CardTitle>
             </CardHeader>
-            <CardBody className="text-sm text-[--muted]">
+            <CardBody className="text-sm text-muted">
               A short summary of what's happening. Status badges live below.
               <div className="mt-2 flex gap-1.5">
                 <Badge>idle</Badge>
@@ -102,7 +102,7 @@ function Primitives() {
             </Avatar>
             <Spinner />
             <Separator orientation="vertical" className="h-6" />
-            <span className="text-sm text-[--muted]">scroll →</span>
+            <span className="text-sm text-muted">scroll →</span>
             <ScrollArea className="h-16 w-48 rounded border border-[--border]">
               <div className="p-2 text-sm space-y-1">
                 {Array.from({ length: 12 }).map((_, i) => (
@@ -154,7 +154,7 @@ function Primitives() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-3">
-      <h2 className="text-sm font-medium uppercase tracking-wider text-[--muted]">{title}</h2>
+      <h2 className="text-sm font-medium uppercase tracking-wider text-muted">{title}</h2>
       {children}
     </section>
   );

@@ -20,10 +20,10 @@ export function TopNav() {
   const presence = info.data?.presence ?? "idle";
 
   return (
-    <header className="h-14 shrink-0 border-b border-line bg-paper flex items-center px-3 gap-4">
+    <header className="h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center px-3 gap-4">
       <Link
         to="/"
-        className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+        className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash"
         aria-label={`${name} — dashboard`}
       >
         <span className="text-moss text-base leading-none" aria-hidden>
@@ -36,7 +36,7 @@ export function TopNav() {
 
       <Link
         to="/sessions"
-        className="rounded px-2 py-1 text-sm text-muted hover:bg-neutral-100 hover:text-ink dark:hover:bg-neutral-900"
+        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
       >
         Sessions
       </Link>

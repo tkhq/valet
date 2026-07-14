@@ -40,6 +40,11 @@ export function useInvalidateMessagesOnQueueState(
   useEffect(() => {
     const debouncer = createDebouncer(() => {
       if (!sessionId) return;
+      // When `threadId` is undefined, `qk.messages` yields the shorter
+      // `["sessions", id, "messages"]` key; `invalidateQueries` prefix-matches
+      // by default, so this still invalidates every per-thread messages
+      // query for the session. Relying on that TanStack default instead of
+      // enumerating thread ids here.
       qc.invalidateQueries({ queryKey: qk.messages(sessionId, threadId) });
     }, delayMs);
     debouncerRef.current = debouncer;

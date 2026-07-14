@@ -73,7 +73,7 @@ export function ModelPicker({
               "h-3.5 w-3.5",
               isOverride
                 ? "text-violet-600 dark:text-violet-400"
-                : "text-[--muted]",
+                : "text-muted",
             )}
             aria-hidden
           />
@@ -86,7 +86,7 @@ export function ModelPicker({
               aria-label="thread override"
             />
           )}
-          <ChevronDown className="h-3.5 w-3.5 text-[--muted] shrink-0 ml-auto" />
+          <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[280px]">
@@ -125,7 +125,7 @@ export function ModelPicker({
                 onClear();
                 setOpen(false);
               }}
-              className="text-[--muted]"
+              className="text-muted"
             >
               <span className="text-xs italic">{inheritLabel}</span>
             </DropdownMenuItem>
@@ -155,7 +155,7 @@ function ModelGroup({
   if (items.length === 0) return null;
   return (
     <div className="py-0.5">
-      <div className="px-2 pb-0.5 text-[10px] uppercase tracking-wider text-[--muted]/70">
+      <div className="px-2 pb-0.5 text-[10px] uppercase tracking-wider text-muted/70">
         {TIER_LABEL[tier]}
       </div>
       {items.map((m) => {
@@ -176,11 +176,11 @@ function ModelGroup({
                 <span className="h-3.5 w-3.5 shrink-0" />
               )}
               <span className="text-sm font-medium">{m.label}</span>
-              <span className="ml-auto font-mono text-[10px] text-[--muted]/70">
+              <span className="ml-auto font-mono text-[10px] text-muted/70">
                 {m.id}
               </span>
             </div>
-            <div className="pl-[22px] text-xs text-[--muted] leading-snug">
+            <div className="pl-[22px] text-xs text-muted leading-snug">
               {m.description}
             </div>
           </DropdownMenuItem>

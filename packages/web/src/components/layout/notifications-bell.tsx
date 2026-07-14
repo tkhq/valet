@@ -87,7 +87,7 @@ export function NotificationsBell() {
           {unreadCount > 0 && (
             <button
               type="button"
-              className="text-xs font-normal text-[--muted] hover:text-[--fg] hover:underline"
+              className="text-xs font-normal text-muted hover:text-[--fg] hover:underline"
               onClick={(e) => {
                 e.stopPropagation();
                 markAllRead.mutate();
@@ -99,7 +99,7 @@ export function NotificationsBell() {
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         {items.length === 0 && (
-          <div className="px-2 py-3 text-sm text-[--muted]">No notifications yet.</div>
+          <div className="px-2 py-3 text-sm text-muted">No notifications yet.</div>
         )}
         {items.map((n) => (
           <DropdownMenuItem
@@ -111,7 +111,7 @@ export function NotificationsBell() {
               {!n.readAt && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-600" aria-hidden />}
               <span className="text-sm font-medium truncate">{n.title}</span>
             </span>
-            <span className="text-xs text-[--muted]">{relativeTime(n.createdAt)}</span>
+            <span className="text-xs text-muted">{relativeTime(n.createdAt)}</span>
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>

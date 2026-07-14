@@ -16,6 +16,32 @@
  *      over the OS media query in both directions.
  */
 
+/**
+ * Hover/press washes — `--ink-wash` and `--moss-wash`.
+ *
+ * OPACITY-MODIFIER TRAP: Tailwind's `bg-ink/10` slash-opacity syntax only
+ * works when a theme color is registered as a function that receives an
+ * `<alpha-value>` placeholder (e.g. `rgb(var(--x) / <alpha-value>)`). Our
+ * tokens (`ink`, `paper`, `moss`, …) are plain hex strings pointing at CSS
+ * variables (`var(--ink)` etc, see `tailwind.config.ts`), so `bg-ink/10`,
+ * `hover:bg-moss/20`, and friends silently no-op — Tailwind can't inject an
+ * alpha channel into an opaque hex custom property. This is why earlier
+ * surfaces reached for hardcoded `hover:bg-neutral-100 dark:hover:bg-neutral-900`
+ * stopgaps instead of a token-based wash. Don't repeat that: use these
+ * pre-mixed `rgba()` wash variables (exposed as the `ink-wash` / `moss-wash`
+ * Tailwind colors below) for hover/press states instead of opacity
+ * modifiers on `ink`/`moss`/`paper`.
+ */
+/**
+ * Shared layout metric: the fixed top-nav height. Consumed by the nav
+ * itself (`h-[--nav-height]`) and by anything that needs to dock below it
+ * without duplicating the pixel value (e.g. `ChildPanel`'s
+ * `top-[--nav-height]`) — keeps the two from drifting out of sync.
+ */
+:root {
+  --nav-height: 3.5rem;
+}
+
 :root {
   color-scheme: light;
 
@@ -25,6 +51,10 @@
   --line: #e7e4de;
   --moss: #3e6b4f;
   --amber: #b98a2f;
+
+  --ink-wash: rgba(31, 29, 26, 0.06);
+  --ink-wash-strong: rgba(31, 29, 26, 0.1);
+  --moss-wash: rgba(62, 107, 79, 0.1);
 }
 
 /* OS-level dark preference — only applies when there's no explicit
@@ -37,6 +67,10 @@
     --ink: #ece9e4;
     --moss: #7fae8f;
     --line: #2a2825;
+
+    --ink-wash: rgba(236, 233, 228, 0.08);
+    --ink-wash-strong: rgba(236, 233, 228, 0.14);
+    --moss-wash: rgba(127, 174, 143, 0.14);
   }
 }
 
@@ -48,6 +82,10 @@
   --ink: #ece9e4;
   --moss: #7fae8f;
   --line: #2a2825;
+
+  --ink-wash: rgba(236, 233, 228, 0.08);
+  --ink-wash-strong: rgba(236, 233, 228, 0.14);
+  --moss-wash: rgba(127, 174, 143, 0.14);
 }
 
 :root[data-theme="light"] {
@@ -57,6 +95,10 @@
   --ink: #1f1d1a;
   --moss: #3e6b4f;
   --line: #e7e4de;
+
+  --ink-wash: rgba(31, 29, 26, 0.06);
+  --ink-wash-strong: rgba(31, 29, 26, 0.1);
+  --moss-wash: rgba(62, 107, 79, 0.1);
 }
 
 /**

@@ -71,7 +71,7 @@ export const DropdownMenuLabel = forwardRef<
   return (
     <RDropdown.Label
       ref={ref}
-      className={cn("px-2 py-1.5 text-xs font-medium text-[--muted]", className)}
+      className={cn("px-2 py-1.5 text-xs font-medium text-muted", className)}
       {...rest}
     />
   );

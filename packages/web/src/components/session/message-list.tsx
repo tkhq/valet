@@ -59,7 +59,7 @@ export function MessageList({
 
   if (visible.length === 0) {
     return (
-      <div className="flex-1 grid place-items-center text-sm text-[--muted]">
+      <div className="flex-1 grid place-items-center text-sm text-muted">
         No messages yet — try sending a prompt below.
       </div>
     );

@@ -29,7 +29,7 @@ export function groupChildrenByThread(
  * running is moss with a subtle pulse, settled is a muted checkmark. */
 export function childStatusDotClassName(status: OrchestratorChildSummary["status"]): string {
   return status === "running"
-    ? "bg-moss animate-pulse"
+    ? "bg-moss animate-pulse motion-reduce:animate-none"
     : "bg-muted";
 }
 
@@ -126,7 +126,7 @@ function ThreadNode({
           "flex items-center gap-2 rounded px-3 py-2 text-sm transition-colors",
           active
             ? "bg-neutral-200 dark:bg-neutral-800 text-ink"
-            : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-900",
+            : "text-ink hover:bg-ink-wash",
         )}
       >
         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", active ? "bg-moss" : "bg-muted")} />
@@ -143,7 +143,7 @@ function ThreadNode({
                   "flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
                   c.sessionId === activeChildId
                     ? "bg-neutral-200 dark:bg-neutral-800 text-ink"
-                    : "text-muted hover:bg-neutral-100 hover:text-ink dark:hover:bg-neutral-900",
+                    : "text-muted hover:bg-ink-wash hover:text-ink",
                 )}
               >
                 <MessageSquare className="h-3 w-3 shrink-0" />

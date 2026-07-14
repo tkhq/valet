@@ -90,7 +90,7 @@ export function ToolShell({
           className={cn(
             "relative w-full flex items-center gap-2 px-2.5 py-1.5",
             "text-left text-xs font-mono leading-none",
-            "hover:bg-neutral-50 dark:hover:bg-neutral-900/40",
+            "hover:bg-ink-wash",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
             "transition-colors",
           )}
@@ -99,7 +99,7 @@ export function ToolShell({
         >
           <ChevronRight
             className={cn(
-              "h-3 w-3 shrink-0 text-[--muted] transition-transform",
+              "h-3 w-3 shrink-0 text-muted transition-transform",
               expanded && "rotate-90",
             )}
             aria-hidden
@@ -123,7 +123,7 @@ export function ToolShell({
           )}
           {!target && <span className="flex-1" />}
           {summary && (
-            <span className="shrink-0 text-[--muted] text-[11px]">
+            <span className="shrink-0 text-muted text-[11px]">
               {summary}
             </span>
           )}
@@ -141,7 +141,7 @@ export function ToolShell({
               )}
             >
               <span
-                className="absolute inset-y-0 -left-1/3 w-1/3 opacity-[0.18]"
+                className="tool-scan-sweep absolute inset-y-0 -left-1/3 w-1/3 opacity-[0.18]"
                 style={{
                   background:
                     "linear-gradient(90deg, transparent, currentColor, transparent)",
@@ -176,6 +176,9 @@ export function ToolShell({
           50%  { transform: translateX(380%); }
           100% { transform: translateX(0%); }
         }
+        @media (prefers-reduced-motion: reduce) {
+          .tool-scan-sweep { animation: none !important; opacity: 0.12 !important; }
+        }
       `}</style>
     </section>
   );
@@ -186,7 +189,7 @@ function StatusPip({ status }: { status: ToolStatus }) {
     <span
       className={cn(
         "shrink-0 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-medium",
-        status === "running" && "text-[--muted]",
+        status === "running" && "text-muted",
         status === "completed" && "text-success-600 dark:text-success-500",
         status === "error" && "text-danger-600 dark:text-danger-500",
       )}
@@ -196,7 +199,7 @@ function StatusPip({ status }: { status: ToolStatus }) {
         className={cn(
           "h-1.5 w-1.5 rounded-full",
           STATUS_DOT[status],
-          status === "running" && "animate-pulse",
+          status === "running" && "animate-pulse motion-reduce:animate-none",
         )}
       />
       {status === "running" ? "running" : status === "completed" ? "done" : "error"}
@@ -259,7 +262,7 @@ export function TruncatedText({
             {numbered && (
               <span
                 aria-hidden
-                className="select-none w-9 pr-3 text-right text-[--muted]/60 shrink-0"
+                className="select-none w-9 pr-3 text-right text-muted/60 shrink-0"
               >
                 {i + 1}
               </span>
@@ -272,7 +275,7 @@ export function TruncatedText({
         <button
           type="button"
           onClick={() => setShowAll(true)}
-          className="mt-1.5 text-[11px] text-[--muted] hover:text-[--fg] underline-offset-2 hover:underline"
+          className="mt-1.5 text-[11px] text-muted hover:text-[--fg] underline-offset-2 hover:underline"
         >
           + {hidden} more {hidden === 1 ? "line" : "lines"}
         </button>
@@ -291,7 +294,7 @@ export function PathLabel({ path, className }: { path: string; className?: strin
   const name = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
   return (
     <span className={cn("font-mono", className)}>
-      {dir && <span className="text-[--muted]/80">{dir}</span>}
+      {dir && <span className="text-muted/80">{dir}</span>}
       <span className="text-[--fg]/95">{name}</span>
     </span>
   );

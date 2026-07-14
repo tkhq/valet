@@ -45,7 +45,7 @@ export function Markdown({ children, className }: { children: string; className?
         "prose-blockquote:border-l-2 prose-blockquote:border-neutral-300",
         "dark:prose-blockquote:border-neutral-700",
         "prose-blockquote:not-italic prose-blockquote:font-normal",
-        "prose-blockquote:text-[--muted] prose-blockquote:my-2",
+        "prose-blockquote:text-muted prose-blockquote:my-2",
         // hr — subtle separator.
         "prose-hr:border-[--border] prose-hr:my-3",
         className,

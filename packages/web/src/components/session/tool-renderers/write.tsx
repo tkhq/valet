@@ -48,7 +48,7 @@ export const writeRenderer: ToolRenderer = {
           </div>
         )}
         {status === "running" && !content ? (
-          <div className="px-3 py-2 text-[11px] text-[--muted] italic font-mono">
+          <div className="px-3 py-2 text-[11px] text-muted italic font-mono">
             writing…
           </div>
         ) : (
@@ -92,7 +92,7 @@ export function DiffAdditions({
         <button
           type="button"
           onClick={() => setShowAll(true)}
-          className="ml-3 mb-2 text-[11px] text-[--muted] hover:text-[--fg] underline-offset-2 hover:underline"
+          className="ml-3 mb-2 text-[11px] text-muted hover:text-[--fg] underline-offset-2 hover:underline"
         >
           + {hidden} more {hidden === 1 ? "line" : "lines"}
         </button>
@@ -125,7 +125,7 @@ export function DiffLine({
           "select-none w-5 shrink-0 text-center",
           kind === "add" && "text-emerald-600 dark:text-emerald-400",
           kind === "remove" && "text-danger-600 dark:text-danger-400",
-          kind === "context" && "text-[--muted]/50",
+          kind === "context" && "text-muted/50",
         )}
       >
         {sigil}

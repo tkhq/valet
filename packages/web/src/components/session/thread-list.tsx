@@ -32,7 +32,7 @@ export function ThreadList() {
 
   if (!sessionId) {
     return (
-      <div className="px-4 py-6 text-center text-xs text-[--muted]">
+      <div className="px-4 py-6 text-center text-xs text-muted">
         Pick a session from the top bar — its threads show up here.
       </div>
     );
@@ -70,7 +70,7 @@ function ThreadListInner({ sessionId }: { sessionId: string }) {
   return (
     <>
       <header className="px-4 py-3 flex items-center justify-between gap-2">
-        <h2 className="text-[10px] font-semibold uppercase tracking-wider text-[--muted]">
+        <h2 className="text-[10px] font-semibold uppercase tracking-wider text-muted">
           Threads
         </h2>
         <Button
@@ -88,7 +88,7 @@ function ThreadListInner({ sessionId }: { sessionId: string }) {
       <ScrollArea className="flex-1">
         <nav className="p-2 space-y-0.5">
           {isLoading && (
-            <div className="px-3 py-2 flex items-center gap-2 text-sm text-[--muted]">
+            <div className="px-3 py-2 flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading…
             </div>
           )}
@@ -133,7 +133,7 @@ function ThreadItem({
         "rounded transition-colors",
         active
           ? "bg-neutral-200 dark:bg-neutral-800"
-          : "hover:bg-neutral-100 dark:hover:bg-neutral-900",
+          : "hover:bg-ink-wash",
       )}
     >
       <Link
@@ -145,7 +145,7 @@ function ThreadItem({
         className="block w-full text-left px-3 pt-2 pb-1 text-sm"
       >
         <div className="flex items-start gap-2 min-w-0">
-          <MessageSquare className="h-3.5 w-3.5 mt-0.5 text-[--muted] shrink-0" />
+          <MessageSquare className="h-3.5 w-3.5 mt-0.5 text-muted shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="font-medium truncate text-[--fg]">{label}</div>
             <div
@@ -153,7 +153,7 @@ function ThreadItem({
                 "text-[10px] truncate",
                 thread.model
                   ? "text-violet-700 dark:text-violet-400"
-                  : "text-[--muted]/70",
+                  : "text-muted/70",
               )}
             >
               {subtitle}

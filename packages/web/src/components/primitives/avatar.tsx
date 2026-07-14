@@ -38,7 +38,7 @@ export const AvatarFallback = forwardRef<
   return (
     <RAvatar.Fallback
       ref={ref}
-      className={cn("flex h-full w-full items-center justify-center font-medium text-[--muted]", className)}
+      className={cn("flex h-full w-full items-center justify-center font-medium text-muted", className)}
       {...rest}
     />
   );

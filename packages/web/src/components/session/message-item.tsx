@@ -16,7 +16,7 @@ export function MessageItem({ message }: { message: StreamMessage }) {
         </AvatarFallback>
       </Avatar>
       <div className="flex-1 min-w-0 space-y-2">
-        <div className="text-xs text-[--muted] flex items-center gap-2">
+        <div className="text-xs text-muted flex items-center gap-2">
           <span className="font-medium text-[--fg]/80">
             {isUser ? "You" : message.role === "assistant" ? "Assistant" : message.role}
           </span>
@@ -91,7 +91,7 @@ function SettledBadge({ outcome }: { outcome: SettledOutcome }) {
         "rounded px-1.5 py-0.5 text-[10px] font-medium",
         isFailure
           ? "bg-danger-500/10 text-danger-600 dark:text-danger-400"
-          : "bg-neutral-200/70 text-[--muted] dark:bg-neutral-800/70",
+          : "bg-neutral-200/70 text-muted dark:bg-neutral-800/70",
       )}
     >
       {label}

@@ -125,7 +125,7 @@ function SearchResults({
           <button
             type="button"
             onClick={() => onSelect(r.path)}
-            className="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            className="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-ink-wash"
           >
             <span className="flex w-full items-center gap-1.5">
               <span className="truncate text-sm text-ink">{r.title || r.path}</span>
