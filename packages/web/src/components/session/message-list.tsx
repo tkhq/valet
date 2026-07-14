@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { StreamMessage } from "~/stores/stream";
 import { MessageItem } from "./message-item";
+import { SignalCard } from "./signal-card";
 
 /**
  * Scrolling message list. Auto-scrolls to bottom when new messages arrive
@@ -23,9 +24,15 @@ import { MessageItem } from "./message-item";
 export function MessageList({
   messages,
   threadId,
+  onOpenChild,
 }: {
   messages: StreamMessage[];
   threadId?: string;
+  /**
+   * Forwarded to `SignalCard` for `child.settled` cards — opens the child
+   * in the slide-over. Falls back to a full-page link when omitted.
+   */
+  onOpenChild?: (childSessionId: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -64,9 +71,13 @@ export function MessageList({
       onScroll={onScroll}
       className="flex-1 overflow-y-auto divide-y divide-[--border]"
     >
-      {visible.map((m) => (
-        <MessageItem key={m.id} message={m} />
-      ))}
+      {visible.map((m) =>
+        m.signal ? (
+          <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
+        ) : (
+          <MessageItem key={m.id} message={m} />
+        ),
+      )}
     </div>
   );
 }

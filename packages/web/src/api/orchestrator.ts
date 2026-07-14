@@ -20,7 +20,9 @@ export const qkOrchestrator = {
   children: () => ["orchestrator", "children"] as const,
 };
 
-export function useOrchestratorInfo(opts?: UseQueryOptions<GetOrchestratorInfoResponse>) {
+export function useOrchestratorInfo(
+  opts?: Partial<UseQueryOptions<GetOrchestratorInfoResponse>>,
+) {
   return useQuery<GetOrchestratorInfoResponse>({
     queryKey: qkOrchestrator.info(),
     queryFn: () => api.getOrchestratorInfo(),
@@ -29,12 +31,30 @@ export function useOrchestratorInfo(opts?: UseQueryOptions<GetOrchestratorInfoRe
 }
 
 export function useOrchestratorChildren(
-  opts?: UseQueryOptions<GetOrchestratorChildrenResponse>,
+  opts?: Partial<UseQueryOptions<GetOrchestratorChildrenResponse>>,
 ) {
   return useQuery<GetOrchestratorChildrenResponse>({
     queryKey: qkOrchestrator.children(),
     queryFn: () => api.getOrchestratorChildren(),
     ...opts,
+  });
+}
+
+/**
+ * `/chat`'s mount-time ensure (brief for Task 5): `GET /info` never
+ * creates the engine session (decision 4), so an assistant that has a name
+ * but was never `POST /orchestrator`-ensured (e.g. named via a future path
+ * that skips the identity step's own ensure call) would 404 the moment the
+ * chat page tries to open its session/WS. `POST /orchestrator` is
+ * idempotent — safe to call on every chat mount.
+ */
+export function useEnsureOrchestrator() {
+  const qc = useQueryClient();
+  return useMutation<{ sessionId: string }, Error, void>({
+    mutationFn: () => api.ensureOrchestrator(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkOrchestrator.info() });
+    },
   });
 }
 

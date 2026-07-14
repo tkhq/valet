@@ -43,10 +43,7 @@ export function ChatCard() {
     setText("");
     try {
       await send.mutateAsync({ text: t });
-      // TODO(T5): navigate to `/chat` once the assistant conversation
-      // route exists. For now the assistant session renders at the normal
-      // session detail route.
-      navigate({ to: "/sessions/$sessionId", params: { sessionId } });
+      navigate({ to: "/chat" });
     } catch (err) {
       setText(t);
       console.error("failed to send:", err);

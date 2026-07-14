@@ -13,7 +13,11 @@ export function AppShell({
   className,
 }: {
   topNav: ReactNode;
-  sidebar: ReactNode;
+  /**
+   * `null`/`undefined` hides the sidebar entirely (no `<aside>` at all) —
+   * used by standalone session views (decision 14: "no thread sidebar").
+   */
+  sidebar?: ReactNode;
   children: ReactNode;
   className?: string;
 }) {
@@ -21,9 +25,11 @@ export function AppShell({
     <div className={cn("h-screen w-screen flex flex-col bg-[--bg] text-[--fg]", className)}>
       {topNav}
       <div className="flex-1 flex min-h-0">
-        <aside className="w-60 shrink-0 border-r border-[--border] flex flex-col">
-          {sidebar}
-        </aside>
+        {sidebar != null && (
+          <aside className="w-60 shrink-0 border-r border-[--border] flex flex-col">
+            {sidebar}
+          </aside>
+        )}
         <main className="flex-1 min-w-0 flex flex-col">{children}</main>
       </div>
     </div>
