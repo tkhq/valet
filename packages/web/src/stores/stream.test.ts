@@ -418,6 +418,54 @@ describe("setThreadMessages", () => {
     const after = useStreamStore.getState().bySession[SESSION].messages;
     expect(after.map((m) => m.id)).toEqual(["other-1"]);
   });
+
+  it("drops an optimistic user message once its persisted twin (same queueItemId, different id) appears in the REST snapshot", () => {
+    const { addUserMessage, setMessageQueueItemId, setThreadMessages } =
+      useStreamStore.getState();
+    const localId = addUserMessage(SESSION, "hi there", THREAD);
+    setMessageQueueItemId(SESSION, localId, "q-1");
+
+    setThreadMessages(SESSION, THREAD, [
+      {
+        id: "server-user-1",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "user",
+        content: "hi there",
+        parts: [{ kind: "text", text: "hi there" }],
+        createdAt: 1,
+        queueItemId: "q-1",
+      },
+    ]);
+
+    const after = useStreamStore.getState().bySession[SESSION].messages;
+    expect(after.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(after.map((m) => m.id)).toEqual(["server-user-1"]);
+  });
+
+  it("drops an unstamped optimistic user message by content match when its REST twin appears before the 202 settles", () => {
+    const { addUserMessage, setThreadMessages } = useStreamStore.getState();
+    const localId = addUserMessage(SESSION, "hi there", THREAD);
+    // No setMessageQueueItemId call — the 202 response (and its queueItemId
+    // stamp) hasn't come back yet.
+
+    setThreadMessages(SESSION, THREAD, [
+      {
+        id: "server-user-1",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "user",
+        content: "hi there",
+        parts: [{ kind: "text", text: "hi there" }],
+        createdAt: 1,
+      },
+    ]);
+
+    const after = useStreamStore.getState().bySession[SESSION].messages;
+    expect(after.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(after.map((m) => m.id)).toEqual(["server-user-1"]);
+    expect(localId).toMatch(/^user-opt-/);
+  });
 });
 
 describe("store default slice", () => {

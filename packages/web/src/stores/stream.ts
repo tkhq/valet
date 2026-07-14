@@ -488,8 +488,27 @@ export const useStreamStore = create<StreamStore>((set) => ({
       // `engine_entries` yet. Kept in their original relative order,
       // appended after the REST rows.
       const freshIds = new Set(freshMessages.map((m) => m.id));
+      // REST-persisted user messages carry `queueItemId` (stamped when the
+      // optimistic row's submission settles). A persisted user message gets
+      // a *fresh* server id — merge-by-id alone never drops the optimistic
+      // twin, producing a duplicate bubble. Match on queueItemId when the
+      // optimistic row has been stamped; if the 202 hasn't returned yet
+      // (unstamped), fall back to content match against REST user rows —
+      // the pre-id-merge dedupe behavior.
+      const freshQueueItemIds = new Set(
+        freshMessages.filter((m) => m.queueItemId).map((m) => m.queueItemId),
+      );
+      const freshUserContents = new Set(
+        freshMessages.filter((m) => m.role === "user").map((m) => m.content),
+      );
+      const isDupedOptimisticUser = (m: StreamMessage): boolean => {
+        if (m.role !== "user" || !m.id.startsWith("user-opt-")) return false;
+        if (m.queueItemId) return freshQueueItemIds.has(m.queueItemId);
+        return freshUserContents.has(m.content);
+      };
       const localOnly = slice.messages.filter(
-        (m) => m.threadId === threadId && !freshIds.has(m.id),
+        (m) =>
+          m.threadId === threadId && !freshIds.has(m.id) && !isDupedOptimisticUser(m),
       );
       return {
         bySession: {
