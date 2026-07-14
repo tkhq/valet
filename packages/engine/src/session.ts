@@ -193,6 +193,36 @@ export class Session {
     }
   }
 
+  /**
+   * Clear the heartbeat and sweep intervals without tearing anything else
+   * down — for host-side cache eviction only. A host that keeps a `Session`
+   * instance in an in-process cache and later evicts it (e.g. to force a
+   * rebuild on the next `sessionFor` after an identity/config change) must
+   * not leave this instance's timers running: `ensureTimers` unref()s them,
+   * but unref() only stops them from keeping the *process* alive — it does
+   * nothing to stop them from keeping *this object* alive (each closure
+   * captures `this`) or from continuing to hit the store every 5-10s.
+   * Mirrors exactly what `destroy()` does to the two timer fields, without
+   * `destroy()`'s store deletion or thread aborts — this instance's
+   * transcript and store rows must survive.
+   *
+   * The object must not be reused after this without a fresh claim: no
+   * caller should hold a reference across an eviction. If one somehow does,
+   * `ensureTimers` will restart the timers lazily on the next claim (it
+   * checks `this.destroyed`, which `suspendTimers` does not set), so this
+   * is not a poison-pill — just an idle instance.
+   */
+  suspendTimers(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.sweepTimer !== null) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+  }
+
   /** Renew leases for every submission this instance is currently running. */
   async heartbeatOnce(): Promise<void> {
     const ids = this.runningItemIds();

@@ -17,7 +17,6 @@ import {
   type Session,
   type SessionStore,
 } from "@valet/engine";
-import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { orchestratorIdentities } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -26,7 +25,7 @@ import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
-import { readFile, type MemoryScope } from "../services/memory.js";
+import { readOwnFile, type MemoryScope } from "../services/memory.js";
 
 /** Personality is capped at injection time (assistant-centered web UI
  * decision 5), independent of any cap the memory service itself applies. */
@@ -382,13 +381,12 @@ export class EngineHost {
     const name = identity?.handle;
     if (!name) return "";
 
-    let personality = "";
-    try {
-      const result = await readFile(db, scope, "assistant/personality.md");
-      if (result.kind === "file") personality = result.file.content.slice(0, PERSONALITY_INJECT_CAP);
-    } catch (err) {
-      if (!(err instanceof NotFoundError)) throw err;
-    }
+    // Own-scope only (never a team member's file — `readOwnFile` bypasses
+    // `readFile`'s team read-union entirely): the persona prefix is
+    // per-user, so a team `assistant/personality.md` must never substitute
+    // for the caller's own (missing) one.
+    const row = await readOwnFile(db, scope, "assistant/personality.md");
+    const personality = row ? row.content.slice(0, PERSONALITY_INJECT_CAP) : "";
 
     const sentence = personality ? `You are ${name}. ${personality}` : `You are ${name}.`;
     return `${sentence}\n\n`;
@@ -421,16 +419,19 @@ export class EngineHost {
    * restoring the same durable session (same transcript) rather than
    * creating a new one. Safe to call on an id that isn't cached — no-op.
    *
-   * Caveat: if the evicted session had live durable-execution timers
-   * (`ensureTimers` — started once a thread claims a submission), those
-   * timers keep firing against the orphaned in-memory `Session`/`Thread`
-   * objects until GC, since `Session` exposes no "stop timers only" hook
-   * and this method deliberately avoids `destroy()`. Harmless in practice
-   * for the orchestrator (PATCH is a user-editing action, not something
-   * that races a running turn), but noted here rather than silently relied
-   * upon.
+   * Calls `session.suspendTimers()` before dropping the cache entry: the
+   * evicted `Session` would otherwise be rooted forever by its two
+   * unref'd intervals (heartbeat 10s, sweep 5s — each interval closure
+   * captures `this`), permanently leaking the object and continuing to
+   * sweep/heartbeat against the store even though nothing references it
+   * through the cache anymore. `unref()` only keeps the *process* from
+   * staying alive on these timers; it does nothing to stop them from
+   * keeping this *object* alive or from continuing to fire. Suspending
+   * them first means the evicted instance is a normal orphan, collected
+   * once its last reference (this method's local `entry`) goes away.
    */
   evictCache(sessionId: string): void {
+    this.cache.get(sessionId)?.session.suspendTimers();
     this.cache.delete(sessionId);
   }
 

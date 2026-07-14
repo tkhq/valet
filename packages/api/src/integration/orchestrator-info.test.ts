@@ -16,6 +16,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { agentSessions, childWatches, orchestratorIdentities } from "../schema/index.js";
+import { addMember, createTeam } from "../services/teams.js";
+import { writeFile } from "../services/memory.js";
 import type {
   EnsureOrchestratorResponse,
   GetOrchestratorChildrenResponse,
@@ -75,6 +77,45 @@ describe("GET /api/orchestrator/info", () => {
     const body = (await res.json()) as GetOrchestratorInfoResponse;
     expect(body.presence).toBe("working");
     expect(body.activeChildren).toBe(1);
+  });
+
+  it("does not leak a team's assistant/personality.md into a member's own persona/info (own-scope read only)", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+
+    // local-user is a member of Platform, which has its own
+    // assistant/personality.md. local-user has never written a personal
+    // one. Personality reads (GET /info and persona injection) must go
+    // through an own-scope-only lookup, not `readFile`'s team read-union
+    // (which is correct/intentional for the memory explorer, but wrong for
+    // a per-user persona/identity field).
+    const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await addMember(db, { teamId: team.id, userId: "local-user", role: "member" });
+    await writeFile(db, { owner: { type: "team", id: team.id }, actorUserId: "local-user" }, {
+      path: "assistant/personality.md",
+      content: "Team-wide corporate voice.",
+    });
+
+    const infoRes = await fetch(`${api.baseUrl}/api/orchestrator/info`);
+    expect(infoRes.status).toBe(200);
+    const infoBody = (await infoRes.json()) as GetOrchestratorInfoResponse;
+    expect(infoBody.personality).toBeNull();
+
+    // Set a name (no personal personality) and confirm the persona prefix
+    // that gets injected into systemPrompt stays neutral — no team content.
+    const patchRes = await fetch(`${api.baseUrl}/api/orchestrator/info`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Wren" }),
+    });
+    expect(patchRes.status).toBe(200);
+
+    const session = await api.providers.engineHost.orchestratorSessionFor(
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.systemPrompt).toContain("You are Wren.\n\n");
+    expect(session.options.systemPrompt).not.toContain("Team-wide corporate voice.");
   });
 
   it("settled child_watches rows don't count toward activeChildren/presence", async () => {

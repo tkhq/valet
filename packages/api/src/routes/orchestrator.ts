@@ -13,10 +13,9 @@ import { Hono } from "hono";
 import { and, count, desc, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { orchestratorSessionId, type Principal } from "@valet/engine";
-import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { agentSessions, childWatches, orchestratorIdentities } from "../schema/index.js";
-import { readFile, writeFile, type MemoryScope } from "../services/memory.js";
+import { readOwnFile, writeFile, type MemoryScope } from "../services/memory.js";
 import type {
   EnsureOrchestratorResponse,
   GetOrchestratorChildrenResponse,
@@ -140,14 +139,13 @@ orchestratorRouter.get("/info", async (c) => {
     .get();
   const name = identity?.handle ?? null;
 
+  // Own-scope only — a team member's `assistant/personality.md` must never
+  // leak into this user's persona/info response (`readOwnFile` bypasses
+  // `readFile`'s team read-union entirely; consistent with `EngineHost`'s
+  // `resolvePersonaPrefix`, the other personality-read call site).
   const scope: MemoryScope = { owner: principal, actorUserId: user.id };
-  let personality: string | null = null;
-  try {
-    const result = await readFile(db, scope, "assistant/personality.md");
-    if (result.kind === "file") personality = result.file.content;
-  } catch (err) {
-    if (!(err instanceof NotFoundError)) throw err;
-  }
+  const personalityRow = await readOwnFile(db, scope, "assistant/personality.md");
+  const personality = personalityRow ? personalityRow.content : null;
 
   const unsettled = await db
     .select({ n: count() })

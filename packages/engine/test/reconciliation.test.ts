@@ -1489,3 +1489,61 @@ describe("sweep interval rejection guard", () => {
     expect(unhandled).toEqual([]);
   });
 });
+
+describe("Session.suspendTimers", () => {
+  it("clears both intervals so no further sweep/heartbeat ticks fire, and destroy() afterward still works", async () => {
+    // Host-side cache-eviction exception (sanctioned): a host that keeps a
+    // Session in an in-process cache and evicts it without destroy()-ing it
+    // (e.g. EngineHost.evictCache) must stop the heartbeat/sweep intervals
+    // itself, or the evicted instance is permanently rooted by its own
+    // unref'd timers and keeps hitting the store forever. Verify behaviorally:
+    // after suspendTimers(), advancing fake timers past both intervals'
+    // periods produces no further store calls.
+    const store = new InMemorySessionStore();
+    const faux = registerFauxProvider({ provider: "recon-suspend-timers" });
+    faux.setResponses([fauxAssistantMessage("noop")]);
+    const bus = new InMemoryEventStream();
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      id: "sess-suspend-timers",
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    await session.ensureDefaultThread();
+
+    const listSpy = vi.spyOn(store, "listUnsettledSubmissions");
+    const renewSpy = vi.spyOn(store, "renewLeases");
+
+    vi.useFakeTimers();
+    try {
+      session.ensureTimers();
+      // Sanity: timers are live before suspension.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(listSpy.mock.calls.length).toBeGreaterThan(0);
+
+      session.suspendTimers();
+      listSpy.mockClear();
+      renewSpy.mockClear();
+
+      // Advance well past both the 10s heartbeat and 5s sweep periods —
+      // neither should fire again.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(listSpy).not.toHaveBeenCalled();
+      expect(renewSpy).not.toHaveBeenCalled();
+
+      // destroy() afterward must still work cleanly (idempotent clearInterval
+      // on already-nulled timer fields, plus the rest of teardown).
+      await session.destroy();
+    } finally {
+      vi.useRealTimers();
+      listSpy.mockRestore();
+      renewSpy.mockRestore();
+      faux.unregister();
+    }
+  });
+});

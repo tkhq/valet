@@ -510,6 +510,26 @@ export async function readFile(
   return { kind: "file", path, rendered: renderFile(row), file: row };
 }
 
+/**
+ * Own-scope-only file read — never resolves a `team:{id}/…` virtual prefix
+ * and never falls back to the directory index. Queries `memory_files`
+ * directly against `scope.owner`, the same pattern `GET /api/memory/tree`
+ * already uses for its deliberately-own-scope listing. For callers like
+ * persona/identity injection where a team member's file must never
+ * substitute for the caller's own (missing) file, this is the correct
+ * primitive — `readFile` is the union-read entry point for the memory
+ * explorer / tools and must stay that way.
+ */
+export async function readOwnFile(db: AppDb, scope: MemoryScope, path: string): Promise<MemoryFileRow | null> {
+  const normalized = normalizePath(path);
+  const row = await db
+    .select()
+    .from(memoryFiles)
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, normalized)))
+    .get();
+  return row ?? null;
+}
+
 // ─── listFiles ─────────────────────────────────────────────────────────
 
 export interface MemoryFileSummary {
