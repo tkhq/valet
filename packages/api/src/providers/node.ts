@@ -144,20 +144,29 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // only receives `{runId, nodeId, prompt, summary?, details?}` — no owner
   // — so it re-resolves the run's owner from the store itself.
   const onApprovalPending: OnApprovalPending = async (info) => {
-    const run = await workflowStore.getRun(info.runId);
-    if (!run?.owner) return; // no recorded owner: nothing to notify
-    const owner: Principal = { type: run.owner.ownerType as Principal["type"], id: run.owner.ownerId };
-    await routeAttention(
-      { db },
-      {
-        kind: "approval",
-        owner,
-        title: info.summary ?? info.prompt,
-        body: info.summary ? info.prompt : undefined,
-        href: `/workflows/runs/${info.runId}`,
-        dedupeKey: `${info.runId}:${info.nodeId}`,
-      },
-    );
+    // Contained: the executor awaits this AFTER persisting the approval
+    // intent, so a throw here would abort the drive AND permanently skip the
+    // notification on the re-drive (intent already exists). A lost
+    // notification must degrade to log-only — the run stays resolvable via
+    // the API either way.
+    try {
+      const run = await workflowStore.getRun(info.runId);
+      if (!run?.owner) return; // no recorded owner: nothing to notify
+      const owner: Principal = { type: run.owner.ownerType as Principal["type"], id: run.owner.ownerId };
+      await routeAttention(
+        { db },
+        {
+          kind: "approval",
+          owner,
+          title: info.summary ?? info.prompt,
+          body: info.summary ? info.prompt : undefined,
+          href: `/workflows/runs/${info.runId}`,
+          dedupeKey: `${info.runId}:${info.nodeId}`,
+        },
+      );
+    } catch (err) {
+      console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
+    }
   };
 
   const workflowRunHost = new LocalRunHost({
