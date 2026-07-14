@@ -5,10 +5,11 @@
  * the submission until it settles, with one bounded schema-repair round trip.
  *
  * Determinism / at-most-once dispatch:
- *   - `sessionId = wf:{runId}:{nodeId}`, `dispatchId = workflow:{runId}:{nodeId}`
- *     (repair turn: `dispatchId + ':repair'`) — both derived from ids already
- *     durable in the checkpoint PK, so a crash-and-resume always recomputes
- *     the same ones.
+ *   - `sessionId = wf:{runId}:{nodeId}[:{iteration}]`, `dispatchId =
+ *     workflow:{runId}:{nodeId}[:{iteration}]` (repair turn: `dispatchId +
+ *     ':repair'`; iteration suffix only when > 0, i.e. foreach bodies) —
+ *     all derived from ids already durable in the checkpoint PK, so a
+ *     crash-and-resume always recomputes the same ones.
  *   - `createSession` is idempotent by id, `prompt` idempotent by
  *     `dispatchId` (engine contract, `engine-deps.ts`), so re-issuing the
  *     dispatch after a crash between "prompt sent" and "receipt persisted"

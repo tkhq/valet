@@ -110,11 +110,10 @@ export interface WorkflowEngineDeps {
    * handle to dedup against (unlike `prompt`'s `dispatchId`), so this is
    * at-least-once per the run-host spec: the executor's intent checkpoint
    * narrows the duplicate window, and one duplicate billed call on a
-   * crash-after-dispatch is the accepted cost. Never throws for a model
-   * error — implementations should surface failures some other way the
-   * caller can distinguish (the `llm` executor's contract, Task 3, covers
-   * this); this signature intentionally has no error variant because the
-   * happy-path text is all the executor needs.
+   * crash-after-dispatch is the accepted cost. Implementations MAY throw on
+   * model/transport errors (pi-ai's `completeSimple` does) — the `llm`
+   * executor treats a throw as a node failure, so callers need no separate
+   * error variant on the result.
    */
   llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult>;
 
