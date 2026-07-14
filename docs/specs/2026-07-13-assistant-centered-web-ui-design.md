@@ -12,7 +12,7 @@ Phase 4 added the orchestrator, memory, signals, and child sessions to the engin
 2. **Two kinds of sessions, kept distinct.** The assistant is the daily driver; **standalone sessions** are the automation substrate (heavily used by workflows in Phase 5) and keep their own area. **Orchestrator-derived (child) sessions nest inline in the assistant's page**, under the thread that spawned them — they never appear in the standalone list.
 3. **Standalone sessions have no thread UI.** One self-contained chat per standalone session (the engine's default thread underneath, never surfaced).
 4. **Memory is browse + read + search** this pass. Writes stay agent-mediated ("ask the assistant to edit it"); no UI editing.
-5. **The assistant is named on first visit** (suggested name + reroll, one step). No avatar/handle ceremony.
+5. **The assistant is named and given a personality on first visit**, and users are actively encouraged to do both: one step, suggested name + reroll, plus a personality field seeded by selectable trait chips ("warm and direct", "dry wit", "meticulous planner", "cheerful hype-person") that compose into editable free text. Skippable (defaults to a neutral persona), editable later from the dashboard identity header. No avatar/handle ceremony.
 6. **Org visibility is deferred** to a future `/org` page; the dashboard stays personal, with the activity feed shaped to accept org events later.
 7. **Aesthetic: calm companion** — warm, quiet, personal; one signature element (the presence mark); everything else disciplined.
 
@@ -22,8 +22,8 @@ Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications
 
 ### `/` — Assistant dashboard
 
-- **First visit** (no `orchestrator_identities.handle`): an inline naming step — "Meet your assistant", a suggested name (Atlas/Wren/… pool), 🎲 reroll, editable field, Start. Start = `PATCH /api/orchestrator/info { name }` + ensure, then the dashboard renders.
-- **Identity header**: name set in the display face, presence mark beneath (see Visual Language), one-line status ("idle" / "thinking" / "working on 2 tasks") derived from live agent status + unsettled children.
+- **First visit** (no `orchestrator_identities.handle`): an inline identity step — "Meet your assistant". A suggested name (Atlas/Wren/… pool) with 🎲 reroll and an editable field, then a **personality** field: 3–4 trait chips ("warm and direct", "dry wit", "meticulous planner", "cheerful hype-person") that append composable phrases into an editable textarea, or write your own. Copy encourages it ("Give them a voice — you can change this anytime"). Start = `PATCH /api/orchestrator/info { name, personality }` + ensure. Skipping personality yields the neutral persona.
+- **Identity header**: name set in the display face, presence mark beneath (see Visual Language), one-line status ("idle" / "thinking" / "working on 2 tasks") derived from live agent status + unsettled children. An edit affordance on the header reopens the identity step inline for renaming / re-personality.
 - **Chat card**: the last ~3 exchanges of the active thread, live via the existing stream store; a composer at its foot — sending admits the prompt and navigates to `/chat`.
 - **Memory card**: pinned files (📌) + today's journal excerpt (first lines, rendered), each linking into `/memory/$path`.
 - **Your work card**: recent **standalone** sessions (status dot, title, relative time) linking to `/sessions/$id`, plus a count line for active children ("2 tasks running under today's thread") linking to `/chat`. Children are NOT listed flat here — they live in the chat's thread tree.
@@ -68,8 +68,8 @@ Read-only. No editing, no graph, no import UI this pass (import stays curl/API).
 
 | Route | Shape | Notes |
 |---|---|---|
-| `GET /api/orchestrator/info` | `{ sessionId, name: string \| null, presence: 'idle'\|'thinking'\|'working', activeChildren: number }` | name from `orchestrator_identities.handle`; presence from live session agent status + unsettled child_watches. Never creates. |
-| `PATCH /api/orchestrator/info` | `{ name }` → `{ ok }` | writes `handle`; name is injected into the persona at wake ("You are {name}, …") — requires cache eviction or next-wake pickup (evict on rename). |
+| `GET /api/orchestrator/info` | `{ sessionId, name: string \| null, personality: string \| null, presence: 'idle'\|'thinking'\|'working', activeChildren: number }` | name/personality from `orchestrator_identities`; presence from live session agent status + unsettled child_watches. Never creates. |
+| `PATCH /api/orchestrator/info` | `{ name?, personality? }` → `{ ok }` | writes `handle` + a new `personality` TEXT column on `orchestrator_identities` (pre-1.0: edit the app 0000 in place). Both are injected into the persona at wake ("You are {name}. {personality}" — personality prose appended after the identity line, before the operating rules, capped ~500 chars). Any identity change evicts the cached session so the next wake picks it up. |
 | `GET /api/orchestrator/children` | `{ children: [{ sessionId, title, parentThreadId, status: 'running'\|'settled', outcome?, createdAt }] }` | child_watches ⋈ agent_sessions for the caller's orchestrator. |
 | `GET /api/memory/tree` | `{ entries: [{ path, title, type, pinned, updatedAt, dir: boolean }] }` | JSON listing for the explorer; the markdown virtual index stays for agents. Own-scope (+ read-union later; this pass own-scope is fine). |
 | Wire `Message.signal?` | `{ signalType, attributes?, senderSessionId? }` | bridge + REST (`entryToMessage`) stop dropping `entry.signal`. Closes the Phase 4 minor; **full persistence round-trip checklist applies** (engine entry → wire → REST → renderer). |
