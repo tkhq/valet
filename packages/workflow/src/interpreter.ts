@@ -333,7 +333,7 @@ async function invokeExecutor(
     case 'foreach':
       throw new Error("executor for 'foreach' not implemented yet (node completion plan Task 6)");
     case 'llm':
-      throw new Error("executor for 'llm' not implemented yet (node completion plan Task 3)");
+      return requireExecutor(executors.llm, node).execute({ ...argsBase, node });
     case 'orchestrator':
       throw new Error("executor for 'orchestrator' not implemented yet (node completion plan Task 5)");
     case 'tool':

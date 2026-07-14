@@ -108,6 +108,7 @@ export { executeStop } from './stop.js';
 export { executeWait } from './wait.js';
 export { executeApproval } from './approval.js';
 export { executeSession } from './session.js';
+export { executeLlm } from './llm.js';
 
 import { executeTrigger } from './trigger.js';
 import { executeSet } from './set.js';
@@ -116,8 +117,9 @@ import { executeStop } from './stop.js';
 import { executeWait } from './wait.js';
 import { executeApproval } from './approval.js';
 import { executeSession } from './session.js';
+import { executeLlm } from './llm.js';
 
-/** The pure executors plus `wait`/`approval`/`session` (Tasks 5, 7). */
+/** The pure executors plus `wait`/`approval`/`session`/`llm` (Tasks 5, 7, 3). */
 export function createDefaultNodeExecutors(): NodeExecutorRegistry {
   return {
     trigger: { execute: executeTrigger },
@@ -127,5 +129,6 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     wait: { execute: executeWait },
     approval: { execute: executeApproval },
     session: { execute: executeSession },
+    llm: { execute: executeLlm },
   };
 }
