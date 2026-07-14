@@ -195,7 +195,7 @@ make db-seed            # Seed test data
 make db-reset           # Reset database (drop and recreate)
 
 # Typecheck
-pnpm typecheck          # All packages
+pnpm typecheck          # All packages except packages/worker (see note below)
 cd packages/worker && pnpm typecheck  # Single package
 
 # Tests
@@ -216,6 +216,8 @@ make deploy              # Deploy worker + modal + client (includes migrations)
 make deploy-migrate      # Apply D1 migrations to production only
 make release             # Full idempotent release: install, build, push image, deploy
 ```
+
+**`packages/worker` is excluded from root `pnpm typecheck`.** It's frozen (kept only for the legacy prod Cloudflare deploy) and was dropped from `tsconfig.json`'s project references as part of the plugin-system-v2 conversion, once the worker's own `src/integrations/packages.ts`/`src/channels/packages.ts` registries stopped being regenerated (plugins now self-declare v2 manifests consumed by `packages/api`, not the worker). Worker deploys pin the last commit before that conversion started: `35b398e5`. Run `cd packages/worker && pnpm typecheck` directly if you need to typecheck it in isolation — root `pnpm typecheck` passing is no longer evidence either way for the worker.
 
 ### Applying D1 Migrations to Production
 
@@ -454,20 +456,26 @@ This codebase has accumulated `any`, `unknown`, and type assertions (`as`) as sh
 7. Add React Query hooks in `packages/client/src/api/<name>.ts`
 8. Run `make db-migrate` (local) or apply to production via the deploy migration workflow above
 
-### Adding a new plugin
+### Adding a new plugin (v2)
+
+Plugins are self-describing: a package exports a single `ValetPlugin` manifest (`{ name, version, actions?, triggers?, skills?, roles?, credentials?, description? }`, see `@valet/engine`'s `ValetPlugin` type) from `./plugin`, and `packages/api` bundles it. The worker's per-capability registries (`src/integrations/packages.ts`, `src/channels/packages.ts`, `src/plugins/content-registry.ts`) are retired — do not add new plugins there.
 
 1. Create directory: `packages/plugin-<name>/`
-2. Add `plugin.yaml` with name, version, description, icon
-3. For **code plugins** (actions/channels):
-   - Add `package.json` with `@valet/sdk` dependency and exports (`./actions`, `./channels`)
-   - Add `tsconfig.json` extending root config
-   - Implement `src/actions/` (provider, actions, triggers) and/or `src/channels/` (transport)
-   - Add reference to root `tsconfig.json` and `packages/worker/tsconfig.json`
-   - Add dependency in `packages/worker/package.json`: `"@valet/plugin-<name>": "workspace:*"`
-4. For **content plugins** (skills/personas/tools):
-   - Add content files in `skills/*.md`, `personas/*.md`, or `tools/*.ts`
-5. Run `make generate-registries` to regenerate all registries
-6. Run `pnpm typecheck` to verify
+2. Add `plugin.yaml` with name, version, description, icon, and `v2: true` (set `enabled: false` too if the manifest should exist but not ship yet — see `packages/plugin-telegram/plugin.yaml`)
+3. Add `package.json`:
+   - `"valet": { "plugin": "./dist/plugin.js" }` marker
+   - `"exports"` with a `"./plugin"` entry pointing at `dist/plugin.js`/`dist/plugin.d.ts`
+   - `@valet/engine` workspace dependency (plus `@valet/sdk`, `@valet/shared`, etc. as needed)
+   - `build`/`typecheck`/`test` scripts matching a sibling plugin package
+4. Add `tsconfig.json` extending the root config, referencing `../engine` (and any other workspace deps)
+5. Implement `src/plugin.ts` default-exporting the `ValetPlugin` manifest:
+   - Actions/triggers: build via `ActionPlugin`/`TriggerDef` (see `packages/plugin-github/src/plugin.ts`) or `mcpActionPlugin` (see `packages/plugin-deepwiki/src/plugin.ts`) for MCP-backed services
+   - Skills: `loadSkillFromMarkdown(content, "plugin")` per `skills/*.md` file
+   - Roles/personas: `loadRoleFromMarkdown(content, "plugin")` per role definition file
+6. Add reference to root `tsconfig.json`'s `references` array (skip `packages/worker/tsconfig.json` — it's frozen and excluded from root typecheck)
+7. Add dependency in `packages/api/package.json`: `"@valet/plugin-<name>": "workspace:*"`
+8. Run `make generate-registries` — scans `packages/plugin-*/plugin.yaml` for `v2: true` (skipping `enabled: false`) and regenerates `packages/api/src/plugins/registry.gen.ts`
+9. Run `pnpm typecheck` to verify
 
 ### Adding a new Durable Object
 

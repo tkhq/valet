@@ -143,3 +143,12 @@ New plugins author engine-native from day one.
 - **Verbatim-body rule erosion:** subagents "improving" logic during ports is the main quality risk — the per-plugin review explicitly diffs bodies against legacy and rejects non-type changes.
 - **Credential key-map drift:** a wrong mapping fails at first real use, not in mocked tests; Wave 2's real-credential dogfood on 2–3 services is the mitigation, and declarations make the expected keys auditable.
 - **Legacy worker pin:** in-place conversion breaks the frozen worker's plugin imports; any future legacy deploy builds from the pre-conversion pin, with cherry-picks per case. This is accepted — the worker was already frozen.
+
+## Implementation notes (2026-07-14)
+
+Recorded during implementation (Task 14: content-plugin manifests, tree cleanup, SDK legacy deletion, worker typecheck exclusion). These are decisions made while executing this spec, not changes to the spec's scope.
+
+- **`transports` deferred to Phase 7.** `ValetPlugin` has no `transports` field today — the v2 `ChannelTransport` contract doesn't exist in code yet. Telegram's manifest (`packages/plugin-telegram/src/plugin.ts`) is a stub (`{ name, version, description }`, `enabled: false` in `plugin.yaml`) so the package is loader-visible without shipping an empty/misleading entry in the bundled registry; Phase 7 adds the transport contract and flips `enabled` on.
+- **`TriggerDef.verify` may be async.** The spec's earlier sketch showed a synchronous signature; GitHub HMAC verification (`crypto.subtle`/node `crypto`) is naturally async, and nothing downstream requires sync, so `verify` returns `Promise<boolean> | boolean`.
+- **MCP plugins use the `ActionPlugin.resolveActions` dynamic seam**, not a static `actions` array: `resolveActions(ctx: { credentials: CredentialProvider })` is invoked lazily by `list_tools`/`call_tool`, cached per catalog instance (i.e. per session — no cross-user leakage) with a short TTL, and instantiated fresh per session rather than shared globally. This is how `mcpActionPlugin` (`packages/sdk/src/mcp/action-plugin.ts`) replaces the legacy `McpActionSource` (deleted this task).
+- **Connect UX is manual token entry for this phase.** Users paste a token/API key per service; there is no OAuth client/redirect/consent flow yet. OAuth lands with the separate auth/login design pass — the "connect one OAuth service" style exit criteria in this plan are satisfied by pasting an OAuth access token directly, not by driving a real OAuth dance.

@@ -1,5 +1,5 @@
 {
-  "name": "@valet/plugin-telegram",
+  "name": "@valet/plugin-sandbox-tunnels",
   "version": "0.0.1",
   "private": true,
   "type": "module",

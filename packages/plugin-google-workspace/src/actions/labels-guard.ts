@@ -1,5 +1,21 @@
-import type { ActionContext, ActionResult } from '@valet/sdk/integrations';
 import { normalizeDocumentId } from './docs-helpers.js';
+
+// The legacy `@valet/sdk/integrations` contract (ActionSource/ActionContext/
+// ActionResult) was deleted in the v2 plugin conversion. This guard only
+// ever read `guardConfig` off the context and `data` off the result, so
+// rather than depend on the full legacy interface we keep a narrow local
+// mirror of the two fields it (and its test) actually touch.
+export interface ActionContext {
+  credentials?: unknown;
+  userId?: string;
+  guardConfig?: Record<string, unknown>;
+}
+
+export interface ActionResult<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

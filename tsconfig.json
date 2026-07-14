@@ -38,7 +38,10 @@
     { "path": "./packages/plugin-email-auth" },
     { "path": "./packages/plugin-google-auth" },
     { "path": "./packages/plugin-telegram" },
-    { "path": "./packages/worker" },
+    { "path": "./packages/plugin-browser" },
+    { "path": "./packages/plugin-workflows" },
+    { "path": "./packages/plugin-sandbox-tunnels" },
+    { "path": "./packages/plugin-personas" },
     { "path": "./packages/api" }
   ]
 }

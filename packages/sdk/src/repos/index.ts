@@ -1,5 +1,3 @@
-import type { ActionSource, TriggerSource } from '../integrations/index.js';
-
 // ─── Repository Provider Contract ────────────────────────────────────────────
 
 export interface RepoCredential {
@@ -65,9 +63,6 @@ export interface RepoProvider {
     },
   ): Promise<SessionRepoEnv>;
   mintToken(credential: RepoCredential): Promise<{ accessToken: string; expiresAt?: string }>;
-
-  getActionSource?(credential: RepoCredential): ActionSource;
-  getTriggerSource?(): TriggerSource;
 }
 
 export interface RepoProviderPackage {

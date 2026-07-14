@@ -10,10 +10,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./channels": {
-      "types": "./dist/channels/index.d.ts",
-      "import": "./dist/channels/index.js"
-    },
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js"
@@ -25,10 +21,6 @@
     "./ui": {
       "types": "./dist/ui/index.d.ts",
       "import": "./dist/ui/index.js"
-    },
-    "./integrations": {
-      "types": "./dist/integrations/index.d.ts",
-      "import": "./dist/integrations/index.js"
     },
     "./identity": {
       "types": "./dist/identity/index.d.ts",
@@ -51,8 +43,7 @@
   "dependencies": {
     "@valet/engine": "workspace:*",
     "@valet/shared": "workspace:*",
-    "typebox": "^1.1.24",
-    "zod": "^3.22.4"
+    "typebox": "^1.1.24"
   },
   "peerDependencies": {
     "react": ">=18.0.0"

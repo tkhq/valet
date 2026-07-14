@@ -38,6 +38,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/plugin-browser':
+        specifier: workspace:*
+        version: link:../plugin-browser
       '@valet/plugin-cloudflare':
         specifier: workspace:*
         version: link:../plugin-cloudflare
@@ -62,6 +65,12 @@ importers:
       '@valet/plugin-notion':
         specifier: workspace:*
         version: link:../plugin-notion
+      '@valet/plugin-personas':
+        specifier: workspace:*
+        version: link:../plugin-personas
+      '@valet/plugin-sandbox-tunnels':
+        specifier: workspace:*
+        version: link:../plugin-sandbox-tunnels
       '@valet/plugin-sentry':
         specifier: workspace:*
         version: link:../plugin-sentry
@@ -74,6 +83,9 @@ importers:
       '@valet/plugin-typefully':
         specifier: workspace:*
         version: link:../plugin-typefully
+      '@valet/plugin-workflows':
+        specifier: workspace:*
+        version: link:../plugin-workflows
       '@valet/sandbox-docker':
         specifier: workspace:*
         version: link:../sandbox-docker
@@ -278,6 +290,19 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/plugin-browser:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+    devDependencies:
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/plugin-cloudflare:
     dependencies:
@@ -488,6 +513,32 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/plugin-personas:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+    devDependencies:
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/plugin-sandbox-tunnels:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+    devDependencies:
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/plugin-sentry:
     dependencies:
       '@valet/engine':
@@ -544,9 +595,9 @@ importers:
 
   packages/plugin-telegram:
     dependencies:
-      '@valet/sdk':
+      '@valet/engine':
         specifier: workspace:*
-        version: link:../sdk
+        version: link:../engine
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -563,6 +614,19 @@ importers:
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
+    devDependencies:
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/plugin-workflows:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -648,9 +712,6 @@ importers:
       typebox:
         specifier: ^1.1.24
         version: 1.1.37
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       '@types/react':
         specifier: ^19.0.0

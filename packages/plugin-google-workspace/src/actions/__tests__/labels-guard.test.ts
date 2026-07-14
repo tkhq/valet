@@ -12,7 +12,7 @@ import {
   resolveGuard,
   extractFileId,
 } from '../labels-guard.js';
-import type { ActionContext } from '@valet/sdk/integrations';
+import type { ActionContext } from '../labels-guard.js';
 
 describe('labels-guard action classification completeness', () => {
   const allRegisteredIds = [
