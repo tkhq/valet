@@ -35,8 +35,23 @@ export function TopNav() {
       <div className="flex-1" />
 
       <Link
+        to="/chat"
+        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
+        activeProps={{ className: "text-ink" }}
+      >
+        Chat
+      </Link>
+      <Link
+        to="/memory"
+        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
+        activeProps={{ className: "text-ink" }}
+      >
+        Memory
+      </Link>
+      <Link
         to="/sessions"
         className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
+        activeProps={{ className: "text-ink" }}
       >
         Sessions
       </Link>

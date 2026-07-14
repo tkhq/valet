@@ -41,8 +41,15 @@ export function MemoryCard() {
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
-      <header className="px-4 py-3 border-b border-line">
-        <h2 className="font-display text-base text-ink">Memory</h2>
+      <header className="px-4 py-3 border-b border-line flex items-center justify-between">
+        <h2 className="font-display text-base text-ink">
+          <Link to="/memory" className="hover:text-moss">
+            Memory
+          </Link>
+        </h2>
+        <Link to="/memory" className="text-xs text-muted hover:text-moss">
+          Browse
+        </Link>
       </header>
 
       <div className="flex-1 px-4 py-3 space-y-4 overflow-y-auto max-h-64">

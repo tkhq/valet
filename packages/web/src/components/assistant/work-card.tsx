@@ -37,7 +37,11 @@ export function WorkCard() {
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
       <header className="px-4 py-3 border-b border-line flex items-center justify-between">
-        <h2 className="font-display text-base text-ink">Your work</h2>
+        <h2 className="font-display text-base text-ink">
+          <Link to="/sessions" className="hover:text-moss">
+            Your work
+          </Link>
+        </h2>
         <Link to="/sessions" className="text-xs text-muted hover:text-moss">
           View all
         </Link>

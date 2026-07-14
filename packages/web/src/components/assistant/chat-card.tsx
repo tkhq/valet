@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Send } from "lucide-react";
 import type { Message } from "@valet/api/wire";
 import { Button, Spinner, Textarea } from "~/components/primitives";
@@ -55,8 +55,15 @@ export function ChatCard() {
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
-      <header className="px-4 py-3 border-b border-line">
-        <h2 className="font-display text-base text-ink">Chat</h2>
+      <header className="px-4 py-3 border-b border-line flex items-center justify-between">
+        <h2 className="font-display text-base text-ink">
+          <Link to="/chat" className="hover:text-moss">
+            Chat
+          </Link>
+        </h2>
+        <Link to="/chat" className="text-xs text-muted hover:text-moss">
+          Open
+        </Link>
       </header>
 
       <div className="flex-1 px-4 py-3 space-y-2 overflow-y-auto max-h-64">
