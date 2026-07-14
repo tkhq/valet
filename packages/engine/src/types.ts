@@ -150,13 +150,15 @@ export interface SubmissionResult {
   outcome: SubmissionOutcome["outcome"];
   /** Content of the last persisted assistant entry carrying this queueItemId with stopReason 'end_turn'. */
   text?: string;
-  output?: unknown; // Phase 5 (resultSchema) — always undefined in Phase 1
+  /** Typed result validated against `AwaitResultOptions.resultSchema`; set only when `outcome` is 'completed' and extraction/validation succeeded. */
+  output?: unknown;
   error?: string;
 }
 
 export interface AwaitResultOptions {
   timeoutMs?: number;
-  resultSchema?: TSchema; // typed now, rejected until Phase 5
+  /** When set and the submission's outcome is 'completed', extracts and validates JSON from the final assistant text into `SubmissionResult.output`. */
+  resultSchema?: TSchema;
   signal?: AbortSignal;
 }
 

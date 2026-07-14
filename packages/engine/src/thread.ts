@@ -26,6 +26,7 @@ import {
   validateSignalTagName,
 } from "./submission.js";
 import { NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
+import { extractStructuredOutput } from "./result-schema.js";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -2458,7 +2459,6 @@ export class Thread {
    * spin forever.
    */
   async awaitResult(queueItemId: string, opts: AwaitResultOptions = {}): Promise<SubmissionResult> {
-    if (opts.resultSchema) throw new Error("resultSchema lands in Phase 5");
     return this.resolveResult(queueItemId, opts, 0);
   }
 
@@ -2510,6 +2510,11 @@ export class Thread {
         : resolveSubmissionText(entries, item.id);
     const result: SubmissionResult = { queueItemId: item.id, outcome: outcome.outcome, text };
     if (outcome.error !== undefined) result.error = outcome.error;
+    if (opts.resultSchema && outcome.outcome === "completed") {
+      const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
+      if (extracted.output !== undefined) result.output = extracted.output;
+      if (extracted.error !== undefined) result.error = extracted.error;
+    }
     return result;
   }
 

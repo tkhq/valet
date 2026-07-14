@@ -336,9 +336,9 @@ describe("Thread.awaitResult", () => {
     faux.unregister();
   });
 
-  it("resultSchema is rejected as not implemented until Phase 5", async () => {
-    const faux = registerFauxProvider({ provider: "await-schema" });
-    faux.setResponses([fauxAssistantMessage("n/a")]);
+  it("resultSchema on a completed submission populates output", async () => {
+    const faux = registerFauxProvider({ provider: "await-schema-valid" });
+    faux.setResponses([fauxAssistantMessage('```json\n{"answer": 42}\n```')]);
 
     const { engine } = makeEngine();
     const session = await engine.createSession({
@@ -349,11 +349,64 @@ describe("Thread.awaitResult", () => {
       model: faux.getModel(),
     });
 
+    const schema = Type.Object({ answer: Type.Number() });
     const r1 = await session.prompt("hi");
-    await expect(
-      session.thread().awaitResult(r1.queueItemId, { resultSchema: Type.Object({}) }),
-    ).rejects.toThrow("resultSchema lands in Phase 5");
+    const result = await session.thread().awaitResult(r1.queueItemId, { resultSchema: schema });
+    expect(result.outcome).toBe("completed");
+    expect(result.output).toEqual({ answer: 42 });
+    expect(result.error).toBeUndefined();
 
+    faux.unregister();
+  });
+
+  it("resultSchema validation failure leaves output undefined, sets error, outcome stays completed", async () => {
+    const faux = registerFauxProvider({ provider: "await-schema-invalid" });
+    faux.setResponses([fauxAssistantMessage('```json\n{"answer": "not-a-number"}\n```')]);
+
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const schema = Type.Object({ answer: Type.Number() });
+    const r1 = await session.prompt("hi");
+    const result = await session.thread().awaitResult(r1.queueItemId, { resultSchema: schema });
+    expect(result.outcome).toBe("completed");
+    expect(result.output).toBeUndefined();
+    expect(result.error).toBeDefined();
+
+    faux.unregister();
+  });
+
+  it("resultSchema is not attempted for a non-completed outcome", async () => {
+    const faux = registerFauxProvider({ provider: "await-schema-timeout", tokensPerSecond: 30 });
+    const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("steer-done")]);
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("original");
+    await waitFor(() => events.some((e) => e.event.type === "text_delta"));
+    await session.thread().submitPrompt("steer-in", { queueMode: "steer" });
+
+    const schema = Type.Object({ answer: Type.Number() });
+    const result = await session.thread().awaitResult(r1.queueItemId, { resultSchema: schema });
+    expect(result.outcome).toBe("superseded");
+    expect(result.output).toBeUndefined();
+    expect(result.error).toBeUndefined();
+
+    await waitFor(async () => (await store.getQueueItem(session.id, r1.queueItemId))?.status === "settled");
     faux.unregister();
   });
 

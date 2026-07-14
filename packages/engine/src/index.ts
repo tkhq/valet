@@ -38,6 +38,7 @@ export {
   orchestratorSessionId,
   parseOrchestratorSessionId,
 } from "./principal.js";
+export { extractStructuredOutput } from "./result-schema.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
 export { Thread } from "./thread.js";
