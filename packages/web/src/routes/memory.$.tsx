@@ -1,5 +1,4 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { MemorySearchPane } from "~/components/memory/memory-search";
 import { MemoryDoc } from "~/components/memory/memory-doc";
 
 /**
@@ -10,6 +9,9 @@ import { MemoryDoc } from "~/components/memory/memory-doc";
  * capture a single segment, which is why this is a splat route rather than
  * `?path=` (the brief's fallback for when splat routing turns out to be
  * awkward — it wasn't).
+ *
+ * The tree/search pane is owned by the parent layout (`memory.tsx`); this
+ * route only renders the right pane's doc content.
  */
 export const Route = createFileRoute("/memory/$")({
   component: MemoryDocPage,
@@ -20,22 +22,13 @@ function MemoryDocPage() {
   const path = _splat ?? "";
   const navigate = useNavigate();
 
-  function onSelect(nextPath: string) {
-    void navigate({ to: "/memory/$", params: { _splat: nextPath } });
-  }
-
   function onNavigateToChat() {
     void navigate({ to: "/chat" });
   }
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col md:flex-row">
-      <aside className="h-64 shrink-0 border-b border-line overflow-y-auto md:h-auto md:w-72 md:border-b-0 md:border-r">
-        <MemorySearchPane activePath={path} onSelect={onSelect} />
-      </aside>
-      <main className="flex-1 min-h-0 overflow-y-auto">
-        <MemoryDoc path={path} onNavigateToChat={onNavigateToChat} />
-      </main>
-    </div>
+    <main className="flex-1 min-h-0 overflow-y-auto">
+      <MemoryDoc path={path} onNavigateToChat={onNavigateToChat} />
+    </main>
   );
 }
