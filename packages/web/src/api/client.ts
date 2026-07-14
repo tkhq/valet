@@ -12,6 +12,8 @@ import type {
   CreateThreadRequest,
   CreateThreadResponse,
   EnsureOrchestratorResponse,
+  GetMemoryTreeResponse,
+  GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
   GetSessionResponse,
   ListDecisionsResponse,
@@ -20,6 +22,8 @@ import type {
   ListSessionsResponse,
   ListThreadsResponse,
   MeResponse,
+  PatchOrchestratorInfoRequest,
+  PatchOrchestratorInfoResponse,
   PatchSessionRequest,
   PatchSessionResponse,
   PatchThreadRequest,
@@ -29,6 +33,7 @@ import type {
   SendPromptResponse,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
+import type { GetMemoryDocResponse } from "./memory-types";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
@@ -78,6 +83,16 @@ export const api = {
     request<EnsureOrchestratorResponse>("POST", "/orchestrator"),
   getOrchestratorInfo: () =>
     request<GetOrchestratorInfoResponse>("GET", "/orchestrator/info"),
+  patchOrchestratorInfo: (body: PatchOrchestratorInfoRequest) =>
+    request<PatchOrchestratorInfoResponse>("PATCH", "/orchestrator/info", body),
+  getOrchestratorChildren: () =>
+    request<GetOrchestratorChildrenResponse>("GET", "/orchestrator/children"),
+
+  // memory (assistant-centered web UI decision 7; dashboard memory card +
+  // the Task 6 explorer share these reads)
+  getMemoryTree: () => request<GetMemoryTreeResponse>("GET", "/memory/tree"),
+  getMemoryDoc: (path: string) =>
+    request<GetMemoryDocResponse>("GET", `/memory?path=${encodeURIComponent(path)}`),
 
   // threads + messages (session-scoped)
   listThreads: (sessionId: string) =>
