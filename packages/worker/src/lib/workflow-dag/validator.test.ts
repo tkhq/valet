@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateDefinition, validateDefinitionWithContext, validateTriggerData, validateAgainstEnvironment, validateAgainstAvailableModels } from './validator.js';
+import { validateDefinition, validateDefinitionWithContext, validateTriggerData, validateAgainstEnvironment, validateAgainstAvailableModels, isValidationWarning } from './validator.js';
 import type { WorkflowDefinition } from '@valet/shared';
 import type { Env } from '../../env.js';
 
@@ -16,8 +16,10 @@ function definition(overrides: Partial<WorkflowDefinition> = {}): WorkflowDefini
 }
 
 // Filter out the non-blocking warnings (advisories, not publish blockers).
+// Delegates to the real classifier so this test helper stays in sync as
+// new warning codes are added (e.g. unknown_tool_service).
 function blockingErrors(errs: ReturnType<typeof validateDefinition>) {
-  return errs.filter((e) => e.code !== 'llm_maxoutput_warning' && e.code !== 'template_unknown_variable');
+  return errs.filter((e) => !isValidationWarning(e));
 }
 
 describe('validateDefinition', () => {
@@ -1245,7 +1247,7 @@ describe('validateDefinitionWithContext — tool service:action existence', () =
     expect(err?.path).toBe('action');
   });
 
-  it('emits unknown_tool_service when the service is unknown', () => {
+  it('emits unknown_tool_service as a WARNING (not blocker) when the service is unknown — the catalog may not see per-user custom MCP connectors, so this must not hard-fail publish', () => {
     const def: WorkflowDefinition = {
       version: 'dag/v1',
       nodes: [
@@ -1260,10 +1262,32 @@ describe('validateDefinitionWithContext — tool service:action existence', () =
       ],
       edges: [{ from: 'query', to: 'finish' }],
     };
-    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
-    expect(errs).toEqual(
+    const all = validateDefinitionWithContext(def, { knownToolActions });
+    // The unknown_tool_service entry exists on the full result set…
+    expect(all).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: 'unknown_tool_service', nodeId: 'query', path: 'service' })]),
     );
+    // …but is filtered out of blocking errors (it's a warning).
+    expect(blockingErrors(all).some((e) => e.code === 'unknown_tool_service')).toBe(false);
+  });
+
+  it('empty knownToolActions map: every service is unknown (warning-only) — a catalog-build failure or empty tenant must not silently hard-block every workflow', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'salesforce-read-only.soqlQuery',
+          params: {},
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const all = validateDefinitionWithContext(def, { knownToolActions: new Map() });
+    expect(blockingErrors(all).filter((e) => e.code === 'unknown_tool_service' || e.code === 'unknown_tool_action')).toEqual([]);
   });
 
   it('accepts a tool node whose service:action resolves', () => {

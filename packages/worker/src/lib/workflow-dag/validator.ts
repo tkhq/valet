@@ -388,7 +388,17 @@ export function groupWorkflowValidationResults(results: WorkflowValidationError[
 }
 
 export function isValidationWarning(result: WorkflowValidationError): boolean {
-  return result.code === 'llm_maxoutput_warning' || result.code === TEMPLATE_UNKNOWN_VARIABLE_CODE;
+  return (
+    result.code === 'llm_maxoutput_warning' ||
+    result.code === TEMPLATE_UNKNOWN_VARIABLE_CODE ||
+    // Unknown services are a warning (not blocker) because the tool
+    // catalog scope in `WorkflowDefinitionValidationContext` may not
+    // include per-user custom MCP connectors — so a legitimate
+    // user-scoped tool node could false-positive here. Unknown actions
+    // WITHIN a known service remain hard errors: for services the
+    // catalog knows, we ARE authoritative.
+    result.code === 'unknown_tool_service'
+  );
 }
 
 /**

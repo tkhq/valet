@@ -458,11 +458,18 @@ workflowsRouter.post('/:id/publish', zValidator('json', publishSchema), async (c
   const providerEnv = await assembleLlmProviderEnv(c.get('db'), c.env);
   const validationEnv = { ...c.env, ...providerEnv } as Env;
   const availableModels = await resolveAvailableModels(c.get('db'), validationEnv);
+  // Build the same tool catalog save_draft/validate use so publish
+  // catches `unknown_tool_action` too — otherwise a definition edited
+  // outside the copilot could slip past into an executable version
+  // with a bad tool id.
+  const { buildKnownToolActions } = await import('../services/action-catalog.js');
+  const knownToolActions = await buildKnownToolActions(c.env, c.get('db'));
   try {
     const result = await publishDraft(c.get('db'), id, {
       userId: user.id,
       env: validationEnv,
       availableModels,
+      knownToolActions,
       ...(body.publishNote ? { publishNote: body.publishNote } : {}),
     });
     return c.json(result);
