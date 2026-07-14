@@ -38,7 +38,11 @@ orchestratorRouter.post("/", async (c) => {
   // Mirror POST /api/sessions: an `agent_sessions` app row is what makes the
   // existing /api/sessions/:id/* routes (messages, threads, decisions) work
   // against this session id too. Idempotent — a second ensure call finds the
-  // row from the first and skips the insert.
+  // row from the first and skips the insert. `sessionId` is deterministic
+  // per principal (`orchestratorSessionId`), so two concurrent first-ensure
+  // requests can both see no existing row and both attempt this insert;
+  // `onConflictDoNothing` on the primary key makes the loser a no-op instead
+  // of an uncaught unique-constraint 500.
   const existingRow = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).get();
   if (!existingRow) {
     const now = Date.now();
@@ -57,6 +61,7 @@ orchestratorRouter.post("/", async (c) => {
         createdAt: now,
         updatedAt: now,
       })
+      .onConflictDoNothing()
       .run();
   }
 

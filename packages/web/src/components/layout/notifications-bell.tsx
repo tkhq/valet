@@ -34,9 +34,15 @@ export function NotificationsBell() {
   const items = data?.notifications ?? [];
   const unreadCount = items.filter((n) => !n.readAt).length;
 
-  function onSelectItem(n: NotificationSummary) {
-    if (!n.readAt) markRead.mutate(n.id);
-    if (n.href) window.location.assign(n.href);
+  async function onSelectItem(n: NotificationSummary) {
+    // Await the mark-read POST before navigating — `window.location.assign`
+    // triggers a full-page nav in the same tick, which can cancel an
+    // in-flight fetch before the browser sends it.
+    try {
+      if (!n.readAt) await markRead.mutateAsync(n.id);
+    } finally {
+      if (n.href) window.location.assign(n.href);
+    }
   }
 
   return (

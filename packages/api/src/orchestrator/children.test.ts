@@ -12,9 +12,17 @@ import { join } from "node:path";
 import { eq, and } from "drizzle-orm";
 import type { QueueItem, SignalContent } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { buildChildSpawner, ChildWatcher, ChildLimitError, type ChildrenDeps } from "./children.js";
+import {
+  buildChildSpawner,
+  ChildWatcher,
+  ChildLimitError,
+  classifyWatcherError,
+  type ChildrenDeps,
+} from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 import { agentSessions, childWatches, eventDropLog } from "../schema/index.js";
+import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
+import { SignalEdgeDeniedError } from "./signals.js";
 
 let api: TestApi | undefined;
 
@@ -23,12 +31,13 @@ afterEach(async () => {
   api = undefined;
 });
 
-function childrenDeps(a: TestApi): ChildrenDeps {
+function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): ChildrenDeps {
   return {
     db: a.providers.db,
     engineHost: a.providers.engineHost,
     engineStore: a.providers.engineStore,
     workspaceRoot: mkdtempSync(join(tmpdir(), "valet-children-test-")),
+    ...overrides,
   };
 }
 
@@ -306,13 +315,18 @@ describe("ChildWatcher", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
-  it("marks the watch settled with an edge_denied drop-log entry when reporting permanently fails", async () => {
+  it("leaves an un-diagnosable (retryable) failure UNSETTLED after exhausting in-process retries, relying on rearm() as the backstop", async () => {
     api = await bootTestApi();
-    const deps = childrenDeps(api);
+    // Small budget so the test doesn't wait on the 30s production default.
+    const deps = childrenDeps(api, { retryDelayMs: 15, maxRetryAttempts: 2 });
     const watcher = new ChildWatcher(deps);
     const { db } = api.providers;
 
-    // A watch whose child session doesn't exist — every attempt throws.
+    // A watch whose child session doesn't exist — every attempt throws a
+    // generic (non-SignalEdgeDeniedError, non-ValidationError) Error, which
+    // `classifyWatcherError` treats as retryable, not a permanent denial
+    // (decision 20): the row must stay unsettled rather than losing the
+    // signal.
     const watch = {
       childSessionId: "child-ghost",
       queueItemId: "qi-ghost",
@@ -328,21 +342,216 @@ describe("ChildWatcher", () => {
 
     watcher.arm(watch);
 
+    // Let both in-process attempts (and the retry delay between them) run out.
+    await new Promise((r) => setTimeout(r, 150));
+
+    const row = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-ghost")).get();
+    expect(row?.settled).toBe(0);
+
+    // Not a real edge denial, so no edge_denied row — and nothing was
+    // actually dropped (the row is still eligible for `rearm()`).
+    const drops = await db
+      .select()
+      .from(eventDropLog)
+      .where(eq(eventDropLog.conversationKey, "qi-ghost"))
+      .all();
+    expect(drops).toHaveLength(0);
+  });
+
+  it("delivers exactly once after deferring on a full parent pending cap: NOT settled + pending_cap drop-log while capped, settles once the thread drains and rearm() re-observes", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { retryDelayMs: 20, maxRetryAttempts: 2 });
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-cap-watch", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    // Pause the parent so nothing claims/drains the filler items on its own.
+    await parent.pause();
+
+    // Fill the thread's pending cap (20, MAX_PENDING_PER_THREAD) directly
+    // via the store — admission-time, no LLM turn required.
+    for (let i = 0; i < 20; i++) {
+      await engineStore.admitSubmission(
+        "parent-cap-watch",
+        parentThread.id,
+        queuedItem(`cap-filler-${i}`, parentThread.id, "filler"),
+      );
+    }
+
+    const child = await engineHost.childSessionFor("child-cap-watch", {
+      parentSessionId: "parent-cap-watch",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    const itemId = "qi-cap-settled";
+    await engineStore.admitSubmission("child-cap-watch", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-cap-watch", childThread.id, itemId, { outcome: "completed" });
+
+    const watch = {
+      childSessionId: "child-cap-watch",
+      queueItemId: itemId,
+      parentSessionId: "parent-cap-watch",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db
+      .insert(childWatches)
+      .values({ ...watch, settled: 0, createdAt: Date.now() })
+      .run();
+
+    watcher.arm(watch);
+
+    await waitFor(async () => {
+      const rows = await db
+        .select()
+        .from(eventDropLog)
+        .where(and(eq(eventDropLog.reason, "pending_cap"), eq(eventDropLog.conversationKey, itemId)))
+        .all();
+      return rows.length > 0;
+    });
+
+    // Give the in-process retries a chance to exhaust; the watch must still
+    // NOT be settled — the settlement is not lost, just deferred.
+    await new Promise((r) => setTimeout(r, 150));
+    const capped = await db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, "child-cap-watch"))
+      .get();
+    expect(capped?.settled).toBe(0);
+
+    // Drain the parent thread and re-arm (the boot backstop) — the signal
+    // must now be delivered exactly once.
+    for (let i = 0; i < 20; i++) {
+      await engineStore.settleUnclaimed("parent-cap-watch", parentThread.id, `cap-filler-${i}`, {
+        outcome: "completed",
+      });
+    }
+    await watcher.rearm();
+
     await waitFor(async () => {
       const row = await db
         .select()
         .from(childWatches)
-        .where(eq(childWatches.childSessionId, "child-ghost"))
+        .where(eq(childWatches.childSessionId, "child-cap-watch"))
+        .get();
+      return row?.settled === 1;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const unsettled = await engineStore.listUnsettledSubmissions("parent-cap-watch");
+    const settledSignals = unsettled.filter(
+      (i) =>
+        typeof i.content === "object" &&
+        i.content !== null &&
+        "kind" in i.content &&
+        i.content.kind === "signal" &&
+        (i.content as SignalContent).signalType === "child.settled" &&
+        (i.content as SignalContent).attributes?.child_session_id === "child-cap-watch",
+    );
+    expect(settledSignals).toHaveLength(1);
+  });
+
+  it("marks the watch settled with an edge_denied drop-log entry on a REAL edge denial (parent session missing)", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const child = await engineHost.childSessionFor("child-real-denial", {
+      parentSessionId: "parent-does-not-exist",
+      parentThreadId: "th-does-not-exist",
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    const itemId = "qi-real-denial";
+    await engineStore.admitSubmission("child-real-denial", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-real-denial", childThread.id, itemId, { outcome: "completed" });
+
+    const watch = {
+      childSessionId: "child-real-denial",
+      queueItemId: itemId,
+      // Never created — `authorizeEdge` throws a real SignalEdgeDeniedError.
+      parentSessionId: "parent-does-not-exist",
+      parentThreadId: "th-does-not-exist",
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db
+      .insert(childWatches)
+      .values({ ...watch, settled: 0, createdAt: Date.now() })
+      .run();
+
+    watcher.arm(watch);
+
+    await waitFor(async () => {
+      const row = await db
+        .select()
+        .from(childWatches)
+        .where(eq(childWatches.childSessionId, "child-real-denial"))
         .get();
       return row?.settled === 1;
     });
 
+    const dispatchId = `settled:child-real-denial:${itemId}`;
     const drops = await db
       .select()
       .from(eventDropLog)
-      .where(and(eq(eventDropLog.reason, "edge_denied"), eq(eventDropLog.conversationKey, "qi-ghost")))
+      .where(and(eq(eventDropLog.reason, "edge_denied"), eq(eventDropLog.conversationKey, dispatchId)))
       .all();
+    // Exactly one row — `authorizeEdge` logs it; `ChildWatcher` must not
+    // double-log an already-logged permanent denial.
     expect(drops).toHaveLength(1);
-    expect(drops[0]?.detail).toContain("child-ghost");
+    expect(drops[0]?.detail).toContain("parent-does-not-exist");
+  });
+});
+
+describe("classifyWatcherError", () => {
+  it("classifies PendingCapError as retryable, pendingCap: true", () => {
+    expect(classifyWatcherError(new PendingCapError("th-x", 20))).toEqual({
+      kind: "retryable",
+      pendingCap: true,
+    });
+  });
+
+  it("classifies a generic Error as retryable, pendingCap: false", () => {
+    expect(classifyWatcherError(new Error("session not found"))).toEqual({
+      kind: "retryable",
+      pendingCap: false,
+    });
+  });
+
+  it("classifies SignalEdgeDeniedError as permanent, alreadyLogged: true", () => {
+    expect(classifyWatcherError(new SignalEdgeDeniedError("a", "b", "no authorized edge"))).toEqual({
+      kind: "permanent",
+      alreadyLogged: true,
+    });
+  });
+
+  it("classifies a hop-budget ValidationError as permanent, alreadyLogged: true", () => {
+    expect(classifyWatcherError(new EngineValidationError("hop budget exceeded (max 8)"))).toEqual({
+      kind: "permanent",
+      alreadyLogged: true,
+    });
+  });
+
+  it("classifies a non-hop-budget ValidationError as permanent, alreadyLogged: false (needs its own drop-log)", () => {
+    expect(classifyWatcherError(new EngineValidationError("fromOffset must be a safe-integer decimal string"))).toEqual({
+      kind: "permanent",
+      alreadyLogged: false,
+    });
   });
 });

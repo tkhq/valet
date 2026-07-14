@@ -80,6 +80,20 @@ const providers = await buildNodeProviders({
   apiBaseUrl: `http://127.0.0.1:${port}`,
 });
 
+// Attention router (Phase 4 decision 19): subscribes submission_stuck →
+// escalation and child-session decision_gate → approval onto the shared
+// EventStream. Wired BEFORE the boot-reconciliation passes below — both
+// restoreUnsettledSessions and childWatcher.rearm() can themselves emit
+// submission_stuck during reconciliation, and a subscriber wired after them
+// would miss those boot-time events entirely. Lives for the process; no
+// explicit unsubscribe at shutdown needed (the stream itself goes away with
+// the process).
+wireAttentionRouter({
+  db: providers.db,
+  engineStore: providers.engineStore,
+  eventStream: providers.eventStream,
+});
+
 // Eager boot restore: pick up any submissions left unsettled by a prior
 // process before we start accepting connections. A restore failure must
 // never prevent `serve` — any unexpected rejection is logged and boot
@@ -93,16 +107,6 @@ await restoreUnsettledSessions(providers).catch((err) => {
 // above; a failure here must likewise never block boot.
 await providers.childWatcher.rearm().catch((err) => {
   console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
-});
-
-// Attention router (Phase 4 decision 19): subscribes submission_stuck →
-// escalation and child-session decision_gate → approval onto the shared
-// EventStream. Lives for the process; no explicit unsubscribe at shutdown
-// needed (the stream itself goes away with the process).
-wireAttentionRouter({
-  db: providers.db,
-  engineStore: providers.engineStore,
-  eventStream: providers.eventStream,
 });
 
 const { app, injectWebSocket } = createApp(providers);

@@ -18,19 +18,26 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, ne } from "drizzle-orm";
-import type {
-  ChildSpawner,
-  Principal,
-  SessionStore,
-  SpawnChildRequest,
-  SpawnChildResult,
-  SubmissionResult,
+import {
+  PendingCapError,
+  ValidationError as EngineValidationError,
+  type ChildSpawner,
+  type Principal,
+  type SessionStore,
+  type SpawnChildRequest,
+  type SpawnChildResult,
+  type SubmissionResult,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
-import { admitSignal, writeDropLog } from "./signals.js";
+import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
+
+/** Delay before the in-process retry of a retryable watcher failure (decision 20). */
+const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
+/** Max in-process attempts for a retryable failure before falling back to the boot `rearm()` backstop. */
+const DEFAULT_WATCHER_MAX_ATTEMPTS = 3;
 
 export interface ChildrenDeps {
   db: AppDb;
@@ -42,6 +49,10 @@ export interface ChildrenDeps {
    * `~/.valet/children`; tests point it at a tmp dir.
    */
   workspaceRoot?: string;
+  /** Override for `ChildWatcher`'s retryable-failure backoff. Tests only. */
+  retryDelayMs?: number;
+  /** Override for `ChildWatcher`'s in-process retry budget. Tests only. */
+  maxRetryAttempts?: number;
 }
 
 /** Thrown when a spawn would exceed a decision-21 limit. Message is what the `task` tool surfaces verbatim as error text. */
@@ -203,6 +214,50 @@ interface ArmArgs {
 }
 
 /**
+ * Classification of a failure raised by `ChildWatcher.attempt` (decision
+ * 20). Exported and pure so the boundary can be unit-tested directly instead
+ * of by forcing specific exceptions through the full watcher/db plumbing
+ * (see CLAUDE.md "extract pure functions to avoid testing private members").
+ *
+ * - `retryable`: a transient condition (the parent thread's pending cap,
+ *   `PendingCapError`; or anything else that isn't a recognized permanent
+ *   denial, e.g. the parent/child session not existing *yet*). The watch
+ *   must NOT be marked settled — the signal is still owed. `pendingCap`
+ *   marks the `PendingCapError` case specifically, since it gets its own
+ *   drop-log reason.
+ * - `permanent`: a denial that will never succeed no matter how many times
+ *   it's retried — `SignalEdgeDeniedError` (real edge-ACL denial) or an
+ *   engine `ValidationError` (e.g. hop budget exceeded). `alreadyLogged`
+ *   is true when `admitSignal`/`authorizeEdge` already wrote the
+ *   corresponding drop-log row with the correct reason (edge_denied /
+ *   hop_budget) — the caller must not write a second one.
+ */
+export type WatcherErrorClassification =
+  | { kind: "retryable"; pendingCap: boolean }
+  | { kind: "permanent"; alreadyLogged: boolean };
+
+export function classifyWatcherError(err: unknown): WatcherErrorClassification {
+  if (err instanceof SignalEdgeDeniedError) {
+    // Always self-logged with reason 'edge_denied' inside `authorizeEdge`.
+    return { kind: "permanent", alreadyLogged: true };
+  }
+  if (err instanceof EngineValidationError) {
+    // The hop-budget case is self-logged with reason 'hop_budget' inside
+    // `admitSignal`'s catch. Any other ValidationError-shaped denial (none
+    // reachable from this path today, but the engine may add one) is still
+    // a permanent, non-retryable failure — it just needs its own drop-log
+    // row here, using the closest available reason.
+    return { kind: "permanent", alreadyLogged: /hop budget/i.test(err.message) };
+  }
+  // PendingCapError (transient — the cap frees up once the parent thread
+  // drains) and every other failure (e.g. a session not yet visible) are
+  // treated as retryable: the row must stay unsettled so the signal isn't
+  // permanently lost, and `rearm()` at the next boot is the durable
+  // backstop once in-process retries are exhausted.
+  return { kind: "retryable", pendingCap: err instanceof PendingCapError };
+}
+
+/**
  * Durable settlement watcher (decision 11). One instance per process, shared
  * across every spawned child; `rearm()` is called at boot next to
  * `restoreUnsettledSessions` so a process that died mid-child-run picks up
@@ -215,37 +270,76 @@ interface ArmArgs {
  * races a still-running watch from before) still produces exactly one
  * persisted `child.settled` entry — the second `admitSignal` call resolves
  * to the same already-admitted queue item instead of creating a new one.
+ *
+ * Retryable failures (decision 20, see `classifyWatcherError`) are never
+ * settled from this loop — a permanently-capped parent thread must not lose
+ * the settlement. They get a bounded number of in-process delayed retries
+ * (`retryDelayMs` apart); once that budget is exhausted the row is simply
+ * left unsettled for the next boot's `rearm()` to pick back up with a fresh
+ * budget. Only a genuinely permanent denial marks the row settled.
  */
 export class ChildWatcher {
-  constructor(private readonly deps: ChildrenDeps) {}
+  private readonly retryDelayMs: number;
+  private readonly maxAttempts: number;
 
-  /** Fire-and-forget: arms `awaitResult` for one watch row. */
-  arm(watch: ArmArgs): void {
-    void this.run(watch).catch((err) => {
+  constructor(private readonly deps: ChildrenDeps) {
+    this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
+    this.maxAttempts = deps.maxRetryAttempts ?? DEFAULT_WATCHER_MAX_ATTEMPTS;
+  }
+
+  /** Fire-and-forget: arms `awaitResult` for one watch row. `attempt` is 1-based, reset to 1 on every `arm`/`rearm` call. */
+  arm(watch: ArmArgs, attempt = 1): void {
+    void this.run(watch, attempt).catch((err) => {
       console.error(`ChildWatcher: unexpected error watching ${watch.childSessionId}:`, err);
     });
   }
 
-  private async run(watch: ArmArgs): Promise<void> {
+  private async run(watch: ArmArgs, attempt: number): Promise<void> {
     try {
       await this.attempt(watch);
     } catch (err) {
-      console.error(`ChildWatcher: first attempt failed for ${watch.childSessionId}, retrying once:`, err);
-      try {
-        await this.attempt(watch);
-      } catch (err2) {
-        // Permanent failure (e.g. the parent session/thread no longer
-        // exists). Mark settled anyway so this row stops being re-armed on
-        // every boot — an un-deliverable signal must not spin forever.
-        console.error(`ChildWatcher: giving up on ${watch.childSessionId} after retry:`, err2);
+      const classification = classifyWatcherError(err);
+
+      if (classification.kind === "retryable") {
+        if (classification.pendingCap) {
+          // Every failed cap-hit is itself a rejected admission — record it,
+          // even though we'll retry, so the cap enforcement is visible in
+          // the drop log (decision 20's "policy drops are never invisible").
+          await writeDropLog(this.deps.db, {
+            orgId: watch.orgId,
+            reason: "pending_cap",
+            conversationKey: watch.queueItemId,
+            detail: `child watcher deferred reporting settlement of ${watch.childSessionId} on parent thread ${watch.parentThreadId}: pending cap reached (attempt ${attempt}): ${String(err)}`,
+          });
+        }
+        if (attempt >= this.maxAttempts) {
+          console.error(
+            `ChildWatcher: ${watch.childSessionId} still retryable after ${attempt} in-process attempts; leaving unsettled for the next boot's rearm():`,
+            err,
+          );
+          return;
+        }
+        console.error(
+          `ChildWatcher: attempt ${attempt} failed for ${watch.childSessionId} (retryable), retrying in ${this.retryDelayMs}ms:`,
+          err,
+        );
+        const timer = setTimeout(() => this.arm(watch, attempt + 1), this.retryDelayMs);
+        timer.unref();
+        return;
+      }
+
+      // Permanent denial. Don't double-log what `admitSignal`/`authorizeEdge`
+      // already recorded with the correct reason.
+      if (!classification.alreadyLogged) {
         await writeDropLog(this.deps.db, {
           orgId: watch.orgId,
           reason: "edge_denied",
           conversationKey: watch.queueItemId,
-          detail: `child watcher permanently failed to report settlement of ${watch.childSessionId}: ${String(err2)}`,
+          detail: `child watcher permanently failed to report settlement of ${watch.childSessionId} (not an edge denial — ${err instanceof Error ? err.name : "error"}): ${String(err)}`,
         });
-        await this.markSettled(watch.childSessionId);
       }
+      console.error(`ChildWatcher: giving up on ${watch.childSessionId} after permanent failure:`, err);
+      await this.markSettled(watch.childSessionId);
     }
   }
 

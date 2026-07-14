@@ -305,7 +305,13 @@ export class EngineHost {
   /** Upserts the `orchestrator_identities` row on first creation of a
    * principal's orchestrator (decision 17/20) — a no-op past the first
    * successful wake since the unique index on (org, ownerType, ownerId)
-   * never changes for a durable, never-rotated orchestrator identity. */
+   * never changes for a durable, never-rotated orchestrator identity.
+   *
+   * Concurrent first-ensure calls (e.g. two tabs waking the same
+   * orchestrator simultaneously) can both see `existing` as undefined and
+   * both attempt the insert — `onConflictDoNothing` on the unique index
+   * makes the loser's insert a no-op instead of an uncaught unique-constraint
+   * throw that would 500 the request. */
   private async ensureOrchestratorIdentity(
     db: AppDb,
     principal: Principal,
@@ -335,6 +341,7 @@ export class EngineHost {
         sessionId,
         createdAt: Date.now(),
       })
+      .onConflictDoNothing()
       .run();
   }
 
