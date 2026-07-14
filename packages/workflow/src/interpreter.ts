@@ -330,6 +330,14 @@ async function invokeExecutor(
       return requireExecutor(executors.session, node).execute({ ...argsBase, node });
     case 'stop':
       return requireExecutor(executors.stop, node).execute({ ...argsBase, node });
+    case 'foreach':
+      throw new Error("executor for 'foreach' not implemented yet (node completion plan Task 6)");
+    case 'llm':
+      throw new Error("executor for 'llm' not implemented yet (node completion plan Task 3)");
+    case 'orchestrator':
+      throw new Error("executor for 'orchestrator' not implemented yet (node completion plan Task 5)");
+    case 'tool':
+      throw new Error("executor for 'tool' not implemented yet (node completion plan Task 4)");
   }
 }
 

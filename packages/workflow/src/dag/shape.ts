@@ -2,9 +2,11 @@
  * Top-level shape of a workflow definition and its non-node primitives.
  * Node type interfaces live in `./nodes.ts`.
  *
- * Lifted from `main`'s `packages/shared/src/types/workflow-dag/shape.ts`
- * per Phase 5 decision 2: the editor-only `ui`/`WorkflowEditorState` field
- * is dropped — this package has no visual editor this phase.
+ * Lifted from `main`'s `packages/shared/src/types/workflow-dag/shape.ts`.
+ * Phase 5 dropped the editor-only `ui`/`WorkflowEditorState` field (no
+ * visual editor that phase); the node-completion-plan re-adds it
+ * (decision 2) — the interpreter and validator both tolerate it
+ * structurally without interpreting its contents.
  */
 
 import type { WorkflowNode } from './nodes.js';
@@ -14,6 +16,18 @@ export interface WorkflowDefinition {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   policy?: WorkflowPolicy;
+  ui?: WorkflowEditorState;
+}
+
+export interface WorkflowEditorState {
+  nodes: Record<
+    string,
+    {
+      position: { x: number; y: number };
+      collapsed?: boolean;
+    }
+  >;
+  viewport?: { x: number; y: number; zoom: number };
 }
 
 export interface WorkflowInputDefinition {

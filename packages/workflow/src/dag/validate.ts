@@ -6,7 +6,7 @@
 
 import { parseDurationMs } from './duration.js';
 import type { WorkflowDefinition } from './shape.js';
-import type { DagNodeType, WorkflowNode } from './nodes.js';
+import type { DagNodeType, ForeachNode, WorkflowNode } from './nodes.js';
 
 export type ValidationResult = { ok: true } | { ok: false; errors: string[] };
 
@@ -20,6 +20,19 @@ const SUPPORTED_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
   'approval',
   'session',
   'stop',
+  'foreach',
+  'llm',
+  'orchestrator',
+  'tool',
+]);
+
+/** Node types allowed as a foreach body (decision 1: no nested foreach/if/approval/stop). */
+const FOREACH_BODY_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
+  'llm',
+  'tool',
+  'set',
+  'orchestrator',
+  'session',
 ]);
 
 export function validateWorkflowDefinition(definition: WorkflowDefinition): ValidationResult {
@@ -98,9 +111,84 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Vali
         errors.push(`node ${JSON.stringify(node.id)}: unparseable approval.timeout ${JSON.stringify(node.timeout)}`);
       }
     }
+    if (node.type === 'session' && node.wait?.timeout !== undefined) {
+      errors.push(`node ${JSON.stringify(node.id)}: session wait.timeout is not implemented — omit it`);
+    }
+    validateStepNodeFields(node, errors, node.id);
+
+    if (node.type === 'foreach') {
+      validateForeachNode(node, nodesById, errors);
+    }
   }
 
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
+/**
+ * Field-level rules shared by `llm`/`orchestrator`/`tool` nodes, whether
+ * they appear at the top level of `definition.nodes` or as a foreach body.
+ * `label` names the node (and, for a body, its owning foreach) in error
+ * messages.
+ */
+function validateStepNodeFields(node: WorkflowNode, errors: string[], label: string): void {
+  if (node.type === 'llm') {
+    if (node.model.trim() === '') {
+      errors.push(`node ${JSON.stringify(label)}: llm.model must be a non-empty string`);
+    }
+    if (node.prompt.trim() === '') {
+      errors.push(`node ${JSON.stringify(label)}: llm.prompt must be a non-empty string`);
+    }
+  }
+  if (node.type === 'orchestrator') {
+    if (node.prompt.trim() === '') {
+      errors.push(`node ${JSON.stringify(label)}: orchestrator.prompt must be a non-empty string`);
+    }
+  }
+  if (node.type === 'tool') {
+    if (node.service.trim() === '') {
+      errors.push(`node ${JSON.stringify(label)}: tool.service must be a non-empty string`);
+    }
+    if (node.action.trim() === '') {
+      errors.push(`node ${JSON.stringify(label)}: tool.action must be a non-empty string`);
+    }
+  }
+}
+
+function validateForeachNode(node: ForeachNode, nodesById: Map<string, WorkflowNode>, errors: string[]): void {
+  if (node.items.trim() === '') {
+    errors.push(`node ${JSON.stringify(node.id)}: foreach.items must be a non-empty string`);
+  }
+
+  if (!FOREACH_BODY_TYPES.has(node.body.type)) {
+    errors.push(
+      `node ${JSON.stringify(node.id)}: foreach.body type ${JSON.stringify(node.body.type)} is not allowed ` +
+        `(must be one of ${[...FOREACH_BODY_TYPES].join(', ')})`,
+    );
+  } else {
+    const bodyLabel = `${node.id}.body (${node.body.id})`;
+    validateStepNodeFields(node.body, errors, bodyLabel);
+  }
+
+  if (nodesById.has(node.body.id)) {
+    errors.push(
+      `node ${JSON.stringify(node.id)}: foreach.body id ${JSON.stringify(node.body.id)} collides with a definition node id`,
+    );
+  }
+
+  if (node.maxItems !== undefined && !isPositiveInteger(node.maxItems)) {
+    errors.push(`node ${JSON.stringify(node.id)}: foreach.maxItems must be a positive integer`);
+  }
+  if (node.concurrency !== undefined) {
+    if (!isPositiveInteger(node.concurrency)) {
+      errors.push(`node ${JSON.stringify(node.id)}: foreach.concurrency must be a positive integer`);
+    } else if (node.concurrency > 10) {
+      errors.push(`node ${JSON.stringify(node.id)}: foreach.concurrency must be <= 10`);
+    }
+  }
+}
+
+function isPositiveInteger(n: number): boolean {
+  return Number.isInteger(n) && n > 0;
 }
 
 function findCycle(nodesById: Map<string, WorkflowNode>, adjacency: Map<string, string[]>): string | null {

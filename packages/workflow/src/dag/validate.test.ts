@@ -147,20 +147,17 @@ describe('validateWorkflowDefinition', () => {
   });
 
   it('rejects an unsupported node type', () => {
-    // `llm` is a real dag/v1 node type in main but is out of scope for
-    // Phase 5 (see plan Global Constraints), so it's absent from the
-    // `WorkflowNode` union. Definitions the validator sees at runtime come
-    // from storage/JSON, not the type checker, so a definition containing
-    // a legacy/unsupported node type is exactly what the runtime guard
-    // exists to catch. Round-trip through JSON (as real callers would) and
-    // narrow with a single assertion rather than fighting the literal
-    // union at the call site.
+    // Definitions the validator sees at runtime come from storage/JSON, not
+    // the type checker, so a definition containing a legacy/unsupported
+    // node type is exactly what the runtime guard exists to catch. Round-trip
+    // through JSON (as real callers would) and narrow with a single
+    // assertion rather than fighting the literal union at the call site.
     const raw: WorkflowDefinition = JSON.parse(
       JSON.stringify({
         version: 'dag/v1',
         nodes: [
           { id: 'trigger', type: 'trigger' },
-          { id: 'legacy', type: 'llm' },
+          { id: 'legacy', type: 'legacy-node-type' },
           { id: 'stop', type: 'stop' },
         ],
         edges: [
@@ -175,5 +172,260 @@ describe('validateWorkflowDefinition', () => {
     if (!result.ok) {
       expect(result.errors.some((e) => e.includes('unsupported node type'))).toBe(true);
     }
+  });
+
+  it('accepts a valid fixture including a `ui` field', () => {
+    const result = validateWorkflowDefinition(
+      definition({
+        ui: {
+          nodes: {
+            trigger: { position: { x: 0, y: 0 } },
+            'set-a': { position: { x: 260, y: 0 }, collapsed: true },
+            stop: { position: { x: 520, y: 0 } },
+          },
+          viewport: { x: 0, y: 0, zoom: 1 },
+        },
+      }),
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('rejects session wait.timeout', () => {
+    const result = validateWorkflowDefinition(
+      definition({
+        nodes: [
+          { id: 'trigger', type: 'trigger' },
+          {
+            id: 'sess',
+            type: 'session',
+            mode: 'start',
+            prompt: 'do it',
+            wait: { mode: 'until_idle', timeout: '5m' },
+          },
+          { id: 'stop', type: 'stop' },
+        ],
+        edges: [
+          { from: 'trigger', to: 'sess' },
+          { from: 'sess', to: 'stop' },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('session wait.timeout is not implemented — omit it'))).toBe(true);
+    }
+  });
+
+  describe('llm node', () => {
+    function llmDefinition(overrides: Partial<{ model: string; prompt: string }>): WorkflowDefinition {
+      return definition({
+        nodes: [
+          { id: 'trigger', type: 'trigger' },
+          { id: 'ask', type: 'llm', model: 'anthropic/claude-sonnet', prompt: 'summarize', ...overrides },
+          { id: 'stop', type: 'stop' },
+        ],
+        edges: [
+          { from: 'trigger', to: 'ask' },
+          { from: 'ask', to: 'stop' },
+        ],
+      });
+    }
+
+    it('accepts a valid llm node', () => {
+      expect(validateWorkflowDefinition(llmDefinition({}))).toEqual({ ok: true });
+    });
+
+    it('rejects an empty model', () => {
+      const result = validateWorkflowDefinition(llmDefinition({ model: '' }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('llm.model must be a non-empty string'))).toBe(true);
+      }
+    });
+
+    it('rejects an empty prompt', () => {
+      const result = validateWorkflowDefinition(llmDefinition({ prompt: '   ' }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('llm.prompt must be a non-empty string'))).toBe(true);
+      }
+    });
+  });
+
+  describe('orchestrator node', () => {
+    it('accepts a valid orchestrator node', () => {
+      const result = validateWorkflowDefinition(
+        definition({
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            { id: 'ask', type: 'orchestrator', prompt: 'do the thing' },
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'ask' },
+            { from: 'ask', to: 'stop' },
+          ],
+        }),
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('rejects an empty prompt', () => {
+      const result = validateWorkflowDefinition(
+        definition({
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            { id: 'ask', type: 'orchestrator', prompt: '' },
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'ask' },
+            { from: 'ask', to: 'stop' },
+          ],
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('orchestrator.prompt must be a non-empty string'))).toBe(true);
+      }
+    });
+  });
+
+  describe('tool node', () => {
+    function toolDefinition(overrides: Partial<{ service: string; action: string }>): WorkflowDefinition {
+      return definition({
+        nodes: [
+          { id: 'trigger', type: 'trigger' },
+          { id: 'call', type: 'tool', service: 'slack', action: 'send_message', params: {}, ...overrides },
+          { id: 'stop', type: 'stop' },
+        ],
+        edges: [
+          { from: 'trigger', to: 'call' },
+          { from: 'call', to: 'stop' },
+        ],
+      });
+    }
+
+    it('accepts a valid tool node', () => {
+      expect(validateWorkflowDefinition(toolDefinition({}))).toEqual({ ok: true });
+    });
+
+    it('rejects an empty service', () => {
+      const result = validateWorkflowDefinition(toolDefinition({ service: '' }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('tool.service must be a non-empty string'))).toBe(true);
+      }
+    });
+
+    it('rejects an empty action', () => {
+      const result = validateWorkflowDefinition(toolDefinition({ action: '' }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('tool.action must be a non-empty string'))).toBe(true);
+      }
+    });
+  });
+
+  describe('foreach node', () => {
+    // Several of these cases construct deliberately invalid foreach shapes
+    // (disallowed body types, malformed maxItems/concurrency) that don't fit
+    // the `ForeachNode` interface — the whole point is exercising the
+    // runtime guard on data the type checker would otherwise reject. Build
+    // the raw JSON (as real callers' stored definitions would look) and
+    // narrow with a single assertion, mirroring the "unsupported node type"
+    // fixture above.
+    function foreachDefinition(node: Record<string, unknown>): WorkflowDefinition {
+      return JSON.parse(
+        JSON.stringify({
+          version: 'dag/v1',
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            {
+              id: 'loop',
+              type: 'foreach',
+              items: '${trigger.data.items}',
+              body: { id: 'loop-body', type: 'set', values: {} },
+              ...node,
+            },
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'loop' },
+            { from: 'loop', to: 'stop' },
+          ],
+        }),
+      ) as WorkflowDefinition;
+    }
+
+    it('accepts a valid foreach node', () => {
+      expect(validateWorkflowDefinition(foreachDefinition({}))).toEqual({ ok: true });
+    });
+
+    it('rejects an empty items expression', () => {
+      const result = validateWorkflowDefinition(foreachDefinition({ items: '' }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.items must be a non-empty string'))).toBe(true);
+      }
+    });
+
+    it.each(['foreach', 'if', 'approval', 'stop'])('rejects a %s body type', (bodyType) => {
+      const result = validateWorkflowDefinition(
+        foreachDefinition({ body: { id: 'loop-body', type: bodyType } }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('is not allowed'))).toBe(true);
+      }
+    });
+
+    it('rejects a body id that collides with a definition node id', () => {
+      const result = validateWorkflowDefinition(foreachDefinition({ body: { id: 'stop', type: 'set', values: {} } }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('collides with a definition node id'))).toBe(true);
+      }
+    });
+
+    it('validates the body node\'s own type-specific rules, naming the foreach and body', () => {
+      const result = validateWorkflowDefinition(
+        foreachDefinition({ body: { id: 'loop-body', type: 'llm', model: '', prompt: 'x' } }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some((e) => e.includes('loop.body (loop-body)') && e.includes('llm.model must be a non-empty string')),
+        ).toBe(true);
+      }
+    });
+
+    it.each([0, -1, 1.5])('rejects a non-positive-integer maxItems (%s)', (maxItems) => {
+      const result = validateWorkflowDefinition(foreachDefinition({ maxItems }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.maxItems must be a positive integer'))).toBe(true);
+      }
+    });
+
+    it.each([0, -1, 1.5])('rejects a non-positive-integer concurrency (%s)', (concurrency) => {
+      const result = validateWorkflowDefinition(foreachDefinition({ concurrency }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.concurrency must be a positive integer'))).toBe(true);
+      }
+    });
+
+    it('rejects concurrency above 10', () => {
+      const result = validateWorkflowDefinition(foreachDefinition({ concurrency: 11 }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.concurrency must be <= 10'))).toBe(true);
+      }
+    });
+
+    it('accepts concurrency of exactly 10', () => {
+      expect(validateWorkflowDefinition(foreachDefinition({ concurrency: 10 }))).toEqual({ ok: true });
+    });
   });
 });
