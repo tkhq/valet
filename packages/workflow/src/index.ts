@@ -69,3 +69,6 @@ export type {
 
 export { driveUntilPark } from './interpreter.js';
 export type { InterpreterDeps } from './interpreter.js';
+
+export { LocalRunHost } from './local-host.js';
+export type { LocalRunHostDeps, RunHost } from './local-host.js';

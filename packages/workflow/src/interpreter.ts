@@ -53,13 +53,26 @@ export interface InterpreterDeps {
   clock: () => number;
   executors?: NodeExecutorRegistry;
   onApprovalPending?: OnApprovalPending;
+  /**
+   * Host-only extension point (Phase 5 plan decision 20): invoked
+   * synchronously right after `store.beginTerminalize` succeeds, before
+   * terminal cleanup and `store.settleRun`. The interpreter itself never
+   * sets this — it exists so `LocalRunHost`'s `crashAt: 'terminalizing'`
+   * test hook can simulate a process crash at exactly this seam (reserving
+   * the outcome, then dying before finalizing) without the interpreter
+   * knowing anything about process lifecycle. Not invoked on the
+   * `resumeTerminalize` path (a reclaimed `terminalizing` run's outcome was
+   * already reserved by the crashed attempt — re-firing the hook here would
+   * simulate a crash that never actually happens twice).
+   */
+  onBeginTerminalize?: () => void | Promise<void>;
 }
 
 /** No `foreach` executor yet (out of scope this phase); the checkpoint PK already carries it for later. */
 const ITERATION = 0;
 
 export async function driveUntilPark(runId: string, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
-  const { store, engine, clock, onApprovalPending } = deps;
+  const { store, engine, clock, onApprovalPending, onBeginTerminalize } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
 
   while (true) {
@@ -104,7 +117,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
       const allTerminal = definition.nodes.every((n) => isSettled(cpAll, n.id));
       if (allTerminal) {
         const anyFailed = [...cpAll.values()].some((cp) => cp.status === 'failed');
-        return await twoPhaseSettle(store, run.runId, attempt, anyFailed ? 'failed' : 'completed');
+        return await twoPhaseSettle(store, run.runId, attempt, anyFailed ? 'failed' : 'completed', onBeginTerminalize);
       }
       return await parkAndReturn(store, run, attempt, run.waitingOn, run.wakeAt);
     }
@@ -153,7 +166,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 
     if (terminate) {
       const finalOutcome = sawFailure ? 'failed' : terminate;
-      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome);
+      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome, onBeginTerminalize);
     }
     if (waitingOn.length > 0) {
       const wakeAt = earliestTimerWake(waitingOn);
@@ -185,13 +198,13 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
 
 async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
-  const { store, engine, clock } = deps;
+  const { store, engine, onBeginTerminalize } = deps;
   for (const wait of run.waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
     }
   }
-  return await twoPhaseSettle(store, run.runId, attempt, 'cancelled');
+  return await twoPhaseSettle(store, run.runId, attempt, 'cancelled', onBeginTerminalize);
 }
 
 /**
@@ -224,13 +237,14 @@ async function terminateSettle(
   attempt: number,
   waitingOn: RunWaitCondition[],
   outcome: 'completed' | 'failed',
+  onBeginTerminalize: (() => void | Promise<void>) | undefined,
 ): Promise<RunParkState> {
   for (const wait of waitingOn) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId);
     }
   }
-  return await twoPhaseSettle(store, runId, attempt, outcome);
+  return await twoPhaseSettle(store, runId, attempt, outcome, onBeginTerminalize);
 }
 
 async function twoPhaseSettle(
@@ -238,11 +252,18 @@ async function twoPhaseSettle(
   runId: string,
   attempt: number,
   outcome: 'completed' | 'failed' | 'cancelled',
+  onBeginTerminalize: (() => void | Promise<void>) | undefined,
 ): Promise<RunParkState> {
   await store.beginTerminalize(runId, attempt, outcome);
+  // Decision 20's crash-point hook: `LocalRunHost` wires this to simulate a
+  // process crash right after the outcome is reserved but before terminal
+  // cleanup/finalization run. A throw here (the test-injected `exit`) must
+  // propagate out of `driveUntilPark` uncaught by this function — the run
+  // is left `terminalizing`, exactly like a real crash.
+  await onBeginTerminalize?.();
   // Terminal cleanup hook: no-op this task. Later tasks (spawned-session
   // teardown, trace finalization) run here, between reserving the
-  // outcome and finalizing it — see decision 20's crash-point hook.
+  // outcome and finalizing it.
   await store.settleRun(runId, outcome);
   return await mustGetParkState(store, runId);
 }
