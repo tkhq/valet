@@ -23,6 +23,7 @@
     "@tanstack/react-router": "^1.151.0",
     "@valet/api": "workspace:*",
     "@valet/workflow": "workspace:*",
+    "@xyflow/react": "^12",
     "clsx": "^2.1.1",
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",
@@ -34,9 +35,9 @@
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.15",
+    "@tanstack/router-plugin": "^1.151.0",
     "@testing-library/react": "^16.0.1",
     "@testing-library/user-event": "^14.5.2",
-    "@tanstack/router-plugin": "^1.151.0",
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
