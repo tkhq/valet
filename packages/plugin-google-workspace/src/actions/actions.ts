@@ -1,10 +1,7 @@
 import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult } from '@valet/engine';
 import { driveActions } from './drive-actions.js';
 import { docsActions } from './docs-actions.js';
-// TODO(Task 11): import sheetsActions from './sheets-actions.js' (still on the
-// legacy @valet/sdk shape) and append it to `allActions` below once it's
-// ported. sheets-actions.ts / sheets-helpers.ts are excluded from this
-// package's tsconfig in the meantime (see tsconfig.json).
+import { sheetsActions } from './sheets-actions.js';
 import {
   classifyAction,
   buildLabelFilterClause,
@@ -143,9 +140,6 @@ function withLabelsGuard(action: PluginAction): PluginAction {
       }
 
       // ── sheets.copy_sheet_to: check both source and destination spreadsheets ──
-      // TODO(Task 11): unreachable until sheets actions are ported and appended
-      // to `allActions`, but the branch is retained verbatim so the guard
-      // still covers it once sheets lands.
 
       if (actionId === 'sheets.copy_sheet_to') {
         const sourceId = typeof p.sourceSpreadsheetId === 'string' ? p.sourceSpreadsheetId : null;
@@ -216,7 +210,7 @@ function withLabelsGuard(action: PluginAction): PluginAction {
   };
 }
 
-const allActions: PluginAction[] = [...driveActions, ...docsActions].map(withLabelsGuard);
+const allActions: PluginAction[] = [...driveActions, ...docsActions, ...sheetsActions].map(withLabelsGuard);
 
 // Service id preserved verbatim from the legacy provider (see provider.ts /
 // worker resolvers) — this is the credential lookup key.

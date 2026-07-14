@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { driveActions } from '../drive-actions.js';
 import { docsActions } from '../docs-actions.js';
-import { sheetsActionDefs } from '../sheets-actions.js';
+import { sheetsActions } from '../sheets-actions.js';
 import {
   LIST_SEARCH_ACTIONS,
   READ_GET_ACTIONS,
@@ -18,7 +18,7 @@ describe('labels-guard action classification completeness', () => {
   const allRegisteredIds = [
     ...driveActions.map((a) => a.id),
     ...docsActions.map((a) => a.id),
-    ...sheetsActionDefs.map((a) => a.id),
+    ...sheetsActions.map((a) => a.id),
   ];
 
   const allClassifiedIds = [
