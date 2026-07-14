@@ -5,18 +5,19 @@
  * its own `intent` checkpoint (via `store.putIntent`) before doing
  * anything externally visible, then either completes it
  * (`store.completeCheckpoint`, terminal `completed`/`failed`/`skipped`) or
- * — for effectful nodes not implemented this task (`wait`, `approval`,
- * `session`) — leaves the intent in place and returns `parked` with the
- * `RunWaitCondition`(s) it is now blocked on. All writes are fenced by
- * `attempt`; a `WorkflowFenceError` from the store means this executor's
- * attempt has been superseded and it must stop (the interpreter propagates
- * the throw, aborting the current `driveUntilPark` call — the next claim
- * re-drives from checkpoints).
+ * — for effectful nodes (`wait`, `approval`, `session`) — leaves the intent
+ * in place and returns `parked` with the `RunWaitCondition`(s) it is now
+ * blocked on. All writes are fenced by `attempt`; a `WorkflowFenceError`
+ * from the store means this executor's attempt has been superseded and it
+ * must stop (the interpreter propagates the throw, aborting the current
+ * `driveUntilPark` call — the next claim re-drives from checkpoints).
  *
- * `trigger`/`set`/`if`/`stop` (this task) never park: they are pure,
- * synchronous, and complete in one call. `wait`/`approval`/`session`
- * (Tasks 5, 7) plug into the same `NodeExecutor` interface and this same
- * registry — no interpreter changes required when they land.
+ * `trigger`/`set`/`if`/`stop` never park: they are pure, synchronous, and
+ * complete in one call. `wait`/`approval` (Task 5) park behind a timer or a
+ * signal-wait, respectively, resuming deterministically from checkpoint
+ * `effects` rather than re-reading the clock. `session` (Task 7) plugs into
+ * the same `NodeExecutor` interface and this same registry — no
+ * interpreter changes required when it lands.
  */
 
 import type { DagNodeType, WorkflowNode } from '../dag/nodes.js';
@@ -68,18 +69,24 @@ export { executeTrigger } from './trigger.js';
 export { executeSet } from './set.js';
 export { executeIf } from './if.js';
 export { executeStop } from './stop.js';
+export { executeWait } from './wait.js';
+export { executeApproval } from './approval.js';
 
 import { executeTrigger } from './trigger.js';
 import { executeSet } from './set.js';
 import { executeIf } from './if.js';
 import { executeStop } from './stop.js';
+import { executeWait } from './wait.js';
+import { executeApproval } from './approval.js';
 
-/** The pure executors this task implements. `wait`/`approval`/`session` are added by later tasks. */
+/** The pure executors plus `wait`/`approval` (Task 5). `session` is added by a later task. */
 export function createDefaultNodeExecutors(): NodeExecutorRegistry {
   return {
     trigger: { execute: executeTrigger },
     set: { execute: executeSet },
     if: { execute: executeIf },
     stop: { execute: executeStop },
+    wait: { execute: executeWait },
+    approval: { execute: executeApproval },
   };
 }
