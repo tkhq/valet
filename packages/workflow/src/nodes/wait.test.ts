@@ -6,6 +6,7 @@ import type { WorkflowEngineDeps } from '../engine-deps.js';
 import { driveUntilPark, type InterpreterDeps } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
+import { executeWait } from './wait.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -21,6 +22,15 @@ function makeFakeEngineDeps(): WorkflowEngineDeps {
     awaitResult: async () => ({ queueItemId: 'queue', outcome: 'completed' as const }),
     abort: async () => {},
     isSettled: async () => true,
+    llmComplete: async () => {
+      throw new Error('llmComplete not exercised by this fixture');
+    },
+    promptOrchestrator: async () => {
+      throw new Error('promptOrchestrator not exercised by this fixture');
+    },
+    invokeAction: async () => {
+      throw new Error('invokeAction not exercised by this fixture');
+    },
   };
 }
 
@@ -145,5 +155,40 @@ describe('executeWait: completes when due', () => {
     expect(park.outcome).toBe('completed');
     const byNode = new Map((await store.getCheckpoints('run-4')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('w')?.status).toBe('completed');
+  });
+});
+
+// `driveUntilPark` always drives at iteration 0 (no `foreach` executor exists
+// yet to invoke a body at iteration > 0 — Task 6). This exercises the
+// executor's checkpoint-keying contract directly.
+describe('executeWait: iteration > 0', () => {
+  it('checkpoints the intent and terminal rows at the given iteration', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock(1_000);
+    const engine = makeFakeEngineDeps();
+    const definition = waitDefinition('5s');
+    await store.createRun('run-5', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-5');
+    const run = await store.getRun('run-5');
+    if (!run) throw new Error('run vanished');
+    const node = definition.nodes.find((n): n is WaitNode => n.id === 'w')!;
+
+    const result = await executeWait({
+      run,
+      node,
+      attempt,
+      iteration: 1,
+      templateContext: { trigger: undefined, nodes: {} },
+      store,
+      clock: clock.now,
+      engine,
+    });
+
+    expect(result.status).toBe('parked');
+    const checkpoints = await store.getCheckpoints('run-5');
+    const cp = checkpoints.find((c) => c.nodeId === 'w' && c.iteration === 1);
+    expect(cp).toBeDefined();
+    expect(cp?.status).toBe('intent');
+    expect(checkpoints.some((c) => c.nodeId === 'w' && c.iteration === 0)).toBe(false);
   });
 });

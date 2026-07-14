@@ -8,6 +8,7 @@ import type { WorkflowEngineDeps, WorkflowPromptReceipt } from '../engine-deps.j
 import { driveUntilPark, type InterpreterDeps } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
+import { executeSession } from './session.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -103,6 +104,15 @@ function makeEngine(
     isSettled: async (sessionId, queueItemId) => {
       calls.push({ kind: 'isSettled', sessionId, queueItemId });
       return nextFrom(isSettledQueue);
+    },
+    llmComplete: async () => {
+      throw new Error('llmComplete not exercised by this fixture');
+    },
+    promptOrchestrator: async () => {
+      throw new Error('promptOrchestrator not exercised by this fixture');
+    },
+    invokeAction: async () => {
+      throw new Error('invokeAction not exercised by this fixture');
     },
   };
 
@@ -391,5 +401,84 @@ describe('executeSession: non-completed outcome fails the node', () => {
     const byNode = new Map((await store.getCheckpoints('run-9')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('s')?.status).toBe('failed');
     expect(byNode.get('s')?.error).toBe('cancelled by user');
+  });
+});
+
+// ─── 10. iteration > 0: id suffix + checkpoint keyed at the iteration ────────
+//
+// `driveUntilPark` always drives the definition's own nodes at iteration 0
+// (no `foreach` executor exists yet to invoke a body at iteration > 0 — that
+// lands in Task 6). This exercises the executor's contract directly, the way
+// a future `foreach` executor will invoke it for one loop iteration.
+
+describe('executeSession: iteration > 0', () => {
+  it('appends :{iteration} to the session id and dispatchId, and checkpoints at that iteration', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine();
+
+    const definition = sessionDefinition({ wait: { mode: 'none' } });
+    await store.createRun('run-10', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-10');
+    const run = await store.getRun('run-10');
+    if (!run) throw new Error('run vanished');
+    const node = definition.nodes.find((n): n is SessionNode => n.id === 's')!;
+
+    const result = await executeSession({
+      run,
+      node,
+      attempt,
+      iteration: 1,
+      templateContext: { trigger: undefined, nodes: {} },
+      store,
+      clock: clock.now,
+      engine,
+    });
+
+    expect(result.status).toBe('completed');
+    const createCall = calls.find((c) => c.kind === 'createSession');
+    const promptCall = calls.find((c) => c.kind === 'prompt');
+    expect(createCall?.id).toBe('wf:run-10:s:1');
+    expect(promptCall?.sessionId).toBe('wf:run-10:s:1');
+    expect(promptCall?.dispatchId).toBe('workflow:run-10:s:1');
+
+    const checkpoints = await store.getCheckpoints('run-10');
+    const cp = checkpoints.find((c) => c.nodeId === 's' && c.iteration === 1);
+    expect(cp).toBeDefined();
+    expect(cp?.status).toBe('completed');
+    // No stray iteration-0 checkpoint was written for this node.
+    expect(checkpoints.some((c) => c.nodeId === 's' && c.iteration === 0)).toBe(false);
+  });
+});
+
+// ─── 11. aliases merge into the template context ─────────────────────────────
+
+describe('executeSession: aliases', () => {
+  it('resolves {{item}} from aliases when rendering the prompt', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine();
+
+    const definition = sessionDefinition({ prompt: 'process {{item}} at index {{index}}', wait: { mode: 'none' } });
+    await store.createRun('run-11', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-11');
+    const run = await store.getRun('run-11');
+    if (!run) throw new Error('run vanished');
+    const node = definition.nodes.find((n): n is SessionNode => n.id === 's')!;
+
+    await executeSession({
+      run,
+      node,
+      attempt,
+      iteration: 1,
+      aliases: { item: 'widget-7', index: 1 },
+      templateContext: { trigger: undefined, nodes: {} },
+      store,
+      clock: clock.now,
+      engine,
+    });
+
+    const promptCall = calls.find((c) => c.kind === 'prompt');
+    expect(promptCall?.text).toBe('process widget-7 at index 1');
   });
 });

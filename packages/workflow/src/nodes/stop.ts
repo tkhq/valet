@@ -11,7 +11,7 @@
 
 import { renderJsonTemplates, renderTemplate } from '../dag/expression.js';
 import type { StopNode } from '../dag/nodes.js';
-import type { NodeExecuteResult, NodeExecutorArgs } from './index.js';
+import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export interface StopResult {
   outcome: 'success' | 'failure';
@@ -20,11 +20,12 @@ export interface StopResult {
 }
 
 export async function executeStop(args: NodeExecutorArgs<StopNode>): Promise<NodeExecuteResult> {
-  const { run, node, attempt, iteration, store, clock, templateContext } = args;
+  const { run, node, attempt, iteration, store, clock } = args;
+  const ctx = resolveTemplateContext(args);
   const outcome = node.outcome ?? 'success';
-  const output = node.output !== undefined ? renderJsonTemplates(node.output, templateContext) : undefined;
+  const output = node.output !== undefined ? renderJsonTemplates(node.output, ctx) : undefined;
   const message =
-    node.message !== undefined ? asString(renderTemplate(node.message, templateContext)) : undefined;
+    node.message !== undefined ? asString(renderTemplate(node.message, ctx)) : undefined;
   const result: StopResult = { outcome, output, message };
 
   await store.putIntent({

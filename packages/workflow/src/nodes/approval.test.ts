@@ -8,6 +8,7 @@ import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { NodeExecutorRegistry, OnApprovalPending } from './index.js';
 import { createDefaultNodeExecutors } from './index.js';
 import type { RunParams } from '../store.js';
+import { executeApproval } from './approval.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -23,6 +24,15 @@ function makeFakeEngineDeps(): WorkflowEngineDeps {
     awaitResult: async () => ({ queueItemId: 'queue', outcome: 'completed' as const }),
     abort: async () => {},
     isSettled: async () => true,
+    llmComplete: async () => {
+      throw new Error('llmComplete not exercised by this fixture');
+    },
+    promptOrchestrator: async () => {
+      throw new Error('promptOrchestrator not exercised by this fixture');
+    },
+    invokeAction: async () => {
+      throw new Error('invokeAction not exercised by this fixture');
+    },
   };
 }
 
@@ -266,6 +276,49 @@ describe('executeApproval: signal inserted before the node first runs', () => {
     const byNode = new Map((await store.getCheckpoints('run-7')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('ap')?.status).toBe('completed');
     expect(byNode.get('ap')?.result).toEqual({ approved: true, resolvedBy: 'dave' });
+  });
+});
+
+// ─── 7. iteration > 0 ─────────────────────────────────────────────────────────
+//
+// `driveUntilPark` always drives at iteration 0 (no `foreach` executor
+// exists yet — Task 6). This exercises the executor's checkpoint-keying
+// contract directly, and confirms the signal type stays iteration-less
+// (approvals can't be foreach bodies — the validator enforces this).
+
+describe('executeApproval: iteration > 0', () => {
+  it('checkpoints the intent at the given iteration; signalType is unaffected', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock(1_000);
+    const engine = makeFakeEngineDeps();
+    const definition = approvalDefinition();
+    await store.createRun('run-8', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-8');
+    const run = await store.getRun('run-8');
+    if (!run) throw new Error('run vanished');
+    const node = definition.nodes.find((n): n is ApprovalNode => n.id === 'ap')!;
+
+    const result = await executeApproval({
+      run,
+      node,
+      attempt,
+      iteration: 1,
+      templateContext: { trigger: undefined, nodes: {} },
+      store,
+      clock: clock.now,
+      engine,
+    });
+
+    expect(result.status).toBe('parked');
+    if (result.status === 'parked') {
+      expect(result.waitingOn).toEqual([{ kind: 'signal', nodeId: 'ap', signalType: 'approval:ap', timeoutAt: undefined }]);
+    }
+
+    const checkpoints = await store.getCheckpoints('run-8');
+    const cp = checkpoints.find((c) => c.nodeId === 'ap' && c.iteration === 1);
+    expect(cp).toBeDefined();
+    expect(cp?.status).toBe('intent');
+    expect(checkpoints.some((c) => c.nodeId === 'ap' && c.iteration === 0)).toBe(false);
   });
 });
 

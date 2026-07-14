@@ -28,6 +28,15 @@ function makeFakeEngineDeps(): WorkflowEngineDeps & {
       abortCalls.push({ sessionId, threadId });
     }),
     isSettled: vi.fn(async () => true),
+    llmComplete: vi.fn(async () => {
+      throw new Error('llmComplete not exercised by this fixture');
+    }),
+    promptOrchestrator: vi.fn(async () => {
+      throw new Error('promptOrchestrator not exercised by this fixture');
+    }),
+    invokeAction: vi.fn(async () => {
+      throw new Error('invokeAction not exercised by this fixture');
+    }),
   };
 }
 

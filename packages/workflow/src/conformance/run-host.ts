@@ -207,6 +207,15 @@ export function makeRunHostFixtureEngine(): RunHostFixtureEngine {
       calls.push({ kind: 'isSettled', sessionId, queueItemId });
       return settled;
     },
+    llmComplete: async () => {
+      throw new Error('llmComplete not exercised by this fixture');
+    },
+    promptOrchestrator: async () => {
+      throw new Error('promptOrchestrator not exercised by this fixture');
+    },
+    invokeAction: async () => {
+      throw new Error('invokeAction not exercised by this fixture');
+    },
   };
 
   return engine;

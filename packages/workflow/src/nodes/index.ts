@@ -39,8 +39,26 @@ export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
   node: TNode;
   /** The claimed attempt driving this run; every store write this executor makes must carry it. */
   attempt: number;
-  /** Always 0 this phase (no `foreach` executor yet — the checkpoint PK already carries it for later). */
+  /**
+   * 0 for every top-level node (the interpreter always drives the
+   * definition's own nodes at iteration 0). Non-zero only when a `foreach`
+   * executor (Task 6) invokes a registry executor directly for one of its
+   * body's iterations — the checkpoint PK already carries it. Every
+   * executor must thread this value into its own checkpoint writes (never
+   * hardcode 0) and, for id-bearing executors (`session`; later `llm`/
+   * `orchestrator`/`tool`), append `:{iteration}` to dispatchIds/
+   * invocationIds/session ids when `iteration > 0` — see `iterationSuffix`.
+   */
   iteration: number;
+  /**
+   * Set by a `foreach` executor when invoking a body executor for one
+   * iteration — e.g. `{ item: items[i], index: i }` (names configurable via
+   * `itemAlias`/`indexAlias`). Never set for top-level nodes. Merge into
+   * `templateContext` via `resolveTemplateContext` before rendering
+   * templates or evaluating conditions — `TemplateContext` already declares
+   * an open index signature for exactly this purpose.
+   */
+  aliases?: Record<string, unknown>;
   /** `{ trigger, nodes }` — `nodes.<id>.output` is each resolved node's checkpoint result. */
   templateContext: TemplateContext;
   /** This node's checkpoint row from the current drive pass, if one already exists (resumption). */
@@ -49,6 +67,24 @@ export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
   clock: () => number;
   engine: WorkflowEngineDeps;
   onApprovalPending?: OnApprovalPending;
+}
+
+/**
+ * `templateContext` with `aliases` merged in (a no-op when `aliases` is
+ * unset, the top-level-node case). Executors that render templates or
+ * evaluate `if` conditions should use this instead of `args.templateContext`
+ * directly, so a `foreach` body picks up its iteration's `item`/`index` (or
+ * whatever `itemAlias`/`indexAlias` name) without every executor
+ * special-casing aliases itself.
+ */
+export function resolveTemplateContext<TNode extends WorkflowNode>(args: NodeExecutorArgs<TNode>): TemplateContext {
+  if (!args.aliases) return args.templateContext;
+  return { ...args.templateContext, ...args.aliases };
+}
+
+/** `:{iteration}` for a non-zero iteration, `''` at iteration 0 — the id-suffix convention decision 7 fixes for dispatchIds/invocationIds/session ids. */
+export function iterationSuffix(iteration: number): string {
+  return iteration > 0 ? `:${iteration}` : '';
 }
 
 export type NodeExecuteResult =

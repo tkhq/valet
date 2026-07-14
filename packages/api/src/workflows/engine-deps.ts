@@ -176,5 +176,22 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const item = await opts.engineStore.getQueueItem(sessionId, queueItemId);
       return item?.status === "settled";
     },
+
+    // Task 7 lands the real implementations (llmComplete over pi-ai
+    // getModel+completeSimple; promptOrchestrator over the Phase 4
+    // EngineHost orchestrator path; invokeAction's Phase-6-deferred stub).
+    // Stubbed here only so this factory keeps satisfying the now-3-method-
+    // wider `WorkflowEngineDeps` interface.
+    async llmComplete() {
+      throw new Error("WorkflowEngineDeps.llmComplete: not implemented — lands in Task 7");
+    },
+
+    async promptOrchestrator() {
+      throw new Error("WorkflowEngineDeps.promptOrchestrator: not implemented — lands in Task 7");
+    },
+
+    async invokeAction() {
+      throw new Error("WorkflowEngineDeps.invokeAction: not implemented — lands in Task 7");
+    },
   };
 }

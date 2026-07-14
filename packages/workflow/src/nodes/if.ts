@@ -22,7 +22,7 @@ import {
 } from '../dag/expression.js';
 import { normalizeIfOperation } from '../dag/if-operations.js';
 import type { IfCondition, IfNode } from '../dag/nodes.js';
-import type { NodeExecuteResult, NodeExecutorArgs } from './index.js';
+import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export interface IfResult {
   result: boolean;
@@ -31,12 +31,13 @@ export interface IfResult {
 }
 
 export async function executeIf(args: NodeExecutorArgs<IfNode>): Promise<NodeExecuteResult> {
-  const { run, node, attempt, iteration, store, clock, templateContext } = args;
+  const { run, node, attempt, iteration, store, clock } = args;
   const combinator = node.combinator ?? 'and';
+  const ctx = resolveTemplateContext(args);
 
   const matched: number[] = [];
   for (let i = 0; i < node.conditions.length; i++) {
-    if (evaluateCondition(node.conditions[i]!, templateContext)) {
+    if (evaluateCondition(node.conditions[i]!, ctx)) {
       matched.push(i);
     }
   }

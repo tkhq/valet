@@ -52,7 +52,7 @@ import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowPromptReceipt } from '../engine-deps.js';
 import type { NodeCheckpoint } from '../store.js';
-import type { NodeExecuteResult, NodeExecutorArgs } from './index.js';
+import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export interface SessionDispatchedResult {
   sessionId: string;
@@ -72,10 +72,12 @@ interface SessionEffects {
 }
 
 export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promise<NodeExecuteResult> {
-  const { run, node, attempt, iteration, store, clock, engine, templateContext, existingCheckpoint } = args;
+  const { run, node, attempt, iteration, store, clock, engine, existingCheckpoint } = args;
+  const templateContext = resolveTemplateContext(args);
 
-  const sessionId = `wf:${run.runId}:${node.id}`;
-  const dispatchId = `workflow:${run.runId}:${node.id}`;
+  const suffix = iterationSuffix(iteration);
+  const sessionId = `wf:${run.runId}:${node.id}${suffix}`;
+  const dispatchId = `workflow:${run.runId}:${node.id}${suffix}`;
   const effects = readEffects(existingCheckpoint, sessionId);
 
   if (effects.receipt === undefined) {

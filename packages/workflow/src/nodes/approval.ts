@@ -30,7 +30,7 @@ import { renderJsonTemplates, renderTemplate, type TemplateContext } from '../da
 import { parseDurationMs } from '../dag/duration.js';
 import type { ApprovalNode } from '../dag/nodes.js';
 import type { NodeCheckpoint, RunSignal } from '../store.js';
-import type { NodeExecuteResult, NodeExecutorArgs } from './index.js';
+import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export interface ApprovalResult {
   approved: boolean;
@@ -44,7 +44,8 @@ interface ApprovalPayload {
 }
 
 export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Promise<NodeExecuteResult> {
-  const { run, node, attempt, iteration, store, clock, templateContext, existingCheckpoint, onApprovalPending } = args;
+  const { run, node, attempt, iteration, store, clock, existingCheckpoint, onApprovalPending } = args;
+  const templateContext = resolveTemplateContext(args);
   const signalType = `approval:${node.id}`;
 
   let timeoutAt: number | undefined;

@@ -6,11 +6,11 @@
 
 import { renderJsonTemplates } from '../dag/expression.js';
 import type { SetNode } from '../dag/nodes.js';
-import type { NodeExecuteResult, NodeExecutorArgs } from './index.js';
+import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export async function executeSet(args: NodeExecutorArgs<SetNode>): Promise<NodeExecuteResult> {
-  const { run, node, attempt, iteration, store, clock, templateContext } = args;
-  const result = renderJsonTemplates(node.values, templateContext);
+  const { run, node, attempt, iteration, store, clock } = args;
+  const result = renderJsonTemplates(node.values, resolveTemplateContext(args));
 
   await store.putIntent({
     runId: run.runId,
