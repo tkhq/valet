@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { Settings } from "lucide-react";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { PresenceMark } from "~/components/assistant/presence-mark";
 import { NotificationsBell } from "./notifications-bell";
@@ -57,6 +58,15 @@ export function TopNav() {
       </Link>
 
       <NotificationsBell />
+
+      <Link
+        to="/settings"
+        className="rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
+        activeProps={{ className: "text-ink" }}
+        aria-label="Settings"
+      >
+        <Settings className="h-4 w-4" />
+      </Link>
     </header>
   );
 }

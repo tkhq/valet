@@ -1,12 +1,12 @@
 import { useEffect, useRef } from "react";
-import { Link, useSearch } from "@tanstack/react-router";
-import { MessageSquare } from "lucide-react";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { MessageSquare, Plus } from "lucide-react";
 import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
-import { useThreads } from "~/api/queries";
+import { useCreateThread, useThreads } from "~/api/queries";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
-import { ScrollArea, Separator, Spinner } from "~/components/primitives";
+import { Button, ScrollArea, Separator, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 
 const CHILDREN_POLL_MS = 30_000;
@@ -58,11 +58,18 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
   const threadsQ = useThreads(sessionId);
   const childrenQ = useOrchestratorChildren({ refetchInterval: CHILDREN_POLL_MS });
   useInvalidateChildrenOnQueueState(sessionId, childrenQ.refetch);
+  const createThread = useCreateThread(sessionId);
+  const navigate = useNavigate({ from: "/chat" });
 
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
   const threads = threadsQ.data?.threads ?? [];
   const activeThreadId = search.thread ?? threads[0]?.id;
   const grouped = groupChildrenByThread(childrenQ.data?.children ?? []);
+
+  async function createAndNavigate() {
+    const thread = await createThread.mutateAsync();
+    navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
+  }
 
   return (
     <>
@@ -94,6 +101,19 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
           ))}
         </nav>
       </ScrollArea>
+      <Separator />
+      <div className="p-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start gap-2 text-muted hover:text-ink"
+          onClick={() => void createAndNavigate()}
+          disabled={createThread.isPending}
+        >
+          <Plus className="h-3.5 w-3.5" />
+          <span>new thread</span>
+        </Button>
+      </div>
     </>
   );
 }

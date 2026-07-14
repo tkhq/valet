@@ -1,7 +1,7 @@
 import { useState, type KeyboardEvent } from "react";
-import { Send } from "lucide-react";
+import { Send, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
-import { useSendPrompt } from "~/api/queries";
+import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
@@ -28,6 +28,7 @@ export function Composer({
   // from under whatever the user is typing.
   const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
   const send = useSendPrompt(sessionId);
+  const abort = useAbortThread(sessionId);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
@@ -64,6 +65,15 @@ export function Composer({
     }
   }
 
+  async function stop() {
+    if (!threadId || abort.isPending) return;
+    try {
+      await abort.mutateAsync({ threadId });
+    } catch (err) {
+      console.error("abort failed:", err);
+    }
+  }
+
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of
@@ -97,10 +107,25 @@ export function Composer({
           className="flex-1"
           disabled={send.isPending || !threadId}
         />
-        <Button type="submit" disabled={!canSend} size="lg">
-          <Send className="h-4 w-4" />
-          <span>Send</span>
-        </Button>
+        {busy ? (
+          <Button
+            type="button"
+            variant="secondary"
+            size="lg"
+            className="text-danger-600 hover:text-danger-500 dark:text-danger-500"
+            onClick={() => void stop()}
+            disabled={!threadId || abort.isPending}
+            aria-label="Stop"
+          >
+            <Square className="h-3.5 w-3.5 fill-current" />
+            <span>Stop</span>
+          </Button>
+        ) : (
+          <Button type="submit" disabled={!canSend} size="lg">
+            <Send className="h-4 w-4" />
+            <span>Send</span>
+          </Button>
+        )}
       </div>
     </form>
   );

@@ -18,6 +18,7 @@ import type {
   GetSessionResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
+  ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
@@ -25,6 +26,7 @@ import type {
   PatchSessionResponse,
   PatchThreadResponse,
   ResolveDecisionRequest,
+  SetNotificationPreferenceRequest,
 } from "@valet/api/wire";
 import { api } from "./client";
 
@@ -41,6 +43,7 @@ export const qk = {
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
   notifications: () => ["notifications"] as const,
+  notificationPreferences: () => ["notifications", "preferences"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -226,5 +229,38 @@ export function useSendPrompt(sessionId: string) {
     mutationFn: ({ text, threadId }) =>
       api.sendPrompt(sessionId, { text, threadId }),
     // Invalidations not needed — live updates flow through the WS store.
+  });
+}
+
+export function useAbortThread(sessionId: string) {
+  return useMutation<{ ok: true }, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => api.abortThread(sessionId, threadId),
+    // No invalidation — the abort's terminal state (submission settled
+    // `aborted`, thread status back to idle) arrives via the WS stream,
+    // same as every other engine-driven state transition.
+  });
+}
+
+// ── Notification preferences (web delivery, Phase 4 decision 19/22) ─────
+
+export function useNotificationPreferences(
+  opts?: UseQueryOptions<ListNotificationPreferencesResponse>,
+) {
+  return useQuery<ListNotificationPreferencesResponse>({
+    queryKey: qk.notificationPreferences(),
+    queryFn: () => api.listNotificationPreferences(),
+    ...opts,
+  });
+}
+
+export function useSetNotificationPreference() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, SetNotificationPreferenceRequest>({
+    mutationFn: (body) => api.setNotificationPreference(body),
+    // Refetch-on-success — simplest honest source of truth for a settings
+    // toggle that's touched rarely; no need for optimistic update plumbing.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.notificationPreferences() });
+    },
   });
 }

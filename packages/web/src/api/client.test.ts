@@ -74,4 +74,34 @@ describe("api client: colon-safe URL encoding", () => {
     expect(url).toBe("/api/orchestrator");
     expect(res.sessionId).toBe(COLON_ID);
   });
+
+  it("abortThread encodes both the session id and the thread id", async () => {
+    const fetchMock = stubFetchOk();
+    await api.abortThread(COLON_ID, "thread:1");
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    expect(url).toBe(
+      `/api/sessions/${encodeURIComponent(COLON_ID)}/threads/${encodeURIComponent("thread:1")}/abort`,
+    );
+  });
+});
+
+describe("api client: notification preferences", () => {
+  it("listNotificationPreferences GETs the preferences endpoint", async () => {
+    const fetchMock = stubFetchOk({ preferences: [] });
+    await api.listNotificationPreferences();
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    const opts = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(url).toBe("/api/notifications/preferences");
+    expect(opts.method).toBe("GET");
+  });
+
+  it("setNotificationPreference PUTs the kind/web body", async () => {
+    const fetchMock = stubFetchOk({ ok: true });
+    await api.setNotificationPreference({ kind: "approval", web: false });
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    const opts = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(url).toBe("/api/notifications/preferences");
+    expect(opts.method).toBe("PUT");
+    expect(JSON.parse(opts.body as string)).toEqual({ kind: "approval", web: false });
+  });
 });

@@ -4,6 +4,11 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
+import { applyStoredTheme } from "./lib/theme";
+
+// Apply the persisted theme choice (Settings → Appearance) before the first
+// paint so a returning `dark`/`light` user doesn't see a light-mode flash.
+applyStoredTheme();
 
 const queryClient = new QueryClient({
   defaultOptions: {

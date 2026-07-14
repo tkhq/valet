@@ -1,4 +1,4 @@
-import { Outlet, createRootRouteWithContext, useRouterState } from "@tanstack/react-router";
+import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
 import { AppShell } from "~/components/layout/app-shell";
@@ -11,7 +11,31 @@ interface RouterContext {
 
 export const Route = createRootRouteWithContext<RouterContext>()({
   component: RootLayout,
+  notFoundComponent: NotFound,
 });
+
+/**
+ * In-voice 404 — the assistant is the app's anchor (decision 9), so the
+ * "not found" copy points back at it rather than a generic error page.
+ * Rendered inside the same `AppShell`/`TopNav` chrome as every other route
+ * (via `RootLayout`'s `<Outlet/>` boundary), so it isn't a bare white page.
+ */
+function NotFound() {
+  return (
+    <div className="flex-1 grid place-items-center p-8 text-center">
+      <div className="max-w-sm space-y-3">
+        <div className="font-display text-2xl text-ink">This page doesn't exist.</div>
+        <p className="text-sm text-muted">The dashboard does.</p>
+        <Link
+          to="/"
+          className="inline-flex rounded px-3 py-1.5 text-sm text-moss hover:underline"
+        >
+          Back to the dashboard
+        </Link>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Which sidebar (if any) the current route gets, per assistant-centered

@@ -10,3 +10,4 @@ export * from "./badge.js";
 export * from "./spinner.js";
 export * from "./separator.js";
 export * from "./scroll-area.js";
+export * from "./switch.js";

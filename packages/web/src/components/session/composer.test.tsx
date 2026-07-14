@@ -11,8 +11,11 @@ import { render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
+const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+
 vi.mock("~/api/queries", () => ({
   useSendPrompt: () => ({ isPending: false, mutateAsync: vi.fn() }),
+  useAbortThread: () => ({ isPending: false, mutateAsync: abortMutateAsync }),
 }));
 
 vi.mock("~/stores/stream", () => ({
@@ -23,11 +26,11 @@ vi.mock("~/stores/stream", () => ({
 
 import { Composer } from "./composer";
 
-function renderComposer() {
+function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
   const queryClient = new QueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
-      <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus="idle" />
+      <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus={agentStatus} />
     </QueryClientProvider>,
   );
 }
@@ -47,5 +50,27 @@ describe("Composer — prefill consumption", () => {
     renderComposer();
     const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
     expect(textarea.value).toBe("");
+  });
+});
+
+describe("Composer — stop button", () => {
+  it("shows Send (not Stop) while idle", () => {
+    useComposerPrefillStore.setState({ text: null });
+    renderComposer("idle");
+    expect(screen.queryByRole("button", { name: /stop/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /send/i })).toBeDefined();
+  });
+
+  it("shows Stop instead of Send while the agent is busy, and aborts the active thread on click", async () => {
+    useComposerPrefillStore.setState({ text: null });
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer("streaming");
+
+    expect(screen.queryByRole("button", { name: /^send$/i })).toBeNull();
+    const stopButton = screen.getByRole("button", { name: /stop/i }) as HTMLButtonElement;
+    expect(stopButton.disabled).toBe(false);
+
+    await userEvent.click(stopButton);
+    expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
   });
 });

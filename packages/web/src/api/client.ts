@@ -18,6 +18,7 @@ import type {
   GetSessionResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
+  ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
@@ -31,6 +32,7 @@ import type {
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
+  SetNotificationPreferenceRequest,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
 import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
@@ -131,6 +133,11 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/messages`,
       body,
     ),
+  abortThread: (sessionId: string, threadId: string) =>
+    request<{ ok: true }>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/abort`,
+    ),
 
   // decision gates
   listDecisions: (sessionId: string) =>
@@ -169,6 +176,10 @@ export const api = {
     request<{ ok: true }>("POST", `/notifications/${encodeURIComponent(id)}/read`),
   markAllNotificationsRead: () =>
     request<{ ok: true }>("POST", "/notifications/read-all"),
+  listNotificationPreferences: () =>
+    request<ListNotificationPreferencesResponse>("GET", "/notifications/preferences"),
+  setNotificationPreference: (body: SetNotificationPreferenceRequest) =>
+    request<{ ok: true }>("PUT", "/notifications/preferences", body),
 };
 
 export { ApiError };
