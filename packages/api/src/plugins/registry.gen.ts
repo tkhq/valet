@@ -3,5 +3,6 @@
 import type { ValetPlugin } from "@valet/engine";
 import plugin0 from "@valet/plugin-github/plugin";
 import plugin1 from "@valet/plugin-gmail/plugin";
+import plugin2 from "@valet/plugin-google-calendar/plugin";
 
-export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1];
+export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2];
