@@ -20,6 +20,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
+  "dependencies": {
+    "@valet/engine": "workspace:*",
+    "typebox": "^1.1.24"
+  },
   "devDependencies": {
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"

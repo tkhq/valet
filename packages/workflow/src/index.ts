@@ -43,3 +43,29 @@ export type {
 } from './store.js';
 
 export { InMemoryWorkflowStore } from './memory-store.js';
+
+export type {
+  WorkflowAwaitResultOptions,
+  WorkflowCreateSessionOptions,
+  WorkflowEngineDeps,
+  WorkflowPromptOptions,
+  WorkflowPromptReceipt,
+} from './engine-deps.js';
+
+export {
+  createDefaultNodeExecutors,
+  executeIf,
+  executeSet,
+  executeStop,
+  executeTrigger,
+} from './nodes/index.js';
+export type {
+  NodeExecuteResult,
+  NodeExecutor,
+  NodeExecutorArgs,
+  NodeExecutorRegistry,
+  OnApprovalPending,
+} from './nodes/index.js';
+
+export { driveUntilPark } from './interpreter.js';
+export type { InterpreterDeps } from './interpreter.js';
