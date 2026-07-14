@@ -31,6 +31,7 @@
     "@valet/plugin-github": "workspace:*",
     "@valet/plugin-gmail": "workspace:*",
     "@valet/plugin-google-calendar": "workspace:*",
+    "@valet/plugin-google-workspace": "workspace:*",
     "@valet/sandbox-docker": "workspace:*",
     "@valet/shared": "workspace:*",
     "@valet/store-sqlite": "workspace:*",

@@ -47,6 +47,9 @@ importers:
       '@valet/plugin-google-calendar':
         specifier: workspace:*
         version: link:../plugin-google-calendar
+      '@valet/plugin-google-workspace':
+        specifier: workspace:*
+        version: link:../plugin-google-workspace
       '@valet/sandbox-docker':
         specifier: workspace:*
         version: link:../sandbox-docker
@@ -397,6 +400,9 @@ importers:
 
   packages/plugin-google-workspace:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
@@ -406,6 +412,9 @@ importers:
       markdown-it:
         specifier: ^14.1.0
         version: 14.1.1
+      typebox:
+        specifier: ^1.1.24
+        version: 1.1.37
       zod:
         specifier: ^3.22.4
         version: 3.25.76

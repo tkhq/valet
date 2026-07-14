@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { driveActionDefs } from '../drive-actions.js';
-import { docsActionDefs } from '../docs-actions.js';
+import { driveActions } from '../drive-actions.js';
+import { docsActions } from '../docs-actions.js';
 import { sheetsActionDefs } from '../sheets-actions.js';
 import {
   LIST_SEARCH_ACTIONS,
@@ -16,8 +16,8 @@ import type { ActionContext } from '@valet/sdk/integrations';
 
 describe('labels-guard action classification completeness', () => {
   const allRegisteredIds = [
-    ...driveActionDefs.map((a) => a.id),
-    ...docsActionDefs.map((a) => a.id),
+    ...driveActions.map((a) => a.id),
+    ...docsActions.map((a) => a.id),
     ...sheetsActionDefs.map((a) => a.id),
   ];
 

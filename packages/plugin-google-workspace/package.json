@@ -5,8 +5,15 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "valet": {
+    "plugin": "./dist/plugin.js"
+  },
   "exports": {
-    "./actions": "./src/actions/index.ts"
+    "./actions": "./src/actions/index.ts",
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    }
   },
   "scripts": {
     "build": "tsc",
@@ -14,9 +21,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@valet/engine": "workspace:*",
     "@valet/sdk": "workspace:*",
     "@valet/shared": "workspace:*",
     "markdown-it": "^14.1.0",
+    "typebox": "^1.1.24",
     "zod": "^3.22.4"
   },
   "devDependencies": {
