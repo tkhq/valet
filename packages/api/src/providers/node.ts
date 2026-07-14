@@ -2,14 +2,16 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { InMemoryCredentialStore, type ChildSpawner, type Principal } from "@valet/engine";
+import type { ChildSpawner, Principal } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
+import { SqliteCredentialStore } from "../plugins/credential-store.js";
 import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { FsBlobStore } from "./blob-fs.js";
@@ -99,7 +101,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const sandboxProvider = new DockerSandboxProvider();
   // Durable event log over the same better-sqlite3 handle the store uses.
   const eventStream = new SqliteEventStream(sqlite);
-  const engineCredentials = new InMemoryCredentialStore();
+  // `AppDb`'s drizzle-orm version doesn't declare `$client` in its public
+  // type even though the runtime instance always carries it (same cast
+  // `workflowStore` below uses) — bridging a library type gap, not a real
+  // type mismatch.
+  const engineCredentials = new SqliteCredentialStore(
+    db as AppDb & { $client: Database.Database },
+    deriveSecretKey(opts.encryptionKey),
+  );
 
   // Circular construction: EngineHost needs the ChildSpawner at construction
   // time (it's baked into every orchestrator session's toolConfig), but the

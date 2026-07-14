@@ -410,6 +410,35 @@ export const workflowSignals = sqliteTable(
   ],
 );
 
+// ─── Credentials (plugin-system-v2 Task 3) ──────────────────────────────────
+//
+// Durable, encrypted store backing the engine's `CredentialStore` port
+// (`packages/engine/src/types.ts`). Secret columns hold AES-256-GCM
+// ciphertext produced by `src/lib/secret-crypto.ts` — plaintext tokens are
+// never persisted. `scopes`/`metadata` are JSON text, same convention as
+// the workflow tables above.
+
+export const credentials = sqliteTable(
+  "credentials",
+  {
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id").notNull(),
+    service: text("service").notNull(),
+    type: text("type", {
+      enum: ["oauth2", "api_key", "bot_token", "service_account", "app_install"],
+    }).notNull(),
+    accessTokenEnc: text("access_token_enc"),
+    refreshTokenEnc: text("refresh_token_enc"),
+    apiKeyEnc: text("api_key_enc"),
+    expiresAt: integer("expires_at"),
+    scopes: text("scopes"),
+    metadata: text("metadata"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.service] })],
+);
+
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -432,3 +461,4 @@ export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
 export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
 export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
 export type WorkflowSignalRow = typeof workflowSignals.$inferSelect;
+export type CredentialRow = typeof credentials.$inferSelect;

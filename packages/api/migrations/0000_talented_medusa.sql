@@ -244,4 +244,19 @@ CREATE TABLE `workflow_signals` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `workflow_signals_run_signal` ON `workflow_signals` (`run_id`,`signal_id`);--> statement-breakpoint
-CREATE INDEX `workflow_signals_run` ON `workflow_signals` (`run_id`);
+CREATE INDEX `workflow_signals_run` ON `workflow_signals` (`run_id`);--> statement-breakpoint
+CREATE TABLE `credentials` (
+	`owner_type` text NOT NULL,
+	`owner_id` text NOT NULL,
+	`service` text NOT NULL,
+	`type` text NOT NULL,
+	`access_token_enc` text,
+	`refresh_token_enc` text,
+	`api_key_enc` text,
+	`expires_at` integer,
+	`scopes` text,
+	`metadata` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	PRIMARY KEY(`owner_type`, `owner_id`, `service`)
+);

@@ -16,7 +16,6 @@ import { join } from "node:path";
 import { createServer, type AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 import {
-  InMemoryCredentialStore,
   VirtualSandboxProvider,
   type ChildSpawner,
   type SandboxProvider,
@@ -24,9 +23,11 @@ import {
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
+import { SqliteCredentialStore } from "../plugins/credential-store.js";
 import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { createApp } from "../app.js";
@@ -130,7 +131,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const engineStore = new SqliteSessionStore(engineDb);
   const sandboxProvider = opts.sandboxProvider ?? new VirtualSandboxProvider();
   const eventStream = new SqliteEventStream(sqlite);
-  const engineCredentials = new InMemoryCredentialStore();
+  // Same `$client` type-gap bridge as `providers/node.ts` — see its comment.
+  const engineCredentials = new SqliteCredentialStore(
+    db as AppDb & { $client: Database.Database },
+    deriveSecretKey("test-key"),
+  );
   const blobs = new FsBlobStore(blobsRoot);
 
   // Pre-allocate the port: EngineHost needs `apiBaseUrl` at construction

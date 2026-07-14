@@ -73,6 +73,9 @@ const port = Number.parseInt(process.env.PORT ?? "8787", 10);
 const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
 const dbPath = process.env.VALET_DB_PATH ?? resolve(dataDir, "app.db");
 const blobsRoot = process.env.VALET_BLOBS_DIR ?? resolve(dataDir, "blobs");
+if (!process.env.VALET_ENCRYPTION_KEY) {
+  console.warn("VALET_ENCRYPTION_KEY is unset — using an insecure default. Set it before storing real credentials.");
+}
 const encryptionKey = process.env.VALET_ENCRYPTION_KEY ?? "dev-key-not-secure";
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 
