@@ -93,10 +93,21 @@
 
 **Exit criteria:** a workflow that spawns a session, awaits a schema-validated result, waits on an approval, and completes — killed and restarted at three different points (mid-node, parked-on-approval, terminalizing) without duplicate dispatches (asserted via dispatchId capture).
 
-## Phase 6 — Telegram channel (local, long-polling)
+## Phase 6 — Platform: auth + plugin system
+
+**Proves:** the product works for real users with real integrations — not just the local stub.
+
+- Real login/auth replacing `VALET_LOCAL_AUTH` (provider TBD in its own design pass), user/org provisioning on first login, and narrowing the internal-token bypass (ledger carry-item).
+- Plugin system v2 per `docs/specs/2026-07-13-plugin-system-v2-design.md`: the `ValetPlugin` manifest, both loaders (bundled registry + dynamic node_modules), the assembler, and the **fleet port** of all action-bearing plugins to engine-native shapes (subagent per plugin, verbatim execute bodies, mocked-fetch tests).
+- Credential declarations feeding connect flows (OAuth/api-key UI built against the declarations contract).
+
+**Exit criteria:** log in as a real user; connect one OAuth service and one API-key service through the UI; the orchestrator lists and calls ported plugin actions via `list_tools`/`call_tool` with per-user credentials; a plugin dropped into node_modules loads on restart without a rebuild; a deliberately broken plugin quarantines without killing boot.
+
+## Phase 7 — Telegram channel (local, long-polling)
 
 **Proves:** the full product loop with a real external surface.
 
+- Implemented as the **first v2 channel plugin** (`plugin-telegram/src/transport/` per the plugin-system spec; legacy `src/channels/` untouched for the worker; payload helpers lifted verbatim).
 - Telegram transport implementing the engine ChannelTransport contract: long-polling ingress (no public webhook), conversationKey codec (`telegram:v1:...`), signal admission with `dispatchId = update_id`, outbound send, gate delivery with inline buttons, gate updates on resolution.
 - Binding + identity-link flows in the API/web (link Telegram account, DM binding auto-created); drop log for unlinked actors; per-binding throttle.
 - Gate hygiene: minimized bodies, explicitly-addressed free-text resolution.
@@ -107,6 +118,7 @@
 
 ## Sequencing notes
 
-- Phases 1→2→3 are strictly ordered (each builds on the previous's contracts). Phase 4 needs 1–3. Phase 5 needs 1–2 (not 3/4). Phase 6 needs 4. So **Phase 5 can run in parallel with Phase 3/4** if capacity allows.
+- Phases 1→2→3 are strictly ordered (each builds on the previous's contracts). Phase 4 needs 1–3. Phase 5 needs 1–2 (not 3/4). Phase 6 (platform) needs 4; Phase 7 (Telegram) needs 4 + 6 (it ships as a v2 channel plugin over the plugin framework). Ordering decided 2026-07-13: 5 → 6 → 7.
+- [2026-07-13] Phases resequenced: the original Phase 6 (Telegram) moved to Phase 7, behind a new platform phase (auth + plugin system, spec: `docs/specs/2026-07-13-plugin-system-v2-design.md`), so Telegram lands as a plugin rather than bespoke wiring. An assistant-centered web-UI detour (spec: `docs/specs/2026-07-13-assistant-centered-web-ui-design.md`) shipped between Phases 4 and 5.
 - Each phase = one detailed plan + one PR-sized review gate; the conformance suites added in early phases run in CI for all later phases.
 - The 0000 migrations are regenerated once at the start of Phase 1 (engine schema) and once at Phase 4 (app schema); dev databases are dropped at both points.
