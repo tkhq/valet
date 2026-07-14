@@ -69,8 +69,12 @@ def get_base_image() -> modal.Image:
         # whisper.cpp (speech-to-text) — build from source. Placed early
         # because it's ~120s and never changes.
         .run_commands(
-            "git clone --depth 1 https://github.com/ggml-org/whisper.cpp /tmp/whisper-build",
-            "cd /tmp/whisper-build && cmake -B build && cmake --build build --config Release -j$(nproc)",
+            # Pin the tag: an unpinned --depth 1 clone tracks HEAD and drifts.
+            "git clone --depth 1 --branch v1.9.1 https://github.com/ggml-org/whisper.cpp /tmp/whisper-build",
+            # BUILD_SHARED_LIBS defaults OFF on Linux (static libs only), so the
+            # libwhisper.so* / libggml*.so* copies below find nothing and the
+            # build fails — force shared libraries on.
+            "cd /tmp/whisper-build && cmake -B build -DBUILD_SHARED_LIBS=ON && cmake --build build --config Release -j$(nproc)",
             "cp /tmp/whisper-build/build/bin/whisper-cli /usr/local/bin/whisper-cli",
             "cp /tmp/whisper-build/build/src/libwhisper.so* /usr/local/lib/",
             "cp /tmp/whisper-build/build/ggml/src/libggml*.so* /usr/local/lib/",
@@ -170,7 +174,7 @@ def get_base_image() -> modal.Image:
                 "OPENCODE_RUNTIME_DIR": "/tmp/valet-opencode",
                 "VALET_PERSONA_DIR": "/tmp/valet-opencode/persona",
                 # Force image rebuild on deploy (change this value to trigger rebuild)
-                "IMAGE_BUILD_VERSION": "2026-07-03-v57-backlinks-session-split",
+                "IMAGE_BUILD_VERSION": "2026-07-13-v58-whisper-shared-libs-pin",
                 "AGENT_BROWSER_HOME": "/tmp/valet-agent-browser",
                 "AGENT_BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium",
                 "AGENT_BROWSER_PROFILE": "/workspace/.agent-browser-profile",
