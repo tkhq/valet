@@ -68,7 +68,13 @@ export interface InterpreterDeps {
   onBeginTerminalize?: () => void | Promise<void>;
 }
 
-/** No `foreach` executor yet (out of scope this phase); the checkpoint PK already carries it for later. */
+/**
+ * The interpreter always drives the definition's own nodes at iteration 0
+ * — a `foreach` body's checkpoints (keyed at iteration > 0) are owned and
+ * driven entirely by the `foreach` executor itself (`nodes/foreach.ts`),
+ * never by this wave loop, since a body's node id never appears in
+ * `definition.nodes`.
+ */
 const ITERATION = 0;
 
 export async function driveUntilPark(runId: string, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
@@ -331,7 +337,7 @@ async function invokeExecutor(
     case 'stop':
       return requireExecutor(executors.stop, node).execute({ ...argsBase, node });
     case 'foreach':
-      throw new Error("executor for 'foreach' not implemented yet (node completion plan Task 6)");
+      return requireExecutor(executors.foreach, node).execute({ ...argsBase, node });
     case 'llm':
       return requireExecutor(executors.llm, node).execute({ ...argsBase, node });
     case 'orchestrator':

@@ -154,9 +154,23 @@ function validateStepNodeFields(node: WorkflowNode, errors: string[], label: str
   }
 }
 
+/** Reserved template-context keys `itemAlias`/`indexAlias` must not shadow (they're spread last in `resolveTemplateContext`). */
+const RESERVED_ALIAS_NAMES: ReadonlySet<string> = new Set(['trigger', 'nodes']);
+
 function validateForeachNode(node: ForeachNode, nodesById: Map<string, WorkflowNode>, errors: string[]): void {
   if (node.items.trim() === '') {
     errors.push(`node ${JSON.stringify(node.id)}: foreach.items must be a non-empty string`);
+  }
+
+  if (node.itemAlias !== undefined && RESERVED_ALIAS_NAMES.has(node.itemAlias)) {
+    errors.push(
+      `node ${JSON.stringify(node.id)}: foreach.itemAlias must not be ${JSON.stringify(node.itemAlias)} (shadows the template context)`,
+    );
+  }
+  if (node.indexAlias !== undefined && RESERVED_ALIAS_NAMES.has(node.indexAlias)) {
+    errors.push(
+      `node ${JSON.stringify(node.id)}: foreach.indexAlias must not be ${JSON.stringify(node.indexAlias)} (shadows the template context)`,
+    );
   }
 
   if (!FOREACH_BODY_TYPES.has(node.body.type)) {

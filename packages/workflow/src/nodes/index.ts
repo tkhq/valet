@@ -111,6 +111,7 @@ export { executeSession } from './session.js';
 export { executeLlm } from './llm.js';
 export { executeTool } from './tool.js';
 export { executeOrchestrator } from './orchestrator.js';
+export { executeForeach } from './foreach.js';
 
 import { executeTrigger } from './trigger.js';
 import { executeSet } from './set.js';
@@ -122,8 +123,9 @@ import { executeSession } from './session.js';
 import { executeLlm } from './llm.js';
 import { executeTool } from './tool.js';
 import { executeOrchestrator } from './orchestrator.js';
+import { executeForeach } from './foreach.js';
 
-/** The pure executors plus `wait`/`approval`/`session`/`llm`/`tool`/`orchestrator` (Tasks 5, 7, 3, 4, 5). */
+/** The pure executors plus `wait`/`approval`/`session`/`llm`/`tool`/`orchestrator`/`foreach` (Tasks 5, 7, 3, 4, 5, 6). */
 export function createDefaultNodeExecutors(): NodeExecutorRegistry {
   return {
     trigger: { execute: executeTrigger },
@@ -136,5 +138,6 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     llm: { execute: executeLlm },
     tool: { execute: executeTool },
     orchestrator: { execute: executeOrchestrator },
+    foreach: { execute: executeForeach },
   };
 }
