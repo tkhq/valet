@@ -8,6 +8,18 @@ import typography from "@tailwindcss/typography";
  */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  // `dark:` utilities must follow the SAME resolution as theme.css's token
+  // blocks (both mechanisms, explicit data-theme winning over the OS): OS
+  // dark applies unless data-theme="light"; data-theme="dark" always applies.
+  // Without this, Tailwind defaults to media-only and the /settings theme
+  // toggle flips the tokens but not `dark:` classes (invisible-text bugs).
+  darkMode: [
+    "variant",
+    [
+      '@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) & }',
+      ':root[data-theme="dark"] &',
+    ],
+  ],
   theme: {
     extend: {
       colors: {
