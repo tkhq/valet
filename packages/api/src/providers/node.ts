@@ -201,7 +201,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `sqlite-store.test.ts` uses) — bridging a library type gap, not a real
   // type mismatch.
   const workflowStore = new SqliteWorkflowStore(db as AppDb & { $client: Database.Database });
-  const workflowEngineDeps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+  const workflowEngineDeps = buildWorkflowEngineDeps({
+    host: engineHost,
+    store: workflowStore,
+    db,
+    engineStore,
+    actionPluginByService,
+    credentials: engineCredentials,
+  });
 
   // Approval attention (decision 12): the FIRST park on an approval node
   // routes through the Phase 4 notification system. `onApprovalPending`

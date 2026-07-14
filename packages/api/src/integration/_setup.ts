@@ -179,7 +179,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   // Same `$client` type-gap bridge as `providers/node.ts` — see its comment.
   const workflowStore = new SqliteWorkflowStore(db as AppDb & { $client: Database.Database });
-  const workflowEngineDeps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+  const workflowEngineDeps = buildWorkflowEngineDeps({
+    host: engineHost,
+    store: workflowStore,
+    db,
+    engineStore,
+    actionPluginByService,
+    credentials: engineCredentials,
+  });
   const realWorkflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,

@@ -439,6 +439,17 @@ export const credentials = sqliteTable(
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.service] })],
 );
 
+// `action_invocations` — durable dedup table for the workflow `tool` node's
+// `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is the
+// JSON-serialized `WorkflowInvokeActionResult`; a duplicate `invocationId`
+// (crash-and-retry, concurrent dispatch) reads back the original row rather
+// than re-invoking the action.
+export const actionInvocations = sqliteTable("action_invocations", {
+  invocationId: text("invocation_id").primaryKey(),
+  result: text("result").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -462,3 +473,4 @@ export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
 export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
 export type WorkflowSignalRow = typeof workflowSignals.$inferSelect;
 export type CredentialRow = typeof credentials.$inferSelect;
+export type ActionInvocationRow = typeof actionInvocations.$inferSelect;

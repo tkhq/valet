@@ -39,9 +39,12 @@ import type { Api, Model } from "@mariozechner/pi-ai";
 import {
   parseOrchestratorSessionId,
   parsePrincipal,
+  type ActionPlugin,
+  type CredentialStore,
   type Principal,
   type SessionStore,
   type SignalContent,
+  type ValetPlugin,
 } from "@valet/engine";
 import type {
   WorkflowAwaitResultOptions,
@@ -59,6 +62,7 @@ import type {
 } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
+import { buildActionInvoker } from "../plugins/action-invoker.js";
 import { orchestratorIdentities, workflowDefinitions } from "../schema/index.js";
 
 // Same compile-time-vs-runtime bridge `resolveModelId` solves in
@@ -75,6 +79,10 @@ export interface WorkflowEngineDepsOpts {
   db: AppDb;
   /** The engine's own session store — needed only for the non-blocking `isSettled` probe. */
   engineStore: SessionStore;
+  /** Assembled plugin action index (plugin-system-v2 plan Task 4) — `invokeAction`'s action resolution seam. */
+  actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /** Credential store `invokeAction` scopes a `CredentialProvider` over (Task 3). */
+  credentials: CredentialStore;
 }
 
 function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: string } {
@@ -206,6 +214,12 @@ async function ensureOrchestratorSession(
 }
 
 export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowEngineDeps {
+  const invokeActionImpl = buildActionInvoker({
+    db: opts.db,
+    credentials: opts.credentials,
+    actionPluginByService: opts.actionPluginByService,
+  });
+
   return {
     async createSession(sessionOpts: WorkflowCreateSessionOptions): Promise<{ id: string }> {
       const session = await ensureSession(opts, sessionOpts.id, sessionOpts.title);
@@ -324,12 +338,22 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       return { sessionId: session.id, threadId: thread.id, queueItemId: receipt.queueItemId };
     },
 
-    // Phase 6 lands the plugin system that would give this a real receiver;
-    // the seam contract (deterministic `invocationId`, dedup-capable
-    // receiver returns the original result for a duplicate id) is documented
-    // on `WorkflowEngineDeps.invokeAction` for that implementer.
-    async invokeAction(_req: WorkflowInvokeActionRequest): Promise<WorkflowInvokeActionResult> {
-      return { ok: false, error: "no integrations are connected — the plugin system lands in Phase 6" };
+    /**
+     * The `tool` node's dispatch primitive, now that the plugin system
+     * (Task 4) and the durable dedup store (Task 6) exist. `invocationId`
+     * is minted by the tool executor as `workflow:{runId}:{nodeId}
+     * [:{iteration}]` — the same convention `parseWorkflowDispatchId`
+     * already parses for `promptOrchestrator`'s `dispatchId`, so it's
+     * reused here rather than duplicated. Run context (`orgId`/
+     * `actorUserId`/`owner`) is resolved the same way every other method on
+     * this port resolves it (`resolveRunContext`), then handed to the
+     * headless `ActionInvoker` — which owns dedup, credential scoping, and
+     * action execution.
+     */
+    async invokeAction(req: WorkflowInvokeActionRequest): Promise<WorkflowInvokeActionResult> {
+      const runId = parseWorkflowDispatchId(req.invocationId);
+      const ctx = await resolveRunContext(opts, runId);
+      return invokeActionImpl(req, { userId: ctx.actorUserId, orgId: ctx.orgId, owner: ctx.owner });
     },
   };
 }
@@ -362,11 +386,16 @@ function resolveWorkflowModel(spec: string): PiModel {
   );
 }
 
-/** Inverse of the `workflow` dispatchId convention: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
-function parseWorkflowDispatchId(dispatchId: string): string {
-  const parts = dispatchId.split(":");
+/**
+ * Inverse of the `workflow` dispatchId/invocationId convention:
+ * `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. Shared by
+ * `promptOrchestrator`'s `dispatchId` and `invokeAction`'s `invocationId` —
+ * same id shape, same runId position.
+ */
+function parseWorkflowDispatchId(id: string): string {
+  const parts = id.split(":");
   if (parts.length < 3 || parts[0] !== "workflow") {
-    throw new Error(`workflow engine-deps: not a workflow dispatchId: ${dispatchId}`);
+    throw new Error(`workflow engine-deps: not a workflow:{runId}:{nodeId} id: ${id}`);
   }
   return parts[1];
 }

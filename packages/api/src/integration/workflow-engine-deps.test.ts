@@ -34,7 +34,7 @@ describeIfKey("api integration: workflow engine-deps", () => {
     async () => {
       const api = await bootTestApi();
       try {
-        const { db, engineHost, engineStore, workflowStore } = api.providers;
+        const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
 
         const workflowId = "wf_engine_deps_test";
         const runId = "wfrun_engine_deps_test";
@@ -60,7 +60,14 @@ describeIfKey("api integration: workflow engine-deps", () => {
           { ownerType: "user", ownerId: LOCAL_USER.id },
         );
 
-        const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+        const deps = buildWorkflowEngineDeps({
+          host: engineHost,
+          store: workflowStore,
+          db,
+          engineStore,
+          actionPluginByService,
+          credentials: engineCredentials,
+        });
 
         const sessionId = `wf:${runId}:node1`;
         const created = await deps.createSession({ id: sessionId, purpose: "workflow" });

@@ -41,6 +41,8 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
           store: providers.workflowStore,
           db: providers.db,
           engineStore: providers.engineStore,
+          actionPluginByService: providers.actionPluginByService,
+          credentials: providers.engineCredentials,
         },
         sessionId,
       ),

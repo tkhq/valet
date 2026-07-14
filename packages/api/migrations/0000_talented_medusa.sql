@@ -260,3 +260,9 @@ CREATE TABLE `credentials` (
 	`updated_at` integer NOT NULL,
 	PRIMARY KEY(`owner_type`, `owner_id`, `service`)
 );
+--> statement-breakpoint
+CREATE TABLE `action_invocations` (
+	`invocation_id` text PRIMARY KEY NOT NULL,
+	`result` text NOT NULL,
+	`created_at` integer NOT NULL
+);

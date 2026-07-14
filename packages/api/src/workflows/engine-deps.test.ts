@@ -1,12 +1,15 @@
 /**
- * Unit tests for `buildWorkflowEngineDeps`'s Task 7 seams: `invokeAction`
- * (Phase-6-deferred stub), `promptOrchestrator` (real `EngineHost`
+ * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
+ * `invokeAction` (now a real headless `ActionInvoker` with durable dedup —
+ * plugin-system-v2 plan Task 6), `promptOrchestrator` (real `EngineHost`
  * orchestrator wiring, no LLM call required — `submitPrompt` returns before
  * the turn actually runs), and `llmComplete`'s no-network unknown-model
  * failure path. The key-gated real-Anthropic completion path is exercised
  * separately in `src/integration/workflow-engine-deps.test.ts`.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { Type } from "typebox";
+import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
@@ -44,31 +47,183 @@ async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<v
   );
 }
 
+/** Fixture `demo.ping` action — counts invocations and echoes whether a credential was resolved, so tests can assert dedup (no re-invocation) and the missing-credential-still-executes contract. */
+function makeFixturePlugin(): { plugin: ValetPlugin; actionPlugin: ActionPlugin; calls: () => number } {
+  let count = 0;
+  const action: PluginAction = {
+    id: "demo.ping",
+    name: "ping",
+    description: "ping",
+    riskLevel: "low",
+    parameters: Type.Object({ msg: Type.String() }),
+    execute: async (args, ctx) => {
+      count += 1;
+      const credential = await ctx.credentials.get();
+      return {
+        success: true,
+        data: { echoed: (args as { msg: string }).msg, hasCredential: credential !== null },
+      };
+    },
+  };
+  const actionPlugin: ActionPlugin = { service: "demo", actions: [action] };
+  const plugin: ValetPlugin = { name: "demo", version: "0.0.1", actions: [actionPlugin] };
+  return { plugin, actionPlugin, calls: () => count };
+}
+
 describe("buildWorkflowEngineDeps: invokeAction", () => {
-  it("returns the Phase-6-deferred stub shape regardless of the request", async () => {
-    api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore } = api.providers;
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+  it("happy path: resolves the fixture action and returns {ok:true, result}", async () => {
+    const fixture = makeFixturePlugin();
+    api = await bootTestApi({ plugins: [fixture.plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+
+    const runId = "wfrun_invoke_happy";
+    await seedRun(api, runId, "wf_invoke_happy");
 
     const result = await deps.invokeAction({
-      service: "github",
-      action: "create_issue",
-      params: { title: "test" },
-      invocationId: "workflow:run1:node1",
+      service: "demo",
+      action: "ping",
+      params: { msg: "hello" },
+      invocationId: `workflow:${runId}:node1`,
     });
 
-    expect(result).toEqual({
-      ok: false,
-      error: "no integrations are connected — the plugin system lands in Phase 6",
+    expect(result).toEqual({ ok: true, result: { echoed: "hello", hasCredential: false } });
+    expect(fixture.calls()).toBe(1);
+  });
+
+  it("is idempotent by invocationId: a duplicate call executes the action ONCE and returns the identical original result", async () => {
+    const fixture = makeFixturePlugin();
+    api = await bootTestApi({ plugins: [fixture.plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
     });
+
+    const runId = "wfrun_invoke_dup";
+    await seedRun(api, runId, "wf_invoke_dup");
+    const req = {
+      service: "demo",
+      action: "ping",
+      params: { msg: "dup" },
+      invocationId: `workflow:${runId}:node1`,
+    };
+
+    const first = await deps.invokeAction(req);
+    const second = await deps.invokeAction(req);
+
+    expect(second).toEqual(first);
+    expect(fixture.calls()).toBe(1);
+  });
+
+  it("unknown action: returns a stable {ok:false} that is also deduped (never invokes execute)", async () => {
+    const fixture = makeFixturePlugin();
+    api = await bootTestApi({ plugins: [fixture.plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+
+    const runId = "wfrun_invoke_unknown";
+    await seedRun(api, runId, "wf_invoke_unknown");
+    const req = {
+      service: "demo",
+      action: "does_not_exist",
+      params: {},
+      invocationId: `workflow:${runId}:node1`,
+    };
+
+    const first = await deps.invokeAction(req);
+    const second = await deps.invokeAction(req);
+
+    expect(first).toEqual({ ok: false, error: "unknown action: demo.does_not_exist" });
+    expect(second).toEqual(first);
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("param validation failure: missing required param returns {ok:false} and never invokes execute", async () => {
+    const fixture = makeFixturePlugin();
+    api = await bootTestApi({ plugins: [fixture.plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+
+    const runId = "wfrun_invoke_badparams";
+    await seedRun(api, runId, "wf_invoke_badparams");
+
+    const result = await deps.invokeAction({
+      service: "demo",
+      action: "ping",
+      params: {},
+      invocationId: `workflow:${runId}:node1`,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("missing credential: the action still executes and sees credentials.get() === null", async () => {
+    const fixture = makeFixturePlugin();
+    api = await bootTestApi({ plugins: [fixture.plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+
+    const runId = "wfrun_invoke_nocred";
+    await seedRun(api, runId, "wf_invoke_nocred");
+
+    const result = await deps.invokeAction({
+      service: "demo",
+      action: "ping",
+      params: { msg: "no creds here" },
+      invocationId: `workflow:${runId}:node1`,
+    });
+
+    expect(result).toEqual({ ok: true, result: { echoed: "no creds here", hasCredential: false } });
+    expect(fixture.calls()).toBe(1);
   });
 });
 
 describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
   it("ensures the owner's orchestrator session and admits a followup signal envelope", async () => {
     api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore } = api.providers;
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
 
     const runId = "wfrun_orch_unit";
     await seedRun(api, runId, "wf_orch_unit");
@@ -103,8 +258,15 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
   it("is idempotent by dispatchId: a duplicate dispatch returns the original receipt", async () => {
     api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore } = api.providers;
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
 
     const runId = "wfrun_orch_dup";
     await seedRun(api, runId, "wf_orch_dup");
@@ -124,8 +286,15 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
   it("groups every prompt from the same run onto one thread", async () => {
     api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore } = api.providers;
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
 
     const runId = "wfrun_orch_thread";
     await seedRun(api, runId, "wf_orch_thread");
@@ -147,8 +316,15 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
   it("throws a descriptive error for a run with no recorded owner", async () => {
     api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore } = api.providers;
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
 
     const runId = "wfrun_orch_no_owner";
     const workflowId = "wf_orch_no_owner";
@@ -187,8 +363,15 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 describe("buildWorkflowEngineDeps: llmComplete", () => {
   it("throws descriptively for an unknown model id, without any network call", async () => {
     api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore } = api.providers;
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
 
     await expect(
       deps.llmComplete({ model: "definitely-not-a-real-model-id", prompt: "hi" }),
