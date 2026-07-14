@@ -435,7 +435,25 @@ export class EngineHost {
     this.cache.delete(sessionId);
   }
 
-  /** Tear down every live session. Call from process shutdown handlers. */
+  /**
+   * Evict every cached session WITHOUT touching durable state — the
+   * process-shutdown path. `Session.destroy()` calls
+   * `store.deleteSession()`, so a shutdown that "destroys" live sessions
+   * erases their threads/queue items/history; kill-mid-turn recovery
+   * (reconciliation on next boot) is the designed restart story, and it
+   * needs those rows. Sandboxes are left as-is — the workspace survives,
+   * the sandbox is disposable (Phase 3), and the next boot re-attaches or
+   * re-provisions.
+   */
+  evictAll(): void {
+    for (const id of [...this.cache.keys()]) this.evictCache(id);
+  }
+
+  /**
+   * Tear down every live session INCLUDING their durable rows
+   * (`store.deleteSession`). NOT for shutdown handlers — that's
+   * `evictAll()`. Kept for tests and true delete-everything flows.
+   */
   async destroyAll(): Promise<void> {
     const ids = [...this.cache.keys()];
     await Promise.allSettled(ids.map((id) => this.destroy(id)));

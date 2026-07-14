@@ -36,7 +36,13 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import type { Api, Model } from "@mariozechner/pi-ai";
-import { parsePrincipal, type Principal, type SessionStore, type SignalContent } from "@valet/engine";
+import {
+  parseOrchestratorSessionId,
+  parsePrincipal,
+  type Principal,
+  type SessionStore,
+  type SignalContent,
+} from "@valet/engine";
 import type {
   WorkflowAwaitResultOptions,
   WorkflowCreateSessionOptions,
@@ -53,7 +59,7 @@ import type {
 } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { orchestratorIdentities, workflowDefinitions } from "../schema/index.js";
 
 // Same compile-time-vs-runtime bridge `resolveModelId` solves in
 // `packages/engine/src/thread.ts` and `EngineHost.resolveModel` (host.ts):
@@ -146,6 +152,17 @@ export async function ensureWorkflowSession(
 }
 
 async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, title?: string) {
+  // Two session kinds reach this seam: `wf:{runId}:{nodeId}` sessions the
+  // `session` node spawns, and the owner's ORCHESTRATOR session that the
+  // `orchestrator` node's receipt points back at (its wake path calls
+  // `awaitResult`/`abort` with `receipt.sessionId`). Each must wake through
+  // its own chokepoint — an orchestrator id fed to `workflowSessionFor`
+  // would rebuild it without persona/memory (the Phase 4 cache-poisoning
+  // class), and a `wf:` id has no orchestrator identity.
+  const principal = parseOrchestratorSessionId(sessionId);
+  if (principal) {
+    return ensureOrchestratorSession(opts, sessionId, principal);
+  }
   const { runId } = parseWorkflowSessionId(sessionId);
   const ctx = await resolveRunContext(opts, runId);
   const workspace = workspaceFor(sessionId);
@@ -156,6 +173,35 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
     owner: ctx.owner,
     workspace,
     title,
+  });
+}
+
+/**
+ * Wake the owner's orchestrator for the settle-side of an `orchestrator`
+ * node (`awaitResult`/`abort`/re-entry after restart). `orgId` isn't in the
+ * session id, but `promptOrchestrator`'s dispatch-side
+ * `orchestratorSessionFor` upserted an `orchestrator_identities` row (Phase
+ * 4), so it's recoverable by owner tuple.
+ */
+async function ensureOrchestratorSession(
+  opts: WorkflowEngineDepsOpts,
+  sessionId: string,
+  principal: Principal,
+) {
+  const row = await opts.db
+    .select({ orgId: orchestratorIdentities.orgId })
+    .from(orchestratorIdentities)
+    .where(eq(orchestratorIdentities.sessionId, sessionId))
+    .get();
+  if (!row) {
+    throw new Error(
+      `workflow engine-deps: no orchestrator identity recorded for ${sessionId} — ` +
+        `the dispatch that produced this receipt should have created one`,
+    );
+  }
+  return opts.host.orchestratorSessionFor(principal, {
+    actorUserId: actorUserIdFor(principal),
+    orgId: row.orgId,
   });
 }
 

@@ -145,16 +145,20 @@ injectWebSocket(server);
 // ── Graceful shutdown — destroy live sandboxes so containers don't leak.
 
 async function shutdown(signal: NodeJS.Signals) {
-  console.log(`\nReceived ${signal}, destroying live sandboxes...`);
+  console.log(`\nReceived ${signal}, shutting down (sessions evicted, durable state kept)...`);
   try {
     await providers.workflowRunHost.stopHost();
   } catch (err) {
     console.error("workflowRunHost.stopHost failed:", err);
   }
   try {
-    await providers.engineHost.destroyAll();
+    // Evict, never destroy: Session.destroy() deletes the session's durable
+    // rows (threads, queue items, transcript). Shutdown must leave the store
+    // intact so boot-time reconciliation can resume unsettled work — the
+    // same contract the kill-mid-turn tests prove for SIGKILL.
+    providers.engineHost.evictAll();
   } catch (err) {
-    console.error("destroyAll failed:", err);
+    console.error("evictAll failed:", err);
   }
   server.close(() => process.exit(0));
   // Hard-exit if close() takes too long (containers can be slow to stop).
