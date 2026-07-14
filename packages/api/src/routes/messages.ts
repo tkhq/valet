@@ -259,6 +259,28 @@ messagesRouter.post("/:id/messages", async (c) => {
   return c.json(resp, 202);
 });
 
+// ── Thread abort ──────────────────────────────────────────────────────────
+//
+// Mirrors the engine-spec route table: `POST .../threads/:threadId/abort`
+// aborts the current turn on this thread and clears its queue. Delegates to
+// `Session.abort({ threadId })`, which stamps `abortRequestedAt` durably and
+// lets the claim/reconcile settlement path record the terminal outcome —
+// see `packages/engine/src/session.ts` `abort()`. A thread with nothing
+// running/queued is a no-op: `Thread.abort()` withdraws no gates, aborts a
+// non-streaming agent (a safe no-op), and settles zero unclaimed items.
+messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { engineSession } = result;
+
+  const threadId = c.req.param("threadId");
+  const thread = engineSession.threadById(threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+
+  await engineSession.abort({ threadId });
+  return c.json({ ok: true });
+});
+
 // ── Decision gates ────────────────────────────────────────────────────────
 //
 // A gate is created by a tool calling `ctx.requestDecision(...)`. The engine

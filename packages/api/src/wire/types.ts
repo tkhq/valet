@@ -566,6 +566,20 @@ export interface ListNotificationsResponse {
   notifications: NotificationSummary[];
 }
 
+export interface NotificationPreferenceSummary {
+  kind: NotificationKind;
+  web: boolean;
+}
+
+export interface ListNotificationPreferencesResponse {
+  preferences: NotificationPreferenceSummary[];
+}
+
+export interface SetNotificationPreferenceRequest {
+  kind: NotificationKind;
+  web: boolean;
+}
+
 // ── REST: memory tree ────────────────────────────────────────────────────
 //
 // GET /api/memory/tree — flat file listing for the web explorer (assistant-

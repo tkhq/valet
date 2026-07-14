@@ -2,23 +2,37 @@
  * Notifications — web delivery surface for the attention router (Phase 4
  * decision 19).
  *
- *   GET  /api/notifications?unread=1  → caller's own rows, newest first, limit 50
- *   POST /api/notifications/:id/read  → mark one of the caller's own rows read
- *   POST /api/notifications/read-all  → mark every unread row of the caller's read
+ *   GET  /api/notifications?unread=1     → caller's own rows, newest first, limit 50
+ *   POST /api/notifications/:id/read     → mark one of the caller's own rows read
+ *   POST /api/notifications/read-all     → mark every unread row of the caller's read
+ *   GET  /api/notifications/preferences  → caller's web-delivery preference per kind
+ *   PUT  /api/notifications/preferences  → upsert caller's preference for one kind
  *
  * Own-rows-only: every route scopes by `c.var.user.id`. A caller can never
  * see or mark another user's notification — an `:id` belonging to someone
  * else 404s, same existence-hiding treatment used elsewhere in this
  * package (teams.ts) for cross-tenant access.
+ *
+ * Preferences mirror `isWebEnabled`'s default in `orchestrator/attention.ts`:
+ * a kind with no row reports `web: true`. The table only ever needs a row
+ * for someone who opted OUT.
  */
 import { Hono } from "hono";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import { notifications, type NotificationRow } from "../schema/index.js";
-import type { ListNotificationsResponse, NotificationSummary } from "../wire/types.js";
+import { notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
+import type {
+  ListNotificationPreferencesResponse,
+  ListNotificationsResponse,
+  NotificationKind,
+  NotificationSummary,
+  SetNotificationPreferenceRequest,
+} from "../wire/types.js";
 
 export const notificationsRouter = new Hono<AppEnv>();
+
+const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval"];
 
 function rowToSummary(row: NotificationRow): NotificationSummary {
   return {
@@ -83,6 +97,55 @@ notificationsRouter.post("/read-all", async (c) => {
     .update(notifications)
     .set({ readAt: Date.now() })
     .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)))
+    .run();
+
+  return c.json({ ok: true });
+});
+
+notificationsRouter.get("/preferences", async (c) => {
+  const { db } = c.var.providers;
+  const userId = c.var.user.id;
+
+  const rows = await db
+    .select()
+    .from(userNotificationPreferences)
+    .where(eq(userNotificationPreferences.userId, userId))
+    .all();
+  const byKind = new Map(rows.map((r) => [r.kind, r]));
+
+  const preferences = NOTIFICATION_KINDS.map((kind) => ({
+    kind,
+    web: (byKind.get(kind)?.web ?? 1) !== 0,
+  }));
+
+  const body: ListNotificationPreferencesResponse = { preferences };
+  return c.json(body);
+});
+
+notificationsRouter.put("/preferences", async (c) => {
+  const { db } = c.var.providers;
+  const userId = c.var.user.id;
+
+  let body: SetNotificationPreferenceRequest;
+  try {
+    body = (await c.req.json()) as SetNotificationPreferenceRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (!NOTIFICATION_KINDS.includes(body.kind)) {
+    return c.json({ error: `kind must be one of ${NOTIFICATION_KINDS.join(", ")}` }, 400);
+  }
+  if (typeof body.web !== "boolean") {
+    return c.json({ error: "web must be a boolean" }, 400);
+  }
+
+  await db
+    .insert(userNotificationPreferences)
+    .values({ userId, kind: body.kind, web: body.web ? 1 : 0 })
+    .onConflictDoUpdate({
+      target: [userNotificationPreferences.userId, userNotificationPreferences.kind],
+      set: { web: body.web ? 1 : 0 },
+    })
     .run();
 
   return c.json({ ok: true });

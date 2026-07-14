@@ -124,6 +124,31 @@ describe("routeAttention (DB-backed)", () => {
     expect(rows[0]?.kind).toBe("escalation");
   });
 
+  it("skips a kind disabled via PUT /api/notifications/preferences (route-driven)", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+
+    const putRes = await fetch(`${api.baseUrl}/api/notifications/preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "notification", web: false }),
+    });
+    expect(putRes.status).toBe(200);
+
+    await routeAttention(
+      { db },
+      { kind: "notification", owner: { type: "user", id: "local-user" }, title: "should be skipped" },
+    );
+    await routeAttention(
+      { db },
+      { kind: "escalation", owner: { type: "user", id: "local-user" }, title: "should land" },
+    );
+
+    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user")).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("escalation");
+  });
+
   it("is idempotent when the same dedupeKey fires twice", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
