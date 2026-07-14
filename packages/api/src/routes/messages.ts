@@ -31,7 +31,7 @@ import type {
   ThreadSummary,
   WithdrawDecisionRequest,
 } from "../wire/types.js";
-import { engineGateToWire, engineToWireParts } from "../engine/bridge.js";
+import { engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -64,6 +64,7 @@ function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): M
     parts,
     createdAt: Number.isFinite(created) ? created : Date.now(),
     queueItemId: e.queueItemId,
+    signal: engineSignalToWire(e.signal),
   };
 }
 

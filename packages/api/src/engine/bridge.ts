@@ -3,12 +3,14 @@ import type {
   DeliveredBusEvent,
   DecisionGate as EngineDecisionGate,
   DecisionResolution as EngineDecisionResolution,
+  MessageEntry as EngineMessageEntry,
   MessagePart as EngineMessagePart,
 } from "@valet/engine";
 import type {
   DecisionGate as WireDecisionGate,
   DecisionResolution as WireDecisionResolution,
   MessagePart as WireMessagePart,
+  MessageSignal as WireMessageSignal,
   WireEvent,
 } from "../wire/types.js";
 
@@ -75,6 +77,24 @@ export function engineToWireParts(parts?: EngineMessagePart[]): WireMessagePart[
     }
   }
   return out;
+}
+
+/**
+ * Trim an engine `MessageEntry.signal` to the wire shape (plan decision 2).
+ *
+ * `tagName`/`hopCount`/`senderOwner` are engine-internal (XML envelope
+ * rendering, hop-budget enforcement, ACL bookkeeping) — the UI only needs
+ * `signalType`/`attributes`/`senderSessionId` to render a signal card.
+ */
+export function engineSignalToWire(
+  signal: EngineMessageEntry["signal"],
+): WireMessageSignal | undefined {
+  if (!signal) return undefined;
+  return {
+    signalType: signal.signalType,
+    attributes: signal.attributes,
+    senderSessionId: signal.senderSessionId,
+  };
 }
 
 /**

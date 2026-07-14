@@ -141,6 +141,17 @@ export type MessagePart =
       error?: string;
     };
 
+/**
+ * Trimmed projection of engine `MessageEntry.signal` (plan decision 2).
+ * `tagName`/`hopCount`/`senderOwner` are engine-internal and not shipped —
+ * the UI only needs enough to render a signal card and link to the sender.
+ */
+export interface MessageSignal {
+  signalType: string;
+  attributes?: Record<string, string>;
+  senderSessionId?: string;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -158,6 +169,12 @@ export interface Message {
    * `submission.settled` events to the originating user message.
    */
   queueItemId?: string;
+  /**
+   * Present when this entry originated from a `SignalContent` prompt (e.g.
+   * a `child.settled` notification). A wire message with `signal` renders
+   * as a card, never a user bubble (plan decision 3).
+   */
+  signal?: MessageSignal;
 }
 
 export interface ListMessagesResponse {

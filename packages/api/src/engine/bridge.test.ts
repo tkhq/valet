@@ -1,10 +1,40 @@
 import { describe, expect, it } from "vitest";
-import type { BusEvent, MessagePart as EngineMessagePart } from "@valet/engine";
-import { busEventToWire, engineToWireParts } from "./bridge.js";
+import type { BusEvent, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
+import { busEventToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
 
 function ev(event: BusEvent["event"], threadId = "t1"): BusEvent {
   return { sessionId: "s1", threadId, userId: "u1", event, timestamp: 100 };
 }
+
+describe("engineSignalToWire", () => {
+  it("trims engine signal to the wire shape (drops tagName/hopCount/senderOwner)", () => {
+    const signal: NonNullable<MessageEntry["signal"]> = {
+      signalType: "child.settled",
+      attributes: { title: "Fix the bug", outcome: "success" },
+      tagName: "signal",
+      senderSessionId: "child-1",
+      senderOwner: { type: "user", id: "u1" },
+      hopCount: 1,
+    };
+    expect(engineSignalToWire(signal)).toEqual({
+      signalType: "child.settled",
+      attributes: { title: "Fix the bug", outcome: "success" },
+      senderSessionId: "child-1",
+    });
+  });
+
+  it("omits attributes/senderSessionId when absent on the engine signal", () => {
+    const signal: NonNullable<MessageEntry["signal"]> = {
+      signalType: "orchestrator.message",
+      tagName: "signal",
+    };
+    expect(engineSignalToWire(signal)).toEqual({ signalType: "orchestrator.message" });
+  });
+
+  it("returns undefined for undefined input", () => {
+    expect(engineSignalToWire(undefined)).toBeUndefined();
+  });
+});
 
 describe("engineToWireParts", () => {
   it("translates engine tool_call → wire tool_call (snake_case kind)", () => {
