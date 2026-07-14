@@ -98,6 +98,23 @@ function workspaceFor(sessionId: string): string {
   return join(homedir(), ".valet", "workflows", sessionId.replace(/:/g, "_"));
 }
 
+/**
+ * Materialize a workflow session so the engine's claim loop can resume any
+ * unsettled submission it holds. Exported for `main.ts`'s boot-time
+ * `restoreUnsettledSessions`: workflow sessions have no `agent_sessions`
+ * app row (they're owned by `workflow_runs`, not the sessions UI), so the
+ * generic app-row restore path skips them — without this, a process restart
+ * mid-session-node leaves the run parked on a submission that never
+ * settles.
+ */
+export async function ensureWorkflowSession(
+  opts: WorkflowEngineDepsOpts,
+  sessionId: string,
+): Promise<{ id: string }> {
+  const session = await ensureSession(opts, sessionId);
+  return { id: session.id };
+}
+
 async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, title?: string) {
   const { runId } = parseWorkflowSessionId(sessionId);
   const ctx = await resolveRunContext(opts, runId);

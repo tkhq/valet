@@ -15,6 +15,7 @@ import { buildNodeProviders } from "./providers/node.js";
 import { agentSessions } from "./schema/index.js";
 import type { Providers } from "./providers/types.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
+import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 
 /**
  * Eager restore of sessions with unsettled submissions. On boot the store may
@@ -33,6 +34,24 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
   }
   for (const id of ids) {
     try {
+      // Workflow sessions (`wf:{runId}:{nodeId}`) have no `agent_sessions`
+      // app row — their context lives in `workflow_runs` — so they must be
+      // materialized through the workflow engine-deps path instead of the
+      // app-row lookup below. Without this branch a restart mid-session-node
+      // leaves the workflow run parked on a submission that never settles.
+      if (id.startsWith("wf:")) {
+        await ensureWorkflowSession(
+          {
+            host: providers.engineHost,
+            store: providers.workflowStore,
+            db: providers.db,
+            engineStore: providers.engineStore,
+          },
+          id,
+        );
+        restored++;
+        continue;
+      }
       // Keep the per-session app-row lookup INSIDE the try: a lookup that
       // rejects (bad row, transient store error) must isolate to this one
       // session, not abort the whole restore pass and crash-loop boot.
