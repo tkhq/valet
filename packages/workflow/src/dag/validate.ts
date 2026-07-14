@@ -111,9 +111,6 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Vali
         errors.push(`node ${JSON.stringify(node.id)}: unparseable approval.timeout ${JSON.stringify(node.timeout)}`);
       }
     }
-    if (node.type === 'session' && node.wait?.timeout !== undefined) {
-      errors.push(`node ${JSON.stringify(node.id)}: session wait.timeout is not implemented — omit it`);
-    }
     validateStepNodeFields(node, errors, node.id);
 
     if (node.type === 'foreach') {
@@ -125,12 +122,15 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Vali
 }
 
 /**
- * Field-level rules shared by `llm`/`orchestrator`/`tool` nodes, whether
- * they appear at the top level of `definition.nodes` or as a foreach body.
- * `label` names the node (and, for a body, its owning foreach) in error
- * messages.
+ * Field-level rules shared by `llm`/`orchestrator`/`tool`/`session` nodes,
+ * whether they appear at the top level of `definition.nodes` or as a foreach
+ * body. `label` names the node (and, for a body, its owning foreach) in
+ * error messages.
  */
 function validateStepNodeFields(node: WorkflowNode, errors: string[], label: string): void {
+  if (node.type === 'session' && node.wait?.timeout !== undefined) {
+    errors.push(`node ${JSON.stringify(label)}: session wait.timeout is not implemented — omit it`);
+  }
   if (node.type === 'llm') {
     if (node.model.trim() === '') {
       errors.push(`node ${JSON.stringify(label)}: llm.model must be a non-empty string`);

@@ -362,6 +362,28 @@ describe('validateWorkflowDefinition', () => {
       expect(validateWorkflowDefinition(foreachDefinition({}))).toEqual({ ok: true });
     });
 
+    it('rejects session wait.timeout inside a foreach body', () => {
+      const result = validateWorkflowDefinition(
+        foreachDefinition({
+          body: {
+            id: 'loop-body',
+            type: 'session',
+            mode: 'start',
+            prompt: 'do the thing for ${item}',
+            wait: { mode: 'until_idle', timeout: '5m' },
+          },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.errors.some(
+            (e) => e.includes('loop.body (loop-body)') && e.includes('session wait.timeout is not implemented'),
+          ),
+        ).toBe(true);
+      }
+    });
+
     it('rejects an empty items expression', () => {
       const result = validateWorkflowDefinition(foreachDefinition({ items: '' }));
       expect(result.ok).toBe(false);
