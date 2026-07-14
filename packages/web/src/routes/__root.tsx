@@ -24,12 +24,15 @@ export const Route = createRootRouteWithContext<RouterContext>()({
  *   spawning thread), replacing the flat thread list.
  * - `/sessions/$sessionId` — no sidebar at all (decision 14: standalone
  *   sessions have no thread UI).
+ * - `/memory` and `/memory/*` — no app sidebar either (Task 6): the
+ *   explorer's own tree pane, rendered inside the route, IS the left pane.
  * - everything else — the existing flat `ThreadList` (a no-op placeholder
  *   off session routes; unchanged from Task 3/4).
  */
 function sidebarForPath(pathname: string) {
   if (pathname === "/chat") return <ThreadTree />;
   if (/^\/sessions\/[^/]+$/.test(pathname)) return null;
+  if (pathname === "/memory" || pathname.startsWith("/memory/")) return null;
   return <ThreadList />;
 }
 

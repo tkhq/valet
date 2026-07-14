@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { ApiError } from "~/api/client";
 import { useMemoryDoc, useMemoryTree } from "~/api/memory";
 import { useOrchestratorInfo } from "~/api/orchestrator";
@@ -17,12 +18,12 @@ export function journalExcerpt(content: string, maxChars = 220): string {
 }
 
 /**
+/**
  * Dashboard memory card (decision 15): pinned files + today's journal
  * excerpt. Self-contained — owns the tree query and the journal doc fetch,
- * degrades per-section rather than blanking. Links target `/memory/$path`
- * (Task 6) via a plain anchor, not the typed router `Link` — that route
- * doesn't exist yet, so a typed `to` would fail typecheck; a 404 in the
- * interim is expected and fine per the task brief.
+ * degrades per-section rather than blanking. Links target the Task 6
+ * explorer's splat route (`/memory/$`, param `_splat` — the file path)
+ * via the typed router `Link` for client-side navigation.
  */
 export function MemoryCard() {
   const info = useOrchestratorInfo();
@@ -75,12 +76,13 @@ export function MemoryCard() {
                 <ul className="space-y-1">
                   {pinned.map((f) => (
                     <li key={f.path}>
-                      <a
-                        href={`/memory/${f.path}`}
+                      <Link
+                        to="/memory/$"
+                        params={{ _splat: f.path }}
                         className="text-sm text-ink hover:text-moss hover:underline"
                       >
                         📌 {f.title || f.path}
-                      </a>
+                      </Link>
                     </li>
                   ))}
                 </ul>
@@ -104,12 +106,13 @@ export function MemoryCard() {
                 </div>
               )}
               {journalQ.data?.kind === "file" && journalQ.data.file && (
-                <a
-                  href={`/memory/${journalPath}`}
+                <Link
+                  to="/memory/$"
+                  params={{ _splat: journalPath }}
                   className="block text-sm text-ink hover:text-moss"
                 >
                   {journalExcerpt(journalQ.data.file.content)}
-                </a>
+                </Link>
               )}
             </div>
           </>

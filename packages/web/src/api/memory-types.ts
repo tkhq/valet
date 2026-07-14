@@ -25,3 +25,21 @@ export interface GetMemoryDocResponse {
     updatedAt: number;
   };
 }
+
+/**
+ * `GET /api/memory/search?q=` isn't part of `@valet/api/wire` either — same
+ * boundary reasoning as `GetMemoryDocResponse` above. Mirrors the service's
+ * `SearchResult` (`packages/api/src/services/memory.ts`), narrowed to what
+ * the explorer's result list actually reads.
+ */
+export interface SearchMemoryResult {
+  path: string;
+  title: string;
+  description: string;
+  type: string;
+  rank: number;
+}
+
+export interface SearchMemoryResponse {
+  results: SearchMemoryResult[];
+}

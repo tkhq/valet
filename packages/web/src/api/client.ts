@@ -33,7 +33,7 @@ import type {
   SendPromptResponse,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
-import type { GetMemoryDocResponse } from "./memory-types";
+import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
@@ -93,6 +93,8 @@ export const api = {
   getMemoryTree: () => request<GetMemoryTreeResponse>("GET", "/memory/tree"),
   getMemoryDoc: (path: string) =>
     request<GetMemoryDocResponse>("GET", `/memory?path=${encodeURIComponent(path)}`),
+  searchMemory: (q: string) =>
+    request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
 
   // threads + messages (session-scoped)
   listThreads: (sessionId: string) =>

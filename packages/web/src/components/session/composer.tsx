@@ -3,6 +3,7 @@ import { Send } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useSendPrompt } from "~/api/queries";
 import { useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
+import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 export function Composer({
   sessionId,
@@ -19,7 +20,13 @@ export function Composer({
   threadId?: string;
   agentStatus: AgentStatus;
 }) {
-  const [text, setText] = useState("");
+  // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
+  // update this" sets this store then navigates to `/chat`; the next
+  // Composer to mount consumes it exactly once as its initial text. Reading
+  // via `getState()` (not the hook) so this is a one-time seed, not a live
+  // subscription — a later `set()` elsewhere shouldn't yank the draft out
+  // from under whatever the user is typing.
+  const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
   const send = useSendPrompt(sessionId);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);

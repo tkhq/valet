@@ -1,0 +1,32 @@
+import { create } from "zustand";
+
+/**
+ * Composer-prefill mechanism (decision 17): the memory doc pane's
+ * "Ask {name} to update this" footer navigates to `/chat` and needs the
+ * composer to open with `Update memory file {path}: ` already typed. A
+ * search param on `/chat` was the other option the brief floated, but that
+ * route already owns `thread`/`child` search state (see `routes/chat.tsx`)
+ * and a `prefill` param would either linger in the URL after being
+ * consumed (stale on back/forward) or need its own strip-on-mount dance.
+ * A tiny write-once store is simpler: the memory page sets it right before
+ * navigating, and the next `Composer` to mount consumes it exactly once
+ * via `getState().consume()` in its initial-text state initializer — see
+ * `components/session/composer.tsx`. Not reactive on purpose (no
+ * subscription): it's a handoff, not shared state.
+ */
+interface ComposerPrefillState {
+  text: string | null;
+  set: (text: string) => void;
+  /** Reads and clears in one step — a second call returns `null`. */
+  consume: () => string | null;
+}
+
+export const useComposerPrefillStore = create<ComposerPrefillState>((set, get) => ({
+  text: null,
+  set: (text) => set({ text }),
+  consume: () => {
+    const current = get().text;
+    if (current !== null) set({ text: null });
+    return current;
+  },
+}));

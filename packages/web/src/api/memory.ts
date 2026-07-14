@@ -7,14 +7,15 @@
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import type { GetMemoryTreeResponse } from "@valet/api/wire";
 import { api, ApiError } from "./client";
-import type { GetMemoryDocResponse } from "./memory-types";
+import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
 
 export const qkMemory = {
   tree: () => ["memory", "tree"] as const,
   doc: (path: string) => ["memory", "doc", path] as const,
+  search: (q: string) => ["memory", "search", q] as const,
 };
 
-export function useMemoryTree(opts?: UseQueryOptions<GetMemoryTreeResponse>) {
+export function useMemoryTree(opts?: Partial<UseQueryOptions<GetMemoryTreeResponse>>) {
   return useQuery<GetMemoryTreeResponse>({
     queryKey: qkMemory.tree(),
     queryFn: () => api.getMemoryTree(),
@@ -32,7 +33,7 @@ export function useMemoryTree(opts?: UseQueryOptions<GetMemoryTreeResponse>) {
  */
 export function useMemoryDoc(
   path: string,
-  opts?: UseQueryOptions<GetMemoryDocResponse>,
+  opts?: Partial<UseQueryOptions<GetMemoryDocResponse>>,
 ) {
   return useQuery<GetMemoryDocResponse>({
     queryKey: qkMemory.doc(path),
@@ -41,6 +42,26 @@ export function useMemoryDoc(
       if (error instanceof ApiError && error.status === 404) return false;
       return failureCount < 2;
     },
+    ...opts,
+  });
+}
+
+/**
+ * FTS search (Task 6, decision 17). `q` is expected to already be the
+ * debounced value — callers own debouncing (`useDebouncedValue`) since
+ * whether/when to debounce is a UI concern, not a data-fetching one.
+ * Disabled for an empty/whitespace-only query so the explorer's tree stays
+ * the resting state instead of firing an invalid `q=` request.
+ */
+export function useMemorySearch(
+  q: string,
+  opts?: Partial<UseQueryOptions<SearchMemoryResponse>>,
+) {
+  const trimmed = q.trim();
+  return useQuery<SearchMemoryResponse>({
+    queryKey: qkMemory.search(trimmed),
+    queryFn: () => api.searchMemory(trimmed),
+    enabled: trimmed.length > 0,
     ...opts,
   });
 }
