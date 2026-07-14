@@ -114,6 +114,28 @@ export async function buildActionCatalog(
 }
 
 /**
+ * Build a service→actionId lookup for the workflow validator's
+ * `knownToolActions` context field. Reuses `buildActionCatalog` so the
+ * validator sees exactly the same tools the copilot and policy editor
+ * do — no drift, no invisible mismatches.
+ *
+ * Returns a Map so lookups are O(1) inside the validator loop.
+ */
+export async function buildKnownToolActions(env: Env, db: AppDb): Promise<Map<string, Set<string>>> {
+  const catalog = await buildActionCatalog(env, db);
+  const known = new Map<string, Set<string>>();
+  for (const entry of catalog) {
+    let actions = known.get(entry.service);
+    if (!actions) {
+      actions = new Set<string>();
+      known.set(entry.service, actions);
+    }
+    actions.add(entry.actionId);
+  }
+  return known;
+}
+
+/**
  * Look up a single action within a service, or `null` if it doesn't exist.
  * Thin wrapper on top of `buildActionCatalog` — the filter and lookup happen
  * in memory because both catalog sources are small enough that a full build

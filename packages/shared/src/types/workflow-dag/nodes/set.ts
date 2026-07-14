@@ -4,6 +4,15 @@ export interface SetNode {
   id: string;
   type: 'set';
   values: unknown;
+  /**
+   * Optional JSON-schema describing the shape produced under
+   * `nodes.<id>.data`. When present, array-typed fields become valid
+   * `foreach.items` sources — the deterministic reshape path that
+   * avoids using an LLM node just to `.map()` an upstream tool result
+   * into a typed array. Only the array-field derivation reads this;
+   * the runtime still emits whatever `values` renders to.
+   */
+  outputSchema?: Record<string, unknown>;
 }
 
 export function createDefaultSetNode(id: string): SetNode {

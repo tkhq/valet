@@ -46,6 +46,14 @@ export function getWorkflowSchemaReference() {
       ifBranches: ['true', 'false'],
       note: 'Edges connect top-level node IDs only. Edges from if nodes must set fromOutput to "true" or "false".',
     },
+    // Every medium/high-risk tool node raises a human approval gate
+    // before it executes. Not obvious to authors — flag it inline so
+    // scale planning happens before build time.
+    approvals: {
+      rule: 'Every tool node with riskLevel medium or high raises ONE human approval per invocation. For a foreach whose body is a tool node, the first iteration prompts; the run detail UI then offers "Approve remaining rows" to batch-clear the rest of the loop.',
+      lowRiskAutoRuns: 'Tool nodes with riskLevel `low` (queries, reads, list operations) do NOT gate — they execute directly.',
+      unattended: 'Scheduled/unattended runs stall on any pending approval. Prefer low-risk read tools inside foreach bodies when the workflow is intended to run unattended.',
+    },
     conditionOperations: {
       string: allowedIfOperations('string'),
       number: allowedIfOperations('number'),
@@ -104,12 +112,32 @@ export function getWorkflowSchemaReference() {
         required: ['id', 'type', 'service', 'action', 'params'],
         optional: ['summary', 'onPolicyDeny', 'retries'],
         description: 'Call a remote integration action.',
+        actionIdFormat: {
+          rule: 'Use the actionId exactly as it appears after the first colon in the tool id returned by `list_tools`. Do not strip prefixes, do not guess.',
+          examples: {
+            'salesforce-read-only:salesforce-read-only.soqlQuery': {
+              service: 'salesforce-read-only',
+              action: 'salesforce-read-only.soqlQuery',
+              note: 'Salesforce MCP actions are service-prefixed — the prefix is part of the action id.',
+            },
+            'google_workspace:sheets.write_spreadsheet': {
+              service: 'google_workspace',
+              action: 'sheets.write_spreadsheet',
+              note: 'Google Workspace actions are NOT service-prefixed.',
+            },
+          },
+          verify: 'workflows.save_draft (with validate=true) and workflows.validate now hard-error on unknown_tool_service / unknown_tool_action with a nearest-match suggestion. If a save validates clean, the ids resolve.',
+        },
       },
       {
         type: 'set',
         required: ['id', 'type', 'values'],
-        optional: [],
-        description: 'Write structured values to nodes.<id>.data.',
+        optional: ['outputSchema'],
+        description: 'Write structured values to nodes.<id>.data. Optionally declare an outputSchema so array-typed fields inside `values` (including template-reference fields) count as valid foreach sources — the deterministic alternative to using an LLM node just to `.map()` an upstream result.',
+        outputSchemaExample: {
+          purpose: 'Make {{nodes.extract.data.records}} a legal `foreach.items` source when `values.records` is a template reference (not a literal array).',
+          shape: '{ type: "object", properties: { records: { type: "array", items: { type: "object" } } }, required: ["records"] }',
+        },
       },
       {
         type: 'if',
@@ -137,6 +165,31 @@ export function getWorkflowSchemaReference() {
         constraints: {
           bodyTypes: FOREACH_BODY_NODE_TYPES,
           bodyNote: 'Nested if, wait, approval, trigger, and foreach nodes are not supported in foreach body.',
+        },
+        // `items` must be a "provably-typed array" — the source node's
+        // shape must declare or produce an array at the referenced
+        // path. This is the single most common friction point when
+        // authoring data-processing workflows; the table below is the
+        // full valid-source enumeration.
+        itemsSources: {
+          rule: 'The referenced path must be provably an array; templates that could resolve to any shape are rejected with `foreach_items_untyped_array_output`.',
+          patterns: [
+            { source: 'trigger', template: '{{trigger.data.<field>}}', precondition: 'trigger.dataSchema.<field>.type === "array"' },
+            { source: 'llm', template: '{{nodes.<id>.data.<field>}} or {{nodes.<id>.data}} if root is array', precondition: 'outputSchema declares field/root as {"type":"array"}' },
+            { source: 'set', template: '{{nodes.<id>.data.<field>}}', precondition: 'Either `values` has a literal array at that path, OR `outputSchema` declares that field as {"type":"array"} (the deterministic-reshape path — pair with a template reference under `values`)' },
+            { source: 'tool', template: '{{nodes.<id>.data.<field>}}', precondition: 'A toolOutputSchema is registered for this service:action declaring the field as array. If the tool has no registered schema, foreach validation is skipped (so it may fail at runtime instead).' },
+            { source: 'orchestrator/session', template: '{{nodes.<id>.data.output.<field>}}', precondition: 'wait.mode === "until_idle" AND outputSchema declares field as array. Note the `.data.output.<field>` nesting — llm/tool go direct at `.data.<field>`.' },
+            { source: 'orchestrator/session', template: '{{nodes.<id>.data.transcript}}', precondition: 'resultMode === "transcript"' },
+            { source: 'foreach', template: '{{nodes.<id>.data.items}}', precondition: 'Always valid (nested-foreach chaining).' },
+          ],
+        },
+        // Downstream nodes reading a foreach's output must know the
+        // wrapper shape. This is not obvious — I had to read a trace
+        // to discover the .data nesting on each item.
+        resultShape: {
+          shape: '{{nodes.<foreach-id>.data}} = { items: Array<{ status: "completed"|"skipped"|"failed", data: <body node output> }>, count, inputCount, completedCount, skippedCount, failedCount, truncatedCount }',
+          itemAccess: 'Inside a downstream foreach iterating over the previous loop\'s output, each `item` has the wrapper shape too — reference `item.data.<field>` (NOT `item.<field>`).',
+          example: 'foreach `write_loop` over {{nodes.tier_loop.data.items}} → body params reference `{{item.data.tier}}`, `{{item.data.accountName}}`, etc.',
         },
       },
       {

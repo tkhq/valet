@@ -242,6 +242,22 @@ export interface WorkflowDefinitionValidationContext {
    * can provide schemas while generic validation can skip unknown tool output.
    */
   toolOutputSchemas?: Record<string, Record<string, unknown> | undefined>;
+  /**
+   * Optional catalog of known service→actions. When present, tool nodes
+   * whose service or action id doesn't resolve produce a hard
+   * `unknown_tool_service` / `unknown_tool_action` error at
+   * save/validate/publish time — the fix that catches the "silent
+   * pending + preflight-retry burn" failure mode where a typo in
+   * `action` only surfaces mid-execution. When absent, the check is
+   * skipped so validators without a live tool catalog (draft-only
+   * shape checks) still work.
+   *
+   * The value is a Set of actionIds — use the actionId exactly as it
+   * appears after the first colon in the tool id from `list_tools`
+   * (some services prefix, e.g. `salesforce-read-only.soqlQuery`;
+   * others don't, e.g. `sheets.write_spreadsheet`).
+   */
+  knownToolActions?: Map<string, Set<string>>;
 }
 
 export function validateDefinitionWithContext(
@@ -303,6 +319,14 @@ export function validateDefinitionWithContext(
   }
 
   validateForeachItemSources(def, errors, context);
+
+  // Tool node service:action existence check. Only runs when the
+  // caller supplies a known-tool catalog. Catches the specific dead-end
+  // where a typo in `action` (e.g. `soqlQuery` vs `salesforce-read-only.soqlQuery`)
+  // validates clean but blows up mid-execution with retry-burn.
+  if (context.knownToolActions) {
+    validateToolActionExistence(def, errors, context.knownToolActions);
+  }
 
   // Template-reference lint. Emits `template_unknown_variable` warnings
   // for `{{...}}` expressions that reference paths the definition can't
@@ -818,7 +842,7 @@ function foreachUntypedArrayMessage(
   }
 
   // Set node or other: fall back to a generic hint.
-  return `${diagnosis} To fix: source node "${sourceNodeId}" must produce an array at the referenced path (for set nodes, provide a literal array value; for other node types, declare an outputSchema with an array field).`;
+  return `${diagnosis} To fix: source node "${sourceNodeId}" must produce an array at the referenced path (for set nodes, either use a literal array under \`values\` OR add \`outputSchema\` declaring the field as \`{"type":"array"}\`; for other node types, declare an outputSchema with an array field).`;
 }
 
 function parseSinglePathTemplate(value: string): string[] | null {
@@ -864,6 +888,13 @@ function deriveTypedArrayOutputPaths(
         break;
       case 'set':
         addStaticArrayPaths(paths, ['nodes', node.id, 'data'], node.values);
+        // set nodes may also declare an outputSchema. When the value
+        // at a given path is a template reference (not a literal array),
+        // the static-array walk above can't see it — the outputSchema
+        // is how the author declares "this path is an array" so the
+        // deterministic `set { records: "{{nodes.query.data.records}}" }`
+        // reshape becomes a valid foreach source.
+        if (node.outputSchema) addSchemaArrayPaths(paths, ['nodes', node.id, 'data'], node.outputSchema);
         break;
       case 'llm':
         if (node.outputSchema) addSchemaArrayPaths(paths, ['nodes', node.id, 'data'], node.outputSchema);
@@ -940,6 +971,72 @@ function formatPathSegments(segments: string[]): string {
 
 function toolOutputSchemaKey(service: string, action: string): string {
   return `${service}:${action}`;
+}
+
+/**
+ * Emit `unknown_tool_service` / `unknown_tool_action` errors for tool
+ * nodes whose `service` or `action` id doesn't resolve against the
+ * caller-supplied catalog. Walks both top-level nodes and foreach body
+ * nodes. When the action id is close to a real one, the message
+ * includes a nearest-match suggestion so authors don't have to
+ * cross-reference `list_tools` output by hand.
+ */
+function validateToolActionExistence(
+  def: WorkflowDefinition,
+  errors: WorkflowValidationError[],
+  known: Map<string, Set<string>>,
+): void {
+  const check = (node: WorkflowNode): void => {
+    if (node.type !== 'tool') return;
+    const actions = known.get(node.service);
+    if (!actions) {
+      const suggestion = nearestString(node.service, Array.from(known.keys()));
+      errors.push({
+        scope: 'node',
+        nodeId: node.id,
+        path: 'service',
+        code: 'unknown_tool_service',
+        message: `tool node "${node.id}" references unknown service "${node.service}"${suggestion ? ` — did you mean "${suggestion}"?` : ''}. Use \`list_tools\` to discover services; the value goes in \`service\` exactly as it appears before the first colon in each tool id.`,
+      });
+      return;
+    }
+    if (actions.has(node.action)) return;
+    const suggestion = nearestString(node.action, Array.from(actions));
+    errors.push({
+      scope: 'node',
+      nodeId: node.id,
+      path: 'action',
+      code: 'unknown_tool_action',
+      message: `tool node "${node.id}": action "${node.action}" not found in ${node.service} package${suggestion ? ` — did you mean "${suggestion}"?` : ''}. Use the action id verbatim from \`list_tools\` (everything after the first colon in the tool id). Some services prefix their action ids with the service name (e.g. \`salesforce-read-only.soqlQuery\`); others don't (e.g. \`sheets.write_spreadsheet\`).`,
+    });
+  };
+  for (const node of def.nodes) {
+    check(node);
+    if (node.type === 'foreach') check(node.body as WorkflowNode);
+  }
+}
+
+/**
+ * Cheap approximate-match ranker. Not Levenshtein — we care about
+ * catching the two dominant typo classes: (1) missing/extra prefix
+ * (`soqlQuery` vs `salesforce-read-only.soqlQuery`) and (2) case/typo.
+ * A substring match beats an equal-length distance; otherwise pick
+ * the shortest candidate that shares the longest common suffix.
+ */
+function nearestString(needle: string, candidates: string[]): string | null {
+  if (candidates.length === 0) return null;
+  const lower = needle.toLowerCase();
+  // Prefer candidates that end with the needle — catches the missing-prefix case
+  // (`soqlQuery` → `salesforce-read-only.soqlQuery`).
+  const suffixMatch = candidates
+    .filter((candidate) => candidate.toLowerCase().endsWith(lower) || lower.endsWith(candidate.toLowerCase()))
+    .sort((a, b) => Math.abs(a.length - needle.length) - Math.abs(b.length - needle.length))[0];
+  if (suffixMatch) return suffixMatch;
+  // Fallback: contains substring match.
+  const contained = candidates.find((candidate) =>
+    candidate.toLowerCase().includes(lower) || lower.includes(candidate.toLowerCase()),
+  );
+  return contained ?? null;
 }
 
 function hasCycle(nodes: WorkflowNode[], edges: WorkflowEdge[]): boolean {

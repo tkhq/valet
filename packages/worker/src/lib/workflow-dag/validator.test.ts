@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateDefinition, validateTriggerData, validateAgainstEnvironment, validateAgainstAvailableModels } from './validator.js';
+import { validateDefinition, validateDefinitionWithContext, validateTriggerData, validateAgainstEnvironment, validateAgainstAvailableModels } from './validator.js';
 import type { WorkflowDefinition } from '@valet/shared';
 import type { Env } from '../../env.js';
 
@@ -1144,5 +1144,194 @@ describe('validateDefinition — body-level templates and per-node baseline', ()
     });
     const errs = blockingErrors(validateDefinition(def));
     expect(errs.some((e) => e.code === 'expression_parse_error')).toBe(true);
+  });
+});
+
+describe('validateDefinition — set node outputSchema (deterministic-reshape source for foreach)', () => {
+  it('accepts a foreach whose items reference a set node with an array-typed outputSchema field, even when values is a template reference', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { raw: { type: 'object' } } },
+        {
+          id: 'reshape',
+          type: 'set',
+          values: { records: '{{trigger.data.raw.records}}' },
+          outputSchema: {
+            type: 'object',
+            properties: { records: { type: 'array', items: { type: 'object' } } },
+            required: ['records'],
+          },
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.reshape.data.records}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'reshape' },
+        { from: 'reshape', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    // Under the old behavior this failed with foreach_items_untyped_array_output because a template
+    // reference under `values` doesn't count as a literal array. outputSchema now bridges that gap.
+    expect(blockingErrors(validateDefinition(def)).filter((e) => e.code === 'foreach_items_untyped_array_output')).toEqual([]);
+  });
+
+  it('still rejects a set-sourced foreach when outputSchema does not declare the field as an array', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { raw: { type: 'object' } } },
+        {
+          id: 'reshape',
+          type: 'set',
+          values: { records: '{{trigger.data.raw.records}}' },
+          outputSchema: {
+            type: 'object',
+            properties: { records: { type: 'string' } },
+          },
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.reshape.data.records}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'reshape' },
+        { from: 'reshape', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    expect(blockingErrors(validateDefinition(def))).toEqual([
+      expect.objectContaining({ code: 'foreach_items_untyped_array_output', nodeId: 'loop' }),
+    ]);
+  });
+});
+
+describe('validateDefinitionWithContext — tool service:action existence', () => {
+  const knownToolActions = new Map<string, Set<string>>([
+    ['salesforce-read-only', new Set(['salesforce-read-only.soqlQuery', 'salesforce-read-only.getUserInfo'])],
+    ['google_workspace', new Set(['sheets.create_spreadsheet', 'sheets.write_spreadsheet', 'sheets.append_rows'])],
+  ]);
+
+  it('emits unknown_tool_action with a nearest-match suggestion for the classic missing-prefix typo', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'soqlQuery',
+          params: { q: 'SELECT Id FROM Account LIMIT 1' },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
+    const err = errs.find((e) => e.code === 'unknown_tool_action');
+    expect(err).toBeDefined();
+    expect(err?.message).toContain('salesforce-read-only.soqlQuery');
+    expect(err?.nodeId).toBe('query');
+    expect(err?.path).toBe('action');
+  });
+
+  it('emits unknown_tool_service when the service is unknown', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-typo',
+          action: 'soqlQuery',
+          params: {},
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
+    expect(errs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'unknown_tool_service', nodeId: 'query', path: 'service' })]),
+    );
+  });
+
+  it('accepts a tool node whose service:action resolves', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'salesforce-read-only.soqlQuery',
+          params: { q: 'SELECT Id FROM Account LIMIT 1' },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
+    expect(errs.filter((e) => e.code === 'unknown_tool_action' || e.code === 'unknown_tool_service')).toEqual([]);
+  });
+
+  it('descends into foreach body tool nodes', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { items: { type: 'array' } } },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{trigger.data.items}}',
+          body: {
+            id: 'write',
+            type: 'tool',
+            service: 'google_workspace',
+            action: 'sheets.write_spreadhseet', // typo
+            params: { spreadsheetId: 'x', range: 'A1', data: [[]] },
+          },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
+    const err = errs.find((e) => e.code === 'unknown_tool_action');
+    expect(err?.nodeId).toBe('write');
+    expect(err?.message).toContain('sheets.write_spreadsheet');
+  });
+
+  it('skips the check entirely when knownToolActions is not provided (back-compat)', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'soqlQuery',
+          params: {},
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    // No context.knownToolActions -> no unknown_tool_action error.
+    const errs = blockingErrors(validateDefinition(def));
+    expect(errs.some((e) => e.code === 'unknown_tool_action' || e.code === 'unknown_tool_service')).toBe(false);
   });
 });

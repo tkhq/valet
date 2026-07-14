@@ -136,6 +136,10 @@ export const setNodeSchema = z.object({
   id: idSchema,
   type: z.literal('set'),
   values: jsonValueSchema,
+  // Optional JSON-schema description of the shape produced under
+  // `nodes.<id>.data`. Consumed by validator.deriveTypedArrayOutputPaths
+  // so set nodes can act as deterministic reshape sources for foreach.
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const stopNodeSchema = z.object({
