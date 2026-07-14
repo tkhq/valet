@@ -76,8 +76,10 @@ def get_base_image() -> modal.Image:
             # build fails — force shared libraries on.
             "cd /tmp/whisper-build && cmake -B build -DBUILD_SHARED_LIBS=ON && cmake --build build --config Release -j$(nproc)",
             "cp /tmp/whisper-build/build/bin/whisper-cli /usr/local/bin/whisper-cli",
-            "cp /tmp/whisper-build/build/src/libwhisper.so* /usr/local/lib/",
-            "cp /tmp/whisper-build/build/ggml/src/libggml*.so* /usr/local/lib/",
+            # Copy shared libs by search, not fixed subdir: the output layout
+            # moved (v1.9.1 emits libwhisper.so under build/bin, not build/src).
+            "find /tmp/whisper-build/build -name 'libwhisper.so*' -exec cp -P {} /usr/local/lib/ \\;",
+            "find /tmp/whisper-build/build -name 'libggml*.so*' -exec cp -P {} /usr/local/lib/ \\;",
             "ldconfig",
             "rm -rf /tmp/whisper-build",
         )
@@ -174,7 +176,7 @@ def get_base_image() -> modal.Image:
                 "OPENCODE_RUNTIME_DIR": "/tmp/valet-opencode",
                 "VALET_PERSONA_DIR": "/tmp/valet-opencode/persona",
                 # Force image rebuild on deploy (change this value to trigger rebuild)
-                "IMAGE_BUILD_VERSION": "2026-07-13-v58-whisper-shared-libs-pin",
+                "IMAGE_BUILD_VERSION": "2026-07-13-v59-whisper-shared-libs-pin",
                 "AGENT_BROWSER_HOME": "/tmp/valet-agent-browser",
                 "AGENT_BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium",
                 "AGENT_BROWSER_PROFILE": "/workspace/.agent-browser-profile",
