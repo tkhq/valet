@@ -6,8 +6,8 @@ type Variant = "primary" | "secondary" | "ghost" | "danger";
 type Size = "sm" | "md" | "lg";
 
 const VARIANT: Record<Variant, string> = {
-  primary:
-    "bg-accent-600 text-white hover:bg-accent-700 active:bg-accent-700 focus-visible:ring-accent-500",
+  // Calm-companion palette (decision 9): moss is the accent for actions.
+  primary: "bg-moss text-white hover:opacity-90 active:opacity-95 focus-visible:ring-moss",
   secondary:
     "bg-neutral-100 text-neutral-900 hover:bg-neutral-200 active:bg-neutral-300 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700 focus-visible:ring-neutral-400",
   ghost:

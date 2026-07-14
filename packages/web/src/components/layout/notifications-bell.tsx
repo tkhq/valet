@@ -25,9 +25,25 @@ import { cn } from "~/lib/cn";
  * an item marks it read and navigates to its `href` (a full-page nav —
  * simplest correct thing for a handful of cross-session links; no typed
  * router route exists for an arbitrary notification target).
+ *
+ * Assistant-centered web UI decision 18: also refetches on dropdown OPEN
+ * (in addition to the 30s poll) so a dropdown left closed for a while
+ * doesn't show stale unread state the moment it's opened.
  */
+
+/**
+ * Pure `onOpenChange` handler, extracted so the open-refetch behavior is
+ * unit-testable without rendering the Radix dropdown (CLAUDE.md: prefer
+ * pure functions over exercising private/DOM internals in tests).
+ */
+export function makeOpenChangeHandler(refetch: () => void): (open: boolean) => void {
+  return (open) => {
+    if (open) refetch();
+  };
+}
+
 export function NotificationsBell() {
-  const { data } = useNotifications();
+  const { data, refetch } = useNotifications();
   const markRead = useMarkNotificationRead();
   const markAllRead = useMarkAllNotificationsRead();
 
@@ -46,7 +62,7 @@ export function NotificationsBell() {
   }
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={makeOpenChangeHandler(refetch)}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"

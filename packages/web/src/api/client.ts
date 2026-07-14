@@ -12,6 +12,7 @@ import type {
   CreateThreadRequest,
   CreateThreadResponse,
   EnsureOrchestratorResponse,
+  GetOrchestratorInfoResponse,
   GetSessionResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
@@ -75,6 +76,8 @@ export const api = {
   // this entry point never touches a raw id itself, only ensures one exists)
   ensureOrchestrator: () =>
     request<EnsureOrchestratorResponse>("POST", "/orchestrator"),
+  getOrchestratorInfo: () =>
+    request<GetOrchestratorInfoResponse>("GET", "/orchestrator/info"),
 
   // threads + messages (session-scoped)
   listThreads: (sessionId: string) =>

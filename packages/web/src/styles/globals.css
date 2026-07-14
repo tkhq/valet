@@ -1,24 +1,22 @@
+@import "../theme.css";
+@import "@fontsource/newsreader/400.css";
+@import "@fontsource/newsreader/400-italic.css";
+@import "@fontsource/newsreader/500.css";
+@import "@fontsource/newsreader/500-italic.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    color-scheme: light;
-    --bg: theme(colors.neutral.50);
-    --fg: theme(colors.neutral.900);
-    --border: theme(colors.neutral.200);
-    --muted: theme(colors.neutral.500);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      color-scheme: dark;
-      --bg: theme(colors.neutral.950);
-      --fg: theme(colors.neutral.50);
-      --border: theme(colors.neutral.800);
-      --muted: theme(colors.neutral.400);
-    }
+    /* Legacy surface variables, now aliased onto the calm-companion tokens
+       (theme.css) instead of the old gray/blue scale — this repaints every
+       existing `bg-[--bg]` / `text-[--fg]` / `border-[--border]` /
+       `text-[--muted]` usage app-wide without a per-component restyle. */
+    --bg: var(--paper);
+    --fg: var(--ink);
+    --border: var(--line);
   }
 
   html, body, #root {

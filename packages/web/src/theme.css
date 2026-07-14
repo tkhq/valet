@@ -1,0 +1,111 @@
+/**
+ * Calm-companion theme tokens (assistant-centered web UI, decision 9).
+ *
+ * Single source of truth for the token palette — values are VERBATIM from
+ * the design spec (docs/specs/2026-07-13-assistant-centered-web-ui-design.md
+ * § Visual Language). Consumed by Tailwind via `tailwind.config.ts` colors
+ * (`paper`, `ink`, `muted`, `line`, `moss`, `amber`) and directly by legacy
+ * `--bg`/`--fg`/`--border`/`--muted` aliases in `styles/globals.css` so
+ * existing surfaces pick up the palette without a full restyle.
+ *
+ * Both light and dark are supported from day one via two independent
+ * mechanisms that must both "win" appropriately:
+ *   1. `prefers-color-scheme: dark` — OS-level default, no explicit choice.
+ *   2. `:root[data-theme="light" | "dark"]` — an explicit in-app override
+ *      (a theme toggle can stamp this attribute later); it takes priority
+ *      over the OS media query in both directions.
+ */
+
+:root {
+  color-scheme: light;
+
+  --paper: #faf9f7;
+  --ink: #1f1d1a;
+  --muted: #6e6a63;
+  --line: #e7e4de;
+  --moss: #3e6b4f;
+  --amber: #b98a2f;
+}
+
+/* OS-level dark preference — only applies when there's no explicit
+   `data-theme="light"` override pinning the app to light. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --paper: #171614;
+    --ink: #ece9e4;
+    --moss: #7fae8f;
+    --line: #2a2825;
+  }
+}
+
+/* Explicit overrides always win over the OS media query. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --paper: #171614;
+  --ink: #ece9e4;
+  --moss: #7fae8f;
+  --line: #2a2825;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --paper: #faf9f7;
+  --ink: #1f1d1a;
+  --moss: #3e6b4f;
+  --line: #e7e4de;
+}
+
+/**
+ * Presence mark (decision 10) — the single place this theme spends
+ * boldness. Idle breathes slowly in moss, thinking breathes quicker in
+ * amber (the palette's "waiting" color), working is steady. Reduced
+ * motion collapses all three to a static dot, enforced twice: the JS
+ * component adds `presence-dot--static` (see presence-mark.tsx), and this
+ * `@media` block is a CSS-only backstop in case a consumer renders the dot
+ * without going through the component.
+ */
+.presence-dot {
+  display: inline-block;
+  border-radius: 9999px;
+}
+
+.presence-dot--idle {
+  background: var(--moss);
+  animation: presence-breathe-idle 2.4s ease-in-out infinite;
+}
+
+.presence-dot--thinking {
+  background: var(--amber);
+  animation: presence-breathe-thinking 1.2s ease-in-out infinite;
+}
+
+.presence-dot--working {
+  background: var(--moss);
+  opacity: 1;
+}
+
+.presence-dot--static {
+  animation: none !important;
+  opacity: 1;
+}
+
+@keyframes presence-breathe-idle {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@keyframes presence-breathe-thinking {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .presence-dot {
+    animation: none !important;
+    opacity: 1;
+  }
+}

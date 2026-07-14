@@ -42,6 +42,15 @@ export default {
           500: "oklch(65.0% 0.150 145)",
           600: "oklch(57.0% 0.150 145)",
         },
+        // Calm-companion palette (assistant-centered web UI, decision 9).
+        // Backed by CSS variables in `src/theme.css` so light/dark and any
+        // future `data-theme` override apply without touching Tailwind.
+        paper: "var(--paper)",
+        ink: "var(--ink)",
+        muted: "var(--muted)",
+        line: "var(--line)",
+        moss: "var(--moss)",
+        amber: "var(--amber)",
       },
       fontFamily: {
         sans: [
@@ -61,6 +70,9 @@ export default {
           "Consolas",
           "monospace",
         ],
+        // The assistant's voice — presence header, dashboard section
+        // headings, memory document rendering (decision 9).
+        display: ["Newsreader", "ui-serif", "Georgia", "serif"],
       },
       borderRadius: {
         sm: "0.25rem",
