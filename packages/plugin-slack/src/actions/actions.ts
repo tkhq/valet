@@ -1,164 +1,59 @@
-import { z } from 'zod';
-import type { ActionDefinition, ActionSource, ActionContext, ActionResult } from '@valet/sdk';
-import { slackFetch, slackGet } from './api.js';
-import { checkPrivateChannelAccess } from './channel-access.js';
-import { buildContentBlocks, SLACK_TEXT_LIMIT } from '../message-chunking.js';
+import { Type } from "typebox";
+import type { Static, TSchema } from "typebox";
+import type {
+  ActionPlugin,
+  Credential,
+  PluginAction,
+  PluginActionContext,
+  PluginActionResult,
+} from "@valet/engine";
+import { slackFetch, slackGet } from "./api.js";
+import { checkPrivateChannelAccess } from "./channel-access.js";
+import { buildContentBlocks, SLACK_TEXT_LIMIT } from "../message-chunking.js";
+
+/**
+ * Curried action builder. The first call binds T from the parameters
+ * schema; the second call types `execute`'s args via Static<T>. Splitting
+ * the inference into two phases sidesteps TS's contextual-inference depth
+ * limit, which otherwise gives up on `args: any` once the file gets long.
+ */
+function action<TParams extends TSchema>(parameters: TParams) {
+  return (rest: {
+    id: string;
+    name: string;
+    description: string;
+    riskLevel: PluginAction["riskLevel"];
+    execute: (
+      args: Static<TParams>,
+      ctx: PluginActionContext,
+    ) => Promise<PluginActionResult>;
+  }): PluginAction<TParams> => ({ ...rest, parameters });
+}
 
 /** Build a descriptive error from a Slack API response. */
-async function slackError(res: Response, data?: { ok: boolean; error?: string }): Promise<ActionResult> {
+async function slackError(res: Response, data?: { ok: boolean; error?: string }): Promise<PluginActionResult> {
   if (data && !data.ok) return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
   return { success: false, error: `Slack API ${res.status}: ${res.statusText}` };
 }
 
-/** Guard that checks private channel membership. Returns an error ActionResult if denied, or null if allowed. */
-async function guardPrivateChannel(token: string, channelId: string, ctx: ActionContext): Promise<ActionResult | null> {
-  const result = await checkPrivateChannelAccess(token, channelId, ctx.credentials.owner_slack_user_id);
+// V2-GAP: identity-link injection not yet wired in v2 hosts. Legacy read this off
+// a worker-injected `ctx.credentials.owner_slack_user_id` (set once a user linked
+// their Slack identity for private-channel access checks). No v2 host populates
+// this yet; we look for it on the resolved credential's metadata so the branch
+// activates automatically once identity-link lands there.
+function ownerSlackUserId(cred: Credential | null): string | undefined {
+  const raw = cred?.metadata?.["owner_slack_user_id"];
+  return typeof raw === "string" ? raw : undefined;
+}
+
+/** Guard that checks private channel membership. Returns an error PluginActionResult if denied, or null if allowed. */
+async function guardPrivateChannel(token: string, channelId: string, ownerId: string | undefined): Promise<PluginActionResult | null> {
+  const result = await checkPrivateChannelAccess(token, channelId, ownerId);
   if (!result.allowed) {
     return { success: false, error: result.error || 'Access denied' };
   }
   return null;
 }
-
-// ─── Action Definitions ──────────────────────────────────────────────────────
-
-const dmOwner: ActionDefinition = {
-  id: 'slack.dm_owner',
-  name: 'DM Owner',
-  description: 'Send a direct message to the session owner on Slack. No user lookup needed.',
-  riskLevel: 'low',
-  params: z.object({
-    text: z.string().describe('Message text'),
-  }),
-};
-
-const dmUser: ActionDefinition = {
-  id: 'slack.dm_user',
-  name: 'DM User',
-  description: 'Send a direct message to a Slack user by their user ID (U...). Use list_users to find IDs.',
-  riskLevel: 'low',
-  params: z.object({
-    user: z.string().describe('User ID (U...)'),
-    text: z.string().describe('Message text'),
-  }),
-};
-
-const addReaction: ActionDefinition = {
-  id: 'slack.add_reaction',
-  name: 'Add Reaction',
-  description: 'Add an emoji reaction to a message',
-  riskLevel: 'low',
-  params: z.object({
-    channel: z.string().describe('Channel ID (C...)'),
-    timestamp: z.string().describe('Message timestamp'),
-    name: z.string().describe('Emoji name without colons (e.g. "thumbsup")'),
-  }),
-};
-
-const listChannels: ActionDefinition = {
-  id: 'slack.list_channels',
-  name: 'List Channels',
-  description: 'List Slack channels. By default lists only channels the bot has joined. Set scope to "all" to discover all public channels in the workspace. Use prefix to filter by channel name prefix (e.g. "eng-" or "team-").',
-  riskLevel: 'low',
-  params: z.object({
-    scope: z.enum(['joined', 'all']).optional().describe('Which channels to list: "joined" (default) = bot member channels, "all" = all public channels'),
-    prefix: z.string().optional().describe('Filter channels whose name starts with this prefix'),
-  }),
-};
-
-const readHistory: ActionDefinition = {
-  id: 'slack.read_history',
-  name: 'Read History',
-  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
-  riskLevel: 'low',
-  params: z.object({
-    channel: z.string().describe('Channel ID (C...)'),
-    limit: z.number().int().min(1).max(200).optional().describe('Max messages per page (default 100, max 200)'),
-    cursor: z.string().optional().describe('Pagination cursor from a previous response\'s next_cursor'),
-    oldest: z.string().optional().describe('Only messages after this Unix ts (e.g. "1774000000.000000"). Inclusive.'),
-    latest: z.string().optional().describe('Only messages before this Unix ts. Inclusive. Defaults to now.'),
-    filter: z.string().optional().describe('Case-insensitive keyword filter applied client-side. Only messages whose text contains this substring are returned. Pagination still advances through all messages — use has_more/next_cursor to continue.'),
-    threads_only: z.boolean().optional().describe('When true, only return messages that have thread replies (reply_count > 0). Useful for finding discussions in noisy alert channels.'),
-    include_subtypes: z.boolean().optional().describe(
-      'When true, include system messages (joins, topic changes, etc.). Default false — only human/bot conversation.'
-    ),
-  }),
-};
-
-const readThread: ActionDefinition = {
-  id: 'slack.read_thread',
-  name: 'Read Thread',
-  description: 'Read replies in a Slack thread. Bot must be a member of the channel.',
-  riskLevel: 'low',
-  params: z.object({
-    channel: z.string().describe('Channel ID (C...)'),
-    thread_ts: z.string().describe('Timestamp of the parent message'),
-    limit: z.number().int().min(1).max(200).optional().describe('Max replies per page (default 100, max 200)'),
-    cursor: z.string().optional().describe('Pagination cursor from a previous response\'s next_cursor'),
-  }),
-};
-
-const listUsers: ActionDefinition = {
-  id: 'slack.list_users',
-  name: 'List Users',
-  description: 'List active human users in the Slack workspace. Returns user IDs needed for dm_user.',
-  riskLevel: 'low',
-  params: z.object({}),
-};
-
-const fetchFile: ActionDefinition = {
-  id: 'slack.fetch_file',
-  name: 'Fetch File',
-  description: 'Download a file from Slack. For images, the content is returned visually so you can see it. For text files, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
-  riskLevel: 'low',
-  params: z.object({
-    url: z.string().describe('Slack file URL (from the files array in message data)'),
-  }),
-};
-
-const getPins: ActionDefinition = {
-  id: 'slack.get_pins',
-  name: 'Get Pins',
-  description: 'Get pinned messages in a channel. Returns messages in the same format as read_history. Useful for understanding what a channel considers important.',
-  riskLevel: 'low',
-  params: z.object({
-    channel: z.string().describe('Channel ID (C...)'),
-  }),
-};
-
-const getChannelInfo: ActionDefinition = {
-  id: 'slack.get_channel_info',
-  name: 'Get Channel Info',
-  description: 'Get detailed information about a channel: topic, purpose, member count, creation date, creator. Useful when reading a channel for the first time — save the context to memory so you do not re-fetch.',
-  riskLevel: 'low',
-  params: z.object({
-    channel: z.string().describe('Channel ID (C...)'),
-  }),
-};
-
-const getReactions: ActionDefinition = {
-  id: 'slack.get_reactions',
-  name: 'Get Reactions',
-  description: 'Get reactions on a specific message with who reacted. Note: Slack may not return all reactors — count is always accurate but the users list can be truncated on popular messages.',
-  riskLevel: 'low',
-  params: z.object({
-    channel: z.string().describe('Channel ID (C...)'),
-    timestamp: z.string().describe('Message timestamp'),
-  }),
-};
-
-const allActions: ActionDefinition[] = [
-  dmOwner,
-  dmUser,
-  addReaction,
-  listChannels,
-  readHistory,
-  readThread,
-  listUsers,
-  fetchFile,
-  getPins,
-  getChannelInfo,
-  getReactions,
-];
 
 const NOISE_SUBTYPES = new Set([
   'channel_join', 'channel_leave', 'channel_topic', 'channel_purpose',
@@ -351,16 +246,18 @@ async function openAndSendDM(
   token: string,
   userId: string,
   text: string,
-  callerIdentity?: { name: string; avatar?: string },
-): Promise<ActionResult> {
+  actorName?: string,
+): Promise<PluginActionResult> {
   const openRes = await slackFetch('conversations.open', token, { users: userId });
   if (!openRes.ok) return slackError(openRes);
   const openData = (await openRes.json()) as { ok: boolean; error?: string; channel?: { id?: string } };
   if (!openData.ok || !openData.channel?.id) return slackError(openRes, openData);
 
   const body: Record<string, unknown> = { channel: openData.channel.id, text };
-  if (callerIdentity?.name) body.username = callerIdentity.name;
-  if (callerIdentity?.avatar) body.icon_url = callerIdentity.avatar;
+  if (actorName) body.username = actorName;
+  // V2-GAP: legacy callerIdentity also carried an avatar URL (icon_url on the
+  // Slack payload). ctx.actor in v2 hosts has no avatar field, so icon_url is
+  // never set until that's wired — hard-coded absent for now.
 
   // For long messages, use blocks so Slack doesn't split into separate threads.
   // Prefers markdown blocks (native table/formatting support), falls back to
@@ -378,418 +275,545 @@ async function openAndSendDM(
   return { success: true, data: { ts: data.ts, channel: data.channel } };
 }
 
-// ─── Action Execution ────────────────────────────────────────────────────────
+// ─── Action Definitions ──────────────────────────────────────────────────────
 
-async function executeAction(
-  actionId: string,
-  params: unknown,
-  ctx: ActionContext,
-): Promise<ActionResult> {
-  const token = ctx.credentials.bot_token || '';
-  if (!token) return { success: false, error: 'Missing bot_token' };
+const dmOwner = action(Type.Object({
+    text: Type.String({ description: 'Message text' }),
+  }))({
+  id: 'slack.dm_owner',
+  name: 'DM Owner',
+  description: 'Send a direct message to the session owner on Slack. No user lookup needed.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const ownerSlackId = ownerSlackUserId(cred);
+    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.' };
+    return openAndSendDM(token, ownerSlackId, p.text, ctx.actor?.name);
+  },
+});
 
-  try {
-    switch (actionId) {
-      case 'slack.dm_owner': {
-        const p = dmOwner.params.parse(params);
-        const ownerSlackId = ctx.credentials.owner_slack_user_id;
-        if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.' };
-        return openAndSendDM(token, ownerSlackId, p.text, ctx.callerIdentity);
-      }
+const dmUser = action(Type.Object({
+    user: Type.String({ description: 'User ID (U...)' }),
+    text: Type.String({ description: 'Message text' }),
+  }))({
+  id: 'slack.dm_user',
+  name: 'DM User',
+  description: 'Send a direct message to a Slack user by their user ID (U...). Use list_users to find IDs.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    return openAndSendDM(token, p.user, p.text, ctx.actor?.name);
+  },
+});
 
-      case 'slack.dm_user': {
-        const p = dmUser.params.parse(params);
-        return openAndSendDM(token, p.user, p.text, ctx.callerIdentity);
-      }
+const addReaction = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...)' }),
+    timestamp: Type.String({ description: 'Message timestamp' }),
+    name: Type.String({ description: 'Emoji name without colons (e.g. "thumbsup")' }),
+  }))({
+  id: 'slack.add_reaction',
+  name: 'Add Reaction',
+  description: 'Add an emoji reaction to a message',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+    const res = await slackFetch('reactions.add', token, {
+      channel: p.channel,
+      timestamp: p.timestamp,
+      name: p.name,
+    });
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string };
+    if (!data.ok) return slackError(res, data);
 
-      case 'slack.add_reaction': {
-        const p = addReaction.params.parse(params);
-        const denied = await guardPrivateChannel(token, p.channel, ctx);
-        if (denied) return denied;
-        const res = await slackFetch('reactions.add', token, {
-          channel: p.channel,
-          timestamp: p.timestamp,
-          name: p.name,
-        });
-        if (!res.ok) return slackError(res);
-        const data = (await res.json()) as { ok: boolean; error?: string };
-        if (!data.ok) return slackError(res, data);
+    return { success: true, data: { channel: p.channel, timestamp: p.timestamp, name: p.name } };
+  },
+});
 
-        return { success: true, data: { channel: p.channel, timestamp: p.timestamp, name: p.name } };
-      }
+const listChannels = action(Type.Object({
+    scope: Type.Optional(Type.Union([Type.Literal('joined'), Type.Literal('all')], {
+      description: 'Which channels to list: "joined" (default) = bot member channels, "all" = all public channels',
+    })),
+    prefix: Type.Optional(Type.String({ description: 'Filter channels whose name starts with this prefix' })),
+  }))({
+  id: 'slack.list_channels',
+  name: 'List Channels',
+  description: 'List Slack channels. By default lists only channels the bot has joined. Set scope to "all" to discover all public channels in the workspace. Use prefix to filter by channel name prefix (e.g. "eng-" or "team-").',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const wantAll = p.scope === 'all';
 
-      case 'slack.list_channels': {
-        const p = listChannels.params.parse(params);
-        const wantAll = p.scope === 'all';
+    // users.conversations = only joined channels (public + private)
+    // conversations.list = all visible channels (public only when scope=all)
+    const method = wantAll ? 'conversations.list' : 'users.conversations';
+    const types = wantAll ? 'public_channel' : 'public_channel,private_channel';
 
-        // users.conversations = only joined channels (public + private)
-        // conversations.list = all visible channels (public only when scope=all)
-        const method = wantAll ? 'conversations.list' : 'users.conversations';
-        const types = wantAll ? 'public_channel' : 'public_channel,private_channel';
+    // Paginate to collect all results (Slack caps at 200 per page)
+    const allChannels: Record<string, unknown>[] = [];
+    let cursor: string | undefined;
+    do {
+      const q: Record<string, unknown> = { types, limit: 200, exclude_archived: true };
+      if (cursor) q.cursor = cursor;
+      const res = await slackGet(method, token, q);
+      if (!res.ok) return slackError(res);
+      const data = (await res.json()) as {
+        ok: boolean; error?: string; channels?: unknown[];
+        response_metadata?: { next_cursor?: string };
+      };
+      if (!data.ok) return slackError(res, data);
+      allChannels.push(...(data.channels || []).map((ch) => ch as Record<string, unknown>));
+      cursor = data.response_metadata?.next_cursor || undefined;
+    } while (cursor);
 
-        // Paginate to collect all results (Slack caps at 200 per page)
-        const allChannels: Record<string, unknown>[] = [];
-        let cursor: string | undefined;
-        do {
-          const q: Record<string, unknown> = { types, limit: 200, exclude_archived: true };
-          if (cursor) q.cursor = cursor;
-          const res = await slackGet(method, token, q);
-          if (!res.ok) return slackError(res);
-          const data = (await res.json()) as {
-            ok: boolean; error?: string; channels?: unknown[];
-            response_metadata?: { next_cursor?: string };
-          };
-          if (!data.ok) return slackError(res, data);
-          allChannels.push(...(data.channels || []).map((ch) => ch as Record<string, unknown>));
-          cursor = data.response_metadata?.next_cursor || undefined;
-        } while (cursor);
+    let channels = allChannels.map(slimChannel);
 
-        let channels = allChannels.map(slimChannel);
-
-        // Client-side prefix filter
-        if (p.prefix) {
-          const pfx = p.prefix.toLowerCase();
-          channels = channels.filter((ch) => typeof ch.name === 'string' && ch.name.toLowerCase().startsWith(pfx));
-        }
-
-        // Filter out private channels the owner doesn't have access to
-        const ownerSlackUserId = ctx.credentials.owner_slack_user_id;
-        if (ownerSlackUserId) {
-          const privateChannels = channels.filter((ch) => ch.is_private === true);
-          if (privateChannels.length > 0) {
-            const accessChecks = await Promise.all(
-              privateChannels.map(async (ch) => {
-                const result = await checkPrivateChannelAccess(token, ch.id as string, ownerSlackUserId);
-                return { id: ch.id, allowed: result.allowed };
-              }),
-            );
-            const deniedIds = new Set(accessChecks.filter((c) => !c.allowed).map((c) => c.id));
-            channels = channels.filter((ch) => !deniedIds.has(ch.id));
-          }
-        } else {
-          // No linked identity — filter out all private channels
-          channels = channels.filter((ch) => ch.is_private !== true);
-        }
-
-        return { success: true, data: { channels, total: channels.length } };
-      }
-
-      case 'slack.read_history': {
-        const p = readHistory.params.parse(params);
-        const denied = await guardPrivateChannel(token, p.channel, ctx);
-        if (denied) return denied;
-        const query: Record<string, unknown> = {
-          channel: p.channel,
-          limit: p.limit || 100,
-        };
-        if (p.cursor) query.cursor = p.cursor;
-        if (p.oldest) query.oldest = p.oldest;
-        if (p.latest) query.latest = p.latest;
-        if (p.oldest || p.latest) query.inclusive = true;
-        const res = await slackGet('conversations.history', token, query);
-        if (!res.ok) return slackError(res);
-        const data = (await res.json()) as { ok: boolean; error?: string; messages?: unknown[]; has_more?: boolean; response_metadata?: { next_cursor?: string } };
-        if (!data.ok) return slackError(res, data);
-
-        let messages = (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>));
-        const fetched = messages.length;
-        if (p.filter) {
-          const kw = p.filter.toLowerCase();
-          messages = messages.filter((m) => typeof m.text === 'string' && m.text.toLowerCase().includes(kw));
-        }
-        if (p.threads_only) {
-          messages = messages.filter((m) => typeof m.reply_count === 'number' && m.reply_count > 0);
-        }
-        if (!p.include_subtypes) {
-          messages = messages.filter((m) => {
-            const subtype = m.subtype as string | undefined;
-            return !subtype || !NOISE_SUBTYPES.has(subtype);
-          });
-        }
-
-        messages = await resolveAndEnrichMessages(token, messages);
-
-        const next_cursor = data.response_metadata?.next_cursor || undefined;
-        const filtered = p.filter || p.threads_only;
-        // Put pagination metadata first — large message arrays may be truncated by tool output limits
-        return { success: true, data: { has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
-      }
-
-      case 'slack.read_thread': {
-        const p = readThread.params.parse(params);
-        const denied = await guardPrivateChannel(token, p.channel, ctx);
-        if (denied) return denied;
-        const query: Record<string, unknown> = {
-          channel: p.channel,
-          ts: p.thread_ts,
-          limit: p.limit || 100,
-        };
-        if (p.cursor) query.cursor = p.cursor;
-        const res = await slackGet('conversations.replies', token, query);
-        if (!res.ok) return slackError(res);
-        const data = (await res.json()) as { ok: boolean; error?: string; messages?: unknown[]; has_more?: boolean; response_metadata?: { next_cursor?: string } };
-        if (!data.ok) return slackError(res, data);
-
-        const messages = await resolveAndEnrichMessages(
-          token,
-          (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>)),
-        );
-
-        const next_cursor = data.response_metadata?.next_cursor || undefined;
-        return { success: true, data: { has_more: data.has_more, next_cursor, total: messages.length, messages } };
-      }
-
-      case 'slack.list_users': {
-        // Single page — most workspaces under 200 humans
-        const res = await slackGet('users.list', token, { limit: 200 });
-        if (!res.ok) return slackError(res);
-        const data = (await res.json()) as { ok: boolean; error?: string; members?: unknown[] };
-        if (!data.ok) return slackError(res, data);
-
-        const members = (data.members || [])
-          .map((m) => m as Record<string, unknown>)
-          .filter((m) => !m.is_bot && !m.deleted)
-          .map(slimUser);
-
-        return { success: true, data: { members } };
-      }
-
-      case 'slack.fetch_file': {
-        const p = fetchFile.params.parse(params);
-
-        // Only allow files.slack.com URLs
-        let parsedUrl: URL;
-        try {
-          parsedUrl = new URL(p.url);
-        } catch {
-          return { success: false, error: 'Invalid URL' };
-        }
-        if (!parsedUrl.hostname.endsWith('.slack.com')) {
-          return { success: false, error: 'This is an external file (e.g. Google Docs). Open the URL directly — it cannot be fetched through Slack. Only files hosted on Slack (files.slack.com) can be downloaded.' };
-        }
-
-        const res = await fetch(p.url, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          return { success: false, error: `Failed to fetch file: ${res.status} ${res.statusText}` };
-        }
-
-        const rawContentType = res.headers.get('content-type') || 'application/octet-stream';
-        const contentType = rawContentType.split(';')[0].trim();
-        // Images up to 1MB get broadcast to the chat UI; larger ones return metadata only
-        const MAX_IMAGE_DISPLAY = 1 * 1024 * 1024;
-        const MAX_IMAGE_FETCH = 10 * 1024 * 1024;
-        const MAX_TEXT_SIZE = 1 * 1024 * 1024;
-
-        // Image files — return via the images pipeline so the user can see them in the chat UI
-        if (contentType.startsWith('image/')) {
-          const buf = await res.arrayBuffer();
-          const filename = parsedUrl.pathname.split('/').pop() || 'image';
-          if (buf.byteLength > MAX_IMAGE_FETCH) {
-            return { success: false, error: `Image too large (${Math.round(buf.byteLength / 1024 / 1024)}MB). Max 10MB.` };
-          }
-          if (buf.byteLength > MAX_IMAGE_DISPLAY) {
-            return {
-              success: true,
-              data: { filename, mimetype: contentType, size: buf.byteLength, note: 'Image too large to display inline in chat.' },
-            };
-          }
-          // Safe base64 encoding that doesn't hit V8's argument limit
-          const bytes = new Uint8Array(buf);
-          let binary = '';
-          for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i]);
-          }
-          const base64 = btoa(binary);
-          return {
-            success: true,
-            data: { filename, mimetype: contentType, size: buf.byteLength },
-            images: [{ data: base64, mimeType: contentType, description: filename }],
-          };
-        }
-
-        // Text files — return content directly
-        if (contentType.startsWith('text/') || contentType === 'application/json' || contentType === 'application/xml') {
-          const text = await res.text();
-          if (text.length > MAX_TEXT_SIZE) {
-            return { success: false, error: `File too large for text extraction (${Math.round(text.length / 1024)}KB). Max 1MB.` };
-          }
-          return { success: true, data: { content: text, mimetype: contentType } };
-        }
-
-        // Other file types — return metadata only
-        return {
-          success: true,
-          data: {
-            mimetype: contentType,
-            note: 'File type is not viewable. Only images and text files can be fetched.',
-          },
-        };
-      }
-
-      case 'slack.get_pins': {
-        const p = getPins.params.parse(params);
-        const denied = await guardPrivateChannel(token, p.channel, ctx);
-        if (denied) return denied;
-
-        const res = await slackGet('pins.list', token, { channel: p.channel });
-        if (!res.ok) return slackError(res);
-        const data = (await res.json()) as { ok: boolean; error?: string; items?: unknown[] };
-        if (!data.ok) return slackError(res, data);
-
-        const items = (data.items || []).map((item) => item as Record<string, unknown>);
-
-        // pins.list returns items with type "message", "file", or "file_comment"
-        // Only message-type pins have a .message object we can slim/enrich
-        const messageItems = items
-          .filter((item) => item.type === 'message' && item.message)
-          .map((item) => item.message as Record<string, unknown>);
-
-        const pins = await resolveAndEnrichMessages(
-          token,
-          messageItems.map((m) => slimMessage(m)),
-        );
-
-        // Surface pinned files separately (name + metadata only)
-        const fileItems = items
-          .filter((item) => item.type === 'file' && item.file)
-          .map((item) => {
-            const f = item.file as Record<string, unknown>;
-            return { type: 'file', name: f.name, mimetype: f.mimetype || undefined, size: f.size, url: f.url_private };
-          });
-
-        return { success: true, data: { total: pins.length + fileItems.length, pins, ...(fileItems.length > 0 ? { files: fileItems } : {}) } };
-      }
-
-      case 'slack.get_channel_info': {
-        const p = getChannelInfo.params.parse(params);
-        const denied = await guardPrivateChannel(token, p.channel, ctx);
-        if (denied) return denied;
-
-        const res = await slackGet('conversations.info', token, { channel: p.channel, include_num_members: true });
-        if (!res.ok) return slackError(res);
-        const data = (await res.json()) as { ok: boolean; error?: string; channel?: Record<string, unknown> };
-        if (!data.ok) return slackError(res, data);
-        const ch = data.channel;
-        if (!ch) return { success: false, error: 'Channel not found' };
-
-        // DMs and group DMs don't have topic/purpose/creator
-        if (ch.is_im || ch.is_mpim) {
-          return {
-            success: true,
-            data: {
-              id: ch.id,
-              is_im: ch.is_im || false,
-              is_mpim: ch.is_mpim || false,
-              num_members: ch.num_members,
-              created: ch.created,
-            },
-          };
-        }
-
-        const topic = (ch.topic || {}) as Record<string, unknown>;
-        const purpose = (ch.purpose || {}) as Record<string, unknown>;
-
-        // Resolve creator through user cache
-        let creatorDisplay: string | undefined;
-        if (typeof ch.creator === 'string') {
-          if (!userCache.has(ch.creator as string)) {
-            try {
-              const userRes = await slackGet('users.info', token, { user: ch.creator });
-              if (userRes.ok) {
-                const userData = (await userRes.json()) as { ok: boolean; user?: Record<string, unknown> };
-                if (userData.ok && userData.user) {
-                  userCache.set(ch.creator as string, formatUserDisplay(ch.creator as string, userData.user));
-                }
-              }
-            } catch { /* leave unresolved */ }
-          }
-          creatorDisplay = userCache.get(ch.creator as string) || (ch.creator as string);
-        }
-
-        return {
-          success: true,
-          data: {
-            id: ch.id,
-            name: ch.name,
-            is_private: ch.is_private || false,
-            is_archived: ch.is_archived || false,
-            topic: topic.value || undefined,
-            purpose: purpose.value || undefined,
-            num_members: ch.num_members,
-            created: ch.created,
-            creator: creatorDisplay,
-          },
-        };
-      }
-
-      case 'slack.get_reactions': {
-        const p = getReactions.params.parse(params);
-        const denied = await guardPrivateChannel(token, p.channel, ctx);
-        if (denied) return denied;
-
-        const res = await slackGet('reactions.get', token, {
-          channel: p.channel,
-          timestamp: p.timestamp,
-          full: true,
-        });
-        if (!res.ok) return slackError(res);
-        const data = (await res.json()) as { ok: boolean; error?: string; message?: Record<string, unknown> };
-        if (!data.ok) return slackError(res, data);
-        const msg = data.message;
-        if (!msg) return { success: false, error: 'Message not found' };
-
-        const rawReactions = Array.isArray(msg.reactions) ? (msg.reactions as Record<string, unknown>[]) : [];
-        if (rawReactions.length === 0) {
-          return { success: true, data: { reactions: [] } };
-        }
-
-        // Collect all user IDs across all reactions for batch resolution
-        const allUserIds = new Set<string>();
-        for (const r of rawReactions) {
-          if (Array.isArray(r.users)) {
-            for (const uid of r.users as string[]) allUserIds.add(uid);
-          }
-        }
-
-        // Resolve uncached users
-        const uncached = [...allUserIds].filter((uid) => !userCache.has(uid));
-        if (uncached.length > 0) {
-          await Promise.all(
-            uncached.map(async (uid) => {
-              try {
-                const userRes = await slackGet('users.info', token, { user: uid });
-                if (!userRes.ok) return;
-                const userData = (await userRes.json()) as { ok: boolean; user?: Record<string, unknown> };
-                if (userData.ok && userData.user) userCache.set(uid, formatUserDisplay(uid, userData.user));
-              } catch { /* leave unresolved */ }
-            }),
-          );
-        }
-
-        const reactions = rawReactions.map((r) => ({
-          name: r.name,
-          count: r.count,
-          users: (Array.isArray(r.users) ? (r.users as string[]) : []).map(
-            (uid) => userCache.get(uid) || uid,
-          ),
-        }));
-
-        return { success: true, data: { reactions } };
-      }
-
-      default:
-        return { success: false, error: `Unknown action: ${actionId}` };
+    // Client-side prefix filter
+    if (p.prefix) {
+      const pfx = p.prefix.toLowerCase();
+      channels = channels.filter((ch) => typeof ch.name === 'string' && ch.name.toLowerCase().startsWith(pfx));
     }
-  } catch (error) {
-    return { success: false, error: String(error) };
-  }
-}
+
+    // Filter out private channels the owner doesn't have access to
+    const ownerSlackId = ownerSlackUserId(cred);
+    if (ownerSlackId) {
+      const privateChannels = channels.filter((ch) => ch.is_private === true);
+      if (privateChannels.length > 0) {
+        const accessChecks = await Promise.all(
+          privateChannels.map(async (ch) => {
+            const result = await checkPrivateChannelAccess(token, ch.id as string, ownerSlackId);
+            return { id: ch.id, allowed: result.allowed };
+          }),
+        );
+        const deniedIds = new Set(accessChecks.filter((c) => !c.allowed).map((c) => c.id));
+        channels = channels.filter((ch) => !deniedIds.has(ch.id));
+      }
+    } else {
+      // No linked identity — filter out all private channels
+      channels = channels.filter((ch) => ch.is_private !== true);
+    }
+
+    return { success: true, data: { channels, total: channels.length } };
+  },
+});
+
+const readHistory = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...)' }),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: 'Max messages per page (default 100, max 200)' })),
+    cursor: Type.Optional(Type.String({ description: 'Pagination cursor from a previous response\'s next_cursor' })),
+    oldest: Type.Optional(Type.String({ description: 'Only messages after this Unix ts (e.g. "1774000000.000000"). Inclusive.' })),
+    latest: Type.Optional(Type.String({ description: 'Only messages before this Unix ts. Inclusive. Defaults to now.' })),
+    filter: Type.Optional(Type.String({ description: 'Case-insensitive keyword filter applied client-side. Only messages whose text contains this substring are returned. Pagination still advances through all messages — use has_more/next_cursor to continue.' })),
+    threads_only: Type.Optional(Type.Boolean({ description: 'When true, only return messages that have thread replies (reply_count > 0). Useful for finding discussions in noisy alert channels.' })),
+    include_subtypes: Type.Optional(Type.Boolean({
+      description: 'When true, include system messages (joins, topic changes, etc.). Default false — only human/bot conversation.',
+    })),
+  }))({
+  id: 'slack.read_history',
+  name: 'Read History',
+  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+    const query: Record<string, unknown> = {
+      channel: p.channel,
+      limit: p.limit || 100,
+    };
+    if (p.cursor) query.cursor = p.cursor;
+    if (p.oldest) query.oldest = p.oldest;
+    if (p.latest) query.latest = p.latest;
+    if (p.oldest || p.latest) query.inclusive = true;
+    const res = await slackGet('conversations.history', token, query);
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; messages?: unknown[]; has_more?: boolean; response_metadata?: { next_cursor?: string } };
+    if (!data.ok) return slackError(res, data);
+
+    let messages = (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>));
+    const fetched = messages.length;
+    if (p.filter) {
+      const kw = p.filter.toLowerCase();
+      messages = messages.filter((m) => typeof m.text === 'string' && m.text.toLowerCase().includes(kw));
+    }
+    if (p.threads_only) {
+      messages = messages.filter((m) => typeof m.reply_count === 'number' && m.reply_count > 0);
+    }
+    if (!p.include_subtypes) {
+      messages = messages.filter((m) => {
+        const subtype = m.subtype as string | undefined;
+        return !subtype || !NOISE_SUBTYPES.has(subtype);
+      });
+    }
+
+    messages = await resolveAndEnrichMessages(token, messages);
+
+    const next_cursor = data.response_metadata?.next_cursor || undefined;
+    const filtered = p.filter || p.threads_only;
+    // Put pagination metadata first — large message arrays may be truncated by tool output limits
+    return { success: true, data: { has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
+  },
+});
+
+const readThread = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...)' }),
+    thread_ts: Type.String({ description: 'Timestamp of the parent message' }),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: 'Max replies per page (default 100, max 200)' })),
+    cursor: Type.Optional(Type.String({ description: 'Pagination cursor from a previous response\'s next_cursor' })),
+  }))({
+  id: 'slack.read_thread',
+  name: 'Read Thread',
+  description: 'Read replies in a Slack thread. Bot must be a member of the channel.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+    const query: Record<string, unknown> = {
+      channel: p.channel,
+      ts: p.thread_ts,
+      limit: p.limit || 100,
+    };
+    if (p.cursor) query.cursor = p.cursor;
+    const res = await slackGet('conversations.replies', token, query);
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; messages?: unknown[]; has_more?: boolean; response_metadata?: { next_cursor?: string } };
+    if (!data.ok) return slackError(res, data);
+
+    const messages = await resolveAndEnrichMessages(
+      token,
+      (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>)),
+    );
+
+    const next_cursor = data.response_metadata?.next_cursor || undefined;
+    return { success: true, data: { has_more: data.has_more, next_cursor, total: messages.length, messages } };
+  },
+});
+
+const listUsers = action(Type.Object({}))({
+  id: 'slack.list_users',
+  name: 'List Users',
+  description: 'List active human users in the Slack workspace. Returns user IDs needed for dm_user.',
+  riskLevel: 'low',
+  execute: async (_args, ctx) => {
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    // Single page — most workspaces under 200 humans
+    const res = await slackGet('users.list', token, { limit: 200 });
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; members?: unknown[] };
+    if (!data.ok) return slackError(res, data);
+
+    const members = (data.members || [])
+      .map((m) => m as Record<string, unknown>)
+      .filter((m) => !m.is_bot && !m.deleted)
+      .map(slimUser);
+
+    return { success: true, data: { members } };
+  },
+});
+
+const fetchFile = action(Type.Object({
+    url: Type.String({ description: 'Slack file URL (from the files array in message data)' }),
+  }))({
+  id: 'slack.fetch_file',
+  name: 'Fetch File',
+  description: 'Download a file from Slack. For images, the content is returned visually so you can see it. For text files, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+
+    // Only allow files.slack.com URLs
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(p.url);
+    } catch {
+      return { success: false, error: 'Invalid URL' };
+    }
+    if (!parsedUrl.hostname.endsWith('.slack.com')) {
+      return { success: false, error: 'This is an external file (e.g. Google Docs). Open the URL directly — it cannot be fetched through Slack. Only files hosted on Slack (files.slack.com) can be downloaded.' };
+    }
+
+    const res = await fetch(p.url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      return { success: false, error: `Failed to fetch file: ${res.status} ${res.statusText}` };
+    }
+
+    const rawContentType = res.headers.get('content-type') || 'application/octet-stream';
+    const contentType = rawContentType.split(';')[0].trim();
+    // Images up to 1MB get broadcast to the chat UI; larger ones return metadata only
+    const MAX_IMAGE_DISPLAY = 1 * 1024 * 1024;
+    const MAX_IMAGE_FETCH = 10 * 1024 * 1024;
+    const MAX_TEXT_SIZE = 1 * 1024 * 1024;
+
+    // Image files — return via the attachments pipeline so the user can see them in the chat UI
+    if (contentType.startsWith('image/')) {
+      const buf = await res.arrayBuffer();
+      const filename = parsedUrl.pathname.split('/').pop() || 'image';
+      if (buf.byteLength > MAX_IMAGE_FETCH) {
+        return { success: false, error: `Image too large (${Math.round(buf.byteLength / 1024 / 1024)}MB). Max 10MB.` };
+      }
+      if (buf.byteLength > MAX_IMAGE_DISPLAY) {
+        return {
+          success: true,
+          data: { filename, mimetype: contentType, size: buf.byteLength, note: 'Image too large to display inline in chat.' },
+        };
+      }
+      const bytes = new Uint8Array(buf);
+      return {
+        success: true,
+        data: { filename, mimetype: contentType, size: buf.byteLength },
+        attachments: [{ type: 'image', data: bytes, mimeType: contentType, name: filename }],
+      };
+    }
+
+    // Text files — return content directly
+    if (contentType.startsWith('text/') || contentType === 'application/json' || contentType === 'application/xml') {
+      const text = await res.text();
+      if (text.length > MAX_TEXT_SIZE) {
+        return { success: false, error: `File too large for text extraction (${Math.round(text.length / 1024)}KB). Max 1MB.` };
+      }
+      return { success: true, data: { content: text, mimetype: contentType } };
+    }
+
+    // Other file types — return metadata only
+    return {
+      success: true,
+      data: {
+        mimetype: contentType,
+        note: 'File type is not viewable. Only images and text files can be fetched.',
+      },
+    };
+  },
+});
+
+const getPins = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...)' }),
+  }))({
+  id: 'slack.get_pins',
+  name: 'Get Pins',
+  description: 'Get pinned messages in a channel. Returns messages in the same format as read_history. Useful for understanding what a channel considers important.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+
+    const res = await slackGet('pins.list', token, { channel: p.channel });
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; items?: unknown[] };
+    if (!data.ok) return slackError(res, data);
+
+    const items = (data.items || []).map((item) => item as Record<string, unknown>);
+
+    // pins.list returns items with type "message", "file", or "file_comment"
+    // Only message-type pins have a .message object we can slim/enrich
+    const messageItems = items
+      .filter((item) => item.type === 'message' && item.message)
+      .map((item) => item.message as Record<string, unknown>);
+
+    const pins = await resolveAndEnrichMessages(
+      token,
+      messageItems.map((m) => slimMessage(m)),
+    );
+
+    // Surface pinned files separately (name + metadata only)
+    const fileItems = items
+      .filter((item) => item.type === 'file' && item.file)
+      .map((item) => {
+        const f = item.file as Record<string, unknown>;
+        return { type: 'file', name: f.name, mimetype: f.mimetype || undefined, size: f.size, url: f.url_private };
+      });
+
+    return { success: true, data: { total: pins.length + fileItems.length, pins, ...(fileItems.length > 0 ? { files: fileItems } : {}) } };
+  },
+});
+
+const getChannelInfo = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...)' }),
+  }))({
+  id: 'slack.get_channel_info',
+  name: 'Get Channel Info',
+  description: 'Get detailed information about a channel: topic, purpose, member count, creation date, creator. Useful when reading a channel for the first time — save the context to memory so you do not re-fetch.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+
+    const res = await slackGet('conversations.info', token, { channel: p.channel, include_num_members: true });
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; channel?: Record<string, unknown> };
+    if (!data.ok) return slackError(res, data);
+    const ch = data.channel;
+    if (!ch) return { success: false, error: 'Channel not found' };
+
+    // DMs and group DMs don't have topic/purpose/creator
+    if (ch.is_im || ch.is_mpim) {
+      return {
+        success: true,
+        data: {
+          id: ch.id,
+          is_im: ch.is_im || false,
+          is_mpim: ch.is_mpim || false,
+          num_members: ch.num_members,
+          created: ch.created,
+        },
+      };
+    }
+
+    const topic = (ch.topic || {}) as Record<string, unknown>;
+    const purpose = (ch.purpose || {}) as Record<string, unknown>;
+
+    // Resolve creator through user cache
+    let creatorDisplay: string | undefined;
+    if (typeof ch.creator === 'string') {
+      if (!userCache.has(ch.creator as string)) {
+        try {
+          const userRes = await slackGet('users.info', token, { user: ch.creator });
+          if (userRes.ok) {
+            const userData = (await userRes.json()) as { ok: boolean; user?: Record<string, unknown> };
+            if (userData.ok && userData.user) {
+              userCache.set(ch.creator as string, formatUserDisplay(ch.creator as string, userData.user));
+            }
+          }
+        } catch { /* leave unresolved */ }
+      }
+      creatorDisplay = userCache.get(ch.creator as string) || (ch.creator as string);
+    }
+
+    return {
+      success: true,
+      data: {
+        id: ch.id,
+        name: ch.name,
+        is_private: ch.is_private || false,
+        is_archived: ch.is_archived || false,
+        topic: topic.value || undefined,
+        purpose: purpose.value || undefined,
+        num_members: ch.num_members,
+        created: ch.created,
+        creator: creatorDisplay,
+      },
+    };
+  },
+});
+
+const getReactions = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...)' }),
+    timestamp: Type.String({ description: 'Message timestamp' }),
+  }))({
+  id: 'slack.get_reactions',
+  name: 'Get Reactions',
+  description: 'Get reactions on a specific message with who reacted. Note: Slack may not return all reactors — count is always accurate but the users list can be truncated on popular messages.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const p = args;
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? "";
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+
+    const res = await slackGet('reactions.get', token, {
+      channel: p.channel,
+      timestamp: p.timestamp,
+      full: true,
+    });
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; message?: Record<string, unknown> };
+    if (!data.ok) return slackError(res, data);
+    const msg = data.message;
+    if (!msg) return { success: false, error: 'Message not found' };
+
+    const rawReactions = Array.isArray(msg.reactions) ? (msg.reactions as Record<string, unknown>[]) : [];
+    if (rawReactions.length === 0) {
+      return { success: true, data: { reactions: [] } };
+    }
+
+    // Collect all user IDs across all reactions for batch resolution
+    const allUserIds = new Set<string>();
+    for (const r of rawReactions) {
+      if (Array.isArray(r.users)) {
+        for (const uid of r.users as string[]) allUserIds.add(uid);
+      }
+    }
+
+    // Resolve uncached users
+    const uncached = [...allUserIds].filter((uid) => !userCache.has(uid));
+    if (uncached.length > 0) {
+      await Promise.all(
+        uncached.map(async (uid) => {
+          try {
+            const userRes = await slackGet('users.info', token, { user: uid });
+            if (!userRes.ok) return;
+            const userData = (await userRes.json()) as { ok: boolean; user?: Record<string, unknown> };
+            if (userData.ok && userData.user) userCache.set(uid, formatUserDisplay(uid, userData.user));
+          } catch { /* leave unresolved */ }
+        }),
+      );
+    }
+
+    const reactions = rawReactions.map((r) => ({
+      name: r.name,
+      count: r.count,
+      users: (Array.isArray(r.users) ? (r.users as string[]) : []).map(
+        (uid) => userCache.get(uid) || uid,
+      ),
+    }));
+
+    return { success: true, data: { reactions } };
+  },
+});
 
 // ─── Export ──────────────────────────────────────────────────────────────────
 
-export const slackActions: ActionSource = {
-  listActions: () => allActions,
-  execute: executeAction,
+export const slackPlugin: ActionPlugin = {
+  service: 'slack',
+  description: 'Slack integration for messages, channels, and users',
+  actions: [
+    dmOwner,
+    dmUser,
+    addReaction,
+    listChannels,
+    readHistory,
+    readThread,
+    listUsers,
+    fetchFile,
+    getPins,
+    getChannelInfo,
+    getReactions,
+  ],
 };

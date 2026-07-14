@@ -5,5 +5,6 @@ import plugin0 from "@valet/plugin-github/plugin";
 import plugin1 from "@valet/plugin-gmail/plugin";
 import plugin2 from "@valet/plugin-google-calendar/plugin";
 import plugin3 from "@valet/plugin-google-workspace/plugin";
+import plugin4 from "@valet/plugin-slack/plugin";
 
-export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3];
+export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4];
