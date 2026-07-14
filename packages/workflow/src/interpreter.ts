@@ -65,6 +65,19 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
   while (true) {
     const run = await store.getRun(runId);
     if (!run) throw new Error(`workflow run not found: ${runId}`);
+
+    // A reclaimed `terminalizing` run (crash between `beginTerminalize` and
+    // `settleRun`) MUST resume settlement directly, never re-enter the wave
+    // loop: the outcome is already reserved, and recomputing the runnable
+    // set here would re-execute nodes the terminalization preempted (e.g. a
+    // sibling branch that hadn't run yet when the `stop` node terminated
+    // the run). The store contract (`store.ts` `claimRun` doc) guarantees
+    // the status stays `terminalizing` across reclaim precisely so this
+    // branch is reachable.
+    if (run.status === 'terminalizing') {
+      return await resumeTerminalize(store, run);
+    }
+
     // The store snapshots exactly what was passed to `createRun` at run
     // start (Task 2's contract); narrowing the JSON-value column back to
     // the type the workflow layer itself wrote is not a "bridging a
@@ -98,6 +111,11 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
 
     const waitingOn: RunWaitCondition[] = [];
     let terminate: 'completed' | 'failed' | undefined;
+    // Failure dominance (mirrors main's runtime.ts): if any node in this
+    // run — this wave or an earlier one — has a `failed` checkpoint, a
+    // terminate settles `failed` regardless of the terminating stop node's
+    // own outcome.
+    let sawFailure = [...cpAll.values()].some((cp) => cp.status === 'failed');
 
     for (const node of runnable) {
       const existingCheckpoint = cpAll.get(node.id);
@@ -114,7 +132,17 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
       };
       const outcome = await invokeExecutor(node, executors, argsBase);
 
+      if (outcome.status === 'failed') sawFailure = true;
+
       if (outcome.status === 'parked') {
+        if (outcome.waitingOn.length === 0) {
+          // A contract violation: `parked` must always carry at least one
+          // wait condition, or the wave loop would spin forever with no
+          // way to know what it's waiting on.
+          throw new Error(
+            `node "${node.id}" (type "${node.type}") returned status "parked" with an empty waitingOn — contract violation`,
+          );
+        }
         waitingOn.push(...outcome.waitingOn);
         continue;
       }
@@ -124,13 +152,33 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
     }
 
     if (terminate) {
-      return await twoPhaseSettle(store, run.runId, attempt, terminate);
+      const finalOutcome = sawFailure ? 'failed' : terminate;
+      return await terminateSettle(store, engine, run.runId, attempt, waitingOn, finalOutcome);
     }
     if (waitingOn.length > 0) {
       const wakeAt = earliestTimerWake(waitingOn);
       return await parkAndReturn(store, run, attempt, waitingOn, wakeAt);
     }
+
     // Otherwise loop again: this wave's completions may unblock more nodes.
+    // Livelock guard: a well-behaved wave that ran ≥1 node either produces
+    // a new terminal checkpoint (progress the next pass's runnable/skip
+    // computation can build on) or reports a wait condition above. A
+    // future executor that returns `completed` without writing its
+    // checkpoint (or otherwise fails to move a node off `intent`/absent)
+    // would otherwise spin this loop forever.
+    const cpAfterWave = await loadCheckpoints(store, runId);
+    const madeProgress = runnable.some((node) => {
+      const cp = cpAfterWave.get(node.id);
+      return cp !== undefined && cp.status !== 'intent';
+    });
+    if (!madeProgress) {
+      throw new Error(
+        `workflow livelock: wave executed ${runnable.length} runnable node(s) (${runnable
+          .map((n) => n.id)
+          .join(', ')}) but produced no new terminal checkpoint and no waitingOn`,
+      );
+    }
   }
 }
 
@@ -144,6 +192,45 @@ async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDep
     }
   }
   return await twoPhaseSettle(store, run.runId, attempt, 'cancelled');
+}
+
+/**
+ * Resume settlement for a run reclaimed while `terminalizing`: the outcome
+ * was already reserved by the crashed attempt's `beginTerminalize` call, so
+ * this only re-runs terminal cleanup (no-op this task) and finalizes via
+ * `settleRun`, which is idempotent. Never touches checkpoints or recomputes
+ * the runnable set.
+ */
+async function resumeTerminalize(store: WorkflowStore, run: WorkflowRun): Promise<RunParkState> {
+  if (run.outcome === undefined) {
+    throw new Error(`workflow run ${run.runId} is terminalizing with no reserved outcome`);
+  }
+  // Terminal cleanup hook: no-op this task. See `twoPhaseSettle`.
+  await store.settleRun(run.runId, run.outcome);
+  return await mustGetParkState(store, run.runId);
+}
+
+/**
+ * Settle a run that terminated via a `stop` node's `terminate` signal.
+ * Mirrors `cancelRun`: any submission wait accumulated by sibling
+ * executors in the same wave (parked while the terminating node also ran)
+ * must be aborted so the dispatched work doesn't keep running after the
+ * workflow has settled.
+ */
+async function terminateSettle(
+  store: WorkflowStore,
+  engine: WorkflowEngineDeps,
+  runId: string,
+  attempt: number,
+  waitingOn: RunWaitCondition[],
+  outcome: 'completed' | 'failed',
+): Promise<RunParkState> {
+  for (const wait of waitingOn) {
+    if (wait.kind === 'submission') {
+      await engine.abort(wait.sessionId, wait.threadId);
+    }
+  }
+  return await twoPhaseSettle(store, runId, attempt, outcome);
 }
 
 async function twoPhaseSettle(

@@ -379,3 +379,301 @@ describe('driveUntilPark: resumption after claim-loss', () => {
     expect(byNode.get('e')?.result).toMatchObject({ outcome: 'success', output: { got: true } });
   });
 });
+
+// ─── 9. Terminalizing-reclaim guard ──────────────────────────────────────────
+
+describe('driveUntilPark: terminalizing-reclaim guard', () => {
+  it('resumes settlement with the reserved outcome and never re-enters the wave loop', async () => {
+    const clock = makeClock();
+    // Lease-expiry reclaim below requires the store's own clock to track
+    // the same fake clock the test advances (the store defaults to real
+    // `Date.now()`, which `clock.advance` doesn't affect).
+    const store = new InMemoryWorkflowStore(clock.now);
+    const engine = makeFakeEngineDeps();
+
+    let sideCalls = 0;
+    const countingSideExecutor: NodeExecutor<WaitNode> = {
+      async execute(): Promise<NodeExecuteResult> {
+        sideCalls += 1;
+        return { status: 'completed', result: {} };
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: countingSideExecutor };
+
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'stop', type: 'stop', outcome: 'success' },
+        { id: 'side', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+      ],
+      edges: [
+        { from: 't', to: 'stop' },
+        { from: 't', to: 'side' },
+      ],
+    };
+    await store.createRun('run-9', runParams(), definition, 'v1');
+    const firstAttempt = await claimAttempt(store, 'run-9', 'owner-a');
+
+    // Model a crash between `beginTerminalize` (outcome reserved) and
+    // `settleRun` (never reached) directly through the store — the durable
+    // truth a real crash-mid-drive would leave behind, per the task brief.
+    await store.beginTerminalize('run-9', firstAttempt, 'completed');
+
+    // Lease expires; a new owner reclaims. Per the store contract, a
+    // reclaimed `terminalizing` run stays `terminalizing`.
+    clock.advance(60_000);
+    const secondAttempt = await claimAttempt(store, 'run-9', 'owner-b');
+    const runAfterReclaim = await store.getRun('run-9');
+    expect(runAfterReclaim?.status).toBe('terminalizing');
+
+    const park = await driveUntilPark('run-9', secondAttempt, { store, engine, clock: clock.now, executors });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+    // The runnable set was never recomputed for this reclaimed run: the
+    // side branch's executor must not have been invoked.
+    expect(sideCalls).toBe(0);
+  });
+});
+
+// ─── 10. Failure dominance on terminate ──────────────────────────────────────
+
+describe('driveUntilPark: failure dominance on terminate', () => {
+  it('settles failed when an earlier-wave node failed, even though the stop node completed', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+
+    const failingExecutor: NodeExecutor<WaitNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        const error = 'boom';
+        await args.store.putIntent({
+          runId: args.run.runId,
+          nodeId: args.node.id,
+          iteration: args.iteration,
+          status: 'intent',
+          attempt: args.attempt,
+          createdAt: args.clock(),
+        });
+        await args.store.completeCheckpoint(args.run.runId, args.node.id, args.iteration, args.attempt, {
+          runId: args.run.runId,
+          nodeId: args.node.id,
+          iteration: args.iteration,
+          status: 'failed',
+          error,
+          attempt: args.attempt,
+          createdAt: args.clock(),
+        });
+        return { status: 'failed', error }; // no `terminate` — this node alone doesn't end the run
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: failingExecutor };
+
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'fail', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 's', type: 'set', values: { ok: true } },
+        { id: 'stop', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 't', to: 'fail' },
+        { from: 't', to: 's' },
+        { from: 's', to: 'stop' }, // `stop` only becomes runnable in a later wave than `fail`
+      ],
+    };
+    await store.createRun('run-10', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-10');
+
+    const park = await driveUntilPark('run-10', attempt, { store, engine, clock: clock.now, executors });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('failed'); // dominated by `fail`'s failure, not `stop`'s own success outcome
+
+    const byNode = new Map((await store.getCheckpoints('run-10')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('fail')?.status).toBe('failed');
+    expect(byNode.get('stop')?.status).toBe('completed'); // the node's own checkpoint is unaffected
+  });
+});
+
+// ─── 11. Livelock guard ──────────────────────────────────────────────────────
+
+describe('driveUntilPark: livelock guard', () => {
+  it('throws a descriptive error when a wave makes no progress, without settling or parking the run', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+
+    const misbehavingExecutor: NodeExecutor<WaitNode> = {
+      async execute(): Promise<NodeExecuteResult> {
+        // Contract violation: reports `completed` without writing any
+        // checkpoint (no `putIntent`/`completeCheckpoint`).
+        return { status: 'completed', result: {} };
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: misbehavingExecutor };
+
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'bad', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+      ],
+      edges: [{ from: 't', to: 'bad' }],
+    };
+    await store.createRun('run-11', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-11');
+
+    await expect(driveUntilPark('run-11', attempt, { store, engine, clock: clock.now, executors })).rejects.toThrow(
+      /livelock/i,
+    );
+
+    const run = await store.getRun('run-11');
+    expect(run?.status).toBe('running'); // never settled or parked
+  });
+
+  it('throws a descriptive error when an executor parks with an empty waitingOn', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+
+    const emptyParkExecutor: NodeExecutor<WaitNode> = {
+      async execute(): Promise<NodeExecuteResult> {
+        return { status: 'parked', waitingOn: [] };
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: emptyParkExecutor };
+
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'w', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+      ],
+      edges: [{ from: 't', to: 'w' }],
+    };
+    await store.createRun('run-12', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-12');
+
+    await expect(driveUntilPark('run-12', attempt, { store, engine, clock: clock.now, executors })).rejects.toThrow(
+      /parked.*empty waitingOn|contract violation/i,
+    );
+  });
+});
+
+// ─── 12. Terminate path aborts in-flight submissions ─────────────────────────
+
+describe('driveUntilPark: terminate does not leak in-flight submissions', () => {
+  it('aborts a sibling submission wait parked in the same wave as a terminating stop', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+
+    const parkingSessionExecutor: NodeExecutor<WaitNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        await args.store.putIntent({
+          runId: args.run.runId,
+          nodeId: args.node.id,
+          iteration: args.iteration,
+          status: 'intent',
+          attempt: args.attempt,
+          createdAt: args.clock(),
+        });
+        return {
+          status: 'parked',
+          waitingOn: [
+            {
+              kind: 'submission',
+              nodeId: args.node.id,
+              sessionId: 'session-leaked',
+              threadId: 'thread-leaked',
+              queueItemId: 'queue-leaked',
+            },
+          ],
+        };
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingSessionExecutor };
+
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        // Definition order matters: `side` parks (accumulating the
+        // submission wait) before `stop` runs and sets `terminate` in the
+        // same wave.
+        { id: 'side', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'stop', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 't', to: 'side' },
+        { from: 't', to: 'stop' },
+      ],
+    };
+    await store.createRun('run-13', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-13');
+
+    const park = await driveUntilPark('run-13', attempt, { store, engine, clock: clock.now, executors });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+    expect(engine.abortCalls).toEqual([{ sessionId: 'session-leaked', threadId: 'thread-leaked' }]);
+  });
+});
+
+// ─── 13. Diamond join + all-incoming-inactive skip propagation ──────────────
+
+describe('driveUntilPark: diamond join and skip propagation', () => {
+  it('runs a join node with one active and one skipped incoming edge, and skip-propagates a node fed only by the skipped branch', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'i', type: 'if', conditions: [{ left: 'trigger.data.flag', dataType: 'boolean', operation: 'isTrue' }] },
+        { id: 'a', type: 'set', values: { branch: 'true-side' } },
+        { id: 'b', type: 'set', values: { branch: 'false-side' } },
+        // Join: one incoming from the taken branch, one from the skipped branch.
+        { id: 'd', type: 'set', values: { joined: true } },
+        { id: 'after-d', type: 'set', values: { after: 'd' } },
+        // Fed only by the skipped branch — must itself skip, and propagate.
+        { id: 'dead-end', type: 'set', values: { unreachable: true } },
+        { id: 'after-dead-end', type: 'set', values: { after: 'dead-end' } },
+      ],
+      edges: [
+        { from: 't', to: 'i' },
+        { from: 'i', to: 'a', fromOutput: 'true' },
+        { from: 'i', to: 'b', fromOutput: 'false' },
+        { from: 'a', to: 'd' },
+        { from: 'b', to: 'd' },
+        { from: 'd', to: 'after-d' },
+        { from: 'b', to: 'dead-end' },
+        { from: 'dead-end', to: 'after-dead-end' },
+      ],
+    };
+    const params = runParams({
+      input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { flag: true }, metadata: {} },
+    });
+    await store.createRun('run-14', params, definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-14');
+
+    const park = await driveUntilPark('run-14', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('completed');
+
+    const byNode = new Map((await store.getCheckpoints('run-14')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('a')?.status).toBe('completed');
+    expect(byNode.get('b')?.status).toBe('skipped');
+    // The join ran because at least one incoming edge (from `a`) was active.
+    expect(byNode.get('d')?.status).toBe('completed');
+    expect(byNode.get('after-d')?.status).toBe('completed');
+    // Fed only by the skipped branch: all incoming inactive → skipped, and propagates.
+    expect(byNode.get('dead-end')?.status).toBe('skipped');
+    expect(byNode.get('after-dead-end')?.status).toBe('skipped');
+  });
+});
