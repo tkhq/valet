@@ -699,3 +699,64 @@ export interface CancelWorkflowRunResponse {
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
 }
+
+// ── REST: plugins + credentials (plugin-system-v2 plan Task 15) ───────────
+
+export type CredentialKind = "oauth2" | "api_key" | "bot_token" | "service_account";
+
+export interface PluginServiceSummary {
+  /** Credential store key — defaults to the plugin name when the
+   * declaration omits its own `service` (see `CredentialDeclaration`). */
+  service: string;
+  type: CredentialKind;
+  scopes?: string[];
+  connectLabel?: string;
+  configKeys: string[];
+  connected: boolean;
+  /** Set (to `true`) only when an `ActionPlugin` for this service declares
+   * `resolveActions` — the plugin's action list isn't fully known statically. */
+  dynamic?: true;
+}
+
+export interface PluginSummary {
+  name: string;
+  version: string;
+  description?: string;
+  /** Count of statically-declared actions only (plugins with `resolveActions`
+   * may expose more at runtime — see `PluginServiceSummary.dynamic`). */
+  actionCount: number;
+  /** Empty when the plugin declares no `credentials` (nothing to connect). */
+  services: PluginServiceSummary[];
+}
+
+export interface ListPluginsResponse {
+  plugins: PluginSummary[];
+}
+
+export interface CredentialSummary {
+  service: string;
+  type: CredentialKind;
+  scopes?: string[];
+  connectedAt: string;
+}
+
+export interface ListCredentialsResponse {
+  credentials: CredentialSummary[];
+}
+
+export interface PutCredentialRequest {
+  type: CredentialKind;
+  accessToken?: string;
+  apiKey?: string;
+  /** Only meaningful (and only accepted) alongside `type: "oauth2"`. */
+  refreshToken?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PutCredentialResponse {
+  ok: true;
+}
+
+export interface DeleteCredentialResponse {
+  ok: true;
+}

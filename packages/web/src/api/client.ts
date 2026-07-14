@@ -14,6 +14,7 @@ import type {
   CreateThreadResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  DeleteCredentialResponse,
   EnsureOrchestratorResponse,
   GetMemoryTreeResponse,
   GetOrchestratorChildrenResponse,
@@ -21,10 +22,12 @@ import type {
   GetSessionResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
+  ListCredentialsResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
+  ListPluginsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
@@ -36,6 +39,8 @@ import type {
   PatchSessionResponse,
   PatchThreadRequest,
   PatchThreadResponse,
+  PutCredentialRequest,
+  PutCredentialResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -226,6 +231,21 @@ export const api = {
     request<CancelWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
+    ),
+
+  // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
+  listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
+  listCredentials: () => request<ListCredentialsResponse>("GET", "/credentials"),
+  putCredential: (service: string, body: PutCredentialRequest) =>
+    request<PutCredentialResponse>(
+      "PUT",
+      `/credentials/${encodeURIComponent(service)}`,
+      body,
+    ),
+  deleteCredential: (service: string) =>
+    request<DeleteCredentialResponse>(
+      "DELETE",
+      `/credentials/${encodeURIComponent(service)}`,
     ),
 };
 

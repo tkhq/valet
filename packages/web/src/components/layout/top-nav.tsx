@@ -63,6 +63,13 @@ export function TopNav() {
       >
         Workflows
       </Link>
+      <Link
+        to="/integrations"
+        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
+        activeProps={{ className: "text-ink" }}
+      >
+        Integrations
+      </Link>
 
       <NotificationsBell />
 
