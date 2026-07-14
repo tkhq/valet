@@ -189,7 +189,7 @@ export function describeSignalContract(makeStore: () => Promise<WorkflowStore> |
         { nodeId: 'node-a', iteration: 0, attempt: 1 },
         terminal({ attempt: 1 }),
       );
-      await store.voidConsumption('sig-1');
+      await store.voidConsumption(RUN_ID, 'sig-1');
 
       const unconsumed = await store.listSignals(RUN_ID, { unconsumed: true });
       expect(unconsumed.map((s) => s.signalId)).toEqual(['sig-1']);
@@ -209,8 +209,8 @@ export function describeSignalContract(makeStore: () => Promise<WorkflowStore> |
       const store = await setup();
       await store.insertSignal(signal());
 
-      await expect(store.voidConsumption('sig-1')).resolves.toBeUndefined();
-      await expect(store.voidConsumption('does-not-exist')).resolves.toBeUndefined();
+      await expect(store.voidConsumption(RUN_ID, 'sig-1')).resolves.toBeUndefined();
+      await expect(store.voidConsumption(RUN_ID, 'does-not-exist')).resolves.toBeUndefined();
 
       const [stored] = await store.listSignals(RUN_ID);
       expect(stored.consumedAt).toBeUndefined();
@@ -231,6 +231,44 @@ export function describeSignalContract(makeStore: () => Promise<WorkflowStore> |
       const all = await store.listSignals(RUN_ID);
       expect(all).toHaveLength(1);
       expect(all[0].consumedAt).toBeDefined();
+    });
+
+    it('signals and voidConsumption are scoped per-run: two runs each holding a same-signalId signal do not interfere', async () => {
+      const store = await setup();
+      const RUN_B = 'run-2';
+      await store.createRun(RUN_B, runParams(), { version: 'dag/v1' }, 'v1');
+
+      const insertedA = await store.insertSignal(signal({ runId: RUN_ID, signalId: 'cancel', signalType: 'cancel' }));
+      const insertedB = await store.insertSignal(signal({ runId: RUN_B, signalId: 'cancel', signalType: 'cancel' }));
+      expect(insertedA.runId).toBe(RUN_ID);
+      expect(insertedB.runId).toBe(RUN_B);
+
+      // Both runs independently see their own 'cancel' signal — run B's
+      // insert must not have collided with (or returned) run A's row.
+      const signalsA = await store.listSignals(RUN_ID);
+      const signalsB = await store.listSignals(RUN_B);
+      expect(signalsA.map((s) => s.signalId)).toEqual(['cancel']);
+      expect(signalsB.map((s) => s.signalId)).toEqual(['cancel']);
+
+      await store.consumeSignalAndCheckpoint(
+        'cancel',
+        { nodeId: 'node-a', iteration: 0, attempt: 1 },
+        terminal({ runId: RUN_ID, nodeId: 'node-a', attempt: 1 }),
+      );
+
+      const [consumedA] = await store.listSignals(RUN_ID);
+      expect(consumedA.consumedAt).toBeDefined();
+      const [unconsumedB] = await store.listSignals(RUN_B);
+      expect(unconsumedB.consumedAt).toBeUndefined();
+
+      // Voiding run B's consumption (it was never consumed) must not touch
+      // run A's already-consumed signal.
+      await store.voidConsumption(RUN_B, 'cancel');
+
+      const [stillConsumedA] = await store.listSignals(RUN_ID);
+      expect(stillConsumedA.consumedAt).toBeDefined();
+      const [stillUnconsumedB] = await store.listSignals(RUN_B);
+      expect(stillUnconsumedB.consumedAt).toBeUndefined();
     });
 
     it('mutating a returned signal does not affect the stored state', async () => {

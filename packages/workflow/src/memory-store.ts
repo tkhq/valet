@@ -19,6 +19,11 @@ function checkpointKey(runId: string, nodeId: string, iteration: number): string
   return `${runId}::${nodeId}::${iteration}`;
 }
 
+/** Signals are scoped per-run: two runs may each hold a signal with the same `signalId` (e.g. `'cancel'`). */
+function signalKey(runId: string, signalId: string): string {
+  return `${runId}::${signalId}`;
+}
+
 export class InMemoryWorkflowStore implements WorkflowStore {
   private runs = new Map<string, WorkflowRun>();
   private checkpoints = new Map<string, NodeCheckpoint>();
@@ -44,6 +49,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     params: RunParams,
     definition: unknown,
     definitionVersionId: string,
+    owner?: { ownerType: string; ownerId: string },
   ): Promise<WorkflowRun> {
     const existing = this.runs.get(runId);
     if (existing) return structuredClone(existing);
@@ -59,6 +65,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       attempt: 0,
       wakeRequested: false,
       createdAt: now,
+      owner: owner ? structuredClone(owner) : undefined,
     };
     this.runs.set(runId, run);
     return structuredClone(run);
@@ -232,10 +239,11 @@ export class InMemoryWorkflowStore implements WorkflowStore {
   }
 
   async insertSignal(signal: RunSignal): Promise<RunSignal> {
-    const existing = this.signals.get(signal.signalId);
+    const key = signalKey(signal.runId, signal.signalId);
+    const existing = this.signals.get(key);
     if (existing) return structuredClone(existing);
     const stored = structuredClone(signal);
-    this.signals.set(signal.signalId, stored);
+    this.signals.set(key, stored);
     return structuredClone(stored);
   }
 
@@ -244,7 +252,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     consumedBy: { nodeId: string; iteration: number; attempt: number },
     checkpoint: NodeCheckpoint,
   ): Promise<void> {
-    const signal = this.signals.get(signalId);
+    const signal = this.signals.get(signalKey(checkpoint.runId, signalId));
     if (!signal) throw new Error(`signal not found: ${signalId}`);
     if (signal.consumedAt !== undefined) {
       const same =
@@ -284,8 +292,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     return out;
   }
 
-  async voidConsumption(signalId: string): Promise<void> {
-    const signal = this.signals.get(signalId);
+  async voidConsumption(runId: string, signalId: string): Promise<void> {
+    const signal = this.signals.get(signalKey(runId, signalId));
     if (!signal) return;
     signal.consumedAt = undefined;
     signal.consumedBy = undefined;

@@ -62,7 +62,12 @@ import type { RunParams, RunParkState, RunWaitCondition, WorkflowStore } from '.
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
 export interface RunHost {
   /** Begin executing a run. Idempotent by runId: re-starting an existing run is a no-op. */
-  start(runId: string, params: RunParams, definition: unknown): Promise<void>;
+  start(
+    runId: string,
+    params: RunParams,
+    definition: unknown,
+    owner?: { ownerType: string; ownerId: string },
+  ): Promise<void>;
   /** Resume a parked run now. Spurious wakes are safe. */
   wake(runId: string): Promise<void>;
   /** Durable timer. Move-forward: keeps the earlier of an existing scheduled wake and `at`. */
@@ -150,9 +155,14 @@ export class LocalRunHost implements RunHost {
 
   // ─── RunHost port ────────────────────────────────────────────────────────
 
-  async start(runId: string, params: RunParams, definition: unknown): Promise<void> {
+  async start(
+    runId: string,
+    params: RunParams,
+    definition: unknown,
+    owner?: { ownerType: string; ownerId: string },
+  ): Promise<void> {
     if (!this.running) return;
-    await this.store.createRun(runId, params, definition, params.definitionVersionId);
+    await this.store.createRun(runId, params, definition, params.definitionVersionId, owner);
     await this.wake(runId);
   }
 
@@ -398,7 +408,7 @@ export class LocalRunHost implements RunHost {
       );
       const hasMatchingTerminal = cp !== undefined && cp.status !== 'intent' && cp.attempt === signal.consumedBy.attempt;
       if (!hasMatchingTerminal) {
-        await this.store.voidConsumption(signal.signalId);
+        await this.store.voidConsumption(runId, signal.signalId);
         voided = true;
       }
     }

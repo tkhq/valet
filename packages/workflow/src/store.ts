@@ -65,6 +65,13 @@ export interface WorkflowRun extends RunParkState {
   wakeAt?: number;
   wakeRequested: boolean;
   createdAt: number;
+  /**
+   * Principal ownership (who this run belongs to for access-control
+   * purposes) — distinct from `RunParkState.ownerId`, which is the
+   * claim-lease owner (a worker instance id). Optional: a caller that
+   * doesn't pass `owner` to `createRun` gets an unset owner.
+   */
+  owner?: { ownerType: string; ownerId: string };
 }
 
 /** A durable signal row (approval resolution, cancellation, etc.). */
@@ -100,12 +107,17 @@ export class WorkflowFenceError extends Error {
 }
 
 export interface WorkflowStore {
-  /** Insert a new run row if absent; if a row with this id already exists, return it unchanged. */
+  /**
+   * Insert a new run row if absent; if a row with this id already exists,
+   * return it unchanged. `owner` records principal ownership (see
+   * `WorkflowRun.owner`); when omitted the run has no recorded owner.
+   */
   createRun(
     runId: string,
     params: RunParams,
     definition: unknown,
     definitionVersionId: string,
+    owner?: { ownerType: string; ownerId: string },
   ): Promise<WorkflowRun>;
 
   getRun(runId: string): Promise<WorkflowRun | null>;
@@ -232,6 +244,11 @@ export interface WorkflowStore {
 
   listSignals(runId: string, opts?: { unconsumed?: boolean }): Promise<RunSignal[]>;
 
-  /** Re-delivery: clear `consumedAt`/`consumedBy` on a signal whose consumption produced no checkpoint. */
-  voidConsumption(signalId: string): Promise<void>;
+  /**
+   * Re-delivery: clear `consumedAt`/`consumedBy` on a signal whose
+   * consumption produced no checkpoint. Scoped by `runId` (in addition to
+   * `signalId`) so voiding a signal on one run can never touch a
+   * same-`signalId` row belonging to a different run.
+   */
+  voidConsumption(runId: string, signalId: string): Promise<void>;
 }

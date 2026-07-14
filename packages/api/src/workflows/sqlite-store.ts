@@ -48,6 +48,8 @@ interface WorkflowRunRow {
   lease_owner_id: string | null;
   lease_expires_at: number | null;
   attempt: number;
+  owner_type: string;
+  owner_id: string;
   created_at: number;
   updated_at: number;
 }
@@ -98,6 +100,11 @@ function rowToRun(row: WorkflowRunRow): WorkflowRun {
     wakeAt: row.wake_at ?? undefined,
     wakeRequested: row.wake_requested !== 0,
     createdAt: row.created_at,
+    // `owner_type`/`owner_id` carry not-null defaults ('user'/'') so a run
+    // created without an owner has a distinguishable sentinel row rather
+    // than NULL columns — map that sentinel back to `undefined` so this
+    // matches `InMemoryWorkflowStore`'s owner-omitted-means-undefined shape.
+    owner: row.owner_id === '' ? undefined : { ownerType: row.owner_type, ownerId: row.owner_id },
   };
 }
 
@@ -154,15 +161,36 @@ export class SqliteWorkflowStore implements WorkflowStore {
     params: RunParams,
     definition: unknown,
     definitionVersionId: string,
+    owner?: { ownerType: string; ownerId: string },
   ): Promise<WorkflowRun> {
     const now = this.clock();
-    this.sqlite
-      .prepare(
-        `INSERT OR IGNORE INTO workflow_runs
-          (id, workflow_id, definition_version_id, definition, params, status, waiting_on, wake_requested, attempt, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', '[]', 0, 0, ?, ?)`,
-      )
-      .run(runId, params.workflowId, definitionVersionId, JSON.stringify(definition), JSON.stringify(params), now, now);
+    if (owner) {
+      this.sqlite
+        .prepare(
+          `INSERT OR IGNORE INTO workflow_runs
+            (id, workflow_id, definition_version_id, definition, params, status, waiting_on, wake_requested, attempt, owner_type, owner_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', '[]', 0, 0, ?, ?, ?, ?)`,
+        )
+        .run(
+          runId,
+          params.workflowId,
+          definitionVersionId,
+          JSON.stringify(definition),
+          JSON.stringify(params),
+          owner.ownerType,
+          owner.ownerId,
+          now,
+          now,
+        );
+    } else {
+      this.sqlite
+        .prepare(
+          `INSERT OR IGNORE INTO workflow_runs
+            (id, workflow_id, definition_version_id, definition, params, status, waiting_on, wake_requested, attempt, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', '[]', 0, 0, ?, ?)`,
+        )
+        .run(runId, params.workflowId, definitionVersionId, JSON.stringify(definition), JSON.stringify(params), now, now);
+    }
     return rowToRun(this.mustGetRunRow(runId));
   }
 
@@ -185,7 +213,7 @@ export class SqliteWorkflowStore implements WorkflowStore {
          WHERE id = ?
            AND (
              status IN ('pending', 'parked')
-             OR (status IN ('running', 'terminalizing') AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+             OR (status IN ('running', 'terminalizing') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
            )`,
       )
       .run(ownerId, now + leaseMs, now, runId, now);
@@ -468,9 +496,9 @@ export class SqliteWorkflowStore implements WorkflowStore {
     return rows.map(rowToSignal);
   }
 
-  async voidConsumption(signalId: string): Promise<void> {
+  async voidConsumption(runId: string, signalId: string): Promise<void> {
     this.sqlite
-      .prepare(`UPDATE workflow_signals SET consumed_at = NULL, consumed_by = NULL WHERE signal_id = ?`)
-      .run(signalId);
+      .prepare(`UPDATE workflow_signals SET consumed_at = NULL, consumed_by = NULL WHERE run_id = ? AND signal_id = ?`)
+      .run(runId, signalId);
   }
 }

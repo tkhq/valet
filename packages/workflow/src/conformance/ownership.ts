@@ -212,6 +212,21 @@ export function describeOwnershipContract(makeStore: () => Promise<WorkflowStore
       expect(run?.outcome).toBe('cancelled');
     });
 
+    it('createRun with an owner round-trips via getRun; omitting owner leaves it unset', async () => {
+      const store = await makeStore();
+      await store.createRun('run-owned', runParams(), { version: 'dag/v1' }, 'v1', {
+        ownerType: 'team',
+        ownerId: 'team-42',
+      });
+      const owned = await store.getRun('run-owned');
+      expect(owned?.owner).toEqual({ ownerType: 'team', ownerId: 'team-42' });
+
+      // The suite's own `setup()`-created RUN_ID run never passed an owner.
+      const store2 = await setup();
+      const unowned = await store2.getRun(RUN_ID);
+      expect(unowned?.owner).toBeUndefined();
+    });
+
     it('listRunnable surfaces a wake-requested parked run and a due-timer parked run', async () => {
       const store = await setup();
       const claimed = await store.claimRun(RUN_ID, 'owner-1', 30_000);
