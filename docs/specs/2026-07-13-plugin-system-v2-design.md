@@ -1,12 +1,12 @@
 # Plugin System v2 — Design Spec
 
-> Defines how the existing plugin library (`packages/plugin-*`, ~56 actions across 14 services, 2 channel plugins, ~10 content skills) moves onto the v2 engine: the `ValetPlugin` manifest contract, the fleet port of actions to engine-native shapes (no compat adapter), channel-transport rewrites, trigger and credential-declaration contracts, and dual loading (bundled registry + dynamic node_modules). Also resequences the local-E2E roadmap: platform (auth + plugins) lands after workflows; Telegram ships as the first v2 channel plugin.
+> Defines the v2 plugin system and the in-place conversion of the existing plugin library (`packages/plugin-*`, ~56 actions across 14 services, 2 channel plugins, ~10 content skills): the `ValetPlugin` manifest contract, engine-native action shapes (no compat adapter, no dual trees — plugins simply become v2), channel-transport rewrites, trigger and credential-declaration contracts, and dual loading (bundled registry + dynamic node_modules). Also resequences the local-E2E roadmap: platform (auth + plugins) lands after workflows; Telegram ships as the first v2 channel plugin.
 
 ## Scope
 
-Covers: the v2 plugin manifest and entry-point convention; the action port (Zod `ActionSource` → engine `ActionPlugin`); channel-transport migration strategy; content plugins (skills/personas) mapping; the trigger contract; credential declarations; the two loaders; per-plugin migration mechanics and sunset rules; roadmap resequencing.
+Covers: the v2 plugin manifest and entry-point convention; the in-place action conversion (Zod `ActionSource` → engine `ActionPlugin`); channel-transport strategy; content plugins (skills/personas) mapping; the trigger contract; credential declarations; the two loaders; per-plugin conversion mechanics; roadmap resequencing.
 
-Does NOT cover: OAuth/connect flow implementation, token storage UI, consent screens (platform/login spec); the HTTP webhook ingress route and trigger routing (lands with its consumers — workflows and channels); the Telegram/Slack transport implementations themselves (their phases); legacy worker changes (frozen until sunset).
+Does NOT cover: OAuth/connect flow implementation, token storage UI, consent screens (platform/login spec); the HTTP webhook ingress route and trigger routing (lands with its consumers — workflows and channels); the Telegram/Slack transport implementations themselves (their phases); the legacy worker (frozen; pins pre-conversion — see Background).
 
 ## Background
 
@@ -15,7 +15,9 @@ Two plugin systems exist today:
 - **Legacy (`@valet/sdk`)**: Zod-based `ActionSource` (`listActions`/`execute` with a flat resolved-credentials `ActionContext`), message-relay `ChannelTransport`, webhook trigger parsers, content files delivered to sandboxes. Compiled into the worker via `make generate-registries`. Serves production until worker sunset.
 - **Engine v2 (`@valet/engine`)**: `plugin-catalog.ts` defines the engine-native `ActionPlugin`/`PluginAction` (TypeBox parameters, `ToolContext`-derived `PluginActionContext`, `ToolAttachment` results) exposed via `list_tools`/`call_tool` indirection, and explicitly does not accept legacy shapes. The engine spec defines the v2 `ChannelTransport` contract (verified ingress → conversationKey → `SignalContent`), `SkillSource`, `RoleSpec`, `CommandToolDef`, and `CredentialStore`.
 
-Decision (with the user): **no compat adapter**. All action plugins are ported engine-native in one subagent-fleet wave. Channels are rewritten to the v2 contract (payload helpers salvaged). Legacy code paths stay in place, untouched, solely for the worker until sunset.
+Decisions (with the user): **no compat adapter, no migration period**. Every supported plugin is converted **in place** in one subagent-fleet wave — `src/actions/` is rewritten to engine-native shapes, the manifest becomes the package's only contract, and the legacy Zod exports are deleted. There is no version flag: a plugin in the tree IS a v2 plugin. Channels are rewritten to the v2 contract (payload helpers salvaged).
+
+**Stated consequence:** the frozen legacy worker imports these packages via its generated registries; in-place conversion breaks those imports. The legacy stack therefore pins to the last pre-conversion commit for any future deploy (it is already frozen), and its registries are not regenerated. If a legacy deploy ever needs a plugin bugfix, it is cherry-picked onto that pin — the main branch carries v2 shapes only.
 
 ## The `ValetPlugin` Manifest
 
@@ -36,13 +38,13 @@ export interface ValetPlugin {
 }
 ```
 
-**Entry-point convention:** a v2 plugin package declares `"valet": { "plugin": "./dist/plugin.js" }` in `package.json`; that module's default export is a `ValetPlugin` (or a `() => ValetPlugin | Promise<ValetPlugin>` factory for plugins needing async assembly). The source convention is `src/v2.ts` (or `src/plugin.ts`) building the manifest; legacy `src/actions/`, `src/channels/` remain for the worker and are ignored by v2 loaders.
+**Entry-point convention:** a plugin package declares `"valet": { "plugin": "./dist/plugin.js" }` in `package.json`; that module's default export is a `ValetPlugin` (or a `() => ValetPlugin | Promise<ValetPlugin>` factory for plugins needing async assembly). The source convention is `src/plugin.ts` building the manifest from the package's action/content modules. The marker's presence is the whole contract — there is no version flag; a package without the marker is not a plugin.
 
-`plugin.yaml` gains a `v2: true|false` flag. Empty scaffolds and retired plugins mark `v2: false` and are skipped by both loaders. `plugin-memory-compaction` is retired outright (v2 compaction hooks + the memory service replaced it).
+Empty scaffolds are deleted from the tree (not flagged). `plugin-memory-compaction` is retired outright (v2 compaction hooks + the memory service replaced it).
 
 ## Actions: the Fleet Port
 
-Every action-bearing plugin is ported engine-native in one wave, one subagent task per plugin, each with its own review gate. The port is a **mechanical transform with a preservation rule**:
+Every action-bearing plugin is converted engine-native **in place** in one wave — one subagent task per plugin, each with its own review gate; the legacy Zod modules are replaced, not shadowed. The conversion is a **mechanical transform with a preservation rule**:
 
 - Zod parameter schemas → TypeBox (`inputSchema` raw-JSON-Schema fields, where present, translate directly).
 - `ActionDefinition` metadata (id, name, description, riskLevel) → `PluginAction` fields verbatim.
@@ -59,7 +61,7 @@ Approval semantics carry over automatically: `riskLevel` maps through `plugin-ca
 
 ## Channels: Rewrite, Salvage Helpers
 
-The legacy message-relay transport and the v2 contract (verified ingress before parsing → conversationKey codec → `SignalContent` admission with `dispatchId` = provider event id → outbound send → gate delivery with inline buttons and edit-on-resolution) share no seam worth adapting. Each channel plugin gains `src/transport/` implementing the v2 contract, lifting payload-level modules (Telegram Bot API client, Slack block rendering, file handling) verbatim. Telegram is rewritten in its roadmap phase (the first v2 channel plugin); Slack follows. Until then, channel plugins load in v2 with `transports: []` and their actions/content only.
+The legacy message-relay transport and the v2 contract (verified ingress before parsing → conversationKey codec → `SignalContent` admission with `dispatchId` = provider event id → outbound send → gate delivery with inline buttons and edit-on-resolution) share no seam worth adapting. Each channel plugin's transport is rewritten to the v2 contract in `src/transport/`, lifting payload-level modules (Telegram Bot API client, Slack block rendering, file handling) verbatim; the legacy channel modules are deleted with the rest of the Zod surface. Telegram's transport is written in its roadmap phase (the first v2 channel plugin); Slack follows. Until then, the channel plugins ship manifests with `transports: []` and their actions/content only.
 
 ## Triggers
 
@@ -111,15 +113,14 @@ Both produce `ValetPlugin[]`; everything downstream is loader-agnostic.
 
 Host assembly (`packages/api`): `assemblePlugins(plugins, config)` → catalog tools via `pluginCatalogTools`, skills/roles merged into session options, transports/triggers registered with their (future) consumers. Per-deployment enable/disable is config on the assembler, not loader logic. Name collisions across plugins fail assembly loudly.
 
-## Migration Mechanics and Sunset Rules
+## Conversion Mechanics
 
-1. **Wave 0 (framework):** `ValetPlugin` type + manifest validation schema in `@valet/engine`; both loaders + assembler in `packages/api`; `generate-registries` v2 target; orchestrator/session wiring (catalog tools + content into `EngineHost` session options).
-2. **Wave 1 (fleet port):** one subagent task per action-bearing plugin (github, slack-actions, gmail, google-calendar, google-workspace, cloudflare, deepwiki, figma, linear, notion, sentry, stripe, typefully, browser/sandbox-tunnels/workflows content) — each: `src/v2.ts` manifest, TypeBox schemas, verbatim bodies, credential key mapping, mocked-fetch tests, per-plugin review.
+1. **Wave 0 (framework):** `ValetPlugin` type + manifest validation schema in `@valet/engine`; both loaders + assembler in `packages/api`; `generate-registries` retargeted to emit the v2 registry (worker registry generation is retired along with the worker's plugin wiring); orchestrator/session wiring (catalog tools + content into `EngineHost` session options).
+2. **Wave 1 (fleet conversion):** one subagent task per action-bearing plugin (github, slack-actions, gmail, google-calendar, google-workspace, cloudflare, deepwiki, figma, linear, notion, sentry, stripe, typefully, browser/sandbox-tunnels/workflows content) — each: replace the Zod modules with engine-native ones, `src/plugin.ts` manifest, TypeBox schemas, verbatim bodies, credential key mapping, mocked-fetch tests, delete dead legacy files, per-plugin review. The SDK's Zod `ActionSource` and legacy channel contracts are deleted at the end of the wave.
 3. **Wave 2 (integration):** orchestrator dogfood with real credentials for 2–3 services; `list_tools`/`call_tool` end-to-end; unavailable-credential UX.
 4. **Channel transports:** Telegram in its roadmap phase, Slack after.
-5. **Sunset:** when the legacy worker retires, delete `src/actions/`+`src/channels/` legacy trees, the SDK's Zod `ActionSource`/channel contracts, and the worker registries. Until then legacy code is frozen — bugfixes land in the v2 port; backporting is per-case and explicit.
 
-New plugins author engine-native from day one; the Zod contract accepts no new plugins effective immediately.
+New plugins author engine-native from day one.
 
 ## Roadmap Resequencing
 
@@ -141,4 +142,4 @@ New plugins author engine-native from day one; the Zod contract accepts no new p
 
 - **Verbatim-body rule erosion:** subagents "improving" logic during ports is the main quality risk — the per-plugin review explicitly diffs bodies against legacy and rejects non-type changes.
 - **Credential key-map drift:** a wrong mapping fails at first real use, not in mocked tests; Wave 2's real-credential dogfood on 2–3 services is the mitigation, and declarations make the expected keys auditable.
-- **Dual-tree period:** legacy and v2 action trees coexist until sunset; the freeze rule (bugfixes land v2-first) prevents silent divergence.
+- **Legacy worker pin:** in-place conversion breaks the frozen worker's plugin imports; any future legacy deploy builds from the pre-conversion pin, with cherry-picks per case. This is accepted — the worker was already frozen.
