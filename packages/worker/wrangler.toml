@@ -60,7 +60,7 @@ deleted_classes = ["WorkflowExecutorDO"]
 # Cloudflare Workflows binding — the dag/v1 interpreter that drives
 # workflow executions. See docs/specs/workflows.md.
 [[workflows]]
-name = "valet-workflow-interpreter"
+name = "${WORKFLOW_NAME}"
 binding = "WORKFLOW_INTERPRETER"
 class_name = "ValetWorkflowInterpreter"
 

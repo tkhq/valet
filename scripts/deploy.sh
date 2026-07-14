@@ -35,6 +35,9 @@ PAGES_DEPLOY_BRANCH="${PAGES_DEPLOY_BRANCH:-main}"
 FRONTEND_PREVIEW_ORIGIN_SUFFIX="${FRONTEND_PREVIEW_ORIGIN_SUFFIX:-${PAGES_PROJECT_NAME}.pages.dev}"
 D1_DATABASE_NAME="${D1_DATABASE_NAME:-${PROJECT_NAME}-db}"
 R2_BUCKET_NAME="${R2_BUCKET_NAME:-${PROJECT_NAME}-storage}"
+# Cloudflare Workflows are scoped by name at the account level, so this must be
+# per-env or one env's deploy claims the workflow for all of them.
+WORKFLOW_NAME="${WORKFLOW_NAME:-${PROJECT_NAME}-workflow-interpreter}"
 MODAL_APP_NAME="${MODAL_APP_NAME:-${PROJECT_NAME}-backend}"
 MODAL_LABEL_PREFIX="${MODAL_LABEL_PREFIX:-${ENVIRONMENT}-}"
 ALLOWED_EMAILS="${ALLOWED_EMAILS:-}"
@@ -120,6 +123,7 @@ generate_wrangler_config() {
         -e "s|\${D1_DATABASE_NAME}|${D1_DATABASE_NAME}|g" \
         -e "s|\${D1_DATABASE_ID}|${D1_DATABASE_ID}|g" \
         -e "s|\${R2_BUCKET_NAME}|${R2_BUCKET_NAME}|g" \
+        -e "s|\${WORKFLOW_NAME}|${WORKFLOW_NAME}|g" \
         -e "s|\${ALLOWED_EMAILS}|${ALLOWED_EMAILS}|g" \
         -e "s|\${API_PUBLIC_URL}|${API_PUBLIC_URL}|g" \
         -e "s|\${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|g" \
