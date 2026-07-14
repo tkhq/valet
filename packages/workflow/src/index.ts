@@ -48,7 +48,13 @@ export type {
   WorkflowAwaitResultOptions,
   WorkflowCreateSessionOptions,
   WorkflowEngineDeps,
+  WorkflowInvokeActionRequest,
+  WorkflowInvokeActionResult,
+  WorkflowLlmCompleteRequest,
+  WorkflowLlmCompleteResult,
   WorkflowPromptOptions,
+  WorkflowPromptOrchestratorOptions,
+  WorkflowPromptOrchestratorResult,
   WorkflowPromptReceipt,
 } from './engine-deps.js';
 

@@ -34,18 +34,34 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
-import type { Principal, SessionStore } from "@valet/engine";
+import { completeSimple, getModel } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@mariozechner/pi-ai";
+import { parsePrincipal, type Principal, type SessionStore, type SignalContent } from "@valet/engine";
 import type {
   WorkflowAwaitResultOptions,
   WorkflowCreateSessionOptions,
   WorkflowEngineDeps,
+  WorkflowInvokeActionRequest,
+  WorkflowInvokeActionResult,
+  WorkflowLlmCompleteRequest,
+  WorkflowLlmCompleteResult,
   WorkflowPromptOptions,
+  WorkflowPromptOrchestratorOptions,
+  WorkflowPromptOrchestratorResult,
   WorkflowPromptReceipt,
   WorkflowStore,
 } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { workflowDefinitions } from "../schema/index.js";
+
+// Same compile-time-vs-runtime bridge `resolveModelId` solves in
+// `packages/engine/src/thread.ts` and `EngineHost.resolveModel` (host.ts):
+// pi-ai's `getModel` is typed against its literal MODELS table, but model
+// ids here come from a workflow definition's `LlmNode.model` string at
+// runtime. Not re-exported from `@valet/engine`, so duplicated here rather
+// than widening that internal export for one caller.
+type PiModel = Model<Api>;
 
 export interface WorkflowEngineDepsOpts {
   host: EngineHost;
@@ -83,13 +99,27 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     throw new Error(`workflow engine-deps: definition not found: ${run.params.workflowId}`);
   }
 
-  const owner: Principal = {
-    type: run.owner.ownerType as Principal["type"],
-    id: run.owner.ownerId,
-  };
-  const actorUserId = owner.type === "user" ? owner.id : `${owner.type}:${owner.id}`;
+  const owner = parsePrincipal(`${run.owner.ownerType}:${run.owner.ownerId}`);
+  if (!owner) {
+    throw new Error(
+      `workflow engine-deps: run ${runId} has an unrecognized owner: ${JSON.stringify(run.owner)}`,
+    );
+  }
 
-  return { orgId: defRow.orgId, actorUserId, owner };
+  return { orgId: defRow.orgId, actorUserId: actorUserIdFor(owner), owner };
+}
+
+/**
+ * A workflow run's owner is a `Principal` (user/team/org), never a live
+ * user session — there's no "acting user" to attribute engine bookkeeping
+ * to. `CreateSessionOptions.userId`/`actorUserId` is only used by the
+ * engine for bookkeeping/defaults, never for auth, so `owner.id` (user) or
+ * `{ownerType}:{ownerId}` (team/org) is a safe placeholder. Shared between
+ * `resolveRunContext` and `promptOrchestrator` so both derive the same
+ * value from a `Principal` the same way.
+ */
+function actorUserIdFor(principal: Principal): string {
+  return principal.type === "user" ? principal.id : `${principal.type}:${principal.id}`;
 }
 
 function workspaceFor(sessionId: string): string {
@@ -177,21 +207,120 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       return item?.status === "settled";
     },
 
-    // Task 7 lands the real implementations (llmComplete over pi-ai
-    // getModel+completeSimple; promptOrchestrator over the Phase 4
-    // EngineHost orchestrator path; invokeAction's Phase-6-deferred stub).
-    // Stubbed here only so this factory keeps satisfying the now-3-method-
-    // wider `WorkflowEngineDeps` interface.
-    async llmComplete() {
-      throw new Error("WorkflowEngineDeps.llmComplete: not implemented — lands in Task 7");
+    async llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult> {
+      const model = resolveWorkflowModel(req.model);
+      const result = await completeSimple(
+        model,
+        {
+          systemPrompt: req.system,
+          messages: [{ role: "user", content: [{ type: "text", text: req.prompt }], timestamp: Date.now() }],
+        },
+        {
+          temperature: req.temperature,
+          maxTokens: req.maxOutputTokens,
+        },
+      );
+      const text = result.content
+        .filter((b): b is { type: "text"; text: string } => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+      return { text };
     },
 
-    async promptOrchestrator() {
-      throw new Error("WorkflowEngineDeps.promptOrchestrator: not implemented — lands in Task 7");
+    /**
+     * Dispatches a followup `SignalContent` onto `opts.ownerHint`'s
+     * orchestrator session (Phase 4 `EngineHost.orchestratorSessionFor` —
+     * same "instant wake, reassembled from config" session every other
+     * orchestrator entrypoint uses). Deliberately does NOT go through
+     * `orchestrator/signals.ts`'s `admitSignal`: that function's edge ACL
+     * (`authorizeEdge`) only recognizes parent<->child and
+     * orchestrator<->orchestrator edges today — same-org workflow dispatch
+     * is an explicitly unimplemented case there (see its comment (c)),
+     * left for a future edge-ACL extension. This builder is itself trusted
+     * host code (same trust level `ensureSession`'s direct
+     * `thread.submitPrompt` calls already have for the `session` node), so
+     * it submits directly rather than waiting on that extension.
+     *
+     * Thread selection: one thread per workflow RUN, keyed
+     * `signal:workflow:{runId}` — the bare-key get-or-create convention
+     * `orchestrator/signals.ts` documents for cross-orchestrator messages
+     * (`signal:{senderId}`), with the workflow run standing in for the
+     * "sender". This groups every llm/orchestrator-node prompt a given run
+     * sends to this orchestrator (including repair rounds, which reuse the
+     * same runId) onto one thread, so the orchestrator's inbox reads as one
+     * conversation per run rather than one row per node/dispatch. Node,
+     * iteration, and repair identity is carried by `dispatchId`
+     * (idempotency) and the signal body — not by thread fragmentation.
+     */
+    async promptOrchestrator(
+      promptText: string,
+      promptOpts: WorkflowPromptOrchestratorOptions,
+    ): Promise<WorkflowPromptOrchestratorResult> {
+      const runId = parseWorkflowDispatchId(promptOpts.dispatchId);
+      const principal = parsePrincipal(`${promptOpts.ownerHint.ownerType}:${promptOpts.ownerHint.ownerId}`);
+      if (!principal) {
+        throw new Error(
+          `workflow engine-deps: promptOrchestrator received an unrecognized ownerHint: ${JSON.stringify(promptOpts.ownerHint)}`,
+        );
+      }
+      const ctx = await resolveRunContext(opts, runId);
+
+      const session = await opts.host.orchestratorSessionFor(principal, {
+        actorUserId: actorUserIdFor(principal),
+        orgId: ctx.orgId,
+      });
+      const thread = session.thread(`signal:workflow:${runId}`);
+      const content: SignalContent = { kind: "signal", signalType: "workflow.request", body: promptText };
+      const receipt = await thread.submitPrompt(content, {
+        dispatchId: promptOpts.dispatchId,
+        queueMode: promptOpts.queueMode,
+      });
+      return { sessionId: session.id, threadId: thread.id, queueItemId: receipt.queueItemId };
     },
 
-    async invokeAction() {
-      throw new Error("WorkflowEngineDeps.invokeAction: not implemented — lands in Task 7");
+    // Phase 6 lands the plugin system that would give this a real receiver;
+    // the seam contract (deterministic `invocationId`, dedup-capable
+    // receiver returns the original result for a duplicate id) is documented
+    // on `WorkflowEngineDeps.invokeAction` for that implementer.
+    async invokeAction(_req: WorkflowInvokeActionRequest): Promise<WorkflowInvokeActionResult> {
+      return { ok: false, error: "no integrations are connected — the plugin system lands in Phase 6" };
     },
   };
+}
+
+/**
+ * Resolves an `LlmNode.model` string to a pi-ai `Model` — `provider/model`
+ * form used as-is; a bare id tried under a small set of common providers
+ * (anthropic first, matching the engine's own anthropic-default
+ * convention in `thread.ts#resolveModelId` / `EngineHost.resolveModel`).
+ * Throws descriptively on no match — the `llm` executor treats any throw
+ * from `llmComplete` as a node failure, so an unknown model surfaces as a
+ * readable per-node error instead of a generic crash.
+ */
+function resolveWorkflowModel(spec: string): PiModel {
+  const slash = spec.indexOf("/");
+  if (slash > 0) {
+    const provider = spec.slice(0, slash);
+    const modelId = spec.slice(slash + 1);
+    const model = getModel(provider as never, modelId as never);
+    if (model) return model;
+    throw new Error(`workflow engine-deps: unknown model "${spec}"`);
+  }
+  const tryProviders = ["anthropic", "openai", "google"] as const;
+  for (const provider of tryProviders) {
+    const model = getModel(provider, spec as never);
+    if (model) return model;
+  }
+  throw new Error(
+    `workflow engine-deps: unknown model "${spec}" (tried bare id under ${tryProviders.join(", ")}; use "provider/model" for anything else)`,
+  );
+}
+
+/** Inverse of the `workflow` dispatchId convention: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
+function parseWorkflowDispatchId(dispatchId: string): string {
+  const parts = dispatchId.split(":");
+  if (parts.length < 3 || parts[0] !== "workflow") {
+    throw new Error(`workflow engine-deps: not a workflow dispatchId: ${dispatchId}`);
+  }
+  return parts[1];
 }

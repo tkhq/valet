@@ -1,11 +1,16 @@
 /**
- * Integration test: `buildWorkflowEngineDeps` (Phase 5 plan Task 10) over a
- * real `EngineHost` + real Anthropic call. Drives one trivial turn through
- * `createSession` -> `prompt` -> `awaitResult`, and asserts a duplicate
- * `prompt` call carrying the same `dispatchId` returns the original receipt
- * rather than dispatching a second submission (the engine's own
- * `dispatchId` idempotency contract, exercised end-to-end through the
- * workflow deps layer).
+ * Integration test: `buildWorkflowEngineDeps` (Phase 5 plan Task 10, Task 7
+ * of the node-completion plan) over a real `EngineHost` + real Anthropic
+ * call.
+ *
+ *  - `createSession -> prompt -> awaitResult` round-trips one trivial
+ *    session-node turn and asserts duplicate-`dispatchId` idempotency.
+ *  - `llm node end-to-end through a run` drives a real
+ *    `trigger -> llm -> stop` definition through the actual `LocalRunHost`
+ *    (no stub), asserting the `llm` node's checkpoint carries a real
+ *    completion with `outputSchema`-validated `output` — i.e. Task 7's
+ *    `llmComplete` seam (pi-ai `getModel` + `completeSimple`) actually
+ *    drives a node to completion, not just a bare API call.
  *
  * Skipped without `ANTHROPIC_API_KEY`.
  */
@@ -14,8 +19,14 @@ import { bootTestApi } from "./_setup.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import type {
+  CreateWorkflowResponse,
+  GetWorkflowRunResponse,
+  StartWorkflowRunResponse,
+} from "../wire/types.js";
 
 const describeIfKey = process.env.ANTHROPIC_API_KEY ? describe : describe.skip;
+const MODEL = "claude-haiku-4-5";
 
 describeIfKey("api integration: workflow engine-deps", () => {
   it(
@@ -73,6 +84,77 @@ describeIfKey("api integration: workflow engine-deps", () => {
 
         const settled = await deps.isSettled(sessionId, receiptA.queueItemId);
         expect(settled).toBe(true);
+      } finally {
+        await api.cleanup();
+      }
+    },
+    45_000,
+  );
+
+  it(
+    "llm node end-to-end through a run: trigger -> llm -> stop, schema-validated output",
+    async () => {
+      const api = await bootTestApi();
+      try {
+        const definition = {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            {
+              id: "llm1",
+              type: "llm",
+              model: MODEL,
+              prompt:
+                'Respond with ONLY JSON matching {"greeting": string} — a short one-word greeting. No other text.',
+              outputSchema: {
+                type: "object",
+                properties: { greeting: { type: "string" } },
+                required: ["greeting"],
+              },
+            },
+            { id: "stop", type: "stop" },
+          ],
+          edges: [
+            { from: "trigger", to: "llm1" },
+            { from: "llm1", to: "stop" },
+          ],
+        };
+
+        const createRes = await fetch(`${api.baseUrl}/api/workflows`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "llm-node-e2e", definition }),
+        });
+        expect(createRes.status).toBe(201);
+        const created = (await createRes.json()) as CreateWorkflowResponse;
+
+        const runRes = await fetch(`${api.baseUrl}/api/workflows/${created.id}/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        expect(runRes.status).toBe(201);
+        const { runId } = (await runRes.json()) as StartWorkflowRunResponse;
+
+        const start = Date.now();
+        let detail: GetWorkflowRunResponse | undefined;
+        while (Date.now() - start < 30_000) {
+          const res = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`);
+          detail = (await res.json()) as GetWorkflowRunResponse;
+          if (detail.run.status === "settled") break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+
+        expect(detail?.run.status).toBe("settled");
+        expect(detail?.run.outcome).toBe("completed");
+
+        const llmCheckpoint = detail?.checkpoints.find((cp) => cp.nodeId === "llm1");
+        expect(llmCheckpoint?.status).toBe("completed");
+        const result = llmCheckpoint?.result as { text: string; output?: { greeting: string } } | undefined;
+        expect(typeof result?.text).toBe("string");
+        expect(result?.text.length).toBeGreaterThan(0);
+        expect(typeof result?.output?.greeting).toBe("string");
+        expect(result?.output?.greeting.length).toBeGreaterThan(0);
       } finally {
         await api.cleanup();
       }
