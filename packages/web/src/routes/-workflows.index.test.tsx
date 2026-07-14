@@ -2,7 +2,8 @@
 /**
  * `/workflows` definitions list (plan decision 11): each row's name links
  * to `/workflows/$workflowId` (the editor), Run starts a run and navigates
- * to the run detail page, and "New workflow" POSTs a minimal trigger→stop
+ * to the run detail page, and "New workflow" opens `NewWorkflowDialog`
+ * (review fix 1), which POSTs the entered name + a minimal trigger→stop
  * definition then navigates to its editor page. `<Link>`/`useNavigate` need
  * router context — mocked the same way `thread-tree-new-thread.test.tsx`
  * does, since this suite only cares that navigation was requested, not
@@ -23,7 +24,7 @@ const navigate = vi.fn();
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
 const createMutateAsync = vi.fn().mockResolvedValue({
   id: "wf_new",
-  name: "Untitled workflow",
+  name: "My new workflow",
   definition: { version: "dag/v1", nodes: [], edges: [] },
   createdAt: 1,
   updatedAt: 1,
@@ -41,7 +42,7 @@ vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
-  useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false }),
+  useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
 }));
 
 import { WorkflowsIndexPage } from "./workflows.index";
@@ -68,16 +69,21 @@ describe("WorkflowsIndexPage", () => {
     );
   });
 
-  it("creates a minimal definition and navigates to its editor page on New workflow", async () => {
+  it("opens the New workflow dialog, defaults the name field, and posts the entered name on Create", async () => {
     render(<WorkflowsIndexPage />);
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
+
+    const nameInput = screen.getByLabelText("Name") as HTMLInputElement;
+    expect(nameInput.value).toBe("Untitled workflow");
+    fireEvent.change(nameInput, { target: { value: "My new workflow" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const call = createMutateAsync.mock.calls[0]![0] as {
       name: string;
       definition: { nodes: Array<{ id: string; type: string }>; edges: Array<{ from: string; to: string }> };
     };
-    expect(call.name).toBe("Untitled workflow");
+    expect(call.name).toBe("My new workflow");
     expect(call.definition.nodes.map((n) => n.type)).toEqual(["trigger", "stop"]);
     expect(call.definition.edges).toEqual([{ from: "trigger", to: "stop" }]);
 

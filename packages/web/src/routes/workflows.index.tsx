@@ -1,29 +1,18 @@
+import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowDefinitionSummary } from "@valet/api/wire";
-import { useCreateWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
+import { useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
+import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { Button, Spinner } from "~/components/primitives";
-
-/** A brand-new definition's starting shape — the minimal valid `dag/v1`
- * graph (trigger straight into stop). "New workflow" creates one of these
- * immediately and drops the user into the editor rather than an empty
- * canvas or a JSON textarea (plan decision 11). */
-function blankDefinition() {
-  return {
-    version: "dag/v1" as const,
-    nodes: [
-      { id: "trigger", type: "trigger" as const },
-      { id: "stop", type: "stop" as const, outcome: "success" as const },
-    ],
-    edges: [{ from: "trigger", to: "stop" }],
-  };
-}
 
 /**
  * `/workflows` — the definitions list (plan decision 11). Each row's name
  * links to `/workflows/$workflowId` (the visual editor); the JSON
- * create/edit form is gone — "New workflow" POSTs a minimal definition and
- * navigates straight to the editor, and editing an existing definition
- * happens on its editor page, not here.
+ * create/edit form is gone — "New workflow" opens `NewWorkflowDialog`
+ * (review fix 1: a name prompt instead of a hardcoded "Untitled
+ * workflow"), which POSTs the entered name + a minimal definition and
+ * navigates straight to the editor. Editing an existing definition happens
+ * on its editor page, not here.
  */
 export const Route = createFileRoute("/workflows/")({
   component: WorkflowsIndexPage,
@@ -31,27 +20,20 @@ export const Route = createFileRoute("/workflows/")({
 
 export function WorkflowsIndexPage() {
   const { data, isLoading, error } = useWorkflows();
-  const create = useCreateWorkflow();
-  const navigate = useNavigate();
+  const [newOpen, setNewOpen] = useState(false);
 
   const workflows = data?.workflows ?? [];
-
-  async function handleCreate() {
-    const created = await create.mutateAsync({
-      name: "Untitled workflow",
-      definition: blankDefinition(),
-    });
-    void navigate({ to: "/workflows/$workflowId", params: { workflowId: created.id } });
-  }
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex items-center justify-between px-6 py-4 border-b border-line">
         <h1 className="text-lg font-semibold tracking-tight text-ink font-display">Workflows</h1>
-        <Button size="sm" onClick={() => void handleCreate()} disabled={create.isPending}>
-          {create.isPending ? "Creating…" : "New workflow"}
+        <Button size="sm" onClick={() => setNewOpen(true)}>
+          New workflow
         </Button>
       </div>
+
+      <NewWorkflowDialog open={newOpen} onOpenChange={setNewOpen} />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
         {isLoading && (

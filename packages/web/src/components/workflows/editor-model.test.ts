@@ -16,6 +16,7 @@ import {
   duplicateNode,
   flowEdgeToWorkflowEdge,
   fromFlow,
+  isWorkflowDefinitionShape,
   removeNode,
   setNodePosition,
   setViewport,
@@ -508,5 +509,18 @@ describe('EditorModel', () => {
     expect(flow.nodes).toHaveLength(4);
     model.removeNode('done');
     expect(model.toFlow().nodes).toHaveLength(3);
+  });
+});
+
+describe('isWorkflowDefinitionShape', () => {
+  it('accepts a value with version/nodes/edges', () => {
+    expect(isWorkflowDefinitionShape({ version: 'dag/v1', nodes: [], edges: [] })).toBe(true);
+  });
+
+  it('rejects non-objects, nulls, and missing fields', () => {
+    expect(isWorkflowDefinitionShape(null)).toBe(false);
+    expect(isWorkflowDefinitionShape('dag/v1')).toBe(false);
+    expect(isWorkflowDefinitionShape({ version: 'dag/v1', nodes: [] })).toBe(false);
+    expect(isWorkflowDefinitionShape({ nodes: [], edges: [] })).toBe(false);
   });
 });

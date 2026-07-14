@@ -15,6 +15,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { WorkflowDefinition } from "@valet/workflow";
+import { ApiError } from "~/api/client";
 import { Editor } from "./editor";
 
 function baseDefinition(): WorkflowDefinition {
@@ -116,6 +117,49 @@ describe("Editor", () => {
     expect(screen.getByRole("alert")).toBeTruthy();
     const saveButton = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
     expect(saveButton.disabled).toBe(true);
+  });
+
+  it("surfaces the server's per-field errors[] instead of the flattened ApiError message", async () => {
+    const onSave = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(400, "PUT /workflows/wf_1 → 400", {
+          error: "invalid workflow definition",
+          errors: ["duplicate node id: a", "unknown edge target: b"],
+        }),
+      );
+    render(<Editor initialDefinition={baseDefinition()} onSave={onSave} />);
+
+    fireEvent.click(screen.getByText("hello"));
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "updated prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.getByText("duplicate node id: a; unknown edge target: b")).toBeTruthy();
+  });
+
+  it("folds externalDirty into the unsaved indicator and Save/Cancel enablement, and Cancel calls onCancelExternal", () => {
+    const onCancelExternal = vi.fn();
+    render(
+      <Editor
+        initialDefinition={baseDefinition()}
+        onSave={vi.fn()}
+        externalDirty
+        onCancelExternal={onCancelExternal}
+      />,
+    );
+
+    // No definition edit was made, but externalDirty alone should still
+    // show the indicator and enable Save/Cancel (a rename with no
+    // definition change still needs to ride the same Save button).
+    expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
+    const saveButton = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(false);
+    const cancelButton = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    expect(cancelButton.disabled).toBe(false);
+
+    fireEvent.click(cancelButton);
+    expect(onCancelExternal).toHaveBeenCalledTimes(1);
   });
 
   it("round-trips the definition through the JSON toggle", () => {

@@ -7,6 +7,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type UseMutationResult,
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -92,7 +93,16 @@ export function useCreateWorkflow() {
   });
 }
 
-export function useUpdateWorkflow(id: string) {
+/** Return type of {@link useUpdateWorkflow} — named so `workflows.$workflowId.tsx`
+ * can thread it through `WorkflowEditorPane`'s props without repeating the
+ * generic instantiation. */
+export type UpdateWorkflowMutation = UseMutationResult<
+  UpdateWorkflowResponse,
+  Error,
+  UpdateWorkflowRequest
+>;
+
+export function useUpdateWorkflow(id: string): UpdateWorkflowMutation {
   const qc = useQueryClient();
   return useMutation<UpdateWorkflowResponse, Error, UpdateWorkflowRequest>({
     mutationFn: (body) => api.updateWorkflow(id, body),

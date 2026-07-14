@@ -9,7 +9,7 @@
  * `<Link>`/`useNavigate` are still mocked since the page renders a back
  * link and calls `useNavigate` on Run.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
@@ -44,16 +44,60 @@ vi.mock("~/api/workflows", () => ({
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
-  useWorkflowRuns: () => ({ data: { runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }] }, isLoading: false }),
+  useWorkflowRuns: () => ({
+    data: { runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }] },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 import { WorkflowEditorPage } from "./workflows.$workflowId";
 
 describe("WorkflowEditorPage", () => {
-  it("loads the fetched definition into the editor", () => {
+  beforeEach(() => {
+    navigate.mockClear();
+    updateMutateAsync.mockClear();
+    startMutateAsync.mockClear();
+  });
+
+  it("loads the fetched definition into the editor and the name field", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     expect(screen.getByTestId("workflow-editor")).toBeTruthy();
-    expect(screen.getByText("Deploy pipeline")).toBeTruthy();
+    const nameInput = screen.getByLabelText("Workflow name") as HTMLInputElement;
+    expect(nameInput.value).toBe("Deploy pipeline");
+  });
+
+  it("renaming marks the page dirty and Save PUTs the new name alongside the definition", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+
+    const saveButton = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+
+    const nameInput = screen.getByLabelText("Workflow name") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "Renamed pipeline" } });
+
+    expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
+    expect(saveButton.disabled).toBe(false);
+
+    fireEvent.click(saveButton);
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalledTimes(1));
+    const call = updateMutateAsync.mock.calls[0]![0] as { name: string; definition: unknown };
+    expect(call.name).toBe("Renamed pipeline");
+    expect(call.definition).toBeTruthy();
+  });
+
+  it("Cancel resets the name back to the last-saved value", () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+
+    const nameInput = screen.getByLabelText("Workflow name") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "Renamed pipeline" } });
+    expect((screen.getByLabelText("Workflow name") as HTMLInputElement).value).toBe("Renamed pipeline");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect((screen.getByLabelText("Workflow name") as HTMLInputElement).value).toBe("Deploy pipeline");
+    expect(screen.queryByTestId("unsaved-indicator")).toBeNull();
   });
 
   it("Save fires the update mutation with the edited definition", async () => {

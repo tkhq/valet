@@ -16,9 +16,10 @@
  */
 import { useMemo, useState } from "react";
 import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
+import { ApiError } from "~/api/client";
 import { Button, Label, Textarea } from "~/components/primitives";
-import { isWorkflowDefinitionShape } from "../definition-form-helpers";
 import {
+  isWorkflowDefinitionShape,
   connect,
   createEdgeId,
   duplicateNode,
@@ -47,15 +48,29 @@ export interface EditorProps {
   initialDefinition: WorkflowDefinition;
   onSave: (definition: WorkflowDefinition) => Promise<void>;
   saving?: boolean;
+  /**
+   * Task 11 review fix: the page owns a rename input outside this
+   * component (in the editor page's header, replacing the old read-only
+   * h1) and reports its own dirtiness here. Editor folds it into its own
+   * dirty/Save/Cancel handling — `externalDirty` ORs into the unsaved
+   * indicator and Save-enablement, `onCancelExternal` is called alongside
+   * the definition reset — so a rename rides the same Save/Cancel actions
+   * as a definition edit without Editor needing to know anything about
+   * names.
+   */
+  externalDirty?: boolean;
+  onCancelExternal?: () => void;
 }
 
-export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
+export function Editor({ initialDefinition, onSave, saving, externalDirty, onCancelExternal }: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonMode, setJsonMode] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  const effectiveDirty = dirty || externalDirty === true;
 
   const flow = useMemo(() => toFlow(definition), [definition]);
   const validation = useMemo(() => validateWorkflowDefinition(definition), [definition]);
@@ -143,6 +158,7 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
     setSaveError(null);
+    onCancelExternal?.();
   }
 
   async function handleSave() {
@@ -151,7 +167,7 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
       await onSave(definition);
       setDirty(false);
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Failed to save workflow.");
+      setSaveError(saveErrorMessage(err));
     }
   }
 
@@ -159,13 +175,13 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
     mutate(next);
   }
 
-  const saveDisabled = !dirty || !validation.ok || saving === true;
+  const saveDisabled = !effectiveDirty || !validation.ok || saving === true;
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-editor">
       <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
-          {dirty && (
+          {effectiveDirty && (
             <span
               data-testid="unsaved-indicator"
               title="Unsaved changes"
@@ -182,7 +198,7 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
               {saveError}
             </span>
           )}
-          <Button variant="secondary" size="sm" onClick={handleCancel} disabled={!dirty}>
+          <Button variant="secondary" size="sm" onClick={handleCancel} disabled={!effectiveDirty}>
             Cancel
           </Button>
           <Button size="sm" onClick={() => void handleSave()} disabled={saveDisabled}>
@@ -294,4 +310,26 @@ function JsonDefinitionEditor({
       </Button>
     </div>
   );
+}
+
+/**
+ * `PUT /workflows/:id` 400s on an invalid definition with
+ * `{ error, errors: string[] }` (`packages/api/src/routes/workflows.ts`
+ * `validateDefinitionInput`). Surface the per-field messages in the
+ * save-error line instead of the flattened `ApiError` message so a
+ * rejected Save says *what's* invalid, not just that the request failed.
+ */
+function saveErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    const payload = err.payload;
+    if (payload && typeof payload === "object") {
+      const errs = (payload as Record<string, unknown>).errors;
+      if (Array.isArray(errs) && errs.every((e): e is string => typeof e === "string") && errs.length > 0) {
+        return errs.join("; ");
+      }
+    }
+    return err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return "Failed to save workflow.";
 }

@@ -2,8 +2,14 @@ import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowDefinition } from "@valet/workflow";
 import type { ListWorkflowRunsResponse } from "@valet/api/wire";
-import { useStartRun, useUpdateWorkflow, useWorkflow, useWorkflowRuns } from "~/api/workflows";
-import { isWorkflowDefinitionShape } from "~/components/workflows/definition-form-helpers";
+import {
+  useStartRun,
+  useUpdateWorkflow,
+  useWorkflow,
+  useWorkflowRuns,
+  type UpdateWorkflowMutation,
+} from "~/api/workflows";
+import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { Editor } from "~/components/workflows/editor/editor";
 import { Badge, Button, Spinner } from "~/components/primitives";
 
@@ -35,15 +41,6 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
     return isWorkflowDefinitionShape(data.definition) ? data.definition : null;
   }, [data]);
 
-  async function handleSave(next: WorkflowDefinition) {
-    await update.mutateAsync({ definition: next });
-  }
-
-  async function handleRun() {
-    const result = await startRun.mutateAsync();
-    void navigate({ to: "/workflows/runs/$runId", params: { runId: result.runId } });
-  }
-
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center gap-2 p-6 text-sm text-muted">
@@ -56,13 +53,82 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
   }
 
   return (
+    <WorkflowEditorPane
+      // Force a full remount on wf→wf navigation (review fix 4): without
+      // this, `WorkflowEditorPane`'s `name`/`committedName` state — seeded
+      // once from `initialName` at mount — would carry over from the
+      // previous workflow while `Editor`'s own `initialDefinition` prop
+      // silently changed underneath it, showing stale name/definition
+      // state until the next edit.
+      key={workflowId}
+      initialName={data.name}
+      initialDefinition={definition}
+      update={update}
+      startRun={startRun}
+      runsQuery={runsQ}
+      navigate={navigate}
+    />
+  );
+}
+
+function WorkflowEditorPane({
+  initialName,
+  initialDefinition,
+  update,
+  startRun,
+  runsQuery,
+  navigate,
+}: {
+  initialName: string;
+  initialDefinition: WorkflowDefinition;
+  update: UpdateWorkflowMutation;
+  startRun: ReturnType<typeof useStartRun>;
+  runsQuery: {
+    data?: ListWorkflowRunsResponse;
+    isLoading: boolean;
+    error: unknown;
+  };
+  navigate: ReturnType<typeof useNavigate>;
+}) {
+  // The rename control (review fix 1): name state lives here, at the page
+  // level, rather than in `Editor` — `Editor` only needs to know whether
+  // the name is dirty (`externalDirty`) so a rename rides the same
+  // Save/Cancel actions as a definition edit. `committedName` tracks the
+  // last-saved value locally instead of comparing against the query's
+  // live `data.name`, so there's no race with the invalidate-then-refetch
+  // that follows a successful save.
+  const [name, setName] = useState(initialName);
+  const [committedName, setCommittedName] = useState(initialName);
+  const nameDirty = name !== committedName;
+
+  async function handleSave(next: WorkflowDefinition) {
+    await update.mutateAsync({ name, definition: next });
+    setCommittedName(name);
+  }
+
+  function handleCancelName() {
+    setName(committedName);
+  }
+
+  async function handleRun() {
+    const result = await startRun.mutateAsync();
+    void navigate({ to: "/workflows/runs/$runId", params: { runId: result.runId } });
+  }
+
+  return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex items-center justify-between px-6 py-4 border-b border-line">
-        <div className="flex items-center gap-3">
-          <Link to="/workflows" className="text-xs text-muted hover:text-ink">
+        <div className="flex items-center gap-3 min-w-0">
+          <Link to="/workflows" className="text-xs text-muted hover:text-ink shrink-0">
             ← Workflows
           </Link>
-          <h1 className="text-lg font-semibold tracking-tight text-ink font-display">{data.name}</h1>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            aria-label="Workflow name"
+            placeholder="Untitled workflow"
+            className="min-w-0 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+          />
         </div>
         <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
           {startRun.isPending ? "Starting…" : "Run"}
@@ -70,10 +136,16 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
       </div>
 
       <div className="min-h-0 flex-1">
-        <Editor initialDefinition={definition} onSave={handleSave} saving={update.isPending} />
+        <Editor
+          initialDefinition={initialDefinition}
+          onSave={handleSave}
+          saving={update.isPending}
+          externalDirty={nameDirty}
+          onCancelExternal={handleCancelName}
+        />
       </div>
 
-      <RunsSection runsQuery={runsQ} />
+      <RunsSection runsQuery={runsQuery} />
     </div>
   );
 }
@@ -110,10 +182,13 @@ function RunsSection({
               <Spinner size={12} /> Loading runs…
             </div>
           )}
-          {!runsQuery.isLoading && runs.length === 0 && (
+          {!runsQuery.isLoading && runsQuery.error != null && (
+            <div className="text-xs text-danger-500">Failed to load runs.</div>
+          )}
+          {!runsQuery.isLoading && runsQuery.error == null && runs.length === 0 && (
             <div className="text-xs text-muted">No runs yet.</div>
           )}
-          {!runsQuery.isLoading && runs.length > 0 && (
+          {!runsQuery.isLoading && runsQuery.error == null && runs.length > 0 && (
             <ul className="space-y-1">
               {runs.map((r) => (
                 <li key={r.runId} className="flex items-center gap-2">

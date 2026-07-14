@@ -51,6 +51,26 @@ import {
 export { validateWorkflowDefinition };
 export type { WorkflowDefinition, WorkflowNode, WorkflowEdge, DagNodeType };
 
+/**
+ * Structural narrowing from the wire's `unknown` definition (both
+ * `WorkflowDefinitionSummary.definition` and the editor's JSON-mode
+ * "Apply" step) to `WorkflowDefinition`, without an `as` cast. Anything
+ * failing this check stays a load/parse error, never a silent bad save —
+ * shared by `editor.tsx`'s JSON toggle and `workflows.$workflowId.tsx`'s
+ * initial-load guard. Lives here (the pure, React-free model module)
+ * rather than a standalone form-helpers file since both consumers already
+ * import from `editor-model`.
+ */
+export function isWorkflowDefinitionShape(value: unknown): value is WorkflowDefinition {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.version === 'string' &&
+    Array.isArray(candidate.nodes) &&
+    Array.isArray(candidate.edges)
+  );
+}
+
 // ─── Flow types (xyflow-shaped, but xyflow-independent) ──────────────────────
 
 export interface FlowPosition {
