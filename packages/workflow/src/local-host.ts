@@ -161,7 +161,10 @@ export class LocalRunHost implements RunHost {
     definition: unknown,
     owner?: { ownerType: string; ownerId: string },
   ): Promise<void> {
-    if (!this.running) return;
+    // The durable createRun is unconditional: a caller that got a runId back
+    // must be able to find the run in the store even if the host is mid-
+    // shutdown (the next boot's poll/sweep picks it up). Only the in-process
+    // wake is gated on `running`.
     await this.store.createRun(runId, params, definition, params.definitionVersionId, owner);
     await this.wake(runId);
   }
