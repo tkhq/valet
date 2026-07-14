@@ -34,9 +34,12 @@ const v = a => a?.stringValue ?? a?.intValue ?? a?.boolValue;
 http.createServer((q, s) => { if (q.method==='POST' && q.url.includes('/v1/traces')) { let b=''; q.on('data',c=>b+=c).on('end',()=>{ try { for (const r of JSON.parse(b).resourceSpans??[]) for (const sc of r.scopeSpans??[]) for (const sp of sc.spans??[]) { const at={}; for (const x of sp.attributes??[]) at[x.key]=v(x.value); fs.appendFileSync(OUT, JSON.stringify({name:sp.name,attrs:at})+'\n'); } } catch {} s.writeHead(200); s.end('{}'); }); } else { s.writeHead(200); s.end('{}'); } }).listen(4318, ()=>console.log('up'));
 EOF
 
-# Substitute ${...} placeholders so the worker boots locally.
+# Substitute ${...} placeholders so the worker boots locally. WORKFLOW_NAME must
+# get a concrete value before the catch-all below, which would otherwise blank it
+# to an empty (invalid) workflow name.
 sed -e 's/\${CF_WORKER_NAME}/valet-dev/g' -e 's/\${R2_BUCKET_NAME}/valet-storage/g' \
     -e 's/\${D1_DATABASE_NAME}/valet-db/g' -e 's/\${D1_DATABASE_ID}/00000000-0000-0000-0000-000000000000/g' \
+    -e 's/\${WORKFLOW_NAME}/valet-dev-workflow-interpreter/g' \
     -e 's/\${[A-Z_]*}//g' "$WORKER/wrangler.toml" > "$WORKER/wrangler.e2e.toml"
 
 # Each run gets a FRESH collector so in-flight exports can't leak across runs.
