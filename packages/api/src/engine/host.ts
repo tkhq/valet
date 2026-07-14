@@ -17,6 +17,7 @@ import {
   type Session,
   type SessionStore,
 } from "@valet/engine";
+import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { orchestratorIdentities } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -25,7 +26,11 @@ import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
-import type { MemoryScope } from "../services/memory.js";
+import { readFile, type MemoryScope } from "../services/memory.js";
+
+/** Personality is capped at injection time (assistant-centered web UI
+ * decision 5), independent of any cap the memory service itself applies. */
+const PERSONALITY_INJECT_CAP = 500;
 
 export interface EngineHostOpts {
   engineStore: SessionStore;
@@ -244,6 +249,7 @@ export class EngineHost {
     const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
+    const personaPrefix = await this.resolvePersonaPrefix(db, scope, meta.orgId, principal);
 
     const model = this.resolveModel();
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
@@ -257,7 +263,7 @@ export class EngineHost {
       queueMode,
       sandbox: { workspace, image: this.opts.defaultImage },
       model,
-      systemPrompt: orchestratorPersona(principal),
+      systemPrompt: personaPrefix + orchestratorPersona(principal),
       tools: buildMemoryTools(),
       toolConfig: {
         apiBaseUrl,
@@ -345,6 +351,49 @@ export class EngineHost {
       .run();
   }
 
+  /**
+   * `You are {name}. {personality}` prefix for the orchestrator's
+   * `systemPrompt` (assistant-centered web UI decision 5): `name` from
+   * `orchestrator_identities.handle`, `personality` from the
+   * `assistant/personality.md` memory file, capped at
+   * `PERSONALITY_INJECT_CAP` chars. Absent name → `""` (neutral persona,
+   * unchanged) regardless of whether a personality file exists — the
+   * identity step always sets name first, so an orphaned personality file
+   * without a name shouldn't happen, but if it ever does we don't want a
+   * prefix with no name in it.
+   */
+  private async resolvePersonaPrefix(
+    db: AppDb,
+    scope: MemoryScope,
+    orgId: string,
+    principal: Principal,
+  ): Promise<string> {
+    const identity = await db
+      .select()
+      .from(orchestratorIdentities)
+      .where(
+        and(
+          eq(orchestratorIdentities.orgId, orgId),
+          eq(orchestratorIdentities.ownerType, principal.type),
+          eq(orchestratorIdentities.ownerId, principal.id),
+        ),
+      )
+      .get();
+    const name = identity?.handle;
+    if (!name) return "";
+
+    let personality = "";
+    try {
+      const result = await readFile(db, scope, "assistant/personality.md");
+      if (result.kind === "file") personality = result.file.content.slice(0, PERSONALITY_INJECT_CAP);
+    } catch (err) {
+      if (!(err instanceof NotFoundError)) throw err;
+    }
+
+    const sentence = personality ? `You are ${name}. ${personality}` : `You are ${name}.`;
+    return `${sentence}\n\n`;
+  }
+
   /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */
   eventStream(): EventStream {
     return this.opts.eventStream;
@@ -359,6 +408,30 @@ export class EngineHost {
     } finally {
       this.cache.delete(sessionId);
     }
+  }
+
+  /**
+   * Drop a session's in-process cache entry WITHOUT tearing down engine
+   * state — unlike `destroy()`, this never calls `session.destroy()` (which
+   * deletes the underlying engine session row via
+   * `SessionStore.deleteSession`). Used when an identity/persona change
+   * needs picking up on the next wake (PATCH /api/orchestrator/info,
+   * decision 4/5): the next `orchestratorSessionFor` call misses the cache
+   * and rebuilds `systemPrompt`/`systemContext` from current configuration,
+   * restoring the same durable session (same transcript) rather than
+   * creating a new one. Safe to call on an id that isn't cached — no-op.
+   *
+   * Caveat: if the evicted session had live durable-execution timers
+   * (`ensureTimers` — started once a thread claims a submission), those
+   * timers keep firing against the orphaned in-memory `Session`/`Thread`
+   * objects until GC, since `Session` exposes no "stop timers only" hook
+   * and this method deliberately avoids `destroy()`. Harmless in practice
+   * for the orchestrator (PATCH is a user-editing action, not something
+   * that races a running turn), but noted here rather than silently relied
+   * upon.
+   */
+  evictCache(sessionId: string): void {
+    this.cache.delete(sessionId);
   }
 
   /** Tear down every live session. Call from process shutdown handlers. */

@@ -19,11 +19,14 @@
  * only, since there's no "acting as a team" session concept yet).
  */
 import { Hono, type Context } from "hono";
+import { and, eq } from "drizzle-orm";
 import { parsePrincipal } from "@valet/engine";
 import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { ReservedPathError } from "../lib/okf.js";
+import { memoryFiles } from "../schema/index.js";
+import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   exportFiles,
   importFiles,
@@ -96,6 +99,48 @@ memoryRouter.get("/", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
+});
+
+/**
+ * GET /api/memory/tree — decision 7. Flat file listing for the web
+ * explorer (no directory rows — the client derives the tree from paths).
+ * Deliberately own-scope only (unlike `readFile`/`listFiles`, which
+ * read-union in team scopes): the design spec calls this out explicitly
+ * ("this pass own-scope is fine"), so this queries `memory_files` directly
+ * against `scope.owner` instead of going through the service's
+ * `listFiles` (which would union team files under a `team:{id}/` virtual
+ * prefix). Dual auth reuses `resolveScope`, same as every other route here.
+ */
+memoryRouter.get("/tree", async (c) => {
+  let scope: MemoryScope;
+  try {
+    scope = resolveScope(c);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+
+  const { db } = c.var.providers;
+  const rows = await db
+    .select()
+    .from(memoryFiles)
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)))
+    .all();
+
+  const entries: MemoryTreeEntry[] = rows
+    .map((r) => ({
+      path: r.path,
+      title: r.title,
+      type: r.type,
+      pinned: r.pinned === 1,
+      updatedAt: r.updatedAt,
+      dir: false,
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  const body: GetMemoryTreeResponse = { entries };
+  return c.json(body);
 });
 
 memoryRouter.put("/", async (c) => {

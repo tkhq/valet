@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import { and, count, desc, eq } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { parseOrchestratorSessionId } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions, messages as messagesTable } from "../schema/index.js";
+import { agentSessions, childWatches, messages as messagesTable } from "../schema/index.js";
 import type {
   CreateSessionRequest,
   CreateSessionResponse,
@@ -35,18 +36,28 @@ function rowToSummary(row: typeof agentSessions.$inferSelect): SessionSummary {
 
 // ── List ──────────────────────────────────────────────────────────────────
 
+// Standalone-only (assistant-centered web UI decision 8): excludes
+// orchestrator ids and child ids, server-side, so the client just renders
+// what it gets. Orchestrator-derived children nest inline in the assistant's
+// chat page (via GET /api/orchestrator/children) instead.
 sessionsRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const userId = c.var.user.id;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
-    .orderBy(desc(agentSessions.updatedAt))
-    .all();
+  const [rows, childRows] = await Promise.all([
+    db
+      .select()
+      .from(agentSessions)
+      .where(and(eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
+      .orderBy(desc(agentSessions.updatedAt))
+      .all(),
+    db.select({ childSessionId: childWatches.childSessionId }).from(childWatches).all(),
+  ]);
 
-  const body: ListSessionsResponse = { sessions: rows.map(rowToSummary) };
+  const childIds = new Set(childRows.map((r) => r.childSessionId));
+  const standalone = rows.filter((r) => parseOrchestratorSessionId(r.id) === null && !childIds.has(r.id));
+
+  const body: ListSessionsResponse = { sessions: standalone.map(rowToSummary) };
   return c.json(body);
 });
 

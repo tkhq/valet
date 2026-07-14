@@ -77,6 +77,44 @@ export interface GetOrchestratorResponse {
   exists: boolean;
 }
 
+export type OrchestratorPresence = "idle" | "thinking" | "working";
+
+/** GET /api/orchestrator/info — assistant identity + presence (assistant-
+ * centered web UI decision 4). Never creates the engine session. */
+export interface GetOrchestratorInfoResponse {
+  sessionId: string;
+  name: string | null;
+  personality: string | null;
+  presence: OrchestratorPresence;
+  activeChildren: number;
+}
+
+/** PATCH /api/orchestrator/info — `name` upserts `orchestrator_identities.handle`;
+ * `personality` writes the `assistant/personality.md` memory file (decision 5). */
+export interface PatchOrchestratorInfoRequest {
+  name?: string;
+  personality?: string;
+}
+
+export interface PatchOrchestratorInfoResponse {
+  ok: true;
+}
+
+export interface OrchestratorChildSummary {
+  sessionId: string;
+  title: string;
+  parentThreadId: string;
+  status: "running" | "settled";
+  outcome?: string;
+  createdAt: number;
+}
+
+/** GET /api/orchestrator/children — child_watches ⋈ agent_sessions for the
+ * caller's orchestrator (decision 6). */
+export interface GetOrchestratorChildrenResponse {
+  children: OrchestratorChildSummary[];
+}
+
 // ── REST: threads ─────────────────────────────────────────────────────────
 
 export interface ThreadSummary {
@@ -526,4 +564,24 @@ export interface NotificationSummary {
 
 export interface ListNotificationsResponse {
   notifications: NotificationSummary[];
+}
+
+// ── REST: memory tree ────────────────────────────────────────────────────
+//
+// GET /api/memory/tree — flat file listing for the web explorer (assistant-
+// centered web UI decision 7). No directory rows; the client derives the
+// tree from paths. `dir` is always `false` today (every row is a file) —
+// carried for API-table fidelity / future directory rows.
+
+export interface MemoryTreeEntry {
+  path: string;
+  title: string;
+  type: string;
+  pinned: boolean;
+  updatedAt: number;
+  dir: boolean;
+}
+
+export interface GetMemoryTreeResponse {
+  entries: MemoryTreeEntry[];
 }
