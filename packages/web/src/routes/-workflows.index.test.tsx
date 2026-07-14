@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 /**
- * `/workflows` definitions list (plan decision 19): renders each
- * definition's name and clicking "Run" fires `useStartRun`'s mutation. The
- * row's inline run list stays collapsed by default (no `<Link>` render), so
- * this doesn't need router context.
+ * `/workflows` definitions list (plan decision 11): each row's name links
+ * to `/workflows/$workflowId` (the editor), Run starts a run and navigates
+ * to the run detail page, and "New workflow" POSTs a minimal trigger→stop
+ * definition then navigates to its editor page. `<Link>`/`useNavigate` need
+ * router context — mocked the same way `thread-tree-new-thread.test.tsx`
+ * does, since this suite only cares that navigation was requested, not
+ * that the router actually resolved it.
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 
 const workflowsData = {
   workflows: [
@@ -15,36 +19,73 @@ const workflowsData = {
   ],
 };
 
-const startMutate = vi.fn();
+const navigate = vi.fn();
+const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
+const createMutateAsync = vi.fn().mockResolvedValue({
+  id: "wf_new",
+  name: "Untitled workflow",
+  definition: { version: "dag/v1", nodes: [], edges: [] },
+  createdAt: 1,
+  updatedAt: 1,
+});
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
+    <a {...rest}>{children}</a>
+  ),
+  useNavigate: () => navigate,
+  createFileRoute: () => (config: unknown) => config,
+}));
 
 vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
-  useStartRun: () => ({ mutate: startMutate, isPending: false }),
-  useCreateWorkflow: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useUpdateWorkflow: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false }),
 }));
 
 import { WorkflowsIndexPage } from "./workflows.index";
 
 describe("WorkflowsIndexPage", () => {
-  it("renders each workflow definition's name", () => {
+  it("renders each workflow definition's name as a link to its editor page", () => {
     render(<WorkflowsIndexPage />);
-    expect(screen.getByText("Deploy pipeline")).toBeTruthy();
+    const link = screen.getByText("Deploy pipeline").closest("a");
+    expect(link?.getAttribute("href") ?? link?.getAttribute("to")).toBeTruthy();
     expect(screen.getByText("Nightly digest")).toBeTruthy();
   });
 
-  it("fires the start-run mutation when Run is clicked", () => {
+  it("starts a run and navigates to the run detail page when Run is clicked", async () => {
     render(<WorkflowsIndexPage />);
     const runButtons = screen.getAllByRole("button", { name: "Run" });
     fireEvent.click(runButtons[0]);
-    expect(startMutate).toHaveBeenCalled();
+
+    await waitFor(() => expect(startMutateAsync).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workflows/runs/$runId",
+        params: { runId: "wfrun_new" },
+      }),
+    );
   });
 
-  it("opens the create form with a name input and definition textarea", () => {
+  it("creates a minimal definition and navigates to its editor page on New workflow", async () => {
     render(<WorkflowsIndexPage />);
     fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
-    expect(screen.getByPlaceholderText("Workflow name")).toBeTruthy();
-    expect(screen.getByPlaceholderText(/version.*dag\/v1/)).toBeTruthy();
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const call = createMutateAsync.mock.calls[0]![0] as {
+      name: string;
+      definition: { nodes: Array<{ id: string; type: string }>; edges: Array<{ from: string; to: string }> };
+    };
+    expect(call.name).toBe("Untitled workflow");
+    expect(call.definition.nodes.map((n) => n.type)).toEqual(["trigger", "stop"]);
+    expect(call.definition.edges).toEqual([{ from: "trigger", to: "stop" }]);
+
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workflows/$workflowId",
+        params: { workflowId: "wf_new" },
+      }),
+    );
   });
 });

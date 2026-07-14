@@ -17,6 +17,7 @@
 import { useMemo, useState } from "react";
 import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
 import { Button, Label, Textarea } from "~/components/primitives";
+import { isWorkflowDefinitionShape } from "../definition-form-helpers";
 import {
   connect,
   createEdgeId,
@@ -54,6 +55,7 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonMode, setJsonMode] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const flow = useMemo(() => toFlow(definition), [definition]);
   const validation = useMemo(() => validateWorkflowDefinition(definition), [definition]);
@@ -128,11 +130,29 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
   function handleEdgeChange(edge: WorkflowFlowEdge, patch: EdgePatch) {
     const match: EdgeMatch = { from: edge.source, to: edge.target, fromOutput: edge.data.fromOutput };
     mutate(updateEdge(definition, match, patch));
+    // Edge ids encode `fromOutput` (`createEdgeId`), so patching it re-keys
+    // the edge in the re-derived flow — carry the selection to the new id
+    // rather than leaving it pointed at an id that no longer exists.
+    const nextFromOutput = "fromOutput" in patch ? patch.fromOutput : edge.data.fromOutput;
+    setSelectedEdgeId(createEdgeId(edge.source, edge.target, nextFromOutput));
+  }
+
+  function handleCancel() {
+    setDefinition(initialDefinition);
+    setDirty(false);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setSaveError(null);
   }
 
   async function handleSave() {
-    await onSave(definition);
-    setDirty(false);
+    setSaveError(null);
+    try {
+      await onSave(definition);
+      setDirty(false);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Failed to save workflow.");
+    }
   }
 
   function handleApplyJson(next: WorkflowDefinition) {
@@ -156,9 +176,19 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
             {jsonMode ? "Visual editor" : "Edit JSON"}
           </Button>
         </div>
-        <Button size="sm" onClick={handleSave} disabled={saveDisabled}>
-          {saving ? "Saving…" : "Save"}
-        </Button>
+        <div className="flex items-center gap-2">
+          {saveError && (
+            <span role="alert" className="text-xs text-danger-600 dark:text-danger-500">
+              {saveError}
+            </span>
+          )}
+          <Button variant="secondary" size="sm" onClick={handleCancel} disabled={!dirty}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={() => void handleSave()} disabled={saveDisabled}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
       </div>
 
       <ValidationBanner errors={errors} />
@@ -207,18 +237,6 @@ export function Editor({ initialDefinition, onSave, saving }: EditorProps) {
         </div>
       )}
     </div>
-  );
-}
-
-/** Type guard for the "Edit JSON" toggle's Apply step — narrows `unknown` to `WorkflowDefinition`
- * without an `as` cast; anything that fails this shape check stays a parse error, never a save. */
-function isWorkflowDefinitionShape(value: unknown): value is WorkflowDefinition {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.version === "string" &&
-    Array.isArray(candidate.nodes) &&
-    Array.isArray(candidate.edges)
   );
 }
 

@@ -66,6 +66,39 @@ describe("Editor", () => {
     expect(llmNode).toMatchObject({ prompt: "updated prompt" });
   });
 
+  it("surfaces a save-error line when onSave rejects, and leaves the definition dirty", async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error("network unreachable"));
+    render(<Editor initialDefinition={baseDefinition()} onSave={onSave} />);
+
+    fireEvent.click(screen.getByText("hello"));
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "updated prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.getByText("network unreachable")).toBeTruthy();
+    // Still dirty — the failed save didn't silently clear the indicator.
+    expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
+  });
+
+  it("Cancel discards edits back to the last-saved definition and is disabled when clean", () => {
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
+
+    const cancelButton = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    expect(cancelButton.disabled).toBe(true);
+
+    fireEvent.click(screen.getByText("hello"));
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "updated prompt" } });
+    expect(cancelButton.disabled).toBe(false);
+
+    fireEvent.click(cancelButton);
+
+    expect(screen.queryByTestId("unsaved-indicator")).toBeNull();
+    expect(cancelButton.disabled).toBe(true);
+    fireEvent.click(screen.getByText("hello"));
+    const promptField = screen.getByLabelText("Prompt") as HTMLTextAreaElement;
+    expect(promptField.value).toBe("hello");
+  });
+
   it("shows the validation banner and disables Save for an invalid definition", () => {
     const invalid: WorkflowDefinition = {
       ...baseDefinition(),

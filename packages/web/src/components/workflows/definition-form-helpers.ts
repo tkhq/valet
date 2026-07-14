@@ -4,6 +4,7 @@
  * the route component so JSON-parsing and error-extraction are unit
  * testable without rendering.
  */
+import type { WorkflowDefinition } from "@valet/workflow";
 import { ApiError } from "~/api/client";
 
 /** Parses the textarea contents; returns a human error string on failure. */
@@ -13,6 +14,24 @@ export function parseDefinitionInput(text: string): { ok: true; value: unknown }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "invalid JSON" };
   }
+}
+
+/**
+ * Structural narrowing from the wire's `unknown` definition (both
+ * `WorkflowDefinitionSummary.definition` and the editor's JSON-mode
+ * "Apply" step) to `WorkflowDefinition`, without an `as` cast. Anything
+ * failing this check stays a load/parse error, never a silent bad save —
+ * shared by `editor.tsx`'s JSON toggle and `workflows.$workflowId.tsx`'s
+ * initial-load guard.
+ */
+export function isWorkflowDefinitionShape(value: unknown): value is WorkflowDefinition {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.version === "string" &&
+    Array.isArray(candidate.nodes) &&
+    Array.isArray(candidate.edges)
+  );
 }
 
 /**
