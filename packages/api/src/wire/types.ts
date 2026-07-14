@@ -485,3 +485,28 @@ export interface AddTeamMemberRequest {
 export interface SetTeamMemberRoleRequest {
   role: TeamRole;
 }
+
+// ── REST: notifications ──────────────────────────────────────────────────
+//
+// Web delivery for the attention router (Phase 4 decision 19). Own-rows-only
+// — every route derives `userId` from the caller's session, never a path
+// param. 30s polling from the web client; no WS plumbing this phase.
+
+export type NotificationKind = "notification" | "question" | "escalation" | "approval";
+export type NotificationUrgency = "low" | "normal" | "high";
+
+export interface NotificationSummary {
+  id: string;
+  kind: NotificationKind;
+  urgency: NotificationUrgency;
+  title: string;
+  body?: string;
+  href?: string;
+  sessionId?: string;
+  createdAt: number;
+  readAt?: number;
+}
+
+export interface ListNotificationsResponse {
+  notifications: NotificationSummary[];
+}

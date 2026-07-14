@@ -18,6 +18,7 @@ import type {
   GetSessionResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
+  ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
   MeResponse,
@@ -39,6 +40,7 @@ export const qk = {
       ? (["sessions", id, "messages", threadId] as const)
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
+  notifications: () => ["notifications"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -178,6 +180,40 @@ export function useWithdrawDecision(sessionId: string) {
   return useMutation<{ ok: true }, Error, { gateId: string }>({
     mutationFn: ({ gateId }) =>
       api.withdrawDecision(sessionId, gateId, { reason: "cancel" }),
+  });
+}
+
+// ── Notifications (attention router, Phase 4 decision 19/22) ─────────────
+//
+// 30s polling, no WS plumbing this phase — see the design doc's "Web
+// surface (minimal)" note.
+
+export function useNotifications(opts?: UseQueryOptions<ListNotificationsResponse>) {
+  return useQuery<ListNotificationsResponse>({
+    queryKey: qk.notifications(),
+    queryFn: () => api.listNotifications(),
+    refetchInterval: 30_000,
+    ...opts,
+  });
+}
+
+export function useMarkNotificationRead() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (id) => api.markNotificationRead(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.notifications() });
+    },
+  });
+}
+
+export function useMarkAllNotificationsRead() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, void>({
+    mutationFn: () => api.markAllNotificationsRead(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.notifications() });
+    },
   });
 }
 

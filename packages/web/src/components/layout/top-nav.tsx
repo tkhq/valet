@@ -13,6 +13,7 @@ import {
   Spinner,
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
+import { NotificationsBell } from "./notifications-bell";
 
 /**
  * App-wide top navigation: brand on the left, session selector in the middle,
@@ -49,6 +50,8 @@ export function TopNav({ onNewSession }: { onNewSession: () => void }) {
       </Link>
 
       <div className="flex-1" />
+
+      <NotificationsBell />
 
       <Button size="sm" onClick={onNewSession}>
         <Plus className="h-4 w-4" />

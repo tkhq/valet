@@ -15,6 +15,7 @@ import type {
   GetSessionResponse,
   ListDecisionsResponse,
   ListMessagesResponse,
+  ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
   MeResponse,
@@ -137,6 +138,17 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(gateId)}/withdraw`,
       body,
     ),
+
+  // notifications
+  listNotifications: (opts?: { unread?: boolean }) =>
+    request<ListNotificationsResponse>(
+      "GET",
+      `/notifications${opts?.unread ? "?unread=1" : ""}`,
+    ),
+  markNotificationRead: (id: string) =>
+    request<{ ok: true }>("POST", `/notifications/${encodeURIComponent(id)}/read`),
+  markAllNotificationsRead: () =>
+    request<{ ok: true }>("POST", "/notifications/read-all"),
 };
 
 export { ApiError };
