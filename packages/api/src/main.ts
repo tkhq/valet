@@ -72,12 +72,15 @@ if (!anthropicApiKey) {
   process.exit(1);
 }
 
+const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;
+
 const providers = await buildNodeProviders({
   dbPath,
   blobsRoot,
   encryptionKey,
   anthropicApiKey,
   apiBaseUrl: `http://127.0.0.1:${port}`,
+  workflowCrashAt,
 });
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
@@ -109,6 +112,10 @@ await providers.childWatcher.rearm().catch((err) => {
   console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
 });
 
+// Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
+// loops so pending/parked runs left over from a prior process pick back up.
+providers.workflowRunHost.startHost();
+
 const { app, injectWebSocket } = createApp(providers);
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
@@ -128,6 +135,11 @@ injectWebSocket(server);
 
 async function shutdown(signal: NodeJS.Signals) {
   console.log(`\nReceived ${signal}, destroying live sandboxes...`);
+  try {
+    await providers.workflowRunHost.stopHost();
+  } catch (err) {
+    console.error("workflowRunHost.stopHost failed:", err);
+  }
   try {
     await providers.engineHost.destroyAll();
   } catch (err) {

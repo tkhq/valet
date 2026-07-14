@@ -596,6 +596,106 @@ export interface MemoryTreeEntry {
   dir: boolean;
 }
 
+// ── REST: workflows (engine v2 Phase 5) ──────────────────────────────────
+//
+// Own-rows-only, same owner-scoping convention as sessions (decision 18).
+
+export interface WorkflowDefinitionSummary {
+  id: string;
+  name: string;
+  definition: unknown;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateWorkflowRequest {
+  name: string;
+  definition: unknown;
+}
+
+export interface ValidationErrorResponse {
+  error: string;
+  errors: string[];
+}
+
+export type CreateWorkflowResponse = WorkflowDefinitionSummary;
+export type GetWorkflowResponse = WorkflowDefinitionSummary;
+export type UpdateWorkflowResponse = WorkflowDefinitionSummary;
+
+export interface UpdateWorkflowRequest {
+  name?: string;
+  definition?: unknown;
+}
+
+export interface ListWorkflowsResponse {
+  workflows: WorkflowDefinitionSummary[];
+}
+
+export interface StartWorkflowRunRequest {
+  input?: Record<string, unknown>;
+}
+
+export interface StartWorkflowRunResponse {
+  runId: string;
+}
+
+export type WorkflowRunStatus = "pending" | "running" | "parked" | "terminalizing" | "settled";
+export type WorkflowRunOutcome = "completed" | "failed" | "cancelled";
+
+export interface WorkflowRunSummary {
+  runId: string;
+  workflowId: string;
+  status: WorkflowRunStatus;
+  outcome?: WorkflowRunOutcome;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListWorkflowRunsResponse {
+  runs: WorkflowRunSummary[];
+}
+
+export interface WorkflowRunCheckpoint {
+  nodeId: string;
+  iteration: number;
+  status: "intent" | "completed" | "failed" | "skipped";
+  result?: unknown;
+  error?: string;
+  createdAt: number;
+}
+
+export interface WorkflowRunSignal {
+  signalId: string;
+  signalType: string;
+  payload?: unknown;
+  createdAt: number;
+}
+
+export interface WorkflowRunDetail {
+  run: WorkflowRunSummary & {
+    waitingOn: unknown[];
+    definition: unknown;
+    params: unknown;
+  };
+  checkpoints: WorkflowRunCheckpoint[];
+  signals: WorkflowRunSignal[];
+}
+
+export type GetWorkflowRunResponse = WorkflowRunDetail;
+
+export interface ResolveWorkflowApprovalRequest {
+  approved: boolean;
+  note?: string;
+}
+
+export interface ResolveWorkflowApprovalResponse {
+  ok: true;
+}
+
+export interface CancelWorkflowRunResponse {
+  ok: true;
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
 }

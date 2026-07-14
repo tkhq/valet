@@ -547,4 +547,82 @@ export class EngineHost {
     if (existing) this.pruneExpiredEvents(childSessionId);
     return session;
   }
+
+  /**
+   * Resolve (or lazily create) a workflow-owned session (Phase 5 plan
+   * decision 15) for a `session` node's `wf:{runId}:{nodeId}` id. Mirrors
+   * `childSessionFor`/`buildChildSession`: Docker sandbox template, `owner`
+   * passed straight through by the caller (the run's principal owner, per
+   * `WorkflowRun.owner`), NO `toolConfig.childSpawner` — a workflow session
+   * can't spawn children, same depth-limit contract as a child session.
+   * Unlike a child session it has no `parentSessionId`/`parentThreadId`
+   * (workflow runs aren't a parent/child engine relationship).
+   */
+  async workflowSessionFor(
+    sessionId: string,
+    opts: {
+      actorUserId: string;
+      orgId: string;
+      owner: Principal;
+      workspace: string;
+      title?: string;
+      modelId?: string;
+    },
+  ): Promise<Session> {
+    const cached = this.cache.get(sessionId);
+    if (cached) return cached.session;
+    const pending = this.inflight.get(sessionId);
+    if (pending) return pending;
+
+    const promise = this.buildWorkflowSession(sessionId, opts).finally(() => {
+      this.inflight.delete(sessionId);
+    });
+    this.inflight.set(sessionId, promise);
+    return promise;
+  }
+
+  private async buildWorkflowSession(
+    sessionId: string,
+    opts: {
+      actorUserId: string;
+      orgId: string;
+      owner: Principal;
+      workspace: string;
+      title?: string;
+      modelId?: string;
+    },
+  ): Promise<Session> {
+    const model = this.resolveModel(opts.modelId);
+
+    const sessionOptions = {
+      userId: opts.actorUserId,
+      orgId: opts.orgId,
+      workspace: opts.workspace,
+      purpose: "workflow" as const,
+      owner: opts.owner,
+      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage },
+      model,
+      systemPrompt: SYSTEM_PROMPT,
+      ...(opts.title ? { metadata: { title: opts.title } } : {}),
+    };
+
+    const engine = new Engine({
+      providers: {
+        store: this.opts.engineStore,
+        stream: this.opts.eventStream,
+        credentials: this.opts.engineCredentials,
+        sandboxProvider: this.opts.sandboxProvider,
+        blobs: this.opts.blobs,
+      },
+    });
+
+    const existing = await this.opts.engineStore.getSession(sessionId);
+    const session = existing
+      ? await engine.restoreSession({ sessionId, options: sessionOptions })
+      : await engine.createSession({ id: sessionId, ...sessionOptions });
+
+    this.cache.set(sessionId, { engine, session });
+    if (existing) this.pruneExpiredEvents(sessionId);
+    return session;
+  }
 }

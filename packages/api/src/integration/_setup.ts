@@ -22,10 +22,13 @@ import {
   type SandboxProvider,
 } from "@valet/engine";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
-import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
+import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
+import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
+import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
+import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { createApp } from "../app.js";
 import type { Providers } from "../providers/types.js";
 
@@ -40,6 +43,13 @@ export interface BootTestApiOpts {
   /** Override the default `VirtualSandboxProvider` — e.g. a create-counting
    * wrapper that proves a code path never provisions a sandbox. */
   sandboxProvider?: SandboxProvider;
+  /**
+   * Override the default real `LocalRunHost` — route-level tests that only
+   * need to observe `start`/`wake`/`terminate` calls (never actually drive a
+   * run) pass a stub implementing the `RunHost` port instead of paying for
+   * the poll/sweep loops.
+   */
+  workflowRunHost?: RunHost;
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -154,6 +164,19 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 
+  // Same `$client` type-gap bridge as `providers/node.ts` — see its comment.
+  const workflowStore = new SqliteWorkflowStore(db as AppDb & { $client: Database.Database });
+  const workflowEngineDeps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+  const realWorkflowRunHost = new LocalRunHost({
+    store: workflowStore,
+    engine: workflowEngineDeps,
+    executors: createDefaultNodeExecutors(),
+  });
+  const workflowRunHost = opts.workflowRunHost ?? realWorkflowRunHost;
+  // Only start the host loop when it's the real one under test control — a
+  // caller-supplied stub owns its own lifecycle (or has none).
+  if (!opts.workflowRunHost) workflowRunHost.startHost();
+
   const providers: Providers = {
     db,
     blobs,
@@ -164,6 +187,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     engineHost,
     childWatcher,
+    workflowStore,
+    workflowRunHost,
   };
 
   const { app, injectWebSocket } = createApp(providers);
@@ -178,6 +203,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     providers,
     async cleanup() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });
     },

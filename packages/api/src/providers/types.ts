@@ -5,6 +5,7 @@ import type {
   SandboxProvider,
   SessionStore,
 } from "@valet/engine";
+import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
@@ -30,4 +31,10 @@ export interface Providers {
   engineHost: EngineHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
+
+  // Workflow run host (Phase 5 plan Task 10) — leased worker loop over the
+  // sqlite-backed WorkflowStore. `workflowRunHost.startHost()`/`stopHost()`
+  // are called from main.ts alongside the server lifecycle.
+  workflowStore: WorkflowStore;
+  workflowRunHost: RunHost;
 }

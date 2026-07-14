@@ -2,12 +2,16 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { InMemoryCredentialStore, type ChildSpawner } from "@valet/engine";
+import { InMemoryCredentialStore, type ChildSpawner, type Principal } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
-import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
+import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
+import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { routeAttention } from "../orchestrator/attention.js";
+import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
+import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { FsBlobStore } from "./blob-fs.js";
 import type { Providers } from "./types.js";
 
@@ -29,6 +33,12 @@ export interface NodeProviderOpts {
    * for `orchestratorSessionFor`; regular sessions don't need it.
    */
   apiBaseUrl?: string;
+  /**
+   * Test-only crash-point hook for `LocalRunHost` (Phase 5 plan decision
+   * 20), sourced from `WF_CRASH_AT` in `main.ts`. When `'terminalizing'`,
+   * the host calls `process.exit(137)` right after `beginTerminalize`.
+   */
+  workflowCrashAt?: "terminalizing";
 }
 
 export const LOCAL_USER = {
@@ -117,6 +127,47 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const childWatcher = new ChildWatcher({ db, engineHost, engineStore });
   spawnerRef = buildChildSpawner({ db, engineHost, engineStore }, childWatcher);
 
+  // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
+  // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
+  // the routes both read/write through — one instance per process, backed
+  // by the same sqlite handle as everything else.
+  //
+  // `AppDb`'s drizzle-orm version doesn't declare `$client` in its public
+  // type even though the runtime instance always carries it (same cast
+  // `sqlite-store.test.ts` uses) — bridging a library type gap, not a real
+  // type mismatch.
+  const workflowStore = new SqliteWorkflowStore(db as AppDb & { $client: Database.Database });
+  const workflowEngineDeps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore });
+
+  // Approval attention (decision 12): the FIRST park on an approval node
+  // routes through the Phase 4 notification system. `onApprovalPending`
+  // only receives `{runId, nodeId, prompt, summary?, details?}` — no owner
+  // — so it re-resolves the run's owner from the store itself.
+  const onApprovalPending: OnApprovalPending = async (info) => {
+    const run = await workflowStore.getRun(info.runId);
+    if (!run?.owner) return; // no recorded owner: nothing to notify
+    const owner: Principal = { type: run.owner.ownerType as Principal["type"], id: run.owner.ownerId };
+    await routeAttention(
+      { db },
+      {
+        kind: "approval",
+        owner,
+        title: info.summary ?? info.prompt,
+        body: info.summary ? info.prompt : undefined,
+        href: `/workflows/runs/${info.runId}`,
+        dedupeKey: `${info.runId}:${info.nodeId}`,
+      },
+    );
+  };
+
+  const workflowRunHost = new LocalRunHost({
+    store: workflowStore,
+    engine: workflowEngineDeps,
+    executors: createDefaultNodeExecutors(),
+    onApprovalPending,
+    crashAt: opts.workflowCrashAt,
+  });
+
   return {
     db,
     blobs,
@@ -127,5 +178,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     engineHost,
     childWatcher,
+    workflowStore,
+    workflowRunHost,
   };
 }
