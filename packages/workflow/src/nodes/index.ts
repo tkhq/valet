@@ -71,6 +71,7 @@ export { executeIf } from './if.js';
 export { executeStop } from './stop.js';
 export { executeWait } from './wait.js';
 export { executeApproval } from './approval.js';
+export { executeSession } from './session.js';
 
 import { executeTrigger } from './trigger.js';
 import { executeSet } from './set.js';
@@ -78,8 +79,9 @@ import { executeIf } from './if.js';
 import { executeStop } from './stop.js';
 import { executeWait } from './wait.js';
 import { executeApproval } from './approval.js';
+import { executeSession } from './session.js';
 
-/** The pure executors plus `wait`/`approval` (Task 5). `session` is added by a later task. */
+/** The pure executors plus `wait`/`approval`/`session` (Tasks 5, 7). */
 export function createDefaultNodeExecutors(): NodeExecutorRegistry {
   return {
     trigger: { execute: executeTrigger },
@@ -88,5 +90,6 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     stop: { execute: executeStop },
     wait: { execute: executeWait },
     approval: { execute: executeApproval },
+    session: { execute: executeSession },
   };
 }
