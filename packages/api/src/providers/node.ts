@@ -181,6 +181,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     anthropicApiKey: opts.anthropicApiKey,
     db,
     apiBaseUrl: opts.apiBaseUrl,
+    plugins,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);

@@ -149,6 +149,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const port = await getFreePort();
   const apiBaseUrl = `http://127.0.0.1:${port}`;
 
+  const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
+
   // Same circular-construction indirection as providers/node.ts — see its
   // comment. Test callers that want to unit-test the spawner/watcher
   // directly still can (they're plain exported functions/classes); this
@@ -163,6 +165,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     anthropicApiKey: ANTHROPIC_API_KEY,
     db,
     apiBaseUrl,
+    plugins,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -186,8 +189,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // Only start the host loop when it's the real one under test control — a
   // caller-supplied stub owns its own lifecycle (or has none).
   if (!opts.workflowRunHost) workflowRunHost.startHost();
-
-  const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
 
   const providers: Providers = {
     db,

@@ -17,6 +17,7 @@ import {
   type Session,
   type SessionStore,
 } from "@valet/engine";
+import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { orchestratorIdentities } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -26,6 +27,7 @@ import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
+import { pluginSessionExtras } from "../plugins/assemble.js";
 
 /** Personality is capped at injection time (assistant-centered web UI
  * decision 5), independent of any cap the memory service itself applies. */
@@ -65,6 +67,12 @@ export interface EngineHostOpts {
    * (depth limit 1, decision 10) since `childSessionFor` never sets it.
    */
   childSpawner?: ChildSpawner;
+  /**
+   * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
+   * output). Every session builder calls `pluginSessionExtras(plugins)`
+   * FRESH — see the call sites below — never cached on the host instance.
+   */
+  plugins?: ValetPlugin[];
 }
 
 export interface SessionMeta {
@@ -143,6 +151,12 @@ export class EngineHost {
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
     const model = this.resolveModel();
+    // Built FRESH per session build, never cached on the host: the plugin
+    // catalog's dynamic-action-resolution cache lives on the `Catalog`
+    // instance `pluginCatalogTools` returns, so it must stay scoped to this
+    // one session's credential context — a shared/cached catalog would leak
+    // one user's resolved tool list into every other session.
+    const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const engine = new Engine({
       providers: {
@@ -165,6 +179,9 @@ export class EngineHost {
             sandbox: { workspace: meta.workspace, image: this.opts.defaultImage },
             model,
             systemPrompt: SYSTEM_PROMPT,
+            tools: extras.tools.length ? extras.tools : undefined,
+            skills: extras.skills.length ? extras.skills : undefined,
+            roles: extras.roles.length ? extras.roles : undefined,
           },
         })
       : await engine.createSession({
@@ -175,6 +192,9 @@ export class EngineHost {
           sandbox: { workspace: meta.workspace, image: this.opts.defaultImage },
           model,
           systemPrompt: SYSTEM_PROMPT,
+          tools: extras.tools.length ? extras.tools : undefined,
+          skills: extras.skills.length ? extras.skills : undefined,
+          roles: extras.roles.length ? extras.roles : undefined,
         });
 
     this.cache.set(sessionId, { engine, session });
@@ -252,6 +272,9 @@ export class EngineHost {
 
     const model = this.resolveModel();
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
+    // Built FRESH per session build, never cached on the host — see the
+    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
+    const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const sessionOptions = {
       userId: meta.actorUserId,
@@ -263,7 +286,9 @@ export class EngineHost {
       sandbox: { workspace, image: this.opts.defaultImage },
       model,
       systemPrompt: personaPrefix + orchestratorPersona(principal),
-      tools: buildMemoryTools(),
+      tools: [...buildMemoryTools(), ...extras.tools],
+      skills: extras.skills.length ? extras.skills : undefined,
+      roles: extras.roles.length ? extras.roles : undefined,
       toolConfig: {
         apiBaseUrl,
         internalToken: internalToken(),
@@ -532,6 +557,9 @@ export class EngineHost {
     },
   ): Promise<Session> {
     const model = this.resolveModel(opts.modelId);
+    // Built FRESH per session build, never cached on the host — see the
+    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
+    const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -544,6 +572,9 @@ export class EngineHost {
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage },
       model,
       systemPrompt: SYSTEM_PROMPT,
+      tools: extras.tools.length ? extras.tools : undefined,
+      skills: extras.skills.length ? extras.skills : undefined,
+      roles: extras.roles.length ? extras.roles : undefined,
     };
 
     const engine = new Engine({
@@ -611,6 +642,9 @@ export class EngineHost {
     },
   ): Promise<Session> {
     const model = this.resolveModel(opts.modelId);
+    // Built FRESH per session build, never cached on the host — see the
+    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
+    const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -621,6 +655,9 @@ export class EngineHost {
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage },
       model,
       systemPrompt: SYSTEM_PROMPT,
+      tools: extras.tools.length ? extras.tools : undefined,
+      skills: extras.skills.length ? extras.skills : undefined,
+      roles: extras.roles.length ? extras.roles : undefined,
       ...(opts.title ? { metadata: { title: opts.title } } : {}),
     };
 
