@@ -335,7 +335,7 @@ async function invokeExecutor(
     case 'llm':
       return requireExecutor(executors.llm, node).execute({ ...argsBase, node });
     case 'orchestrator':
-      throw new Error("executor for 'orchestrator' not implemented yet (node completion plan Task 5)");
+      return requireExecutor(executors.orchestrator, node).execute({ ...argsBase, node });
     case 'tool':
       return requireExecutor(executors.tool, node).execute({ ...argsBase, node });
   }
