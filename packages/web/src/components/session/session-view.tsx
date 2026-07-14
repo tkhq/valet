@@ -30,11 +30,11 @@ export type SessionViewVariant = "full" | "panel" | "standalone";
  *
  * Variant controls header chrome only. The threads/thread-tree *sidebar*
  * is NOT rendered here — it's a root-layout concern (`__root.tsx` swaps
- * `ThreadTree`/`ThreadList`/nothing based on the current route), because
- * the sidebar lives outside this component's DOM subtree in the app
- * shell's `<aside>`. "full" (used by `/chat`) gets the thread-tree sidebar
- * from the root layout; "standalone" (`/sessions/$sessionId`) and "panel"
- * (`ChildPanel`) get no sidebar at all (decisions 14/13).
+ * `ThreadTree`/nothing based on the current route), because the sidebar
+ * lives outside this component's DOM subtree in the app shell's `<aside>`.
+ * "full" (used by `/chat`) gets the thread-tree sidebar from the root
+ * layout; "standalone" (`/sessions/$sessionId`) and "panel" (`ChildPanel`)
+ * get no sidebar at all (decisions 14/13).
  *
  * - `full` / `standalone`: identical body — the existing `SessionHeader`
  *   (title, model picker, sandbox/connection/status chips, delete).

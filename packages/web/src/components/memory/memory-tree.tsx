@@ -171,7 +171,7 @@ function TreeRow({
       className={cn(
         "flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-sm truncate",
         isActive
-          ? "bg-moss/10 font-medium text-moss"
+          ? "bg-moss-wash font-medium text-moss"
           : "text-ink hover:bg-ink-wash",
       )}
       style={{ paddingLeft: 20 + depth * 12 }}

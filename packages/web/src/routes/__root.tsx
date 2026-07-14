@@ -3,7 +3,6 @@ import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
 import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
-import { ThreadList } from "~/components/session/thread-list";
 import { ThreadTree } from "~/components/session/thread-tree";
 
 interface RouterContext {
@@ -22,18 +21,16 @@ export const Route = createRootRouteWithContext<RouterContext>()({
  *
  * - `/chat` — the nested thread-tree (children grouped under their
  *   spawning thread), replacing the flat thread list.
- * - `/sessions/$sessionId` — no sidebar at all (decision 14: standalone
- *   sessions have no thread UI).
- * - `/memory` and `/memory/*` — no app sidebar either (Task 6): the
- *   explorer's own tree pane, rendered inside the route, IS the left pane.
- * - everything else — the existing flat `ThreadList` (a no-op placeholder
- *   off session routes; unchanged from Task 3/4).
+ * - everything else (`/`, `/sessions`, `/sessions/$sessionId`,
+ *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
+ *   have no thread UI (decision 14); the memory explorer renders its own
+ *   tree pane inside the route (Task 6); the dashboard and session list
+ *   have no thread concept at all. The old flat `ThreadList` sidebar that
+ *   used to cover this "everything else" bucket is dead — deleted.
  */
 function sidebarForPath(pathname: string) {
   if (pathname === "/chat") return <ThreadTree />;
-  if (/^\/sessions\/[^/]+$/.test(pathname)) return null;
-  if (pathname === "/memory" || pathname.startsWith("/memory/")) return null;
-  return <ThreadList />;
+  return null;
 }
 
 function RootLayout() {

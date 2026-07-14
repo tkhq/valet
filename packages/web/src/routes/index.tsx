@@ -63,11 +63,7 @@ function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
   const childrenQ = useOrchestratorChildren();
   const notificationsQ = useNotifications();
 
-  const events = mergeActivity(
-    notificationsQ.data?.notifications ?? [],
-    childrenQ.data?.children ?? [],
-    info.sessionId,
-  );
+  const events = mergeActivity(notificationsQ.data?.notifications ?? [], childrenQ.data?.children ?? []);
 
   return (
     <div className="flex-1 overflow-y-auto">

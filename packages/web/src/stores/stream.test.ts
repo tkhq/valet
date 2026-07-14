@@ -308,6 +308,118 @@ describe("stream store reducer", () => {
   });
 });
 
+describe("setThreadMessages", () => {
+  beforeEach(reset);
+
+  it("keeps a mid-stream assistant message that hasn't been persisted to REST yet", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+
+    // The assistant message begins streaming — exists in the store, not
+    // yet in any REST snapshot.
+    ingest(SESSION, messageStart("asst-1", 1));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "text_delta",
+      threadId: THREAD,
+      messageId: "asst-1",
+      delta: "hel",
+    });
+
+    // A `queue.state`-triggered refetch lands mid-stream, before
+    // `message_end`/persistence — REST only knows about the prior turn.
+    setThreadMessages(SESSION, THREAD, [
+      {
+        id: "user-1",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "user",
+        content: "do the thing",
+        parts: [{ kind: "text", text: "do the thing" }],
+        createdAt: 1,
+      },
+    ]);
+
+    const afterRefetch = useStreamStore.getState().bySession[SESSION].messages;
+    expect(afterRefetch.map((m) => m.id)).toEqual(["user-1", "asst-1"]);
+    const asst = afterRefetch.find((m) => m.id === "asst-1");
+    expect(asst?.content).toBe("hel");
+
+    // The stream continues after the merge — subsequent deltas must still
+    // find the message (idx >= 0), proving it wasn't dropped.
+    ingest(SESSION, {
+      seq: 3,
+      ts: Date.now(),
+      type: "text_delta",
+      threadId: THREAD,
+      messageId: "asst-1",
+      delta: "lo",
+    });
+    const afterDelta = useStreamStore.getState().bySession[SESSION].messages;
+    expect(afterDelta.find((m) => m.id === "asst-1")?.content).toBe("hello");
+  });
+
+  it("drops the store's copy once the REST snapshot includes the same id (no duplicate)", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+
+    ingest(SESSION, messageStart("asst-1", 1));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "text_delta",
+      threadId: THREAD,
+      messageId: "asst-1",
+      delta: "hello",
+    });
+
+    // message_end has now arrived and the engine persisted the entry under
+    // the same id — the follow-up refetch's REST snapshot includes it.
+    setThreadMessages(SESSION, THREAD, [
+      {
+        id: "asst-1",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "assistant",
+        content: "hello",
+        parts: [{ kind: "text", text: "hello" }],
+        createdAt: 1,
+      },
+    ]);
+
+    const after = useStreamStore.getState().bySession[SESSION].messages;
+    expect(after.filter((m) => m.id === "asst-1")).toHaveLength(1);
+    expect(after.map((m) => m.id)).toEqual(["asst-1"]);
+  });
+
+  it("preserves an optimistic user message not yet reflected in the REST snapshot", () => {
+    const { addUserMessage, setThreadMessages } = useStreamStore.getState();
+    const localId = addUserMessage(SESSION, "hi there", THREAD);
+
+    setThreadMessages(SESSION, THREAD, []);
+
+    const after = useStreamStore.getState().bySession[SESSION].messages;
+    expect(after.map((m) => m.id)).toEqual([localId]);
+  });
+
+  it("leaves other threads' messages untouched", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "message_start",
+      threadId: "other-thread",
+      messageId: "other-1",
+      role: "assistant",
+    });
+
+    setThreadMessages(SESSION, THREAD, []);
+
+    const after = useStreamStore.getState().bySession[SESSION].messages;
+    expect(after.map((m) => m.id)).toEqual(["other-1"]);
+  });
+});
+
 describe("store default slice", () => {
   beforeEach(reset);
 

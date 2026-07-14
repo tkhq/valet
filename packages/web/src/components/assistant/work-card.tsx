@@ -33,7 +33,6 @@ export function WorkCard() {
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, RECENT_LIMIT);
   const childrenLine = activeChildrenLine(info.data?.activeChildren ?? 0);
-  const assistantSessionId = info.data?.sessionId;
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
@@ -84,12 +83,8 @@ export function WorkCard() {
           </ul>
         )}
 
-        {childrenLine && assistantSessionId && (
-          <Link
-            to="/sessions/$sessionId"
-            params={{ sessionId: assistantSessionId }}
-            className="block border-t border-line pt-2 text-xs text-moss hover:underline"
-          >
+        {childrenLine && (
+          <Link to="/chat" className="block border-t border-line pt-2 text-xs text-moss hover:underline">
             {childrenLine}
           </Link>
         )}

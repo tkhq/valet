@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 import type { OrchestratorChildSummary } from "@valet/api/wire";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
@@ -29,6 +29,15 @@ function SessionPage() {
   const { thread } = Route.useSearch();
   const childrenQ = useOrchestratorChildren();
   const info = useOrchestratorInfo();
+
+  // The assistant's own session lives at `/chat`, not this standalone
+  // session route. Notification/activity hrefs built server-side (see
+  // `packages/api`'s attention-wiring) still point `/sessions/{orchestratorId}`
+  // at this route, so redirect here rather than changing the API — this
+  // future-proofs any such link regardless of where it originates.
+  if (info.data?.sessionId && info.data.sessionId === sessionId) {
+    return <Navigate to="/chat" replace />;
+  }
 
   const child = findChild(childrenQ.data?.children ?? [], sessionId);
 

@@ -113,15 +113,23 @@ export interface StreamStore {
    */
   setMessageQueueItemId(sessionId: string, messageId: string, queueItemId: string): void;
   /**
-   * Replace the messages for a single thread with a fresh REST snapshot.
-   * Other threads' messages stay put. Optimistic messages for the same
-   * thread are kept *unless* the new snapshot already contains a user
-   * message with matching content — in which case we drop the optimistic
-   * one to avoid a brief duplicate while the page renders.
+   * Merge the messages for a single thread with a fresh REST snapshot.
+   * Other threads' messages stay put. Within the target thread, any
+   * store message whose id is *absent* from the REST snapshot is kept
+   * (positioned after the REST rows, in its original relative order) —
+   * this generalizes the old user-opt- prefix special case to cover any
+   * client-local row the REST snapshot hasn't caught up to yet, most
+   * importantly a mid-stream assistant message (created at `message_start`,
+   * not yet persisted) that this same refetch would otherwise silently
+   * wipe out from under an in-flight `text_delta`/`tool_start` stream. Once
+   * the REST snapshot's id set includes a given row (e.g. the engine has
+   * persisted it under the same id), the REST copy wins and the local
+   * extra is dropped.
    *
    * This is the entry point for thread history loading after a thread
-   * switch (or initial route mount). WS init no longer carries messages;
-   * REST is the authoritative source.
+   * switch (or initial route mount), and is also invoked opportunistically
+   * mid-turn (see `useInvalidateMessagesOnQueueState`) — hence the merge
+   * rather than a hard replace.
    */
   setThreadMessages(
     sessionId: string,
@@ -474,25 +482,21 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const slice = ensure(state, sessionId);
       // Keep messages from other threads untouched.
       const others = slice.messages.filter((m) => m.threadId !== threadId);
-      // Optimistic user messages we placed locally — preserve any whose
-      // content isn't already in the REST snapshot. Once the server has
-      // persisted the prompt, the snapshot will include it (with a server
-      // id), and we drop the optimistic copy to prevent a duplicate row.
-      const restUserContents = new Set(
-        freshMessages.filter((m) => m.role === "user").map((m) => m.content),
-      );
-      const optimisticPending = slice.messages.filter(
-        (m) =>
-          m.threadId === threadId &&
-          m.id.startsWith("user-opt-") &&
-          !restUserContents.has(m.content),
+      // Store-local rows for this thread that the REST snapshot doesn't
+      // (yet) know about — optimistic user messages awaiting persistence,
+      // and in-flight assistant messages the engine hasn't flushed to
+      // `engine_entries` yet. Kept in their original relative order,
+      // appended after the REST rows.
+      const freshIds = new Set(freshMessages.map((m) => m.id));
+      const localOnly = slice.messages.filter(
+        (m) => m.threadId === threadId && !freshIds.has(m.id),
       );
       return {
         bySession: {
           ...state.bySession,
           [sessionId]: {
             ...slice,
-            messages: [...others, ...freshMessages, ...optimisticPending],
+            messages: [...others, ...freshMessages, ...localOnly],
           },
         },
       };

@@ -16,9 +16,9 @@ export interface ActivityEvent {
 /**
  * Merges notifications + settled children into one timeline, newest first,
  * top 8 (decision 16). Pure so the merge/sort/cap logic is testable
- * without mounting queries. `assistantSessionId` targets child rows at the
- * assistant's session route for now — TODO(T5): retarget to `/chat` once
- * that route exists.
+ * without mounting queries. Child rows deep-link to `/chat` — settled
+ * children live in the assistant's thread tree there, not on a standalone
+ * session route.
  *
  * Child `createdAt` is the watch's spawn time, not its settlement time —
  * `child_watches` carries no separate settled-at column (see decision 6's
@@ -29,7 +29,6 @@ export interface ActivityEvent {
 export function mergeActivity(
   notifications: NotificationSummary[],
   children: OrchestratorChildSummary[],
-  assistantSessionId: string | undefined,
   limit = ACTIVITY_LIMIT,
 ): ActivityEvent[] {
   const fromNotifications: ActivityEvent[] = notifications.map((n) => ({
@@ -46,7 +45,7 @@ export function mergeActivity(
       id: `child:${c.sessionId}`,
       kind: "child.settled",
       title: `${c.title} settled`,
-      href: assistantSessionId ? `/sessions/${assistantSessionId}` : "#",
+      href: "/chat",
       createdAt: c.createdAt,
     }));
 
