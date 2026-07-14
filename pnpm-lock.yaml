@@ -38,6 +38,12 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/plugin-cloudflare':
+        specifier: workspace:*
+        version: link:../plugin-cloudflare
+      '@valet/plugin-deepwiki':
+        specifier: workspace:*
+        version: link:../plugin-deepwiki
       '@valet/plugin-github':
         specifier: workspace:*
         version: link:../plugin-github
@@ -50,9 +56,24 @@ importers:
       '@valet/plugin-google-workspace':
         specifier: workspace:*
         version: link:../plugin-google-workspace
+      '@valet/plugin-linear':
+        specifier: workspace:*
+        version: link:../plugin-linear
+      '@valet/plugin-notion':
+        specifier: workspace:*
+        version: link:../plugin-notion
+      '@valet/plugin-sentry':
+        specifier: workspace:*
+        version: link:../plugin-sentry
       '@valet/plugin-slack':
         specifier: workspace:*
         version: link:../plugin-slack
+      '@valet/plugin-stripe':
+        specifier: workspace:*
+        version: link:../plugin-stripe
+      '@valet/plugin-typefully':
+        specifier: workspace:*
+        version: link:../plugin-typefully
       '@valet/sandbox-docker':
         specifier: workspace:*
         version: link:../sandbox-docker
@@ -260,15 +281,15 @@ importers:
 
   packages/plugin-cloudflare:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -279,15 +300,15 @@ importers:
 
   packages/plugin-deepwiki:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -308,15 +329,15 @@ importers:
 
   packages/plugin-figma:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -431,15 +452,15 @@ importers:
 
   packages/plugin-linear:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -450,15 +471,15 @@ importers:
 
   packages/plugin-notion:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -469,15 +490,15 @@ importers:
 
   packages/plugin-sentry:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -504,15 +525,15 @@ importers:
 
   packages/plugin-stripe:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
-      zod:
-        specifier: ^3.22.4
-        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
@@ -536,6 +557,9 @@ importers:
 
   packages/plugin-typefully:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/sdk':
         specifier: workspace:*
         version: link:../sdk
@@ -615,9 +639,15 @@ importers:
 
   packages/sdk:
     dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
+      typebox:
+        specifier: ^1.1.24
+        version: 1.1.37
       zod:
         specifier: ^3.22.4
         version: 3.25.76
@@ -8811,14 +8841,6 @@ snapshots:
     optionalDependencies:
       vite: 6.4.1(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0)
 
-  '@vitest/mocker@4.0.18(vite@6.4.1(@types/node@20.19.39)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))':
-    dependencies:
-      '@vitest/spy': 4.0.18
-      estree-walker: 3.0.3
-      magic-string: 0.30.21
-    optionalDependencies:
-      vite: 6.4.1(@types/node@20.19.39)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0)
-
   '@vitest/mocker@4.0.18(vite@6.4.1(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 4.0.18
@@ -11645,7 +11667,7 @@ snapshots:
   vitest@4.0.18(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       '@vitest/expect': 4.0.18
-      '@vitest/mocker': 4.0.18(vite@6.4.1(@types/node@20.19.39)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
+      '@vitest/mocker': 4.0.18(vite@6.4.1(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
       '@vitest/pretty-format': 4.0.18
       '@vitest/runner': 4.0.18
       '@vitest/snapshot': 4.0.18

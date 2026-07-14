@@ -3,3 +3,4 @@ version: 0.0.1
 description: Sentry integration for error tracking and monitoring
 icon: "\U0001F41B"
 actionType: mcp
+v2: true

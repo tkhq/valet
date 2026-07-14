@@ -14,6 +14,10 @@
       "types": "./dist/channels/index.d.ts",
       "import": "./dist/channels/index.js"
     },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    },
     "./meta": {
       "types": "./dist/meta.d.ts",
       "import": "./dist/meta.js"
@@ -45,7 +49,9 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@valet/engine": "workspace:*",
     "@valet/shared": "workspace:*",
+    "typebox": "^1.1.24",
     "zod": "^3.22.4"
   },
   "peerDependencies": {
