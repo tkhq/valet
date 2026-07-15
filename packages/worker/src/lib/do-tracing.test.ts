@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { trace } from '@opentelemetry/api';
-import { parentContext } from './do-tracing.js';
+import { InMemorySpanExporter, type SpanExporter } from '@opentelemetry/sdk-trace-base';
+import { createTraceProvider, parentContext } from './do-tracing.js';
 
 // parentContext parses the Worker→DO `traceparent` header so DO-internal spans nest
 // under the worker trace. Importing it does not trigger the lazy `cloudflare:workers`
@@ -31,5 +32,29 @@ describe('parentContext', () => {
   it('returns a parent-less context when traceparent ids are the wrong length', () => {
     const req = new Request('https://do/x', { headers: { traceparent: '00-abc-def-01' } });
     expect(trace.getSpanContext(parentContext(req))).toBeUndefined();
+  });
+});
+
+// Pins the redact → drop-count → batch chain that createTraceProvider builds.
+// Deleting the RedactingSpanExporter wrapping must fail this test.
+describe('createTraceProvider', () => {
+  it('redacts URL query secrets before spans reach the terminal exporter', async () => {
+    const memory = new InMemorySpanExporter();
+    const keeper: SpanExporter = {
+      export: (spans, cb) => memory.export(spans, cb),
+      shutdown: () => Promise.resolve(),
+      forceFlush: () => Promise.resolve(),
+    };
+    const created = await createTraceProvider({}, 'test-svc', keeper);
+    expect(created).not.toBeNull();
+    const tracer = created!.provider.getTracer('test-svc');
+    const span = tracer.startSpan('fetch', {
+      attributes: { 'url.full': 'https://api.test/cb?token=LEAKSECRET&x=1' },
+    });
+    span.end();
+    await created!.provider.forceFlush();
+    const [exported] = memory.getFinishedSpans();
+    expect(exported?.attributes['url.full']).toBe('https://api.test/cb');
+    expect(JSON.stringify(exported?.attributes)).not.toContain('LEAKSECRET');
   });
 });

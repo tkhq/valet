@@ -201,6 +201,39 @@ describe('emitWorkflowRunSpans', () => {
     expect(count).toBe(0);
   });
 
+
+  it('detaches from an UNSAMPLED traceparent: fresh sampled root, spans still export, dispatch trace kept as attribute', async () => {
+    const traceId = 'c'.repeat(32);
+    const count = await emitWorkflowRunSpans(
+      DISABLED_ENV,
+      makeParams({ traceparent: `00-${traceId}-${'d'.repeat(16)}-00` }),
+      makeResult(),
+      { exporter },
+    );
+    // The whole point: an unsampled upstream decision must not silently
+    // swallow the run's spans while we report a positive count.
+    expect(count).toBe(4);
+    const spans = memory.getFinishedSpans();
+    expect(spans).toHaveLength(4);
+    const root = spans.find((s) => s.name === 'workflow.run');
+    expect(root?.parentSpanContext).toBeUndefined();
+    expect(root?.spanContext().traceId).not.toBe(traceId);
+    expect(root?.attributes['valet.dispatch.trace_id']).toBe(traceId);
+  });
+
+  it('counts cancel-path skipped envelopes as skipped, not executed', async () => {
+    const result = makeResult({ status: 'cancelled' });
+    result.state.nodes['start'] = {
+      status: 'skipped',
+      startedAt: '2026-07-15T00:00:02.000Z',
+      completedAt: '2026-07-15T00:00:02.000Z',
+    };
+    await emitWorkflowRunSpans(DISABLED_ENV, makeParams(), result, { exporter });
+    const root = memory.getFinishedSpans().find((s) => s.name === 'workflow.run');
+    expect(root?.attributes['valet.workflow.node_count']).toBe(1); // trigger only
+    expect(root?.attributes['valet.workflow.skipped_count']).toBe(2); // orphan + start
+  });
+
   it('never throws when the export flush rejects; reports 0 spans', async () => {
     const failing: SpanExporter = {
       export: (spans: ReadableSpan[], cb: Parameters<SpanExporter['export']>[1]) =>

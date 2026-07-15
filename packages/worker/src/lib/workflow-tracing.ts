@@ -48,6 +48,14 @@ export async function emitWorkflowRunSpans(
     const nodeTypes = new Map(params.definition.nodes.map((n) => [n.id, n.type]));
     const executed = Object.entries(result.state.nodes ?? {});
     const skipped = Object.entries(result.state.skipped ?? {});
+    // Cancel-path nodes land in state.nodes with an envelope status of
+    // 'skipped'; count them with the edge-skips so node_count means "ran".
+    const ranCount = executed.filter(([, n]) => n.status !== 'skipped').length;
+    const skippedTotal = skipped.length + (executed.length - ranCount);
+    // Defensive cap: a pathological definition can't overflow the batch
+    // processor's queue (2048) into silent drops. Root carries the loss.
+    const CAP = 1500;
+    const truncated = Math.max(0, executed.length + skipped.length - CAP);
 
     // Run bounds from the replay-stable per-node timestamps; a run with no
     // executed nodes (early cancel) collapses to a zero-length span at now.
@@ -57,8 +65,16 @@ export async function emitWorkflowRunSpans(
     const runEnd = ends.length > 0 ? Math.max(...ends, runStart) : runStart;
 
     // Parent to the dispatching request's trace when the trigger path stamped
-    // one; parseTraceparent falls back to a fresh root on missing/malformed.
-    const parent: Context = parseTraceparent(params.traceparent);
+    // a SAMPLED traceparent. An unsampled parent (flags 00 — proxies and
+    // upstream clients stamp these routinely) would make the default
+    // ParentBased sampler drop every span here while we still report a
+    // count, so those runs get a fresh sampled root instead, with the
+    // dispatching trace id kept as an attribute for manual correlation.
+    const tpParts = params.traceparent?.trim().split('-') ?? [];
+    const tpValid = tpParts.length >= 4 && /^[0-9a-f]{32}$/.test(tpParts[1] ?? '');
+    const parentSampled = tpValid && (parseInt(tpParts[3]!, 16) & 1) === 1;
+    const parent: Context = parentSampled ? parseTraceparent(params.traceparent) : parseTraceparent(undefined);
+    const dispatchTraceId = tpValid && !parentSampled ? tpParts[1] : undefined;
     const root = tracer.startSpan('workflow.run', {
       startTime: runStart,
       attributes: {
@@ -68,9 +84,11 @@ export async function emitWorkflowRunSpans(
         'valet.workflow.mode': params.mode ?? 'production',
         'valet.workflow.trigger_type': params.trigger.type,
         'valet.workflow.status': result.status,
-        'valet.workflow.node_count': executed.length,
-        'valet.workflow.skipped_count': skipped.length,
+        'valet.workflow.node_count': ranCount,
+        'valet.workflow.skipped_count': skippedTotal,
         'valet.workflow.failed_count': result.failures?.length ?? 0,
+        ...(truncated > 0 ? { 'valet.spans.truncated': truncated } : {}),
+        ...(dispatchTraceId ? { 'valet.dispatch.trace_id': dispatchTraceId } : {}),
       },
     }, parent);
     if (result.status === 'failed') {
@@ -83,7 +101,9 @@ export async function emitWorkflowRunSpans(
 
     const runCtx = trace.setSpan(parent, root);
     let count = 1;
+    let budget = CAP;
     for (const [nodeId, node] of executed) {
+      if (budget-- <= 0) break;
       const start = Date.parse(node.startedAt);
       const end = Date.parse(node.completedAt);
       const span = tracer.startSpan(`workflow.node.${nodeTypes.get(nodeId) ?? 'unknown'}`, {
@@ -99,8 +119,11 @@ export async function emitWorkflowRunSpans(
       count += 1;
     }
     for (const [nodeId] of skipped) {
+      if (budget-- <= 0) break;
       // Skip reasons stay off the span: edge-eval failures embed expression
       // text. The workflow_execution_nodes row carries the full reason.
+      // Skips carry no runtime timestamp (only the D1 trace row does), so
+      // they're stamped at runEnd — a known approximation.
       const span = tracer.startSpan(`workflow.node.${nodeTypes.get(nodeId) ?? 'unknown'}`, {
         startTime: runEnd,
         attributes: {
@@ -114,8 +137,13 @@ export async function emitWorkflowRunSpans(
     }
 
     root.end(runEnd);
-    await provider.forceFlush();
-    await provider.shutdown();
+    // Bound the export so a black-holed collector can't hold the workflow
+    // instance open for the full 15s export timeout; a timed-out flush is
+    // logged by the drop counter when the export eventually fails.
+    await Promise.race([
+      provider.forceFlush().then(() => provider.shutdown()),
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
+    ]);
     return count;
   } catch (err) {
     console.warn('[workflow-tracing] span emission failed:', err instanceof Error ? err.message : String(err));
