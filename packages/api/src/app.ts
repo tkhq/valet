@@ -24,6 +24,8 @@ import { notificationsRouter } from "./routes/notifications.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { credentialsRouter } from "./routes/credentials.js";
+import { meRouter } from "./routes/me.js";
+import { modelsRouter } from "./routes/models.js";
 import { registerWsRoutes } from "./routes/ws.js";
 
 export interface CreatedApp {
@@ -65,6 +67,8 @@ export function createApp(providers: Providers): CreatedApp {
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
   app.route("/api/credentials", credentialsRouter);
+  app.route("/api/me", meRouter);
+  app.route("/api/models", modelsRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)

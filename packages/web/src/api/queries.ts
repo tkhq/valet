@@ -22,7 +22,7 @@ import type {
   ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
-  MeResponse,
+  AuthMeResponse,
   PatchSessionResponse,
   PatchThreadResponse,
   ResolveDecisionRequest,
@@ -48,8 +48,8 @@ export const qk = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
-export function useMe(opts?: UseQueryOptions<MeResponse>) {
-  return useQuery<MeResponse>({ queryKey: qk.me(), queryFn: () => api.me(), ...opts });
+export function useMe(opts?: UseQueryOptions<AuthMeResponse>) {
+  return useQuery<AuthMeResponse>({ queryKey: qk.me(), queryFn: () => api.me(), ...opts });
 }
 
 export function useSessions(opts?: UseQueryOptions<ListSessionsResponse>) {

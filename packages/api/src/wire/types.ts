@@ -27,7 +27,7 @@ export interface ApiError {
 
 // ── REST: auth ────────────────────────────────────────────────────────────
 
-export interface MeResponse {
+export interface AuthMeResponse {
   user: User;
 }
 
@@ -759,4 +759,43 @@ export interface PutCredentialResponse {
 
 export interface DeleteCredentialResponse {
   ok: true;
+}
+
+// ── REST: me + models (split-settings design) ─────────────────────────────
+//
+// `/api/me` is the settings-shell's per-user profile surface — distinct from
+// `/api/auth/me` (`AuthMeResponse`, session-probe shape). `orgRole` comes
+// from `org_members.role` (falls back to `"member"` if the caller has no
+// org-membership row); `defaultModel` feeds `EngineHost`'s model override
+// seam and is validated against `/api/models`'s id set on PATCH.
+
+export interface MeResponse {
+  id: string;
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+  role: "admin" | "member";
+  orgId: string;
+  orgRole: "admin" | "member";
+  defaultModel: string | null;
+}
+
+/** Whitelisted fields only — unknown keys 400. `defaultModel: null` clears the override. */
+export interface PatchMeRequest {
+  name?: string;
+  avatarUrl?: string;
+  defaultModel?: string | null;
+}
+
+export type PatchMeResponse = MeResponse;
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  contextWindow: number;
+  reasoning: boolean;
+}
+
+export interface ListModelsResponse {
+  models: ModelInfo[];
 }

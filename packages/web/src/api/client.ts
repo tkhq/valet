@@ -32,7 +32,7 @@ import type {
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
-  MeResponse,
+  AuthMeResponse,
   PatchOrchestratorInfoRequest,
   PatchOrchestratorInfoResponse,
   PatchSessionRequest,
@@ -84,7 +84,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
   // auth
-  me: () => request<MeResponse>("GET", "/auth/me"),
+  me: () => request<AuthMeResponse>("GET", "/auth/me"),
 
   // sessions
   listSessions: () => request<ListSessionsResponse>("GET", "/sessions"),
