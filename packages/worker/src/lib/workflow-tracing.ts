@@ -138,12 +138,18 @@ export async function emitWorkflowRunSpans(
 
     root.end(runEnd);
     // Bound the export so a black-holed collector can't hold the workflow
-    // instance open for the full 15s export timeout; a timed-out flush is
-    // logged by the drop counter when the export eventually fails.
-    await Promise.race([
-      provider.forceFlush().then(() => provider.shutdown()),
-      new Promise((resolve) => setTimeout(resolve, 5_000)),
+    // instance open for the full 15s export timeout. If the bound wins the
+    // race the export may never land, so log it here — the isolate can be
+    // reclaimed the moment this step returns, before the drop counter would
+    // ever observe the failed export.
+    const TIMED_OUT = Symbol('flush-timeout');
+    const flushed = await Promise.race([
+      provider.forceFlush().then(() => provider.shutdown()).then(() => 'flushed' as const),
+      new Promise<typeof TIMED_OUT>((resolve) => setTimeout(() => resolve(TIMED_OUT), 5_000)),
     ]);
+    if (flushed === TIMED_OUT) {
+      console.warn(`[workflow-tracing] flush exceeded 5s bound for ${params.executionId}; ${count} span(s) may not have exported`);
+    }
     return count;
   } catch (err) {
     console.warn('[workflow-tracing] span emission failed:', err instanceof Error ? err.message : String(err));

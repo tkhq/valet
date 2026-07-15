@@ -202,6 +202,40 @@ describe('emitWorkflowRunSpans', () => {
   });
 
 
+  it('caps emission at 1500 spans and stamps valet.spans.truncated with the overflow', async () => {
+    // Build a definition + result with more executed nodes than the cap so the
+    // budget break fires and the truncated attribute reflects the real overflow.
+    const N = 1600;
+    const nodes: WorkflowDefinition['nodes'] = [{ id: 'trigger', type: 'trigger' }];
+    const stateNodes: Record<string, { status: 'completed'; startedAt: string; completedAt: string }> = {
+      trigger: { status: 'completed', startedAt: '2026-07-15T00:00:01.000Z', completedAt: '2026-07-15T00:00:01.500Z' },
+    };
+    for (let i = 0; i < N; i++) {
+      nodes.push({ id: `n${i}`, type: 'set', values: {} });
+      stateNodes[`n${i}`] = { status: 'completed', startedAt: '2026-07-15T00:00:02.000Z', completedAt: '2026-07-15T00:00:02.100Z' };
+    }
+    const bigDef: WorkflowDefinition = { version: 'dag/v1', nodes, edges: [] };
+    const count = await emitWorkflowRunSpans(
+      DISABLED_ENV,
+      makeParams({ definition: bigDef }),
+      makeResult({ state: { trigger: stateNodes.trigger as never, nodes: stateNodes as never, skipped: {} } }),
+      { exporter },
+    );
+    // 1 root + CAP child spans (never more), and the loop stops at the budget.
+    expect(count).toBe(1501);
+    const spans = memory.getFinishedSpans();
+    expect(spans).toHaveLength(1501);
+    const root = spans.find((sp) => sp.name === 'workflow.run');
+    // executed(1601) - CAP(1500) = 101 truncated.
+    expect(root?.attributes['valet.spans.truncated']).toBe(101);
+  });
+
+  it('omits valet.spans.truncated entirely when under the cap', async () => {
+    await emitWorkflowRunSpans(DISABLED_ENV, makeParams(), makeResult(), { exporter });
+    const root = memory.getFinishedSpans().find((sp) => sp.name === 'workflow.run');
+    expect(root?.attributes['valet.spans.truncated']).toBeUndefined();
+  });
+
   it('detaches from an UNSAMPLED traceparent: fresh sampled root, spans still export, dispatch trace kept as attribute', async () => {
     const traceId = 'c'.repeat(32);
     const count = await emitWorkflowRunSpans(
