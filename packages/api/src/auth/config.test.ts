@@ -105,32 +105,72 @@ describe("loadAuthConfig", () => {
   });
 
   it("requires all three OIDC env vars: issuer, clientId, clientSecret", () => {
-    expect(() =>
+    let thrownMessage = "";
+    try {
       loadAuthConfig({
         BETTER_AUTH_SECRET: "secret",
         AUTH_OIDC_ISSUER: "https://oidc.example.com",
-      })
-    ).toThrow(/AUTH_OIDC_ISSUER.*AUTH_OIDC_CLIENT_ID.*AUTH_OIDC_CLIENT_SECRET/);
+      });
+    } catch (e) {
+      thrownMessage = (e as Error).message;
+    }
+
+    // Should name only the missing vars, not the ones that ARE set
+    expect(thrownMessage).toContain("AUTH_OIDC_CLIENT_ID");
+    expect(thrownMessage).toContain("AUTH_OIDC_CLIENT_SECRET");
+    expect(thrownMessage).not.toContain("AUTH_OIDC_ISSUER");
   });
 
-  it("throws when OIDC issuer is set but clientId is missing", () => {
-    expect(() =>
+  it("throws when OIDC issuer and clientSecret are set but clientId is missing", () => {
+    let thrownMessage = "";
+    try {
       loadAuthConfig({
         BETTER_AUTH_SECRET: "secret",
         AUTH_OIDC_ISSUER: "https://oidc.example.com",
         AUTH_OIDC_CLIENT_SECRET: "secret",
-      })
-    ).toThrow(/AUTH_OIDC_CLIENT_ID/);
+      });
+    } catch (e) {
+      thrownMessage = (e as Error).message;
+    }
+
+    expect(thrownMessage).toContain("AUTH_OIDC_CLIENT_ID");
+    expect(thrownMessage).not.toContain("AUTH_OIDC_ISSUER");
+    expect(thrownMessage).not.toContain("AUTH_OIDC_CLIENT_SECRET");
   });
 
-  it("throws when OIDC issuer is set but clientSecret is missing", () => {
-    expect(() =>
+  it("throws when OIDC issuer and clientId are set but clientSecret is missing", () => {
+    let thrownMessage = "";
+    try {
       loadAuthConfig({
         BETTER_AUTH_SECRET: "secret",
         AUTH_OIDC_ISSUER: "https://oidc.example.com",
         AUTH_OIDC_CLIENT_ID: "client-id",
-      })
-    ).toThrow(/AUTH_OIDC_CLIENT_SECRET/);
+      });
+    } catch (e) {
+      thrownMessage = (e as Error).message;
+    }
+
+    expect(thrownMessage).toContain("AUTH_OIDC_CLIENT_SECRET");
+    expect(thrownMessage).not.toContain("AUTH_OIDC_ISSUER");
+    expect(thrownMessage).not.toContain("AUTH_OIDC_CLIENT_ID");
+  });
+
+  it("names only missing OIDC vars in error message", () => {
+    let thrownMessage = "";
+    try {
+      loadAuthConfig({
+        BETTER_AUTH_SECRET: "secret",
+        AUTH_OIDC_ISSUER: "https://oidc.example.com",
+        AUTH_OIDC_CLIENT_ID: "client-id",
+        // clientSecret is missing
+      });
+    } catch (e) {
+      thrownMessage = (e as Error).message;
+    }
+
+    expect(thrownMessage).toContain("AUTH_OIDC_CLIENT_SECRET");
+    expect(thrownMessage).not.toContain("AUTH_OIDC_ISSUER");
+    expect(thrownMessage).not.toContain("AUTH_OIDC_CLIENT_ID");
   });
 
   it("populates OIDC config when all three required vars are set", () => {

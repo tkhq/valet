@@ -73,24 +73,28 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
 
   if (oidcCount === 0) {
     // No OIDC config: valid
-  } else if (oidcCount === 3) {
+  } else if (oidcCount === 3 && oidcIssuer && oidcClientId && oidcClientSecret) {
     // All OIDC vars set: valid, parse them
-    const issuerUrl = new URL(oidcIssuer!);
+    const issuerUrl = new URL(oidcIssuer);
     const defaultDomain = issuerUrl.hostname;
     const domain = env.AUTH_OIDC_DOMAIN ?? defaultDomain;
     const name = env.AUTH_OIDC_NAME ?? "SSO";
 
     oidc = {
-      issuer: oidcIssuer!,
-      clientId: oidcClientId!,
-      clientSecret: oidcClientSecret!,
+      issuer: oidcIssuer,
+      clientId: oidcClientId,
+      clientSecret: oidcClientSecret,
       name,
       domain,
     };
   } else {
     // Partial OIDC config: invalid
+    const missing: string[] = [];
+    if (!oidcIssuer) missing.push("AUTH_OIDC_ISSUER");
+    if (!oidcClientId) missing.push("AUTH_OIDC_CLIENT_ID");
+    if (!oidcClientSecret) missing.push("AUTH_OIDC_CLIENT_SECRET");
     throw new Error(
-      `OIDC configuration is incomplete. All three must be set: AUTH_OIDC_ISSUER, AUTH_OIDC_CLIENT_ID, AUTH_OIDC_CLIENT_SECRET`,
+      `OIDC configuration is incomplete. Set all three or none: ${missing.join(", ")}`,
     );
   }
 
@@ -105,11 +109,11 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
 
   if (googleCount === 0) {
     // No Google config: valid
-  } else if (googleCount === 2) {
+  } else if (googleCount === 2 && googleClientId && googleClientSecret) {
     // Both Google vars set: valid
     googleConfig = {
-      clientId: googleClientId!,
-      clientSecret: googleClientSecret!,
+      clientId: googleClientId,
+      clientSecret: googleClientSecret,
     };
   } else {
     // Partial Google config: invalid
@@ -132,11 +136,11 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
 
   if (githubCount === 0) {
     // No GitHub config: valid
-  } else if (githubCount === 2) {
+  } else if (githubCount === 2 && githubClientId && githubClientSecret) {
     // Both GitHub vars set: valid
     githubConfig = {
-      clientId: githubClientId!,
-      clientSecret: githubClientSecret!,
+      clientId: githubClientId,
+      clientSecret: githubClientSecret,
     };
   } else {
     // Partial GitHub config: invalid
