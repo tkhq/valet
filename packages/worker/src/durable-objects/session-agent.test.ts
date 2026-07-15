@@ -868,6 +868,23 @@ describe('SessionAgentDO', () => {
       });
     });
 
+    it('does not emit a terminated outcome when stopping an already-errored session', async () => {
+      const { agent } = await createTestAgent();
+      // A prior spawn/hibernate failure already emitted session.outcome{error}
+      // and left the session in the terminal 'error' status.
+      (agent as any).sessionState.set('status', 'error');
+      (agent as any).flushMetrics = vi.fn().mockResolvedValue(undefined);
+      (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+      await (agent as any).handleStop('parent_stopped');
+
+      // The error outcome must remain the last one — no superseding terminated.
+      expect((agent as any).emitEvent).not.toHaveBeenCalledWith(
+        'session.outcome',
+        expect.objectContaining({ properties: { reason: 'terminated' } }),
+      );
+    });
+
     it('routes circuit-breaker exhaustion of a regular session to a recovery_exhausted outcome', async () => {
       const { agent } = await createTestAgent();
       // Regular (non-orchestrator) sessions terminate once recovery is exhausted.
@@ -912,10 +929,9 @@ describe('SessionAgentDO', () => {
       });
     });
 
-    // Persistence-level test (Conner's review): don't mock emitEvent or
-    // flushMetrics — drive a real terminal transition and assert the
-    // session.outcome row actually landed in the D1 analytics_events sink,
-    // not just the DO-local buffer.
+    // Persistence-level test: don't mock emitEvent or flushMetrics — drive a
+    // real terminal transition and assert the session.outcome row actually
+    // landed in the D1 analytics_events sink, not just the DO-local buffer.
     it('persists session.outcome { recovery_exhausted } to D1 through the real emit + flush path', async () => {
       const { agent, d1, doSqlite } = await createPersistenceAgent();
       (agent as any).sessionState.set('status', 'recovering');
@@ -923,7 +939,7 @@ describe('SessionAgentDO', () => {
       await (agent as any).handleStop('recovery_exhausted');
 
       // Query the actual D1-side SQLite. The row exists here only if
-      // emitSessionOutcome emitted AND flushMetrics persisted the buffered
+      // emitSessionOutcome emitted AND the flush persisted the buffered
       // row (flushed=0 → batchInsertAnalyticsEvents → analytics_events).
       const rows = d1
         .prepare(
@@ -942,6 +958,41 @@ describe('SessionAgentDO', () => {
         .prepare("SELECT flushed FROM analytics_events WHERE event_type = 'session.outcome'")
         .get() as { flushed: number } | undefined;
       expect(localOutcome?.flushed).toBe(1);
+    });
+
+    // Backlog regression: the terminal flush drains in bounded batches, so a
+    // session that terminates with a large unflushed backlog must still get its
+    // session.outcome (the newest, highest-id row) to D1. A single bounded
+    // SELECT ... LIMIT 100 would strand the outcome behind the backlog.
+    it('persists the terminal session.outcome even with a >100-event unflushed backlog', async () => {
+      const { agent, d1, doSqlite } = await createPersistenceAgent();
+      (agent as any).sessionState.set('status', 'recovering');
+
+      // Seed 150 unflushed analytics_events into the DO-local buffer so the
+      // outcome row emitted during handleStop lands well outside the first
+      // LIMIT-100 window.
+      const BACKLOG = 150;
+      const insert = doSqlite.prepare(
+        "INSERT INTO analytics_events (event_type, flushed) VALUES ('llm_call', 0)",
+      );
+      for (let i = 0; i < BACKLOG; i++) insert.run();
+
+      await (agent as any).handleStop('recovery_exhausted');
+
+      // The outcome reached D1 despite being the highest-id row behind the backlog.
+      const outcome = d1
+        .prepare(
+          "SELECT properties FROM analytics_events WHERE event_type = 'session.outcome'",
+        )
+        .all() as Array<{ properties: string | null }>;
+      expect(outcome).toHaveLength(1);
+      expect(JSON.parse(outcome[0].properties ?? '{}')).toEqual({ reason: 'recovery_exhausted' });
+
+      // The entire backlog drained too — nothing left unflushed in the buffer.
+      const remaining = doSqlite
+        .prepare('SELECT COUNT(*) as count FROM analytics_events WHERE flushed = 0')
+        .get() as { count: number };
+      expect(remaining.count).toBe(0);
     });
   });
 

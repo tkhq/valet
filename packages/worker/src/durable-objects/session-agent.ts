@@ -4781,7 +4781,14 @@ export class SessionAgentDO {
     // `handleStop` is the funnel for every termination, including recovery
     // exhaustion (reason 'recovery_exhausted'). Surface that as its own
     // terminal outcome; all other stop reasons collapse to 'terminated'.
-    await this.emitSessionOutcome(reason === 'recovery_exhausted' ? 'recovery_exhausted' : 'terminated');
+    // A session that already reached the terminal `error` outcome keeps it: a
+    // later stop/cascade must not write a superseding `terminated` outcome,
+    // since consumers take the last outcome per session and that would mask
+    // the failure. Recovery exhaustion runs with status 'recovering', so its
+    // outcome is unaffected.
+    if (currentStatus !== 'error') {
+      await this.emitSessionOutcome(reason === 'recovery_exhausted' ? 'recovery_exhausted' : 'terminated');
+    }
 
     // Publish session.completed to EventBus
     this.notifyEventBus({
@@ -6513,46 +6520,66 @@ export class SessionAgentDO {
         await this.flushActiveSeconds();
       }
 
-      // Flush unflushed analytics events to D1 (single path replacing audit_log + usage_events)
+      await this.flushAnalyticsEvents();
+    } catch (err) {
+      console.error('[SessionAgentDO] flushMetrics failed:', err);
+    }
+  }
+
+  /**
+   * Drain the DO-local `analytics_events` buffer (`flushed = 0`) to D1 — the
+   * single path replacing the old audit_log + usage_events tables.
+   *
+   * Loops in batches of 100 until the buffer is empty: a terminal transition
+   * flushes exactly once, so a bounded single query would strand a just-emitted
+   * `session.outcome` row behind any backlog of >100 unflushed events (a D1
+   * outage or a long burst since the last flush). Bails out of the loop on a
+   * D1 failure — the rows stay `flushed = 0` for the next attempt — so a
+   * persistent error can't spin forever.
+   */
+  private async flushAnalyticsEvents(): Promise<void> {
+    const sessionId = this.sessionState.sessionId;
+    if (!sessionId) return;
+
+    const userId = this.sessionState.userId || null;
+    for (;;) {
       const unflushed = this.ctx.storage.sql
         .exec('SELECT id, event_type, turn_id, duration_ms, channel, model, queue_mode, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, tool_name, error_code, summary, actor_id, properties, created_at FROM analytics_events WHERE flushed = 0 ORDER BY id ASC LIMIT 100')
         .toArray();
 
-      if (unflushed.length > 0) {
-        const userId = this.sessionState.userId || null;
-        try {
-          await batchInsertAnalyticsEvents(this.env.DB, sessionId, userId, unflushed.map((row) => ({
-            id: `${sessionId}:${row.id as number}`,
-            eventType: row.event_type as string,
-            turnId: row.turn_id != null ? (row.turn_id as string) : undefined,
-            durationMs: row.duration_ms != null ? (row.duration_ms as number) : undefined,
-            channel: row.channel != null ? (row.channel as string) : undefined,
-            model: row.model != null ? (row.model as string) : undefined,
-            queueMode: row.queue_mode != null ? (row.queue_mode as string) : undefined,
-            inputTokens: row.input_tokens != null ? (row.input_tokens as number) : undefined,
-            outputTokens: row.output_tokens != null ? (row.output_tokens as number) : undefined,
-            cacheReadTokens: row.cache_read_tokens != null ? (row.cache_read_tokens as number) : undefined,
-            cacheWriteTokens: row.cache_write_tokens != null ? (row.cache_write_tokens as number) : undefined,
-            reasoningTokens: row.reasoning_tokens != null ? (row.reasoning_tokens as number) : undefined,
-            toolName: row.tool_name != null ? (row.tool_name as string) : undefined,
-            errorCode: row.error_code != null ? (row.error_code as string) : undefined,
-            summary: row.summary != null ? (row.summary as string) : undefined,
-            actorId: row.actor_id != null ? (row.actor_id as string) : undefined,
-            properties: row.properties != null ? (row.properties as string) : undefined,
-            createdAt: new Date((row.created_at as number) * 1000).toISOString(),
-          })));
-          const flushedIds = unflushed.map((r) => r.id as number);
-          const placeholders = flushedIds.map(() => '?').join(',');
-          this.ctx.storage.sql.exec(
-            `UPDATE analytics_events SET flushed = 1 WHERE id IN (${placeholders})`,
-            ...flushedIds,
-          );
-        } catch (flushErr) {
-          console.error('[SessionAgentDO] Failed to flush analytics events to D1:', flushErr);
-        }
+      if (unflushed.length === 0) return;
+
+      try {
+        await batchInsertAnalyticsEvents(this.env.DB, sessionId, userId, unflushed.map((row) => ({
+          id: `${sessionId}:${row.id as number}`,
+          eventType: row.event_type as string,
+          turnId: row.turn_id != null ? (row.turn_id as string) : undefined,
+          durationMs: row.duration_ms != null ? (row.duration_ms as number) : undefined,
+          channel: row.channel != null ? (row.channel as string) : undefined,
+          model: row.model != null ? (row.model as string) : undefined,
+          queueMode: row.queue_mode != null ? (row.queue_mode as string) : undefined,
+          inputTokens: row.input_tokens != null ? (row.input_tokens as number) : undefined,
+          outputTokens: row.output_tokens != null ? (row.output_tokens as number) : undefined,
+          cacheReadTokens: row.cache_read_tokens != null ? (row.cache_read_tokens as number) : undefined,
+          cacheWriteTokens: row.cache_write_tokens != null ? (row.cache_write_tokens as number) : undefined,
+          reasoningTokens: row.reasoning_tokens != null ? (row.reasoning_tokens as number) : undefined,
+          toolName: row.tool_name != null ? (row.tool_name as string) : undefined,
+          errorCode: row.error_code != null ? (row.error_code as string) : undefined,
+          summary: row.summary != null ? (row.summary as string) : undefined,
+          actorId: row.actor_id != null ? (row.actor_id as string) : undefined,
+          properties: row.properties != null ? (row.properties as string) : undefined,
+          createdAt: new Date((row.created_at as number) * 1000).toISOString(),
+        })));
+        const flushedIds = unflushed.map((r) => r.id as number);
+        const placeholders = flushedIds.map(() => '?').join(',');
+        this.ctx.storage.sql.exec(
+          `UPDATE analytics_events SET flushed = 1 WHERE id IN (${placeholders})`,
+          ...flushedIds,
+        );
+      } catch (flushErr) {
+        console.error('[SessionAgentDO] Failed to flush analytics events to D1:', flushErr);
+        return;
       }
-    } catch (err) {
-      console.error('[SessionAgentDO] flushMetrics failed:', err);
     }
   }
 
@@ -6663,8 +6690,11 @@ export class SessionAgentDO {
    * termination path as `terminated`.
    *
    * `emitEvent` only writes the DO-local SQLite buffer (`flushed = 0`); a
-   * terminal session may never run `flushMetrics` again, so we flush here to
-   * persist the row to D1 immediately. Callers must `await` this so the flush
+   * terminal session may never flush again, so we drain the buffer here to
+   * persist the row to D1 immediately. We flush only the analytics buffer
+   * (not the full `flushMetrics`) because the terminal paths that reach here
+   * (stop/hibernate) already flushed message/tool metrics just before, and
+   * those counts are unchanged. Callers must `await` this so the flush
    * completes before the terminal path tears the DO down.
    */
   private async emitSessionOutcome(
@@ -6675,7 +6705,7 @@ export class SessionAgentDO {
       errorCode,
       properties: { reason },
     });
-    await this.flushMetrics();
+    await this.flushAnalyticsEvents();
   }
 
   private async handleTunnelDelete(

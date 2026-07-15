@@ -19,6 +19,7 @@
 
 import type { ToolNode } from '@valet/shared';
 import type { ActionContext, ActionResult } from '@valet/sdk';
+import { noopAnalytics } from '@valet/sdk/analytics';
 import { renderJsonTemplates, renderTemplate } from '../../lib/workflow-dag/expression.js';
 import { buildTemplateContext } from '../context.js';
 import { integrationRegistry } from '../../integrations/registry.js';
@@ -295,12 +296,12 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     userId: runParams.userId,
     ...(attribution ? { attribution } : {}),
     // Deliberately a no-op for workflow-origin actions. Wiring these into
-    // analytics_events is DEFERRED: the table's session_id is NOT NULL with a
+    // analytics_events is deferred: the table's session_id is NOT NULL with a
     // FK to sessions.id, but a tool node runs directly on the CF workflow
     // interpreter and has no session row — only workflow_executions.id. Emitting
     // here needs a product/schema decision on workflow-origin session_id
-    // semantics; see docs/specs/2026-07-07-value-metrics-proposal.md §6.
-    analytics: { emit: () => { /* deferred — see value-metrics proposal §6 */ } },
+    // semantics.
+    analytics: noopAnalytics,
   } satisfies ActionContext;
 
   // node.retries is the author-declared number of additional attempts
@@ -349,13 +350,8 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
         credentials,
         userId: runParams.userId,
         ...(attribution ? { attribution } : {}),
-        // Deliberately a no-op for workflow-origin actions. Wiring these into
-        // analytics_events is DEFERRED: the table's session_id is NOT NULL with a
-        // FK to sessions.id, but a tool node runs directly on the CF workflow
-        // interpreter and has no session row — only workflow_executions.id.
-        // Emitting here needs a product/schema decision on workflow-origin
-        // session_id semantics; see docs/specs/2026-07-07-value-metrics-proposal.md §6.
-        analytics: { emit: () => { /* deferred — see value-metrics proposal §6 */ } },
+        // No-op for workflow-origin actions (see the primary actionContext above).
+        analytics: noopAnalytics,
       } satisfies ActionContext;
       const retryJson = await step.do(`tool:${node.id}${iSuffix}:execute:auth-retry`, { retries: { ...NO_RETRY } }, async () => {
         const retryResult = await actionSource.execute(node.action, renderedParams, actionContext);

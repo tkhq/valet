@@ -461,16 +461,23 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
     // which were merely spawned FROM this PR. The event id is deterministic so
     // GitHub redeliveries dedupe via INSERT OR IGNORE.
     if (authored && prState === 'merged') {
-      const session = await db.getSession(appDb, sessionId);
-      if (session) {
-        await db.batchInsertAnalyticsEvents(env.DB, sessionId, session.userId ?? null, [
-          {
-            id: `${sessionId}:pr_merged:${prNumber}`,
-            eventType: 'session.outcome',
-            createdAt: pr.merged_at || new Date().toISOString(),
-            properties: JSON.stringify({ reason: 'pr_merged', repo: repoFullName, prNumber }),
-          },
-        ]);
+      // Best-effort telemetry: a D1 failure here must not abort the git-state
+      // DO notify below (or the remaining targets), so keep it off the critical
+      // path with its own guard.
+      try {
+        const session = await db.getSession(appDb, sessionId);
+        if (session) {
+          await db.batchInsertAnalyticsEvents(env.DB, sessionId, session.userId ?? null, [
+            {
+              id: `${sessionId}:pr_merged:${prNumber}`,
+              eventType: 'session.outcome',
+              createdAt: pr.merged_at || new Date().toISOString(),
+              properties: JSON.stringify({ reason: 'pr_merged', repo: repoFullName, prNumber }),
+            },
+          ]);
+        }
+      } catch (err) {
+        console.error(`Failed to record pr_merged outcome for session ${sessionId}:`, err);
       }
     }
 
