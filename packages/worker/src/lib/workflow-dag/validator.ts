@@ -430,11 +430,12 @@ export const VALIDATION_CODES = {
   edge_self_loop: 'error',
   edge_to_unknown: 'error',
   edge_when_unparseable: 'error',
+  if_edge_missing_fromOutput: 'error',
+  fromOutput_on_non_if: 'error',
   expression_parse_error: 'error',
   template_parse_error: 'error',
   foreach_alias_shadows_reserved: 'error',
   foreach_aliases_collide: 'error',
-  foreach_body_type_disallowed: 'error',
   foreach_concurrency_exceeds_policy: 'error',
   foreach_items_not_expression: 'error',
   foreach_items_trigger_untyped: 'error',
@@ -702,16 +703,13 @@ function validateForeach(node: ForeachNode, errors: WorkflowValidationError[], l
     });
   }
 
-  // Body type allowlist.
-  if (!FOREACH_BODY_TYPES.has(node.body.type)) {
-    errors.push({
-      scope: 'node',
-      nodeId: node.id,
-      code: 'foreach_body_type_disallowed',
-      message: `foreach body type "${node.body.type}" is not allowed; permitted: ${[...FOREACH_BODY_TYPES].join(', ')}`,
-    });
-  }
-
+  // Body type allowlist is enforced earlier by `validateRawNodeTypes`
+  // via the `unknown_foreach_body_type` code — that check runs in
+  // validateDefinitionShape and short-circuits before this function
+  // is reached with a disallowed body. If you ever bypass
+  // validateDefinitionShape (e.g. call validateNode directly with a
+  // hand-built foreach), the zod parse catches it separately.
+  //
   // Recursively validate the body node. ForeachBodyNode is a subset of
   // WorkflowNode so this typechecks without a cast.
   validateNode(node.body, errors, limits);

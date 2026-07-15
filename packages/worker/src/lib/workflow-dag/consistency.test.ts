@@ -123,6 +123,22 @@ describe('validation code registry coverage', () => {
         ],
         edges: [],                                             // project_column_path_malformed
       },
+      {
+        version: 'dag/v1',
+        nodes: [
+          { id: 'route', type: 'if', conditions: [{ left: 'trigger.data.x', dataType: 'boolean', operation: 'isTrue' }] },
+          { id: 'done', type: 'stop' },
+        ],
+        edges: [{ from: 'route', to: 'done' }],                // if_edge_missing_fromOutput
+      },
+      {
+        version: 'dag/v1',
+        nodes: [
+          { id: 'a', type: 'set', values: {} },
+          { id: 'b', type: 'stop' },
+        ],
+        edges: [{ from: 'a', to: 'b', fromOutput: 'true' }],   // fromOutput_on_non_if
+      },
     ];
     const seen = new Set<string>();
     for (const def of seedDefinitions) {
