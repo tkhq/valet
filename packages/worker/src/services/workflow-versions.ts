@@ -149,6 +149,14 @@ export async function publishDraft(
      * custom MCP connectors.
      */
     knownToolActions?: Map<string, Set<string>>;
+    /**
+     * Optional tool output schemas (service:actionId → JSON-schema).
+     * Feeds the validator's typed-array derivation for foreach
+     * sources. Populated by `buildValidatorToolContext` from both the
+     * static registry (`REGISTERED_TOOL_OUTPUT_SCHEMAS`) and any
+     * catalog-declared schemas.
+     */
+    toolOutputSchemas?: Record<string, Record<string, unknown>>;
   },
 ): Promise<{ version: PublishedVersion }> {
   const row = await db.select({
@@ -173,8 +181,10 @@ export async function publishDraft(
   // tool catalog, feed it through so `unknown_tool_action` (typo on a
   // known service) hard-blocks publish — matching the save/validate
   // gates that already check this.
-  const errors = validateDefinitionWithContext(def, opts.knownToolActions ? { knownToolActions: opts.knownToolActions } : {})
-    .filter((e) => !isValidationWarning(e));
+  const errors = validateDefinitionWithContext(def, {
+    ...(opts.knownToolActions ? { knownToolActions: opts.knownToolActions } : {}),
+    ...(opts.toolOutputSchemas ? { toolOutputSchemas: opts.toolOutputSchemas } : {}),
+  }).filter((e) => !isValidationWarning(e));
   if (errors.length > 0) {
     throw new WorkflowVersionError('invalid_definition', 'draft failed validation', errors);
   }

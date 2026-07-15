@@ -40,6 +40,9 @@ Pull the source data. Salesforce SOQL, Google Sheets read, GitHub search, Linear
 
 ### 3. `extract` — a `set` node with `outputSchema` (preferred) or `llm` node (fallback)
 
+For **records → 2D array** reshapes (query result → spreadsheet rows), see also the `project` node below — it's a first-class deterministic transform that skips the LLM entirely.
+
+
 The source tool returns nested objects (`records[].Account.Name`). Downstream `foreach` and Sheets writes want a flat array. This is where you reshape.
 
 **Preferred: `set` with `outputSchema`.** Deterministic, free, no LLM cost. Available since the DX changelist landed:
@@ -60,6 +63,23 @@ The source tool returns nested objects (`records[].Account.Name`). Downstream `f
 The `outputSchema` tells the validator that `nodes.extract.data.records` is an array, so the downstream `foreach` accepts it. The runtime just emits whatever `values` renders to.
 
 **Fallback: `llm` node** when you need to flatten nested paths (`Account.Name` → `accountName`) at the same time. Use only when actually needed — it's ~1s per call and costs tokens for plumbing.
+
+**`project` — the deterministic query-result → spreadsheet-rows primitive.** When your end state is a 2D array (Sheets `write_spreadsheet` / `append_rows`), skip the extract-then-format two-step and use a single `project` node:
+
+```json
+{
+  "id": "rows",
+  "type": "project",
+  "source": "{{nodes.query.data.records}}",
+  "columns": [
+    { "header": "Account", "path": "Account.Name" },
+    { "header": "Website", "path": "Account.Website" },
+    { "header": "Funding", "path": "Account.Funding_Raised__c", "default": 0 }
+  ]
+}
+```
+
+Output at `{{nodes.rows.data}}` is `Array<Array<unknown>>` — feed it straight into `sheets.write_spreadsheet` `data`. Pure, no LLM tokens, no truncation risk, and its output IS a typed array so it's a valid `foreach.items` source. This is the primary answer to "how do I get 1,657 records into a sheet without an LLM in the loop." Set `includeHeader: false` when appending to a sheet that already has headers.
 
 ### 4. `tier_loop` — a `foreach` with an `llm` body
 

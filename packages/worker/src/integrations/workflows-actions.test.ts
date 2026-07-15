@@ -84,14 +84,14 @@ describe('workflowActions', () => {
     expect(result.success).toBe(true);
     expect(result.data).toMatchObject({
       version: 'dag/v1',
-      validNodeTypes: ['trigger', 'llm', 'tool', 'set', 'if', 'wait', 'approval', 'foreach', 'orchestrator', 'session', 'stop'],
+      validNodeTypes: ['trigger', 'llm', 'tool', 'set', 'if', 'wait', 'approval', 'foreach', 'orchestrator', 'session', 'stop', 'project'],
       legacyNodeTypeAliases: {
         agent_prompt: 'llm',
         http: 'tool',
         loop: 'foreach',
         sleep: 'wait',
       },
-      foreachBodyTypes: ['llm', 'tool', 'set', 'stop', 'orchestrator', 'session'],
+      foreachBodyTypes: ['llm', 'tool', 'set', 'stop', 'orchestrator', 'session', 'project'],
       conditionOperations: {
         string: expect.arrayContaining(['isNotEmpty', 'matchesRegex']),
         aliases: expect.objectContaining({ is_not_empty: 'isNotEmpty' }),

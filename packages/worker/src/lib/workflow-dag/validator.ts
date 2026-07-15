@@ -397,7 +397,17 @@ export function isValidationWarning(result: WorkflowValidationError): boolean {
     // user-scoped tool node could false-positive here. Unknown actions
     // WITHIN a known service remain hard errors: for services the
     // catalog knows, we ARE authoritative.
-    result.code === 'unknown_tool_service'
+    result.code === 'unknown_tool_service' ||
+    // Foreach items that can't be statically proven to be an array
+    // are a warning, not a blocker. The tool catalog often lacks
+    // registered output schemas for arbitrary-query tools (SOQL, raw
+    // SQL, HTTP fetch), so `{{nodes.query.data.records}}` where
+    // `records` genuinely IS an array at runtime is a false positive.
+    // Runtime still hard-fails when the resolved value isn't
+    // iterable, and the improved error message points at what to
+    // check. This trade favors letting the obvious template just work
+    // over the static safety net.
+    result.code === 'foreach_items_untyped_array_output'
   );
 }
 
@@ -561,6 +571,11 @@ function validateNode(
       } else {
         validateSessionPrompt(node, errors);
       }
+      break;
+    case 'project':
+      // `source` is a template resolving to an array; parse-check it here
+      // like other single-template fields.
+      tryParseTemplate(node.id, 'source', node.source, errors);
       break;
   }
 }
@@ -795,9 +810,12 @@ function validateForeachItemSources(
     if (!sourceNode) continue;
 
     // Tool outputs can be user/custom-MCP driven. Only enforce this rule
-    // when the caller supplied a schema for the selected action.
+    // when either (a) the caller supplied a service-level schema for the
+    // selected action, or (b) the tool node declared its own per-node
+    // outputSchema (the arbitrary-query case: SOQL/SQL/HTTP fetch).
     if (
       sourceNode.type === 'tool' &&
+      !sourceNode.outputSchema &&
       !context.toolOutputSchemas?.[toolOutputSchemaKey(sourceNode.service, sourceNode.action)]
     ) {
       continue;
@@ -928,8 +946,16 @@ function deriveTypedArrayOutputPaths(
       case 'foreach':
         paths.add(formatPathSegments(['nodes', node.id, 'data', 'items']));
         break;
+      case 'project':
+        // project always emits an Array<Array<unknown>> at data root, so
+        // `{{nodes.<id>.data}}` is itself an array-typed foreach source.
+        paths.add(formatPathSegments(['nodes', node.id, 'data']));
+        break;
       case 'tool': {
-        const schema = context.toolOutputSchemas?.[toolOutputSchemaKey(node.service, node.action)];
+        // Per-node `outputSchema` beats the service-level registered
+        // schema — the author knows the shape of their SELECT/query
+        // even when the tool can't declare it statically.
+        const schema = node.outputSchema ?? context.toolOutputSchemas?.[toolOutputSchemaKey(node.service, node.action)];
         if (schema) addSchemaArrayPaths(paths, ['nodes', node.id, 'data'], schema);
         break;
       }

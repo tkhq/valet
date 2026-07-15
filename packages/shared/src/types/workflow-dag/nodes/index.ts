@@ -65,6 +65,12 @@ import {
   createDefaultSessionNode,
   sessionNodeDocs,
 } from './session.js';
+import {
+  type ProjectNode,
+  type ProjectColumn,
+  createDefaultProjectNode,
+  projectNodeDocs,
+} from './project.js';
 
 // Re-export per-type interfaces so consumers can still `import { LlmNode }
 // from '@valet/shared'`.
@@ -84,6 +90,8 @@ export type {
   SessionNode,
   StartSessionNode,
   PromptSessionNode,
+  ProjectNode,
+  ProjectColumn,
 };
 
 // ─── Discriminated union ─────────────────────────────────────────────────────
@@ -99,7 +107,8 @@ export type WorkflowNode =
   | StopNode
   | ToolNode
   | OrchestratorNode
-  | SessionNode;
+  | SessionNode
+  | ProjectNode;
 
 export type DagNodeType = WorkflowNode['type'];
 export type AddableDagNodeType = Exclude<DagNodeType, 'trigger'>;
@@ -126,6 +135,7 @@ export const NODE_DOCS: NodeDocsRegistry = {
   stop: stopNodeDocs,
   orchestrator: orchestratorNodeDocs,
   session: sessionNodeDocs,
+  project: projectNodeDocs,
 };
 
 // ─── Default factories ───────────────────────────────────────────────────────
@@ -142,6 +152,7 @@ const NODE_DEFAULT_FACTORIES: { [K in DagNodeType]: (id: string) => Extract<Work
   stop: createDefaultStopNode,
   orchestrator: createDefaultOrchestratorNode,
   session: createDefaultSessionNode,
+  project: createDefaultProjectNode,
 };
 
 export function createDefaultWorkflowNode<K extends DagNodeType>(

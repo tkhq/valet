@@ -23,6 +23,7 @@ export const WORKFLOW_NODE_TYPES = [
   'orchestrator',
   'session',
   'stop',
+  'project',
 ] as const;
 
 export const FOREACH_BODY_NODE_TYPES = [
@@ -32,6 +33,7 @@ export const FOREACH_BODY_NODE_TYPES = [
   'stop',
   'orchestrator',
   'session',
+  'project',
 ] as const;
 
 export const LEGACY_NODE_TYPE_ALIASES = {
@@ -150,6 +152,23 @@ export const stopNodeSchema = z.object({
   message: z.string().optional(),
 });
 
+// Project: deterministic array-of-records → 2D array reshape.
+// Emits `Array<Array<unknown>>` under nodes.<id>.data (optionally
+// prefixed by a header row derived from `columns[].header`).
+export const projectColumnSchema = z.object({
+  header: z.string().min(1),
+  path: z.string().min(1),
+  default: z.unknown().optional(),
+});
+
+export const projectNodeSchema = z.object({
+  id: idSchema,
+  type: z.literal('project'),
+  source: z.string().min(1),
+  columns: z.array(projectColumnSchema).min(1),
+  includeHeader: z.boolean().optional(),
+});
+
 export const toolNodeSchema = z.object({
   id: idSchema,
   type: z.literal('tool'),
@@ -159,6 +178,11 @@ export const toolNodeSchema = z.object({
   summary: z.string().optional(),
   onPolicyDeny: z.enum(['fail', 'skip']).optional(),
   retries: z.number().int().min(0).max(10).optional(),
+  // Per-node override of the tool action's output shape. Feeds the
+  // validator's typed-array derivation for foreach sources. When
+  // present, this beats any service-level schema registered via
+  // context.toolOutputSchemas.
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
 });
 
 const waitConfigSchema = z.object({
@@ -231,6 +255,7 @@ export const foreachBodySchema = z.union([
   stopNodeSchema,
   orchestratorNodeSchema,
   sessionNodeSchema,
+  projectNodeSchema,
 ]);
 
 export const foreachNodeSchema = z.object({
@@ -259,6 +284,7 @@ export const workflowNodeSchema = z.union([
   toolNodeSchema,
   orchestratorNodeSchema,
   sessionNodeSchema,
+  projectNodeSchema,
 ]);
 
 // ─── Policy + editor metadata ───────────────────────────────────────────────

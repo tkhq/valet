@@ -110,8 +110,12 @@ export function getWorkflowSchemaReference() {
       {
         type: 'tool',
         required: ['id', 'type', 'service', 'action', 'params'],
-        optional: ['summary', 'onPolicyDeny', 'retries'],
-        description: 'Call a remote integration action.',
+        optional: ['summary', 'onPolicyDeny', 'retries', 'outputSchema'],
+        description: 'Call a remote integration action. Optionally declare `outputSchema` when the action returns a shape the tool package can\'t know statically (arbitrary-query tools like SOQL, raw SQL, HTTP fetch) — the per-node schema then feeds foreach typed-array derivation without needing an intermediate `set`/`llm` reshape node.',
+        outputSchemaExample: {
+          purpose: 'Make `{{nodes.query.data.records}}` a legal `foreach.items` source when the tool package doesn\'t register a static output schema.',
+          shape: '{ type: "object", properties: { records: { type: "array", items: { type: "object" } }, totalSize: { type: "number" } }, required: ["records"] }',
+        },
         actionIdFormat: {
           rule: 'Use the actionId exactly as it appears after the first colon in the tool id returned by `list_tools`. Do not strip prefixes, do not guess.',
           examples: {
@@ -177,7 +181,7 @@ export function getWorkflowSchemaReference() {
             { source: 'trigger', template: '{{trigger.data.<field>}}', precondition: 'trigger.dataSchema.<field>.type === "array"' },
             { source: 'llm', template: '{{nodes.<id>.data.<field>}} or {{nodes.<id>.data}} if root is array', precondition: 'outputSchema declares field/root as {"type":"array"}' },
             { source: 'set', template: '{{nodes.<id>.data.<field>}}', precondition: 'Either `values` has a literal array at that path, OR `outputSchema` declares that field as {"type":"array"} (the deterministic-reshape path — pair with a template reference under `values`)' },
-            { source: 'tool', template: '{{nodes.<id>.data.<field>}}', precondition: 'A toolOutputSchema is registered for this service:action declaring the field as array. If the tool has no registered schema, foreach validation is skipped (so it may fail at runtime instead).' },
+            { source: 'tool', template: '{{nodes.<id>.data.<field>}}', precondition: 'Either a service-level toolOutputSchema is registered for this service:action declaring the field as array, OR the tool node itself carries `outputSchema` describing the shape (the arbitrary-query path — SOQL/SQL/HTTP fetch). Per-node schema beats registered.' },
             { source: 'orchestrator/session', template: '{{nodes.<id>.data.output.<field>}}', precondition: 'wait.mode === "until_idle" AND outputSchema declares field as array. Note the `.data.output.<field>` nesting — llm/tool go direct at `.data.<field>`.' },
             { source: 'orchestrator/session', template: '{{nodes.<id>.data.transcript}}', precondition: 'resultMode === "transcript"' },
             { source: 'foreach', template: '{{nodes.<id>.data.items}}', precondition: 'Always valid (nested-foreach chaining).' },
@@ -209,6 +213,25 @@ export function getWorkflowSchemaReference() {
         required: ['id', 'type'],
         optional: ['outcome', 'output', 'message'],
         description: 'End a branch with optional output.',
+      },
+      {
+        type: 'project',
+        required: ['id', 'type', 'source', 'columns'],
+        optional: ['includeHeader'],
+        description: 'Deterministic array-of-records → 2D array reshape. Reads `source` (must resolve to an array), then for each element emits an array of cells by resolving each column\'s dotted `path`. Emits `Array<Array<unknown>>` at `nodes.<id>.data`, ready to feed Sheets `write_spreadsheet` / `append_rows` directly. Pure; no LLM cost. Replaces the LLM-as-formatter anti-pattern for query-result → spreadsheet flows.',
+        columnShape: '{ header: string, path: string, default?: unknown }',
+        example: {
+          id: 'rows',
+          type: 'project',
+          source: '{{nodes.query.data.records}}',
+          includeHeader: true,
+          columns: [
+            { header: 'Account', path: 'Account.Name' },
+            { header: 'Funding', path: 'Account.Funding_Raised__c', default: 0 },
+            { header: 'Owner', path: 'Owner.Name' },
+          ],
+        },
+        foreachSource: 'A project node\'s output IS the array — use `{{nodes.<id>.data}}` (not `.data.<field>`) as the foreach source.',
       },
     ],
   };

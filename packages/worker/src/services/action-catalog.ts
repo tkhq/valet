@@ -114,12 +114,49 @@ export async function buildActionCatalog(
 }
 
 /**
- * Build a service→actionId lookup for the workflow validator's
- * `knownToolActions` context field. Reuses `buildActionCatalog` so the
- * validator sees exactly the same tools the copilot and policy editor
- * do — no drift, no invisible mismatches.
+ * Build the workflow validator's tool-related context in one pass:
+ *   - `knownToolActions`: service→actionId lookup used by the
+ *     `unknown_tool_service`/`unknown_tool_action` checks.
+ *   - `toolOutputSchemas`: keyed by `service:actionId`, merges (a) the
+ *     static registry of fixed-shape tools (`salesforce-read-only.soqlQuery`
+ *     etc.) with (b) any per-action `outputSchema` the action catalog
+ *     surfaced (from action definitions or the MCP tool cache).
  *
- * Returns a Map so lookups are O(1) inside the validator loop.
+ * Both are built off the same `buildActionCatalog` pass so they can't
+ * drift from what the policy editor sees.
+ */
+export async function buildValidatorToolContext(
+  env: Env,
+  db: AppDb,
+): Promise<{
+  knownToolActions: Map<string, Set<string>>;
+  toolOutputSchemas: Record<string, Record<string, unknown>>;
+}> {
+  const catalog = await buildActionCatalog(env, db);
+  const knownToolActions = new Map<string, Set<string>>();
+  const { REGISTERED_TOOL_OUTPUT_SCHEMAS } = await import('./tool-output-schemas.js');
+  const toolOutputSchemas: Record<string, Record<string, unknown>> = { ...REGISTERED_TOOL_OUTPUT_SCHEMAS };
+  for (const entry of catalog) {
+    let actions = knownToolActions.get(entry.service);
+    if (!actions) {
+      actions = new Set<string>();
+      knownToolActions.set(entry.service, actions);
+    }
+    actions.add(entry.actionId);
+    if (entry.outputSchema) {
+      const key = `${entry.service}:${entry.actionId}`;
+      // Catalog-declared schemas beat the static registry; the tool
+      // author knows its own shape better than a curated fallback.
+      toolOutputSchemas[key] = entry.outputSchema;
+    }
+  }
+  return { knownToolActions, toolOutputSchemas };
+}
+
+/**
+ * Back-compat wrapper: some callers only need the action-existence map.
+ * Prefer `buildValidatorToolContext` for save/validate/publish which
+ * want both.
  */
 export async function buildKnownToolActions(env: Env, db: AppDb): Promise<Map<string, Set<string>>> {
   const catalog = await buildActionCatalog(env, db);
