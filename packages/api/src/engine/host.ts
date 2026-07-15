@@ -15,11 +15,12 @@ import {
   type Principal,
   type SandboxProvider,
   type Session,
+  type SessionData,
   type SessionStore,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { orchestratorIdentities } from "../schema/index.js";
+import { orchestratorIdentities, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
@@ -150,7 +151,6 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
-    const model = this.resolveModel();
     // Built FRESH per session build, never cached on the host: the plugin
     // catalog's dynamic-action-resolution cache lives on the `Catalog`
     // instance `pluginCatalogTools` returns, so it must stay scoped to this
@@ -169,6 +169,7 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
+    const model = await this.resolveModelForBuild(existing, meta.userId);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -270,7 +271,8 @@ export class EngineHost {
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, scope, meta.orgId, principal);
 
-    const model = this.resolveModel();
+    const existing = await this.opts.engineStore.getSession(sessionId);
+    const model = await this.resolveModelForBuild(existing, meta.actorUserId);
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // Built FRESH per session build, never cached on the host — see the
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
@@ -319,7 +321,6 @@ export class EngineHost {
       },
     });
 
-    const existing = await this.opts.engineStore.getSession(sessionId);
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
@@ -514,6 +515,50 @@ export class EngineHost {
   }
 
   /**
+   * `users.default_model` for `userId`, or `undefined` if unset or the host
+   * has no `db` (only `orchestratorSessionFor` requires `db`; the other
+   * builders degrade gracefully to the hardcoded default when it's absent,
+   * e.g. in tests that don't wire one up). Deliberately uncached — split-
+   * settings decision 9 requires a settings change to apply on the very next
+   * session build, not after some TTL.
+   */
+  private async userDefaultModel(userId: string): Promise<string | undefined> {
+    if (!this.opts.db) return undefined;
+    const row = await this.opts.db
+      .select({ defaultModel: users.defaultModel })
+      .from(users)
+      .where(eq(users.id, userId))
+      .get();
+    return row?.defaultModel ?? undefined;
+  }
+
+  /**
+   * Resolve the `Model` to build/restore a session with. Spec-pinned
+   * restore-no-clobber constraint: `Session.rehydrate`
+   * (`packages/engine/src/session.ts`) always takes `options.model` as
+   * handed to it by the caller — it never falls back to the persisted
+   * `SessionData.model` on its own. That means if the host passed a fresh
+   * "current user default" on every restore, an explicit per-session
+   * `session.setModel(...)` override would get silently clobbered the next
+   * time the session's cache entry is evicted and rebuilt (e.g.
+   * `evictAll()` on shutdown, or an idle sweep). So on restore
+   * (`existing` present), the *persisted* model always wins over both
+   * `overrideId` and the user default — that persisted value already
+   * reflects whatever `setModel` (or the original create-time model) set.
+   * Only on create does `overrideId ?? userDefault ?? hardcoded-default`
+   * apply.
+   */
+  private async resolveModelForBuild(
+    existing: SessionData | null,
+    userId: string,
+    overrideId?: string,
+  ): Promise<Model<any>> {
+    if (existing?.model) return this.resolveModel(existing.model);
+    const id = overrideId ?? (await this.userDefaultModel(userId));
+    return this.resolveModel(id);
+  }
+
+  /**
    * Resolve (or lazily create) a child session (Phase 4 decision 10/11).
    * Purpose 'child', linked to its parent via `parentSessionId`/
    * `parentThreadId`. Deliberately gets NO `toolConfig.childSpawner` — the
@@ -556,10 +601,12 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
-    const model = this.resolveModel(opts.modelId);
     // Built FRESH per session build, never cached on the host — see the
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
+
+    const existing = await this.opts.engineStore.getSession(childSessionId);
+    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -587,7 +634,6 @@ export class EngineHost {
       },
     });
 
-    const existing = await this.opts.engineStore.getSession(childSessionId);
     const session = existing
       ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
@@ -641,10 +687,12 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
-    const model = this.resolveModel(opts.modelId);
     // Built FRESH per session build, never cached on the host — see the
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
+
+    const existing = await this.opts.engineStore.getSession(sessionId);
+    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -671,7 +719,6 @@ export class EngineHost {
       },
     });
 
-    const existing = await this.opts.engineStore.getSession(sessionId);
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
