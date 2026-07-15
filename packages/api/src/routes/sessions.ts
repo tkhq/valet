@@ -4,6 +4,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseOrchestratorSessionId } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, messages as messagesTable } from "../schema/index.js";
 import type {
   CreateSessionRequest,
@@ -41,10 +42,11 @@ function rowToSummary(row: typeof agentSessions.$inferSelect): SessionSummary {
 // orchestrator ids and child ids, server-side, so the client just renders
 // what it gets. Orchestrator-derived children nest inline in the assistant's
 // chat page (via GET /api/orchestrator/children) instead.
-sessionsRouter.get("/", async (c) => {
-  const { db } = c.var.providers;
-  const userId = c.var.user.id;
-
+//
+// Exported so other mounts needing the same "this user's standalone
+// sessions" view (e.g. the MCP `list_sessions` tool, Task 9) reuse the exact
+// query instead of re-deriving it.
+export async function listStandaloneSessions(db: AppDb, userId: string) {
   const [rows, childRows] = await Promise.all([
     db
       .select()
@@ -56,7 +58,14 @@ sessionsRouter.get("/", async (c) => {
   ]);
 
   const childIds = new Set(childRows.map((r) => r.childSessionId));
-  const standalone = rows.filter((r) => parseOrchestratorSessionId(r.id) === null && !childIds.has(r.id));
+  return rows.filter((r) => parseOrchestratorSessionId(r.id) === null && !childIds.has(r.id));
+}
+
+sessionsRouter.get("/", async (c) => {
+  const { db } = c.var.providers;
+  const userId = c.var.user.id;
+
+  const standalone = await listStandaloneSessions(db, userId);
 
   const body: ListSessionsResponse = { sessions: standalone.map(rowToSummary) };
   return c.json(body);

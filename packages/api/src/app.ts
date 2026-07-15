@@ -14,9 +14,10 @@ import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
 import { buildAuthMiddleware } from "./middleware/auth.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
+import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse } from "./wire/types.js";
-import { sessionsRouter } from "./routes/sessions.js";
+import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
@@ -76,6 +77,19 @@ export function createApp(providers: Providers, authWiring: AuthWiring = {}): Cr
     app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
     app.get("/.well-known/oauth-authorization-server", (c) => oAuthDiscoveryMetadata(auth)(c.req.raw));
     app.get("/.well-known/oauth-protected-resource", (c) => oAuthProtectedResourceMetadata(auth)(c.req.raw));
+
+    // MCP endpoint (Task 9): public mount, `withMcpAuth` guards it with the
+    // `mcp` plugin's own bearer-token check (401 + `WWW-Authenticate` on
+    // missing/invalid/expired tokens) — not `authMiddleware`.
+    const mcp = mcpHandler({
+      auth,
+      db: providers.db,
+      listSessions: async (userId) => {
+        const rows = await listStandaloneSessions(providers.db, userId);
+        return rows.map((r) => ({ id: r.id, title: r.title, status: r.status }));
+      },
+    });
+    app.all("/mcp", (c) => mcp(c.req.raw));
   }
 
   // Unauthenticated: drives `/login`/`/signup` control rendering.

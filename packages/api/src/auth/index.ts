@@ -4,9 +4,9 @@
  * does. Callers (`main.ts`, the test bootstrap) resolve `AuthConfig` via
  * `loadAuthConfig` and hooks via `buildAuthHooks`, then hand both here.
  */
-import { betterAuth } from "better-auth";
+import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { mcp, oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-auth/plugins";
+import { mcp, oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type OAuthAccessToken } from "better-auth/plugins";
 import { apiKey } from "@better-auth/api-key";
 import { sso } from "@better-auth/sso";
 import type { AppDb } from "../lib/drizzle.js";
@@ -122,16 +122,26 @@ export interface ValetVerifyApiKeyResult {
  * `oAuthDiscoveryMetadata`/`oAuthProtectedResourceMetadata` require
  * structurally (both declared `(...args: any) => any` upstream, so a
  * looser `unknown[]`/`unknown` signature here still satisfies their
- * generic constraint), and the two endpoints the auth middleware ladder
+ * generic constraint), the two endpoints the auth middleware ladder
  * (Task 7) calls directly: `getSession` (cookie/session-header auth) and
- * `verifyApiKey` (the `apiKey` plugin's key-verification endpoint).
+ * `verifyApiKey` (the `apiKey` plugin's key-verification endpoint), and
+ * `getMcpSession` — `withMcpAuth`'s bearer-token verifier (Task 9), also
+ * declared `(...args: any) => Promise<OAuthAccessToken | null>` upstream so
+ * the same looser `unknown[]` signature satisfies it. `options` is
+ * `withMcpAuth`'s other generic-constraint member (it reads
+ * `options.basePath`/`options.baseURL` to build the `WWW-Authenticate`
+ * challenge's `resource_metadata` URL) — the same config object passed
+ * into `betterAuth()` below, so `BetterAuthOptions` (not a hand-narrowed
+ * subset) is the honest type for it.
  * `buildAuth` casts the real instance down to it below.
  */
 export interface ValetAuth {
   handler: (request: Request) => Promise<Response>;
+  options: BetterAuthOptions;
   api: {
     getMcpOAuthConfig: (...args: unknown[]) => unknown;
     getMCPProtectedResource: (...args: unknown[]) => unknown;
+    getMcpSession: (...args: unknown[]) => Promise<OAuthAccessToken | null>;
     getSession: (opts: {
       headers: Headers;
     }) => Promise<{ session: ValetAuthSession; user: ValetAuthSessionUser } | null>;
