@@ -1,8 +1,8 @@
 # Auth v2 Design — better-auth + OIDC (Keycloak-ready) + social + MCP
 
-**Date:** 2026-07-14 (rev 2 — adds social sign-on and the Valet MCP OAuth server after better-auth API research)
+**Date:** 2026-07-14 (rev 3 — adds allowed-email-domains policy and sandbox auth: per-session sandbox tokens + browser→sandbox JWT primitives)
 **Status:** Approved for planning
-**Scope:** Real authentication for the v2 stack (`packages/api` + `packages/web`): email/password login, social sign-on (Google/GitHub), generic OIDC SSO (Keycloak first), invites, API keys, MCP OAuth provider + minimal `/mcp` endpoint, and provisioning. Replaces the `VALET_LOCAL_AUTH` stub as the production path while keeping it for dev/tests.
+**Scope:** Real authentication for the v2 stack (`packages/api` + `packages/web`): email/password login, social sign-on (Google/GitHub), generic OIDC SSO (Keycloak first), invites, allowed email domains, API keys, MCP OAuth provider + minimal `/mcp` endpoint, sandbox auth (per-session tokens + service-JWT primitives), and provisioning. Replaces the `VALET_LOCAL_AUTH` stub as the production path while keeping it for dev/tests.
 
 All better-auth API facts below were verified against the installed `better-auth@1.6.23` / `@better-auth/sso@1.6.23` / `@better-auth/api-key@1.6.23` types and CLI-generated schema (research scratch: `$CLAUDE_JOB_DIR/tmp/ba-research`).
 
@@ -17,11 +17,15 @@ All better-auth API facts below were verified against the installed `better-auth
    - **Email/password** signups require an invite: a code presented at signup, or an unexpired invite matching the email.
    - **Social** (Google/GitHub) signups require an **email-targeted invite** — configuring Google as a login option must not admit every Google account on the internet, and OAuth redirects can't carry a code, so admission is by invite-matching-email only.
    - **Enterprise SSO (OIDC/Keycloak)** signups skip invites entirely — the IdP is the deployment's access control; anyone it authenticates is provisioned as a member.
+   - **Allowed email domains act as a standing invite**: when `AUTH_ALLOWED_EMAIL_DOMAINS` is set (comma-separated, e.g. `example.com,example.dev`), a signup (password or social) whose email domain matches is admitted WITHOUT an invite, as `member`. Explicit invites still admit non-matching emails (external-contractor case). Unset → invite-only as above. Matching is on the exact domain of the email address, case-insensitive, no subdomain wildcards.
 6. **API keys are in scope**: user-generated via the `@better-auth/api-key` plugin, hashed at rest, shown once, revocable, listed with a displayable `start` hint and last-request timestamp. A key authenticates as its owner with the owner's role — no scope model this pass. **Explicit verification** (`auth.api.verifyApiKey`) in our middleware; the plugin's `enableSessionForAPIKeys` mode stays off (its own docs mark it not recommended for production).
 7. **Valet MCP server (walking skeleton).** better-auth's `mcp` plugin makes Valet an OAuth **authorization server** (dynamic client registration, authorize/token/consent endpoints, `/.well-known` discovery), so Claude or any remote MCP client can OAuth in as a Valet user. This pass ships the OAuth plumbing plus a minimal `/mcp` endpoint (Streamable HTTP, `withMcpAuth`-guarded) exposing two tools: `whoami` and `list_sessions`. The full Valet tool surface over MCP is a follow-up design.
-8. **The internal-token bypass (`x-valet-internal`) is preserved unchanged** for sandbox→api calls. Narrowing it is out of scope.
+8. **Sandbox auth is in scope — the internal token stops being the sandbox story.**
+   - The `x-valet-internal` token is redefined as **process-internal only**: it authenticates loopback calls from the api's own process (today's orchestrator `mem_*` tools). It never enters a container. Behavior unchanged, contract narrowed and documented.
+   - **Per-session sandbox tokens** are the credential for anything running inside a sandbox that calls the api: minted at sandbox provision (`st_` opaque token, SHA-256 hash stored in a `sandbox_tokens` table with `session_id`, `user_id`, `org_id`, `created_at`, `expires_at`, `revoked_at`), injected into the container env (`VALET_SANDBOX_TOKEN`, `VALET_API_URL`), revoked when the session stops. A request bearing one gets a **constrained principal** — `c.var.sandbox = { sessionId, userId, orgId }`, NOT `c.var.user` — and only routes that opt into the sandbox principal accept it. The token binds the owner: no trusting caller-supplied owner headers on this path.
+   - **Browser→sandbox service-JWT primitives** ship now; the gateway that consumes them is a later pass. Carried from v1: a per-session signing secret derived as `HMAC-SHA256(master secret, sessionId)` — the sandbox can verify JWTs without holding the master secret, and a compromised sandbox cannot forge tokens for other sessions. The api exposes `POST /api/sessions/:id/sandbox-jwt` (session-access-gated) minting a short-lived (10-minute) HS256 JWT `{ sub: userId, sid: sessionId, iat, exp }`; sandbox-docker injects the derived secret as `VALET_SANDBOX_JWT_SECRET` into the container env. The master secret is `VALET_SANDBOX_JWT_MASTER` (falls back to `BETTER_AUTH_SECRET` when unset — one fewer required var; the derivation isolates sessions either way).
 9. **The dev stub survives**: `VALET_LOCAL_AUTH=1` keeps today's single-local-user behavior as the LAST rung of the middleware ladder, so `make dev-local` and the existing test fleet run unchanged. `VALET_TEST_AUTH_HEADER` impersonation stays test-bootstrap-only, exactly as documented in `middleware/auth.ts` today.
-10. **Carried over from v1** (`packages/worker` auth, the proven parts): `finalizeIdentityLogin` provisioning semantics (match-by-email, first-user-promote, invite-by-code OR invite-by-email with role attached), the provider-token → credential-store hook (login doubles as connecting an integration), name backfill from identity, api-token prefix/last-used UX. NOT carried: the `IdentityProvider` plugin registry, hand-rolled state JWTs/sessions/password hashing/rate limiting, the SAML endpoint — better-auth and Keycloak replace all of it.
+10. **Carried over from v1** (`packages/worker` auth, the proven parts): `finalizeIdentityLogin` provisioning semantics (match-by-email, first-user-promote, invite-by-code OR invite-by-email with role attached), the provider-token → credential-store hook (login doubles as connecting an integration), name backfill from identity, api-token prefix/last-used UX, and `deriveSandboxJwtSecret`'s per-session key-derivation construction (decision 8). NOT carried: the `IdentityProvider` plugin registry, hand-rolled state JWTs/sessions/password hashing/rate limiting, the SAML endpoint — better-auth and Keycloak replace all of it.
 11. **Pre-1.0 schema policy applies**: all new tables fold into the `0000` api migration; no new numbered migrations; `rm ~/.valet/app.db` after schema edits.
 
 ## Architecture
@@ -33,6 +37,7 @@ packages/api/src/auth/
 ├── provisioning.ts   # hooks: invite gate, first-user-admin, org membership,
 │                     #   name backfill, provider-token → credential-store capture
 ├── invites.ts        # invite create/validate/consume (Valet-owned table)
+├── sandbox-tokens.ts # per-session sandbox token mint/verify/revoke + JWT derivation/mint
 └── mcp.ts            # /mcp endpoint: withMcpAuth + minimal MCP tool handler
 ```
 
@@ -59,6 +64,8 @@ packages/api/src/auth/
 | `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Optional social provider. |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | Optional social provider. |
 | `AUTH_TRUSTED_ORIGINS` | Comma-separated extra origins (dev default adds `http://localhost:5173` for the Vite proxy). |
+| `AUTH_ALLOWED_EMAIL_DOMAINS` | Optional comma-separated domains admitted without an invite (decision 5). |
+| `VALET_SANDBOX_JWT_MASTER` | Optional master secret for per-session service-JWT derivation; falls back to `BETTER_AUTH_SECRET`. |
 
 Keycloak is configured via the sso plugin's **`defaultSSO` option** (config-only, idempotent, takes precedence over DB rows — no `sso_provider` seeding, no `registerSSOProvider` call, which requires a session and is non-idempotent). Set `trustEmailVerified: true` on the plugin: we trust the enterprise IdP's `email_verified` claim.
 
@@ -77,6 +84,7 @@ New tables, transcribed verbatim from the CLI-generated Drizzle schema (research
 - `apikey` — api-key plugin. Note: owner column is `reference_id` (not `user_id`), plus `config_id` (default `"default"`), `start` (displayable first chars), `prefix`, `last_request`, `expires_at`, `enabled`, rate-limit columns.
 - `oauth_application`, `oauth_access_token`, `oauth_consent` — MCP plugin (dynamic client registration + issued tokens + consent records).
 - `invites` — **Valet-owned**: `id`, `code_hash` (SHA-256 of the invite code), `email` (nullable — when set, the invite auto-matches that address; required path for social signups), `role` (`admin` | `member`), `created_by`, `created_at`, `expires_at`, `accepted_by` (nullable), `accepted_at` (nullable).
+- `sandbox_tokens` — **Valet-owned**: `id`, `token_hash` (SHA-256), `session_id`, `user_id`, `org_id`, `created_at`, `expires_at`, `revoked_at` (nullable).
 
 Dependency alignment: bump `better-sqlite3` to `^12` and `drizzle-orm` to `^0.45.2` in `packages/api` + `packages/store-sqlite` (better-auth peer ranges; Node 22 satisfies both).
 
@@ -84,7 +92,8 @@ Dependency alignment: bump `better-sqlite3` to `^12` and `drizzle-orm` to `^0.45
 
 `authMiddleware` — first match wins:
 
-1. **Internal token**: valid `x-valet-internal` → pass through without `c.var.user` (unchanged).
+1. **Internal token**: valid `x-valet-internal` → pass through without `c.var.user` (process-internal callers only; unchanged behavior, narrowed contract).
+1b. **Sandbox token**: `x-valet-sandbox: st_…` → hash lookup in `sandbox_tokens` (unexpired, unrevoked) → `c.var.sandbox = { sessionId, userId, orgId }` — NOT `c.var.user`. Routes opt in to the sandbox principal explicitly (this pass: the memory routes, which derive their owner tuple from it instead of trusting `x-valet-owner` headers on this path).
 2. **Session**: `auth.api.getSession({ headers })` → `{ session, user } | null`; on hit, `c.var.user = { id, email, name, role, orgId }` (`role`/`defaultModel` ride on the returned user via additionalFields; `orgId` from the single org row, cached).
 3. **API key**: `x-api-key` header present → `auth.api.verifyApiKey({ body: { key } })` → on `valid`, load the owner via `key.referenceId` → same `c.var.user` shape. The plugin updates `last_request` itself.
 4. **Dev stub**: `VALET_LOCAL_AUTH=1` → today's hardcoded local user (and the separately-gated test impersonation header).
@@ -98,9 +107,11 @@ MCP requests do not use this ladder: the `/mcp` endpoint is guarded by `withMcpA
 
 Ports v1's `finalizeIdentityLogin` semantics onto better-auth's verified hook points:
 
-**Invite gate — `hooks.before`** (`createAuthMiddleware`, sees the raw body): on `ctx.path === "/sign-up/email"`, allow if the db has zero users; otherwise require `ctx.body.inviteCode` (extra body keys pass schema validation and are not persisted) to match a valid invite, or an unexpired invite matching the email. Reject with `APIError("FORBIDDEN", { message: "an invite is required to join this deployment" })`.
+**Admission rule (one function, used by both gates):** admit when (in order) the db has zero users (→ role `admin`), OR the email's domain matches `AUTH_ALLOWED_EMAIL_DOMAINS` (→ `member`), OR a valid invite matches by code or email (→ the invite's role). Enterprise SSO paths skip the rule entirely (→ `member`, or `admin` if first user).
 
-**Creation gate for OAuth paths — `databaseHooks.user.create.before`**: receives `(user, context)`; `context?.path` distinguishes the flow — `"/sign-up/email"` (already gated above), `"/callback/:id"` / `"/sign-in/social"` (social), `"/sso/callback/:providerId"` (enterprise SSO). For social paths: allow if zero users, else require an unexpired invite matching `user.email`; otherwise return `false` (aborts creation). SSO paths always pass. This hook also returns `{ data }` to stamp `role`: `admin` for the first user, else the invite's role, else `member` (SSO).
+**Invite gate — `hooks.before`** (`createAuthMiddleware`, sees the raw body): on `ctx.path === "/sign-up/email"`, apply the admission rule with `ctx.body.inviteCode` (extra body keys pass schema validation and are not persisted) + the signup email. Reject with `APIError("FORBIDDEN", { message: "an invite is required to join this deployment" })`.
+
+**Creation gate for OAuth paths — `databaseHooks.user.create.before`**: receives `(user, context)`; `context?.path` distinguishes the flow — `"/sign-up/email"` (already gated above), `"/callback/:id"` / `"/sign-in/social"` (social), `"/sso/callback/:providerId"` (enterprise SSO). Social paths apply the admission rule with `user.email` (no code available — domain match or email-targeted invite only); on failure return `false` (aborts creation). SSO paths always pass. This hook also returns `{ data }` to stamp `role` per the admission rule's outcome.
 
 **Post-create provisioning — `databaseHooks.user.create.after`**: create the org row if absent; insert the `org_members` row with the resolved role; mark the matched invite accepted (`accepted_by`, `accepted_at`).
 
@@ -119,6 +130,17 @@ Ports v1's `finalizeIdentityLogin` semantics onto better-auth's verified hook po
 - Settings → **You** → new **API keys** section: create (named, secret displayed once), list (`start` hint, created, last used, expiry), revoke. Backed by the plugin's own endpoints via `apiKeyClient()`.
 - Server config: `apiKey({ defaultPrefix: "vlt_", rateLimit: { enabled: false } })` — Valet keys are power-user credentials; better-auth's per-key rate limiting defaults (10 req/day) are wrong for us.
 - Wire: `x-api-key: vlt_…` (middleware rung 3).
+
+## Sandbox auth (`auth/sandbox-tokens.ts`)
+
+Two credentials, one file, both independent of better-auth:
+
+**Sandbox→api tokens.** `mintSandboxToken(sessionId, userId, orgId, ttl)` → `st_{48 hex}` (returned once; SHA-256 hash stored). The engine host's sandbox provision path calls it and injects `VALET_SANDBOX_TOKEN` + `VALET_API_URL` into the container env (sandbox-docker `create` env plumbing); session stop/hibernate revokes (`revoked_at`). `verifySandboxToken(token)` → `{ sessionId, userId, orgId } | null` (unexpired, unrevoked; constant-time hash compare). Middleware rung 1b consumes it. TTL: 24h, re-minted on session restore — an evicted/restored sandbox gets a fresh token, and hibernated sandboxes hold only expired/revoked credentials.
+
+**Browser→sandbox service JWTs.** `deriveSandboxJwtSecret(master, sessionId)` = hex(HMAC-SHA256(master, sessionId)) — v1's proven construction: the container can verify JWTs without the master secret, and one sandbox's secret is useless for another session. `mintSandboxJwt(master, sessionId, userId)` → HS256 JWT `{ sub, sid, iat, exp: +10min }` (via `jose` or the few lines of node:crypto v1 used). Surface:
+- `POST /api/sessions/:id/sandbox-jwt` → `{ token, expiresAt }`, gated on the caller's access to the session (owner this pass).
+- sandbox-docker injects `VALET_SANDBOX_JWT_SECRET` (the derived secret) into the container env at create.
+- No in-sandbox consumer ships this pass (the gateway is a later pass); the contract is pinned by tests: a JWT minted by the api verifies against the derived secret inside the container env, expired/cross-session JWTs fail.
 
 ## Valet MCP server (walking skeleton)
 
@@ -139,7 +161,9 @@ Ports v1's `finalizeIdentityLogin` semantics onto better-auth's verified hook po
 
 ## Testing
 
-- **Middleware matrix**: session cookie / api key / internal token / stub / nothing→401; stub disabled when `VALET_LOCAL_AUTH≠1`; rungs 2–3 absent in stub-only mode.
+- **Middleware matrix**: session cookie / api key / internal token / sandbox token / stub / nothing→401; stub disabled when `VALET_LOCAL_AUTH≠1`; rungs 2–3 absent in stub-only mode; sandbox principal never satisfies user-only routes.
+- **Sandbox tokens**: mint→verify round-trip; expired/revoked fail; revocation on session stop; memory routes accept the sandbox principal and derive the owner tuple from it; JWT derivation/mint: derived-secret verify succeeds, cross-session and expired JWTs fail; container env carries `VALET_SANDBOX_TOKEN`/`VALET_SANDBOX_JWT_SECRET` (sandbox-docker unit test on the create env).
+- **Domain admission**: matching email admitted without invite as member (password + social paths); non-matching still requires invite; case-insensitivity; unset → invite-only.
 - **Signup gates**: first user (password) → admin + org + membership; second password signup without invite rejected; with code-invite joins with invite role; email-matched invite auto-consumes; expired/revoked/accepted invites rejected; single-use enforced. Social-path creation hook: rejected without email-matched invite, admitted with one (unit-tested by invoking the hook with a synthesized social context). SSO-path: admitted without invite as member.
 - **Provisioning**: role stamping via `create.before` data; org_members rows; invite acceptance bookkeeping; account-token capture writes to the credential store (fake account row with tokens).
 - **API keys**: create/list/revoke round-trip via plugin endpoints; revoked/expired key fails rung 3; `verifyApiKey` path sets the right user; secret never re-readable.
@@ -153,5 +177,5 @@ Ports v1's `finalizeIdentityLogin` semantics onto better-auth's verified hook po
 - SAML terminating at Valet (Keycloak brokers it).
 - API-key scopes/permissions; org-level login-provider toggles; email delivery of invites (link-sharing only); password reset / email verification flows (need a mailer — follow-up; better-auth supports both when one exists).
 - The full Valet MCP tool surface (own design pass; this pass proves the OAuth plumbing with two tools).
-- Narrowing the internal-token bypass; sandbox gateway JWTs (`deriveSandboxJwtSecret` stays a v1 reference for the future sandbox pass).
+- The in-sandbox auth gateway itself (v1's :9000 proxy) and any in-sandbox services consuming the service JWTs — this pass ships the tested token/JWT contract only.
 - Multi-org.
