@@ -242,18 +242,13 @@ async function runIteration(
         ...(recordWaiting ? { recordWaiting } : {}),
       });
     } else {
-      // Side-effectful non-step-driven body types (currently just llm)
-      // need NO_RETRY to match the top-level runtime policy. Without
-      // this, CF's default 5-retry policy would duplicate billed model
-      // calls and re-render user-visible content on a transient error.
-      // Mirrors runtime.ts:executeNodeStep — the policy must hold for a
-      // node wherever it appears in the graph.
-      //
-      // Pure non-step-driven body types (`set`, `project`) don't need
-      // NO_RETRY: their executors are deterministic and idempotent, so
-      // CF's default retries are safe and even useful (transient
-      // template-render / DO-comms hiccups get retried for free).
-      const stepConfig = args.node.body.type === 'llm' ? { retries: { ...NO_RETRY } } : undefined;
+      // NO_RETRY applies to every non-step-driven body type — same
+      // reasoning as runtime.ts:executeNodeStep. Pure executors (set/
+      // project/if/stop) throw deterministically, so retrying is
+      // guaranteed to throw the same error; side-effectful ones (llm)
+      // shouldn't fire duplicated billed calls on transient errors.
+      // The policy must hold for a node wherever it appears in the
+      // graph, so foreach bodies inherit it here.
       const callback = async () => {
         const out = await dispatchNode(args.node.body, {
           node: args.node.body,
@@ -267,9 +262,7 @@ async function runIteration(
         });
         return JSON.stringify(out ?? null);
       };
-      const json = stepConfig
-        ? await args.step.do(stepName, stepConfig, callback)
-        : await args.step.do(stepName, callback);
+      const json = await args.step.do(stepName, { retries: { ...NO_RETRY } }, callback);
       data = JSON.parse(json) as unknown;
     }
     return { status: 'completed', data };
