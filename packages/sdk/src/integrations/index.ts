@@ -64,6 +64,13 @@ export interface ActionResult<T = unknown> {
 /** Context passed to listActions for credential-dependent sources (e.g. MCP). */
 export interface ActionListContext {
   credentials?: IntegrationCredentials;
+  /**
+   * Callback invoked when a source silently returns `[]` because the
+   * underlying discovery call failed (expired credentials, MCP server
+   * unreachable, etc.). Per-call so concurrent callers on a shared
+   * source instance don't race on stashed error state.
+   */
+  onListError?: (error: string) => void;
 }
 
 /** Source of typed actions for a service. */
