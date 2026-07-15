@@ -19,9 +19,9 @@
  *    error for things like unbalanced quotes or bare operators — it
  *    degrades to a literal-term parse. The `ValidationError`-on-syntax-error
  *    path in `searchFiles` is a defensive backstop for genuine pg
- *    `42601`/`42804` errors and is asserted to exist (via the narrow
- *    `isPgSyntaxError` unit below) rather than reachable through query text,
- *    since no known websearch-syntax input actually raises one.
+ *    `42601`/`42804` errors; it is unreachable through query text (no known
+ *    websearch-syntax input raises one) and deliberately untested — the
+ *    malformed-query tests below pin the forgiving behavior instead.
  *  - relative ordering: a title-match ranks above a content-only match
  *    (weight A vs D), and a path-match ranks above a content-only match
  *    (weight C vs D) — the adversarial pair decision 9 calls out, since a
