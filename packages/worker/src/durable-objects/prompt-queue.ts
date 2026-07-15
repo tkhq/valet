@@ -160,6 +160,36 @@ export class PromptQueue {
     // `errorSafetyNetAt` session-state keys for the same reason.
     try { this.sql.exec('ALTER TABLE channel_state ADD COLUMN idle_queued_since INTEGER'); } catch { /* already exists */ }
     try { this.sql.exec('ALTER TABLE channel_state ADD COLUMN error_safety_net_at INTEGER'); } catch { /* already exists */ }
+    this.migrateStatusCheckForDeadLetter();
+  }
+
+  /**
+   * Relax the prompt_queue.status CHECK so the recovery circuit breaker can mark
+   * a poison prompt 'dead_letter'. SQLite can't ALTER a CHECK, so a DO created
+   * before 'dead_letter' was permitted is rebuilt in place (rename → recreate →
+   * copy). Idempotent: the guard matches only the pre-'dead_letter' constraint
+   * text, which the rebuild removes, so this runs at most once per DO.
+   */
+  private migrateStatusCheckForDeadLetter(): void {
+    const oldStatusCheck = "CHECK(status IN ('queued', 'processing', 'completed'))";
+    const schema = this.sql
+      .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue'")
+      .toArray()[0]?.sql as string | undefined;
+    if (!schema?.includes(oldStatusCheck)) return;
+
+    const rebuilt = schema
+      .replace(oldStatusCheck, "CHECK(status IN ('queued', 'processing', 'completed', 'dead_letter'))")
+      .replace('CREATE TABLE prompt_queue', 'CREATE TABLE prompt_queue_migrate');
+    const columns = this.sql
+      .exec('PRAGMA table_info(prompt_queue)')
+      .toArray()
+      .map((col) => col.name as string)
+      .join(', ');
+
+    this.sql.exec(rebuilt);
+    this.sql.exec(`INSERT INTO prompt_queue_migrate (${columns}) SELECT ${columns} FROM prompt_queue`);
+    this.sql.exec('DROP TABLE prompt_queue');
+    this.sql.exec('ALTER TABLE prompt_queue_migrate RENAME TO prompt_queue');
   }
 
   // ─── Core Queue Operations ───────────────────────────────────────────────
@@ -344,14 +374,16 @@ export class PromptQueue {
     }
   }
 
-  /** Ids of all entries currently marked 'processing'. Captured before a
-   *  recovery revert so the caller can quarantine the in-flight prompt(s) if
-   *  the recovery circuit breaker trips. */
-  getProcessingIds(): string[] {
-    return this.sql
-      .exec("SELECT id FROM prompt_queue WHERE status = 'processing'")
-      .toArray()
-      .map((row) => row.id as string);
+  /** Id of the oldest in-flight (processing) prompt, or null. The recovery
+   *  circuit breaker captures this at sandbox loss as the poison suspect — the
+   *  in-flight prompt that has been re-dispatched longest — so a trip
+   *  quarantines exactly that prompt and leaves healthy sibling-channel work
+   *  queued to retry after backoff. */
+  getOldestProcessingId(): string | null {
+    const rows = this.sql
+      .exec("SELECT id FROM prompt_queue WHERE status = 'processing' ORDER BY created_at ASC LIMIT 1")
+      .toArray();
+    return rows.length > 0 ? (rows[0].id as string) : null;
   }
 
   /** Move entries into the terminal 'dead_letter' state so they are never

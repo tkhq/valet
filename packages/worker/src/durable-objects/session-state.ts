@@ -360,6 +360,18 @@ export class SessionState {
     this.set('lastFailureReason', val || '');
   }
 
+  /** Id of the prompt that was in flight when the sandbox was last lost — the
+   *  poison suspect the recovery breaker quarantines on a trip. Captured at
+   *  disconnect (before the 5s grace revert queues it) so it survives the
+   *  revert; cleared when the breaker resets. */
+  get lastRecoveryPromptId(): string {
+    return this.get('lastRecoveryPromptId') || '';
+  }
+
+  set lastRecoveryPromptId(val: string) {
+    this.set('lastRecoveryPromptId', val || '');
+  }
+
   get sandboxGeneration(): number {
     return parseInt(this.get('sandboxGeneration') || '0', 10);
   }
@@ -374,6 +386,7 @@ export class SessionState {
     this.lastRecoveryAt = 0;
     this.backoffUntil = 0;
     this.lastFailureReason = undefined;
+    this.lastRecoveryPromptId = '';
   }
 
   // ─── Runner Disconnect Tracking ─────────────────────────────────
@@ -423,6 +436,10 @@ export class SessionState {
     this.initialPrompt = undefined;
     this.initialModel = undefined;
     this.parentThreadId = undefined;
+    // A reused well-known DO (e.g. orchestrator:{userId}) must not inherit a
+    // recovery breaker count from a prior lifecycle, or its first sandbox loss
+    // could trip the breaker with no rapid-failure loop.
+    this.resetRecoveryState();
     // Set optional fields
     if (params.sandboxId) this.sandboxId = params.sandboxId;
     if (params.tunnelUrls) this.tunnelUrls = params.tunnelUrls;

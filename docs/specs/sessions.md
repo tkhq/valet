@@ -407,13 +407,13 @@ Queued user prompts are single-slot replaceable by default: a newly queued follo
 - 5-minute watchdog alarm: detects stuck `processing` prompts when no runner connected.
 - Error safety-net alarm: forces completion if runner reports error but never sends `complete`.
 
-**Recovery circuit breaker:** When the runner grace period expires, `performRecovery` respawns the sandbox and increments a persisted attempt counter. Reaching ready does not reset the counter — reaching ready only proves the sandbox booted, not that it will stay up. The breaker instead cools down from the alarm once the runner has held ready continuously for `RECOVERY_STABLE_INTERVAL_MS` (two grace periods): the reset measures *uptime* (`now − readyAt`), not the boot latency at the ready signal, so a genuine recovery clears the breaker while a recover→ready→die flap keeps the counter climbing.
+**Recovery circuit breaker:** When the runner grace period expires, `performRecovery` respawns the sandbox and increments a persisted attempt counter. Reaching ready does not reset the counter — reaching ready only proves the sandbox booted, not that it will stay up. The breaker instead cools down once the runner has held ready continuously for `RECOVERY_STABLE_INTERVAL_MS` (two grace periods): the alarm reset measures *uptime* (`now − readyAt`), not the boot latency at the ready signal, so a genuine recovery clears the breaker while a recover→ready→die flap keeps the counter climbing. `readyAt` is stamped only on the first ready after a recovery or a fresh start, so a transient sub-grace reconnect can't reset the uptime clock without a real failure. The counter is also cleared on a clean idle-hibernation and on a fresh `handleStart`, so a reused well-known DO does not inherit a stale count.
 
 After more than three consecutive losses with no stable interval between them the breaker trips:
 - **Orchestrators** enter `backoff` on an escalating tier (1m → 5m → 15m cap). Backoff-expiry retries resume the same tripped attempt count — they do not reset it — so the tier escalates on continued flapping.
 - **Regular sessions** terminate (`recovery_exhausted`).
 
-On trip, whatever prompt was in flight when the sandbox died is **dead-lettered** (`prompt_queue.status = 'dead_letter'`), not reverted to `queued`, so a poison prompt that keeps crashing the sandbox is dropped from the queue instead of re-dispatched after every backoff. A `recovery.flapping` audit event is emitted before the trip as a leading indicator, and `recovery.dead_letter` records the quarantine.
+On trip, the single poison suspect — the prompt in flight when the sandbox was lost — is **dead-lettered** (`prompt_queue.status = 'dead_letter'`) instead of reverted to `queued`, so it is dropped from the queue rather than re-dispatched after every backoff; healthy sibling-channel prompts stay queued and retry. The suspect is captured at disconnect, before the grace revert queues it. A `recovery.flapping` audit event is emitted before the trip as a leading indicator, and `recovery.dead_letter` records the quarantine.
 
 ### Thread Resume
 

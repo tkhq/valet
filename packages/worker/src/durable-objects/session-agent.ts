@@ -231,7 +231,7 @@ const SCHEMA_SQL = `
     queue_type TEXT NOT NULL DEFAULT 'prompt' CHECK(queue_type IN ('prompt', 'workflow_execute')),
     workflow_execution_id TEXT,
     workflow_payload TEXT,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'processing', 'completed')),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'processing', 'completed', 'dead_letter')),
     author_id TEXT,
     author_email TEXT,
     author_name TEXT,
@@ -1103,6 +1103,13 @@ export class SessionAgentDO {
 
     if (isRunner) {
       console.log(`[SessionAgentDO] Runner disconnected: code=${code} reason="${reason || 'unknown'}"`);
+      // Capture the in-flight prompt as the poison suspect NOW, while it is still
+      // 'processing' — before the grace revert below (or the 5s disconnect timer)
+      // moves it back to 'queued'. If the sandbox keeps crashing and the breaker
+      // trips, performRecovery quarantines exactly this prompt rather than every
+      // processing row, so healthy sibling-channel work is not dropped.
+      const inFlightPromptId = this.promptQueue.getOldestProcessingId();
+      if (inFlightPromptId) this.sessionState.lastRecoveryPromptId = inFlightPromptId;
       // Defer revert — if runner reconnects within grace period, processing entry stays intact
       if (this.disconnectRevertTimer) clearTimeout(this.disconnectRevertTimer);
       this.disconnectRevertTimer = setTimeout(() => {
@@ -1271,8 +1278,12 @@ export class SessionAgentDO {
     // ─── Runner Grace Period Check ──────────────────────────────────
     if (this.sessionState.runnerDisconnectedAt && now - this.sessionState.runnerDisconnectedAt >= SessionAgentDO.RUNNER_GRACE_PERIOD_MS) {
       console.log(`[SessionAgentDO] Runner did not reconnect within ${SessionAgentDO.RUNNER_GRACE_PERIOD_MS / 1000}s — attempting recovery`);
+      // The sandbox was lost at disconnect, not now — this alarm fires a full
+      // grace period later. Pass the disconnect time so the flapping measure
+      // reflects real uptime, not uptime plus the grace period.
+      const lossAt = this.sessionState.runnerDisconnectedAt;
       this.sessionState.runnerDisconnectedAt = null;
-      await this.performRecovery('sandbox_lost');
+      await this.performRecovery('sandbox_lost', lossAt);
       // performRecovery transitions to initializing (spawning new sandbox) or
       // terminal state (circuit breaker tripped). Re-arm if still alive.
       if (!['terminated', 'error'].includes(this.sessionState.status)) {
@@ -1309,6 +1320,12 @@ export class SessionAgentDO {
       && this.promptQueue.processingCount === 0
       && !this._activeWorkflowExecutionId;
     if (idleHibernateAllowed && this.lifecycle.checkIdleTimeout()) {
+      // A clean idle-hibernate is proof the runner stayed healthy long enough to
+      // go idle — clear any lingering recovery breaker count so the next wake or
+      // a reused DO doesn't trip prematurely on a single loss. The alarm cooldown
+      // above only runs while 'running', which a shorter idle timeout can pre-empt
+      // (it fires before the runner holds ready for a full stable interval).
+      if (this.sessionState.recoveryAttemptCount > 0) this.sessionState.resetRecoveryState();
       // Set status immediately to prevent re-entrant hibernation from subsequent alarms.
       // performHibernate() checks this guard and skips if already in progress.
       this.sessionState.status = 'hibernating';
@@ -3221,8 +3238,14 @@ export class SessionAgentDO {
           if (wasInitializing) {
             this.runnerLink.ready = true;
             // Stamp when the runner became ready so the recovery breaker's alarm
-            // cooldown can measure uptime rather than resetting on boot latency.
-            this.runnerLink.readyAt = Date.now();
+            // cooldown can measure uptime. Only stamp a ready that follows an
+            // actual recovery (which clears readyAt to 0) or a fresh start — a
+            // transient sub-grace reconnect leaves readyAt set, and re-stamping it
+            // would reset the uptime clock with no failure, so the breaker could
+            // never cool down.
+            if (this.runnerLink.readyAt === 0) {
+              this.runnerLink.readyAt = Date.now();
+            }
             console.log('[SessionAgentDO] Runner is now ready (first idle after connect)');
 
             // Transition waiting_runner → running now that the Runner is connected and healthy
@@ -5811,17 +5834,22 @@ export class SessionAgentDO {
    *
    * Flow:
    * 1. Transition to 'recovering' → broadcast + D1 sync
-   * 2. Revert any in-flight prompt back to queued (remembered for quarantine)
+   * 2. Resolve the poison suspect, then revert any in-flight prompt to queued
    * 3. Rotate the runner token and increment sandbox generation
    * 4. Advance the breaker counter — unless this is a backoff retry, which
    *    resumes an already-counted failure
-   * 5. Circuit breaker: on trip, quarantine the in-flight prompt so it can't
-   *    re-poison the sandbox, then backoff (orchestrators) or terminate (regular)
+   * 5. Circuit breaker: on trip, quarantine exactly the poison suspect so it
+   *    can't re-poison the sandbox, then backoff (orchestrators) or terminate
    * 6. Otherwise: transition to 'initializing' and respawn the sandbox
+   *
+   * `lossAt` is when the sandbox was actually lost — the disconnect time on the
+   * grace path, which fires a full grace period after the loss. Defaults to now
+   * for paths where the loss is detected inline (watchdog, ensure_running).
    */
-  private async performRecovery(reason: string): Promise<void> {
+  private async performRecovery(reason: string, lossAt?: number): Promise<void> {
     const sessionId = this.sessionState.sessionId;
     const now = Date.now();
+    const lossTime = lossAt ?? now;
     // Backoff retries resume an already-counted failure: they must not advance
     // the attempt counter or re-trip the breaker, or the respawn below never
     // runs and the exponential tier (1m→5m→15m) can't escalate.
@@ -5845,13 +5873,17 @@ export class SessionAgentDO {
       );
     }
 
-    // ─── 2. Revert in-flight prompts back to queued ─────────────────
-    // Capture the in-flight prompt(s) first: if this recovery trips the breaker
-    // they are the prime suspects for crashing the sandbox and get quarantined
-    // (step 5) instead of reverted and re-dispatched.
-    const inFlightPromptIds = this.promptQueue.getProcessingIds();
-    if (inFlightPromptIds.length > 0) {
-      console.log(`[SessionAgentDO] Recovery: reverting ${inFlightPromptIds.length} processing entries to queued`);
+    // ─── 2. Resolve poison suspect, then revert in-flight prompts ────
+    // Prefer a still-processing row (watchdog and other inline paths, where
+    // nothing has reverted yet); else fall back to the id captured at disconnect
+    // — on the dominant sandbox-crash path the 5s grace revert has already moved
+    // it to 'queued', so getOldestProcessingId would return null here. Persist it
+    // so backoff retries keep quarantining the same prompt.
+    const poisonPromptId = this.promptQueue.getOldestProcessingId() ?? this.sessionState.lastRecoveryPromptId;
+    if (poisonPromptId) this.sessionState.lastRecoveryPromptId = poisonPromptId;
+    const stuckProcessing = this.promptQueue.processingCount;
+    if (stuckProcessing > 0) {
+      console.log(`[SessionAgentDO] Recovery: reverting ${stuckProcessing} processing entries to queued`);
       this.promptQueue.revertProcessingToQueued();
     }
     this.promptQueue.runnerBusy = false;
@@ -5885,14 +5917,14 @@ export class SessionAgentDO {
     if (
       !isBackoffRetry &&
       readyAtBeforeLoss > 0 &&
-      !isRecoveryStable(readyAtBeforeLoss, now, SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS)
+      !isRecoveryStable(readyAtBeforeLoss, lossTime, SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS)
     ) {
       console.warn(
-        `[SessionAgentDO] Recovery flapping — session ${sessionId} lost its sandbox ${now - readyAtBeforeLoss}ms after ready (attempt #${attemptCount})`,
+        `[SessionAgentDO] Recovery flapping — session ${sessionId} lost its sandbox ${lossTime - readyAtBeforeLoss}ms after ready (attempt #${attemptCount})`,
       );
       this.emitAuditEvent(
         'recovery.flapping',
-        `Sandbox lost ${now - readyAtBeforeLoss}ms after ready — attempt #${attemptCount}`,
+        `Sandbox lost ${lossTime - readyAtBeforeLoss}ms after ready — attempt #${attemptCount}`,
       );
     }
 
@@ -5904,16 +5936,17 @@ export class SessionAgentDO {
     const CIRCUIT_BREAKER_MAX_ATTEMPTS = 3;
 
     if (!isBackoffRetry && attemptCount > CIRCUIT_BREAKER_MAX_ATTEMPTS) {
-      // Quarantine whatever was in flight when the sandbox died so a poison
-      // prompt can't re-crash the respawned sandbox forever. Drops it from the
-      // queue into 'dead_letter' — for orchestrators the row survives as a
-      // diagnostic; for regular sessions the audit event is the record.
-      if (inFlightPromptIds.length > 0) {
-        this.promptQueue.deadLetter(inFlightPromptIds);
-        console.log(`[SessionAgentDO] Circuit breaker: quarantined ${inFlightPromptIds.length} in-flight prompt(s) for session ${sessionId}`);
+      // Quarantine exactly the poison suspect so it can't re-crash the respawned
+      // sandbox forever. Only that one prompt is dropped into 'dead_letter' —
+      // healthy sibling-channel prompts stay queued and retry after backoff. For
+      // orchestrators the row survives as a diagnostic; for regular sessions the
+      // audit event is the record.
+      if (poisonPromptId) {
+        this.promptQueue.deadLetter([poisonPromptId]);
+        console.log(`[SessionAgentDO] Circuit breaker: quarantined in-flight prompt ${poisonPromptId} for session ${sessionId}`);
         this.emitAuditEvent(
           'recovery.dead_letter',
-          `Quarantined ${inFlightPromptIds.length} in-flight prompt(s) after ${attemptCount} recoveries`,
+          `Quarantined in-flight prompt after ${attemptCount} recoveries`,
         );
       }
 
@@ -6068,6 +6101,7 @@ export class SessionAgentDO {
       this.sessionState.tunnels = [];
       this.promptQueue.runnerBusy = false;
       this.runnerLink.ready = false; // runner is gone — clear ready state for next wake
+      this.runnerLink.readyAt = 0; // next lifecycle re-stamps its own ready uptime
       this.sessionState.status = 'hibernated';
 
       this.broadcastToClients({

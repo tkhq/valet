@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { PromptQueue, type EnqueueParams, type CollectBufferEntry } from './prompt-queue.js';
 
 // ─── SqlStorage Mock ─────────────────────────────────────────────────────────
@@ -1037,5 +1038,64 @@ describe('PromptQueue', () => {
     it('clearQueued returns 0 when nothing to clear', () => {
       expect(pq.clearQueued()).toBe(0);
     });
+  });
+});
+
+// ─── dead_letter status CHECK migration (real SQLite) ─────────────────────────
+//
+// The Map-backed mock above does not enforce the prompt_queue CHECK constraint,
+// so it can't prove the quarantine write is accepted. This drives the real
+// migration against an actual SQLite table created with the pre-'dead_letter'
+// constraint (a DO from before the breaker fix) and verifies deadLetter() works.
+
+// Minimal SqlStorage shim over better-sqlite3 — the same test-only double-cast
+// the mock above uses. Only .exec(...).toArray() is exercised by the migration
+// and deadLetter paths.
+function createRealSql(db: DatabaseType): SqlStorage {
+  const exec = (query: string, ...bindings: unknown[]) => {
+    const isRead = /^\s*(SELECT|PRAGMA|WITH)/i.test(query);
+    if (isRead) {
+      const rows = db.prepare(query).all(...bindings) as Record<string, unknown>[];
+      return { toArray: () => rows, one: () => rows[0] };
+    }
+    const info = db.prepare(query).run(...bindings);
+    return { toArray: () => [], one: () => { throw new Error('no rows'); }, rowsWritten: info.changes };
+  };
+  return { exec } as unknown as SqlStorage;
+}
+
+describe('prompt_queue dead_letter migration (real SQLite)', () => {
+  it('rebuilds the pre-dead_letter CHECK so a poison prompt can be quarantined', () => {
+    const db = new Database(':memory:');
+    // An existing DO created before 'dead_letter' was a permitted status.
+    db.exec(`CREATE TABLE prompt_queue (
+      id TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      queue_type TEXT NOT NULL DEFAULT 'prompt' CHECK(queue_type IN ('prompt', 'workflow_execute')),
+      status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'processing', 'completed')),
+      channel_key TEXT,
+      dispatched_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );`);
+    db.exec('CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('poison', 'boom', 'processing')").run();
+
+    // Before the migration the CHECK rejects the quarantine write.
+    expect(() =>
+      db.prepare("UPDATE prompt_queue SET status = 'dead_letter' WHERE id = 'poison'").run(),
+    ).toThrow(/CHECK constraint failed/);
+
+    const pq = new PromptQueue(createRealSql(db));
+    pq.runMigrations();
+
+    // After the migration the write is accepted and the row survives the rebuild.
+    expect(pq.deadLetter(['poison'])).toBe(1);
+    const row = db.prepare("SELECT status FROM prompt_queue WHERE id = 'poison'").get() as { status: string };
+    expect(row.status).toBe('dead_letter');
+
+    // Idempotent: re-running neither throws nor loses the row.
+    expect(() => pq.runMigrations()).not.toThrow();
+    expect(db.prepare('SELECT COUNT(*) AS c FROM prompt_queue').get()).toEqual({ c: 1 });
+    db.close();
   });
 });

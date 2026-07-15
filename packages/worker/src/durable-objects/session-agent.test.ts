@@ -902,6 +902,101 @@ describe('SessionAgentDO', () => {
       expect((agent as any).sessionState.status).toBe('backoff');
       expect(lastBackoffSeconds()).toBe(300);
     });
+
+    // Register a fake runner socket and drive the real disconnect handler so the
+    // poison-suspect capture runs exactly where production runs it. The 5s
+    // in-memory revert timer is cleared and simulated by hand (real timers don't
+    // fire inside the test).
+    async function crashRunner(agent: any) {
+      const runnerWs = { close: vi.fn() } as unknown as WebSocket;
+      (agent as any).ctx.acceptWebSocket(runnerWs, ['runner']);
+      (agent as any).flushTraces = vi.fn().mockResolvedValue(undefined);
+      await agent.webSocketClose(runnerWs, 1006, 'sandbox crash', false);
+      if ((agent as any).disconnectRevertTimer) {
+        clearTimeout((agent as any).disconnectRevertTimer);
+        (agent as any).disconnectRevertTimer = null;
+      }
+    }
+
+    it('captures the poison prompt at disconnect and quarantines it after the 5s revert', async () => {
+      const { agent, sql } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      (agent as any).promptQueue.enqueue({ id: 'poison', content: 'boom', status: 'processing', channelKey: 'web:default' });
+
+      // Sandbox crash → runner WS closes. Capture happens here, while 'processing'.
+      await crashRunner(agent);
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('poison');
+
+      // The 5s disconnect grace reverts processing→queued, so by grace-expiry
+      // recovery nothing is 'processing' — the capture is the only record.
+      (agent as any).promptQueue.revertProcessingToQueued();
+      expect((agent as any).promptQueue.getOldestProcessingId()).toBeNull();
+
+      for (let i = 0; i < 4; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+      }
+
+      expect((agent as any).sessionState.status).toBe('backoff');
+      expect(sql.queue.get('poison')?.status).toBe('dead_letter');
+    });
+
+    it('quarantines only the poison prompt and leaves a healthy sibling to retry', async () => {
+      const { agent, sql } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      // Both channels are in flight when the sandbox dies. The oldest in-flight
+      // prompt (enqueued first) is the poison suspect.
+      (agent as any).promptQueue.enqueue({ id: 'poison-a', content: 'boom', status: 'processing', channelKey: 'web:a' });
+      (agent as any).promptQueue.enqueue({ id: 'healthy-b', content: 'ok', status: 'processing', channelKey: 'web:b' });
+
+      await crashRunner(agent);
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('poison-a');
+
+      // Grace revert queues both; drive recoveries to the trip.
+      (agent as any).promptQueue.revertProcessingToQueued();
+      for (let i = 0; i < 4; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+      }
+
+      expect((agent as any).sessionState.status).toBe('backoff');
+      // Only the poison is dead-lettered; the sibling stays queued to retry.
+      expect(sql.queue.get('poison-a')?.status).toBe('dead_letter');
+      expect(sql.queue.get('healthy-b')?.status).toBe('queued');
+    });
+
+    it('a clean idle-hibernation within the stable window clears a lingering breaker count', async () => {
+      const { agent } = await armRecovery();
+      const clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      (agent as any).performHibernate = vi.fn().mockResolvedValue(undefined);
+
+      // Flapped up to 3 (not yet tripped), then went idle. The idle timeout is
+      // shorter than the stable interval, so idle-hibernate fires before the
+      // alarm cooldown that would otherwise clear the counter.
+      (agent as any).sessionState.status = 'running';
+      (agent as any).sessionState.recoveryAttemptCount = 3;
+      (agent as any).sessionState.idleTimeoutMs = 60_000;
+      (agent as any).sessionState.lastUserActivityAt = clock - 120_000;
+
+      await agent.alarm();
+
+      expect((agent as any).sessionState.status).toBe('hibernating');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
+    });
+
+    it('a fresh start on a reused well-known DO does not inherit a stale breaker count', async () => {
+      const { agent } = await armRecovery();
+      (agent as any).sessionState.recoveryAttemptCount = 4;
+      (agent as any).sessionState.lastRecoveryPromptId = 'stale-poison';
+
+      (agent as any).sessionState.initialize({ sessionId: 'orchestrator:user-1', userId: 'user-1', workspace: '/w' });
+
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('');
+    });
   });
 
   it('sends a minimal init payload during client websocket upgrade', async () => {
