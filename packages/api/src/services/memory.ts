@@ -14,7 +14,7 @@
  * this phase), relevance boosting, shareable-export filtering, reranking,
  * and tag-similarity hints.
  */
-import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
 import { NotFoundError, ValidationError } from "@valet/shared";
@@ -623,7 +623,13 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
           or(isNull(memoryFiles.expires), gt(memoryFiles.expires, now)),
         ),
       )
-      .orderBy(desc(rankExpr))
+      // Tie-break on path ascending — `ORDER BY rank DESC` alone leaves
+      // equal-rank rows in an unspecified (and observed-nondeterministic
+      // across PGlite/pg) order (Task 7 reviewer minor). Path is unique
+      // per owner but not globally, so this is a stable secondary key
+      // within a single owner's rows and merely deterministic (not
+      // necessarily meaningful) across owners in the read-union.
+      .orderBy(desc(rankExpr), asc(memoryFiles.path))
       .limit(limit);
   } catch (err) {
     if (isPgSyntaxError(err)) {
