@@ -24,10 +24,15 @@ export interface OrgMemberSummary {
   joinedAt: number;
 }
 
-export type SetOrgMemberRoleResult = { ok: true } | { ok: false; error: string };
+export type SetOrgMemberRoleResult =
+  | { ok: true }
+  | { ok: false; reason: "not_found" | "last_admin"; error: string };
 
 /** Exact copy string the last-admin guard returns — routes/tests assert on it byte-exact. */
 export const LAST_ADMIN_ERROR = "an organization needs at least one admin";
+
+/** Exact copy string returned when the target userId has no membership row in the org. */
+export const MEMBER_NOT_FOUND_ERROR = "member not found";
 
 /** True when `userId` holds `org_members.role === "admin"` in `orgId`. */
 export async function isOrgAdmin(db: AppQueryable, orgId: string, userId: string): Promise<boolean> {
@@ -128,10 +133,15 @@ export async function setOrgMemberRole(
       .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
       .get();
 
-    if (member?.role === "admin" && role === "member") {
+    if (!member) {
+      result = { ok: false, reason: "not_found", error: MEMBER_NOT_FOUND_ERROR };
+      return;
+    }
+
+    if (member.role === "admin" && role === "member") {
       const admins = countOrgAdmins(tx, orgId);
       if (admins <= 1) {
-        result = { ok: false, error: LAST_ADMIN_ERROR };
+        result = { ok: false, reason: "last_admin", error: LAST_ADMIN_ERROR };
         return;
       }
     }

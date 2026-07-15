@@ -175,7 +175,7 @@ orgRouter.patch("/members/:userId", async (c) => {
 
   const result = await setOrgMemberRole(db, user.orgId, targetUserId, body.role);
   if (!result.ok) {
-    return c.json({ error: result.error }, 400);
+    return c.json({ error: result.error }, result.reason === "not_found" ? 404 : 400);
   }
 
   const resp: PatchOrgMemberResponse = { ok: true };

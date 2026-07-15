@@ -7,6 +7,7 @@ import {
   getOrgFeatures,
   isOrgAdmin,
   listOrgMembers,
+  MEMBER_NOT_FOUND_ERROR,
   renameOrg,
   setOrgFeatures,
   setOrgMemberRole,
@@ -71,7 +72,16 @@ describe("org service", () => {
   describe("setOrgMemberRole", () => {
     it("rejects demoting the sole admin with the exact error string", async () => {
       const result = await setOrgMemberRole(db, orgId, "admin1", "member");
-      expect(result).toEqual({ ok: false, error: "an organization needs at least one admin" });
+      expect(result).toEqual({
+        ok: false,
+        reason: "last_admin",
+        error: "an organization needs at least one admin",
+      });
+    });
+
+    it("rejects a userId with no membership row in the org", async () => {
+      const result = await setOrgMemberRole(db, orgId, "no-such-user", "admin");
+      expect(result).toEqual({ ok: false, reason: "not_found", error: MEMBER_NOT_FOUND_ERROR });
     });
 
     it("allows demoting once a second admin exists", async () => {

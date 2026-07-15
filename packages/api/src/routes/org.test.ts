@@ -123,6 +123,34 @@ describe("PATCH /api/org", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects an unknown features.* key with 400", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/org`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ features: { bogus: true } }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("an empty features object is a 200 no-op that leaves the gate unchanged", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/org`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ features: {} }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OrgResponse;
+    expect(body.features.organizations).toBe(false);
+
+    const getRes = await fetch(`${api.baseUrl}/api/org`, { headers: HEADERS });
+    const getBody = (await getRes.json()) as OrgResponse;
+    expect(getBody.features.organizations).toBe(false);
+  });
+
   it("401s without auth configured", async () => {
     api = await bootTestApi();
     const prev = process.env.VALET_LOCAL_AUTH;
@@ -267,5 +295,31 @@ describe("PATCH /api/org/members/:userId", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+
+  it("404s for a userId with no membership row in the org", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/org/members/nonexistent-user`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ role: "admin" }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("member not found");
+  });
+
+  it("400s for an invalid role value", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/org/members/test-member`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ role: "owner" }),
+    });
+    expect(res.status).toBe(400);
   });
 });
