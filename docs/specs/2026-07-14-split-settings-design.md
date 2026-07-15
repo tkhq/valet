@@ -24,6 +24,9 @@ Does NOT cover: real login / identity providers (auth design pass, separate); in
 4. **Provisioning rule**: whoever creates an org is its admin. Today that means the seeded `local-user` is admin; the future auth phase inherits the rule for first login.
 5. **Assistant identity is shared, not duplicated**: settings reuses the dashboard's identity editing components (extracted), both over `PATCH /api/orchestrator/info`.
 6. **Visual language extends calm-companion**: no boxes-in-a-void; card-less stacks with hairline separators, quiet rail, moss active accent, Newsreader headings. Implementation uses the frontend-design skill.
+7. **Single-org is deliberate** (user decision 2026-07-14): the `/api/org` singular shape is a Phase-6 simplification. Multi-org, if the auth phase brings it, re-keys these thin routes to `/api/orgs/:id` and adds an org switcher to the rail — accepted future rework, not a blocker.
+8. **Members cannot see the org roster yet — deliberate**: all org sections are admin-gated this phase. Member-visible org information (roster, team membership, org name display) is real but deferred; its enumeration happens with the auth pass when members can actually exist.
+9. **Default model is a user preference, in scope**: `users.default_model` (nullable) feeds the host's existing-but-never-populated `defaultModelId` seam. Model enumeration comes from pi-ai's static registry (`getModels("anthropic")` — no network call), surfaced via a new `GET /api/models` route powering a typeahead. Anthropic-only for now, matching `EngineHost.resolveModel`.
 
 ## Routes & navigation
 
@@ -65,6 +68,7 @@ Every control enumerated (surfaces alone are not a spec).
 - Assistant name: text input (writes `orchestrator_identities.handle`).
 - Personality: multiline editor (writes `assistant/personality.md` memory file).
 - One Save per field-group, both via existing `PATCH /api/orchestrator/info`; loading/saving/error states as on the dashboard. Components extracted from `IdentityStep` so dashboard and settings share one implementation.
+- **Default model**: typeahead combobox (input + filtered list) over `GET /api/models`; curated `MODEL_CATALOG` entries show their friendly label/tier grouping first, remaining registry models listed by raw id below. Selection → `PATCH /api/me {defaultModel}`; a "System default" clear affordance → `{defaultModel: null}` (falls back to `claude-haiku-4-5`). Helper text: "New conversations start on this model; you can still switch per-thread in the chat header."
 
 ### You · Appearance
 - Theme: three radio-cards (System / Light / Dark) over the existing `~/lib/theme.ts` client-side mechanism. New `radio-card` pattern component in primitives.
@@ -96,14 +100,17 @@ Every control enumerated (surfaces alone are not a spec).
 
 | Route | Method | Authz | Behavior |
 |---|---|---|---|
-| `/api/me` | GET | user | `{id, email, name, avatarUrl, role, orgId, orgRole}` |
-| `/api/me` | PATCH | user | update `name`/`avatarUrl` on `users` |
+| `/api/me` | GET | user | `{id, email, name, avatarUrl, role, orgId, orgRole, defaultModel}` |
+| `/api/me` | PATCH | user | update `name`/`avatarUrl`/`defaultModel` on `users` (defaultModel validated against the registry; null clears) |
+| `/api/models` | GET | user | pi-ai `getModels("anthropic")` mapped to `{id, name, contextWindow, reasoning}[]` — static registry, no provider API call |
 | `/api/org` | GET | org member | `{id, name, createdAt, features, callerRole}` |
 | `/api/org` | PATCH | **org admin** | update `name` and/or `features.organizations` |
 | `/api/org/members` | GET | org admin + gate | member rows joined `users` × `org_members` |
 | `/api/org/members/:userId` | PATCH | org admin + gate | set `org_members.role`; last-admin guard |
 
 - **`requireOrgAdmin(db, orgId, userId)`** helper (new, in api services or middleware): reads `org_members.role === "admin"`. Used by the routes above; `teams.ts`'s `canMutateTeam` swaps its `user.role === "admin"` shortcut for it. `users.role` remains the *global operator* gate for `/api/admin` only.
+- **Schema** (0000 edited in place, `rm ~/.valet/app.db`): `orgs.features` TEXT JSON default `'{}'`; `users.default_model` TEXT nullable.
+- **Default-model threading in `EngineHost`**: the builders that currently call `resolveModel()` with no override (`buildSession`, `buildOrchestratorSession`) read the acting user's `users.default_model` and pass it as the override; child/workflow builders keep their explicit `modelId` params, falling back to the owner's default when absent. Constraint: the user default must NOT clobber an explicit per-session `setModel` override across restore — verify the engine's restore semantics preserve the persisted session model when present, and add a regression test for exactly that.
 - Wire types added in `wire/types.ts` per convention; route tests per existing colocated patterns (incl. member-cannot-PATCH-org, last-admin 400, gate-off 404).
 
 ## Web architecture
@@ -127,7 +134,7 @@ Calm-companion, extended: page title and section headings in Newsreader; rail wi
 
 - API: route tests for every new route (authz matrix: member vs admin; gate on/off; last-admin guard; me PATCH field whitelist). `teams.ts` authz-swap regression: a non-admin org member with team-admin rights can still mutate their team; a plain member cannot.
 - Web: route-adjacent component tests — rail renders gate-aware groups; each section renders and submits its mutation (msw/fetch-mock per existing patterns); org empty states for member/gate-off.
-- Manual dogfood: enable gate → rename org → flip a member role (via test-header second user) → create team → add member → theme + notification toggles still work → disable gate.
+- Manual dogfood: enable gate → rename org → flip a member role (via test-header second user) → create team → add member → set default model via typeahead → new chat thread starts on it while an existing thread's header override survives → theme + notification toggles still work → disable gate.
 
 ## Provisioning rule (for the auth phase, stated now)
 
