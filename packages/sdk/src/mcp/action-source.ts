@@ -104,13 +104,26 @@ export class McpActionSource implements ActionSource {
         return { success: false, error: errorText || 'MCP tool returned an error' };
       }
 
-      // Extract text content for the result
-      const textParts = result.content
-        .filter((c) => c.type === 'text' && c.text)
-        .map((c) => c.text);
-      const data = textParts.length === 1 ? textParts[0] : textParts.join('\n');
+      // Result data preference:
+      //   1. `structuredContent` (MCP 2025-06-18) — canonical parsed
+      //      form when the server advertises an outputSchema.
+      //   2. `content[].text` parsed as JSON — servers on older spec
+      //      revisions (or that omit structuredContent) stringify their
+      //      JSON into a text block; without parsing here, downstream
+      //      template paths like `{{nodes.query.data.records}}` resolve
+      //      to null because `data` is a string, not an object.
+      //   3. Raw text — for tools that legitimately return text/markdown
+      //      the JSON-parse falls through and callers see a string.
+      if (result.structuredContent !== undefined) {
+        return { success: true, data: result.structuredContent };
+      }
 
-      return { success: true, data };
+      const textParts: string[] = result.content
+        .filter((c): c is { type: string; text: string } => c.type === 'text' && typeof c.text === 'string' && c.text.length > 0)
+        .map((c) => c.text);
+      const rawText = textParts.length === 1 ? textParts[0]! : textParts.join('\n');
+      const parsed = tryParseJson(rawText);
+      return { success: true, data: parsed !== undefined ? parsed : rawText };
     } catch (err) {
       return {
         success: false,
@@ -139,5 +152,25 @@ export class McpActionSource implements ActionSource {
     if (tool.annotations?.readOnlyHint) return 'low';
     if (tool.annotations?.destructiveHint) return 'critical';
     return this.defaultRiskLevel;
+  }
+}
+
+/**
+ * Try to parse text as JSON. Returns undefined on parse failure OR when
+ * the parsed value is a bare string/number/boolean — bare primitives
+ * suggest the tool intentionally returned text (e.g. `"hello"`) rather
+ * than structured data, so we prefer the raw text in that case. Only
+ * objects and arrays are treated as "the server meant JSON."
+ */
+function tryParseJson(text: string): unknown {
+  if (!text) return undefined;
+  const trimmed = text.trimStart();
+  if (trimmed[0] !== '{' && trimmed[0] !== '[') return undefined;
+  try {
+    const value = JSON.parse(text);
+    if (value !== null && typeof value === 'object') return value;
+    return undefined;
+  } catch {
+    return undefined;
   }
 }

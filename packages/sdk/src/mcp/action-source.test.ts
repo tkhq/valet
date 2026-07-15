@@ -106,6 +106,78 @@ describe('McpActionSource', () => {
     }]);
   });
 
+  it('parses JSON-in-text tool results into structured data', async () => {
+    // Older MCP servers stringify their JSON output into a text block.
+    // Without parsing here, `data` is a string and downstream template
+    // paths like `{{nodes.query.data.records}}` resolve to null.
+    const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const rpc = await readRpc(init);
+      if (rpc.method === 'initialize') {
+        return jsonResponse({
+          jsonrpc: '2.0', id: rpc.id,
+          result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'fake', version: '1.0.0' } },
+        }, { headers: { 'mcp-session-id': 'session-1' } });
+      }
+      if (rpc.method === 'notifications/initialized') return new Response(null, { status: 202 });
+      return jsonResponse({
+        jsonrpc: '2.0', id: rpc.id,
+        result: {
+          content: [{ type: 'text', text: '{"totalSize":3,"records":[{"Name":"Stripe"}]}' }],
+        },
+      });
+    });
+
+    const source = new McpActionSource({ mcpUrl: 'https://mcp.example.com', serviceName: 'custom', noAuth: true, fetch: fakeFetch });
+    const result = await source.execute('custom.soqlQuery', {}, { credentials: {}, userId: 'u' });
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({ totalSize: 3, records: [{ Name: 'Stripe' }] });
+  });
+
+  it('prefers structuredContent over parsed text when both are present', async () => {
+    const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const rpc = await readRpc(init);
+      if (rpc.method === 'initialize') {
+        return jsonResponse({
+          jsonrpc: '2.0', id: rpc.id,
+          result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'fake', version: '1.0.0' } },
+        }, { headers: { 'mcp-session-id': 'session-1' } });
+      }
+      if (rpc.method === 'notifications/initialized') return new Response(null, { status: 202 });
+      return jsonResponse({
+        jsonrpc: '2.0', id: rpc.id,
+        result: {
+          content: [{ type: 'text', text: '{"legacy":"ignore me"}' }],
+          structuredContent: { canonical: 'use me', count: 42 },
+        },
+      });
+    });
+
+    const source = new McpActionSource({ mcpUrl: 'https://mcp.example.com', serviceName: 'custom', noAuth: true, fetch: fakeFetch });
+    const result = await source.execute('custom.tool', {}, { credentials: {}, userId: 'u' });
+    expect(result.data).toEqual({ canonical: 'use me', count: 42 });
+  });
+
+  it('preserves plain-text output that is not JSON', async () => {
+    const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const rpc = await readRpc(init);
+      if (rpc.method === 'initialize') {
+        return jsonResponse({
+          jsonrpc: '2.0', id: rpc.id,
+          result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'fake', version: '1.0.0' } },
+        }, { headers: { 'mcp-session-id': 'session-1' } });
+      }
+      if (rpc.method === 'notifications/initialized') return new Response(null, { status: 202 });
+      return jsonResponse({
+        jsonrpc: '2.0', id: rpc.id,
+        result: { content: [{ type: 'text', text: 'hello, world' }] },
+      });
+    });
+
+    const source = new McpActionSource({ mcpUrl: 'https://mcp.example.com', serviceName: 'custom', noAuth: true, fetch: fakeFetch });
+    const result = await source.execute('custom.echo', {}, { credentials: {}, userId: 'u' });
+    expect(result.data).toBe('hello, world');
+  });
+
   it('reports listTools failures via onListError, not shared instance state', async () => {
     // Two concurrent listActions calls on the same instance: one
     // fails, one succeeds. Each caller must observe its own outcome
