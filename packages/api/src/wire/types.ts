@@ -76,6 +76,13 @@ export interface ListSessionsResponse {
 export type CreateSessionResponse = SessionDetail;
 export type GetSessionResponse = SessionDetail;
 
+/** POST /api/sessions/:id/sandbox-jwt — mints a short-lived service JWT the
+ * session's sandbox uses to call back into the API (auth-v2 design). */
+export interface SandboxJwtResponse {
+  token: string;
+  expiresAt: number;
+}
+
 // ── REST: orchestrator ────────────────────────────────────────────────────
 
 /** POST /api/orchestrator — ensures the caller's orchestrator session exists. */

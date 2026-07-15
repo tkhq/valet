@@ -10,6 +10,7 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   ListSessionsResponse,
+  SandboxJwtResponse,
   SessionDetail,
   SessionStatus,
   SessionSummary,
@@ -215,6 +216,28 @@ sessionsRouter.patch("/:id", async (c) => {
     model: engineSession.options.model.id,
   };
   return c.json(detail);
+});
+
+// ── Sandbox JWT ───────────────────────────────────────────────────────────
+
+// Mints a short-lived service JWT the session's sandbox uses to call back
+// into the API (Task 8, auth-v2 plan). Owner-gated like every other
+// `/api/sessions/:id` route — unknown or not-owned ids 404.
+sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
+  const { db, engineHost } = c.var.providers;
+  const id = c.req.param("id");
+  const userId = c.var.user.id;
+
+  const row = await db
+    .select()
+    .from(agentSessions)
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
+    .get();
+  if (!row) return c.json({ error: "session not found" }, 404);
+
+  const { token, expiresAt } = engineHost.mintSandboxJwtFor(id, userId);
+  const body: SandboxJwtResponse = { token, expiresAt };
+  return c.json(body);
 });
 
 // ── Delete ────────────────────────────────────────────────────────────────

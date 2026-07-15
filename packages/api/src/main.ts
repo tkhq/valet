@@ -93,6 +93,12 @@ if (!anthropicApiKey) {
 
 const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;
 
+// Real auth (auth-v2 design): only wired when BETTER_AUTH_SECRET resolves a
+// config. Absent → stub-only mode. Loaded before `buildNodeProviders` so
+// `EngineHost` can be constructed with the sandbox JWT master / API base
+// URL it needs at session-provision time — not after boot.
+const authConfig = loadAuthConfig(process.env);
+
 const providers = await buildNodeProviders({
   dbPath,
   blobsRoot,
@@ -100,6 +106,8 @@ const providers = await buildNodeProviders({
   anthropicApiKey,
   apiBaseUrl: `http://127.0.0.1:${port}`,
   workflowCrashAt,
+  sandboxJwtMaster: authConfig?.sandboxJwtMaster,
+  sandboxApiUrl: authConfig?.baseUrl,
 });
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
@@ -135,9 +143,8 @@ await providers.childWatcher.rearm().catch((err) => {
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
 
-// Real auth (auth-v2 design): only wired when BETTER_AUTH_SECRET resolves a
-// config. Absent → stub-only mode, same as before this pass.
-const authConfig = loadAuthConfig(process.env);
+// `authConfig` was loaded above (before `buildNodeProviders`, which needs
+// it); wire up the real auth instance now that `providers` exists.
 const authWiring: AuthWiring = authConfig
   ? {
       auth: buildAuth({

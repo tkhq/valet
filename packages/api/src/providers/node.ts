@@ -79,6 +79,18 @@ export interface NodeProviderOpts {
    * nodeModulesResult.plugins])`.
    */
   plugins?: ValetPlugin[];
+  /**
+   * Forwarded to `EngineHost.sandboxJwtMaster` (Task 8, auth-v2 plan) —
+   * `AuthConfig.sandboxJwtMaster` when real auth is configured, else
+   * undefined (the host falls back to `internalToken()`).
+   */
+  sandboxJwtMaster?: string;
+  /**
+   * Forwarded to `EngineHost.sandboxApiUrl` (Task 8, auth-v2 plan) —
+   * `AuthConfig.baseUrl` when real auth is configured, else undefined (the
+   * host falls back to the local dev default).
+   */
+  sandboxApiUrl?: string;
 }
 
 export const LOCAL_USER = {
@@ -176,6 +188,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     anthropicApiKey: opts.anthropicApiKey,
     db,
     apiBaseUrl: opts.apiBaseUrl,
+    sandboxJwtMaster: opts.sandboxJwtMaster,
+    sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");

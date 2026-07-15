@@ -22,6 +22,12 @@ import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { orchestratorIdentities, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
+import {
+  deriveSandboxJwtSecret,
+  mintSandboxToken,
+  mintSandboxJwt,
+  revokeSandboxTokens,
+} from "../auth/sandbox-tokens.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
@@ -47,10 +53,12 @@ export interface EngineHostOpts {
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
   /**
-   * The app db handle — needed only by `orchestratorSessionFor` (memory
+   * The app db handle — required by `orchestratorSessionFor` (memory
    * snapshot assembly, journal bootstrap, the compaction hook, and the
-   * `orchestrator_identities` upsert). Regular `sessionFor` sessions never
-   * touch it.
+   * `orchestrator_identities` upsert). Every session builder also uses it
+   * (when present) to mint/revoke the session's sandbox token (Task 8,
+   * auth-v2 plan) — absent only in tests that don't wire one up, which
+   * degrade gracefully to no sandbox env injection.
    */
   db?: AppDb;
   /**
@@ -60,6 +68,21 @@ export interface EngineHostOpts {
    * `orchestratorSessionFor`.
    */
   apiBaseUrl?: string;
+  /**
+   * Master key `deriveSandboxJwtSecret`/`mintSandboxJwt` derive per-session
+   * secrets from (Task 8, auth-v2 plan). `AuthConfig.sandboxJwtMaster` when
+   * real auth is configured; falls back to `internalToken()` in stub mode
+   * so dev keeps working without `BETTER_AUTH_SECRET`.
+   */
+  sandboxJwtMaster?: string;
+  /**
+   * The API's own externally-reachable base URL, injected into every
+   * sandbox's env as `VALET_API_URL` (Task 8, auth-v2 plan) —
+   * `AuthConfig.baseUrl` when configured, else the local dev default. NOT
+   * the same as `apiBaseUrl` above, which is this process's own
+   * `http://127.0.0.1:{port}` used for internal orchestrator tool calls.
+   */
+  sandboxApiUrl?: string;
   /**
    * Injected into every orchestrator session's `toolConfig.childSpawner`
    * (Phase 4 decision 10/17). Absent in tests that don't need `task` to
@@ -170,6 +193,7 @@ export class EngineHost {
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const model = await this.resolveModelForBuild(existing, meta.userId);
+    const sandboxEnv = this.mintSandboxEnv(sessionId, meta.userId, meta.orgId);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -177,7 +201,7 @@ export class EngineHost {
             userId: meta.userId,
             orgId: meta.orgId,
             workspace: meta.workspace,
-            sandbox: { workspace: meta.workspace, image: this.opts.defaultImage },
+            sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv },
             model,
             systemPrompt: SYSTEM_PROMPT,
             tools: extras.tools.length ? extras.tools : undefined,
@@ -190,7 +214,7 @@ export class EngineHost {
           userId: meta.userId,
           orgId: meta.orgId,
           workspace: meta.workspace,
-          sandbox: { workspace: meta.workspace, image: this.opts.defaultImage },
+          sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv },
           model,
           systemPrompt: SYSTEM_PROMPT,
           tools: extras.tools.length ? extras.tools : undefined,
@@ -204,6 +228,53 @@ export class EngineHost {
     // window. Fire-and-forget — never block or fail the restore.
     if (existing) this.pruneExpiredEvents(sessionId);
     return session;
+  }
+
+  /**
+   * Master key `deriveSandboxJwtSecret`/`mintSandboxJwt` derive per-session
+   * secrets from (Task 8, auth-v2 plan): `opts.sandboxJwtMaster` (from
+   * `AuthConfig.sandboxJwtMaster`) when real auth is configured, else
+   * `internalToken()` so stub-only dev keeps working.
+   */
+  private resolveSandboxJwtMaster(): string {
+    return this.opts.sandboxJwtMaster ?? internalToken();
+  }
+
+  /**
+   * Mints a fresh long-lived sandbox bearer token (revoking any prior live
+   * one for this session — `mintSandboxToken`'s own contract) and derives
+   * this session's JWT secret, returning the three env vars every sandbox
+   * gets at provision time: `VALET_SANDBOX_TOKEN`, `VALET_API_URL`,
+   * `VALET_SANDBOX_JWT_SECRET` (Task 8, auth-v2 plan). Called once per
+   * session BUILD (create or restore) — not per sandbox re-provision within
+   * a build's lifetime, since the `SandboxCreateOpts` object handed to
+   * `engine.createSession`/`restoreSession` is captured once and reused by
+   * the attachment for every (re-)provision until the next build.
+   *
+   * Returns `undefined` when `opts.db` is absent (tests that don't wire a
+   * db up) — sandboxes then provision with no extra env, same as before
+   * this wiring existed.
+   */
+  private mintSandboxEnv(sessionId: string, userId: string, orgId: string): Record<string, string> | undefined {
+    if (!this.opts.db) return undefined;
+    const { token } = mintSandboxToken(this.opts.db, { sessionId, userId, orgId });
+    const secret = deriveSandboxJwtSecret(this.resolveSandboxJwtMaster(), sessionId);
+    return {
+      VALET_SANDBOX_TOKEN: token,
+      VALET_API_URL: this.opts.sandboxApiUrl ?? "http://localhost:8788",
+      VALET_SANDBOX_JWT_SECRET: secret,
+    };
+  }
+
+  /**
+   * Mints a short-lived service JWT (`{ sub: userId, sid: sessionId }`) for
+   * `POST /api/sessions/:id/sandbox-jwt` (Task 8, auth-v2 plan) — the same
+   * master/derivation the sandbox's own `VALET_SANDBOX_JWT_SECRET` uses, so
+   * a route-minted JWT and a sandbox-minted one verify against the same
+   * secret.
+   */
+  mintSandboxJwtFor(sessionId: string, userId: string, ttlMs?: number): { token: string; expiresAt: number } {
+    return mintSandboxJwt(this.resolveSandboxJwtMaster(), { sessionId, userId, ttlMs });
   }
 
   /**
@@ -278,6 +349,7 @@ export class EngineHost {
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
+    const sandboxEnv = this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -285,7 +357,7 @@ export class EngineHost {
       purpose: "orchestrator" as const,
       owner: principal,
       queueMode,
-      sandbox: { workspace, image: this.opts.defaultImage },
+      sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv },
       model,
       systemPrompt: personaPrefix + orchestratorPersona(principal),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -423,7 +495,13 @@ export class EngineHost {
     return this.opts.eventStream;
   }
 
-  /** Tear down a single session: destroy engine + sandbox, drop the cache entry. */
+  /**
+   * Tear down a single session: destroy engine + sandbox, drop the cache
+   * entry, and revoke the session's live sandbox tokens (Task 8, auth-v2
+   * plan) — a stopped session's sandbox must not be able to keep calling
+   * back into the API with a token minted for a build that no longer
+   * exists.
+   */
   async destroy(sessionId: string): Promise<void> {
     const entry = this.cache.get(sessionId);
     if (!entry) return;
@@ -431,6 +509,7 @@ export class EngineHost {
       await entry.session.destroy();
     } finally {
       this.cache.delete(sessionId);
+      if (this.opts.db) revokeSandboxTokens(this.opts.db, sessionId);
     }
   }
 
@@ -608,6 +687,7 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
+    const sandboxEnv = this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -616,7 +696,7 @@ export class EngineHost {
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
-      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage },
+      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv },
       model,
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
@@ -694,13 +774,14 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(sessionId);
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
+    const sandboxEnv = this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "workflow" as const,
       owner: opts.owner,
-      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage },
+      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv },
       model,
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
