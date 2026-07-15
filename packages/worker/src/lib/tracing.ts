@@ -78,9 +78,14 @@ function percentDecode(value: string): string {
     bytes.set(chunk, offset);
     offset += chunk.length;
   }
-  // ignoreBOM keeps a leading U+FEFF instead of stripping it, matching
-  // Python's urllib.parse.unquote (the backend decoder) byte-for-byte.
-  return new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
+  const text = new TextDecoder().decode(bytes);
+  // TextDecoder strips a leading U+FEFF BOM; Python's urllib.parse.unquote (the
+  // backend decoder) keeps it. Re-add it so both exporters derive identical
+  // header bytes. (workers-types omits the `ignoreBOM` option, so decode + patch.)
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf && !text.startsWith('﻿')) {
+    return `﻿${text}`;
+  }
+  return text;
 }
 
 // Secrets that sit in the URL PATH rather than the query — e.g. the Telegram bot token
