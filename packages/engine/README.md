@@ -37,14 +37,15 @@ has zero platform dependencies.
 - Built-in `thread_read` tool: a thread can read recent messages from a
   sibling, parent, or child thread.
 - Built-in tools: `read`, `write`, `edit`, `bash`, `thread_read`.
-- **Persistent SessionStore.** `SqliteSessionStore` (Drizzle SQLite schema,
-  migrations, in-process via `better-sqlite3`) implements the same
-  `SessionStore` interface as `InMemorySessionStore`. Both pass an
-  identical 10-test contract suite. Schema mirrors the V1 spec's required
-  tables: `engine_sessions`, `engine_threads`, `engine_entries`,
-  `engine_queue_state`, `engine_decision_gates`,
-  `engine_decision_gate_refs`, `engine_suspended_turns`, plus stubbed
-  `engine_queue_items` for future per-item visibility.
+- **Persistent SessionStore.** `PgSessionStore` (`@valet/store-postgres`:
+  raw-SQL Postgres store, embedded PGlite for dev/tests, node-postgres for
+  real deployments) implements the same `SessionStore` interface as
+  `InMemorySessionStore`. Both pass the exported contract suites
+  (`runSessionStoreContract`, `runEventStreamContract`, concurrency
+  contract). Tables: `engine_sessions`, `engine_threads`, `engine_entries`,
+  `engine_queue_items`, `engine_decision_gates`,
+  `engine_decision_gate_refs`, `engine_suspended_turns`,
+  `engine_attempt_markers`, `engine_events`, `engine_meta`.
 - In-memory providers: `InMemorySessionStore`, `InMemoryEventBus`,
   `InMemoryBlobStore`, `InMemoryCredentialStore`, `VirtualSandbox` /
   `VirtualSandboxProvider` (in-memory FS + a small whitelist of safe shell
@@ -52,16 +53,10 @@ has zero platform dependencies.
 
 ## What's deferred (post-prototype)
 
-- **D1 wiring.** `SqliteSessionStore` uses `better-sqlite3`. The Cloudflare
-  adapter will reuse the same Drizzle queries through `drizzle-orm/d1`.
-- **Postgres dialect mirror.** The K8s adapter contract requires a
-  pg-core schema mirror. Same logical schema, different column helpers;
-  doable in one task once the K8s adapter is on deck.
-- **Per-queue-item rows.** Today the active and pending queue items are
-  persisted via the JSON-encoded `engine_queue_state.pending` column.
-  `engine_queue_items` exists as a schema stub; populating it gives the
-  adapter visibility into individual items but isn't a correctness
-  requirement.
+- **Cloudflare wiring.** A future Workers deployment reuses
+  `@valet/store-postgres` unchanged over Neon through Hyperdrive
+  (node-postgres works on Workers with `nodejs_compat`) — see
+  docs/specs/2026-07-15-postgres-backend-design.md, decision 13.
 - **Compaction.** Token-aware context compression is not implemented.
   `CompactionEntry` is in the DAG schema; the algorithm itself is a
   follow-up.

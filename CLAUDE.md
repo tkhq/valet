@@ -43,9 +43,9 @@ If you change the result shape engine-side, **add an assertion that `result.text
 That's almost certainly a shape mismatch, *not* a persistence-failure. The data is in `engine_entries`; the frontend can't dig it out. Inspect:
 
 - Real Postgres (`DATABASE_URL` set): `psql "$DATABASE_URL" -c "select parts from engine_entries where role='assistant' order by id desc limit 1;"`
-- Embedded PGlite (default dev, data dir `~/.valet/pg/`):
+- Embedded PGlite (default dev, data dir `~/.valet/pg/`) — stop the dev API first (a live process owns the data dir), then run from `packages/api` (bare-specifier resolution). Note: plain `node --input-type=module`, NOT `tsx -e` — tsx's eval mode compiles to CJS and rejects top-level await:
   ```bash
-  npx tsx -e '
+  cd packages/api && node --input-type=module -e '
   import { PGlite } from "@electric-sql/pglite";
   const db = new PGlite(process.env.HOME + "/.valet/pg");
   const { rows } = await db.query(
@@ -53,6 +53,7 @@ That's almost certainly a shape mismatch, *not* a persistence-failure. The data 
     ["assistant"],
   );
   console.log(rows);
+  await db.close();
   '
   ```
 - Compare against what `resultText` extracts in `packages/web/src/components/session/tool-renderers/types.ts`
@@ -68,9 +69,9 @@ That's almost certainly a shape mismatch, *not* a persistence-failure. The data 
 
 We are NOT in production. There is no real data to preserve. When you change an engine or app schema:
 
-- **Edit `packages/store-postgres/migrations/pg/0000_engine.sql`** (and the corresponding `packages/api/migrations/pg/0000_app.sql` for app-side tables) directly to add the new columns. Update the matching Drizzle table in `packages/store-postgres/src/schema.ts` or `packages/api/src/schema/index.ts` so codegen agrees.
+- **Edit `packages/store-postgres/migrations/pg/0000_engine.sql`** (and the corresponding `packages/api/migrations/pg/0000_app.sql` for app-side tables) directly to add the new columns. For app tables, update the matching Drizzle table in `packages/api/src/schema/index.ts`. The engine store has no Drizzle schema — it's raw SQL; update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` instead (bigint ms columns MUST funnel through `toNum`, see the note there).
 - **Do NOT add `0001_…sql`, `0002_…sql`, etc.** Each one becomes a separate `ALTER TABLE` migration that we'll have to maintain forever. Until the first release, the right move is one clean `0000` that reflects the current schema.
-- After editing, blow away the local PGlite data dir (`rm -rf ~/.valet/pg`) and let it recreate on the next boot. There is a one-time backfill in `applyAppMigrations` / `applyEngineMigrations` that marks 0000 as already applied if the schema tables exist — that backfill is for upgrading dev DBs across the *initial* tracker introduction, not for accumulating real migrations.
+- After editing, blow away the local PGlite data dir (`rm -rf ~/.valet/pg`) and let it recreate on the next boot. The pg migration runners have NO backfill path (unlike the retired sqlite ones): an existing data dir whose tracker already lists `0000` will simply skip your edited file — the reset is mandatory, not a nicety.
 - Once we ship 1.0 and have user data on disk, this rule flips: every schema change becomes a new numbered migration, no edits to past ones.
 
 ---

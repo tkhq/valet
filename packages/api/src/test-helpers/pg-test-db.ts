@@ -43,6 +43,13 @@ export interface TestPgDb {
  * Resets the shared PGlite instance to a clean schema and re-applies both
  * migration sets (app + engine). Call once per test boot in place of
  * constructing a fresh `:memory:` sqlite handle.
+ *
+ * WARNING (single-live-app trap): because every caller in the process shares
+ * one PGlite instance, calling this while a previously-booted app/store in
+ * the same process is still live drops that app's schema out from under it.
+ * One live boot per process at a time — tear down (cleanup/close the app)
+ * before booting the next. Vitest's per-file process isolation makes this
+ * safe across files; within a file, boot sequentially.
  */
 export async function freshTestPgDb(): Promise<TestPgDb> {
   const { pglite, pgdb } = sharedInstance();
