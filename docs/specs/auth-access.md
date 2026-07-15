@@ -204,10 +204,12 @@ Both GitHub and Google follow the same pattern. Routes are mounted at `/auth` (n
 3. Backfill `gitName` and `gitEmail` if not already set.
 4. Process invite acceptance (by code from state JWT or by email match for new users).
 5. Generate session token: 32 random bytes, hex-encoded.
-6. SHA-256 hash the token, store in `auth_sessions` with 7-day expiry.
+6. SHA-256 hash the token, store in `auth_sessions` with a 30-day initial expiry.
 7. Redirect to `${FRONTEND_URL}/auth/callback?token=...&provider=...`.
 
-**Token refresh:** Not implemented. Google refresh tokens are stored but never used for automatic refresh. GitHub tokens do not expire by default.
+**Session lifetime:** Rolling 30-day sliding window. Every authenticated request extends `expires_at` to `now + 30 days` via the same fire-and-forget UPDATE that touches `last_used_at`. A user who touches the app at least once every 30 days stays logged in indefinitely. The TTL constant `SESSION_TTL_MS` in `services/oauth.ts` and `SESSION_SLIDING_WINDOW_SQL` in `middleware/auth.ts` must stay in sync.
+
+**Token refresh:** Not implemented as a separate endpoint — the sliding window replaces it. Google refresh tokens are stored but only used to refresh Google API access, never the Valet session. GitHub tokens do not expire by default.
 
 ### Email Gating
 
@@ -230,10 +232,13 @@ Protects all `/api/*` routes. Applied at the app level in `index.ts`.
 **Token extraction:** `Authorization: Bearer <token>` header first, fallback to `?token=<token>` query parameter.
 
 **Validation chain:**
-1. SHA-256 hash the token.
-2. Try `auth_sessions`: match `token_hash`, check `expires_at > now`. Update `last_used_at`.
-3. Fall back to `api_tokens`: match `token_hash`, check not expired, check not revoked. Update `last_used_at`.
-4. If neither validates: `UnauthorizedError`.
+1. If no bearer token is present: throw `UnauthorizedError` with code `AUTH_MISSING`.
+2. SHA-256 hash the token.
+3. Try `auth_sessions`: match `token_hash`, check `expires_at > now`. On success, fire-and-forget UPDATE that sets `last_used_at = now` and slides `expires_at = now + 30 days`.
+4. Fall back to `api_tokens`: match `token_hash`, check not expired, check not revoked. Update `last_used_at`. API tokens are **not** slid — they have their own admin-set expiry.
+5. If neither validates: `UnauthorizedError` with code `AUTH_INVALID`.
+
+**Error codes:** The auth middleware is the only site that returns `AUTH_MISSING` / `AUTH_INVALID`. Route-level 401s (session ownership, webhook signatures, trigger tokens) use route-specific error bodies without an auth-tier code. The client (`packages/client/src/api/client.ts`) treats only auth-tier codes as "your login is dead" and clears local auth state; every other 401 surfaces as an ordinary error without logging the user out.
 
 **Context set:** `c.set('user', { id, email, role })`.
 

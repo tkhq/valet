@@ -1,7 +1,14 @@
 import type { MiddlewareHandler } from 'hono';
-import { UnauthorizedError } from '@valet/shared';
+import { ErrorCodes, UnauthorizedError } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import { extractBearerToken } from '../lib/ws-auth.js';
+
+/**
+ * Session sliding window: every authenticated request pushes `expires_at`
+ * this far into the future. A user who touches the app at least once per
+ * window stays logged in indefinitely.
+ */
+export const SESSION_SLIDING_WINDOW_SQL = "datetime('now', '+30 days')";
 
 /**
  * Authentication middleware supporting:
@@ -31,25 +38,27 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env; Variables: Varia
   // Extract bearer token from Authorization header, WebSocket subprotocol, or legacy ?token= query param
   const bearerToken = extractBearerToken(c.req.raw);
 
-  if (bearerToken) {
-    const tokenHash = await hashToken(bearerToken);
-
-    // Try auth_sessions first (OAuth session tokens)
-    const sessionUser = await validateAuthSession(tokenHash, c.env);
-    if (sessionUser) {
-      c.set('user', sessionUser);
-      return next();
-    }
-
-    // Fall back to api_tokens (programmatic API keys)
-    const apiKeyUser = await validateAPIKey(tokenHash, c.env);
-    if (apiKeyUser) {
-      c.set('user', apiKeyUser);
-      return next();
-    }
+  if (!bearerToken) {
+    throw new UnauthorizedError('Missing authentication', ErrorCodes.AUTH_MISSING);
   }
 
-  throw new UnauthorizedError('Missing or invalid authentication');
+  const tokenHash = await hashToken(bearerToken);
+
+  // Try auth_sessions first (OAuth session tokens)
+  const sessionUser = await validateAuthSession(tokenHash, c.env);
+  if (sessionUser) {
+    c.set('user', sessionUser);
+    return next();
+  }
+
+  // Fall back to api_tokens (programmatic API keys)
+  const apiKeyUser = await validateAPIKey(tokenHash, c.env);
+  if (apiKeyUser) {
+    c.set('user', apiKeyUser);
+    return next();
+  }
+
+  throw new UnauthorizedError('Invalid or expired authentication', ErrorCodes.AUTH_INVALID);
 };
 
 async function validateAuthSession(
@@ -68,8 +77,15 @@ async function validateAuthSession(
       .first<{ id: string; email: string; role: string }>();
 
     if (result) {
-      // Update last_used_at (fire-and-forget)
-      env.DB.prepare("UPDATE auth_sessions SET last_used_at = datetime('now') WHERE token_hash = ?")
+      // Slide the session window on every use: an active user should never
+      // hit the expiry cliff. Fire-and-forget — a failed write just means
+      // the session slides on the next request.
+      env.DB.prepare(
+        `UPDATE auth_sessions
+         SET last_used_at = datetime('now'),
+             expires_at = ${SESSION_SLIDING_WINDOW_SQL}
+         WHERE token_hash = ?`,
+      )
         .bind(tokenHash)
         .run()
         .catch(() => {});

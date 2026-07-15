@@ -9,6 +9,9 @@ import { getGitHubConfig } from './github-config.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/** Session TTL. Must stay in sync with SESSION_SLIDING_WINDOW_SQL in auth middleware. */
+export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
 function generateSessionToken(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
@@ -106,10 +109,12 @@ async function finalizeUserLogin(
     }
   }
 
-  // Generate session token
+  // Generate session token. Initial expiry matches the sliding window in
+  // authMiddleware so the two never disagree; every authenticated request
+  // subsequently extends `expires_at` back to now + SESSION_TTL_MS.
   const sessionToken = generateSessionToken();
   const tokenHash = await hashToken(sessionToken);
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 
   await db.createAuthSession(appDb, {
     id: crypto.randomUUID(),

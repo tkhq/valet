@@ -8,6 +8,7 @@ import {
   RateLimitError,
   IntegrationError,
   ErrorCodes,
+  isAuthFailureCode,
 } from './errors.js';
 
 describe('ErrorCodes', () => {
@@ -87,11 +88,32 @@ describe('UnauthorizedError', () => {
     expect(err.message).toBe('Token expired');
   });
 
+  it('accepts a custom auth-failure code', () => {
+    const err = new UnauthorizedError('Bad token', ErrorCodes.AUTH_INVALID);
+    expect(err.code).toBe('AUTH_INVALID');
+    expect(err.statusCode).toBe(401);
+  });
+
   it('instanceof chain', () => {
     const err = new UnauthorizedError();
     expect(err).toBeInstanceOf(UnauthorizedError);
     expect(err).toBeInstanceOf(ValetError);
     expect(err).toBeInstanceOf(Error);
+  });
+});
+
+describe('isAuthFailureCode', () => {
+  it('matches all auth-tier codes', () => {
+    expect(isAuthFailureCode('UNAUTHORIZED')).toBe(true);
+    expect(isAuthFailureCode('AUTH_MISSING')).toBe(true);
+    expect(isAuthFailureCode('AUTH_INVALID')).toBe(true);
+  });
+
+  it('rejects resource-level 401 codes and unknown values', () => {
+    expect(isAuthFailureCode('FORBIDDEN')).toBe(false);
+    expect(isAuthFailureCode('SESSION_NOT_FOUND')).toBe(false);
+    expect(isAuthFailureCode(undefined)).toBe(false);
+    expect(isAuthFailureCode('')).toBe(false);
   });
 });
 

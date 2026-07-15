@@ -14,6 +14,8 @@ export const ErrorCodes = {
 
   // Auth errors
   UNAUTHORIZED: 'UNAUTHORIZED',
+  AUTH_MISSING: 'AUTH_MISSING',
+  AUTH_INVALID: 'AUTH_INVALID',
   FORBIDDEN: 'FORBIDDEN',
   INVALID_TOKEN: 'INVALID_TOKEN',
   TOKEN_EXPIRED: 'TOKEN_EXPIRED',
@@ -73,9 +75,19 @@ export class NotFoundError extends ValetError {
 }
 
 export class UnauthorizedError extends ValetError {
-  constructor(message = 'Unauthorized') {
-    super(message, ErrorCodes.UNAUTHORIZED, 401);
+  constructor(message = 'Unauthorized', code: ErrorCode = ErrorCodes.UNAUTHORIZED) {
+    super(message, code, 401);
   }
+}
+
+export const AUTH_FAILURE_CODES: readonly ErrorCode[] = [
+  ErrorCodes.AUTH_MISSING,
+  ErrorCodes.AUTH_INVALID,
+  ErrorCodes.UNAUTHORIZED,
+];
+
+export function isAuthFailureCode(code: string | undefined): boolean {
+  return typeof code === 'string' && (AUTH_FAILURE_CODES as readonly string[]).includes(code);
 }
 
 export class ForbiddenError extends ValetError {

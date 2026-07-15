@@ -1,5 +1,6 @@
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
+import { isAuthFailureCode } from '@valet/shared';
 
 // In production, use the worker URL. In development, proxy through Vite.
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -70,7 +71,11 @@ export async function apiClient<T>(
       // Response may not be JSON
     }
 
-    if (response.status === 401) {
+    // Only treat 401 as "your login is dead" when the response carries an
+    // auth-tier error code from our auth middleware. Resource-authorization
+    // 401s from individual routes (session ownership checks, webhook
+    // signature failures) should surface as errors, not log the user out.
+    if (response.status === 401 && isAuthFailureCode(errorData.code)) {
       useAuthStore.getState().clearAuth();
       router.navigate({ to: '/login' });
     }
