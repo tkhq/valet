@@ -66,7 +66,13 @@ export async function apiClient<T>(
   if (!response.ok) {
     let errorData: { error?: string; code?: string; details?: unknown } = {};
     try {
-      errorData = await response.json();
+      const parsed = await response.json();
+      // Guard non-object JSON — `null`, primitives, and arrays would
+      // otherwise let `parsed.code` / `parsed.error` throw or return
+      // wrong values (e.g., `Array.prototype.error` is undefined).
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        errorData = parsed as typeof errorData;
+      }
     } catch {
       // Response may not be JSON
     }

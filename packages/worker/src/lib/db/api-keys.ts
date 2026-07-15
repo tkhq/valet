@@ -52,6 +52,16 @@ export async function revokeApiToken(db: AppDb, id: string, userId: string): Pro
   return (result.meta?.changes ?? 0) > 0;
 }
 
-export async function deleteUserApiTokens(db: AppDb, userId: string): Promise<void> {
-  await db.delete(apiTokens).where(eq(apiTokens.userId, userId));
+/**
+ * Revoke every non-revoked API token belonging to `userId` by stamping
+ * `revoked_at`. Matches `revokeApiToken`'s soft-delete pattern rather
+ * than hard-deleting, so the row survives for audit/forensics (which
+ * tokens did this user ever issue?) while the auth middleware still
+ * rejects it via its `revoked_at IS NULL` guard.
+ */
+export async function revokeUserApiTokens(db: AppDb, userId: string): Promise<void> {
+  await db
+    .update(apiTokens)
+    .set({ revokedAt: sql`datetime('now')` })
+    .where(and(eq(apiTokens.userId, userId), isNull(apiTokens.revokedAt)));
 }

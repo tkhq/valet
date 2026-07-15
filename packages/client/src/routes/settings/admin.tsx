@@ -1970,14 +1970,21 @@ function InvitesSection() {
 
 // --- Users ---
 
+type RowAction =
+  | { kind: 'confirm-remove'; userId: string }
+  | { kind: 'confirm-revoke'; userId: string }
+  | { kind: 'revoked'; userId: string }
+  | null;
+
 function UsersSection({ currentUserId }: { currentUserId: string }) {
   const { data: users, isLoading } = useOrgUsers();
   const updateRole = useUpdateUserRole();
   const removeUser = useRemoveUser();
   const revokeSessions = useRevokeUserSessions();
-  const [confirmDelete, setConfirmDelete] = React.useState<string | null>(null);
-  const [confirmRevoke, setConfirmRevoke] = React.useState<string | null>(null);
-  const [revokedForUser, setRevokedForUser] = React.useState<string | null>(null);
+  // Single tagged state so a row can only be in one action mode at a time —
+  // starting a Remove confirm cancels any pending Revoke confirm (and vice
+  // versa), preventing two Confirm/Cancel bars from coexisting on the row.
+  const [rowAction, setRowAction] = React.useState<RowAction>(null);
 
   const adminCount = users?.filter((u) => u.role === 'admin').length ?? 0;
 
@@ -2039,51 +2046,53 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                     </td>
                     <td className="py-2 text-right">
                       <div className="flex items-center gap-2 justify-end">
-                        {confirmRevoke === u.id ? (
+                        {rowAction?.kind === 'confirm-revoke' && rowAction.userId === u.id ? (
                           <>
                             <span className="text-xs text-red-600 dark:text-red-400">Confirm?</span>
                             <Button
                               variant="secondary"
                               onClick={() => {
                                 revokeSessions.mutate(u.id, {
-                                  onSuccess: () => setRevokedForUser(u.id),
-                                  onSettled: () => setConfirmRevoke(null),
+                                  onSuccess: () => setRowAction({ kind: 'revoked', userId: u.id }),
+                                  onError: () => setRowAction(null),
                                 });
                               }}
                               disabled={revokeSessions.isPending}
                             >
                               Revoke
                             </Button>
-                            <Button variant="secondary" onClick={() => setConfirmRevoke(null)}>
+                            <Button variant="secondary" onClick={() => setRowAction(null)}>
                               Cancel
                             </Button>
                           </>
-                        ) : revokedForUser === u.id ? (
+                        ) : rowAction?.kind === 'revoked' && rowAction.userId === u.id ? (
                           <span className="text-xs text-neutral-500 dark:text-neutral-400">Sessions revoked</span>
                         ) : (
-                          <Button variant="secondary" onClick={() => setConfirmRevoke(u.id)}>
-                            Revoke sessions
-                          </Button>
+                          !isSelf && (
+                            <Button variant="secondary" onClick={() => setRowAction({ kind: 'confirm-revoke', userId: u.id })}>
+                              Revoke sessions
+                            </Button>
+                          )
                         )}
                         {!isSelf && !isLastAdmin && (
-                          confirmDelete === u.id ? (
+                          rowAction?.kind === 'confirm-remove' && rowAction.userId === u.id ? (
                             <>
                               <span className="text-xs text-red-600 dark:text-red-400">Confirm?</span>
                               <Button
                                 variant="secondary"
                                 onClick={() => {
-                                  removeUser.mutate(u.id, { onSettled: () => setConfirmDelete(null) });
+                                  removeUser.mutate(u.id, { onSettled: () => setRowAction(null) });
                                 }}
                                 disabled={removeUser.isPending}
                               >
                                 Remove
                               </Button>
-                              <Button variant="secondary" onClick={() => setConfirmDelete(null)}>
+                              <Button variant="secondary" onClick={() => setRowAction(null)}>
                                 Cancel
                               </Button>
                             </>
                           ) : (
-                            <Button variant="secondary" onClick={() => setConfirmDelete(u.id)}>
+                            <Button variant="secondary" onClick={() => setRowAction({ kind: 'confirm-remove', userId: u.id })}>
                               Remove
                             </Button>
                           )

@@ -251,6 +251,7 @@ const EXPECTED_INTERVAL_MS: Record<string, number> = {
   nightly_analytics_retention: 86_400_000,
   nightly_webhook_retention: 86_400_000,
   nightly_schedule_tick_retention: 86_400_000,
+  nightly_auth_session_expiry: 86_400_000,
 };
 
 /**

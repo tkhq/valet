@@ -107,10 +107,10 @@ async function finalizeUserLogin(
     }
   }
 
-  // Generate session token. Initial expiry uses the same TTL as the
-  // sliding-window UPDATE in authMiddleware; every authenticated request
-  // subsequently slides `expires_at` when the remaining window drops below
-  // half the TTL.
+  // Generate session token. Expiry is a fixed 7-day cap from creation
+  // (SESSION_TTL_MS) — the middleware touches `last_used_at` on every
+  // authenticated request but deliberately does NOT slide `expires_at`,
+  // so the user re-authenticates through the identity provider weekly.
   const sessionToken = generateSessionToken();
   const tokenHash = await hashToken(sessionToken);
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();

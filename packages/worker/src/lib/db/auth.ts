@@ -1,6 +1,6 @@
 import type { AppDb } from '../drizzle.js';
 import { eq, and, gt, isNull, sql } from 'drizzle-orm';
-import { authSessions, users, invites } from '../schema/index.js';
+import { authSessions, invites } from '../schema/index.js';
 
 export async function createAuthSession(
   db: AppDb,
@@ -13,27 +13,6 @@ export async function createAuthSession(
     provider: data.provider,
     expiresAt: data.expiresAt,
   });
-}
-
-export async function getAuthSessionByTokenHash(
-  db: AppDb,
-  tokenHash: string
-): Promise<{ id: string; email: string } | null> {
-  const result = await db
-    .select({ id: users.id, email: users.email })
-    .from(authSessions)
-    .innerJoin(users, eq(authSessions.userId, users.id))
-    .where(and(eq(authSessions.tokenHash, tokenHash), gt(authSessions.expiresAt, sql`datetime('now')`)))
-    .get();
-
-  if (result) {
-    await db
-      .update(authSessions)
-      .set({ lastUsedAt: sql`datetime('now')` })
-      .where(eq(authSessions.tokenHash, tokenHash));
-  }
-
-  return result || null;
 }
 
 export async function deleteAuthSession(db: AppDb, tokenHash: string): Promise<void> {

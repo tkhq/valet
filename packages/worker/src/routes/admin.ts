@@ -14,8 +14,8 @@ import {
   listCustomProviders,
   deleteCustomProvider,
   getOrchestratorIdentity,
-  deleteUserAuthSessions,
 } from '../lib/db.js';
+import { NotFoundError } from '@valet/shared';
 import { getDb } from '../lib/drizzle.js';
 import * as adminService from '../services/admin.js';
 
@@ -224,10 +224,25 @@ adminRouter.delete('/users/:id', async (c) => {
  * for that user will be logged out on their next request (the middleware
  * returns AUTH_INVALID, the client clears local auth state). Does not
  * delete the user or API tokens — use `DELETE /users/:id` for that.
+ *
+ * Refuses self-revoke (an admin should log themselves out normally, not
+ * via the admin panel — trivial to mis-click during an incident) and
+ * 404s on unknown user id so admins get real feedback.
  */
 adminRouter.post('/users/:id/revoke-sessions', async (c) => {
   const userId = c.req.param('id');
-  await deleteUserAuthSessions(c.get('db'), userId);
+  const currentUser = c.get('user');
+
+  const result = await adminService.revokeUserSessionsSafe(c.get('db'), userId, currentUser.id);
+  if (!result.ok) {
+    if (result.error === 'self_revoke') {
+      throw new ValidationError('Cannot revoke your own sessions from the admin panel — use logout instead');
+    }
+    if (result.error === 'user_not_found') {
+      throw new NotFoundError('User', userId);
+    }
+  }
+
   return c.json({ ok: true });
 });
 

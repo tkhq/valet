@@ -195,9 +195,16 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
 
       if (!resp.ok) {
         const body = await resp.text().catch(() => '');
-        let parsed: { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> }; code?: string } = {};
+        type ErrBody = { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> }; code?: string };
+        let parsed: ErrBody = {};
         try {
-          parsed = JSON.parse(body);
+          const raw = JSON.parse(body);
+          // Guard non-object JSON — a bare `null`, primitive, or array
+          // response body would otherwise let `parsed.code` throw or
+          // silently miss the auth-tier gate below.
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            parsed = raw as ErrBody;
+          }
         } catch {
           /* leave parsed empty */
         }
