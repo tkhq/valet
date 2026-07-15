@@ -20,6 +20,7 @@ except AttributeError:
 
 logger = logging.getLogger(__name__)
 
+import tracing
 from config import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     GATEWAY_PORT,
@@ -127,23 +128,24 @@ class SandboxManager:
         # Strip empty values so Modal doesn't set blank env vars
         secrets_dict = {k: v for k, v in secrets_dict.items() if v}
 
-        sandbox = await modal.Sandbox.create.aio(
-            "/bin/bash", "/start.sh",
-            app=self.app,
-            image=image,
-            cpu=config.cpu_cores,
-            memory=config.memory_mib,
-            encrypted_ports=[OPENCODE_PORT, GATEWAY_PORT],
-            timeout=MAX_TIMEOUT_SECONDS,
-            secrets=[modal.Secret.from_dict(secrets_dict)],
-            volumes={
-                "/workspace": modal.Volume.from_name(
-                    self.workspace_volume_name(config.session_id),
-                    create_if_missing=True,
-                ),
-                WHISPER_MODELS_MOUNT: modal.Volume.from_name(WHISPER_MODELS_VOLUME),
-            },
-        )
+        with tracing.span("modal.sandbox.create", attributes={"session_id": config.session_id}):
+            sandbox = await modal.Sandbox.create.aio(
+                "/bin/bash", "/start.sh",
+                app=self.app,
+                image=image,
+                cpu=config.cpu_cores,
+                memory=config.memory_mib,
+                encrypted_ports=[OPENCODE_PORT, GATEWAY_PORT],
+                timeout=MAX_TIMEOUT_SECONDS,
+                secrets=[modal.Secret.from_dict(secrets_dict)],
+                volumes={
+                    "/workspace": modal.Volume.from_name(
+                        self.workspace_volume_name(config.session_id),
+                        create_if_missing=True,
+                    ),
+                    WHISPER_MODELS_MOUNT: modal.Volume.from_name(WHISPER_MODELS_VOLUME),
+                },
+            )
 
         tunnels = await sandbox.tunnels.aio()
 
@@ -206,7 +208,8 @@ class SandboxManager:
             )
             raise
         try:
-            image = await sandbox.snapshot_filesystem.aio(timeout=55)
+            with tracing.span("modal.sandbox.snapshot", attributes={"sandbox_id": sandbox_id}):
+                image = await sandbox.snapshot_filesystem.aio(timeout=55)
         except Exception as exc:
             # Sandbox already exited (e.g. idle timeout) — can't snapshot.
             # Use the resolved _ConflictError type when available, otherwise
@@ -241,23 +244,24 @@ class SandboxManager:
 
         secrets_dict = {k: v for k, v in secrets_dict.items() if v}
 
-        sandbox = await modal.Sandbox.create.aio(
-            "/bin/bash", "/start.sh",
-            app=self.app,
-            image=image,
-            cpu=config.cpu_cores,
-            memory=config.memory_mib,
-            encrypted_ports=[OPENCODE_PORT, GATEWAY_PORT],
-            timeout=MAX_TIMEOUT_SECONDS,
-            secrets=[modal.Secret.from_dict(secrets_dict)],
-            volumes={
-                "/workspace": modal.Volume.from_name(
-                    self.workspace_volume_name(config.session_id),
-                    create_if_missing=True,
-                ),
-                WHISPER_MODELS_MOUNT: modal.Volume.from_name(WHISPER_MODELS_VOLUME),
-            },
-        )
+        with tracing.span("modal.sandbox.restore", attributes={"session_id": config.session_id}):
+            sandbox = await modal.Sandbox.create.aio(
+                "/bin/bash", "/start.sh",
+                app=self.app,
+                image=image,
+                cpu=config.cpu_cores,
+                memory=config.memory_mib,
+                encrypted_ports=[OPENCODE_PORT, GATEWAY_PORT],
+                timeout=MAX_TIMEOUT_SECONDS,
+                secrets=[modal.Secret.from_dict(secrets_dict)],
+                volumes={
+                    "/workspace": modal.Volume.from_name(
+                        self.workspace_volume_name(config.session_id),
+                        create_if_missing=True,
+                    ),
+                    WHISPER_MODELS_MOUNT: modal.Volume.from_name(WHISPER_MODELS_VOLUME),
+                },
+            )
 
         tunnels = await sandbox.tunnels.aio()
 

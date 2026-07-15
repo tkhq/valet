@@ -10,6 +10,7 @@
  * - Activity touch (lastUserActivityAt)
  */
 
+import { activeTraceparent } from '../lib/tracing.js';
 import type { SessionState } from './session-state.js';
 
 // ─── Error Types ──────────────────────────────────────────────────────────────
@@ -61,6 +62,14 @@ export class SessionLifecycle {
 
   // ─── Sandbox Operations (pure HTTP) ─────────────────────────────────
 
+  /** JSON headers for backend fetches. Propagates trace context so Modal backend spans join the originating trace. */
+  private backendHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const traceparent = activeTraceparent();
+    if (traceparent) headers['traceparent'] = traceparent;
+    return headers;
+  }
+
   /** Spawn a new sandbox via the Modal backend. */
   async spawnSandbox(
     backendUrl: string,
@@ -69,7 +78,7 @@ export class SessionLifecycle {
     const start = Date.now();
     const response = await fetch(backendUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.backendHeaders(),
       body: JSON.stringify(spawnRequest),
     });
 
@@ -99,7 +108,7 @@ export class SessionLifecycle {
     try {
       await fetch(terminateUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.backendHeaders(),
         body: JSON.stringify({ sandboxId }),
       });
     } catch (err) {
@@ -122,7 +131,7 @@ export class SessionLifecycle {
 
     const response = await fetch(hibernateUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.backendHeaders(),
       body: JSON.stringify({ sandboxId }),
     });
 
@@ -186,7 +195,7 @@ export class SessionLifecycle {
     console.log(`[SessionLifecycle] restoreSandbox: fetching ${restoreUrl} (snapshotId=${snapshotImageId})`);
     const response = await fetch(restoreUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.backendHeaders(),
       body: JSON.stringify({
         ...spawnRequest,
         snapshotImageId,
