@@ -177,6 +177,10 @@ pnpm install
 make dev-local          # @valet/api on :8788 + @valet/web on :5173
                         # Requires ANTHROPIC_API_KEY + Docker daemon.
                         # Open http://localhost:5173
+                        # Setting BETTER_AUTH_SECRET enables real auth (email/password,
+                        # optional OIDC/social via AUTH_* vars — see
+                        # docs/specs/2026-07-14-auth-v2-design.md). Unset, VALET_LOCAL_AUTH=1
+                        # keeps the stub behaving as before.
 
 # Legacy stack (Cloudflare Worker + old client)
 make dev-worker         # Cloudflare Worker on :8787

@@ -172,4 +172,47 @@ describe("MCP endpoint", () => {
     const sessions = JSON.parse(listSessionsText) as Array<{ id: string; title: string | null; status: string }>;
     expect(sessions).toEqual([{ id: "mcp-session-1", title: "My session", status: "active" }]);
   });
+
+  it("an expired oauth_access_token row is rejected with 401", async () => {
+    api = await bootTestApi({ auth: true });
+    const { db } = api.providers;
+
+    const now = Date.now();
+    db.insert(users)
+      .values({
+        id: "mcp-user-expired",
+        name: "MCP Expired User",
+        email: "mcp-expired@nowhere.test",
+        role: "member",
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+      })
+      .run();
+
+    const accessToken = "mcp-test-access-token-expired";
+    db.insert(oauthAccessToken)
+      .values({
+        id: "mcp-token-expired",
+        accessToken,
+        refreshToken: "mcp-refresh-token-expired",
+        // Expired: expiry is in the past.
+        accessTokenExpiresAt: new Date(now - 60_000),
+        refreshTokenExpiresAt: new Date(now + 3_600_000),
+        clientId: null,
+        userId: "mcp-user-expired",
+        scopes: "mcp",
+        createdAt: new Date(now - 120_000),
+        updatedAt: new Date(now - 120_000),
+      })
+      .run();
+
+    const res = await mcpRequest(api.baseUrl, accessToken, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toBeTruthy();
+  });
 });

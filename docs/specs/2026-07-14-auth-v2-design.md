@@ -1,7 +1,7 @@
 # Auth v2 Design — better-auth + OIDC (Keycloak-ready) + social + MCP
 
 **Date:** 2026-07-14 (rev 3 — adds allowed-email-domains policy and sandbox auth: per-session sandbox tokens + browser→sandbox JWT primitives)
-**Status:** Approved for planning
+**Status:** Implemented (2026-07-15)
 **Scope:** Real authentication for the v2 stack (`packages/api` + `packages/web`): email/password login, social sign-on (Google/GitHub), generic OIDC SSO (Keycloak first), invites, allowed email domains, API keys, MCP OAuth provider + minimal `/mcp` endpoint, sandbox auth (per-session tokens + service-JWT primitives), and provisioning. Replaces the `VALET_LOCAL_AUTH` stub as the production path while keeping it for dev/tests.
 
 All better-auth API facts below were verified against the installed `better-auth@1.6.23` / `@better-auth/sso@1.6.23` / `@better-auth/api-key@1.6.23` types and CLI-generated schema (research scratch: `$CLAUDE_JOB_DIR/tmp/ba-research`).
