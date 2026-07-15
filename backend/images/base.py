@@ -80,6 +80,11 @@ def get_base_image() -> modal.Image:
             # moved (v1.9.1 emits libwhisper.so under build/bin, not build/src).
             "find /tmp/whisper-build/build -name 'libwhisper.so*' -exec cp -P {} /usr/local/lib/ \\;",
             "find /tmp/whisper-build/build -name 'libggml*.so*' -exec cp -P {} /usr/local/lib/ \\;",
+            # Guard the copy: find -exec exits 0 even when nothing matched, so a
+            # future layout drift would silently ship an image whose whisper-cli
+            # fails at runtime. The old fixed-path glob cp hard-failed on no match
+            # — restore that with an explicit existence check.
+            "ls /usr/local/lib/libwhisper.so* /usr/local/lib/libggml*.so* >/dev/null",
             "ldconfig",
             "rm -rf /tmp/whisper-build",
         )

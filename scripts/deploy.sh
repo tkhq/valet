@@ -8,8 +8,10 @@ NC='\033[0m'
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-# Require ENVIRONMENT to select which config file to source. Any name works —
-# it just selects .env.deploy.<env> (dev, prod, test, a personal env, ...).
+# Require ENVIRONMENT to select which config file to source: it picks
+# .env.deploy.<env> (dev, prod, test, a personal env, ...). Keep it DNS-safe
+# (lowercase letters, digits, hyphens) — it feeds Modal endpoint labels and
+# subdomains unsanitized.
 : "${ENVIRONMENT:?Set ENVIRONMENT to the suffix of a .env.deploy.<env> config (e.g. dev, prod, test). Usage: ENVIRONMENT=dev $0 [command]}"
 
 DEPLOY_CONFIG=".env.deploy.${ENVIRONMENT}"
@@ -45,12 +47,19 @@ API_PUBLIC_URL="${API_PUBLIC_URL:-}"
 # workspace: `modal profile current` returns the profile name, which is not
 # necessarily the workspace slug, so auto-discovery builds the wrong URL.
 MODAL_WORKSPACE="${MODAL_WORKSPACE:-}"
-# Modal profile to deploy with. Set in .env.deploy.<env> to pin the env to a
-# workspace; the config is sourced with set -a, so the modal CLI sees it.
-MODAL_PROFILE="${MODAL_PROFILE:-}"
 # Client build mode: production | development. Empty preserves the historical
 # default (production only when ENVIRONMENT=prod).
 CLIENT_BUILD_MODE="${CLIENT_BUILD_MODE:-}"
+
+# MODAL_WORKSPACE sets the endpoint-URL slug; MODAL_PROFILE (sourced under set -a
+# above, so the modal CLI sees it) picks which workspace the backend deploys to.
+# Setting only one risks pointing the Worker at a workspace the backend was never
+# deployed to — a profile name is not necessarily its workspace slug — so warn
+# when they are not set together.
+if { [ -n "${MODAL_WORKSPACE:-}" ] && [ -z "${MODAL_PROFILE:-}" ]; } \
+    || { [ -z "${MODAL_WORKSPACE:-}" ] && [ -n "${MODAL_PROFILE:-}" ]; }; then
+    echo -e "${YELLOW}Warning: set MODAL_WORKSPACE and MODAL_PROFILE together for team workspaces; only one is set, so the Worker's endpoint URL may not match the deploy target.${NC}"
+fi
 
 # ─── Shared Helpers ──────────────────────────────────────────────────────────
 
@@ -131,15 +140,21 @@ resolve_worker_url() {
     fi
 }
 
+# Escape a value for safe use as a sed replacement string with a | delimiter:
+# backslash, the & backreference, and the | delimiter must all be escaped.
+sed_escape() {
+    printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
 generate_wrangler_config() {
-    sed -e "s|\${CF_WORKER_NAME}|${CF_WORKER_NAME}|g" \
-        -e "s|\${D1_DATABASE_NAME}|${D1_DATABASE_NAME}|g" \
-        -e "s|\${D1_DATABASE_ID}|${D1_DATABASE_ID}|g" \
-        -e "s|\${R2_BUCKET_NAME}|${R2_BUCKET_NAME}|g" \
-        -e "s|\${ALLOWED_EMAILS}|${ALLOWED_EMAILS}|g" \
-        -e "s|\${API_PUBLIC_URL}|${API_PUBLIC_URL}|g" \
-        -e "s|\${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|g" \
-        -e "s|\${MODAL_BACKEND_URL}|${MODAL_BACKEND_URL}|g" \
+    sed -e "s|\${CF_WORKER_NAME}|$(sed_escape "${CF_WORKER_NAME}")|g" \
+        -e "s|\${D1_DATABASE_NAME}|$(sed_escape "${D1_DATABASE_NAME}")|g" \
+        -e "s|\${D1_DATABASE_ID}|$(sed_escape "${D1_DATABASE_ID}")|g" \
+        -e "s|\${R2_BUCKET_NAME}|$(sed_escape "${R2_BUCKET_NAME}")|g" \
+        -e "s|\${ALLOWED_EMAILS}|$(sed_escape "${ALLOWED_EMAILS}")|g" \
+        -e "s|\${API_PUBLIC_URL}|$(sed_escape "${API_PUBLIC_URL}")|g" \
+        -e "s|\${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|$(sed_escape "${FRONTEND_PREVIEW_ORIGIN_SUFFIX}")|g" \
+        -e "s|\${MODAL_BACKEND_URL}|$(sed_escape "${MODAL_BACKEND_URL}")|g" \
         packages/worker/wrangler.toml > packages/worker/wrangler.deploy.toml
 }
 
@@ -169,6 +184,10 @@ build_client() {
     if [ -z "$client_mode" ]; then
         if [ "${ENVIRONMENT}" = "prod" ]; then client_mode="production"; else client_mode="development"; fi
     fi
+    if [ "$client_mode" != "production" ] && [ "$client_mode" != "development" ]; then
+        echo -e "${RED}Invalid CLIENT_BUILD_MODE='${CLIENT_BUILD_MODE}' (expected: production | development)${NC}"
+        exit 1
+    fi
 
     if [ "$client_mode" = "production" ]; then
         build_version_tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
@@ -177,7 +196,7 @@ build_client() {
         fi
     else
         build_args=(-- --mode development)
-        echo -e "${YELLOW}Building client in development mode (ENVIRONMENT=${ENVIRONMENT})${NC}"
+        echo -e "${YELLOW}Building client in development mode (CLIENT_BUILD_MODE=${client_mode})${NC}"
     fi
 
     echo -e "${GREEN}✓ Build metadata: env=${ENVIRONMENT}, commit=${build_commit_hash}${NC}"
@@ -191,7 +210,7 @@ build_client() {
         VITE_DEPLOY_ENVIRONMENT="${ENVIRONMENT}" \
         VITE_BUILD_COMMIT_HASH="${build_commit_hash}" \
         VITE_BUILD_VERSION_TAG="${build_version_tag}" \
-        pnpm run build "${build_args[@]}"
+        pnpm run build ${build_args[@]+"${build_args[@]}"}
     )
 }
 
