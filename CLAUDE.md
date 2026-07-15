@@ -30,7 +30,7 @@ pnpm --filter @valet/engine test -- happy-path
 
 # Store-contract: tool_call parts round-trip + updateEntry transitions running→completed
 pnpm --filter @valet/engine test -- in-memory-store
-pnpm --filter @valet/store-sqlite test
+pnpm --filter @valet/store-postgres test
 
 # API integration: real Anthropic + Docker, then GET /messages must include readable result
 ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @valet/api test -- src/integration
@@ -42,7 +42,19 @@ If you change the result shape engine-side, **add an assertion that `result.text
 
 That's almost certainly a shape mismatch, *not* a persistence-failure. The data is in `engine_entries`; the frontend can't dig it out. Inspect:
 
-- `sqlite3 ~/.valet/app.db "select parts from engine_entries where role='assistant' order by id desc limit 1;"` — see the actual stored shape
+- Real Postgres (`DATABASE_URL` set): `psql "$DATABASE_URL" -c "select parts from engine_entries where role='assistant' order by id desc limit 1;"`
+- Embedded PGlite (default dev, data dir `~/.valet/pg/`):
+  ```bash
+  npx tsx -e '
+  import { PGlite } from "@electric-sql/pglite";
+  const db = new PGlite(process.env.HOME + "/.valet/pg");
+  const { rows } = await db.query(
+    "select parts from engine_entries where role=$1 order by id desc limit 1",
+    ["assistant"],
+  );
+  console.log(rows);
+  '
+  ```
 - Compare against what `resultText` extracts in `packages/web/src/components/session/tool-renderers/types.ts`
 
 ### Other persistence-adjacent gotchas
@@ -56,9 +68,9 @@ That's almost certainly a shape mismatch, *not* a persistence-failure. The data 
 
 We are NOT in production. There is no real data to preserve. When you change an engine or app schema:
 
-- **Edit `packages/store-sqlite/migrations/sqlite/0000_lonely_lizard.sql`** (and the corresponding `packages/api/migrations/00*.sql` for app-side tables) directly to add the new columns. Update the matching Drizzle table in `packages/store-sqlite/src/schema.ts` or `packages/api/src/schema/index.ts` so codegen agrees.
+- **Edit `packages/store-postgres/migrations/pg/0000_engine.sql`** (and the corresponding `packages/api/migrations/pg/0000_app.sql` for app-side tables) directly to add the new columns. Update the matching Drizzle table in `packages/store-postgres/src/schema.ts` or `packages/api/src/schema/index.ts` so codegen agrees.
 - **Do NOT add `0001_…sql`, `0002_…sql`, etc.** Each one becomes a separate `ALTER TABLE` migration that we'll have to maintain forever. Until the first release, the right move is one clean `0000` that reflects the current schema.
-- After editing, blow away the local sqlite file (`rm ~/.valet/app.db`) and let it recreate on the next boot. There is a one-time backfill in `applyAppMigrations` / `applyEngineMigrations` that marks 0000 as already applied if the schema tables exist — that backfill is for upgrading dev DBs across the *initial* tracker introduction, not for accumulating real migrations.
+- After editing, blow away the local PGlite data dir (`rm -rf ~/.valet/pg`) and let it recreate on the next boot. There is a one-time backfill in `applyAppMigrations` / `applyEngineMigrations` that marks 0000 as already applied if the schema tables exist — that backfill is for upgrading dev DBs across the *initial* tracker introduction, not for accumulating real migrations.
 - Once we ship 1.0 and have user data on disk, this rule flips: every schema change becomes a new numbered migration, no edits to past ones.
 
 ---
@@ -73,12 +85,12 @@ Valet is a hosted background coding agent platform. Users interact with an AI co
 valet/
 ├── packages/
 │   ├── api/                 # Greenfield Node-first API (Hono + node-server + node-ws)
-│   │                        #   wired to @valet/engine + sandbox-docker + store-sqlite
+│   │                        #   wired to @valet/engine + sandbox-docker + store-postgres
 │   ├── web/                 # Greenfield client (Vite + React 19 + Tailwind 3 + Radix)
 │   ├── client/              # LEGACY React SPA — kept for prod CF deploy, frozen
 │   ├── worker/              # LEGACY Cloudflare Worker — kept for prod CF deploy, frozen
 │   ├── engine/              # @valet/engine — portable agent loop (pi-agent-core)
-│   ├── store-sqlite/        # SessionStore impl over better-sqlite3
+│   ├── store-postgres/      # SessionStore impl over Postgres (PGlite dev/test, node-postgres prod)
 │   ├── sandbox-docker/      # Sandbox provider over Docker (long-running container, bind mount)
 │   ├── sandbox-local/       # Sandbox provider over the host fs/process
 │   ├── shared/              # Shared TypeScript types & errors
@@ -117,7 +129,7 @@ valet/
 
 | Layer | Tech | Key Files |
 |-------|------|-----------|
-| **API (new)** | Hono 4, @hono/node-server, @hono/node-ws, Drizzle (better-sqlite3), pi-ai | `packages/api/src/` |
+| **API (new)** | Hono 4, @hono/node-server, @hono/node-ws, Drizzle (Postgres: PGlite dev/test, node-postgres prod), pi-ai | `packages/api/src/` |
 | **Web (new)** | Vite 6, React 19, TanStack Router/Query, Tailwind 3, Radix UI, Zustand | `packages/web/src/` |
 | Frontend (legacy) | React 19, Vite 6, TanStack Router/Query, Zustand, Tailwind, Radix UI | `packages/client/src/` |
 | Worker (legacy) | Cloudflare Workers, Hono 4, D1 (SQLite via Drizzle ORM), R2, Durable Objects | `packages/worker/src/` |

@@ -18,7 +18,6 @@
     { "path": "./packages/shared" },
     { "path": "./packages/engine" },
     { "path": "./packages/workflow" },
-    { "path": "./packages/store-sqlite" },
     { "path": "./packages/store-postgres" },
     { "path": "./packages/sandbox-local" },
     { "path": "./packages/sandbox-docker" },

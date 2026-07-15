@@ -37,14 +37,14 @@ Wire shapes are defined in `src/wire/types.ts` and re-exported as `@valet/api/wi
 
 ## Auth
 
-Stub-only. Set `VALET_LOCAL_AUTH=1` for `/api/*` access; otherwise routes 401. There is no JWT, no OAuth, no real user store. The "user" is a hardcoded local-dev identity seeded into sqlite at boot.
+Stub-only unless `BETTER_AUTH_SECRET` is set (real auth via better-auth). Set `VALET_LOCAL_AUTH=1` for stub `/api/*` access; otherwise routes 401. The stub "user" is a hardcoded local-dev identity seeded into the database at boot.
 
 ## Storage
 
-Single sqlite file under `~/.valet/app.db` (override with `VALET_DATA_DIR` or `VALET_DB_PATH`). Two coexisting schema sets:
+Postgres, either embedded (PGlite, default) or real. `DATABASE_URL` set → connects via `pg.Pool`; unset → boots an embedded PGlite instance at `VALET_PG_DATA_DIR` (default `~/.valet/pg/`). Two coexisting schema sets:
 
-- App schema (`packages/api/migrations/`): orgs, users, org_members, agent_sessions, session_threads, messages.
-- Engine schema (`@valet/store-sqlite/migrations/sqlite/`): engine_sessions, engine_threads, engine_entries, queue, decision gates.
+- App schema (`packages/api/migrations/pg/`): orgs, users, org_members, agent_sessions, session_threads, messages.
+- Engine schema (`@valet/store-postgres/migrations/pg/`): engine_sessions, engine_threads, engine_entries, queue, decision gates.
 
 Table names don't collide. `buildNodeProviders` runs both migration sets at boot.
 
@@ -92,8 +92,9 @@ Boots the server in-process, creates a session, opens the WS, posts a prompt, an
 | `ANTHROPIC_API_KEY` | — (required) | Engine LLM calls |
 | `VALET_LOCAL_AUTH` | unset | Set to `1` to enable the stub auth (otherwise 401) |
 | `PORT` | `8788` | HTTP listen port |
-| `VALET_DATA_DIR` | `~/.valet` | Where the sqlite db + blobs live |
-| `VALET_DB_PATH` | `$VALET_DATA_DIR/app.db` | sqlite file (overrides `VALET_DATA_DIR`) |
+| `VALET_DATA_DIR` | `~/.valet` | Where the embedded PGlite dir + blobs live |
+| `DATABASE_URL` | unset | Real Postgres connection string; set → node-postgres `Pool` instead of embedded PGlite |
+| `VALET_PG_DATA_DIR` | `$VALET_DATA_DIR/pg` | Embedded PGlite data dir (ignored when `DATABASE_URL` is set) |
 | `VALET_BLOBS_DIR` | `$VALET_DATA_DIR/blobs` | filesystem blob root |
 | `VALET_ENCRYPTION_KEY` | `dev-key-not-secure` | reserved for future encrypted-at-rest fields |
 
@@ -110,4 +111,4 @@ Boots the server in-process, creates a session, opens the WS, posts a prompt, an
 ## Out of scope but adjacent
 
 - Cloudflare deploy of `@valet/api`. The legacy `packages/worker` keeps serving prod CF until a future cutover plan.
-- Migrating any data from the legacy worker's D1 schema into this sqlite file.
+- Migrating any data from the legacy worker's D1 schema into this Postgres database.

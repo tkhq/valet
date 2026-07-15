@@ -1,7 +1,7 @@
 # Postgres Backend Design — one dialect everywhere (sub-project A)
 
 **Date:** 2026-07-15
-**Status:** Approved for planning
+**Status:** Implemented (2026-07-15)
 **Scope:** Move the entire v2 stack (`packages/api`, `packages/engine` stores, `packages/workflow` store) from SQLite/better-sqlite3 to a single Postgres dialect. Dev and tests run embedded **PGlite**; k8s/production run real Postgres via `DATABASE_URL`; a future Cloudflare deployment reaches the same stores through Hyperdrive+Neon. SQLite and better-sqlite3 **retire from the repo** at the end of this pass.
 **Sequencing:** Sub-project A of the deployment arc. Sub-project B (`docs/specs/2026-07-15-kubernetes-deployment-design.md`) consumes this. Specs are written together; execution is A then B.
 
