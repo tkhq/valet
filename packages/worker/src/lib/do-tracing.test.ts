@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { trace } from '@opentelemetry/api';
 import { InMemorySpanExporter, type SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { createTraceProvider, parentContext } from './do-tracing.js';
@@ -35,8 +35,9 @@ describe('parentContext', () => {
   });
 });
 
-// Pins the redact → drop-count → batch chain that createTraceProvider builds.
-// Deleting the RedactingSpanExporter wrapping must fail this test.
+// Pins the redact → drop-count → batch chain that createTraceProvider builds:
+// the first test fails if the RedactingSpanExporter wrapping is removed, the
+// second if the DropCountingSpanExporter wrapping is removed.
 describe('createTraceProvider', () => {
   it('redacts URL query secrets before spans reach the terminal exporter', async () => {
     const memory = new InMemorySpanExporter();
@@ -56,5 +57,29 @@ describe('createTraceProvider', () => {
     const [exported] = memory.getFinishedSpans();
     expect(exported?.attributes['url.full']).toBe('https://api.test/cb');
     expect(JSON.stringify(exported?.attributes)).not.toContain('LEAKSECRET');
+  });
+
+  it('counts failed terminal exports on the returned drop counter', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // A terminal exporter that reports a non-success code (SUCCESS === 0) for
+      // every batch, so the drop counter must observe the failure.
+      const failing: SpanExporter = {
+        export: (_spans, cb) => cb({ code: 1, error: new Error('rate limited') }),
+        shutdown: () => Promise.resolve(),
+        forceFlush: () => Promise.resolve(),
+      };
+      const created = await createTraceProvider({}, 'test-svc', failing);
+      expect(created).not.toBeNull();
+      const tracer = created!.provider.getTracer('test-svc');
+      tracer.startSpan('fetch').end();
+      // A failed export makes the batch processor reject the flush; the drop
+      // counter still records it in the export callback beforehand.
+      await created!.provider.forceFlush().catch(() => {});
+      expect(created!.dropCounter.dropped).toBe(1);
+      expect(created!.dropCounter.errors).toBe(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

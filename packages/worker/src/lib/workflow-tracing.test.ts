@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { InMemorySpanExporter, type ReadableSpan, type SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { SpanStatusCode } from '@opentelemetry/api';
-import type { WorkflowDefinition } from '@valet/shared';
+import type { WorkflowDefinition, WorkflowDagState, WorkflowNodeOutput } from '@valet/shared';
 import { emitWorkflowRunSpans } from './workflow-tracing.js';
 import type { TracingEnv } from './tracing.js';
 import type { WorkflowRunParams, WorkflowRunResult } from '../workflows/types.js';
@@ -207,7 +207,7 @@ describe('emitWorkflowRunSpans', () => {
     // budget break fires and the truncated attribute reflects the real overflow.
     const N = 1600;
     const nodes: WorkflowDefinition['nodes'] = [{ id: 'trigger', type: 'trigger' }];
-    const stateNodes: Record<string, { status: 'completed'; startedAt: string; completedAt: string }> = {
+    const stateNodes: Record<string, WorkflowNodeOutput> = {
       trigger: { status: 'completed', startedAt: '2026-07-15T00:00:01.000Z', completedAt: '2026-07-15T00:00:01.500Z' },
     };
     for (let i = 0; i < N; i++) {
@@ -215,10 +215,15 @@ describe('emitWorkflowRunSpans', () => {
       stateNodes[`n${i}`] = { status: 'completed', startedAt: '2026-07-15T00:00:02.000Z', completedAt: '2026-07-15T00:00:02.100Z' };
     }
     const bigDef: WorkflowDefinition = { version: 'dag/v1', nodes, edges: [] };
+    const bigState: WorkflowDagState = {
+      trigger: { type: 'manual', timestamp: '2026-07-15T00:00:00.000Z', data: {}, metadata: {} },
+      nodes: stateNodes,
+      skipped: {},
+    };
     const count = await emitWorkflowRunSpans(
       DISABLED_ENV,
       makeParams({ definition: bigDef }),
-      makeResult({ state: { trigger: stateNodes.trigger as never, nodes: stateNodes as never, skipped: {} } }),
+      makeResult({ state: bigState }),
       { exporter },
     );
     // 1 root + CAP child spans (never more), and the loop stops at the budget.
@@ -266,6 +271,29 @@ describe('emitWorkflowRunSpans', () => {
     const root = memory.getFinishedSpans().find((s) => s.name === 'workflow.run');
     expect(root?.attributes['valet.workflow.node_count']).toBe(1); // trigger only
     expect(root?.attributes['valet.workflow.skipped_count']).toBe(2); // orphan + start
+  });
+
+  it('returns within the 5s bound and warns when the export flush stalls', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // A collector that never invokes the export callback: provider.forceFlush()
+      // never settles, so only the 5s bound can end the race.
+      const blackHole: SpanExporter = {
+        export: () => { /* never calls back */ },
+        shutdown: () => Promise.resolve(),
+        forceFlush: () => Promise.resolve(),
+      };
+      const pending = emitWorkflowRunSpans(DISABLED_ENV, makeParams(), makeResult(), { exporter: blackHole });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const count = await pending;
+      // The count is still reported (spans were built) and the timeout is logged.
+      expect(count).toBe(4);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('flush exceeded 5s bound'));
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('never throws when the export flush rejects; reports 0 spans', async () => {

@@ -58,7 +58,10 @@ function makeEvent(): { payload: WorkflowRunParams } {
   };
 }
 
-const RESULT: WorkflowRunResult = { status: 'completed', state: { nodes: {}, skipped: {} } as never };
+const RESULT: WorkflowRunResult = {
+  status: 'completed',
+  state: { trigger: { type: 'manual', timestamp: 't', data: {}, metadata: {} }, nodes: {}, skipped: {} },
+};
 
 describe('ValetWorkflowInterpreter.run', () => {
   beforeEach(() => {

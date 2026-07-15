@@ -61,8 +61,11 @@ export async function emitWorkflowRunSpans(
     // executed nodes (early cancel) collapses to a zero-length span at now.
     const starts = executed.map(([, n]) => Date.parse(n.startedAt)).filter(Number.isFinite);
     const ends = executed.map(([, n]) => Date.parse(n.completedAt)).filter(Number.isFinite);
-    const runStart = starts.length > 0 ? Math.min(...starts) : Date.now();
-    const runEnd = ends.length > 0 ? Math.max(...ends, runStart) : runStart;
+    // Reduce rather than spread: `executed` is uncapped here (the CAP only
+    // bounds span emission below), and Math.min(...arr) over a pathological
+    // node map would RangeError past the engine's argument limit.
+    const runStart = starts.length > 0 ? starts.reduce((a, b) => Math.min(a, b)) : Date.now();
+    const runEnd = ends.reduce((a, b) => Math.max(a, b), runStart);
 
     // Parent to the dispatching request's trace when the trigger path stamped
     // a SAMPLED traceparent. An unsampled parent (flags 00 — proxies and
@@ -70,11 +73,16 @@ export async function emitWorkflowRunSpans(
     // ParentBased sampler drop every span here while we still report a
     // count, so those runs get a fresh sampled root instead, with the
     // dispatching trace id kept as an attribute for manual correlation.
+    // Both ids must be well-formed to parent: a valid trace id with a
+    // malformed span id can't be a parent link either (parseTraceparent
+    // rejects it), so it falls back to the fresh-root + trace-id-attribute
+    // path rather than silently losing all correlation.
     const tpParts = params.traceparent?.trim().split('-') ?? [];
-    const tpValid = tpParts.length >= 4 && /^[0-9a-f]{32}$/.test(tpParts[1] ?? '');
-    const parentSampled = tpValid && (parseInt(tpParts[3]!, 16) & 1) === 1;
+    const traceIdValid = tpParts.length >= 4 && /^[0-9a-f]{32}$/.test(tpParts[1] ?? '');
+    const spanIdValid = /^[0-9a-f]{16}$/.test(tpParts[2] ?? '');
+    const parentSampled = traceIdValid && spanIdValid && (parseInt(tpParts[3]!, 16) & 1) === 1;
     const parent: Context = parentSampled ? parseTraceparent(params.traceparent) : parseTraceparent(undefined);
-    const dispatchTraceId = tpValid && !parentSampled ? tpParts[1] : undefined;
+    const dispatchTraceId = traceIdValid && !parentSampled ? tpParts[1] : undefined;
     const root = tracer.startSpan('workflow.run', {
       startTime: runStart,
       attributes: {
@@ -144,9 +152,14 @@ export async function emitWorkflowRunSpans(
     // ever observe the failed export.
     const TIMED_OUT = Symbol('flush-timeout');
     const flushed = await Promise.race([
-      provider.forceFlush().then(() => provider.shutdown()).then(() => 'flushed' as const),
+      provider.forceFlush().then(() => 'flushed' as const),
       new Promise<typeof TIMED_OUT>((resolve) => setTimeout(() => resolve(TIMED_OUT), 5_000)),
     ]);
+    // Always tear the provider down, even when the 5s bound won: otherwise the
+    // BatchSpanProcessor and its 15s export-timeout timer outlive this step and
+    // leak into the isolate. Not awaited — shutdown() runs its own flush, which
+    // a black-holed collector would stall for the same 15s we just bounded.
+    void provider.shutdown().catch(() => {});
     if (flushed === TIMED_OUT) {
       console.warn(`[workflow-tracing] flush exceeded 5s bound for ${params.executionId}; ${count} span(s) may not have exported`);
     }

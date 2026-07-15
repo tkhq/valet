@@ -34,6 +34,11 @@ call**, so DO calls stay correlated even though the DOs run uninstrumented. On t
   in `index.ts`), so OAuth codes / tokens in URLs (e.g. `?code=...`) are never exported.
   This is source-side defense-in-depth; the Collector gateway (below) is still the place
   for full redaction.
+- **The Workflow interpreter emits its own trace per run.** It runs as a Cloudflare
+  Workflow (not the auto-instrumented Worker), so `lib/workflow-tracing.ts` reconstructs a
+  `workflow.run` span tree from replay-stable node timestamps and flushes it in a final
+  `step.do`, parented into the dispatching request's trace via a propagated `traceparent`.
+  See [`docs/specs/workflows.md`](specs/workflows.md#trace-emission).
 
 Tracing is a **no-op when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset** — the head sampler
 drops every span, so nothing is recorded or exported and no network call is made. It
