@@ -4,7 +4,7 @@ import { eq, sql, asc, and, inArray } from 'drizzle-orm';
 import { toDate } from '../drizzle.js';
 import { users, credentials } from '../schema/index.js';
 import { deleteUserAuthSessions } from './auth.js';
-import { revokeUserApiTokens } from './api-keys.js';
+import { deleteUserApiTokens } from './api-keys.js';
 
 function rowToUser(row: typeof users.$inferSelect): User {
   return {
@@ -208,14 +208,13 @@ export async function listUsers(db: AppDb): Promise<User[]> {
 export async function deleteUser(db: AppDb, userId: string): Promise<void> {
   // Clean up user-owned credentials (no longer cascade-deleted after migration 0066)
   await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
-  // Revoke live login sessions and API tokens explicitly. Auth sessions
-  // are hard-deleted (they're short-lived state, not audit-worthy). API
-  // tokens are soft-revoked via `revoked_at` so the row survives for
-  // audit trails — the middleware's `revoked_at IS NULL` filter blocks
-  // further use, and the users FK ON DELETE CASCADE will hard-drop the
-  // row when the user row goes away next.
+  // Revoke live login sessions and API tokens explicitly. The `auth_sessions`
+  // and `api_tokens` FKs on user_id already declare ON DELETE CASCADE, but the
+  // explicit deletes make the security-sensitive intent visible in code and
+  // defend against future FK changes (see migration 0066 which removed the
+  // credentials cascade).
   await deleteUserAuthSessions(db, userId);
-  await revokeUserApiTokens(db, userId);
+  await deleteUserApiTokens(db, userId);
   await db.delete(users).where(eq(users.id, userId));
 }
 

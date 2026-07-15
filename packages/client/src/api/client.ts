@@ -23,6 +23,38 @@ export function getWebSocketUrl(path: string): string {
   return url.toString();
 }
 
+/**
+ * Read a `Response` body as text AND parse it as a JSON object. Both are
+ * returned so callers that want a friendly-error fallback (the raw text)
+ * don't have to re-read the stream. `parsed` is null for non-JSON bodies,
+ * empty bodies, and valid JSON that isn't a plain object (`null`,
+ * primitives, arrays) — otherwise a naive `.code` / `.error` access on
+ * the caller side would throw or return misleading values.
+ *
+ * `apiClient` and the copilot streaming client both gate auth-clear on
+ * `parsed.code` via `isAuthFailureCode`, so they must agree on this shape.
+ */
+export async function readErrorBody(
+  response: Response
+): Promise<{ text: string; parsed: Record<string, unknown> | null }> {
+  let text = '';
+  try {
+    text = await response.text();
+  } catch {
+    return { text: '', parsed: null };
+  }
+  if (!text) return { text: '', parsed: null };
+  try {
+    const raw = JSON.parse(text);
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      return { text, parsed: raw as Record<string, unknown> };
+    }
+  } catch {
+    /* fall through */
+  }
+  return { text, parsed: null };
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -64,18 +96,8 @@ export async function apiClient<T>(
   });
 
   if (!response.ok) {
-    let errorData: { error?: string; code?: string; details?: unknown } = {};
-    try {
-      const parsed = await response.json();
-      // Guard non-object JSON — `null`, primitives, and arrays would
-      // otherwise let `parsed.code` / `parsed.error` throw or return
-      // wrong values (e.g., `Array.prototype.error` is undefined).
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        errorData = parsed as typeof errorData;
-      }
-    } catch {
-      // Response may not be JSON
-    }
+    const { parsed } = await readErrorBody(response);
+    const errorData: { error?: string; code?: string; details?: unknown } = parsed ?? {};
 
     // Only treat 401 as "your login is dead" when the response carries an
     // auth-tier error code from our auth middleware. Resource-authorization

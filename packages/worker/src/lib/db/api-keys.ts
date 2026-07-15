@@ -53,15 +53,18 @@ export async function revokeApiToken(db: AppDb, id: string, userId: string): Pro
 }
 
 /**
- * Revoke every non-revoked API token belonging to `userId` by stamping
- * `revoked_at`. Matches `revokeApiToken`'s soft-delete pattern rather
- * than hard-deleting, so the row survives for audit/forensics (which
- * tokens did this user ever issue?) while the auth middleware still
- * rejects it via its `revoked_at IS NULL` guard.
+ * Hard-delete every API token belonging to `userId`. Used by `deleteUser`
+ * as an explicit companion to the `api_tokens.user_id` FK ON DELETE
+ * CASCADE — the FK would delete these rows on the subsequent user delete
+ * anyway, but calling this here makes the intent visible in code and
+ * defends against future FK changes.
+ *
+ * NOTE: audit retention of "which tokens did this user ever hold" is not
+ * a goal here — the FK cascade would hard-delete these rows regardless.
+ * If a future caller wants to revoke tokens without deleting the user,
+ * add a `revokeUserApiTokens` (soft-delete via `revoked_at`) helper for
+ * that use case instead of overloading this one.
  */
-export async function revokeUserApiTokens(db: AppDb, userId: string): Promise<void> {
-  await db
-    .update(apiTokens)
-    .set({ revokedAt: sql`datetime('now')` })
-    .where(and(eq(apiTokens.userId, userId), isNull(apiTokens.revokedAt)));
+export async function deleteUserApiTokens(db: AppDb, userId: string): Promise<void> {
+  await db.delete(apiTokens).where(eq(apiTokens.userId, userId));
 }

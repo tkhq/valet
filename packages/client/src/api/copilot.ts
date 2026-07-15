@@ -9,7 +9,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { api } from './client';
+import { api, readErrorBody } from './client';
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
 import { isAuthFailureCode } from '@valet/shared';
@@ -194,20 +194,9 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
       });
 
       if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
         type ErrBody = { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> }; code?: string };
-        let parsed: ErrBody = {};
-        try {
-          const raw = JSON.parse(body);
-          // Guard non-object JSON — a bare `null`, primitive, or array
-          // response body would otherwise let `parsed.code` throw or
-          // silently miss the auth-tier gate below.
-          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-            parsed = raw as ErrBody;
-          }
-        } catch {
-          /* leave parsed empty */
-        }
+        const { text: body, parsed: parsedRaw } = await readErrorBody(resp);
+        const parsed = (parsedRaw ?? {}) as ErrBody;
 
         // Auth expiry: mirror apiClient — only clear auth on auth-tier
         // codes emitted by the auth middleware. Route-level 401s (e.g.
