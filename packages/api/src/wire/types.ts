@@ -31,6 +31,18 @@ export interface AuthMeResponse {
   user: User;
 }
 
+/**
+ * `GET /api/auth-config` — unauthenticated. Drives `/login`/`/signup`
+ * control rendering (auth-v2 design). `stub: true` means no `AuthConfig`
+ * resolved (`BETTER_AUTH_SECRET` unset) — real auth endpoints aren't
+ * mounted and the app runs the `VALET_LOCAL_AUTH` dev stub.
+ */
+export interface AuthConfigResponse {
+  stub: boolean;
+  social: ("google" | "github")[];
+  sso: { name: string } | null;
+}
+
 // ── REST: sessions ────────────────────────────────────────────────────────
 
 export type SessionStatus = "active" | "archived" | "deleted";

@@ -13,7 +13,9 @@ import type { AppEnv } from "./env.js";
 import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
 import { authMiddleware } from "./middleware/auth.js";
-import { authRouter } from "./routes/auth.js";
+import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
+import type { AuthConfig } from "./auth/config.js";
+import type { AuthConfigResponse } from "./wire/types.js";
 import { sessionsRouter } from "./routes/sessions.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
@@ -36,8 +38,20 @@ export interface CreatedApp {
   injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
 }
 
-export function createApp(providers: Providers): CreatedApp {
+/**
+ * Real-auth wiring — both fields are only present when `BETTER_AUTH_SECRET`
+ * resolved a config (auth-v2 design). Absent → stub-only mode (today's
+ * `VALET_LOCAL_AUTH` behavior), and `GET /api/auth-config` reports
+ * `{ stub: true }`.
+ */
+export interface AuthWiring {
+  auth?: ValetAuth;
+  authConfig?: AuthConfig;
+}
+
+export function createApp(providers: Providers, authWiring: AuthWiring = {}): CreatedApp {
   const app = new Hono<AppEnv>();
+  const { auth, authConfig } = authWiring;
 
   app.use("*", logger());
   app.use(
@@ -54,10 +68,34 @@ export function createApp(providers: Providers): CreatedApp {
     c.json({ ok: true, service: "valet-api", ts: Date.now() }),
   );
 
+  // better-auth owns everything under /api/auth/* (signup, login, session,
+  // social + SSO callbacks, api-key endpoints, MCP OAuth). Mounted BEFORE
+  // authMiddleware so it's public even when VALET_LOCAL_AUTH isn't set —
+  // otherwise login/signup could never succeed in production.
+  if (auth) {
+    app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+    app.get("/.well-known/oauth-authorization-server", (c) => oAuthDiscoveryMetadata(auth)(c.req.raw));
+    app.get("/.well-known/oauth-protected-resource", (c) => oAuthProtectedResourceMetadata(auth)(c.req.raw));
+  }
+
+  // Unauthenticated: drives `/login`/`/signup` control rendering.
+  app.get("/api/auth-config", (c) => {
+    const body: AuthConfigResponse = authConfig
+      ? {
+          stub: false,
+          social: [
+            ...(authConfig.social.google ? (["google"] as const) : []),
+            ...(authConfig.social.github ? (["github"] as const) : []),
+          ],
+          sso: authConfig.oidc ? { name: authConfig.oidc.name } : null,
+        }
+      : { stub: true, social: [], sso: null };
+    return c.json(body);
+  });
+
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
   app.use("/api/*", authMiddleware);
 
-  app.route("/api/auth", authRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);

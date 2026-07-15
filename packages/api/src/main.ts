@@ -10,10 +10,13 @@ import { serve } from "@hono/node-server";
 import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { createApp } from "./app.js";
+import { createApp, type AuthWiring } from "./app.js";
 import { buildNodeProviders } from "./providers/node.js";
 import { agentSessions } from "./schema/index.js";
 import type { Providers } from "./providers/types.js";
+import { loadAuthConfig } from "./auth/config.js";
+import { buildAuthHooks } from "./auth/provisioning.js";
+import { buildAuth } from "./auth/index.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
@@ -132,7 +135,21 @@ await providers.childWatcher.rearm().catch((err) => {
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
 
-const { app, injectWebSocket } = createApp(providers);
+// Real auth (auth-v2 design): only wired when BETTER_AUTH_SECRET resolves a
+// config. Absent → stub-only mode, same as before this pass.
+const authConfig = loadAuthConfig(process.env);
+const authWiring: AuthWiring = authConfig
+  ? {
+      auth: buildAuth({
+        db: providers.db,
+        cfg: authConfig,
+        hooks: buildAuthHooks({ db: providers.db, cfg: authConfig, credentialStore: providers.engineCredentials }),
+      }),
+      authConfig,
+    }
+  : {};
+
+const { app, injectWebSocket } = createApp(providers, authWiring);
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`@valet/api listening on http://localhost:${info.port}`);
@@ -140,7 +157,7 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`  db:       ${dbPath}`);
   console.log(`  blobs:    ${blobsRoot}`);
   console.log(
-    `  auth:     ${process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
+    `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
   );
 });
 

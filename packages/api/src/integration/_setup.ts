@@ -33,8 +33,11 @@ import { assemblePlugins } from "../plugins/assemble.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
-import { createApp } from "../app.js";
+import { createApp, type AuthWiring } from "../app.js";
 import type { Providers } from "../providers/types.js";
+import { loadAuthConfig } from "../auth/config.js";
+import { buildAuthHooks } from "../auth/provisioning.js";
+import { buildAuth } from "../auth/index.js";
 
 export interface TestApi {
   baseUrl: string;
@@ -57,6 +60,16 @@ export interface BootTestApiOpts {
   /** Plugin set for the assembled `Providers.plugins`/`actionPluginByService`
    * — tests never scan node_modules; default `[]`. */
   plugins?: ValetPlugin[];
+  /**
+   * Boots with a real better-auth instance instead of stub-only mode: sets
+   * `BETTER_AUTH_SECRET=test-secret` (restored on `cleanup()`) so
+   * `loadAuthConfig` resolves, then wires `buildAuthHooks` + `buildAuth`
+   * into `createApp` exactly as `main.ts` does. Every other caller stays
+   * untouched — `BETTER_AUTH_SECRET` is unset by default, so `createApp`
+   * gets no `auth`/`authConfig` and runs stub-only, same as before this
+   * option existed.
+   */
+  auth?: boolean;
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -84,6 +97,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // packages/api/src/middleware/auth.ts).
   process.env.VALET_TEST_AUTH_HEADER = "1";
 
+  const prevAuthSecret = process.env.BETTER_AUTH_SECRET;
+  if (opts.auth) {
+    process.env.BETTER_AUTH_SECRET = "test-secret";
+  }
+
   const sqlite = new Database(":memory:");
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
@@ -93,37 +111,43 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const db = buildAppDb(sqlite);
   const engineDb = drizzle(sqlite);
 
-  // Seed the local-dev identity (mirrors buildNodeProviders).
+  // Seed the local-dev identity (mirrors buildNodeProviders) — skipped in
+  // `auth: true` mode: these stub identities exist for the
+  // `x-valet-test-user-id` impersonation header (stub-auth-only), and a
+  // pre-seeded user would break the admission rule's "first-ever signup is
+  // admin" case (auth-instance tests sign up the actual first user).
   const now = Date.now();
-  db.insert(orgs).values({ id: "local-org", name: "Local Dev", createdAt: now }).onConflictDoNothing().run();
-  db.insert(users)
-    .values({ id: "local-user", email: "local@dev", name: "Local Dev", role: "admin" })
-    .onConflictDoNothing()
-    .run();
-  db.insert(orgMembers)
-    .values({ orgId: "local-org", userId: "local-user", role: "admin", createdAt: now })
-    .onConflictDoNothing()
-    .run();
-  // Non-admin identity for role-gated route tests. Select it via the
-  // `x-valet-test-user-id` header (see authMiddleware).
-  db.insert(users)
-    .values({ id: "test-member", email: "member@dev", name: "Test Member", role: "member" })
-    .onConflictDoNothing()
-    .run();
-  db.insert(orgMembers)
-    .values({ orgId: "local-org", userId: "test-member", role: "member", createdAt: now })
-    .onConflictDoNothing()
-    .run();
-  // A second org admin, distinct from `local-user`, for tests exercising the
-  // org-admin recovery path on a team they aren't a member of.
-  db.insert(users)
-    .values({ id: "test-admin", email: "admin@dev", name: "Test Admin", role: "admin" })
-    .onConflictDoNothing()
-    .run();
-  db.insert(orgMembers)
-    .values({ orgId: "local-org", userId: "test-admin", role: "admin", createdAt: now })
-    .onConflictDoNothing()
-    .run();
+  if (!opts.auth) {
+    db.insert(orgs).values({ id: "local-org", name: "Local Dev", createdAt: now }).onConflictDoNothing().run();
+    db.insert(users)
+      .values({ id: "local-user", email: "local@dev", name: "Local Dev", role: "admin" })
+      .onConflictDoNothing()
+      .run();
+    db.insert(orgMembers)
+      .values({ orgId: "local-org", userId: "local-user", role: "admin", createdAt: now })
+      .onConflictDoNothing()
+      .run();
+    // Non-admin identity for role-gated route tests. Select it via the
+    // `x-valet-test-user-id` header (see authMiddleware).
+    db.insert(users)
+      .values({ id: "test-member", email: "member@dev", name: "Test Member", role: "member" })
+      .onConflictDoNothing()
+      .run();
+    db.insert(orgMembers)
+      .values({ orgId: "local-org", userId: "test-member", role: "member", createdAt: now })
+      .onConflictDoNothing()
+      .run();
+    // A second org admin, distinct from `local-user`, for tests exercising
+    // the org-admin recovery path on a team they aren't a member of.
+    db.insert(users)
+      .values({ id: "test-admin", email: "admin@dev", name: "Test Admin", role: "admin" })
+      .onConflictDoNothing()
+      .run();
+    db.insert(orgMembers)
+      .values({ orgId: "local-org", userId: "test-admin", role: "admin", createdAt: now })
+      .onConflictDoNothing()
+      .run();
+  }
 
   const blobsRoot = mkdtempSync(join(tmpdir(), "valet-itest-blobs-"));
   const engineStore = new SqliteSessionStore(engineDb);
@@ -206,7 +230,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     actionPluginByService,
   };
 
-  const { app, injectWebSocket } = createApp(providers);
+  let authWiring: AuthWiring = {};
+  if (opts.auth) {
+    const authConfig = loadAuthConfig(process.env);
+    if (!authConfig) {
+      throw new Error("bootTestApi({ auth: true }): BETTER_AUTH_SECRET was set but loadAuthConfig returned null");
+    }
+    const hooks = buildAuthHooks({ db, cfg: authConfig, credentialStore: engineCredentials });
+    authWiring = { auth: buildAuth({ db, cfg: authConfig, hooks }), authConfig };
+  }
+
+  const { app, injectWebSocket } = createApp(providers, authWiring);
   const server = serve({ fetch: app.fetch, port });
   injectWebSocket(server);
 
@@ -221,6 +255,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });
+      if (opts.auth) {
+        if (prevAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
+        else process.env.BETTER_AUTH_SECRET = prevAuthSecret;
+      }
     },
   };
 }
