@@ -166,7 +166,11 @@ describe("auth middleware ladder — real-auth boots", () => {
     expect(revokedBody.error).toBe("invalid api key");
   });
 
-  it("a sandbox principal does not satisfy a user-scoped route (GET /api/me → 401)", async () => {
+  // Deliberately changed from the original 401 assertion: the sandbox rung
+  // now rejects valid tokens on non-memory paths with an explicit 403 in
+  // the middleware, instead of falling into the handler and 401ing (or
+  // TypeError-500ing on routes that read `c.var.user` unguarded).
+  it("a valid sandbox token on a user-scoped route (GET /api/me) → 403 'sandbox token not accepted here'", async () => {
     api = await bootTestApi({ auth: true });
     const { db } = api.providers;
 
@@ -186,6 +190,37 @@ describe("auth middleware ladder — real-auth boots", () => {
     });
 
     const meRes = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-valet-sandbox": token } });
-    expect(meRes.status).toBe(401);
+    expect(meRes.status).toBe(403);
+    const body = (await meRes.json()) as { error: string };
+    expect(body.error).toBe("sandbox token not accepted here");
+  });
+
+  it("a malformed session cookie falls down the ladder instead of 500ing", async () => {
+    api = await bootTestApi({ auth: true });
+    // Garbage + oversized cookie value: whether better-auth throws or
+    // returns null, the middleware must treat it as "no session". With no
+    // other credential and no stub, that lands on the 401 rung — never 500.
+    const prev = process.env.VALET_LOCAL_AUTH;
+    delete process.env.VALET_LOCAL_AUTH;
+    try {
+      const res = await fetch(`${api.baseUrl}/api/me`, {
+        headers: { cookie: `better-auth.session_token=${"garbage.signature".repeat(500)}` },
+      });
+      expect(res.status).toBe(401);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("unauthorized");
+    } finally {
+      if (prev !== undefined) process.env.VALET_LOCAL_AUTH = prev;
+    }
+  });
+
+  it("a malformed x-api-key 401s cleanly instead of 500ing", async () => {
+    api = await bootTestApi({ auth: true });
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      headers: { "x-api-key": "x".repeat(4096) },
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("invalid api key");
   });
 });

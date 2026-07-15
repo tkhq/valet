@@ -27,6 +27,11 @@ export interface AuthUser {
  */
 const orgIdMemo = new WeakMap<AppDb, string>();
 
+/** The only route prefix that consumes `c.var.sandbox` today. Must match
+ * the mount point in `app.ts` (`app.route("/api/memory", memoryRouter)`) —
+ * see rung 2 of the ladder below. */
+const SANDBOX_ALLOWED_PATH_PREFIX = "/api/memory";
+
 function resolveOrgId(db: AppDb): string {
   const cached = orgIdMemo.get(db);
   if (cached) return cached;
@@ -71,9 +76,13 @@ export interface BuildAuthMiddlewareOpts {
  * Auth middleware ladder (auth-v2 design). First match wins:
  *
  *   1. `x-valet-internal` valid → `next()`, no `c.var.user`/`c.var.sandbox`.
- *   2. `x-valet-sandbox` present → `verifySandboxToken`; valid sets
- *      `c.var.sandbox`; invalid 401s even in stub mode — an explicit
- *      credential beats every fallback below it.
+ *   2. `x-valet-sandbox` present → `verifySandboxToken`; invalid 401s even
+ *      in stub mode — an explicit credential beats every fallback below it.
+ *      Valid tokens only set `c.var.sandbox` and `next()` when the path
+ *      starts with `SANDBOX_ALLOWED_PATH_PREFIX` (memory routes, the only
+ *      consumer of `c.var.sandbox`); every other path 403s instead of
+ *      falling through, so a valid sandbox token against e.g. `/api/me`
+ *      never reaches a handler that unconditionally reads `c.var.user`.
  *   3. `auth` configured and a valid session (cookie or session header)
  *      resolves → `c.var.user`.
  *   4. `auth` configured and `x-api-key` present → `verifyApiKey`; invalid
@@ -108,12 +117,19 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
       return;
     }
 
-    // 2. Sandbox token — explicit credential, invalid always 401s.
+    // 2. Sandbox token — explicit credential, invalid always 401s. Valid
+    // sandbox principals are only accepted on the memory routes today —
+    // every other route reads `c.var.user`, not `c.var.sandbox`, so letting
+    // a sandbox token through elsewhere would crash the route handler with
+    // an unguarded TypeError instead of failing cleanly here.
     const sandboxHeader = c.req.header("x-valet-sandbox");
     if (sandboxHeader !== undefined) {
       const principal = verifySandboxToken(db, sandboxHeader);
       if (!principal) {
         return c.json({ error: "invalid sandbox token" }, 401);
+      }
+      if (!c.req.path.startsWith(SANDBOX_ALLOWED_PATH_PREFIX)) {
+        return c.json({ error: "sandbox token not accepted here" }, 403);
       }
       c.set("sandbox", principal);
       await next();
@@ -121,8 +137,15 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
     }
 
     if (auth) {
-      // 3. Session (cookie or session header).
-      const sessionResult = await auth.api.getSession({ headers: c.req.raw.headers });
+      // 3. Session (cookie or session header). A malformed/oversized cookie
+      // must fall through to the next rung, not 500 — better-auth doesn't
+      // guarantee it returns null instead of throwing on garbage input.
+      let sessionResult: Awaited<ReturnType<ValetAuth["api"]["getSession"]>> = null;
+      try {
+        sessionResult = await auth.api.getSession({ headers: c.req.raw.headers });
+      } catch {
+        sessionResult = null;
+      }
       if (sessionResult) {
         c.set("user", {
           id: sessionResult.user.id,
@@ -135,10 +158,17 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         return;
       }
 
-      // 4. API key — explicit credential, invalid always 401s.
+      // 4. API key — explicit credential, invalid always 401s. A
+      // malformed/oversized key must 401 cleanly rather than 500 — same
+      // "don't trust the auth provider not to throw" rule as rung 3.
       const apiKeyHeader = c.req.header("x-api-key");
       if (apiKeyHeader) {
-        const result = await auth.api.verifyApiKey({ body: { key: apiKeyHeader } });
+        let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
+        try {
+          result = await auth.api.verifyApiKey({ body: { key: apiKeyHeader } });
+        } catch {
+          return c.json({ error: "invalid api key" }, 401);
+        }
         if (!result.valid || !result.key) {
           return c.json({ error: "invalid api key" }, 401);
         }
