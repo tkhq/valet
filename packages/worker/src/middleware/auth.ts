@@ -4,16 +4,14 @@ import type { Env, Variables } from '../env.js';
 import { extractBearerToken } from '../lib/ws-auth.js';
 
 /**
- * Session lifetime. `SESSION_TTL_MS` is the single source of truth; the SQL
- * fragment is derived from it. Every authenticated request slides
- * `expires_at` forward when less than half the window remains, so an active
- * user stays logged in indefinitely without generating a D1 write per
- * request.
+ * Session lifetime. Fixed 7-day expiry from creation — no sliding, no
+ * refresh. Weekly re-auth through the identity provider is a deliberate
+ * security posture: it bounds the blast radius of a stolen token
+ * (localStorage → XSS-accessible) and forces the OAuth provider back into
+ * the loop so account-level revocations propagate.
  */
-export const SESSION_TTL_DAYS = 30;
+export const SESSION_TTL_DAYS = 7;
 export const SESSION_TTL_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
-export const SESSION_SLIDING_WINDOW_SQL = `datetime('now', '+${SESSION_TTL_DAYS} days')`;
-const SESSION_SLIDE_THRESHOLD_MS = SESSION_TTL_MS / 2;
 
 /**
  * Authentication middleware supporting:
@@ -84,16 +82,6 @@ function scheduleWrite(ctx: ExecutionContext | undefined, promise: Promise<unkno
   }
 }
 
-/** True when the row's `expires_at` is within the sliding-half-life of now.
- *  Handles both SQLite's `YYYY-MM-DD HH:MM:SS` (UTC) and ISO 8601 formats;
- *  the initial insert in oauth.ts writes ISO, subsequent slides write SQLite. */
-function needsSlide(expiresAt: string): boolean {
-  const iso = expiresAt.includes('T') ? expiresAt : expiresAt.replace(' ', 'T') + 'Z';
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return true; // unparseable → slide defensively
-  return ms - Date.now() < SESSION_SLIDE_THRESHOLD_MS;
-}
-
 async function validateAuthSession(
   tokenHash: string,
   env: Env,
@@ -101,28 +89,21 @@ async function validateAuthSession(
 ): Promise<{ id: string; email: string; role: 'admin' | 'member' } | null> {
   try {
     const result = await env.DB.prepare(
-      `SELECT u.id, u.email, u.role, s.expires_at
+      `SELECT u.id, u.email, u.role
        FROM auth_sessions s
        JOIN users u ON s.user_id = u.id
        WHERE s.token_hash = ?
          AND s.expires_at > datetime('now')`
     )
       .bind(tokenHash)
-      .first<{ id: string; email: string; role: string; expires_at: string }>();
+      .first<{ id: string; email: string; role: string }>();
 
-    if (result && needsSlide(result.expires_at)) {
-      // Half-life gate: only slide when less than half the TTL remains.
-      // Bounds writes to at most one per session per (TTL/2) days regardless
-      // of request volume, while still guaranteeing an active user never
-      // hits the expiry cliff.
+    if (result) {
+      // Touch last_used_at for observability. Session expiry is NOT slid —
+      // the 7-day cap from creation is deliberate.
       scheduleWrite(
         ctx,
-        env.DB.prepare(
-          `UPDATE auth_sessions
-           SET last_used_at = datetime('now'),
-               expires_at = ${SESSION_SLIDING_WINDOW_SQL}
-           WHERE token_hash = ?`,
-        )
+        env.DB.prepare("UPDATE auth_sessions SET last_used_at = datetime('now') WHERE token_hash = ?")
           .bind(tokenHash)
           .run(),
       );
