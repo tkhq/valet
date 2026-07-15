@@ -46,12 +46,12 @@ export function toNumOrNull(value: unknown, field = "value"): number | null {
   return value === null || value === undefined ? null : toNum(value, field);
 }
 
-function asString(value: unknown, field: string): string {
+export function asString(value: unknown, field: string): string {
   if (typeof value !== "string") throw new Error(`expected string for ${field}, got ${typeof value}`);
   return value;
 }
 
-function asStringOrNull(value: unknown, field: string): string | null {
+export function asStringOrNull(value: unknown, field: string): string | null {
   return value === null || value === undefined ? null : asString(value, field);
 }
 
