@@ -997,6 +997,73 @@ describe('SessionAgentDO', () => {
       expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
       expect((agent as any).sessionState.lastRecoveryPromptId).toBe('');
     });
+
+    it('a cooldown alarm during the disconnect grace window does not reset the breaker, and the session still trips', async () => {
+      const { agent } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      // A session that flapped up to 3 (one loss short of the trip) and is now
+      // running with the runner ready. Recent activity keeps it out of idle
+      // hibernate, which would otherwise clear the breaker on its own.
+      (agent as any).sessionState.status = 'running';
+      (agent as any).sessionState.recoveryAttemptCount = 3;
+      (agent as any).sessionState.lastUserActivityAt = clock;
+      (agent as any).runnerLink.ready = true;
+      const readyAt = clock;
+      (agent as any).runnerLink.readyAt = readyAt;
+
+      // The runner holds ready 90s — between the 60s grace and the 120s stable
+      // interval — then the sandbox dies. status stays 'running' through grace.
+      clock = readyAt + 90_000;
+      (agent as any).sessionState.runnerDisconnectedAt = clock;
+
+      // The breaker-cooldown alarm fires INSIDE the grace window (at readyAt +
+      // the 120s stable interval). Uptime reads >= the stable interval, but the
+      // runner is disconnected and the sandbox is dead — the breaker must hold.
+      clock = readyAt + 120_000; // still < disconnect + 60s grace (readyAt + 150s)
+      await agent.alarm();
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(3);
+
+      // Grace expires: recovery runs, the count reaches 4, and the breaker trips.
+      clock = readyAt + 90_000 + 61_000;
+      await agent.alarm();
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(4);
+      expect((agent as any).sessionState.status).toBe('backoff');
+    });
+
+    it('a fresh start on a reused DO clears the stale readyAt so uptime measures the new lifecycle', async () => {
+      const { agent } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      // A prior lifecycle left a stale readyAt on the reused well-known DO.
+      (agent as any).runnerLink.ready = true;
+      (agent as any).runnerLink.readyAt = clock - 500_000;
+
+      // A fresh start (runner reconnects with the sandbox already running).
+      const body = {
+        sessionId: 'orchestrator:user-1',
+        userId: 'user-1',
+        workspace: '/w',
+        runnerToken: 'tok-new',
+        sandboxId: 'sb-new',
+        tunnelUrls: { opencode: 'https://tunnel' },
+      };
+      await (agent as any).handleStart(
+        new Request('https://do/start', { method: 'POST', body: JSON.stringify(body) }),
+      );
+
+      // The stale readyAt is cleared, so the round-3 stamping guard refreshes it.
+      expect((agent as any).runnerLink.readyAt).toBe(0);
+
+      // The next ready transition stamps a fresh readyAt against the new
+      // lifecycle's clock — not the old one.
+      clock += 30_000;
+      (agent as any).sessionState.status = 'waiting_runner';
+      await driveReady(agent);
+      expect((agent as any).runnerLink.readyAt).toBe(clock);
+    });
   });
 
   it('sends a minimal init payload during client websocket upgrade', async () => {

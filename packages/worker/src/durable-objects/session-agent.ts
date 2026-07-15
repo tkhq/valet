@@ -1108,6 +1108,10 @@ export class SessionAgentDO {
       // moves it back to 'queued'. If the sandbox keeps crashing and the breaker
       // trips, performRecovery quarantines exactly this prompt rather than every
       // processing row, so healthy sibling-channel work is not dropped.
+      // Best-effort heuristic: the oldest in-flight prompt is the prime suspect,
+      // not a certainty. Under concurrent multi-channel dispatch the true
+      // offender may be a newer row on another channel, so this can mis-target;
+      // there is no crash-linked signal to pin it down precisely (known limitation).
       const inFlightPromptId = this.promptQueue.getOldestProcessingId();
       if (inFlightPromptId) this.sessionState.lastRecoveryPromptId = inFlightPromptId;
       // Defer revert — if runner reconnects within grace period, processing entry stays intact
@@ -1297,8 +1301,12 @@ export class SessionAgentDO {
     // full stable interval. Measuring uptime (now − readyAt) here — not boot
     // latency at the ready signal — is what lets a genuine recovery reset while
     // a recover→ready→die flap keeps climbing toward the trip.
+    // Gate on the runner being currently connected: status stays 'running'
+    // throughout the disconnect grace window while the sandbox is already dead,
+    // so an alarm firing inside that window must NOT cool the breaker.
     if (
       status === 'running' &&
+      !this.sessionState.runnerDisconnectedAt &&
       this.sessionState.recoveryAttemptCount > 0 &&
       isRecoveryStable(this.runnerLink.readyAt, now, SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS)
     ) {
@@ -4565,6 +4573,7 @@ export class SessionAgentDO {
     this.sessionState.initialize(body);
     this.runnerLink.token = body.runnerToken;
     this.runnerLink.ready = false; // clear stale ready state from previous lifecycle
+    this.runnerLink.readyAt = 0; // reset the uptime clock so the next ready stamps fresh — a reused DO must not measure uptime against the prior lifecycle
     this.promptQueue.runnerBusy = false;
     this.promptQueue.clearAllChannelBusy();
     this.promptQueue.queueMode = body.queueMode || 'followup';
@@ -5948,6 +5957,10 @@ export class SessionAgentDO {
           'recovery.dead_letter',
           `Quarantined in-flight prompt after ${attemptCount} recoveries`,
         );
+        // The suspect is quarantined — clear the persisted id so a later,
+        // unrelated idle loss (no in-flight prompt) can't fall back to and
+        // re-dead-letter this stale id from a prior incident.
+        this.sessionState.lastRecoveryPromptId = '';
       }
 
       const isOrchestrator = sessionId?.startsWith('orchestrator:') ?? false;
@@ -6326,8 +6339,10 @@ export class SessionAgentDO {
 
     // Recovery breaker cooldown — wake once a running runner has held ready for
     // a full stable interval so the alarm can clear the breaker (see alarmTick).
+    // Skip while the runner is in the disconnect grace window: the alarm gate
+    // there refuses to cool the breaker, so scheduling a wake would be wasted.
     const readyAt = this.runnerLink.readyAt;
-    const breakerCooldown = readyAt > 0 && this.sessionState.recoveryAttemptCount > 0 && this.sessionState.status === 'running'
+    const breakerCooldown = readyAt > 0 && this.sessionState.recoveryAttemptCount > 0 && this.sessionState.status === 'running' && !this.sessionState.runnerDisconnectedAt
       ? readyAt + SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS
       : null;
 
