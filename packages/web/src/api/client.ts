@@ -14,6 +14,8 @@ import type {
   CreateSessionResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  CreateInviteRequest,
+  CreateInviteResponse,
   CreateThreadRequest,
   CreateThreadResponse,
   CreateWorkflowRequest,
@@ -28,6 +30,7 @@ import type {
   GetWorkflowRunResponse,
   ListCredentialsResponse,
   ListDecisionsResponse,
+  ListInvitesResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
@@ -59,6 +62,7 @@ import type {
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RevokeInviteResponse,
   SendPromptRequest,
   SendPromptResponse,
   SetNotificationPreferenceRequest,
@@ -307,6 +311,13 @@ export const api = {
       `/org/members/${encodeURIComponent(userId)}`,
       body,
     ),
+
+  // org invites (org-admin only)
+  listInvites: () => request<ListInvitesResponse>("GET", "/org/invites"),
+  createInvite: (body: CreateInviteRequest) =>
+    request<CreateInviteResponse>("POST", "/org/invites", body),
+  revokeInvite: (id: string) =>
+    request<RevokeInviteResponse>("DELETE", `/org/invites/${encodeURIComponent(id)}`),
 
   // teams (org membership structure — first UI over the existing router)
   listTeams: () => request<ListTeamsResponse>("GET", "/teams"),

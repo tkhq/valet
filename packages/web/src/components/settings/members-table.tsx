@@ -72,7 +72,6 @@ export function MembersTable({ members }: { members: OrgMemberWire[] }) {
           );
         })}
       </div>
-      <p className="text-xs text-muted">Invites arrive with real login.</p>
     </div>
   );
 }

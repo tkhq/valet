@@ -2,11 +2,14 @@
 /**
  * Organization sections (split-settings design, Task 7): General's rename +
  * disable-gate confirm flow, Members' roster + role change + sole-admin
- * disable + footer copy, and Teams' create/duplicate-409/delete/add-member
- * flows over the (extended) `/api/teams` router. Mocks `~/api/settings` the
- * same way `-settings.sections.test.tsx` mocks it for the You sections —
- * these tests only care what each section renders and which mutation it
- * fires, not that TanStack Query or the router themselves resolve anything.
+ * disable, and Teams' create/duplicate-409/delete/add-member flows over the
+ * (extended) `/api/teams` router. Mocks `~/api/settings` the same way
+ * `-settings.sections.test.tsx` mocks it for the You sections — these tests
+ * only care what each section renders and which mutation it fires, not that
+ * TanStack Query or the router themselves resolve anything.
+ *
+ * Task 11 extends the Members describe block with the invite dialog + the
+ * pending-invites list, mocking `~/api/invites` the same way.
  */
 import type { ReactElement } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -29,6 +32,9 @@ const deleteTeamMutate = vi.fn();
 const addTeamMemberMutate = vi.fn();
 const setTeamMemberRoleMutate = vi.fn();
 const removeTeamMemberMutate = vi.fn();
+
+const createInviteMutate = vi.fn();
+const revokeInviteMutate = vi.fn();
 
 let orgData: {
   id: string;
@@ -68,6 +74,17 @@ let teamMembersData: { members: Array<{ userId: string; role: "admin" | "member"
   members: [{ userId: "u1", role: "admin" }],
 };
 
+let invitesData: {
+  invites: Array<{
+    id: string;
+    email: string | null;
+    role: "admin" | "member";
+    createdBy: string;
+    createdAt: number;
+    expiresAt: number;
+  }>;
+} = { invites: [] };
+
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigateMock,
@@ -90,6 +107,12 @@ vi.mock("~/api/settings", () => ({
   useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
   useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
   useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
+}));
+
+vi.mock("~/api/invites", () => ({
+  useInvites: () => ({ data: invitesData, isLoading: false, error: null }),
+  useCreateInvite: () => ({ mutate: createInviteMutate, isPending: false, error: null }),
+  useRevokeInvite: () => ({ mutate: revokeInviteMutate, isPending: false, error: null }),
 }));
 
 import { OrganizationGeneralPage } from "./settings.organization.index";
@@ -115,6 +138,7 @@ beforeEach(() => {
     teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 0, memberCount: 1 }],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
+  invitesData = { invites: [] };
 });
 
 describe("OrganizationGeneralPage", () => {
@@ -156,11 +180,6 @@ describe("OrganizationMembersPage", () => {
     expect(screen.getByText("grace@x.test")).toBeTruthy();
   });
 
-  it("shows the spec-verbatim footer note", () => {
-    renderWithTooltip(<OrganizationMembersPage />);
-    expect(screen.getByText("Invites arrive with real login.")).toBeTruthy();
-  });
-
   it("disables the sole admin's role control with the last-admin tooltip", () => {
     renderWithTooltip(<OrganizationMembersPage />);
     const adminButtons = screen.getAllByRole("button", { name: /Admin/ });
@@ -191,6 +210,86 @@ describe("OrganizationMembersPage", () => {
     renderWithTooltip(<OrganizationMembersPage />);
     const adminButtons = screen.getAllByRole("button", { name: /Admin/ });
     for (const b of adminButtons) expect((b as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows the Invite button for an admin", () => {
+    renderWithTooltip(<OrganizationMembersPage />);
+    expect(screen.getByRole("button", { name: "Invite" })).toBeTruthy();
+  });
+
+  it("hides the Invite button for a non-admin", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    renderWithTooltip(<OrganizationMembersPage />);
+    expect(screen.queryByRole("button", { name: "Invite" })).toBeNull();
+  });
+
+  it("creating an invite posts { email?, role } and reveals the copyable link", async () => {
+    const user = userEvent.setup();
+    createInviteMutate.mockImplementation((_body, opts) => {
+      opts.onSuccess({
+        id: "invite_1",
+        code: "abc123",
+        email: "grace@x.test",
+        role: "admin",
+        expiresAt: 0,
+      });
+    });
+    renderWithTooltip(<OrganizationMembersPage />);
+
+    await user.click(screen.getByRole("button", { name: "Invite" }));
+    await user.type(await screen.findByLabelText("Email (optional)"), "grace@x.test");
+    await user.click(screen.getByRole("radio", { name: /Admin/ }));
+    await user.click(screen.getByRole("button", { name: "Create invite" }));
+
+    expect(createInviteMutate).toHaveBeenCalledWith(
+      { email: "grace@x.test", role: "admin" },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+    expect(screen.getByText(/invite=abc123/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Share this link. For Google or GitHub sign-in, the invite must include their email.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("defaults the role radio to Member and posts email: undefined when left blank", async () => {
+    const user = userEvent.setup();
+    createInviteMutate.mockImplementation((_body, opts) => {
+      opts.onSuccess({ id: "invite_1", code: "xyz", email: null, role: "member", expiresAt: 0 });
+    });
+    renderWithTooltip(<OrganizationMembersPage />);
+
+    await user.click(screen.getByRole("button", { name: "Invite" }));
+    await user.click(screen.getByRole("button", { name: "Create invite" }));
+
+    expect(createInviteMutate).toHaveBeenCalledWith(
+      { email: undefined, role: "member" },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+
+  it("lists pending invites and revokes one via the confirm-gated control", async () => {
+    const user = userEvent.setup();
+    invitesData = {
+      invites: [
+        { id: "invite_1", email: "newhire@x.test", role: "member", createdBy: "u1", createdAt: 0, expiresAt: 0 },
+        { id: "invite_2", email: null, role: "admin", createdBy: "u1", createdAt: 0, expiresAt: 0 },
+      ],
+    };
+    renderWithTooltip(<OrganizationMembersPage />);
+
+    expect(screen.getByText("newhire@x.test")).toBeTruthy();
+    expect(screen.getByText("anyone with the link")).toBeTruthy();
+
+    const revokeButtons = screen.getAllByRole("button", { name: "Revoke" });
+    await user.click(revokeButtons[0]);
+    await user.click(screen.getByRole("button", { name: "Confirm revoke" }));
+
+    expect(revokeInviteMutate).toHaveBeenCalledWith(
+      "invite_1",
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
   });
 });
 

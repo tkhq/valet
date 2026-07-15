@@ -5,8 +5,9 @@
  */
 import { createAuthClient } from "better-auth/react";
 import { ssoClient } from "@better-auth/sso/client";
+import { apiKeyClient } from "@better-auth/api-key/client";
 
-export const authClient = createAuthClient({ plugins: [ssoClient()] });
+export const authClient = createAuthClient({ plugins: [ssoClient(), apiKeyClient()] });
 
 /**
  * `inviteCode` rides the `/sign-up/email` body but isn't a user-table

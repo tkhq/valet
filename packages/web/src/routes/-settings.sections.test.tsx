@@ -8,15 +8,21 @@
  * way `-integrations.test.tsx` mocks `~/api/integrations` — these tests
  * only care what each section renders and which mutation it fires, not that
  * TanStack Query or the router themselves resolve anything.
+ *
+ * Task 11 adds the API keys section, mocking `~/api/api-keys` the same way
+ * — the create flow's one-time secret reveal and the revoke confirm-gate.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 const patchMeMutate = vi.fn();
 const patchOrgMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const setPrefMutate = vi.fn();
 const navigateMock = vi.fn();
 const saveIdentityMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+const createApiKeyMutate = vi.fn();
+const revokeApiKeyMutate = vi.fn();
 
 let meData: {
   id: string;
@@ -42,6 +48,14 @@ let orgData: { callerRole: "admin" | "member"; features: { organizations: boolea
   callerRole: "admin",
   features: { organizations: false },
 };
+
+let apiKeysData: Array<{
+  id: string;
+  name: string | null;
+  start: string | null;
+  createdAt: Date;
+  lastRequest: Date | null;
+}> = [];
 
 const modelsData = {
   models: [
@@ -84,10 +98,17 @@ vi.mock("~/api/queries", () => ({
   useSetNotificationPreference: () => ({ mutate: setPrefMutate }),
 }));
 
+vi.mock("~/api/api-keys", () => ({
+  useApiKeys: () => ({ data: apiKeysData, isLoading: false, error: null }),
+  useCreateApiKey: () => ({ mutate: createApiKeyMutate, isPending: false, error: null }),
+  useRevokeApiKey: () => ({ mutate: revokeApiKeyMutate, isPending: false, error: null }),
+}));
+
 import { ProfilePage } from "./settings.profile";
 import { AssistantPage } from "./settings.assistant";
 import { AppearancePage } from "./settings.appearance";
 import { NotificationsPage } from "./settings.notifications";
+import { ApiKeysPage } from "./settings.api-keys";
 
 describe("ProfilePage", () => {
   beforeEach(() => {
@@ -250,5 +271,81 @@ describe("NotificationsPage", () => {
     const toggle = screen.getByRole("switch", { name: "Notifications web notifications" });
     fireEvent.click(toggle);
     expect(setPrefMutate).toHaveBeenCalledWith({ kind: "notification", web: false });
+  });
+});
+
+describe("ApiKeysPage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiKeysData = [];
+  });
+
+  it("shows the brief-verbatim empty state when there are no keys", () => {
+    render(<ApiKeysPage />);
+    expect(
+      screen.getByText("No API keys yet. Create one to call the API from scripts."),
+    ).toBeTruthy();
+  });
+
+  it("creating a key calls apiKey.create and reveals the secret exactly once", () => {
+    createApiKeyMutate.mockImplementation((_name, opts) => {
+      opts.onSuccess({
+        id: "key_1",
+        name: "CI pipeline",
+        key: "valet_sk_live_abc123",
+        start: "valet_sk_l",
+        prefix: "valet_sk_",
+      });
+    });
+    render(<ApiKeysPage />);
+
+    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "CI pipeline" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(createApiKeyMutate).toHaveBeenCalledWith(
+      "CI pipeline",
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+    expect(screen.getByText("valet_sk_live_abc123")).toBeTruthy();
+    expect(screen.getByText("This is the only time the full key is shown.")).toBeTruthy();
+  });
+
+  it("renders list rows with the start hint, name, created, and last-used columns", () => {
+    apiKeysData = [
+      {
+        id: "key_1",
+        name: "CI pipeline",
+        start: "valet_sk_l",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        lastRequest: null,
+      },
+    ];
+    render(<ApiKeysPage />);
+    expect(screen.getByText("CI pipeline")).toBeTruthy();
+    expect(screen.getByText("valet_sk_l")).toBeTruthy();
+    expect(screen.getByText("Last used Never")).toBeTruthy();
+  });
+
+  it("revoking a key is confirm-gated", async () => {
+    const user = userEvent.setup();
+    apiKeysData = [
+      {
+        id: "key_1",
+        name: "CI pipeline",
+        start: "valet_sk_l",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        lastRequest: null,
+      },
+    ];
+    render(<ApiKeysPage />);
+
+    await user.click(screen.getByRole("button", { name: "Revoke" }));
+    expect(revokeApiKeyMutate).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Confirm revoke" }));
+    expect(revokeApiKeyMutate).toHaveBeenCalledWith(
+      "key_1",
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
   });
 });
