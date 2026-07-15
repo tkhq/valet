@@ -85,31 +85,55 @@ export function pgDbFromPool(pool: Pool): PgDb {
       return { rows: result.rows, rowCount: normalizePoolRowCount(result.rowCount) };
     },
     async transaction(fn) {
-      const client: PoolClient = await pool.connect();
-      const queryable: PgQueryable = {
-        async query(text, params = []) {
-          assertNotTransactionControl(text);
-          const result = await client.query(text, params);
-          return { rows: result.rows, rowCount: normalizePoolRowCount(result.rowCount) };
-        },
-      };
-      try {
-        await client.query("BEGIN");
-        const result = await fn(queryable);
-        await client.query("COMMIT");
-        return result;
-      } catch (err) {
+      const attemptOnce = async () => {
+        const client: PoolClient = await pool.connect();
+        const queryable: PgQueryable = {
+          async query(text, params = []) {
+            assertNotTransactionControl(text);
+            const result = await client.query(text, params);
+            return { rows: result.rows, rowCount: normalizePoolRowCount(result.rowCount) };
+          },
+        };
         try {
-          await client.query("ROLLBACK");
-        } catch {
-          // A failed ROLLBACK (e.g. connection drop) must not mask the
-          // original error — the caller needs the real fencing/business
-          // failure. The client is released below either way; node-postgres
-          // discards broken connections on release(err-less) via pool checks.
+          await client.query("BEGIN");
+          const result = await fn(queryable);
+          await client.query("COMMIT");
+          return result;
+        } catch (err) {
+          try {
+            await client.query("ROLLBACK");
+          } catch {
+            // A failed ROLLBACK (e.g. connection drop) must not mask the
+            // original error — the caller needs the real fencing/business
+            // failure. The client is released below either way; node-postgres
+            // discards broken connections on release(err-less) via pool checks.
+          }
+          throw err;
+        } finally {
+          client.release();
+        }
+      };
+
+      try {
+        return await attemptOnce();
+      } catch (err) {
+        // ABBA deadlock retry (decision 6 fallout, not a design flaw):
+        // different store methods fence-lock different "always-present
+        // stable rows" (appendEntries/updateEntry lock the fenced queue-item
+        // row then touch engine_threads; admitSubmission locks the
+        // engine_threads row then touches queue-item rows). Two callers
+        // taking those locks in opposite order on overlapping rows can
+        // deadlock — Postgres detects it and aborts exactly one of the two
+        // transactions with 40P01, which is by design recoverable: the
+        // winner's commit released the locks the loser needed, so retrying
+        // the loser's transaction from scratch (fresh client, fresh BEGIN)
+        // makes forward progress. One retry is enough because a repeat
+        // deadlock on the same retry would indicate a live, not transient,
+        // cycle — propagate that rather than looping.
+        if (isPgDeadlock(err)) {
+          return await attemptOnce();
         }
         throw err;
-      } finally {
-        client.release();
       }
     },
     async close() {
@@ -131,5 +155,12 @@ function hasCause(value: unknown): value is { cause: unknown } {
 export function isPgUniqueViolation(err: unknown): boolean {
   if (hasCode(err) && err.code === "23505") return true;
   if (hasCause(err)) return isPgUniqueViolation(err.cause);
+  return false;
+}
+
+/** True iff `err` (or its `.cause`) carries Postgres's deadlock_detected code. */
+export function isPgDeadlock(err: unknown): boolean {
+  if (hasCode(err) && err.code === "40P01") return true;
+  if (hasCause(err)) return isPgDeadlock(err.cause);
   return false;
 }

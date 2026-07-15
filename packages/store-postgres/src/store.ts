@@ -19,6 +19,7 @@ import type {
   ThreadData,
   WriteFence,
 } from "@valet/engine";
+import { isPgUniqueViolation } from "./db.js";
 import type { PgDb, PgQueryable } from "./db.js";
 import {
   entryToRow,
@@ -683,65 +684,105 @@ export class PgSessionStore implements SessionStore {
 
   // === Submission lifecycle (durable execution) ===
 
+  /**
+   * Resolves the dispatchId dedup outcome once an existing row with the
+   * same (sessionId, dispatchId) is found: same content → return it
+   * (idempotent replay), different content → ConflictError. Shared by the
+   * in-transaction pre-check (the common case: same thread, or a prior
+   * admission already visible) and the post-unique-violation fallback in
+   * `admitSubmission` (the cross-thread race: two threads' admissions each
+   * lock a different `engine_threads` row, so neither serializes against
+   * the other, and both can pass the pre-check before either inserts).
+   */
+  private resolveDispatchDedup(raw: Record<string, unknown>, item: QueueItem): QueueItem {
+    const existingItem = queueItemRowToItem(rawToQueueItemRow(raw));
+    const sameContent = JSON.stringify(existingItem.content) === JSON.stringify(item.content);
+    if (sameContent) return existingItem;
+    throw new ConflictError(`dispatchId ${item.dispatchId} already admitted with different content`, {
+      dispatchId: item.dispatchId,
+      existingItemId: existingItem.id,
+    });
+  }
+
   async admitSubmission(
     sessionId: string,
     threadId: string,
     item: QueueItem,
     opts?: { steer?: boolean; maxPending?: number },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
-    const { deduped, supersededItemIds } = await this.db.transaction(
-      async (tx): Promise<{ deduped: QueueItem | null; supersededItemIds: string[] }> => {
-        // Serialize admissions for this thread. The dispatchId dedup check,
-        // pending-cap count, and insert must all observe the same snapshot
-        // as a concurrent admission for the same thread — analogous to
-        // decision 6's event-seq translation, which locks a stable
-        // always-present row (there, engine_sessions; here, engine_threads,
-        // which saveThread guarantees exists before any queue item can be
-        // admitted) rather than a not-yet-existing queue-item row.
-        await tx.query("SELECT id FROM engine_threads WHERE id = $1 FOR UPDATE", [threadId]);
+    let deduped: QueueItem | null;
+    let supersededItemIds: string[];
+    try {
+      ({ deduped, supersededItemIds } = await this.db.transaction(
+        async (tx): Promise<{ deduped: QueueItem | null; supersededItemIds: string[] }> => {
+          // Serialize admissions for this thread. The dispatchId dedup check,
+          // pending-cap count, and insert must all observe the same snapshot
+          // as a concurrent admission for the same thread — analogous to
+          // decision 6's event-seq translation, which locks a stable
+          // always-present row (there, engine_sessions; here, engine_threads,
+          // which saveThread guarantees exists before any queue item can be
+          // admitted) rather than a not-yet-existing queue-item row.
+          await tx.query("SELECT id FROM engine_threads WHERE id = $1 FOR UPDATE", [threadId]);
 
-        if (item.dispatchId) {
-          const existing = await tx.query(
-            "SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2",
-            [sessionId, item.dispatchId],
-          );
-          const raw = existing.rows[0];
-          if (raw) {
-            const existingItem = queueItemRowToItem(rawToQueueItemRow(raw));
-            const sameContent = JSON.stringify(existingItem.content) === JSON.stringify(item.content);
-            if (sameContent) return { deduped: existingItem, supersededItemIds: [] };
-            throw new ConflictError(`dispatchId ${item.dispatchId} already admitted with different content`, {
-              dispatchId: item.dispatchId,
-              existingItemId: existingItem.id,
-            });
-          }
-        }
-
-        if (opts?.maxPending !== undefined) {
-          const countResult = await tx.query(PENDING_COUNT_SQL, [sessionId, threadId]);
-          const count = toNum(countResult.rows[0]?.count, "count");
-          if (count >= opts.maxPending) {
-            throw new PendingCapError(threadId, opts.maxPending);
-          }
-        }
-
-        await tx.query(INSERT_QUEUE_ITEM_SQL, queueItemInsertParams(sessionId, threadId, item));
-
-        const superseded: string[] = [];
-        if (opts?.steer) {
-          const candidates = await tx.query(STEER_CANDIDATES_SQL, [sessionId, threadId, item.id, item.createdAt]);
-          const ids = candidates.rows.map(rowId);
-          if (ids.length > 0) {
-            await tx.query(
-              `UPDATE engine_queue_items SET superseded_by_item_id = $1, updated_at = $2 WHERE id = ANY($3::text[])`,
-              [item.id, Date.now(), ids],
+          if (item.dispatchId) {
+            const existing = await tx.query(
+              "SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2",
+              [sessionId, item.dispatchId],
             );
-            superseded.push(...ids);
+            const raw = existing.rows[0];
+            if (raw) {
+              return { deduped: this.resolveDispatchDedup(raw, item), supersededItemIds: [] };
+            }
           }
+
+          if (opts?.maxPending !== undefined) {
+            const countResult = await tx.query(PENDING_COUNT_SQL, [sessionId, threadId]);
+            const count = toNum(countResult.rows[0]?.count, "count");
+            if (count >= opts.maxPending) {
+              throw new PendingCapError(threadId, opts.maxPending);
+            }
+          }
+
+          await tx.query(INSERT_QUEUE_ITEM_SQL, queueItemInsertParams(sessionId, threadId, item));
+
+          const superseded: string[] = [];
+          if (opts?.steer) {
+            const candidates = await tx.query(STEER_CANDIDATES_SQL, [sessionId, threadId, item.id, item.createdAt]);
+            const ids = candidates.rows.map(rowId);
+            if (ids.length > 0) {
+              await tx.query(
+                `UPDATE engine_queue_items SET superseded_by_item_id = $1, updated_at = $2 WHERE id = ANY($3::text[])`,
+                [item.id, Date.now(), ids],
+              );
+              superseded.push(...ids);
+            }
+          }
+          return { deduped: null, supersededItemIds: superseded };
+        },
+      ));
+    } catch (err) {
+      // Cross-thread dispatch-dedup race: this admission's own thread lock
+      // (engine_threads WHERE id = threadId) doesn't serialize against a
+      // concurrent admission on a *different* thread of the same session,
+      // so two admissions racing the same dispatchId on different threads
+      // can both pass the pre-check above and both attempt the insert. The
+      // `(session_id, dispatch_id)` partial unique index is what actually
+      // arbitrates the race; the loser here re-reads the winner's row and
+      // dedups against it idempotently — same outcome sqlite's whole-DB
+      // lock gave for free, just reached via the constraint instead of a
+      // pre-check when the two calls fall on the same thread.
+      if (item.dispatchId && isPgUniqueViolation(err)) {
+        const existing = await this.db.query(
+          "SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2",
+          [sessionId, item.dispatchId],
+        );
+        const raw = existing.rows[0];
+        if (raw) {
+          return { item: this.resolveDispatchDedup(raw, item), admitted: false, supersededItemIds: [] };
         }
-        return { deduped: null, supersededItemIds: superseded };
-      },
-    );
+      }
+      throw err;
+    }
 
     if (deduped) {
       return { item: deduped, admitted: false, supersededItemIds: [] };
