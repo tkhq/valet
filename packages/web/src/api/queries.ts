@@ -22,7 +22,6 @@ import type {
   ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
-  AuthMeResponse,
   PatchSessionResponse,
   PatchThreadResponse,
   ResolveDecisionRequest,
@@ -33,7 +32,6 @@ import { api } from "./client";
 // ── Query key factory ────────────────────────────────────────────────────
 
 export const qk = {
-  me: () => ["me"] as const,
   sessions: () => ["sessions"] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
@@ -47,10 +45,6 @@ export const qk = {
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
-
-export function useMe(opts?: UseQueryOptions<AuthMeResponse>) {
-  return useQuery<AuthMeResponse>({ queryKey: qk.me(), queryFn: () => api.me(), ...opts });
-}
 
 export function useSessions(opts?: UseQueryOptions<ListSessionsResponse>) {
   return useQuery<ListSessionsResponse>({

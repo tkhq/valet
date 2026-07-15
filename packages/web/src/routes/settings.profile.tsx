@@ -5,6 +5,7 @@ import { FieldRow } from "~/components/settings/field-row";
 import { EnableOrgCard } from "~/components/settings/enable-org-card";
 import { Avatar, AvatarFallback, AvatarImage, Button, Input, Spinner } from "~/components/primitives";
 import { useMe, useOrg, usePatchMe } from "~/api/settings";
+import { authClient } from "~/lib/auth-client";
 
 /**
  * `/settings/profile` — You · Profile. Name + avatar URL, one Save enabled
@@ -44,6 +45,11 @@ export function ProfilePage() {
 
   const showEnableCard =
     orgQ.data?.callerRole === "admin" && orgQ.data.features.organizations === false;
+
+  async function signOut() {
+    await authClient.signOut();
+    window.location.href = "/login";
+  }
 
   return (
     <div className="space-y-10">
@@ -98,6 +104,14 @@ export function ProfilePage() {
             </div>
           </>
         )}
+      </Section>
+
+      <Section title="Sign out" description="Sign out of Valet on this device.">
+        <div className="py-4">
+          <Button type="button" variant="secondary" onClick={signOut}>
+            Sign out
+          </Button>
+        </div>
       </Section>
 
       {showEnableCard && <EnableOrgCard />}

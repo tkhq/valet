@@ -27,10 +27,6 @@ export interface ApiError {
 
 // ── REST: auth ────────────────────────────────────────────────────────────
 
-export interface AuthMeResponse {
-  user: User;
-}
-
 /**
  * `GET /api/auth-config` — unauthenticated. Drives `/login`/`/signup`
  * control rendering (auth-v2 design). `stub: true` means no `AuthConfig`
@@ -794,11 +790,12 @@ export interface DeleteCredentialResponse {
 
 // ── REST: me + models (split-settings design) ─────────────────────────────
 //
-// `/api/me` is the settings-shell's per-user profile surface — distinct from
-// `/api/auth/me` (`AuthMeResponse`, session-probe shape). `orgRole` comes
-// from `org_members.role` (falls back to `"member"` if the caller has no
-// org-membership row); `defaultModel` feeds `EngineHost`'s model override
-// seam and is validated against `/api/models`'s id set on PATCH.
+// `/api/me` is the settings-shell's per-user profile surface — distinct
+// from better-auth's own session-probe endpoints under `/api/auth/*`.
+// `orgRole` comes from `org_members.role` (falls back to `"member"` if the
+// caller has no org-membership row); `defaultModel` feeds `EngineHost`'s
+// model override seam and is validated against `/api/models`'s id set on
+// PATCH.
 
 export interface MeResponse {
   id: string;

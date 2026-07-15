@@ -21,6 +21,8 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tanstack/react-query": "^5.60.0",
     "@tanstack/react-router": "^1.151.0",
+    "@better-auth/sso": "1.6.23",
+    "better-auth": "1.6.23",
     "@valet/api": "workspace:*",
     "@valet/workflow": "workspace:*",
     "@xyflow/react": "^12",

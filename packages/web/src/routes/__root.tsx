@@ -57,8 +57,22 @@ function sidebarForPath(pathname: string) {
   return null;
 }
 
+/** `/login`, `/signup` — public, unauthenticated. They render standalone
+ * (no `TopNav`/`AppShell` chrome, which assumes a signed-in session) so an
+ * unauthenticated visitor never sees app nav before they can sign in. */
+const PUBLIC_ROUTES = new Set(["/login", "/signup"]);
+
 function RootLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+
+  if (PUBLIC_ROUTES.has(pathname)) {
+    return (
+      <TooltipProvider>
+        <Outlet />
+      </TooltipProvider>
+    );
+  }
+
   return (
     <TooltipProvider>
       <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)}>

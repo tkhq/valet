@@ -8,6 +8,7 @@
  */
 import type {
   AddTeamMemberRequest,
+  AuthConfigResponse,
   CancelWorkflowRunResponse,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -38,7 +39,6 @@ import type {
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
-  AuthMeResponse,
   MeResponse,
   OrgMembersResponse,
   OrgResponse,
@@ -80,6 +80,48 @@ class ApiError extends Error {
   }
 }
 
+// `GET /api/auth-config` is unauthenticated and doesn't change without a
+// server restart — fetched once and cached, shared by `useAuthConfig`
+// (login/signup control rendering) and the 401 guard below.
+let cachedAuthConfig: AuthConfigResponse | null = null;
+let authConfigPromise: Promise<AuthConfigResponse> | null = null;
+
+async function fetchAuthConfig(): Promise<AuthConfigResponse> {
+  if (cachedAuthConfig) return cachedAuthConfig;
+  if (!authConfigPromise) {
+    authConfigPromise = fetch(`${BASE}/auth-config`)
+      .then((res) => res.json() as Promise<AuthConfigResponse>)
+      .then((cfg) => {
+        cachedAuthConfig = cfg;
+        return cfg;
+      })
+      .catch((err) => {
+        authConfigPromise = null;
+        throw err;
+      });
+  }
+  return authConfigPromise;
+}
+
+const AUTH_ROUTES = new Set(["/login", "/signup"]);
+let redirectingToLogin = false;
+
+/**
+ * Central 401 → `/login` redirect. `stub: true` (dev, `VALET_LOCAL_AUTH=1`)
+ * never redirects — behavior there is unchanged. Guarded by
+ * `redirectingToLogin` so a burst of concurrent 401s (several in-flight
+ * queries after a session expires) triggers exactly one navigation, not a
+ * per-request storm.
+ */
+async function maybeRedirectToLogin(): Promise<void> {
+  if (redirectingToLogin) return;
+  if (AUTH_ROUTES.has(window.location.pathname)) return;
+  const cfg = await fetchAuthConfig();
+  if (cfg.stub) return;
+  redirectingToLogin = true;
+  window.location.href = "/login";
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -92,6 +134,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     try {
       payload = JSON.parse(text);
     } catch {}
+    if (res.status === 401 && path !== "/auth-config") {
+      void maybeRedirectToLogin();
+    }
     throw new ApiError(res.status, `${method} ${path} → ${res.status}`, payload);
   }
   if (res.status === 204) return undefined as T;
@@ -100,7 +145,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
   // auth
-  me: () => request<AuthMeResponse>("GET", "/auth/me"),
+  getAuthConfig: () => fetchAuthConfig(),
 
   // sessions
   listSessions: () => request<ListSessionsResponse>("GET", "/sessions"),
