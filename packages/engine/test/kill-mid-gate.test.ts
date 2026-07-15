@@ -4,14 +4,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import {
   fauxAssistantMessage,
   registerFauxProvider,
   Type,
 } from "@mariozechner/pi-ai";
-import { SqliteSessionStore, SqliteEventStream } from "@valet/store-sqlite";
+import { PgSessionStore, PgEventStream, pgDbFromPglite } from "@valet/store-postgres";
 import {
   Engine,
   VirtualSandboxProvider,
@@ -57,12 +56,14 @@ describe("kill-mid-gate recovery (cross-process SIGKILL, roadmap exit criterion)
     "SIGKILL while a gate is pending → restart re-arms, resolve replays the turn to completion, durable log holds one pending + one resolved event",
     async () => {
       const dir = await mkdtemp(join(tmpdir(), "valet-kill-mid-gate-"));
-      const dbPath = join(dir, "engine.db");
+      // PGlite wants a directory to persist to, not a single file — unlike the
+      // sqlite predecessor's single `engine.db` path.
+      const dataDir = join(dir, "pgdata");
 
       // ── Phase 1: run the turn in a child, then SIGKILL it while the gate is pending ──
       const child: ChildProcess = spawn(
         process.execPath,
-        ["--import", "tsx", CHILD, dbPath],
+        ["--import", "tsx", CHILD, dataDir],
         { cwd: ENGINE_ROOT, stdio: ["ignore", "pipe", "pipe"] },
       );
 
@@ -99,9 +100,10 @@ describe("kill-mid-gate recovery (cross-process SIGKILL, roadmap exit criterion)
         // the model concludes the turn.
         faux.setResponses([fauxAssistantMessage("all done after restart")]);
 
-        const sqlite = new Database(dbPath);
-        const store = new SqliteSessionStore(drizzle(sqlite));
-        const stream = new SqliteEventStream(sqlite);
+        const pglite = await PGlite.create(dataDir);
+        const pgdb = pgDbFromPglite(pglite);
+        const store = new PgSessionStore(pgdb);
+        const stream = new PgEventStream(pgdb);
         const engine = new Engine({
           providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() },
         });
@@ -176,7 +178,7 @@ describe("kill-mid-gate recovery (cross-process SIGKILL, roadmap exit criterion)
         expect(seqs.length).toBeGreaterThan(0);
         expect(seqs).toEqual(seqs.map((_, i) => i + 1));
 
-        sqlite.close();
+        await pglite.close();
         faux.unregister();
       } finally {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");

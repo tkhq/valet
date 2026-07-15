@@ -2,8 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@mariozechner/pi-ai";
 import { Type } from "typebox";
 import {
@@ -17,7 +16,7 @@ import {
   type QueueItem,
   type SessionStore,
 } from "../src/index.js";
-import { SqliteSessionStore, applyEngineMigrations } from "@valet/store-sqlite";
+import { PgSessionStore, applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 
 let seedSeq = 1;
 function seedItem(threadId: string, id: string): QueueItem {
@@ -415,11 +414,14 @@ describe("Thread.awaitResult", () => {
     faux.setResponses([fauxAssistantMessage("resumed-done")]);
 
     const dir = mkdtempSync(join(tmpdir(), "valet-await-result-"));
-    const dbPath = join(dir, "engine.db");
+    // PGlite wants a directory to persist to, not a single file — unlike the
+    // sqlite predecessor's single `engine.db` path.
+    const dataDir = join(dir, "pgdata");
 
-    const sqliteA = new Database(dbPath);
-    applyEngineMigrations(sqliteA);
-    const storeA = new SqliteSessionStore(drizzle(sqliteA));
+    const pgliteA = await PGlite.create(dataDir);
+    const pgdbA = pgDbFromPglite(pgliteA);
+    await applyEngineMigrations(pgdbA);
+    const storeA = new PgSessionStore(pgdbA);
     const busA = new InMemoryEventStream();
     const engineA = new Engine({
       providers: { store: storeA, stream: busA, sandboxProvider: new VirtualSandboxProvider() },
@@ -437,10 +439,10 @@ describe("Thread.awaitResult", () => {
     await waitFor(async () => (await storeA.getQueueItem(sessionA.id, r1.queueItemId))?.status === "settled");
     const resultFromA = await sessionA.thread().awaitResult(r1.queueItemId);
 
-    sqliteA.close();
+    await pgliteA.close();
 
-    const sqliteB = new Database(dbPath);
-    const storeB = new SqliteSessionStore(drizzle(sqliteB));
+    const pgliteB = await PGlite.create(dataDir);
+    const storeB = new PgSessionStore(pgDbFromPglite(pgliteB));
     const busB = new InMemoryEventStream();
     const engineB = new Engine({
       providers: { store: storeB, stream: busB, sandboxProvider: new VirtualSandboxProvider() },
@@ -464,7 +466,7 @@ describe("Thread.awaitResult", () => {
       text: "resumed-done",
     });
 
-    sqliteB.close();
+    await pgliteB.close();
     faux.unregister();
   });
 });

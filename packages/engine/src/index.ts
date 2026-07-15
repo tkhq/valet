@@ -60,7 +60,7 @@ export {
   CONTAINER_DEATH_PATTERN,
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
-// SqliteSessionStore lives in @valet/store-sqlite.
+// PgSessionStore lives in @valet/store-postgres.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
 export {

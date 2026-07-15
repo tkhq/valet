@@ -1,32 +1,32 @@
 /**
  * Child entrypoint for the kill-mid-turn recovery proof (kill-mid-turn.test.ts).
  *
- * Runs a real Engine over a SqliteSessionStore on `dbPath`, with a faux
- * provider scripted to emit TWO sequential `slow_marker` tool calls. The tool
- * appends `executed:<tag>` to `markerPath` and then sleeps 5s — long enough for
- * the parent test to SIGKILL this process while the FIRST tool call is still
- * sleeping. At that point the store durably holds an assistant entry with a
- * `tool_call` part stuck at status "running" (the crash point reconciliation
- * must repair to an error without re-executing).
+ * Runs a real Engine over a PgSessionStore (PGlite, file-backed data dir) on
+ * `dataDir`, with a faux provider scripted to emit TWO sequential
+ * `slow_marker` tool calls. The tool appends `executed:<tag>` to `markerPath`
+ * and then sleeps 5s — long enough for the parent test to SIGKILL this
+ * process while the FIRST tool call is still sleeping. At that point the
+ * store durably holds an assistant entry with a `tool_call` part stuck at
+ * status "running" (the crash point reconciliation must repair to an error
+ * without re-executing).
  *
  * The faux provider is registered here because pi-ai's provider registry is
  * per-process; the parent registers its own (same provider NAME so the model id
  * resolves) scripted for the post-repair continuation.
  *
- * argv: [dbPath, markerPath]
+ * argv: [dataDir, markerPath]
  * Prints `READY:<queueItemId>` once, after submitPrompt, then never exits on its
  * own — the parent kills it.
  */
 import { appendFile } from "node:fs/promises";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import {
   fauxAssistantMessage,
   fauxToolCall,
   registerFauxProvider,
   Type,
 } from "@mariozechner/pi-ai";
-import { SqliteSessionStore, applyEngineMigrations } from "@valet/store-sqlite";
+import { PgSessionStore, applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import {
   Engine,
   InMemoryEventStream,
@@ -34,16 +34,17 @@ import {
   type ToolDef,
 } from "../src/index.js";
 
-const [dbPath, markerPath] = process.argv.slice(2);
-if (!dbPath || !markerPath) {
-  process.stderr.write("usage: kill-child.ts <dbPath> <markerPath>\n");
+const [dataDir, markerPath] = process.argv.slice(2);
+if (!dataDir || !markerPath) {
+  process.stderr.write("usage: kill-child.ts <dataDir> <markerPath>\n");
   process.exit(2);
 }
 
 async function main(): Promise<void> {
-  const sqlite = new Database(dbPath);
-  applyEngineMigrations(sqlite);
-  const store = new SqliteSessionStore(drizzle(sqlite));
+  const pglite = await PGlite.create(dataDir);
+  const pgdb = pgDbFromPglite(pglite);
+  await applyEngineMigrations(pgdb);
+  const store = new PgSessionStore(pgdb);
   const bus = new InMemoryEventStream();
   const engine = new Engine({
     providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },

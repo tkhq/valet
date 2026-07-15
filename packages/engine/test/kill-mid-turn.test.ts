@@ -4,14 +4,13 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import {
   fauxAssistantMessage,
   registerFauxProvider,
   Type,
 } from "@mariozechner/pi-ai";
-import { SqliteSessionStore } from "@valet/store-sqlite";
+import { PgSessionStore, pgDbFromPglite } from "@valet/store-postgres";
 import {
   Engine,
   InMemoryEventStream,
@@ -61,13 +60,15 @@ describe("kill-mid-turn recovery (cross-process SIGKILL, exit criterion)", () =>
     "SIGKILL mid-tool → restart repairs the dangling tool_call to error, completes, no duplicate side effect",
     async () => {
       const dir = await mkdtemp(join(tmpdir(), "valet-kill-mid-turn-"));
-      const dbPath = join(dir, "engine.db");
+      // PGlite wants a directory to persist to, not a single file — unlike the
+      // sqlite predecessor's single `engine.db` path.
+      const dataDir = join(dir, "pgdata");
       const markerPath = join(dir, "marker.log");
 
       // ── Phase 1: run the turn in a child process, then SIGKILL it mid-tool ──
       const child: ChildProcess = spawn(
         process.execPath,
-        ["--import", "tsx", CHILD, dbPath, markerPath],
+        ["--import", "tsx", CHILD, dataDir, markerPath],
         { cwd: ENGINE_ROOT, stdio: ["ignore", "pipe", "pipe"] },
       );
 
@@ -127,8 +128,8 @@ describe("kill-mid-turn recovery (cross-process SIGKILL, exit criterion)", () =>
           },
         };
 
-        const sqlite = new Database(dbPath);
-        const store = new SqliteSessionStore(drizzle(sqlite));
+        const pglite = await PGlite.create(dataDir);
+        const store = new PgSessionStore(pgDbFromPglite(pglite));
         const bus = new InMemoryEventStream();
         const engine = new Engine({
           providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
@@ -181,9 +182,9 @@ describe("kill-mid-turn recovery (cross-process SIGKILL, exit criterion)", () =>
         // call-2 was never emitted by the model, so no such part exists.
         expect(parts.some((p) => p.type === "tool_call" && p.callId === "call-2")).toBe(false);
 
-        sqlite.close();
+        await pglite.close();
         faux.unregister();
-        await expect(fileExists(dbPath)).resolves.toBe(true);
+        await expect(fileExists(dataDir)).resolves.toBe(true);
       } finally {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       }

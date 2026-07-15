@@ -1,26 +1,26 @@
 /**
  * Child entrypoint for the kill-mid-gate recovery proof (kill-mid-gate.test.ts).
  *
- * Runs a real Engine over a SqliteSessionStore + SqliteEventStream on `dbPath`,
- * with a faux provider scripted to emit ONE `do_thing` tool call. The tool calls
- * `ctx.requestDecision` (approval, resumeKey "kg"), which opens a durable
- * decision gate and suspends the turn — the submission durably parks in
- * `blocked_on_decision_gate` with a persisted suspended-turn checkpoint and a
- * pending gate row.
+ * Runs a real Engine over a PgSessionStore + PgEventStream (PGlite, file-backed
+ * data dir) on `dataDir`, with a faux provider scripted to emit ONE `do_thing`
+ * tool call. The tool calls `ctx.requestDecision` (approval, resumeKey "kg"),
+ * which opens a durable decision gate and suspends the turn — the submission
+ * durably parks in `blocked_on_decision_gate` with a persisted suspended-turn
+ * checkpoint and a pending gate row.
  *
  * Once the store shows the gate `pending` AND the item `blocked_on_decision_gate`,
  * the child prints `READY:<gateId>` once, then hangs. The parent SIGKILLs it,
- * boots a fresh Engine over the same db (reconciliation re-arms the gate),
- * resolves the gate, and asserts the continuation replays to completion.
+ * boots a fresh Engine over the same data dir (reconciliation re-arms the
+ * gate), resolves the gate, and asserts the continuation replays to
+ * completion.
  *
  * The faux provider is registered here because pi-ai's provider registry is
  * per-process; the parent registers its own (same provider NAME so the persisted
  * model id resolves) scripted for the post-resolve continuation.
  *
- * argv: [dbPath]
+ * argv: [dataDir]
  */
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -28,19 +28,20 @@ import {
   Type,
 } from "@mariozechner/pi-ai";
 import {
-  SqliteSessionStore,
-  SqliteEventStream,
+  PgSessionStore,
+  PgEventStream,
   applyEngineMigrations,
-} from "@valet/store-sqlite";
+  pgDbFromPglite,
+} from "@valet/store-postgres";
 import {
   Engine,
   VirtualSandboxProvider,
   type ToolDef,
 } from "../src/index.js";
 
-const [dbPath] = process.argv.slice(2);
-if (!dbPath) {
-  process.stderr.write("usage: kill-gate-child.ts <dbPath>\n");
+const [dataDir] = process.argv.slice(2);
+if (!dataDir) {
+  process.stderr.write("usage: kill-gate-child.ts <dataDir>\n");
   process.exit(2);
 }
 
@@ -62,10 +63,11 @@ const approvalTool: ToolDef<typeof approvalParams> = {
 const SESSION_ID = "kill-gate-sess";
 
 async function main(): Promise<void> {
-  const sqlite = new Database(dbPath);
-  applyEngineMigrations(sqlite);
-  const store = new SqliteSessionStore(drizzle(sqlite));
-  const stream = new SqliteEventStream(sqlite);
+  const pglite = await PGlite.create(dataDir);
+  const pgdb = pgDbFromPglite(pglite);
+  await applyEngineMigrations(pgdb);
+  const store = new PgSessionStore(pgdb);
+  const stream = new PgEventStream(pgdb);
   const engine = new Engine({
     providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() },
   });
