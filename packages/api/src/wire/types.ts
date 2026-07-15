@@ -799,3 +799,52 @@ export interface ModelInfo {
 export interface ListModelsResponse {
   models: ModelInfo[];
 }
+
+// ── REST: org (split-settings design) ──────────────────────────────────
+//
+// Singular `/api/org` shape — single-org is deliberate (spec decision 7);
+// `orgId` always resolves from the caller's own membership. `GET` is
+// member-readable; `PATCH` (incl. the `features.organizations` gate toggle
+// itself) is org-admin only. The members routes additionally require the
+// gate to be on — off => 404 `{error:"organizations not enabled"}`.
+
+export interface OrgFeaturesWire {
+  organizations: boolean;
+}
+
+export interface OrgResponse {
+  id: string;
+  name: string;
+  createdAt: number;
+  features: OrgFeaturesWire;
+  callerRole: "admin" | "member";
+}
+
+/** Whitelisted fields only — unknown top-level keys 400. */
+export interface PatchOrgRequest {
+  name?: string;
+  features?: Partial<OrgFeaturesWire>;
+}
+
+export type PatchOrgResponse = OrgResponse;
+
+export interface OrgMemberWire {
+  userId: string;
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+  role: "admin" | "member";
+  joinedAt: number;
+}
+
+export interface OrgMembersResponse {
+  members: OrgMemberWire[];
+}
+
+export interface PatchOrgMemberRequest {
+  role: "admin" | "member";
+}
+
+export interface PatchOrgMemberResponse {
+  ok: true;
+}
