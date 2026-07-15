@@ -390,6 +390,28 @@ export async function dispatchWebhookForTrigger(
 
 // ─── Pull Request Webhook Handler ───────────────────────────────────────────
 
+/**
+ * Pick the single session credited with authoring a merged PR when several
+ * unlinked sessions share its head branch (continuation / multiplayer work on
+ * one branch). Choosing the session with the most commits on the branch ties
+ * the pr_merged value signal to the biggest contributor; the session-id
+ * tie-break keeps the choice deterministic, so GitHub redeliveries and
+ * concurrent deliveries pick the same winner and dedupe cleanly. Returns
+ * undefined when there are no candidates.
+ */
+export function pickBranchAuthorSessionId(
+  candidates: Array<{ session_id: string; commit_count: number | null }>,
+): string | undefined {
+  let best: { sessionId: string; commits: number } | undefined;
+  for (const c of candidates) {
+    const commits = c.commit_count ?? 0;
+    if (!best || commits > best.commits || (commits === best.commits && c.session_id < best.sessionId)) {
+      best = { sessionId: c.session_id, commits };
+    }
+  }
+  return best?.sessionId;
+}
+
 export async function handlePullRequestWebhook(env: Env, payload: any): Promise<void> {
   const action = payload.action;
   const pr = payload.pull_request;
@@ -412,16 +434,25 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
   }));
 
   // A session that just opened this PR from its sandbox is not linked yet
-  // (nothing stamps pr_number at creation time) — link it via its head
-  // branch. Skip rows already tied to a different PR.
+  // (nothing stamps pr_number at creation time) — link it via its head branch.
+  // Several sessions can share one branch (continuation / multiplayer work), so
+  // link exactly one as the author — the biggest contributor — and only when no
+  // session is already linked to this PR by pr_number. The other co-branch
+  // sessions are left untouched: linking them would multiply the pr_merged value
+  // signal and inflate merged-PR counts (getAdoptionMetrics counts prState=
+  // 'merged' rows), and they are co-workers, not this PR's author. Rows already
+  // tied to a different PR are skipped.
+  const hasLinkedAuthor = targets.some((t) => t.authored);
   const headBranch: string | undefined = pr.head?.ref;
-  if (headBranch) {
+  if (headBranch && !hasLinkedAuthor) {
     const seen = new Set(targets.map((t) => t.sessionId));
     const branchMatches = await db.findSessionsByRepoBranch(appDb, repoFullName, headBranch);
-    for (const bm of branchMatches.results ?? []) {
-      if (!seen.has(bm.session_id) && bm.pr_number == null) {
-        targets.push({ sessionId: bm.session_id, authored: true });
-      }
+    const candidates = (branchMatches.results ?? []).filter(
+      (bm) => !seen.has(bm.session_id) && bm.pr_number == null,
+    );
+    const authorId = pickBranchAuthorSessionId(candidates);
+    if (authorId) {
+      targets.push({ sessionId: authorId, authored: true });
     }
   }
 

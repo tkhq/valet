@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { canonicalizeRawQuery, handleGenericWebhook, handlePullRequestWebhook } from './webhooks.js';
+import { canonicalizeRawQuery, handleGenericWebhook, handlePullRequestWebhook, pickBranchAuthorSessionId } from './webhooks.js';
 import type { Env } from '../env.js';
 import { createTestDb } from '../test-utils/db.js';
 import { makeD1Adapter } from '../test-utils/d1.js';
@@ -275,5 +275,104 @@ describe('handlePullRequestWebhook — session.outcome { pr_merged } out-of-band
     });
 
     expect(outcomeRows(sqlite)).toHaveLength(0);
+  });
+
+  it('credits exactly one session — the biggest contributor — when several share the merged PR head branch', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    // Two sessions worked the same branch; neither is linked to the PR by
+    // pr_number yet. Only the higher-commit session gets the pr_merged signal.
+    await seedSession(appDb, { sessionId: 'sess-minor', git: { branch: 'feature/x', commitCount: 2 } });
+    await seedSession(appDb, { sessionId: 'sess-major', git: { branch: 'feature/x', commitCount: 7 } });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    const rows = outcomeRows(sqlite);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session_id).toBe('sess-major');
+  });
+
+  it('leaves losing co-branch sessions untouched — not marked merged, not stamped with pr_number', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    // Only the winner may be linked. A loser marked prState='merged' without a
+    // pr_number would inflate getAdoptionMetrics.totalPRsMerged (which gates on
+    // prState only) above totalPRsCreated (which gates on pr_number).
+    await seedSession(appDb, { sessionId: 'sess-minor', git: { branch: 'feature/x', commitCount: 2 } });
+    await seedSession(appDb, { sessionId: 'sess-major', git: { branch: 'feature/x', commitCount: 7 } });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    const rows = sqlite
+      .prepare('SELECT session_id, pr_state, pr_number FROM session_git_state')
+      .all() as Array<{ session_id: string; pr_state: string | null; pr_number: number | null }>;
+    const major = rows.find((r) => r.session_id === 'sess-major')!;
+    const minor = rows.find((r) => r.session_id === 'sess-minor')!;
+    expect(major.pr_state).toBe('merged');
+    expect(major.pr_number).toBe(PR);
+    expect(minor.pr_state).not.toBe('merged');
+    expect(minor.pr_number).toBeNull();
+  });
+
+  it('breaks commit-count ties deterministically by session id', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    await seedSession(appDb, { sessionId: 'sess-bbb', git: { branch: 'feature/x', commitCount: 3 } });
+    await seedSession(appDb, { sessionId: 'sess-aaa', git: { branch: 'feature/x', commitCount: 3 } });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    const rows = outcomeRows(sqlite);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session_id).toBe('sess-aaa');
+  });
+
+  it('credits the pr_number-linked author, not a branch co-worker sharing the head branch', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    // The author is already linked by pr_number; a co-worker shares the branch
+    // but is unlinked (and has more commits). Only the linked author is credited.
+    await seedSession(appDb, { sessionId: 'sess-author', git: { prNumber: PR, branch: 'feature/x', commitCount: 1 } });
+    await seedSession(appDb, { sessionId: 'sess-coworker', git: { branch: 'feature/x', commitCount: 9 } });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    const rows = outcomeRows(sqlite);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session_id).toBe('sess-author');
+  });
+
+  it('stays idempotent for a branch-credited author across redeliveries (winner is stamped, never re-picked)', async () => {
+    const { env, appDb, sqlite } = makeEnv();
+    await seedSession(appDb, { sessionId: 'sess-minor', git: { branch: 'feature/x', commitCount: 2 } });
+    await seedSession(appDb, { sessionId: 'sess-major', git: { branch: 'feature/x', commitCount: 7 } });
+
+    await handlePullRequestWebhook(env, mergedPayload());
+    await handlePullRequestWebhook(env, mergedPayload());
+
+    const rows = outcomeRows(sqlite);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session_id).toBe('sess-major');
+  });
+});
+
+describe('pickBranchAuthorSessionId — deterministic single-author selection', () => {
+  it('returns undefined when there are no candidates', () => {
+    expect(pickBranchAuthorSessionId([])).toBeUndefined();
+  });
+
+  it('picks the highest commit_count', () => {
+    expect(
+      pickBranchAuthorSessionId([
+        { session_id: 'a', commit_count: 2 },
+        { session_id: 'b', commit_count: 5 },
+        { session_id: 'c', commit_count: 1 },
+      ]),
+    ).toBe('b');
+  });
+
+  it('treats null commit_count as zero and breaks ties by session id', () => {
+    expect(
+      pickBranchAuthorSessionId([
+        { session_id: 'z', commit_count: null },
+        { session_id: 'm', commit_count: 0 },
+      ]),
+    ).toBe('m');
   });
 });

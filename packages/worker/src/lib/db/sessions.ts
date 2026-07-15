@@ -554,7 +554,11 @@ export async function getAdoptionMetrics(db: AppDb, periodDays: number): Promise
   const result = await db
     .select({
       totalPrsCreated: sql<number>`COUNT(CASE WHEN ${sessionGitState.prNumber} IS NOT NULL AND ${sessionGitState.agentAuthored} = 1 THEN 1 END)`,
-      totalPrsMerged: sql<number>`COUNT(CASE WHEN ${sessionGitState.prState} = 'merged' AND ${sessionGitState.agentAuthored} = 1 THEN 1 END)`,
+      // Gate merged on pr_number too, matching totalPrsCreated: a row can carry
+      // prState='merged' without a pr_number (a session sharing a merged PR's
+      // branch but not linked to it). Counting those would push totalPrsMerged
+      // above totalPrsCreated and mergeRate past 100%.
+      totalPrsMerged: sql<number>`COUNT(CASE WHEN ${sessionGitState.prNumber} IS NOT NULL AND ${sessionGitState.prState} = 'merged' AND ${sessionGitState.agentAuthored} = 1 THEN 1 END)`,
       totalCommits: sql<number>`COALESCE(SUM(${sessionGitState.commitCount}), 0)`,
     })
     .from(sessionGitState)
