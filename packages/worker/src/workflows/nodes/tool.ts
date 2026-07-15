@@ -62,8 +62,11 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
 
   // 1. Preflight reads (disabled-action + action definition) — cached
   // so a replay returns the same risk level and disabled state without
-  // re-reading D1 or re-listing integration actions.
-  const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, async () => {
+  // re-reading D1 or re-listing integration actions. NO_RETRY: every
+  // throw here is deterministic (action disabled, no package, action
+  // not found, no credentials); CF's default 5x backoff would silently
+  // stall the node for minutes before writing `failed`.
+  const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, { retries: { ...NO_RETRY } }, async () => {
     if (await isActionDisabled(db, node.service, node.action)) {
       throw new Error(`tool node "${node.id}": action ${node.service}.${node.action} is disabled`);
     }
