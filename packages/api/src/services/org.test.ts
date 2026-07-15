@@ -15,7 +15,7 @@ import {
 
 function seedUser(db: AppDb, id: string, orgId: string, role: "admin" | "member", createdAt: number) {
   db.insert(users)
-    .values({ id, email: `${id}@x.test`, name: id, role: "member", createdAt })
+    .values({ id, email: `${id}@x.test`, name: id, role: "member", createdAt: new Date(createdAt) })
     .run();
   db.insert(orgMembers).values({ orgId, userId: id, role, createdAt }).run();
 }

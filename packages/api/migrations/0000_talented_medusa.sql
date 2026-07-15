@@ -176,17 +176,180 @@ CREATE TABLE `session_threads` (
 );
 --> statement-breakpoint
 CREATE INDEX `session_threads_session` ON `session_threads` (`session_id`);--> statement-breakpoint
-CREATE TABLE `users` (
+CREATE TABLE `user` (
 	`id` text PRIMARY KEY NOT NULL,
+	`name` text NOT NULL,
 	`email` text NOT NULL,
-	`name` text,
-	`avatar_url` text,
-	`role` text NOT NULL,
-	`default_model` text,
-	`created_at` integer NOT NULL
+	`email_verified` integer DEFAULT false NOT NULL,
+	`image` text,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`role` text DEFAULT 'member' NOT NULL,
+	`default_model` text
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);--> statement-breakpoint
+CREATE UNIQUE INDEX `user_email_unique` ON `user` (`email`);--> statement-breakpoint
+CREATE TABLE `session` (
+	`id` text PRIMARY KEY NOT NULL,
+	`expires_at` integer NOT NULL,
+	`token` text NOT NULL,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`ip_address` text,
+	`user_agent` text,
+	`user_id` text NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `session_token_unique` ON `session` (`token`);--> statement-breakpoint
+CREATE INDEX `session_userId_idx` ON `session` (`user_id`);--> statement-breakpoint
+CREATE TABLE `account` (
+	`id` text PRIMARY KEY NOT NULL,
+	`account_id` text NOT NULL,
+	`provider_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`access_token` text,
+	`refresh_token` text,
+	`id_token` text,
+	`access_token_expires_at` integer,
+	`refresh_token_expires_at` integer,
+	`scope` text,
+	`password` text,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `account_userId_idx` ON `account` (`user_id`);--> statement-breakpoint
+CREATE TABLE `verification` (
+	`id` text PRIMARY KEY NOT NULL,
+	`identifier` text NOT NULL,
+	`value` text NOT NULL,
+	`expires_at` integer NOT NULL,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX `verification_identifier_idx` ON `verification` (`identifier`);--> statement-breakpoint
+CREATE TABLE `sso_provider` (
+	`id` text PRIMARY KEY NOT NULL,
+	`issuer` text NOT NULL,
+	`oidc_config` text,
+	`saml_config` text,
+	`user_id` text,
+	`provider_id` text NOT NULL,
+	`organization_id` text,
+	`domain` text NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `sso_provider_providerId_unique` ON `sso_provider` (`provider_id`);--> statement-breakpoint
+CREATE TABLE `apikey` (
+	`id` text PRIMARY KEY NOT NULL,
+	`config_id` text DEFAULT 'default' NOT NULL,
+	`name` text,
+	`start` text,
+	`reference_id` text NOT NULL,
+	`prefix` text,
+	`key` text NOT NULL,
+	`refill_interval` integer,
+	`refill_amount` integer,
+	`last_refill_at` integer,
+	`enabled` integer DEFAULT true,
+	`rate_limit_enabled` integer DEFAULT true,
+	`rate_limit_time_window` integer DEFAULT 86400000,
+	`rate_limit_max` integer DEFAULT 10,
+	`request_count` integer DEFAULT 0,
+	`remaining` integer,
+	`last_request` integer,
+	`expires_at` integer,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	`permissions` text,
+	`metadata` text
+);
+--> statement-breakpoint
+CREATE INDEX `apikey_configId_idx` ON `apikey` (`config_id`);--> statement-breakpoint
+CREATE INDEX `apikey_referenceId_idx` ON `apikey` (`reference_id`);--> statement-breakpoint
+CREATE INDEX `apikey_key_idx` ON `apikey` (`key`);--> statement-breakpoint
+CREATE TABLE `oauth_application` (
+	`id` text PRIMARY KEY NOT NULL,
+	`name` text,
+	`icon` text,
+	`metadata` text,
+	`client_id` text,
+	`client_secret` text,
+	`redirect_urls` text,
+	`type` text,
+	`disabled` integer DEFAULT false,
+	`user_id` text,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `oauth_application_clientId_unique` ON `oauth_application` (`client_id`);--> statement-breakpoint
+CREATE INDEX `oauthApplication_userId_idx` ON `oauth_application` (`user_id`);--> statement-breakpoint
+CREATE TABLE `oauth_access_token` (
+	`id` text PRIMARY KEY NOT NULL,
+	`access_token` text,
+	`refresh_token` text,
+	`access_token_expires_at` integer,
+	`refresh_token_expires_at` integer,
+	`client_id` text,
+	`user_id` text,
+	`scopes` text,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`client_id`) REFERENCES `oauth_application`(`client_id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `oauth_access_token_accessToken_unique` ON `oauth_access_token` (`access_token`);--> statement-breakpoint
+CREATE UNIQUE INDEX `oauth_access_token_refreshToken_unique` ON `oauth_access_token` (`refresh_token`);--> statement-breakpoint
+CREATE INDEX `oauthAccessToken_clientId_idx` ON `oauth_access_token` (`client_id`);--> statement-breakpoint
+CREATE INDEX `oauthAccessToken_userId_idx` ON `oauth_access_token` (`user_id`);--> statement-breakpoint
+CREATE TABLE `oauth_consent` (
+	`id` text PRIMARY KEY NOT NULL,
+	`client_id` text,
+	`user_id` text,
+	`scopes` text,
+	`created_at` integer,
+	`updated_at` integer,
+	`consent_given` integer,
+	FOREIGN KEY (`client_id`) REFERENCES `oauth_application`(`client_id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `oauthConsent_clientId_idx` ON `oauth_consent` (`client_id`);--> statement-breakpoint
+CREATE INDEX `oauthConsent_userId_idx` ON `oauth_consent` (`user_id`);--> statement-breakpoint
+CREATE TABLE `invites` (
+	`id` text PRIMARY KEY NOT NULL,
+	`code_hash` text NOT NULL,
+	`email` text,
+	`role` text DEFAULT 'member' NOT NULL,
+	`created_by` text NOT NULL,
+	`created_at` integer NOT NULL,
+	`expires_at` integer NOT NULL,
+	`accepted_by` text,
+	`accepted_at` integer
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `invites_code_hash_unique` ON `invites` (`code_hash`);--> statement-breakpoint
+CREATE INDEX `idx_invites_email` ON `invites` (`email`);--> statement-breakpoint
+CREATE TABLE `sandbox_tokens` (
+	`id` text PRIMARY KEY NOT NULL,
+	`token_hash` text NOT NULL,
+	`session_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`org_id` text NOT NULL,
+	`created_at` integer NOT NULL,
+	`expires_at` integer NOT NULL,
+	`revoked_at` integer
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `sandbox_tokens_token_hash_unique` ON `sandbox_tokens` (`token_hash`);--> statement-breakpoint
+CREATE INDEX `idx_sandbox_tokens_hash` ON `sandbox_tokens` (`token_hash`);--> statement-breakpoint
 CREATE TABLE `workflow_checkpoints` (
 	`run_id` text NOT NULL,
 	`node_id` text NOT NULL,

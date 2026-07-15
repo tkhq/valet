@@ -6,7 +6,7 @@ import { exportFiles, importFiles, readFile, searchFiles, writeFile, type Memory
 
 function seedUser(db: AppDb, id: string, orgId: string) {
   db.insert(users)
-    .values({ id, email: `${id}@x.test`, name: id, role: "member", createdAt: Date.now() })
+    .values({ id, email: `${id}@x.test`, name: id, role: "member" })
     .run();
 }
 

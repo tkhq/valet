@@ -784,7 +784,7 @@ export interface DeleteCredentialResponse {
 export interface MeResponse {
   id: string;
   email: string;
-  name: string | null;
+  name: string;
   avatarUrl: string | null;
   role: "admin" | "member";
   orgId: string;
@@ -843,7 +843,7 @@ export type PatchOrgResponse = OrgResponse;
 export interface OrgMemberWire {
   userId: string;
   email: string;
-  name: string | null;
+  name: string;
   avatarUrl: string | null;
   role: "admin" | "member";
   joinedAt: number;

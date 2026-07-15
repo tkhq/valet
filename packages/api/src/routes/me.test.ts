@@ -48,7 +48,7 @@ describe("GET /api/me", () => {
     api = await bootTestApi();
     await api.providers.db
       .insert(users)
-      .values({ id: "test-no-org", email: "noorg@dev", role: "member", createdAt: Date.now() });
+      .values({ id: "test-no-org", email: "noorg@dev", name: "No Org", role: "member" });
 
     const res = await fetch(`${api.baseUrl}/api/me`, {
       headers: { "x-valet-test-user-id": "test-no-org" },

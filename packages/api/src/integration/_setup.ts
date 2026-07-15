@@ -30,6 +30,7 @@ import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { SqliteCredentialStore } from "../plugins/credential-store.js";
 import { assemblePlugins } from "../plugins/assemble.js";
+import { orgMembers, orgs, users } from "../schema/index.js";
 import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { createApp } from "../app.js";
@@ -89,50 +90,42 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   applyAppMigrations(sqlite);
   applyEngineMigrations(sqlite);
 
-  // Seed the local-dev identity (mirrors buildNodeProviders).
-  const now = Date.now();
-  sqlite
-    .prepare("INSERT OR IGNORE INTO orgs (id, name, created_at) VALUES (?, ?, ?)")
-    .run("local-org", "Local Dev", now);
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)",
-    )
-    .run("local-user", "local@dev", "Local Dev", "admin", now);
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
-    )
-    .run("local-org", "local-user", "admin");
-  // Non-admin identity for role-gated route tests. Select it via the
-  // `x-valet-test-user-id` header (see authMiddleware).
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)",
-    )
-    .run("test-member", "member@dev", "Test Member", "member", now);
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
-    )
-    .run("local-org", "test-member", "member");
-  // A second org admin, distinct from `local-user`, for tests exercising the
-  // org-admin recovery path on a team they aren't a member of.
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)",
-    )
-    .run("test-admin", "admin@dev", "Test Admin", "admin", now);
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
-    )
-    .run("local-org", "test-admin", "admin");
-
-  const blobsRoot = mkdtempSync(join(tmpdir(), "valet-itest-blobs-"));
-
   const db = buildAppDb(sqlite);
   const engineDb = drizzle(sqlite);
+
+  // Seed the local-dev identity (mirrors buildNodeProviders).
+  const now = Date.now();
+  db.insert(orgs).values({ id: "local-org", name: "Local Dev", createdAt: now }).onConflictDoNothing().run();
+  db.insert(users)
+    .values({ id: "local-user", email: "local@dev", name: "Local Dev", role: "admin" })
+    .onConflictDoNothing()
+    .run();
+  db.insert(orgMembers)
+    .values({ orgId: "local-org", userId: "local-user", role: "admin", createdAt: now })
+    .onConflictDoNothing()
+    .run();
+  // Non-admin identity for role-gated route tests. Select it via the
+  // `x-valet-test-user-id` header (see authMiddleware).
+  db.insert(users)
+    .values({ id: "test-member", email: "member@dev", name: "Test Member", role: "member" })
+    .onConflictDoNothing()
+    .run();
+  db.insert(orgMembers)
+    .values({ orgId: "local-org", userId: "test-member", role: "member", createdAt: now })
+    .onConflictDoNothing()
+    .run();
+  // A second org admin, distinct from `local-user`, for tests exercising the
+  // org-admin recovery path on a team they aren't a member of.
+  db.insert(users)
+    .values({ id: "test-admin", email: "admin@dev", name: "Test Admin", role: "admin" })
+    .onConflictDoNothing()
+    .run();
+  db.insert(orgMembers)
+    .values({ orgId: "local-org", userId: "test-admin", role: "admin", createdAt: now })
+    .onConflictDoNothing()
+    .run();
+
+  const blobsRoot = mkdtempSync(join(tmpdir(), "valet-itest-blobs-"));
   const engineStore = new SqliteSessionStore(engineDb);
   const sandboxProvider = opts.sandboxProvider ?? new VirtualSandboxProvider();
   const eventStream = new SqliteEventStream(sqlite);

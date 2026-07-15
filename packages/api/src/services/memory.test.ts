@@ -9,7 +9,7 @@ import { listFiles, patchFile, readFile, removeFile, searchFiles, writeFile, typ
 
 function seedUser(db: AppDb, id: string, orgId: string) {
   db.insert(users)
-    .values({ id, email: `${id}@x.test`, name: id, role: "member", createdAt: Date.now() })
+    .values({ id, email: `${id}@x.test`, name: id, role: "member" })
     .run();
   db.insert(orgMembers).values({ orgId, userId: id, role: "member" }).run();
 }

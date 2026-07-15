@@ -8,6 +8,7 @@ import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import { orgMembers, orgs, users } from "../schema/index.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
@@ -110,28 +111,22 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   applyAppMigrations(sqlite);
   applyEngineMigrations(sqlite);
 
-  // Seed the local-dev identity. Idempotent.
-  const now = Date.now();
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO orgs (id, name, created_at) VALUES (?, ?, ?)",
-    )
-    .run(LOCAL_ORG.id, LOCAL_ORG.name, now);
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)",
-    )
-    .run(LOCAL_USER.id, LOCAL_USER.email, LOCAL_USER.name, LOCAL_USER.role, now);
-  sqlite
-    .prepare(
-      "INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)",
-    )
-    .run(LOCAL_ORG.id, LOCAL_USER.id, "admin");
-
   // Two Drizzle handles: one for the app schema, one for the engine schema.
   // Same connection underneath; Drizzle's per-handle config is local.
   const db = buildAppDb(sqlite);
   const engineDb = drizzle(sqlite);
+
+  // Seed the local-dev identity. Idempotent.
+  const now = Date.now();
+  db.insert(orgs).values({ id: LOCAL_ORG.id, name: LOCAL_ORG.name, createdAt: now }).onConflictDoNothing().run();
+  db.insert(users)
+    .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
+    .onConflictDoNothing()
+    .run();
+  db.insert(orgMembers)
+    .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
+    .onConflictDoNothing()
+    .run();
 
   const engineStore = new SqliteSessionStore(engineDb);
   const blobs = new FsBlobStore(opts.blobsRoot);

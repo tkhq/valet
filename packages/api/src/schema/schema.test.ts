@@ -16,9 +16,7 @@ describe("api schema migrations", () => {
     const now = Date.now();
 
     db.insert(orgs).values({ id: "o1", name: "Acme", createdAt: now }).run();
-    db.insert(users)
-      .values({ id: "u1", email: "u@x", name: "U", role: "admin", createdAt: now })
-      .run();
+    db.insert(users).values({ id: "u1", email: "u@x", name: "U", role: "admin" }).run();
     db.insert(orgMembers).values({ orgId: "o1", userId: "u1", role: "admin" }).run();
     db.insert(agentSessions)
       .values({

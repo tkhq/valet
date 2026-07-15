@@ -20,7 +20,7 @@ import { getModels } from "@mariozechner/pi-ai";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgMembers, users } from "../schema/index.js";
-import type { MeResponse, PatchMeRequest, PatchMeResponse } from "../wire/types.js";
+import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
 
@@ -45,7 +45,7 @@ async function loadMeResponse(
     id: row.id,
     email: row.email,
     name: row.name,
-    avatarUrl: row.avatarUrl,
+    avatarUrl: row.image,
     role: user.role,
     orgId: user.orgId,
     orgRole: membership?.role ?? "member",
@@ -75,7 +75,9 @@ meRouter.patch("/", async (c) => {
     return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
   }
 
-  const update: Partial<PatchMeRequest> = {};
+  // Keyed by db column name (`image`, not wire-level `avatarUrl`) since this
+  // feeds `db.update(users).set(...)` directly.
+  const update: { name?: string; image?: string; defaultModel?: string | null } = {};
 
   if ("name" in raw) {
     if (typeof raw.name !== "string") {
@@ -88,7 +90,7 @@ meRouter.patch("/", async (c) => {
     if (typeof raw.avatarUrl !== "string") {
       return c.json({ error: "avatarUrl must be a string" }, 400);
     }
-    update.avatarUrl = raw.avatarUrl;
+    update.image = raw.avatarUrl;
   }
 
   if ("defaultModel" in raw) {

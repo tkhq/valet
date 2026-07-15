@@ -18,7 +18,7 @@ export interface OrgFeatures {
 export interface OrgMemberSummary {
   userId: string;
   email: string;
-  name: string | null;
+  name: string;
   avatarUrl: string | null;
   role: OrgRole;
   joinedAt: number;
@@ -86,7 +86,7 @@ export async function listOrgMembers(db: AppDb, orgId: string): Promise<OrgMembe
       memberCreatedAt: orgMembers.createdAt,
       email: users.email,
       name: users.name,
-      avatarUrl: users.avatarUrl,
+      avatarUrl: users.image,
       userCreatedAt: users.createdAt,
     })
     .from(orgMembers)
@@ -101,7 +101,10 @@ export async function listOrgMembers(db: AppDb, orgId: string): Promise<OrgMembe
     name: r.name,
     avatarUrl: r.avatarUrl,
     role: r.role,
-    joinedAt: r.memberCreatedAt ?? r.userCreatedAt,
+    // `users.createdAt` is a `timestamp_ms`-mode column (Date at the JS
+    // boundary); `org_members.createdAt` is a plain ms-epoch integer. Both
+    // collapse to a ms-epoch number here.
+    joinedAt: r.memberCreatedAt ?? r.userCreatedAt.getTime(),
   }));
 }
 

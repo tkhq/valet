@@ -48,7 +48,11 @@
     "@valet/shared": "workspace:*",
     "@valet/store-sqlite": "workspace:*",
     "@valet/workflow": "workspace:*",
-    "drizzle-orm": "^0.45.1",
+    "@better-auth/sso": "1.6.23",
+    "@better-auth/api-key": "1.6.23",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "better-auth": "1.6.23",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.3.0",
     "typebox": "^1.1.24",
     "yaml": "^2.9.0"
@@ -56,13 +60,13 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^20.0.0",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.0.0",
     "drizzle-kit": "^0.31.9",
     "tsx": "^4.0.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   },
   "peerDependencies": {
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^12.0.0"
   }
 }

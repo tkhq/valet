@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { sqliteTable, text, integer, index, primaryKey, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // ─── Identity ───────────────────────────────────────────────────────────────
@@ -11,16 +12,222 @@ export const orgs = sqliteTable("orgs", {
   createdAt: integer("created_at").notNull(),
 });
 
-export const users = sqliteTable("users", {
+// better-auth's default model name for the user table is "user" (singular);
+// we keep the Drizzle export name `users` so existing call sites still
+// compile, but the underlying sqlite table is named "user" — do not fight
+// better-auth with model remapping (auth-v2 design, Schema).
+export const users = sqliteTable("user", {
   id: text("id").primaryKey(),
+  name: text("name").notNull(),
   email: text("email").notNull().unique(),
-  name: text("name"),
-  avatarUrl: text("avatar_url"),
-  role: text("role", { enum: ["admin", "member"] }).notNull(),
+  emailVerified: integer("email_verified", { mode: "boolean" }).default(false).notNull(),
+  image: text("image"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+  role: text("role", { enum: ["admin", "member"] }).notNull().default("member"),
   // Nullable user preference feeding `EngineHost`'s model override seam;
   // null falls back to the host default (split-settings design, decision 9).
   defaultModel: text("default_model"),
-  createdAt: integer("created_at").notNull(),
+});
+
+// ─── better-auth core + plugin tables ───────────────────────────────────────
+//
+// Verbatim transcription of the better-auth CLI-generated schema for our
+// enabled plugins (core, sso, api-key, oidc-provider) — see auth-v2 design
+// §Schema. Do not hand-tune column shapes here; regenerate via
+// `npx @better-auth/cli generate` against `auth.ts` and diff instead.
+
+export const session = sqliteTable(
+  "session",
+  {
+    id: text("id").primaryKey(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    token: text("token").notNull().unique(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+      .notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+      .notNull(),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+  },
+  (t) => [index("session_userId_idx").on(t.userId)],
+);
+
+export const account = sqliteTable(
+  "account",
+  {
+    id: text("id").primaryKey(),
+    accountId: text("account_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    idToken: text("id_token"),
+    accessTokenExpiresAt: integer("access_token_expires_at", { mode: "timestamp_ms" }),
+    refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp_ms" }),
+    scope: text("scope"),
+    password: text("password"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+      .notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+      .notNull(),
+  },
+  (t) => [index("account_userId_idx").on(t.userId)],
+);
+
+export const verification = sqliteTable(
+  "verification",
+  {
+    id: text("id").primaryKey(),
+    identifier: text("identifier").notNull(),
+    value: text("value").notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+      .notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+      .notNull(),
+  },
+  (t) => [index("verification_identifier_idx").on(t.identifier)],
+);
+
+export const ssoProvider = sqliteTable("sso_provider", {
+  id: text("id").primaryKey(),
+  issuer: text("issuer").notNull(),
+  oidcConfig: text("oidc_config"),
+  samlConfig: text("saml_config"),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  providerId: text("provider_id").notNull().unique(),
+  organizationId: text("organization_id"),
+  domain: text("domain").notNull(),
+});
+
+export const apikey = sqliteTable(
+  "apikey",
+  {
+    id: text("id").primaryKey(),
+    configId: text("config_id").default("default").notNull(),
+    name: text("name"),
+    start: text("start"),
+    referenceId: text("reference_id").notNull(),
+    prefix: text("prefix"),
+    key: text("key").notNull(),
+    refillInterval: integer("refill_interval"),
+    refillAmount: integer("refill_amount"),
+    lastRefillAt: integer("last_refill_at", { mode: "timestamp_ms" }),
+    enabled: integer("enabled", { mode: "boolean" }).default(true),
+    rateLimitEnabled: integer("rate_limit_enabled", { mode: "boolean" }).default(true),
+    rateLimitTimeWindow: integer("rate_limit_time_window").default(86400000),
+    rateLimitMax: integer("rate_limit_max").default(10),
+    requestCount: integer("request_count").default(0),
+    remaining: integer("remaining"),
+    lastRequest: integer("last_request", { mode: "timestamp_ms" }),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+    permissions: text("permissions"),
+    metadata: text("metadata"),
+  },
+  (t) => [
+    index("apikey_configId_idx").on(t.configId),
+    index("apikey_referenceId_idx").on(t.referenceId),
+    index("apikey_key_idx").on(t.key),
+  ],
+);
+
+export const oauthApplication = sqliteTable(
+  "oauth_application",
+  {
+    id: text("id").primaryKey(),
+    name: text("name"),
+    icon: text("icon"),
+    metadata: text("metadata"),
+    clientId: text("client_id").unique(),
+    clientSecret: text("client_secret"),
+    redirectUrls: text("redirect_urls"),
+    type: text("type"),
+    disabled: integer("disabled", { mode: "boolean" }).default(false),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
+  },
+  (t) => [index("oauthApplication_userId_idx").on(t.userId)],
+);
+
+export const oauthAccessToken = sqliteTable(
+  "oauth_access_token",
+  {
+    id: text("id").primaryKey(),
+    accessToken: text("access_token").unique(),
+    refreshToken: text("refresh_token").unique(),
+    accessTokenExpiresAt: integer("access_token_expires_at", { mode: "timestamp_ms" }),
+    refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp_ms" }),
+    clientId: text("client_id").references(() => oauthApplication.clientId, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    scopes: text("scopes"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
+  },
+  (t) => [
+    index("oauthAccessToken_clientId_idx").on(t.clientId),
+    index("oauthAccessToken_userId_idx").on(t.userId),
+  ],
+);
+
+export const oauthConsent = sqliteTable(
+  "oauth_consent",
+  {
+    id: text("id").primaryKey(),
+    clientId: text("client_id").references(() => oauthApplication.clientId, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    scopes: text("scopes"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
+    consentGiven: integer("consent_given", { mode: "boolean" }),
+  },
+  (t) => [
+    index("oauthConsent_clientId_idx").on(t.clientId),
+    index("oauthConsent_userId_idx").on(t.userId),
+  ],
+);
+
+// ─── Valet-owned auth adjuncts ──────────────────────────────────────────────
+
+export const invites = sqliteTable("invites", {
+  id: text("id").primaryKey(),
+  codeHash: text("code_hash").notNull().unique(),
+  email: text("email"),
+  role: text("role", { enum: ["admin", "member"] }).notNull().default("member"),
+  createdBy: text("created_by").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  acceptedBy: text("accepted_by"),
+  acceptedAt: integer("accepted_at", { mode: "timestamp_ms" }),
+});
+
+export const sandboxTokens = sqliteTable("sandbox_tokens", {
+  id: text("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  sessionId: text("session_id").notNull(),
+  userId: text("user_id").notNull(),
+  orgId: text("org_id").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
 });
 
 export const orgMembers = sqliteTable(
@@ -461,6 +668,16 @@ export const actionInvocations = sqliteTable("action_invocations", {
 
 export type OrgRow = typeof orgs.$inferSelect;
 export type UserRow = typeof users.$inferSelect;
+export type SessionRow = typeof session.$inferSelect;
+export type AccountRow = typeof account.$inferSelect;
+export type VerificationRow = typeof verification.$inferSelect;
+export type SsoProviderRow = typeof ssoProvider.$inferSelect;
+export type ApikeyRow = typeof apikey.$inferSelect;
+export type OauthApplicationRow = typeof oauthApplication.$inferSelect;
+export type OauthAccessTokenRow = typeof oauthAccessToken.$inferSelect;
+export type OauthConsentRow = typeof oauthConsent.$inferSelect;
+export type InviteRow = typeof invites.$inferSelect;
+export type SandboxTokenRow = typeof sandboxTokens.$inferSelect;
 export type OrgMemberRow = typeof orgMembers.$inferSelect;
 export type AgentSessionRow = typeof agentSessions.$inferSelect;
 export type SessionThreadRow = typeof sessionThreads.$inferSelect;

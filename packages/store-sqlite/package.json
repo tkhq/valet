@@ -18,17 +18,17 @@
   },
   "dependencies": {
     "@valet/engine": "workspace:*",
-    "drizzle-orm": "^0.45.1"
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^20.0.0",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.0.0",
     "drizzle-kit": "^0.31.9",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   },
   "peerDependencies": {
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^12.0.0"
   }
 }
