@@ -9,7 +9,7 @@
         dev dev-worker dev-opencode dev-client dev-all \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
-        test test-unit test-integration test-e2e \
+        test test-unit test-integration test-e2e test-pg \
         test-workflow test-triggers test-webhooks test-schedule \
         smoke-test smoke-test-prod smoke-test-api smoke-test-agent \
         lint typecheck \
@@ -297,6 +297,23 @@ test-e2e: wait-for-services ## Run end-to-end tests
 	@make test-workflow
 	@make test-triggers
 	@make test-webhooks
+
+test-pg: ## Run store-postgres conformance suite against a dockerized postgres:17 (host port 5433, ephemeral)
+	@echo "$(GREEN)Starting postgres:17 for test-pg...$(NC)"
+	@docker rm -f valet-test-pg >/dev/null 2>&1 || true
+	@docker run --rm -d --name valet-test-pg -p 5433:5432 \
+		-e POSTGRES_USER=valet -e POSTGRES_PASSWORD=valet -e POSTGRES_DB=valet_test \
+		postgres:17 >/dev/null
+	@echo "Waiting for postgres to accept connections..."
+	@for i in $$(seq 1 30); do \
+		docker exec valet-test-pg pg_isready -U valet >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@TEST_DATABASE_URL=postgres://valet:valet@localhost:5433/valet_test $(PNPM) --filter @valet/store-postgres test; \
+		status=$$?; \
+		echo "$(GREEN)Stopping postgres:17...$(NC)"; \
+		docker stop valet-test-pg >/dev/null 2>&1 || true; \
+		exit $$status
 
 smoke-test: ## Run API smoke tests (direct API + agent-dispatched)
 	@WORKER_URL=$(WORKER_URL) API_TOKEN=$(API_TOKEN) pnpm vitest run --config tests/smoke/vitest.config.ts
