@@ -80,7 +80,7 @@ import { matchesCronField, getZonedDateParts, cronMatchesNow, findMissedCronTick
 import { resolveAuthRedirectOrigin } from './lib/auth-redirect-origin.js';
 import { instrument, OTLPExporter } from '@microlabs/otel-cf-workers';
 import type { ResolveConfigFn } from '@microlabs/otel-cf-workers';
-import { buildTraceConfig, RedactingSpanExporter, setSessionAttributes } from './lib/tracing.js';
+import { activeTraceparent, buildTraceConfig, RedactingSpanExporter, setSessionAttributes } from './lib/tracing.js';
 import { log } from './lib/log.js';
 
 const workerTraceConfig: ResolveConfigFn = (env: Env) => {
@@ -971,11 +971,16 @@ async function archiveTerminatedSessions(env: Env): Promise<void> {
 
   // Fan-out: delete each session's persisted workspace volume
   const deleteWorkspaceUrl = env.MODAL_BACKEND_URL.replace('{label}', 'delete-workspace');
+  // Propagate trace context so the Modal delete_workspace spans join the
+  // scheduled-handler trace (this runs inside the instrument()'d cron scope).
+  const deleteHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+  const traceparent = activeTraceparent();
+  if (traceparent) deleteHeaders['traceparent'] = traceparent;
   const workspaceDeleteResults = await Promise.allSettled(
     gcSucceededIds.map(async (sessionId) => {
       const response = await fetch(deleteWorkspaceUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: deleteHeaders,
         body: JSON.stringify({ sessionId }),
       });
 

@@ -62,7 +62,13 @@ export class SessionLifecycle {
 
   // ─── Sandbox Operations (pure HTTP) ─────────────────────────────────
 
-  /** JSON headers for backend fetches. Propagates trace context so Modal backend spans join the originating trace. */
+  /**
+   * JSON headers for backend fetches. Propagates trace context so Modal backend
+   * spans join the originating trace. activeTraceparent() reads the ambient OTel
+   * context: when no AsyncLocalStorage context manager is registered in this DO
+   * isolate (alarm-driven paths outside a DoTracer span), it returns null and the
+   * header is simply omitted — known gap, tracked separately.
+   */
   private backendHeaders(): Record<string, string> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const traceparent = activeTraceparent();

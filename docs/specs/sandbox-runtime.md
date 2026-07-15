@@ -486,6 +486,12 @@ Recognized Modal snapshot failures, including image creation timeouts and "faile
 
 Uses `modal.Image.from_id(snapshot_image_id)` as base image, creates new sandbox with fresh secrets. Filesystem state (repo, deps, generated files) preserved from snapshot.
 
+### Tracing
+
+The Worker propagates a W3C `traceparent` header on every backend call: the four lifecycle fetches in `SessionLifecycle` (spawn/terminate/snapshot/restore) and the session-GC `delete-workspace` fan-out. Each endpoint accepts the header as an optional FastAPI `Header` param and opens a `modal.<endpoint>` span parented to it (`backend/tracing.py`), with child spans around sandbox create, filesystem snapshot, and restore. Span attributes are identifiers only (`session_id`, `sandbox_id`), stringified and truncated; exceptions are recorded as class names, never messages.
+
+OTel config (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `MODAL_APP_NAME` for `service.name`) is captured from the deploy shell into a Modal secret attached to the endpoint functions — a secret rather than image env because the headers carry the OTLP auth token. When the endpoint is unset the tracer never initializes and every span is a no-op, so the feature ships dark. Spans export via `BatchSpanProcessor` on its schedule plus the provider's atexit shutdown; there is no per-request flush. An unsampled inbound `traceparent` (flags `00`) is ignored in favor of a fresh sampled root so backend spans are never silently dropped.
+
 ## OpenCode Configuration
 
 Base config at `docker/opencode/opencode.json`. The Runner merges this with runtime config (custom providers, tool toggles, instructions) and writes the final config to `${OPENCODE_RUNTIME_DIR}/config/opencode/opencode.json`.

@@ -1,9 +1,14 @@
 """OpenTelemetry tracing for the Modal backend.
 
-Ships dark: a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (baked into the
-function image at deploy time, see app.py). Every path is exception-safe —
-tracing failures degrade to no-op spans and must never break an endpoint, so
-OTel imports stay lazy and guarded.
+Ships dark: a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (delivered via a
+deploy-time Modal secret, see app.py). Every path is exception-safe — tracing
+failures degrade to no-op spans and must never break an endpoint, so OTel
+imports stay lazy and guarded.
+
+Export cadence: spans flush on the BatchSpanProcessor schedule (5s default in
+SDK 1.43) and on interpreter exit — TracerProvider defaults shutdown_on_exit=True,
+which registers an atexit shutdown that drains the processor. No per-request
+flushing: force_flush blocks the event loop for up to its timeout.
 """
 
 from __future__ import annotations
@@ -21,7 +26,13 @@ _init_done = False
 
 
 def parse_otlp_headers(raw: str | None) -> dict[str, str]:
-    """Parse the OTLP `k=v,k2=v2` header convention into a header dict."""
+    """Parse the OTLP `k=v,k2=v2` header convention into a header dict.
+
+    Values are percent-decoded per the OTLP env spec — Grafana Cloud documents
+    the `Authorization=Basic%20<token>` form.
+    """
+    from urllib.parse import unquote
+
     headers: dict[str, str] = {}
     if not raw:
         return headers
@@ -29,7 +40,7 @@ def parse_otlp_headers(raw: str | None) -> dict[str, str]:
         key, eq, value = pair.partition("=")
         key = key.strip()
         if eq and key:
-            headers[key] = value.strip()
+            headers[key] = unquote(value.strip())
     return headers
 
 
@@ -61,9 +72,10 @@ def _init(provider: Any = None) -> None:
             endpoint=f"{endpoint.rstrip('/')}/v1/traces",
             headers=parse_otlp_headers(os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")),
         )
+        # `or`, not a .get default: the deploy-time secret may set MODAL_APP_NAME to "".
         tracer_provider = TracerProvider(
             resource=Resource.create(
-                {"service.name": os.environ.get("MODAL_APP_NAME", "valet-backend")}
+                {"service.name": os.environ.get("MODAL_APP_NAME") or "valet-backend"}
             )
         )
         tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
@@ -95,17 +107,57 @@ def _parent_context(traceparent: str | None) -> Any:
         parts = traceparent.strip().split("-")
         if len(parts) < 4 or len(parts[1]) != 32 or len(parts[2]) != 16:
             return None
+        # An unsampled parent (flags bit 0 unset) would make the default
+        # parent-based sampler drop every backend span. Start a fresh sampled
+        # root instead of silently inheriting the drop decision.
+        if not int(parts[3], 16) & 1:
+            return None
         span_context = SpanContext(
             trace_id=int(parts[1], 16),
             span_id=int(parts[2], 16),
             is_remote=True,
-            trace_flags=TraceFlags(
-                TraceFlags.SAMPLED if int(parts[3], 16) & 1 else TraceFlags.DEFAULT
-            ),
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
         )
         return trace_api.set_span_in_context(NonRecordingSpan(span_context))
     except Exception:
         return None
+
+
+_MAX_ATTR_LENGTH = 128
+
+
+def _sanitize_attributes(attributes: dict[str, Any] | None) -> dict[str, str] | None:
+    """Coerce attribute values to bounded strings.
+
+    Endpoint attributes come from request bodies on public endpoints, so cap
+    what an attacker can push onto a span: str() + truncate to 128 chars.
+    """
+    if not attributes:
+        return None
+    try:
+        return {
+            str(key)[:_MAX_ATTR_LENGTH]: str(value)[:_MAX_ATTR_LENGTH]
+            for key, value in attributes.items()
+        }
+    except Exception:
+        return None
+
+
+def mark_error(span_obj: Any, exc: BaseException) -> None:
+    """Mark a handled exception on a span (class name only, no message).
+
+    For endpoints that catch an exception and return a structured error
+    response — the span would otherwise end looking successful.
+    """
+    if span_obj is None:
+        return
+    try:
+        from opentelemetry.trace import Status, StatusCode
+
+        span_obj.set_attribute("error.class", type(exc).__name__)
+        span_obj.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+    except Exception:
+        pass
 
 
 @contextmanager
@@ -134,7 +186,11 @@ def span(
         from opentelemetry import context as context_api, trace as trace_api
         from opentelemetry.trace import Status, StatusCode
 
-        otel_span = tracer.start_span(name, context=_parent_context(traceparent), attributes=attributes)
+        otel_span = tracer.start_span(
+            name,
+            context=_parent_context(traceparent),
+            attributes=_sanitize_attributes(attributes),
+        )
         token = context_api.attach(trace_api.set_span_in_context(otel_span))
     except Exception:
         logger.warning("failed to start span %s; continuing untraced", name, exc_info=True)
@@ -164,7 +220,8 @@ def span(
 
 
 def flush() -> None:
-    """Flush buffered spans now — Modal can reap idle containers before the batch interval."""
+    """Drain buffered spans synchronously. Test helper — production relies on
+    the batch schedule + the provider's atexit shutdown (see module docstring)."""
     try:
         if _provider is not None:
             _provider.force_flush(timeout_millis=2_000)

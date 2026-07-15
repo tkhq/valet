@@ -61,6 +61,7 @@ describe('SessionLifecycle.snapshotSandbox', () => {
       sandboxId: 'sb-123',
       hibernateUrl: 'https://backend/hibernate',
     });
+    // ctx is untouched by the HTTP methods; single-cast bridges the unused platform type.
     return new SessionLifecycle(state, {} as DurableObjectState);
   }
 
@@ -120,6 +121,7 @@ describe('SessionLifecycle traceparent propagation', () => {
   });
 
   function makeLifecycle() {
+    // ctx is untouched by the HTTP methods; single-cast bridges the unused platform type.
     return new SessionLifecycle(new FakeSessionState(), {} as DurableObjectState);
   }
 
