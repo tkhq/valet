@@ -513,6 +513,7 @@ export interface TeamSummary {
   orgId: string;
   name: string;
   createdAt: number;
+  memberCount: number;
 }
 
 export interface TeamMemberSummary {
@@ -522,6 +523,10 @@ export interface TeamMemberSummary {
 
 export interface ListTeamsResponse {
   teams: TeamSummary[];
+}
+
+export interface ListTeamMembersResponse {
+  members: TeamMemberSummary[];
 }
 
 export interface CreateTeamRequest {

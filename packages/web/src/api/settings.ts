@@ -13,7 +13,12 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  AddTeamMemberRequest,
+  CreateTeamRequest,
+  CreateTeamResponse,
   ListModelsResponse,
+  ListTeamMembersResponse,
+  ListTeamsResponse,
   MeResponse,
   OrgMembersResponse,
   OrgResponse,
@@ -23,6 +28,7 @@ import type {
   PatchOrgMemberResponse,
   PatchOrgRequest,
   PatchOrgResponse,
+  SetTeamMemberRoleRequest,
 } from "@valet/api/wire";
 import { api } from "./client";
 
@@ -33,6 +39,8 @@ export const qkSettings = {
   org: () => ["settings", "org"] as const,
   orgMembers: () => ["settings", "org", "members"] as const,
   models: () => ["settings", "models"] as const,
+  teams: () => ["settings", "teams"] as const,
+  teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -72,6 +80,22 @@ export function useModels(opts?: UseQueryOptions<ListModelsResponse>) {
   });
 }
 
+export function useTeams(opts?: UseQueryOptions<ListTeamsResponse>) {
+  return useQuery<ListTeamsResponse>({
+    queryKey: qkSettings.teams(),
+    queryFn: () => api.listTeams(),
+    ...opts,
+  });
+}
+
+export function useTeamMembers(teamId: string, opts?: UseQueryOptions<ListTeamMembersResponse>) {
+  return useQuery<ListTeamMembersResponse>({
+    queryKey: qkSettings.teamMembers(teamId),
+    queryFn: () => api.listTeamMembers(teamId),
+    ...opts,
+  });
+}
+
 // ── Mutations ────────────────────────────────────────────────────────────
 
 export function usePatchMe() {
@@ -99,11 +123,90 @@ export function useSetOrgMemberRole() {
   return useMutation<
     PatchOrgMemberResponse,
     Error,
-    { userId: string; body: PatchOrgMemberRequest }
+    { userId: string; body: PatchOrgMemberRequest },
+    { previous: OrgMembersResponse | undefined }
   >({
     mutationFn: ({ userId, body }) => api.patchOrgMember(userId, body),
-    onSuccess: () => {
+    // Optimistic: the row flips immediately, then rolls back if the server
+    // rejects it (e.g. the last-admin guard) — the UI disable on the sole
+    // admin row is a courtesy, not the source of truth.
+    onMutate: async ({ userId, body }) => {
+      await qc.cancelQueries({ queryKey: qkSettings.orgMembers() });
+      const previous = qc.getQueryData<OrgMembersResponse>(qkSettings.orgMembers());
+      if (previous) {
+        qc.setQueryData<OrgMembersResponse>(qkSettings.orgMembers(), {
+          members: previous.members.map((m) =>
+            m.userId === userId ? { ...m, role: body.role } : m,
+          ),
+        });
+      }
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(qkSettings.orgMembers(), context.previous);
+      }
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: qkSettings.orgMembers() });
+    },
+  });
+}
+
+// ── Teams ────────────────────────────────────────────────────────────────
+
+export function useCreateTeam() {
+  const qc = useQueryClient();
+  return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
+    mutationFn: (body) => api.createTeam(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
+    },
+  });
+}
+
+export function useDeleteTeam() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (id) => api.deleteTeam(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
+    },
+  });
+}
+
+export function useAddTeamMember() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, { teamId: string; body: AddTeamMemberRequest }>({
+    mutationFn: ({ teamId, body }) => api.addTeamMember(teamId, body),
+    onSuccess: (_data, { teamId }) => {
+      qc.invalidateQueries({ queryKey: qkSettings.teamMembers(teamId) });
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
+    },
+  });
+}
+
+export function useSetTeamMemberRole() {
+  const qc = useQueryClient();
+  return useMutation<
+    { ok: true },
+    Error,
+    { teamId: string; userId: string; body: SetTeamMemberRoleRequest }
+  >({
+    mutationFn: ({ teamId, userId, body }) => api.setTeamMemberRole(teamId, userId, body),
+    onSuccess: (_data, { teamId }) => {
+      qc.invalidateQueries({ queryKey: qkSettings.teamMembers(teamId) });
+    },
+  });
+}
+
+export function useRemoveTeamMember() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, { teamId: string; userId: string }>({
+    mutationFn: ({ teamId, userId }) => api.removeTeamMember(teamId, userId),
+    onSuccess: (_data, { teamId }) => {
+      qc.invalidateQueries({ queryKey: qkSettings.teamMembers(teamId) });
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
     },
   });
 }

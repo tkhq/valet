@@ -7,9 +7,12 @@
  * auth lands we'll wire token storage here.
  */
 import type {
+  AddTeamMemberRequest,
   CancelWorkflowRunResponse,
   CreateSessionRequest,
   CreateSessionResponse,
+  CreateTeamRequest,
+  CreateTeamResponse,
   CreateThreadRequest,
   CreateThreadResponse,
   CreateWorkflowRequest,
@@ -30,6 +33,8 @@ import type {
   ListModelsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
+  ListTeamMembersResponse,
+  ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
@@ -57,6 +62,7 @@ import type {
   SendPromptRequest,
   SendPromptResponse,
   SetNotificationPreferenceRequest,
+  SetTeamMemberRoleRequest,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
@@ -255,6 +261,28 @@ export const api = {
       "PATCH",
       `/org/members/${encodeURIComponent(userId)}`,
       body,
+    ),
+
+  // teams (org membership structure — first UI over the existing router)
+  listTeams: () => request<ListTeamsResponse>("GET", "/teams"),
+  createTeam: (body: CreateTeamRequest) =>
+    request<CreateTeamResponse>("POST", "/teams", body),
+  deleteTeam: (id: string) =>
+    request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}`),
+  listTeamMembers: (id: string) =>
+    request<ListTeamMembersResponse>("GET", `/teams/${encodeURIComponent(id)}/members`),
+  addTeamMember: (id: string, body: AddTeamMemberRequest) =>
+    request<{ ok: true }>("POST", `/teams/${encodeURIComponent(id)}/members`, body),
+  setTeamMemberRole: (id: string, userId: string, body: SetTeamMemberRoleRequest) =>
+    request<{ ok: true }>(
+      "PATCH",
+      `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      body,
+    ),
+  removeTeamMember: (id: string, userId: string) =>
+    request<{ ok: true }>(
+      "DELETE",
+      `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)

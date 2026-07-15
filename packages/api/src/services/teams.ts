@@ -235,6 +235,38 @@ export async function listTeamsForUser(db: AppDb, userId: string): Promise<TeamR
 }
 
 /**
+ * Lists every team in an org, regardless of the caller's own membership.
+ * Org admins manage the whole roster, not just teams they happen to belong
+ * to — `listTeamsForUser` alone would hide a team from an admin who isn't
+ * on it.
+ */
+export async function listTeamsForOrg(db: AppDb, orgId: string): Promise<TeamRow[]> {
+  return db
+    .select({
+      id: teams.id,
+      orgId: teams.orgId,
+      name: teams.name,
+      createdAt: teams.createdAt,
+    })
+    .from(teams)
+    .where(eq(teams.orgId, orgId))
+    .orderBy(teams.createdAt)
+    .all();
+}
+
+/** Lists a team's members (userId + role), for the teams settings panel. */
+export async function listTeamMembers(
+  db: AppDb,
+  teamId: string,
+): Promise<Array<{ userId: string; role: TeamRole }>> {
+  return db
+    .select({ userId: teamMembers.userId, role: teamMembers.role })
+    .from(teamMembers)
+    .where(eq(teamMembers.teamId, teamId))
+    .all();
+}
+
+/**
  * Deletion guard hook: the orchestrator spec blocks team deletion "while
  * team-owned workflows exist." Workflows don't exist in v2 yet (Phase 5/6),
  * so this is a deliberate no-op — wire the real check here once the

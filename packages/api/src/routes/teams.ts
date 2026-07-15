@@ -31,6 +31,8 @@ import {
   createTeam,
   deleteTeam,
   LastAdminError,
+  listTeamMembers,
+  listTeamsForOrg,
   listTeamsForUser,
   NotTeamMemberError,
   removeMember,
@@ -41,6 +43,7 @@ import type {
   AddTeamMemberRequest,
   CreateTeamRequest,
   CreateTeamResponse,
+  ListTeamMembersResponse,
   ListTeamsResponse,
   SetTeamMemberRoleRequest,
   TeamRole,
@@ -49,8 +52,12 @@ import type {
 
 export const teamsRouter = new Hono<AppEnv>();
 
-function rowToSummary(row: TeamRow): TeamSummary {
-  return { id: row.id, orgId: row.orgId, name: row.name, createdAt: row.createdAt };
+async function rowToSummary(
+  db: AppEnv["Variables"]["providers"]["db"],
+  row: TeamRow,
+): Promise<TeamSummary> {
+  const memberCount = (await listTeamMembers(db, row.id)).length;
+  return { id: row.id, orgId: row.orgId, name: row.name, createdAt: row.createdAt, memberCount };
 }
 
 function isTeamRole(v: unknown): v is TeamRole {
@@ -103,16 +110,57 @@ async function canMutateTeam(
   return member?.role === "admin";
 }
 
+/**
+ * Gates read access to a team's member roster: any member of the team, or
+ * any org admin (admins manage the whole org's teams, not just ones they're
+ * on) — looser than `canMutateTeam`, which requires *team*-admin.
+ */
+async function canViewTeam(
+  db: AppEnv["Variables"]["providers"]["db"],
+  teamId: string,
+  user: AuthUser,
+): Promise<boolean> {
+  if (await isOrgAdmin(db, user.orgId, user.id)) return true;
+  const member = await db
+    .select()
+    .from(teamMembers)
+    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, user.id)))
+    .get();
+  return !!member;
+}
+
 // ── List ──────────────────────────────────────────────────────────────────
 
 teamsRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
 
-  const rows = await listTeamsForUser(db, user.id);
+  // Org admins manage every team in the org, not just ones they belong to;
+  // plain members still only see their own memberships.
+  const admin = await isOrgAdmin(db, user.orgId, user.id);
+  const rows = admin
+    ? await listTeamsForOrg(db, user.orgId)
+    : (await listTeamsForUser(db, user.id)).filter((r) => r.orgId === user.orgId);
+
   const body: ListTeamsResponse = {
-    teams: rows.filter((r) => r.orgId === user.orgId).map(rowToSummary),
+    teams: await Promise.all(rows.map((r) => rowToSummary(db, r))),
   };
+  return c.json(body);
+});
+
+// ── Members: list ────────────────────────────────────────────────────────
+
+teamsRouter.get("/:id/members", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+
+  const members = await listTeamMembers(db, id);
+  const body: ListTeamMembersResponse = { members };
   return c.json(body);
 });
 
@@ -134,7 +182,7 @@ teamsRouter.post("/", async (c) => {
 
   try {
     const team = await createTeam(db, { orgId: user.orgId, name: body.name, creatorUserId: user.id });
-    const resp: CreateTeamResponse = { team: rowToSummary(team) };
+    const resp: CreateTeamResponse = { team: await rowToSummary(db, team) };
     return c.json(resp, 201);
   } catch (err) {
     const mapped = handleServiceError(err);

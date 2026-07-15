@@ -7,6 +7,8 @@ import {
   createTeam,
   deleteTeam,
   LastAdminError,
+  listTeamMembers,
+  listTeamsForOrg,
   listTeamsForUser,
   NotOrgMemberError,
   NotTeamMemberError,
@@ -107,6 +109,23 @@ describe("teams service", () => {
   it("removeMember rejects a user who isn't a member", async () => {
     const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
     await expect(removeMember(db, { teamId: team.id, userId: "u3" })).rejects.toThrow(NotTeamMemberError);
+  });
+
+  it("listTeamsForOrg returns every team in the org, not just the caller's own", async () => {
+    const t1 = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    const t2 = await createTeam(db, { orgId, name: "Design", creatorUserId: "u2" });
+    const orgTeams = await listTeamsForOrg(db, orgId);
+    expect(orgTeams.map((t) => t.id).sort()).toEqual([t1.id, t2.id].sort());
+  });
+
+  it("listTeamMembers returns userId + role for a team", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+    const members = await listTeamMembers(db, team.id);
+    expect(members.sort((a, b) => a.userId.localeCompare(b.userId))).toEqual([
+      { userId: "u1", role: "admin" },
+      { userId: "u2", role: "member" },
+    ]);
   });
 
   it("last-admin guard is atomic under a role-change + removal race on the only two admins", async () => {
