@@ -25,7 +25,7 @@ import type {
   LlmNode,
 } from '@valet/shared';
 import { parseTemplate, parseExpression, TemplateParseError } from './expression.js';
-import { lintTemplateReferences, TEMPLATE_UNKNOWN_VARIABLE_CODE } from './template-lint.js';
+import { lintTemplateReferences } from './template-lint.js';
 import { allowedIfOperations, isIfOperationSupported, normalizeIfOperation } from './if-operations.js';
 import { parseDurationMs } from './duration.js';
 import { parseModelId, hasProviderKey } from '../llm/model-id.js';
@@ -387,28 +387,82 @@ export function groupWorkflowValidationResults(results: WorkflowValidationError[
   return { errors, warnings };
 }
 
+/**
+ * Central registry of every validation code the validator + template
+ * lint can emit, with its severity. `isValidationWarning` reads from
+ * this map. Adding a new emit-site without registering its code here
+ * defaults to 'error' — safer to hard-block than to silently ignore a
+ * forgotten registration.
+ *
+ * The `consistency.test.ts` sweep drives a suite of intentionally-broken
+ * definitions through `validateDefinition` and asserts every surfaced
+ * code has a registry entry, catching drift at CI.
+ *
+ * When adding a warning, include a one-liner comment explaining the
+ * false-positive scenario that motivates the downgrade — warnings are
+ * our "known-limited-authority" bucket, not a general soft-fail category.
+ */
+export const VALIDATION_CODES = {
+  // ── Warnings ────────────────────────────────────────────────────────
+  llm_maxoutput_warning: 'warning',
+  template_unknown_variable: 'warning',
+  // Catalog scope may not include per-user custom MCP connectors, so a
+  // legitimate user-scoped tool node could false-positive here.
+  // Unknown actions WITHIN a known service stay a hard error.
+  unknown_tool_service: 'warning',
+  // Arbitrary-query tools (SOQL/HTTP) often lack registered output
+  // schemas, so the obvious `{{nodes.query.data.records}}` can't be
+  // statically proven to be an array. Runtime hard-fails with a
+  // descriptive message when the resolved value isn't iterable.
+  // Distinct from `foreach_items_trigger_untyped` (trigger.dataSchema
+  // is 100% author-owned, so THAT stays a hard error).
+  foreach_items_untyped_array_output: 'warning',
+
+  // ── Errors ──────────────────────────────────────────────────────────
+  malformed_definition: 'error',
+  cycle: 'error',
+  duplicate_id: 'error',
+  unknown_node_type: 'error',
+  unknown_foreach_body_type: 'error',
+  max_nodes_exceeded: 'error',
+  edge_from_stop: 'error',
+  edge_from_unknown: 'error',
+  edge_self_loop: 'error',
+  edge_to_unknown: 'error',
+  edge_when_unparseable: 'error',
+  expression_parse_error: 'error',
+  template_parse_error: 'error',
+  foreach_alias_shadows_reserved: 'error',
+  foreach_aliases_collide: 'error',
+  foreach_body_type_disallowed: 'error',
+  foreach_concurrency_exceeds_policy: 'error',
+  foreach_items_not_expression: 'error',
+  foreach_items_trigger_untyped: 'error',
+  foreach_max_items_exceeds_policy: 'error',
+  if_operation_unsupported: 'error',
+  input_not_in_enum: 'error',
+  input_required_missing: 'error',
+  input_type_mismatch: 'error',
+  input_unknown: 'error',
+  invalid_regex: 'error',
+  llm_model_id_invalid: 'error',
+  llm_model_missing: 'error',
+  llm_model_unavailable: 'error',
+  llm_provider_key_missing: 'error',
+  project_column_path_malformed: 'error',
+  session_thread_targeting_xor: 'error',
+  unknown_tool_action: 'error',
+  wait_duration_exceeds_policy: 'error',
+  wait_duration_unparseable: 'error',
+} as const satisfies Record<string, 'warning' | 'error'>;
+
+export type ValidationCode = keyof typeof VALIDATION_CODES;
+
 export function isValidationWarning(result: WorkflowValidationError): boolean {
-  return (
-    result.code === 'llm_maxoutput_warning' ||
-    result.code === TEMPLATE_UNKNOWN_VARIABLE_CODE ||
-    // Unknown services are a warning (not blocker) because the tool
-    // catalog scope in `WorkflowDefinitionValidationContext` may not
-    // include per-user custom MCP connectors — so a legitimate
-    // user-scoped tool node could false-positive here. Unknown actions
-    // WITHIN a known service remain hard errors: for services the
-    // catalog knows, we ARE authoritative.
-    result.code === 'unknown_tool_service' ||
-    // Foreach items that can't be statically proven to be an array
-    // are a warning, not a blocker. The tool catalog often lacks
-    // registered output schemas for arbitrary-query tools (SOQL, raw
-    // SQL, HTTP fetch), so `{{nodes.query.data.records}}` where
-    // `records` genuinely IS an array at runtime is a false positive.
-    // Runtime still hard-fails when the resolved value isn't
-    // iterable, and the improved error message points at what to
-    // check. This trade favors letting the obvious template just work
-    // over the static safety net.
-    result.code === 'foreach_items_untyped_array_output'
-  );
+  // Unknown codes default to 'error' (safer to hard-block than to
+  // silently soft-fail on a code someone forgot to register).
+  const severity = (VALIDATION_CODES as Record<string, 'warning' | 'error'>)[result.code];
+  return severity === 'warning';
 }
 
 /**

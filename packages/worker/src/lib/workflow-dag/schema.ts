@@ -287,6 +287,33 @@ export const workflowNodeSchema = z.union([
   projectNodeSchema,
 ]);
 
+/**
+ * Per-type registry of zod schemas. Sibling to the union above;
+ * consistency.test.ts walks this to verify each node type in
+ * `WORKFLOW_NODE_TYPES` has a schema AND a shared discriminated-union
+ * type AND a NODE_DOCS entry AND a factory AND a reference-doc entry.
+ * Keep in sync with `workflowNodeSchema` — the consistency test
+ * catches drift.
+ *
+ * `session` uses `startSessionNodeSchema` as the representative shape
+ * for `.shape` walks (the `prompt` variant is a subset of `start`
+ * minus `workspace`; enumerating `start` gives the fuller schema).
+ */
+export const NODE_SCHEMAS_BY_TYPE = {
+  trigger: triggerNodeSchema,
+  llm: llmNodeSchema,
+  tool: toolNodeSchema,
+  set: setNodeSchema,
+  if: ifNodeSchema,
+  wait: waitNodeSchema,
+  approval: approvalNodeSchema,
+  foreach: foreachNodeSchema,
+  orchestrator: orchestratorNodeSchema,
+  session: startSessionNodeSchema,
+  stop: stopNodeSchema,
+  project: projectNodeSchema,
+} as const;
+
 // ─── Policy + editor metadata ───────────────────────────────────────────────
 
 export const workflowPolicySchema = z.object({
