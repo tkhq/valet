@@ -91,6 +91,20 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     const defs = await source.listActions(listCtx);
     const def = defs.find((a) => a.id === node.action);
     if (!def) {
+      // Distinguish "action truly doesn't exist" from "listActions
+      // failed transiently" (expired OAuth token, network hiccup, MCP
+      // server down). McpActionSource swallows listTools errors and
+      // returns an empty array, stashing the underlying error on
+      // `lastListError`. Without this branch, an OAuth refresh
+      // failure surfaced as "action not found" — misleading, because
+      // save-time validation had passed (it reads mcp_tool_cache, not
+      // a live listTools call) and the author knows the id is right.
+      const listError = getListError(source);
+      if (listError) {
+        throw new Error(
+          `tool node "${node.id}": listing actions for "${node.service}" failed — the action id is correct in the tool catalog, but the live MCP server call returned no results. Underlying error: ${listError}. This usually means the ${node.service} credential expired or the MCP server is unreachable; re-connect the integration in the UI to refresh the token.`,
+        );
+      }
       throw new Error(`tool node "${node.id}": action "${node.action}" not found in ${node.service} package`);
     }
     return JSON.stringify({ riskLevel: def.riskLevel ?? 'medium' });
@@ -387,6 +401,12 @@ function providerRequiresUserCredential(
   if (provider.authType === 'none') return false;
   if (provider.isCustomConnector && provider.authType === 'api_key') return provider.credentialScope === 'user';
   return true;
+}
+
+function getListError(source: unknown): string | null {
+  const s = source as { getLastListError?: () => string | null | undefined };
+  if (typeof s.getLastListError !== 'function') return null;
+  return s.getLastListError() ?? null;
 }
 
 function isAuthFailure(result: ActionResult): boolean {
