@@ -19,18 +19,24 @@ _label_prefix = os.environ.get("MODAL_LABEL_PREFIX", "")
 # OTel config captured at deploy time from the deploy shell env (same pattern as
 # MODAL_APP_NAME / MODAL_LABEL_PREFIX above) and attached to every endpoint
 # function. A Modal secret, not image env: OTEL_EXPORTER_OTLP_HEADERS carries the
-# OTLP auth token. Unset at deploy → empty → tracing no-ops (ships dark).
+# OTLP auth token. Unset at deploy → key stripped → tracing no-ops (ships dark).
+# Strip empties so Modal doesn't set a blank MODAL_APP_NAME that would shadow the
+# modal.App(...) name default above (same guard as sandboxes.py).
 _otel_secret = modal.Secret.from_dict({
-    "OTEL_EXPORTER_OTLP_ENDPOINT": os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
-    "OTEL_EXPORTER_OTLP_HEADERS": os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
-    "MODAL_APP_NAME": os.environ.get("MODAL_APP_NAME", ""),
+    key: value
+    for key, value in {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+        "OTEL_EXPORTER_OTLP_HEADERS": os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
+        "MODAL_APP_NAME": os.environ.get("MODAL_APP_NAME", ""),
+    }.items()
+    if value
 })
 
 # Image for the web functions — includes our backend Python modules
 # Also mount runner package and docker files so sandbox image builds can reference them
 fn_image = (
     modal.Image.debian_slim()
-    .pip_install("fastapi[standard]", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http")
+    .pip_install("fastapi[standard]", "opentelemetry-sdk==1.43.0", "opentelemetry-exporter-otlp-proto-http==1.43.0")
     .add_local_python_source("session", "sandboxes", "config", "images", "tracing")
     .add_local_dir("docker", remote_path="/root/docker", ignore=["**/node_modules"])
     .add_local_dir("packages/runner", remote_path="/root/packages/runner", ignore=["**/node_modules"])
@@ -121,14 +127,14 @@ async def hibernate_session(request: dict, traceparent: str | None = Header(defa
         sandbox_id = request["sandboxId"]
         try:
             snapshot_image_id = await session_manager.hibernate(sandbox_id)
-        except SandboxAlreadyFinishedError as exc:
-            # Handled here, so the span never sees the raise — mark it ERROR explicitly.
-            tracing.mark_error(otel_span, exc)
+        except SandboxAlreadyFinishedError:
+            # Idle-timeout exit is a normal lifecycle outcome, not a span error.
             return JSONResponse(
                 status_code=409,
                 content={"error": "sandbox_already_finished", "message": "Sandbox has already exited (idle timeout). Cannot hibernate."},
             )
         except SandboxSnapshotFailedError as exc:
+            # Handled here, so the span never sees the raise — mark it ERROR explicitly.
             tracing.mark_error(otel_span, exc)
             return JSONResponse(
                 status_code=503,

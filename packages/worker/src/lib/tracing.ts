@@ -22,7 +22,14 @@ export function isTracingEnabled(env: TracingEnv): boolean {
   return typeof endpoint === 'string' && endpoint.trim().length > 0;
 }
 
-/** Parse the OTLP `key=value,key2=value2` header convention into a header map. */
+/**
+ * Parse the OTLP `key=value,key2=value2` header convention into a header map.
+ *
+ * Values are percent-decoded to match the backend parser (backend/tracing.py):
+ * one OTEL_EXPORTER_OTLP_HEADERS value (e.g. the Grafana Cloud `Authorization=
+ * Basic%20<token>` form) must yield the same auth header on both exporters.
+ * Malformed sequences are left verbatim, mirroring Python's lenient unquote().
+ */
 export function parseOtlpHeaders(raw: string | undefined): Record<string, string> {
   const headers: Record<string, string> = {};
   if (!raw) return headers;
@@ -31,9 +38,17 @@ export function parseOtlpHeaders(raw: string | undefined): Record<string, string
     if (eq <= 0) continue;
     const key = pair.slice(0, eq).trim();
     const value = pair.slice(eq + 1).trim();
-    if (key) headers[key] = value;
+    if (key) headers[key] = percentDecode(value);
   }
   return headers;
+}
+
+function percentDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 // Secrets that sit in the URL PATH rather than the query — e.g. the Telegram bot token
@@ -136,4 +151,17 @@ export function activeTraceparent(): string | null {
   if (!sc || !sc.traceId || sc.traceId === '0'.repeat(32)) return null;
   const flags = (sc.traceFlags & 1) === 1 ? '01' : '00';
   return `00-${sc.traceId}-${sc.spanId}-${flags}`;
+}
+
+/**
+ * `base` headers plus a `traceparent` for the active span, when there is one.
+ * Shared by DO backend fetches (session-lifecycle.ts) and the scheduled
+ * workspace-delete fan-out (index.ts) so both propagate trace context to the
+ * Modal backend identically.
+ */
+export function withTraceparent(base: Record<string, string> = {}): Record<string, string> {
+  const headers = { ...base };
+  const traceparent = activeTraceparent();
+  if (traceparent) headers['traceparent'] = traceparent;
+  return headers;
 }

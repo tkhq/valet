@@ -10,7 +10,7 @@
  * - Activity touch (lastUserActivityAt)
  */
 
-import { activeTraceparent } from '../lib/tracing.js';
+import { withTraceparent } from '../lib/tracing.js';
 import type { SessionState } from './session-state.js';
 
 // ─── Error Types ──────────────────────────────────────────────────────────────
@@ -70,10 +70,7 @@ export class SessionLifecycle {
    * header is simply omitted — known gap, tracked separately.
    */
   private backendHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const traceparent = activeTraceparent();
-    if (traceparent) headers['traceparent'] = traceparent;
-    return headers;
+    return withTraceparent({ 'Content-Type': 'application/json' });
   }
 
   /** Spawn a new sandbox via the Modal backend. */

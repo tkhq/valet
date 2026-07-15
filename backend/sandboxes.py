@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import logging
 import modal
 
+import tracing
+
 # ConflictError is public API (Modal v1.3+) but may not exist in older
 # runtime SDKs injected into function containers. Fall back to catching
 # the raw grpclib.GRPCError that Modal is migrating away from.
@@ -20,7 +22,6 @@ except AttributeError:
 
 logger = logging.getLogger(__name__)
 
-import tracing
 from config import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     GATEWAY_PORT,

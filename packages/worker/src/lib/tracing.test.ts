@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { context, trace } from '@opentelemetry/api';
+import { context, trace, TraceFlags } from '@opentelemetry/api';
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
-import { activeTraceparent, buildTraceConfig, isTracingEnabled, parseOtlpHeaders, redactUrlAttributes, setSessionAttributes } from './tracing.js';
+import { activeTraceparent, buildTraceConfig, isTracingEnabled, parseOtlpHeaders, redactUrlAttributes, setSessionAttributes, withTraceparent } from './tracing.js';
 
 describe('isTracingEnabled', () => {
   it('is false when the endpoint is unset or blank', () => {
@@ -23,6 +23,14 @@ describe('parseOtlpHeaders', () => {
       Authorization: 'Basic abc',
       k: 'a=b',
     });
+  });
+  it('percent-decodes values so a %20-encoded token matches the backend parser', () => {
+    expect(parseOtlpHeaders('Authorization=Basic%20abc123')).toEqual({
+      Authorization: 'Basic abc123',
+    });
+  });
+  it('leaves a malformed percent-sequence verbatim', () => {
+    expect(parseOtlpHeaders('k=100%')).toEqual({ k: '100%' });
   });
 });
 
@@ -151,6 +159,51 @@ describe('activeTraceparent', () => {
       const sc = span.spanContext();
       expect(activeTraceparent()).toBe(`00-${sc.traceId}-${sc.spanId}-01`);
       span.end();
+    });
+  });
+
+  it('is null when the active span context has an all-zero trace id', () => {
+    const sc = { traceId: '0'.repeat(32), spanId: '1'.repeat(16), traceFlags: TraceFlags.SAMPLED };
+    context.with(trace.setSpanContext(context.active(), sc), () => {
+      expect(activeTraceparent()).toBeNull();
+    });
+  });
+
+  it('emits the unsampled 00 flag when the active span is not sampled', () => {
+    const sc = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), traceFlags: TraceFlags.NONE };
+    context.with(trace.setSpanContext(context.active(), sc), () => {
+      expect(activeTraceparent()).toBe(`00-${'a'.repeat(32)}-${'b'.repeat(16)}-00`);
+    });
+  });
+});
+
+describe('withTraceparent', () => {
+  let provider: BasicTracerProvider;
+  beforeAll(() => {
+    provider = new BasicTracerProvider();
+    trace.setGlobalTracerProvider(provider);
+    context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+  });
+  afterAll(async () => {
+    await provider.shutdown();
+    trace.disable();
+    context.disable();
+  });
+
+  it('adds a traceparent to the base headers when a span is active', () => {
+    trace.getTracer('t').startActiveSpan('op', (span) => {
+      const sc = span.spanContext();
+      expect(withTraceparent({ 'Content-Type': 'application/json' })).toEqual({
+        'Content-Type': 'application/json',
+        traceparent: `00-${sc.traceId}-${sc.spanId}-01`,
+      });
+      span.end();
+    });
+  });
+
+  it('returns the base headers unchanged when no span is active', () => {
+    expect(withTraceparent({ 'Content-Type': 'application/json' })).toEqual({
+      'Content-Type': 'application/json',
     });
   });
 });
