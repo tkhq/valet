@@ -860,3 +860,38 @@ export interface PatchOrgMemberRequest {
 export interface PatchOrgMemberResponse {
   ok: true;
 }
+
+// ── REST: org invites (org-admin only) ───────────────────────────────────
+//
+// `POST` mints a code and returns it exactly once — no other response ever
+// includes it (only `invites.code_hash` is persisted).
+
+export interface CreateInviteRequest {
+  email?: string;
+  role: "admin" | "member";
+}
+
+export interface CreateInviteResponse {
+  id: string;
+  code: string;
+  email: string | null;
+  role: "admin" | "member";
+  expiresAt: number;
+}
+
+export interface InviteWire {
+  id: string;
+  email: string | null;
+  role: "admin" | "member";
+  createdBy: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface ListInvitesResponse {
+  invites: InviteWire[];
+}
+
+export interface RevokeInviteResponse {
+  ok: true;
+}

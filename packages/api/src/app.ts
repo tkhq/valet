@@ -27,6 +27,7 @@ import { credentialsRouter } from "./routes/credentials.js";
 import { meRouter } from "./routes/me.js";
 import { modelsRouter } from "./routes/models.js";
 import { orgRouter } from "./routes/org.js";
+import { orgInvitesRouter } from "./routes/org-invites.js";
 import { registerWsRoutes } from "./routes/ws.js";
 
 export interface CreatedApp {
@@ -71,6 +72,7 @@ export function createApp(providers: Providers): CreatedApp {
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/org", orgRouter);
+  app.route("/api/org/invites", orgInvitesRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)
