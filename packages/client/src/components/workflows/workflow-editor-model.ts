@@ -9,6 +9,7 @@ import {
   type IfNode,
   type LlmNode,
   type OrchestratorNode,
+  type ProjectNode,
   type SessionNode,
   type SetNode,
   type StopNode,
@@ -365,18 +366,16 @@ export const NODE_DESCRIPTIONS = Object.fromEntries(
   (Object.keys(NODE_DOCS) as DagNodeType[]).map((t) => [t, NODE_DOCS[t].description]),
 ) as Record<DagNodeType, string>;
 
-export const NODE_TYPE_OPTIONS: Array<{ type: AddableDagNodeType; label: string; description: string }> = [
-  { type: 'llm', label: NODE_LABELS.llm, description: NODE_DESCRIPTIONS.llm },
-  { type: 'tool', label: NODE_LABELS.tool, description: NODE_DESCRIPTIONS.tool },
-  { type: 'if', label: NODE_LABELS.if, description: NODE_DESCRIPTIONS.if },
-  { type: 'foreach', label: NODE_LABELS.foreach, description: NODE_DESCRIPTIONS.foreach },
-  { type: 'approval', label: NODE_LABELS.approval, description: NODE_DESCRIPTIONS.approval },
-  { type: 'wait', label: NODE_LABELS.wait, description: NODE_DESCRIPTIONS.wait },
-  { type: 'set', label: NODE_LABELS.set, description: NODE_DESCRIPTIONS.set },
-  { type: 'orchestrator', label: NODE_LABELS.orchestrator, description: NODE_DESCRIPTIONS.orchestrator },
-  { type: 'session', label: NODE_LABELS.session, description: NODE_DESCRIPTIONS.session },
-  { type: 'stop', label: NODE_LABELS.stop, description: NODE_DESCRIPTIONS.stop },
-];
+// Derive from NODE_DOCS so this list can't drift when a new node type
+// is added. `trigger` is excluded because it's a fixed entry point,
+// not a palette-addable type. Order is stable across environments
+// because Object.keys preserves insertion order for string keys and
+// NODE_DOCS is authored in a fixed order. Guarded by
+// `workflow-editor-consistency.test.ts`.
+export const NODE_TYPE_OPTIONS: Array<{ type: AddableDagNodeType; label: string; description: string }> =
+  (Object.keys(NODE_DOCS) as DagNodeType[])
+    .filter((t): t is AddableDagNodeType => t !== 'trigger')
+    .map((t) => ({ type: t, label: NODE_LABELS[t], description: NODE_DESCRIPTIONS[t] }));
 
 export interface NodePaletteSection {
   id: string;
@@ -649,9 +648,21 @@ export function createWorkflowInputPatchForNode(
       return { prompt: appendExpression(node.prompt, source.expression) } satisfies Partial<SessionNode>;
     case 'stop':
       return { output: source.expression } satisfies Partial<StopNode>;
+    case 'project':
+      // project.source is the single template field; only accept array
+      // sources (project expects Array<record>). Falls back to null for
+      // non-arrays instead of clobbering an in-progress path.
+      return source.valueType === 'array'
+        ? ({ source: source.expression } satisfies Partial<ProjectNode>)
+        : null;
     case 'wait':
     case 'trigger':
       return null;
+    default: {
+      const _exhaustive: never = node;
+      void _exhaustive;
+      return null;
+    }
   }
 }
 
@@ -838,6 +849,19 @@ function summarizeNode(node: WorkflowNode): string {
       return trimSummary(node.prompt || (node.mode === 'prompt' ? node.sessionId : node.workspace) || 'No prompt configured');
     case 'stop':
       return trimSummary(node.message || node.outcome || 'success');
+    case 'project':
+      return trimSummary(
+        node.columns && node.columns.length > 0
+          ? `${node.columns.length} column${node.columns.length === 1 ? '' : 's'}`
+          : 'No columns configured',
+      );
+    default: {
+      // Exhaustiveness guard so a new node type in the shared union
+      // becomes a compile error instead of a blank summary card.
+      const _exhaustive: never = node;
+      void _exhaustive;
+      return '';
+    }
   }
 }
 
