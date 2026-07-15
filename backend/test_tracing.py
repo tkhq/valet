@@ -83,7 +83,12 @@ def test_body_exception_is_recorded_and_reraised():
 
     span = exporter.get_finished_spans()[0]
     assert span.status.status_code == StatusCode.ERROR
-    assert any(event.name == "exception" for event in span.events)
+    # Class name only — the raw message must never reach the span.
+    assert span.attributes["error.class"] == "RuntimeError"
+    assert span.status.description == "RuntimeError"
+    assert not span.events
+    serialized = repr((span.attributes, span.status.description, span.events))
+    assert "boom" not in serialized
 
 
 def test_parse_otlp_headers():

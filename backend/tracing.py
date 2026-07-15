@@ -144,9 +144,11 @@ def span(
     try:
         yield otel_span
     except BaseException as exc:
+        # Class name only — exception messages can carry request/backend text,
+        # and the fixed-classification rule keeps raw strings off spans.
         try:
-            otel_span.record_exception(exc)
-            otel_span.set_status(Status(StatusCode.ERROR, str(exc)))
+            otel_span.set_attribute("error.class", type(exc).__name__)
+            otel_span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
         except Exception:
             pass
         raise
