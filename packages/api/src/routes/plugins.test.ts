@@ -81,10 +81,14 @@ describe("GET /api/plugins", () => {
       },
     ]);
 
+    // Plugin-level dynamic flag: set on the resolveActions plugin, absent otherwise.
+    expect(fixture?.dynamic).toBe(true);
+
     const bare = plugins.find((p) => p.name === "bare-plugin");
     expect(bare).toBeDefined();
     expect(bare?.services).toEqual([]);
     expect(bare?.actionCount).toBe(1);
+    expect(bare?.dynamic).toBeUndefined();
   });
 
   it("flips connected:true after a credential is saved for the service", async () => {

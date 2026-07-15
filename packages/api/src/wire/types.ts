@@ -730,6 +730,13 @@ export interface PluginSummary {
   /** Count of statically-declared actions only (plugins with `resolveActions`
    * may expose more at runtime — see `PluginServiceSummary.dynamic`). */
   actionCount: number;
+  /**
+   * Set (to `true`) when ANY of the plugin's ActionPlugins declares
+   * `resolveActions`. Needed at the plugin level because a dynamic plugin
+   * with no credential declaration (e.g. deepwiki) has `services: []`, and
+   * the UI would otherwise read it as content-only.
+   */
+  dynamic?: true;
   /** Empty when the plugin declares no `credentials` (nothing to connect). */
   services: PluginServiceSummary[];
 }

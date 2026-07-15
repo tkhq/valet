@@ -1,0 +1,39 @@
+/**
+ * Friendly labels for plugin/service ids on `/integrations`. Raw manifest
+ * names are lowercase package-ish ids (`google-workspace`, `deepwiki`);
+ * people recognize product names. Unknown ids fall back to title-cased
+ * words so a dropped-in third-party plugin still reads like a name, not
+ * an identifier.
+ */
+const DISPLAY_NAMES: Record<string, string> = {
+  github: "GitHub",
+  gmail: "Gmail",
+  "google-calendar": "Google Calendar",
+  google_calendar: "Google Calendar",
+  "google-workspace": "Google Workspace",
+  google_workspace: "Google Workspace",
+  slack: "Slack",
+  cloudflare: "Cloudflare",
+  deepwiki: "DeepWiki",
+  linear: "Linear",
+  notion: "Notion",
+  sentry: "Sentry",
+  stripe: "Stripe",
+  typefully: "Typefully",
+  figma: "Figma",
+  browser: "Browser",
+  workflows: "Workflows",
+  "sandbox-tunnels": "Sandbox tunnels",
+  personas: "Personas",
+  telegram: "Telegram",
+};
+
+export function displayName(id: string): string {
+  const known = DISPLAY_NAMES[id];
+  if (known) return known;
+  return id
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word, i) => (i === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}

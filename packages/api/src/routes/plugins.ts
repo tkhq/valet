@@ -49,6 +49,7 @@ pluginsRouter.get("/", async (c) => {
       version: plugin.version,
       description: plugin.description,
       actionCount,
+      dynamic: dynamicServices.size > 0 ? true : undefined,
       services,
     };
   });
