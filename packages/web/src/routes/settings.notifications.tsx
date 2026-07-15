@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import type { NotificationKind } from "@valet/api/wire";
 import { useNotificationPreferences, useSetNotificationPreference } from "~/api/queries";
 import { Section } from "~/components/settings/section";
+import { FieldRow } from "~/components/settings/field-row";
 import { Spinner, Switch } from "~/components/primitives";
 
 /**
@@ -59,17 +60,13 @@ export function NotificationsPage() {
           // row — mirrors the API's own default (see notifications.ts).
           const web = byKind.get(kind) ?? true;
           return (
-            <div key={kind} className="flex items-center justify-between gap-4 py-4">
-              <div className="min-w-0">
-                <div className="text-sm font-medium text-ink">{KIND_LABEL[kind]}</div>
-                <div className="text-xs text-muted">{KIND_DESCRIPTION[kind]}</div>
-              </div>
+            <FieldRow key={kind} label={KIND_LABEL[kind]} hint={KIND_DESCRIPTION[kind]}>
               <Switch
                 checked={web}
                 onCheckedChange={(next) => setPref.mutate({ kind, web: next })}
                 aria-label={`${KIND_LABEL[kind]} web notifications`}
               />
-            </div>
+            </FieldRow>
           );
         })}
     </Section>

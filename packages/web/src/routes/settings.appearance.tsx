@@ -1,22 +1,24 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { Monitor, Sun, Moon } from "lucide-react";
 import { Section } from "~/components/settings/section";
+import { RadioCard } from "~/components/settings/radio-card";
 import { readStoredTheme, setTheme, type ThemeChoice } from "~/lib/theme";
-import { cn } from "~/lib/cn";
 
 /**
- * `/settings/appearance` — You · Appearance. Theme choice, carried over
- * verbatim-ish from the old flat `/settings` page (Task 6 restyles this as
- * the spec's `radio-card` pattern; behavior is unchanged here).
+ * `/settings/appearance` — You · Appearance. Theme choice, restyled per the
+ * spec's "Visual direction" into three `RadioCard`s (moss ring when
+ * selected); the underlying `~/lib/theme.ts` mechanism is unchanged from
+ * the old flat `/settings` page.
  */
 export const Route = createFileRoute("/settings/appearance")({
   component: AppearancePage,
 });
 
-const THEME_OPTIONS: { value: ThemeChoice; label: string }[] = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
+const THEME_OPTIONS: { value: ThemeChoice; label: string; description: string; icon: typeof Monitor }[] = [
+  { value: "system", label: "System", description: "Follows your device's setting.", icon: Monitor },
+  { value: "light", label: "Light", description: "Bright, paper-toned surfaces.", icon: Sun },
+  { value: "dark", label: "Dark", description: "Low-glare, dark surfaces.", icon: Moon },
 ];
 
 export function AppearancePage() {
@@ -30,27 +32,16 @@ export function AppearancePage() {
   return (
     <Section title="Appearance" description="Choose how Valet looks on this device.">
       <div className="py-4">
-        <div
-          role="radiogroup"
-          aria-label="Theme"
-          className="inline-flex rounded border border-line bg-paper p-0.5"
-        >
+        <div role="radiogroup" aria-label="Theme" className="flex flex-col gap-2 sm:flex-row">
           {THEME_OPTIONS.map((opt) => (
-            <button
+            <RadioCard
               key={opt.value}
-              type="button"
-              role="radio"
-              aria-checked={choice === opt.value}
-              onClick={() => choose(opt.value)}
-              className={cn(
-                "rounded px-3 py-1.5 text-sm transition-colors",
-                choice === opt.value
-                  ? "bg-neutral-200 dark:bg-neutral-800 text-ink"
-                  : "text-muted hover:text-ink",
-              )}
-            >
-              {opt.label}
-            </button>
+              title={opt.label}
+              description={opt.description}
+              selected={choice === opt.value}
+              onSelect={() => choose(opt.value)}
+              icon={<opt.icon className="h-4 w-4" />}
+            />
           ))}
         </div>
       </div>

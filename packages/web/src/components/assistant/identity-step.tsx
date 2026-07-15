@@ -1,8 +1,4 @@
-import { useState } from "react";
-import { Dices } from "lucide-react";
-import { Button, Input, Textarea } from "~/components/primitives";
-import { useSaveIdentity } from "~/api/orchestrator";
-import { cn } from "~/lib/cn";
+import { IdentityFields, type IdentityFieldsProps } from "./identity-fields";
 
 /**
  * "Meet your assistant" identity step (assistant-centered web UI, decision
@@ -10,190 +6,23 @@ import { cn } from "~/lib/cn";
  * null`) and reopened inline, prefilled, from the identity header's edit
  * affordance — same component, `variant` only changes copy/chrome, not
  * behavior.
+ *
+ * The actual name/personality fields + save mechanics live in
+ * `identity-fields.tsx` (extracted for `/settings/assistant`'s reuse); this
+ * module re-exports the pure helpers for the existing test suite and keeps
+ * `IdentityStep` as a thin alias so the dashboard's call sites (and its
+ * `variant="onboarding"|"edit"` contract) don't change.
  */
-export const NAME_POOL = [
-  "Atlas",
-  "Beacon",
-  "Cleo",
-  "Dash",
-  "Echo",
-  "Fable",
-  "Iris",
-  "Juno",
-  "Lark",
-  "Nova",
-  "Opal",
-  "Piper",
-  "Quinn",
-  "Sage",
-  "Wren",
-] as const;
+export {
+  NAME_POOL,
+  TRAIT_CHIPS,
+  pickRandomName,
+  appendTraitSentence,
+  identitySubmitBody,
+} from "./identity-fields";
 
-export const TRAIT_CHIPS = [
-  "warm and direct",
-  "dry wit",
-  "meticulous planner",
-  "cheerful hype-person",
-] as const;
+export type IdentityStepProps = IdentityFieldsProps;
 
-/** Pure so a reroll's randomness is testable without mounting React. */
-export function pickRandomName(
-  pool: readonly string[] = NAME_POOL,
-  exclude?: string,
-  random: () => number = Math.random,
-): string {
-  const candidates = exclude ? pool.filter((n) => n !== exclude) : pool;
-  const source = candidates.length > 0 ? candidates : pool;
-  return source[Math.floor(random() * source.length)] ?? source[0];
-}
-
-/**
- * Appends a chip's phrase sentence ("You are {trait}.") to the current
- * personality text — decision 11 verbatim. Composable: clicking multiple
- * chips (or typing free text, then clicking a chip) keeps appending.
- */
-export function appendTraitSentence(current: string, trait: string): string {
-  const sentence = `You are ${trait}.`;
-  const trimmed = current.trimEnd();
-  return trimmed.length === 0 ? sentence : `${trimmed} ${sentence}`;
-}
-
-/**
- * Pure PATCH-body derivation, extracted so the "Skip personality" path
- * (submit name only, ignoring whatever's typed in the textarea) is
- * testable without mounting the mutation. `withPersonality: false` always
- * omits `personality`, regardless of its content; `true` omits it only
- * when the field is blank.
- */
-export function identitySubmitBody(
-  name: string,
-  personality: string,
-  withPersonality: boolean,
-): { name: string; personality?: string } {
-  const trimmedName = name.trim();
-  const trimmedPersonality = personality.trim();
-  if (withPersonality && trimmedPersonality.length > 0) {
-    return { name: trimmedName, personality: trimmedPersonality };
-  }
-  return { name: trimmedName };
-}
-
-export interface IdentityStepProps {
-  initialName?: string | null;
-  initialPersonality?: string | null;
-  /** "onboarding" = first-visit full-page copy; "edit" = header reopen. */
-  variant?: "onboarding" | "edit";
-  onDone?: () => void;
-  onCancel?: () => void;
-  className?: string;
-}
-
-export function IdentityStep({
-  initialName,
-  initialPersonality,
-  variant = "onboarding",
-  onDone,
-  onCancel,
-  className,
-}: IdentityStepProps) {
-  const [name, setName] = useState(() => initialName || pickRandomName());
-  const [personality, setPersonality] = useState(initialPersonality ?? "");
-  const save = useSaveIdentity();
-
-  const trimmedName = name.trim();
-  const canSubmit = trimmedName.length > 0 && !save.isPending;
-
-  async function submit(withPersonality: boolean) {
-    if (!canSubmit) return;
-    const body = identitySubmitBody(name, personality, withPersonality);
-    try {
-      await save.mutateAsync(body);
-      onDone?.();
-    } catch (err) {
-      console.error("failed to save identity:", err);
-    }
-  }
-
-  return (
-    <div className={cn("space-y-6", className)}>
-      <div className="space-y-1">
-        <h1 className="font-display text-2xl text-ink">
-          {variant === "onboarding" ? "Meet your assistant" : "Rename your assistant"}
-        </h1>
-        <p className="text-sm text-muted">
-          Give them a voice — you can change this anytime.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <label htmlFor="assistant-name" className="text-xs font-medium text-muted">
-          Name
-        </label>
-        <div className="flex gap-2">
-          <Input
-            id="assistant-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Name your assistant"
-            autoFocus
-            className="flex-1"
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            size="md"
-            aria-label="Suggest another name"
-            onClick={() => setName((current) => pickRandomName(NAME_POOL, current))}
-          >
-            <Dices className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-
-      <div className="space-y-2">
-        <label htmlFor="assistant-personality" className="text-xs font-medium text-muted">
-          Personality (optional)
-        </label>
-        <div className="flex flex-wrap gap-1.5">
-          {TRAIT_CHIPS.map((trait) => (
-            <button
-              key={trait}
-              type="button"
-              onClick={() => setPersonality((current) => appendTraitSentence(current, trait))}
-              className="rounded-full border border-line px-2.5 py-1 text-xs text-muted hover:border-moss hover:text-ink transition-colors"
-            >
-              {trait}
-            </button>
-          ))}
-        </div>
-        <Textarea
-          id="assistant-personality"
-          value={personality}
-          onChange={(e) => setPersonality(e.target.value)}
-          placeholder="You are warm and direct. Or write your own."
-          rows={3}
-        />
-      </div>
-
-      {save.error && (
-        <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
-          {save.error.message}
-        </div>
-      )}
-
-      <div className="flex items-center gap-2">
-        <Button type="button" onClick={() => submit(true)} disabled={!canSubmit}>
-          {variant === "onboarding" ? "Start" : "Save"}
-        </Button>
-        <Button type="button" variant="ghost" onClick={() => submit(false)} disabled={!canSubmit}>
-          Skip personality
-        </Button>
-        {variant === "edit" && onCancel && (
-          <Button type="button" variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-        )}
-      </div>
-    </div>
-  );
+export function IdentityStep(props: IdentityStepProps) {
+  return <IdentityFields {...props} />;
 }
