@@ -16,6 +16,7 @@
  * breach so the trigger path can map to the right HTTP status.
  */
 
+import { activeTraceparent } from '../lib/tracing.js';
 import type { Env } from '../env.js';
 import { getDb } from '../lib/drizzle.js';
 import { eq, inArray, and } from 'drizzle-orm';
@@ -281,6 +282,7 @@ export async function createExecution(env: Env, input: CreateExecutionInput): Pr
   // delete the row we just inserted so we don't leak a pending
   // execution that no CF instance will ever advance.
   try {
+    const traceparent = activeTraceparent();
     await env.WORKFLOW_INTERPRETER.create({
       id: executionId,
       params: {
@@ -290,6 +292,7 @@ export async function createExecution(env: Env, input: CreateExecutionInput): Pr
         trigger,
         definition: def,
         mode,
+        ...(traceparent ? { traceparent } : {}),
       },
     });
   } catch (err) {
