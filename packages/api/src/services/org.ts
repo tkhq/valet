@@ -5,6 +5,7 @@
  * *operator* gate for `/api/admin` only (see `requireOrgAdmin`'s doc
  * comment on the routes that use it).
  */
+import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
@@ -33,6 +34,21 @@ export const LAST_ADMIN_ERROR = "an organization needs at least one admin";
 
 /** Exact copy string returned when the target userId has no membership row in the org. */
 export const MEMBER_NOT_FOUND_ERROR = "member not found";
+
+/**
+ * Single-org bootstrap: returns the existing org row (first one found) or
+ * creates one named "My organization". Used by the auth provisioning hooks
+ * (`auth/provisioning.ts`) to guarantee an org exists before the first
+ * `org_members` row is inserted — this app has exactly one org today.
+ */
+export function ensureOrg(db: AppDb): { id: string } {
+  const existing = db.select({ id: orgs.id }).from(orgs).get();
+  if (existing) return existing;
+
+  const id = `org_${randomUUID()}`;
+  db.insert(orgs).values({ id, name: "My organization", createdAt: Date.now() }).run();
+  return { id };
+}
 
 /** True when `userId` holds `org_members.role === "admin"` in `orgId`. */
 export async function isOrgAdmin(db: AppQueryable, orgId: string, userId: string): Promise<boolean> {
