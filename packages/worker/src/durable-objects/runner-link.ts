@@ -162,6 +162,21 @@ export class RunnerLink {
     this.deps.setState('runnerConnectedAt', ms ? String(ms) : '');
   }
 
+  /**
+   * Timestamp (ms since epoch) when the runner last signaled ready (its first
+   * `agentStatus: idle` after connecting), or 0 if not ready this lifecycle.
+   * The recovery circuit breaker measures uptime from this to tell a genuine
+   * recovery from a transient recover→ready→die flap.
+   */
+  get readyAt(): number {
+    const val = this.deps.getState('runnerReadyAt');
+    return val ? parseInt(val, 10) : 0;
+  }
+
+  set readyAt(ms: number) {
+    this.deps.setState('runnerReadyAt', ms ? String(ms) : '');
+  }
+
   // ─── Send ───────────────────────────────────────────────────────────
 
   /**

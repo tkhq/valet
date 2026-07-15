@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ACTION_APPROVAL_EXPIRY_MS, SessionAgentDO, buildActionApprovalPromptActions, buildForwardedParts, resolveSlackChannelId } from './session-agent.js';
+import { ACTION_APPROVAL_EXPIRY_MS, SessionAgentDO, buildActionApprovalPromptActions, buildForwardedParts, isRecoveryStable, resolveSlackChannelId } from './session-agent.js';
 import { createTestDb } from '../test-utils/db.js';
 import { sessions } from '../lib/schema/sessions.js';
 import { users } from '../lib/schema/users.js';
@@ -435,6 +435,12 @@ function createMockSql(): SqlStorage & {
         } else if (q.includes("SET status = 'completed' WHERE id = ?")) {
           const row = queue.get(String(params[0]));
           if (row) row.status = 'completed';
+        } else if (q.includes("SET status = 'dead_letter'") && q.includes('WHERE id = ?')) {
+          const row = queue.get(String(params[0]));
+          if (row) {
+            row.status = 'dead_letter';
+            if (q.includes('dispatched_at = NULL')) row.dispatched_at = null;
+          }
         }
         return cursor([]);
       }
@@ -734,57 +740,48 @@ describe('SessionAgentDO', () => {
     });
   });
 
+  describe('isRecoveryStable', () => {
+    const INTERVAL = 2 * 60_000; // matches RECOVERY_STABLE_INTERVAL_MS (2 grace periods)
+
+    it('is false when the runner never reached ready this lifecycle', () => {
+      expect(isRecoveryStable(0, 1_000_000, INTERVAL)).toBe(false);
+    });
+
+    it('is false for a normal fast boot — a short uptime is not a stable interval', () => {
+      // Ready 3s ago. Measured as uptime this is NOT stable, even though the
+      // boot itself was fast — the boot-latency-vs-uptime distinction the
+      // breaker got wrong before.
+      expect(isRecoveryStable(1_000_000 - 3_000, 1_000_000, INTERVAL)).toBe(false);
+    });
+
+    it('is true once the runner has held ready for a full interval', () => {
+      expect(isRecoveryStable(1_000_000 - INTERVAL, 1_000_000, INTERVAL)).toBe(true);
+      expect(isRecoveryStable(1_000_000 - (INTERVAL + 1), 1_000_000, INTERVAL)).toBe(true);
+    });
+  });
+
   describe('recovery circuit breaker (TKAI-180)', () => {
     // Drives the real SessionAgentDO through the incident's recover→ready→die
-    // cycle: performRecovery (real) increments the attempt counter and checks
-    // the breaker; the runner reaching "ready" is simulated by the reset call
-    // the agentStatus:idle handler makes (session-agent.ts). spawnSandbox is
-    // mocked so no Modal sandbox is needed — the recovery logic runs for real.
+    // cycle: performRecovery (real) advances the breaker, and the runner
+    // reaching "ready" is driven through the real agentStatus:idle handler
+    // (driveReady) rather than by hand-calling a private helper. spawnSandbox
+    // is mocked so no Modal sandbox is needed — the recovery logic runs for real.
     async function armRecovery() {
       const { agent, sql, waitUntil, broadcasts } = await createTestAgent();
       (agent as any).sessionState.backendUrl = 'https://backend/create-session';
       (agent as any).sessionState.spawnRequest = { sessionId: 'orchestrator:user-1' };
       (agent as any).spawnSandbox = vi.fn().mockResolvedValue(undefined);
+      (agent as any).notifyParentEvent = vi.fn().mockResolvedValue(undefined);
       return { agent, sql, waitUntil, broadcasts };
     }
 
-    it('REPRO: unconditional reset on every ready pins the breaker at #1 and loops forever', async () => {
-      const { agent } = await armRecovery();
-      let clock = 1_779_300_000_000;
-      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    // Signal the runner reaching ready via the real WS handler, which stamps
+    // runnerLink.readyAt (the uptime marker the breaker reads).
+    async function driveReady(agent: any) {
+      await agent.runnerHandlers.agentStatus({ type: 'agentStatus', status: 'idle' });
+    }
 
-      // The pre-fix behavior: the fresh runner reaches ready each cycle and
-      // resets unconditionally, so the counter never climbs past 1.
-      for (let i = 0; i < 8; i++) {
-        await (agent as any).performRecovery('sandbox_lost');
-        clock += 3_000; // runner connects + reaches ready ~3s later
-        (agent as any).sessionState.resetRecoveryState(); // unconditional (bug)
-        clock += 62_000; // ~grace period later the sandbox is lost again
-      }
-
-      expect((agent as any).sessionState.status).not.toBe('backoff');
-      expect((agent as any).sessionState.recoveryAttemptCount).toBeLessThanOrEqual(1);
-    });
-
-    it('FIX: guarded reset lets a rapid recover→die loop trip into backoff', async () => {
-      const { agent } = await armRecovery();
-      let clock = 1_779_300_000_000;
-      vi.spyOn(Date, 'now').mockImplementation(() => clock);
-
-      for (let i = 0; i < 8; i++) {
-        await (agent as any).performRecovery('sandbox_lost');
-        if ((agent as any).sessionState.status === 'backoff') break;
-        clock += 3_000; // transient readiness — shorter than a recover→die cycle
-        (agent as any).resetRecoveryStateIfStable(); // guarded: won't reset
-        clock += 62_000;
-      }
-
-      // Orchestrator trips to backoff after >3 rapid recoveries instead of looping.
-      expect((agent as any).sessionState.status).toBe('backoff');
-      expect((agent as any).sessionState.recoveryAttemptCount).toBeGreaterThan(3);
-    });
-
-    it('does not penalize a genuinely healthy interval', async () => {
+    it('reaching ready stamps readyAt but does not reset the breaker', async () => {
       const { agent } = await armRecovery();
       let clock = 1_779_300_000_000;
       vi.spyOn(Date, 'now').mockImplementation(() => clock);
@@ -792,31 +789,118 @@ describe('SessionAgentDO', () => {
       await (agent as any).performRecovery('sandbox_lost');
       expect((agent as any).sessionState.recoveryAttemptCount).toBe(1);
 
-      // Runner stays up well past a recover→die cycle before the next idle.
-      clock += 5 * 60_000;
-      (agent as any).resetRecoveryStateIfStable();
-      expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
-      // A healthy reset is not flapping — no leading-indicator event.
-      expect((agent as any).emitAuditEvent).not.toHaveBeenCalledWith(
-        'recovery.flapping',
-        expect.anything(),
+      clock += 3_000; // runner reaches ready 3s later (a fast boot)
+      await driveReady(agent);
+
+      expect((agent as any).runnerLink.readyAt).toBe(clock);
+      // A fast boot is not proof of stability — the breaker stays armed.
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1);
+    });
+
+    it('a rapid recover→ready→die loop trips into backoff and emits recovery.flapping', async () => {
+      const { agent } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      for (let i = 0; i < 8; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+        if ((agent as any).sessionState.status === 'backoff') break;
+        clock += 3_000; // ready briefly (fast boot, shorter than a stable interval)
+        await driveReady(agent);
+        clock += 62_000; // sandbox lost again ~a grace period later
+      }
+
+      expect((agent as any).sessionState.status).toBe('backoff');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBeGreaterThan(3);
+      expect((agent as any).emitAuditEvent).toHaveBeenCalledWith('recovery.flapping', expect.any(String));
+    });
+
+    it('quarantines the in-flight poison prompt when the breaker trips', async () => {
+      const { agent, sql } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      // A prompt that is in flight each time the sandbox dies.
+      (agent as any).promptQueue.enqueue({ id: 'poison', content: 'boom', status: 'processing', channelKey: 'web:default' });
+
+      for (let i = 0; i < 8; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+        if ((agent as any).sessionState.status === 'backoff') break;
+        clock += 3_000;
+        await driveReady(agent);
+        // Model the respawned sandbox picking the same prompt back up.
+        (agent as any).promptQueue.dequeueNext();
+        clock += 62_000;
+      }
+
+      expect((agent as any).sessionState.status).toBe('backoff');
+      // The poison prompt is dropped into dead_letter, not left queued for
+      // re-dispatch after the backoff cooldown.
+      expect(sql.queue.get('poison')?.status).toBe('dead_letter');
+      expect((agent as any).emitAuditEvent).toHaveBeenCalledWith(
+        'recovery.dead_letter',
+        expect.stringContaining('Quarantined'),
       );
     });
 
-    it('emits recovery.flapping when readiness is too transient to reset the breaker', async () => {
+    it('a genuinely healthy interval clears the breaker via the alarm cooldown', async () => {
       const { agent } = await armRecovery();
       let clock = 1_779_300_000_000;
       vi.spyOn(Date, 'now').mockImplementation(() => clock);
 
       await (agent as any).performRecovery('sandbox_lost');
-      clock += 3_000; // ready 3s after recovery — a flapping cycle, not healthy
-      (agent as any).resetRecoveryStateIfStable();
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1);
 
-      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1); // breaker held
-      expect((agent as any).emitAuditEvent).toHaveBeenCalledWith(
-        'recovery.flapping',
-        expect.stringContaining('breaker held'),
-      );
+      // Runner reconnects and reaches ready — drive the real idle transition.
+      (agent as any).sessionState.status = 'waiting_runner';
+      clock += 3_000;
+      await driveReady(agent);
+      expect((agent as any).sessionState.status).toBe('running');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1); // not reset at ready
+
+      // After the runner has held ready for a full stable interval, the alarm
+      // cools the breaker down (measuring uptime, not boot latency).
+      clock += 130_000; // > RECOVERY_STABLE_INTERVAL_MS (2 * 60s)
+      await agent.alarm();
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
+    });
+
+    it('backoff retries escalate the exponential tier instead of flattening it at 1m', async () => {
+      const { agent, broadcasts } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      const lastBackoffSeconds = () => {
+        const msgs = broadcasts.filter((b) => b.type === 'message');
+        const content = (msgs[msgs.length - 1]?.data as { content?: string } | undefined)?.content ?? '';
+        const m = /Backing off for (\d+)s/.exec(content);
+        return m ? Number(m[1]) : null;
+      };
+
+      // Four rapid losses trip the breaker into the first tier.
+      for (let i = 0; i < 4; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+        clock += 3_000;
+        await driveReady(agent);
+        clock += 62_000;
+      }
+      expect((agent as any).sessionState.status).toBe('backoff');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(4);
+      expect(lastBackoffSeconds()).toBe(60);
+
+      // Backoff cooldown elapses: the retry resumes the same count (no reset)
+      // and respawns; a further loss escalates the tier to 5m rather than
+      // re-tripping at 1m forever.
+      await (agent as any).performRecovery('backoff_retry');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(4);
+      clock += 3_000;
+      await driveReady(agent);
+      clock += 62_000;
+      await (agent as any).performRecovery('sandbox_lost');
+
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(5);
+      expect((agent as any).sessionState.status).toBe('backoff');
+      expect(lastBackoffSeconds()).toBe(300);
     });
   });
 

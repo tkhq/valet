@@ -344,6 +344,31 @@ export class PromptQueue {
     }
   }
 
+  /** Ids of all entries currently marked 'processing'. Captured before a
+   *  recovery revert so the caller can quarantine the in-flight prompt(s) if
+   *  the recovery circuit breaker trips. */
+  getProcessingIds(): string[] {
+    return this.sql
+      .exec("SELECT id FROM prompt_queue WHERE status = 'processing'")
+      .toArray()
+      .map((row) => row.id as string);
+  }
+
+  /** Move entries into the terminal 'dead_letter' state so they are never
+   *  dispatched again. Used by the recovery circuit breaker to quarantine a
+   *  prompt that repeatedly crashes the sandbox — the queue drain only selects
+   *  'queued' rows, so a dead-lettered row stays as an inert diagnostic record.
+   *  Returns the number of ids quarantined. */
+  deadLetter(ids: readonly string[]): number {
+    for (const id of ids) {
+      this.sql.exec(
+        "UPDATE prompt_queue SET status = 'dead_letter', dispatched_at = NULL WHERE id = ?",
+        id,
+      );
+    }
+    return ids.length;
+  }
+
   /** Drop a single entry — marks completed and DELETEs in one step so the
    *  row doesn't linger as an orphaned 'completed' row until the next
    *  unscoped markCompleted() sweep. */

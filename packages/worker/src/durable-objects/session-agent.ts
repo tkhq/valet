@@ -125,6 +125,22 @@ function buildThreadContinuationContext(rows: Array<{ role?: unknown; content?: 
 }
 
 /**
+ * Whether a runner that became ready at `runnerReadyAt` has since held ready
+ * long enough (`stableIntervalMs`) to count as a genuine recovery rather than a
+ * transient recover→ready→die flap. Measures uptime (`now − runnerReadyAt`),
+ * not the boot latency at the ready signal. Returns false when the runner never
+ * reached ready this lifecycle (`runnerReadyAt` is 0).
+ */
+export function isRecoveryStable(
+  runnerReadyAt: number,
+  now: number,
+  stableIntervalMs: number,
+): boolean {
+  if (runnerReadyAt <= 0) return false;
+  return now - runnerReadyAt >= stableIntervalMs;
+}
+
+/**
  * Restore the composite Slack channelId (with thread_ts) when the agent
  * sends only a bare channel ID. Returns the original channelId unchanged
  * for non-Slack channels or when the stored context doesn't match.
@@ -364,11 +380,10 @@ export class SessionAgentDO {
   private _activeWorkflowExecutionId: string | undefined;
 
   private static readonly RUNNER_GRACE_PERIOD_MS = 60_000;
-  // A runner reaching "ready" only clears the recovery circuit breaker once it
-  // has outlived a recover→ready→die cycle — i.e. it stayed up longer than the
-  // grace period that would otherwise trigger the next recovery. Without this,
-  // a sandbox that dies ~every grace period resets the breaker each cycle and
-  // the session recovers forever instead of tripping into backoff.
+  // How long a runner must stay continuously ready (uptime, not boot latency)
+  // before the recovery circuit breaker cools down. A session that dies again
+  // within this window counts as a recover→ready→die flap and keeps the breaker
+  // climbing toward its trip; one that stays up longer is a genuine recovery.
   private static readonly RECOVERY_STABLE_INTERVAL_MS = 2 * SessionAgentDO.RUNNER_GRACE_PERIOD_MS;
   private static readonly MODAL_SANDBOX_MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
   private static readonly MODAL_SANDBOX_TIMEOUT_EDGE_THRESHOLD_MS =
@@ -1242,7 +1257,9 @@ export class SessionAgentDO {
       const backoffUntil = this.sessionState.backoffUntil;
       if (backoffUntil > 0 && now >= backoffUntil) {
         console.log('[SessionAgentDO] Backoff cooldown elapsed — retrying recovery');
-        this.sessionState.resetRecoveryState();
+        // Don't reset the breaker here — performRecovery('backoff_retry') is a
+        // resumption of an already-counted failure, so the attempt counter must
+        // survive for the exponential tier (1m→5m→15m) to escalate.
         await this.performRecovery('backoff_retry');
       }
       // Whether we retried or the timer hasn't expired yet, re-arm and return.
@@ -1262,6 +1279,20 @@ export class SessionAgentDO {
         this.rescheduleIdleAlarm();
       }
       return;
+    }
+
+    // ─── Recovery Breaker Cooldown ──────────────────────────────────
+    // Clear the breaker once a running session has held its runner ready for a
+    // full stable interval. Measuring uptime (now − readyAt) here — not boot
+    // latency at the ready signal — is what lets a genuine recovery reset while
+    // a recover→ready→die flap keeps climbing toward the trip.
+    if (
+      status === 'running' &&
+      this.sessionState.recoveryAttemptCount > 0 &&
+      isRecoveryStable(this.runnerLink.readyAt, now, SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS)
+    ) {
+      console.log(`[SessionAgentDO] Recovery breaker cleared — runner stable for ${now - this.runnerLink.readyAt}ms`);
+      this.sessionState.resetRecoveryState();
     }
 
     // ─── Collect Mode Flush Check (Phase D) ──────────────────────────
@@ -3189,6 +3220,9 @@ export class SessionAgentDO {
           const wasInitializing = !this.runnerLink.isReady;
           if (wasInitializing) {
             this.runnerLink.ready = true;
+            // Stamp when the runner became ready so the recovery breaker's alarm
+            // cooldown can measure uptime rather than resetting on boot latency.
+            this.runnerLink.readyAt = Date.now();
             console.log('[SessionAgentDO] Runner is now ready (first idle after connect)');
 
             // Transition waiting_runner → running now that the Runner is connected and healthy
@@ -3201,11 +3235,11 @@ export class SessionAgentDO {
               this.broadcastToClients({ type: 'status', data: { status: 'running', sandboxRunning: true } });
             }
 
-            // Runner is healthy — reset recovery counters so the circuit breaker
-            // starts fresh for any future sandbox loss. Guarded so a transient
-            // recover→ready→die cycle can't reset the breaker every grace period
-            // and loop forever (see resetRecoveryStateIfStable).
-            this.resetRecoveryStateIfStable();
+            // The recovery breaker is NOT reset here: reaching ready proves only
+            // that the sandbox booted, not that it will stay up. Resetting on the
+            // ready signal would clear the breaker on every recover→ready→die flap
+            // and loop forever. The breaker cools down from the alarm once the
+            // runner has held ready for a full stable interval (uptime).
 
             // Revert any processing entries that survived DO eviction.
             // The disconnectRevertTimer is an in-memory setTimeout that is lost
@@ -5659,8 +5693,8 @@ export class SessionAgentDO {
         const now = Date.now();
         const backoffUntil = this.sessionState.backoffUntil;
         if (backoffUntil > 0 && now >= backoffUntil) {
-          // Cooldown elapsed — reset circuit breaker before retrying
-          this.sessionState.resetRecoveryState();
+          // Cooldown elapsed — retry without resetting the breaker so the
+          // exponential tier keeps escalating if the session is still flapping.
           await this.performRecovery('ensure_running_after_backoff');
           return Response.json({ status: 'recovering' }, { status: 202 });
         }
@@ -5772,54 +5806,29 @@ export class SessionAgentDO {
   }
 
   /**
-   * Clear the recovery circuit breaker only when a ready runner reflects a
-   * genuinely healthy interval, not a transient recover→ready→die cycle.
-   *
-   * A runner that reconnects after recovery and then loses its sandbox again a
-   * grace period later would, if it reset unconditionally, keep the breaker
-   * pinned at attempt #1 forever — the session never trips into backoff and
-   * loops indefinitely. So only reset once the runner has been up longer than a
-   * recover→die cycle since the last recovery (or if no recovery has happened).
-   */
-  private resetRecoveryStateIfStable(): void {
-    const lastRecoveryAt = this.sessionState.lastRecoveryAt;
-    const msSinceLastRecovery = Date.now() - lastRecoveryAt;
-    const stable =
-      lastRecoveryAt === 0 ||
-      msSinceLastRecovery > SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS;
-    if (stable) {
-      this.sessionState.resetRecoveryState();
-      return;
-    }
-    // Held the breaker: the runner reached ready, but too soon after the last
-    // recovery to count as a healthy interval — the session is flapping
-    // (recover → briefly ready → die). Emit a leading indicator BEFORE the
-    // breaker trips into backoff so a recovery-rate signal / the health endpoint
-    // can catch a flapping session early instead of after the fact.
-    const attempt = this.sessionState.recoveryAttemptCount;
-    console.warn(
-      `[SessionAgentDO] Recovery breaker held — session ${this.sessionState.sessionId} flapping (attempt #${attempt}, ready ${msSinceLastRecovery}ms after last recovery)`,
-    );
-    this.emitAuditEvent(
-      'recovery.flapping',
-      `Runner ready ${msSinceLastRecovery}ms after recovery #${attempt} — breaker held`,
-    );
-  }
-
-  /**
    * Attempt to recover from a sandbox loss by respawning the sandbox.
    * Called when the runner grace period expires instead of immediately terminating.
    *
    * Flow:
    * 1. Transition to 'recovering' → broadcast + D1 sync
-   * 2. Revert any in-flight prompt back to queued
+   * 2. Revert any in-flight prompt back to queued (remembered for quarantine)
    * 3. Rotate the runner token and increment sandbox generation
-   * 4. Circuit breaker: if >3 attempts in 10 minutes, backoff (orchestrators) or terminate (regular)
-   * 5. Otherwise: transition to 'initializing' and respawn the sandbox
+   * 4. Advance the breaker counter — unless this is a backoff retry, which
+   *    resumes an already-counted failure
+   * 5. Circuit breaker: on trip, quarantine the in-flight prompt so it can't
+   *    re-poison the sandbox, then backoff (orchestrators) or terminate (regular)
+   * 6. Otherwise: transition to 'initializing' and respawn the sandbox
    */
   private async performRecovery(reason: string): Promise<void> {
     const sessionId = this.sessionState.sessionId;
     const now = Date.now();
+    // Backoff retries resume an already-counted failure: they must not advance
+    // the attempt counter or re-trip the breaker, or the respawn below never
+    // runs and the exponential tier (1m→5m→15m) can't escalate.
+    const isBackoffRetry = reason === 'backoff_retry' || reason === 'ensure_running_after_backoff';
+    // How long the runner held ready before this loss (0 if it never reached
+    // ready). Read before step 3 clears it — feeds the flapping indicator.
+    const readyAtBeforeLoss = this.runnerLink.readyAt;
 
     console.log(`[SessionAgentDO] performRecovery(${reason}) for session ${sessionId}`);
     this.logModalHardTimeoutEdgeIfNeeded(reason, now);
@@ -5837,9 +5846,12 @@ export class SessionAgentDO {
     }
 
     // ─── 2. Revert in-flight prompts back to queued ─────────────────
-    const stuckProcessing = this.promptQueue.processingCount;
-    if (stuckProcessing > 0) {
-      console.log(`[SessionAgentDO] Recovery: reverting ${stuckProcessing} processing entries to queued`);
+    // Capture the in-flight prompt(s) first: if this recovery trips the breaker
+    // they are the prime suspects for crashing the sandbox and get quarantined
+    // (step 5) instead of reverted and re-dispatched.
+    const inFlightPromptIds = this.promptQueue.getProcessingIds();
+    if (inFlightPromptIds.length > 0) {
+      console.log(`[SessionAgentDO] Recovery: reverting ${inFlightPromptIds.length} processing entries to queued`);
       this.promptQueue.revertProcessingToQueued();
     }
     this.promptQueue.runnerBusy = false;
@@ -5849,11 +5861,14 @@ export class SessionAgentDO {
     this.runnerLink.token = crypto.randomUUID();
     this.sessionState.sandboxGeneration = this.sessionState.sandboxGeneration + 1;
     this.runnerLink.ready = false;
+    this.runnerLink.readyAt = 0;
 
     // ─── 4. Update recovery counters ────────────────────────────────
-    this.sessionState.recoveryAttemptCount = this.sessionState.recoveryAttemptCount + 1;
-    this.sessionState.lastRecoveryAt = now;
-    this.sessionState.lastFailureReason = reason;
+    if (!isBackoffRetry) {
+      this.sessionState.recoveryAttemptCount = this.sessionState.recoveryAttemptCount + 1;
+      this.sessionState.lastRecoveryAt = now;
+      this.sessionState.lastFailureReason = reason;
+    }
 
     const attemptCount = this.sessionState.recoveryAttemptCount;
     console.log(`[SessionAgentDO] Recovery attempt #${attemptCount} for session ${sessionId} (reason: ${reason})`);
@@ -5863,13 +5878,45 @@ export class SessionAgentDO {
       properties: { attempt: attemptCount, reason },
     });
 
+    // Leading indicator: the runner had reached ready but lost its sandbox again
+    // before holding ready for a full stable interval — a recover→ready→die flap.
+    // Emitted BEFORE the breaker trips so a recovery-rate signal / the health
+    // endpoint can catch a flapping session early.
+    if (
+      !isBackoffRetry &&
+      readyAtBeforeLoss > 0 &&
+      !isRecoveryStable(readyAtBeforeLoss, now, SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS)
+    ) {
+      console.warn(
+        `[SessionAgentDO] Recovery flapping — session ${sessionId} lost its sandbox ${now - readyAtBeforeLoss}ms after ready (attempt #${attemptCount})`,
+      );
+      this.emitAuditEvent(
+        'recovery.flapping',
+        `Sandbox lost ${now - readyAtBeforeLoss}ms after ready — attempt #${attemptCount}`,
+      );
+    }
+
     // ─── 5. Circuit breaker check ───────────────────────────────────
-    // Trip if more than 3 consecutive recovery attempts without success.
-    // The counter is reset to 0 when the runner signals readiness (resetRecoveryState),
-    // so reaching >3 means repeated rapid failures without any healthy interval.
+    // Trip after more than 3 consecutive losses without a stable interval. The
+    // breaker cools down from the alarm once a runner holds ready for
+    // RECOVERY_STABLE_INTERVAL_MS, so reaching >3 means repeated rapid losses
+    // with no healthy interval between them.
     const CIRCUIT_BREAKER_MAX_ATTEMPTS = 3;
 
-    if (attemptCount > CIRCUIT_BREAKER_MAX_ATTEMPTS) {
+    if (!isBackoffRetry && attemptCount > CIRCUIT_BREAKER_MAX_ATTEMPTS) {
+      // Quarantine whatever was in flight when the sandbox died so a poison
+      // prompt can't re-crash the respawned sandbox forever. Drops it from the
+      // queue into 'dead_letter' — for orchestrators the row survives as a
+      // diagnostic; for regular sessions the audit event is the record.
+      if (inFlightPromptIds.length > 0) {
+        this.promptQueue.deadLetter(inFlightPromptIds);
+        console.log(`[SessionAgentDO] Circuit breaker: quarantined ${inFlightPromptIds.length} in-flight prompt(s) for session ${sessionId}`);
+        this.emitAuditEvent(
+          'recovery.dead_letter',
+          `Quarantined ${inFlightPromptIds.length} in-flight prompt(s) after ${attemptCount} recoveries`,
+        );
+      }
+
       const isOrchestrator = sessionId?.startsWith('orchestrator:') ?? false;
 
       if (isOrchestrator) {
@@ -6243,7 +6290,14 @@ export class SessionAgentDO {
       ? wakeStarted + SANDBOX_WAKE_TIMEOUT_MS
       : null;
 
-    return [promptExpiry, followupMs, watchdog, safetyNet, parentIdle, gracePeriod, idleQueueDeadline, readyDeadline, backoffDeadline, wakeDeadline, this.traceFlushDeadline];
+    // Recovery breaker cooldown — wake once a running runner has held ready for
+    // a full stable interval so the alarm can clear the breaker (see alarmTick).
+    const readyAt = this.runnerLink.readyAt;
+    const breakerCooldown = readyAt > 0 && this.sessionState.recoveryAttemptCount > 0 && this.sessionState.status === 'running'
+      ? readyAt + SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS
+      : null;
+
+    return [promptExpiry, followupMs, watchdog, safetyNet, parentIdle, gracePeriod, idleQueueDeadline, readyDeadline, backoffDeadline, wakeDeadline, breakerCooldown, this.traceFlushDeadline];
   }
 
   private rescheduleIdleAlarm(): void {
