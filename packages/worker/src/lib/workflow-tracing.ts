@@ -1,4 +1,4 @@
-import { SpanStatusCode, trace, type Context } from '@opentelemetry/api';
+import { SpanStatusCode, isValidSpanId, isValidTraceId, trace, type Context } from '@opentelemetry/api';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { createTraceProvider, parseTraceparent } from './do-tracing.js';
 import { isTracingEnabled, type TracingEnv } from './tracing.js';
@@ -73,13 +73,15 @@ export async function emitWorkflowRunSpans(
     // ParentBased sampler drop every span here while we still report a
     // count, so those runs get a fresh sampled root instead, with the
     // dispatching trace id kept as an attribute for manual correlation.
-    // Both ids must be well-formed to parent: a valid trace id with a
-    // malformed span id can't be a parent link either (parseTraceparent
-    // rejects it), so it falls back to the fresh-root + trace-id-attribute
-    // path rather than silently losing all correlation.
+    // Both ids must be W3C-valid to parent — not just hex-shaped. An all-zero
+    // trace or span id (INVALID_TRACEID/INVALID_SPANID) is syntactically hex
+    // but OTel treats it as no context, so parenting to it would start a fresh
+    // root with the dispatch id dropped too. isValidTraceId/isValidSpanId
+    // reject the zero ids, so those runs fall back to the fresh-root +
+    // trace-id-attribute path rather than silently losing all correlation.
     const tpParts = params.traceparent?.trim().split('-') ?? [];
-    const traceIdValid = tpParts.length >= 4 && /^[0-9a-f]{32}$/.test(tpParts[1] ?? '');
-    const spanIdValid = /^[0-9a-f]{16}$/.test(tpParts[2] ?? '');
+    const traceIdValid = tpParts.length >= 4 && isValidTraceId(tpParts[1] ?? '');
+    const spanIdValid = isValidSpanId(tpParts[2] ?? '');
     const parentSampled = traceIdValid && spanIdValid && (parseInt(tpParts[3]!, 16) & 1) === 1;
     const parent: Context = parentSampled ? parseTraceparent(params.traceparent) : parseTraceparent(undefined);
     const dispatchTraceId = traceIdValid && !parentSampled ? tpParts[1] : undefined;
@@ -151,17 +153,26 @@ export async function emitWorkflowRunSpans(
     // reclaimed the moment this step returns, before the drop counter would
     // ever observe the failed export.
     const TIMED_OUT = Symbol('flush-timeout');
-    const flushed = await Promise.race([
-      provider.forceFlush().then(() => 'flushed' as const),
-      new Promise<typeof TIMED_OUT>((resolve) => setTimeout(() => resolve(TIMED_OUT), 5_000)),
-    ]);
-    // Always tear the provider down, even when the 5s bound won: otherwise the
-    // BatchSpanProcessor and its 15s export-timeout timer outlive this step and
-    // leak into the isolate. Not awaited — shutdown() runs its own flush, which
-    // a black-holed collector would stall for the same 15s we just bounded.
-    void provider.shutdown().catch(() => {});
-    if (flushed === TIMED_OUT) {
-      console.warn(`[workflow-tracing] flush exceeded 5s bound for ${params.executionId}; ${count} span(s) may not have exported`);
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const flushed = await Promise.race([
+        provider.forceFlush().then(() => 'flushed' as const),
+        new Promise<typeof TIMED_OUT>((resolve) => {
+          boundTimer = setTimeout(() => resolve(TIMED_OUT), 5_000);
+        }),
+      ]);
+      if (flushed === TIMED_OUT) {
+        console.warn(`[workflow-tracing] flush exceeded 5s bound for ${params.executionId}; ${count} span(s) may not have exported`);
+      }
+    } finally {
+      // Clear the 5s bound when the flush wins the race, so a live timer never
+      // leaks past this step. Always tear the provider down too — including
+      // when forceFlush() rejects — otherwise the BatchSpanProcessor and its
+      // 15s export-timeout timer outlive the step and leak into the isolate.
+      // shutdown() is not awaited: it runs its own flush, which a black-holed
+      // collector would stall for the same 15s we just bounded.
+      if (boundTimer !== undefined) clearTimeout(boundTimer);
+      void provider.shutdown().catch(() => {});
     }
     return count;
   } catch (err) {

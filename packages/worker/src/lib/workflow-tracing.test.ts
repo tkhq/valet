@@ -260,6 +260,55 @@ describe('emitWorkflowRunSpans', () => {
     expect(root?.attributes['valet.dispatch.trace_id']).toBe(traceId);
   });
 
+  it('detaches from an all-zero span id: fresh root, dispatch trace kept as attribute', async () => {
+    const traceId = 'e'.repeat(32);
+    const count = await emitWorkflowRunSpans(
+      DISABLED_ENV,
+      // Hex-shaped but W3C-invalid parent span id: parenting to it would start
+      // a fresh root AND drop the dispatch id, silently losing all correlation.
+      makeParams({ traceparent: `00-${traceId}-${'0'.repeat(16)}-01` }),
+      makeResult(),
+      { exporter },
+    );
+    expect(count).toBe(4);
+    const root = memory.getFinishedSpans().find((s) => s.name === 'workflow.run');
+    expect(root?.parentSpanContext).toBeUndefined();
+    expect(root?.spanContext().traceId).not.toBe(traceId);
+    expect(root?.attributes['valet.dispatch.trace_id']).toBe(traceId);
+  });
+
+  it('starts a fresh trace on an all-zero trace id without parenting or a dispatch attribute', async () => {
+    const count = await emitWorkflowRunSpans(
+      DISABLED_ENV,
+      makeParams({ traceparent: `00-${'0'.repeat(32)}-${'d'.repeat(16)}-01` }),
+      makeResult(),
+      { exporter },
+    );
+    expect(count).toBe(4);
+    const root = memory.getFinishedSpans().find((s) => s.name === 'workflow.run');
+    expect(root?.parentSpanContext).toBeUndefined();
+    expect(root?.spanContext().traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(root?.attributes['valet.dispatch.trace_id']).toBeUndefined();
+  });
+
+  it('clears the 5s flush bound on the happy path, leaving no dangling timer', async () => {
+    const setSpy = vi.spyOn(globalThis, 'setTimeout');
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+    try {
+      const count = await emitWorkflowRunSpans(DISABLED_ENV, makeParams(), makeResult(), { exporter });
+      expect(count).toBe(4);
+      // The flush won the race well under 5s, so its bound timer must be
+      // cleared — the very leak class this bound targets. 5s is unique to the
+      // bound here (the batch processor uses 30s/15s).
+      const boundIdx = setSpy.mock.calls.findIndex((args) => args[1] === 5_000);
+      expect(boundIdx).toBeGreaterThanOrEqual(0);
+      expect(clearSpy).toHaveBeenCalledWith(setSpy.mock.results[boundIdx]!.value);
+    } finally {
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    }
+  });
+
   it('counts cancel-path skipped envelopes as skipped, not executed', async () => {
     const result = makeResult({ status: 'cancelled' });
     result.state.nodes['start'] = {
