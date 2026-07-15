@@ -25,7 +25,7 @@ import type {
   LlmNode,
 } from '@valet/shared';
 import { parseTemplate, parseExpression, TemplateParseError } from './expression.js';
-import { lintTemplateReferences, TEMPLATE_UNKNOWN_VARIABLE_CODE } from './template-lint.js';
+import { lintTemplateReferences } from './template-lint.js';
 import { allowedIfOperations, isIfOperationSupported, normalizeIfOperation } from './if-operations.js';
 import { parseDurationMs } from './duration.js';
 import { parseModelId, hasProviderKey } from '../llm/model-id.js';
@@ -242,6 +242,22 @@ export interface WorkflowDefinitionValidationContext {
    * can provide schemas while generic validation can skip unknown tool output.
    */
   toolOutputSchemas?: Record<string, Record<string, unknown> | undefined>;
+  /**
+   * Optional catalog of known service→actions. When present, tool nodes
+   * whose service or action id doesn't resolve produce a hard
+   * `unknown_tool_service` / `unknown_tool_action` error at
+   * save/validate/publish time — the fix that catches the "silent
+   * pending + preflight-retry burn" failure mode where a typo in
+   * `action` only surfaces mid-execution. When absent, the check is
+   * skipped so validators without a live tool catalog (draft-only
+   * shape checks) still work.
+   *
+   * The value is a Set of actionIds — use the actionId exactly as it
+   * appears after the first colon in the tool id from `list_tools`
+   * (some services prefix, e.g. `salesforce-read-only.soqlQuery`;
+   * others don't, e.g. `sheets.write_spreadsheet`).
+   */
+  knownToolActions?: Map<string, Set<string>>;
 }
 
 export function validateDefinitionWithContext(
@@ -304,6 +320,14 @@ export function validateDefinitionWithContext(
 
   validateForeachItemSources(def, errors, context);
 
+  // Tool node service:action existence check. Only runs when the
+  // caller supplies a known-tool catalog. Catches the specific dead-end
+  // where a typo in `action` (e.g. `soqlQuery` vs `salesforce-read-only.soqlQuery`)
+  // validates clean but blows up mid-execution with retry-burn.
+  if (context.knownToolActions) {
+    validateToolActionExistence(def, errors, context.knownToolActions);
+  }
+
   // Template-reference lint. Emits `template_unknown_variable` warnings
   // for `{{...}}` expressions that reference paths the definition can't
   // prove exist — the same class of issue the client editor flags in red
@@ -363,8 +387,83 @@ export function groupWorkflowValidationResults(results: WorkflowValidationError[
   return { errors, warnings };
 }
 
+/**
+ * Central registry of every validation code the validator + template
+ * lint can emit, with its severity. `isValidationWarning` reads from
+ * this map. Adding a new emit-site without registering its code here
+ * defaults to 'error' — safer to hard-block than to silently ignore a
+ * forgotten registration.
+ *
+ * The `consistency.test.ts` sweep drives a suite of intentionally-broken
+ * definitions through `validateDefinition` and asserts every surfaced
+ * code has a registry entry, catching drift at CI.
+ *
+ * When adding a warning, include a one-liner comment explaining the
+ * false-positive scenario that motivates the downgrade — warnings are
+ * our "known-limited-authority" bucket, not a general soft-fail category.
+ */
+export const VALIDATION_CODES = {
+  // ── Warnings ────────────────────────────────────────────────────────
+  llm_maxoutput_warning: 'warning',
+  template_unknown_variable: 'warning',
+  // Catalog scope may not include per-user custom MCP connectors, so a
+  // legitimate user-scoped tool node could false-positive here.
+  // Unknown actions WITHIN a known service stay a hard error.
+  unknown_tool_service: 'warning',
+  // Arbitrary-query tools (SOQL/HTTP) often lack registered output
+  // schemas, so the obvious `{{nodes.query.data.records}}` can't be
+  // statically proven to be an array. Runtime hard-fails with a
+  // descriptive message when the resolved value isn't iterable.
+  // Distinct from `foreach_items_trigger_untyped` (trigger.dataSchema
+  // is 100% author-owned, so THAT stays a hard error).
+  foreach_items_untyped_array_output: 'warning',
+
+  // ── Errors ──────────────────────────────────────────────────────────
+  malformed_definition: 'error',
+  cycle: 'error',
+  duplicate_id: 'error',
+  unknown_node_type: 'error',
+  unknown_foreach_body_type: 'error',
+  max_nodes_exceeded: 'error',
+  edge_from_stop: 'error',
+  edge_from_unknown: 'error',
+  edge_self_loop: 'error',
+  edge_to_unknown: 'error',
+  edge_when_unparseable: 'error',
+  if_edge_missing_fromOutput: 'error',
+  fromOutput_on_non_if: 'error',
+  expression_parse_error: 'error',
+  template_parse_error: 'error',
+  foreach_alias_shadows_reserved: 'error',
+  foreach_aliases_collide: 'error',
+  foreach_concurrency_exceeds_policy: 'error',
+  foreach_items_not_expression: 'error',
+  foreach_items_trigger_untyped: 'error',
+  foreach_max_items_exceeds_policy: 'error',
+  if_operation_unsupported: 'error',
+  input_not_in_enum: 'error',
+  input_required_missing: 'error',
+  input_type_mismatch: 'error',
+  input_unknown: 'error',
+  invalid_regex: 'error',
+  llm_model_id_invalid: 'error',
+  llm_model_missing: 'error',
+  llm_model_unavailable: 'error',
+  llm_provider_key_missing: 'error',
+  project_column_path_malformed: 'error',
+  session_thread_targeting_xor: 'error',
+  unknown_tool_action: 'error',
+  wait_duration_exceeds_policy: 'error',
+  wait_duration_unparseable: 'error',
+} as const satisfies Record<string, 'warning' | 'error'>;
+
+export type ValidationCode = keyof typeof VALIDATION_CODES;
+
 export function isValidationWarning(result: WorkflowValidationError): boolean {
-  return result.code === 'llm_maxoutput_warning' || result.code === TEMPLATE_UNKNOWN_VARIABLE_CODE;
+  // Unknown codes default to 'error' (safer to hard-block than to
+  // silently soft-fail on a code someone forgot to register).
+  const severity = (VALIDATION_CODES as Record<string, 'warning' | 'error'>)[result.code];
+  return severity === 'warning';
 }
 
 /**
@@ -528,6 +627,31 @@ function validateNode(
         validateSessionPrompt(node, errors);
       }
       break;
+    case 'project':
+      // `source` is a template resolving to an array; parse-check it here
+      // like other single-template fields.
+      tryParseTemplate(node.id, 'source', node.source, errors);
+      // Column paths: reject empty segments so authoring mistakes like
+      // "." (splits to no segments → whole record becomes the cell),
+      // "x." (silent trailing-dot strip), or "x..y" (silent middle-dot
+      // collapse) are caught at validate time instead of surprising at
+      // runtime. The zod schema's `min(1)` enforces one CHARACTER, not
+      // one segment — "." passes zod but is meaningless here.
+      for (let i = 0; i < node.columns.length; i++) {
+        const col = node.columns[i]!;
+        const rawSegments = col.path.split('.');
+        const nonEmpty = rawSegments.filter((s) => s.trim().length > 0);
+        if (nonEmpty.length === 0 || nonEmpty.length !== rawSegments.length) {
+          errors.push({
+            scope: 'field',
+            nodeId: node.id,
+            path: `columns.${i}.path`,
+            code: 'project_column_path_malformed',
+            message: `project node "${node.id}" column ${i} has malformed path "${col.path}" — paths must be non-empty dotted segments (e.g. "Account.Name"). Rejected: leading/trailing dot, empty segments, whitespace-only segments.`,
+          });
+        }
+      }
+      break;
   }
 }
 
@@ -579,16 +703,13 @@ function validateForeach(node: ForeachNode, errors: WorkflowValidationError[], l
     });
   }
 
-  // Body type allowlist.
-  if (!FOREACH_BODY_TYPES.has(node.body.type)) {
-    errors.push({
-      scope: 'node',
-      nodeId: node.id,
-      code: 'foreach_body_type_disallowed',
-      message: `foreach body type "${node.body.type}" is not allowed; permitted: ${[...FOREACH_BODY_TYPES].join(', ')}`,
-    });
-  }
-
+  // Body type allowlist is enforced earlier by `validateRawNodeTypes`
+  // via the `unknown_foreach_body_type` code — that check runs in
+  // validateDefinitionShape and short-circuits before this function
+  // is reached with a disallowed body. If you ever bypass
+  // validateDefinitionShape (e.g. call validateNode directly with a
+  // hand-built foreach), the zod parse catches it separately.
+  //
   // Recursively validate the body node. ForeachBodyNode is a subset of
   // WorkflowNode so this typechecks without a cast.
   validateNode(node.body, errors, limits);
@@ -745,12 +866,15 @@ function validateForeachItemSources(
       // payload's shape is opaque, so we can't prove the named path is
       // iterable — the workflow is one malformed trigger call away from
       // a runtime explosion. The author must declare the trigger schema
-      // and name an array field there. Surfaced as a hard error (not a
-      // warning) so programmatic authors calling workflows.validate or
-      // workflows.save_draft see a real signal — warnings are invisible
-      // to that loop and the agent will happily ship broken workflows.
+      // and name an array field there. Surfaced as a HARD ERROR (distinct
+      // code from the node-source case) — trigger is fully author-owned,
+      // so untyped-array here always indicates a definition bug we can
+      // catch at authoring time. The node-source case is a warning
+      // because the tool catalog often lacks a schema for arbitrary-query
+      // tools, and false-positive-hard-error would be worse than a
+      // runtime failure with a clear message.
       if (arrayPaths.has(formatPathSegments(segments))) continue;
-      errors.push(foreachUntypedArrayError(node.id, node.items));
+      errors.push(foreachTriggerUntypedError(node.id, node.items));
       continue;
     }
 
@@ -761,9 +885,12 @@ function validateForeachItemSources(
     if (!sourceNode) continue;
 
     // Tool outputs can be user/custom-MCP driven. Only enforce this rule
-    // when the caller supplied a schema for the selected action.
+    // when either (a) the caller supplied a service-level schema for the
+    // selected action, or (b) the tool node declared its own per-node
+    // outputSchema (the arbitrary-query case: SOQL/SQL/HTTP fetch).
     if (
       sourceNode.type === 'tool' &&
+      !sourceNode.outputSchema &&
       !context.toolOutputSchemas?.[toolOutputSchemaKey(sourceNode.service, sourceNode.action)]
     ) {
       continue;
@@ -786,6 +913,21 @@ function foreachUntypedArrayError(
     path: 'items',
     code: 'foreach_items_untyped_array_output',
     message: foreachUntypedArrayMessage(nodeId, items, sourceNodeType, sourceNodeId),
+  };
+}
+
+/**
+ * Distinct code for trigger-source untyped foreach so it stays a hard
+ * error while node-source cases (which can false-positive on tools
+ * without registered schemas) get downgraded to warning.
+ */
+function foreachTriggerUntypedError(nodeId: string, items: string): WorkflowValidationError {
+  return {
+    scope: 'field',
+    nodeId,
+    path: 'items',
+    code: 'foreach_items_trigger_untyped',
+    message: foreachUntypedArrayMessage(nodeId, items, undefined, undefined),
   };
 }
 
@@ -818,7 +960,7 @@ function foreachUntypedArrayMessage(
   }
 
   // Set node or other: fall back to a generic hint.
-  return `${diagnosis} To fix: source node "${sourceNodeId}" must produce an array at the referenced path (for set nodes, provide a literal array value; for other node types, declare an outputSchema with an array field).`;
+  return `${diagnosis} To fix: source node "${sourceNodeId}" must produce an array at the referenced path (for set nodes, either use a literal array under \`values\` OR add \`outputSchema\` declaring the field as \`{"type":"array"}\`; for other node types, declare an outputSchema with an array field).`;
 }
 
 function parseSinglePathTemplate(value: string): string[] | null {
@@ -864,6 +1006,13 @@ function deriveTypedArrayOutputPaths(
         break;
       case 'set':
         addStaticArrayPaths(paths, ['nodes', node.id, 'data'], node.values);
+        // set nodes may also declare an outputSchema. When the value
+        // at a given path is a template reference (not a literal array),
+        // the static-array walk above can't see it — the outputSchema
+        // is how the author declares "this path is an array" so the
+        // deterministic `set { records: "{{nodes.query.data.records}}" }`
+        // reshape becomes a valid foreach source.
+        if (node.outputSchema) addSchemaArrayPaths(paths, ['nodes', node.id, 'data'], node.outputSchema);
         break;
       case 'llm':
         if (node.outputSchema) addSchemaArrayPaths(paths, ['nodes', node.id, 'data'], node.outputSchema);
@@ -887,8 +1036,16 @@ function deriveTypedArrayOutputPaths(
       case 'foreach':
         paths.add(formatPathSegments(['nodes', node.id, 'data', 'items']));
         break;
+      case 'project':
+        // project always emits an Array<Array<unknown>> at data root, so
+        // `{{nodes.<id>.data}}` is itself an array-typed foreach source.
+        paths.add(formatPathSegments(['nodes', node.id, 'data']));
+        break;
       case 'tool': {
-        const schema = context.toolOutputSchemas?.[toolOutputSchemaKey(node.service, node.action)];
+        // Per-node `outputSchema` beats the service-level registered
+        // schema — the author knows the shape of their SELECT/query
+        // even when the tool can't declare it statically.
+        const schema = node.outputSchema ?? context.toolOutputSchemas?.[toolOutputSchemaKey(node.service, node.action)];
         if (schema) addSchemaArrayPaths(paths, ['nodes', node.id, 'data'], schema);
         break;
       }
@@ -940,6 +1097,72 @@ function formatPathSegments(segments: string[]): string {
 
 function toolOutputSchemaKey(service: string, action: string): string {
   return `${service}:${action}`;
+}
+
+/**
+ * Emit `unknown_tool_service` / `unknown_tool_action` errors for tool
+ * nodes whose `service` or `action` id doesn't resolve against the
+ * caller-supplied catalog. Walks both top-level nodes and foreach body
+ * nodes. When the action id is close to a real one, the message
+ * includes a nearest-match suggestion so authors don't have to
+ * cross-reference `list_tools` output by hand.
+ */
+function validateToolActionExistence(
+  def: WorkflowDefinition,
+  errors: WorkflowValidationError[],
+  known: Map<string, Set<string>>,
+): void {
+  const check = (node: WorkflowNode): void => {
+    if (node.type !== 'tool') return;
+    const actions = known.get(node.service);
+    if (!actions) {
+      const suggestion = nearestString(node.service, Array.from(known.keys()));
+      errors.push({
+        scope: 'node',
+        nodeId: node.id,
+        path: 'service',
+        code: 'unknown_tool_service',
+        message: `tool node "${node.id}" references unknown service "${node.service}"${suggestion ? ` — did you mean "${suggestion}"?` : ''}. Use \`list_tools\` to discover services; the value goes in \`service\` exactly as it appears before the first colon in each tool id.`,
+      });
+      return;
+    }
+    if (actions.has(node.action)) return;
+    const suggestion = nearestString(node.action, Array.from(actions));
+    errors.push({
+      scope: 'node',
+      nodeId: node.id,
+      path: 'action',
+      code: 'unknown_tool_action',
+      message: `tool node "${node.id}": action "${node.action}" not found in ${node.service} package${suggestion ? ` — did you mean "${suggestion}"?` : ''}. Use the action id verbatim from \`list_tools\` (everything after the first colon in the tool id). Some services prefix their action ids with the service name (e.g. \`salesforce-read-only.soqlQuery\`); others don't (e.g. \`sheets.write_spreadsheet\`).`,
+    });
+  };
+  for (const node of def.nodes) {
+    check(node);
+    if (node.type === 'foreach') check(node.body as WorkflowNode);
+  }
+}
+
+/**
+ * Cheap approximate-match ranker. Not Levenshtein — we care about
+ * catching the two dominant typo classes: (1) missing/extra prefix
+ * (`soqlQuery` vs `salesforce-read-only.soqlQuery`) and (2) case/typo.
+ * A substring match beats an equal-length distance; otherwise pick
+ * the shortest candidate that shares the longest common suffix.
+ */
+function nearestString(needle: string, candidates: string[]): string | null {
+  if (candidates.length === 0) return null;
+  const lower = needle.toLowerCase();
+  // Prefer candidates that end with the needle — catches the missing-prefix case
+  // (`soqlQuery` → `salesforce-read-only.soqlQuery`).
+  const suffixMatch = candidates
+    .filter((candidate) => candidate.toLowerCase().endsWith(lower) || lower.endsWith(candidate.toLowerCase()))
+    .sort((a, b) => Math.abs(a.length - needle.length) - Math.abs(b.length - needle.length))[0];
+  if (suffixMatch) return suffixMatch;
+  // Fallback: contains substring match.
+  const contained = candidates.find((candidate) =>
+    candidate.toLowerCase().includes(lower) || lower.includes(candidate.toLowerCase()),
+  );
+  return contained ?? null;
 }
 
 function hasCycle(nodes: WorkflowNode[], edges: WorkflowEdge[]): boolean {

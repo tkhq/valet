@@ -383,6 +383,28 @@ describe('lintTemplateReferences', () => {
     expect(errs[0]!.message).toContain('trigger.data.missing');
   });
 
+  it('flags unknown-variable references inside project.source', () => {
+    // Regression: project was added to the shared node union without a
+    // case in iterateTemplatedFields, so its `source` template was
+    // silently skipped by the lint. This test locks the fix in place.
+    const errs = lintTemplateReferences(def([
+      { id: 'trigger', type: 'trigger', dataSchema: { records: { type: 'array' } } },
+      {
+        id: 'rows',
+        type: 'project',
+        source: '{{nodes.mistyped.data}}', // no `mistyped` node exists
+        columns: [{ header: 'H', path: 'name' }],
+      },
+    ]));
+    expect(errs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: 'rows',
+        code: TEMPLATE_UNKNOWN_VARIABLE_CODE,
+        message: expect.stringContaining('nodes.mistyped'),
+      }),
+    ]));
+  });
+
   it('skips syntactically-invalid templates (those are parse errors)', () => {
     // parseTemplate throws on `{{ unterminated — the lint should stay
     // silent since the existing validator emits template_parse_error.

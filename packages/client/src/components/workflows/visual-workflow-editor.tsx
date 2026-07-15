@@ -7,6 +7,8 @@ import type {
   IfNode,
   LlmNode,
   OrchestratorNode,
+  ProjectColumn,
+  ProjectNode,
   SessionNode,
   SetNode,
   StopNode,
@@ -136,7 +138,11 @@ import {
 
 type ForeachBodyNodeType = ForeachBodyNode['type'];
 
-const FOREACH_BODY_NODE_TYPES: ForeachBodyNodeType[] = ['llm', 'tool', 'set', 'stop', 'orchestrator', 'session'];
+// Keep in sync with `FOREACH_BODY_NODE_TYPES` in
+// packages/worker/src/lib/workflow-dag/schema.ts. Client-side
+// consistency test (`workflow-editor-consistency.test.ts`) asserts
+// both lists agree.
+const FOREACH_BODY_NODE_TYPES: ForeachBodyNodeType[] = ['llm', 'tool', 'set', 'stop', 'orchestrator', 'session', 'project'];
 
 interface VisualWorkflowEditorProps {
   definition: WorkflowDefinition | null;
@@ -1249,10 +1255,22 @@ function getNodeTemplateValues(node: WorkflowNode): string[] {
       return node.mode === 'start'
         ? compactStrings([node.prompt, node.workspace, node.title])
         : compactStrings([node.prompt, node.sessionId, node.threadId]);
+    case 'project':
+      // `source` is the template field; `columns[].path` is a
+      // dotted path against each row, not a workflow-state template.
+      return compactStrings([node.source]);
     case 'trigger':
     case 'if':
     case 'wait':
       return [];
+    default: {
+      // Exhaustiveness guard — a new node type added to the shared
+      // union without a case here would silently skip template
+      // validation. This turns that into a compile error.
+      const _exhaustive: never = node;
+      void _exhaustive;
+      return [];
+    }
   }
 }
 
@@ -1692,6 +1710,16 @@ function NodeParameterFields({
       return <SessionFields node={node} templateSources={templateSources} onUpdate={onUpdate} />;
     case 'stop':
       return <StopFields node={node} templateSources={templateSources} onUpdate={onUpdate} />;
+    case 'project':
+      return <ProjectFields node={node} templateSources={templateSources} onUpdate={onUpdate} />;
+    default: {
+      // Exhaustiveness guard so a new node type added to the shared
+      // union without a case here becomes a compile error instead of
+      // rendering an empty properties panel silently.
+      const _exhaustive: never = node;
+      void _exhaustive;
+      return null;
+    }
   }
 }
 
@@ -2744,6 +2772,78 @@ function SetFields({ node, onUpdate, templateSources }: NodeFieldProps<SetNode>)
   return <KeyValueEditor label="Values" value={asRecord(node.values)} templateSources={templateSources} onChange={(values) => onUpdate({ values })} help={NODE_DOCS.set.fields?.values?.help} />;
 }
 
+function ProjectFields({ node, onUpdate, templateSources }: NodeFieldProps<ProjectNode>) {
+  const columns = node.columns ?? [];
+  const updateColumn = (index: number, patch: Partial<ProjectColumn>): void => {
+    const next = columns.map((c, i) => (i === index ? { ...c, ...patch } : c));
+    onUpdate({ columns: next });
+  };
+  const removeColumn = (index: number): void => {
+    onUpdate({ columns: columns.filter((_, i) => i !== index) });
+  };
+  const addColumn = (): void => {
+    onUpdate({ columns: [...columns, { header: '', path: '' }] });
+  };
+  return (
+    <>
+      <TemplateTextAreaField
+        label="Source"
+        value={node.source}
+        templateSources={templateSources}
+        onChange={(source) => onUpdate({ source })}
+        minRows={2}
+        help={NODE_DOCS.project.fields?.source?.help}
+      />
+      <CheckboxField
+        label="Include header row"
+        checked={node.includeHeader !== false}
+        onChange={(includeHeader) => onUpdate({ includeHeader })}
+        help={NODE_DOCS.project.fields?.includeHeader?.help}
+      />
+      <Field label="Columns" help={NODE_DOCS.project.fields?.columns?.help}>
+        <div className="space-y-2">
+          {columns.length === 0 && (
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              No columns yet. Each column maps a dotted path against every source row (e.g. <code>Account.Name</code>).
+            </p>
+          )}
+          {columns.map((col, index) => (
+            <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-700 dark:bg-neutral-900">
+              <Input
+                value={col.header}
+                onChange={(event) => updateColumn(index, { header: event.target.value })}
+                placeholder="Header"
+                aria-label={`Column ${index + 1} header`}
+              />
+              <Input
+                value={col.path}
+                onChange={(event) => updateColumn(index, { path: event.target.value })}
+                placeholder="Account.Name"
+                aria-label={`Column ${index + 1} path`}
+              />
+              <button
+                type="button"
+                onClick={() => removeColumn(index)}
+                className="rounded-md border border-neutral-300 px-2 text-xs text-neutral-600 hover:bg-neutral-100 dark:border-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                aria-label={`Remove column ${index + 1}`}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={addColumn}
+            className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+          >
+            + Add column
+          </button>
+        </div>
+      </Field>
+    </>
+  );
+}
+
 function OrchestratorFields({ node, onUpdate, templateSources }: NodeFieldProps<OrchestratorNode>) {
   const waitMode = node.wait?.mode ?? 'none';
   return (
@@ -3637,5 +3737,5 @@ function ChevronDownIcon({ className }: { className?: string }) {
 }
 
 function isForeachBodyNode(node: WorkflowNode): node is ForeachBodyNode {
-  return ['llm', 'tool', 'set', 'stop', 'orchestrator', 'session'].includes(node.type);
+  return (FOREACH_BODY_NODE_TYPES as string[]).includes(node.type);
 }

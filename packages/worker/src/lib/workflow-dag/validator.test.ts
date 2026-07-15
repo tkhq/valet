@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateDefinition, validateTriggerData, validateAgainstEnvironment, validateAgainstAvailableModels } from './validator.js';
+import { validateDefinition, validateDefinitionWithContext, validateTriggerData, validateAgainstEnvironment, validateAgainstAvailableModels, isValidationWarning } from './validator.js';
 import type { WorkflowDefinition } from '@valet/shared';
 import type { Env } from '../../env.js';
 
@@ -16,8 +16,10 @@ function definition(overrides: Partial<WorkflowDefinition> = {}): WorkflowDefini
 }
 
 // Filter out the non-blocking warnings (advisories, not publish blockers).
+// Delegates to the real classifier so this test helper stays in sync as
+// new warning codes are added (e.g. unknown_tool_service).
 function blockingErrors(errs: ReturnType<typeof validateDefinition>) {
-  return errs.filter((e) => e.code !== 'llm_maxoutput_warning' && e.code !== 'template_unknown_variable');
+  return errs.filter((e) => !isValidationWarning(e));
 }
 
 describe('validateDefinition', () => {
@@ -369,9 +371,13 @@ describe('validateDefinition', () => {
       ],
     });
 
+    // Trigger source keeps a DISTINCT hard-error code
+    // (foreach_items_trigger_untyped) — the author owns trigger.dataSchema
+    // entirely, so we can and should hard-block. Only node-source untyped
+    // paths are downgraded to warnings (see foreach_items_untyped_array_output).
     expect(blockingErrors(validateDefinition(def))).toEqual([
       expect.objectContaining({
-        code: 'foreach_items_untyped_array_output',
+        code: 'foreach_items_trigger_untyped',
         nodeId: 'sweep',
         path: 'items',
         message: expect.stringContaining('foreach "sweep" uses {{trigger.data.names}}, but it is not a typed array output'),
@@ -397,9 +403,10 @@ describe('validateDefinition', () => {
       ],
     });
 
+    // Trigger source stays a hard error under the distinct code.
     expect(blockingErrors(validateDefinition(def))).toEqual([
       expect.objectContaining({
-        code: 'foreach_items_untyped_array_output',
+        code: 'foreach_items_trigger_untyped',
         nodeId: 'sweep',
       }),
     ]);
@@ -451,8 +458,8 @@ describe('validateDefinition', () => {
       ],
     });
 
-    const errs = blockingErrors(validateDefinition(def));
-    expect(errs).toEqual(expect.arrayContaining([
+    // Warning-level surface, not a hard block.
+    expect(validateDefinition(def)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         nodeId: 'write_companies',
         path: 'items',
@@ -460,6 +467,9 @@ describe('validateDefinition', () => {
         message: expect.stringContaining('foreach "write_companies" uses {{nodes.scrape_yc.data.companies}}, but it is not a typed array output'),
       }),
     ]));
+    expect(
+      blockingErrors(validateDefinition(def)).some((e) => e.code === 'foreach_items_untyped_array_output'),
+    ).toBe(false);
   });
 
   it('accepts foreach items that reference an array declared by a session output schema', () => {
@@ -535,9 +545,12 @@ describe('validateDefinition', () => {
       ],
     });
 
-    expect(blockingErrors(validateDefinition(def))).toEqual(expect.arrayContaining([
+    expect(validateDefinition(def)).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'foreach_items_untyped_array_output' }),
     ]));
+    expect(
+      blockingErrors(validateDefinition(def)).some((e) => e.code === 'foreach_items_untyped_array_output'),
+    ).toBe(false);
   });
 
   it('accepts foreach items that reference an array declared by an llm outputSchema', () => {
@@ -641,7 +654,7 @@ describe('validateDefinition', () => {
       ],
     });
 
-    const errs = blockingErrors(validateDefinition(def));
+    const errs = validateDefinition(def);
     expect(errs).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: 'foreach_items_untyped_array_output',
@@ -651,9 +664,13 @@ describe('validateDefinition', () => {
         message: expect.stringContaining('llm node "classify"'),
       }),
     ]));
-    // Also verify the actionable fix hint mentions outputSchema.
+    // Actionable fix hint still mentions outputSchema.
     const untyped = errs.find((e) => e.code === 'foreach_items_untyped_array_output');
     expect(untyped?.message).toMatch(/outputSchema/);
+    // Warning-level, not blocker.
+    expect(
+      blockingErrors(errs).some((e) => e.code === 'foreach_items_untyped_array_output'),
+    ).toBe(false);
   });
 
   it('rejects foreach itemAlias shadowing reserved context names', () => {
@@ -1144,5 +1161,372 @@ describe('validateDefinition — body-level templates and per-node baseline', ()
     });
     const errs = blockingErrors(validateDefinition(def));
     expect(errs.some((e) => e.code === 'expression_parse_error')).toBe(true);
+  });
+});
+
+describe('validateDefinition — set node outputSchema (deterministic-reshape source for foreach)', () => {
+  it('accepts a foreach whose items reference a set node with an array-typed outputSchema field, even when values is a template reference', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { raw: { type: 'object' } } },
+        {
+          id: 'reshape',
+          type: 'set',
+          values: { records: '{{trigger.data.raw.records}}' },
+          outputSchema: {
+            type: 'object',
+            properties: { records: { type: 'array', items: { type: 'object' } } },
+            required: ['records'],
+          },
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.reshape.data.records}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'reshape' },
+        { from: 'reshape', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    // Under the old behavior this failed with foreach_items_untyped_array_output because a template
+    // reference under `values` doesn't count as a literal array. outputSchema now bridges that gap.
+    expect(blockingErrors(validateDefinition(def)).filter((e) => e.code === 'foreach_items_untyped_array_output')).toEqual([]);
+  });
+
+  it('still rejects a set-sourced foreach when outputSchema does not declare the field as an array', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { raw: { type: 'object' } } },
+        {
+          id: 'reshape',
+          type: 'set',
+          values: { records: '{{trigger.data.raw.records}}' },
+          outputSchema: {
+            type: 'object',
+            properties: { records: { type: 'string' } },
+          },
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.reshape.data.records}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'reshape' },
+        { from: 'reshape', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    // Warning-level: the validator surfaces the mismatch but doesn't hard-block.
+    expect(validateDefinition(def)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'foreach_items_untyped_array_output', nodeId: 'loop' }),
+    ]));
+    expect(
+      blockingErrors(validateDefinition(def)).some((e) => e.code === 'foreach_items_untyped_array_output'),
+    ).toBe(false);
+  });
+});
+
+describe('validateDefinitionWithContext — tool service:action existence', () => {
+  const knownToolActions = new Map<string, Set<string>>([
+    ['salesforce-read-only', new Set(['salesforce-read-only.soqlQuery', 'salesforce-read-only.getUserInfo'])],
+    ['google_workspace', new Set(['sheets.create_spreadsheet', 'sheets.write_spreadsheet', 'sheets.append_rows'])],
+  ]);
+
+  it('emits unknown_tool_action with a nearest-match suggestion for the classic missing-prefix typo', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'soqlQuery',
+          params: { q: 'SELECT Id FROM Account LIMIT 1' },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
+    const err = errs.find((e) => e.code === 'unknown_tool_action');
+    expect(err).toBeDefined();
+    expect(err?.message).toContain('salesforce-read-only.soqlQuery');
+    expect(err?.nodeId).toBe('query');
+    expect(err?.path).toBe('action');
+  });
+
+  it('emits unknown_tool_service as a WARNING (not blocker) when the service is unknown — the catalog may not see per-user custom MCP connectors, so this must not hard-fail publish', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-typo',
+          action: 'soqlQuery',
+          params: {},
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const all = validateDefinitionWithContext(def, { knownToolActions });
+    // The unknown_tool_service entry exists on the full result set…
+    expect(all).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'unknown_tool_service', nodeId: 'query', path: 'service' })]),
+    );
+    // …but is filtered out of blocking errors (it's a warning).
+    expect(blockingErrors(all).some((e) => e.code === 'unknown_tool_service')).toBe(false);
+  });
+
+  it('accepts a foreach whose items reference a tool node with a per-node outputSchema declaring the field as array (the arbitrary-SOQL/SQL case)', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'salesforce-read-only.soqlQuery',
+          params: { q: 'SELECT Id FROM Account LIMIT 1' },
+          outputSchema: {
+            type: 'object',
+            properties: { records: { type: 'array', items: { type: 'object' } } },
+            required: ['records'],
+          },
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.query.data.records}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'query', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    expect(blockingErrors(validateDefinition(def)).filter((e) => e.code === 'foreach_items_untyped_array_output')).toEqual([]);
+  });
+
+  it('accepts a foreach over a tool source when only a service-level toolOutputSchemas entry is registered (no per-node outputSchema)', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'salesforce-read-only.soqlQuery',
+          params: { q: 'SELECT Id FROM Account LIMIT 1' },
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.query.data.records}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'query', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    const context = {
+      toolOutputSchemas: {
+        'salesforce-read-only:salesforce-read-only.soqlQuery': {
+          type: 'object',
+          properties: { records: { type: 'array', items: { type: 'object' } } },
+        },
+      },
+    };
+    expect(
+      blockingErrors(validateDefinitionWithContext(def, context)).filter((e) => e.code === 'foreach_items_untyped_array_output'),
+    ).toEqual([]);
+  });
+
+  it('rejects project column paths with empty/whitespace segments (\".\", \"x.\", \"x..y\") that pass zod min(1) but resolve weirdly at runtime', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { records: { type: 'array' } } },
+        {
+          id: 'rows',
+          type: 'project',
+          source: '{{trigger.data.records}}',
+          columns: [
+            { header: 'A', path: '.' },
+            { header: 'B', path: 'x.' },
+            { header: 'C', path: 'x..y' },
+            { header: 'OK', path: 'Account.Name' }, // valid
+          ],
+        },
+      ],
+      edges: [{ from: 'trigger', to: 'rows' }],
+    };
+    const errs = blockingErrors(validateDefinition(def));
+    const bad = errs.filter((e) => e.code === 'project_column_path_malformed');
+    expect(bad.map((e) => e.path)).toEqual(['columns.0.path', 'columns.1.path', 'columns.2.path']);
+  });
+
+  it('accepts a foreach whose items reference a project node (its output IS the array)', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { records: { type: 'array' } } },
+        {
+          id: 'rows',
+          type: 'project',
+          source: '{{trigger.data.records}}',
+          columns: [{ header: 'Name', path: 'name' }],
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.rows.data}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'rows' },
+        { from: 'rows', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    expect(blockingErrors(validateDefinition(def)).filter((e) => e.code === 'foreach_items_untyped_array_output')).toEqual([]);
+  });
+
+  it('foreach_items_untyped_array_output is now a WARNING (not blocker) so the obvious {{nodes.query.data.records}} template does not hard-fail when no schema is available', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'salesforce-read-only.soqlQuery',
+          params: {},
+        },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.query.data.records}}',
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'query', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    // No context.toolOutputSchemas, no per-node outputSchema → currently the
+    // check is skipped for tool sources (see validateForeachItemSources), but
+    // if it fires, it must be a warning, not a blocking error.
+    const all = validateDefinition(def);
+    expect(blockingErrors(all).some((e) => e.code === 'foreach_items_untyped_array_output')).toBe(false);
+  });
+
+  it('empty knownToolActions map: every service is unknown (warning-only) — a catalog-build failure or empty tenant must not silently hard-block every workflow', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'salesforce-read-only.soqlQuery',
+          params: {},
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const all = validateDefinitionWithContext(def, { knownToolActions: new Map() });
+    expect(blockingErrors(all).filter((e) => e.code === 'unknown_tool_service' || e.code === 'unknown_tool_action')).toEqual([]);
+  });
+
+  it('accepts a tool node whose service:action resolves', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'salesforce-read-only.soqlQuery',
+          params: { q: 'SELECT Id FROM Account LIMIT 1' },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
+    expect(errs.filter((e) => e.code === 'unknown_tool_action' || e.code === 'unknown_tool_service')).toEqual([]);
+  });
+
+  it('descends into foreach body tool nodes', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { items: { type: 'array' } } },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{trigger.data.items}}',
+          body: {
+            id: 'write',
+            type: 'tool',
+            service: 'google_workspace',
+            action: 'sheets.write_spreadhseet', // typo
+            params: { spreadsheetId: 'x', range: 'A1', data: [[]] },
+          },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'loop' },
+        { from: 'loop', to: 'finish' },
+      ],
+    };
+    const errs = blockingErrors(validateDefinitionWithContext(def, { knownToolActions }));
+    const err = errs.find((e) => e.code === 'unknown_tool_action');
+    expect(err?.nodeId).toBe('write');
+    expect(err?.message).toContain('sheets.write_spreadsheet');
+  });
+
+  it('skips the check entirely when knownToolActions is not provided (back-compat)', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'query',
+          type: 'tool',
+          service: 'salesforce-read-only',
+          action: 'soqlQuery',
+          params: {},
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'query', to: 'finish' }],
+    };
+    // No context.knownToolActions -> no unknown_tool_action error.
+    const errs = blockingErrors(validateDefinition(def));
+    expect(errs.some((e) => e.code === 'unknown_tool_action' || e.code === 'unknown_tool_service')).toBe(false);
   });
 });

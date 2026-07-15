@@ -49,6 +49,7 @@ import { executeOrchestrator } from './nodes/orchestrator.js';
 import { executeSession } from './nodes/session.js';
 import { executeSet } from './nodes/set.js';
 import { executeStop, StopFailure, type StopOutput } from './nodes/stop.js';
+import { executeProject } from './nodes/project.js';
 import { executeTool } from './nodes/tool.js';
 import { executeWait } from './nodes/wait.js';
 import { readExecutionCancelState, setExecutionStatus } from './execution-status.js';
@@ -672,6 +673,8 @@ export async function dispatchNode(node: WorkflowNode, args: NodeExecutorArgs): 
       return executeOrchestrator({ ...args, node });
     case 'session':
       return executeSession({ ...args, node });
+    case 'project':
+      return executeProject({ ...args, node });
     case 'approval':
       return executeApproval({ ...args, node });
     default: {
