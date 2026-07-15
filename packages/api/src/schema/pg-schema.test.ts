@@ -1,0 +1,249 @@
+/**
+ * Task 6 exit test: the pg app schema (`index.pg.ts`) + migrations
+ * (`migrations/pg/0000_app.sql`) + async migration runner (`lib/drizzle-pg.ts`)
+ * boot cleanly against PGlite, every table lands, the `memory_files`
+ * tsvector generated column round-trips a `websearch_to_tsquery` search with
+ * the weight ordering spec decision 9 requires, and a real `betterAuth()`
+ * instance mounted over the regenerated pg block can complete a signup.
+ *
+ * Nothing else in the repo imports `index.pg.ts`/`drizzle-pg.ts` yet (Task 7
+ * does the cutover) — this file is the only consumer, and intentionally so.
+ */
+import { PGlite } from "@electric-sql/pglite";
+import { betterAuth } from "better-auth";
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { eq } from "drizzle-orm";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
+import { applyAppMigrations, buildAppPgDb } from "../lib/drizzle-pg.js";
+import {
+  users,
+  session,
+  account,
+  verification,
+  ssoProvider,
+  apikey,
+  oauthApplication,
+  oauthAccessToken,
+  oauthConsent,
+  memoryFiles,
+} from "./index.pg.js";
+
+const APP_TABLES = [
+  "orgs",
+  "user",
+  "session",
+  "account",
+  "verification",
+  "sso_provider",
+  "apikey",
+  "oauth_application",
+  "oauth_access_token",
+  "oauth_consent",
+  "invites",
+  "sandbox_tokens",
+  "org_members",
+  "agent_sessions",
+  "session_threads",
+  "messages",
+  "teams",
+  "team_members",
+  "orchestrator_identities",
+  "child_watches",
+  "notifications",
+  "user_notification_preferences",
+  "event_drop_log",
+  "channel_bindings",
+  "user_identity_links",
+  "memory_files",
+  "workflow_definitions",
+  "workflow_runs",
+  "workflow_checkpoints",
+  "workflow_signals",
+  "credentials",
+  "action_invocations",
+];
+
+async function tableExists(db: PgDb, table: string): Promise<boolean> {
+  const result = await db.query(
+    "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1",
+    [table],
+  );
+  return result.rows.length > 0;
+}
+
+describe("pg app schema + migrations", () => {
+  // Task 0 finding (docs/specs/2026-07-15-postgres-backend-design.md): PGlite's
+  // wasm heap isn't reliably released on close(), so this file shares ONE
+  // instance across all its tests/describe blocks.
+  const pglite = new PGlite();
+  const db = pgDbFromPglite(pglite);
+  const drizzleDb = buildAppPgDb(pglite);
+
+  beforeAll(async () => {
+    await applyAppMigrations(db);
+  });
+
+  afterAll(async () => {
+    await db.close();
+  });
+
+  it(`creates all ${APP_TABLES.length} app tables`, async () => {
+    for (const table of APP_TABLES) {
+      expect(await tableExists(db, table), `expected table ${table} to exist`).toBe(true);
+    }
+  });
+
+  it("tracks the applied migration in __valet_app_migrations", async () => {
+    const result = await db.query("SELECT filename FROM __valet_app_migrations WHERE filename = $1", [
+      "0000_app.sql",
+    ]);
+    expect(result.rows).toHaveLength(1);
+  });
+
+  it("is idempotent on re-run", async () => {
+    await expect(applyAppMigrations(db)).resolves.toBeUndefined();
+    for (const table of APP_TABLES) {
+      expect(await tableExists(db, table)).toBe(true);
+    }
+  });
+
+  it("workflow_signals.id is a generated-always identity column", async () => {
+    const col = await db.query(
+      "SELECT is_identity, identity_generation FROM information_schema.columns " +
+        "WHERE table_name = 'workflow_signals' AND column_name = 'id'",
+    );
+    expect(col.rows[0]).toEqual({ is_identity: "YES", identity_generation: "ALWAYS" });
+  });
+
+  describe("memory_files search_vector generated column (spec decision 9)", () => {
+    const now = Date.now();
+
+    beforeAll(async () => {
+      // A title-relevance doc: the term appears ONLY in the title (weight A).
+      await drizzleDb.insert(memoryFiles).values({
+        ownerType: "user",
+        ownerId: "u1",
+        path: "notes/xylophone.md",
+        title: "Xylophone maintenance guide",
+        content: "This document covers general instrument upkeep.",
+        description: "",
+        tags: "[]",
+        createdAt: now,
+        updatedAt: now,
+      });
+      // A content-relevance doc: the SAME term appears only deep in the body
+      // (weight D), title/description/tags are unrelated.
+      await drizzleDb.insert(memoryFiles).values({
+        ownerType: "user",
+        ownerId: "u1",
+        path: "notes/unrelated.md",
+        title: "Weekly journal",
+        content: "Today I practiced piano and briefly mentioned a xylophone in passing.",
+        description: "",
+        tags: "[]",
+        createdAt: now,
+        updatedAt: now,
+      });
+      // A path-relevance doc: the term appears in the path (weight C) and
+      // content (weight D), but NOT the title — must still outrank a
+      // content-only match (decision 9's adversarial-review catch: path
+      // must not collapse into content's weight class).
+      await drizzleDb.insert(memoryFiles).values({
+        ownerType: "user",
+        ownerId: "u1",
+        path: "instruments/xylophone/setup.md",
+        title: "Setup",
+        content: "Generic setup instructions mentioning a xylophone once.",
+        description: "",
+        tags: "[]",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    it("websearch_to_tsquery matches all three docs containing the term", async () => {
+      const result = await db.query(
+        `SELECT path FROM memory_files WHERE search_vector @@ websearch_to_tsquery('english', $1) ORDER BY path`,
+        ["xylophone"],
+      );
+      expect(result.rows.map((r) => r.path)).toEqual([
+        "instruments/xylophone/setup.md",
+        "notes/unrelated.md",
+        "notes/xylophone.md",
+      ]);
+    });
+
+    it("ts_rank_cd ranks a title match above a content-only match", async () => {
+      const result = await db.query(
+        `SELECT path, ts_rank_cd(search_vector, websearch_to_tsquery('english', $1)) AS rank
+         FROM memory_files
+         WHERE search_vector @@ websearch_to_tsquery('english', $1)
+           AND path IN ('notes/xylophone.md', 'notes/unrelated.md')
+         ORDER BY rank DESC`,
+        ["xylophone"],
+      );
+      expect(result.rows.map((r) => r.path)).toEqual(["notes/xylophone.md", "notes/unrelated.md"]);
+    });
+
+    it("ts_rank_cd ranks a path match above a content-only match", async () => {
+      const result = await db.query(
+        `SELECT path, ts_rank_cd(search_vector, websearch_to_tsquery('english', $1)) AS rank
+         FROM memory_files
+         WHERE search_vector @@ websearch_to_tsquery('english', $1)
+           AND path IN ('instruments/xylophone/setup.md', 'notes/unrelated.md')
+         ORDER BY rank DESC`,
+        ["xylophone"],
+      );
+      expect(result.rows.map((r) => r.path)).toEqual([
+        "instruments/xylophone/setup.md",
+        "notes/unrelated.md",
+      ]);
+    });
+  });
+
+  describe("better-auth instance over the regenerated pg block", () => {
+    it("a real sign-up creates a user row with a role", async () => {
+      const auth = betterAuth({
+        secret: "test-secret-at-least-32-characters-long",
+        baseURL: "http://localhost:8788",
+        basePath: "/api/auth",
+        database: drizzleAdapter(drizzleDb, {
+          provider: "pg",
+          schema: {
+            user: users,
+            session,
+            account,
+            verification,
+            ssoProvider,
+            apikey,
+            oauthApplication,
+            oauthAccessToken,
+            oauthConsent,
+          },
+        }),
+        emailAndPassword: { enabled: true },
+        user: {
+          additionalFields: {
+            role: { type: "string", required: true, input: false, defaultValue: "member" },
+            defaultModel: { type: "string", required: false },
+          },
+        },
+      });
+
+      const res = await auth.handler(
+        new Request("http://localhost:8788/api/auth/sign-up/email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "Pg Test User", email: "pg-schema-test@nowhere.test", password: "correct-horse-battery" }),
+        }),
+      );
+      expect(res.status).toBe(200);
+
+      const row = await drizzleDb.select().from(users).where(eq(users.email, "pg-schema-test@nowhere.test")).limit(1);
+      expect(row).toHaveLength(1);
+      expect(row[0]?.role).toBe("member");
+      expect(row[0]?.name).toBe("Pg Test User");
+    });
+  });
+});
