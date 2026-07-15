@@ -1,124 +1,157 @@
-# Auth v2 Design — better-auth + OIDC (Keycloak-ready)
+# Auth v2 Design — better-auth + OIDC (Keycloak-ready) + social + MCP
 
-**Date:** 2026-07-14
+**Date:** 2026-07-14 (rev 2 — adds social sign-on and the Valet MCP OAuth server after better-auth API research)
 **Status:** Approved for planning
-**Scope:** Real authentication for the v2 stack (`packages/api` + `packages/web`): email/password login, generic OIDC SSO (Keycloak first), invites, API keys, and provisioning. Replaces the `VALET_LOCAL_AUTH` stub as the production path while keeping it for dev/tests.
+**Scope:** Real authentication for the v2 stack (`packages/api` + `packages/web`): email/password login, social sign-on (Google/GitHub), generic OIDC SSO (Keycloak first), invites, API keys, MCP OAuth provider + minimal `/mcp` endpoint, and provisioning. Replaces the `VALET_LOCAL_AUTH` stub as the production path while keeping it for dev/tests.
+
+All better-auth API facts below were verified against the installed `better-auth@1.6.23` / `@better-auth/sso@1.6.23` / `@better-auth/api-key@1.6.23` types and CLI-generated schema (research scratch: `$CLAUDE_JOB_DIR/tmp/ba-research`).
 
 ## Decisions (locked)
 
-1. **Deployment model: single deployment, one IdP.** Each Valet deployment configures at most ONE external OIDC issuer via environment variables. Per-org / multi-tenant IdP routing is out of scope (the design must not preclude it, but no code ships for it).
-2. **Engine: better-auth** (v1.6.x) with the Drizzle adapter over the existing better-sqlite3 app db. Plugins: email/password (core), `@better-auth/sso` (generic OIDC), `apiKey`. We do NOT use better-auth's organization plugin — Valet's own single-org model (`orgs`, `org_members`) stays authoritative.
+1. **Deployment model: single deployment, one enterprise IdP.** Each deployment configures at most ONE external OIDC issuer via env. Per-org / multi-tenant IdP routing is out of scope (must not be precluded; no code ships for it).
+2. **Engine: better-auth 1.6.23** with the Drizzle adapter over the existing better-sqlite3 app db. Packages: `better-auth` (core email/password, social providers, MCP plugin) + `@better-auth/sso` (generic OIDC) + `@better-auth/api-key`. We do NOT use better-auth's organization plugin — Valet's single-org model (`orgs`, `org_members`) stays authoritative. (Considered and rejected: it would migrate the just-shipped org/teams/members work onto the auth library's tables, fight our feature-gate semantics, and couple core domain to the identity dependency. Cost accepted: we own our invites table, and future fine-grained permissions or org-switching is a design pass, not a config change.)
 3. **No managed auth vendor.** Keycloak (or any OIDC issuer) is the IAM layer; Valet is a standard OIDC relying party. SAML never terminates at Valet — Keycloak brokers SAML/social upstream and presents OIDC downstream.
-4. **Built-in email/password** exists for deployments without an IdP. Passwords are hashed and managed entirely by better-auth; Valet code never touches password material.
-5. **Signup policy: first user open, then invite-only.** The first-ever signup becomes org admin (creates the org row if absent). Every subsequent email/password signup requires a valid invite. **OIDC logins skip the invite requirement** — a configured IdP is the deployment's access control, and anyone it authenticates is auto-provisioned as a member.
-6. **API keys are in scope**: user-generated, hashed at rest, shown once, revocable, listed with a `vlt_`-prefixed hint and last-used timestamp. A key authenticates as its owner with the owner's role — no separate scope model this pass.
-7. **The internal-token bypass (`x-valet-internal`) is preserved unchanged** for sandbox→api calls (memory routes). Narrowing it further is out of scope.
-8. **The dev stub survives**: `VALET_LOCAL_AUTH=1` keeps today's single-local-user behavior as the LAST rung of the middleware ladder, so `make dev-local` and the existing test fleet run unchanged. `VALET_TEST_AUTH_HEADER` impersonation stays test-bootstrap-only, exactly as documented in `middleware/auth.ts` today.
-9. **Carried over from v1** (`packages/worker` auth, the proven parts): provisioning semantics of `finalizeIdentityLogin` (match-by-email, first-user-promote, invite-by-code OR invite-by-email with role attached), the provider-token → credential-store hook (login can double as connecting an integration), git-config backfill from identity, and the api-token UX details (prefix display, last-used). NOT carried: the `IdentityProvider` plugin registry, hand-rolled state JWTs/session issuance/password hashing/rate limiting, and the SAML endpoint — better-auth and Keycloak replace all of it.
-10. **Pre-1.0 schema policy applies**: all new tables are folded into the `0000` migrations (api + store-sqlite as appropriate); no new numbered migrations; `rm ~/.valet/app.db` after schema edits.
+4. **Built-in email/password** for deployments without an IdP. Passwords hashed and managed entirely by better-auth; Valet code never touches password material.
+5. **Signup policy: first user open, then gated by trust source.**
+   - First-ever signup (any method) → org admin; creates the org row if absent.
+   - **Email/password** signups require an invite: a code presented at signup, or an unexpired invite matching the email.
+   - **Social** (Google/GitHub) signups require an **email-targeted invite** — configuring Google as a login option must not admit every Google account on the internet, and OAuth redirects can't carry a code, so admission is by invite-matching-email only.
+   - **Enterprise SSO (OIDC/Keycloak)** signups skip invites entirely — the IdP is the deployment's access control; anyone it authenticates is provisioned as a member.
+6. **API keys are in scope**: user-generated via the `@better-auth/api-key` plugin, hashed at rest, shown once, revocable, listed with a displayable `start` hint and last-request timestamp. A key authenticates as its owner with the owner's role — no scope model this pass. **Explicit verification** (`auth.api.verifyApiKey`) in our middleware; the plugin's `enableSessionForAPIKeys` mode stays off (its own docs mark it not recommended for production).
+7. **Valet MCP server (walking skeleton).** better-auth's `mcp` plugin makes Valet an OAuth **authorization server** (dynamic client registration, authorize/token/consent endpoints, `/.well-known` discovery), so Claude or any remote MCP client can OAuth in as a Valet user. This pass ships the OAuth plumbing plus a minimal `/mcp` endpoint (Streamable HTTP, `withMcpAuth`-guarded) exposing two tools: `whoami` and `list_sessions`. The full Valet tool surface over MCP is a follow-up design.
+8. **The internal-token bypass (`x-valet-internal`) is preserved unchanged** for sandbox→api calls. Narrowing it is out of scope.
+9. **The dev stub survives**: `VALET_LOCAL_AUTH=1` keeps today's single-local-user behavior as the LAST rung of the middleware ladder, so `make dev-local` and the existing test fleet run unchanged. `VALET_TEST_AUTH_HEADER` impersonation stays test-bootstrap-only, exactly as documented in `middleware/auth.ts` today.
+10. **Carried over from v1** (`packages/worker` auth, the proven parts): `finalizeIdentityLogin` provisioning semantics (match-by-email, first-user-promote, invite-by-code OR invite-by-email with role attached), the provider-token → credential-store hook (login doubles as connecting an integration), name backfill from identity, api-token prefix/last-used UX. NOT carried: the `IdentityProvider` plugin registry, hand-rolled state JWTs/sessions/password hashing/rate limiting, the SAML endpoint — better-auth and Keycloak replace all of it.
+11. **Pre-1.0 schema policy applies**: all new tables fold into the `0000` api migration; no new numbered migrations; `rm ~/.valet/app.db` after schema edits.
 
 ## Architecture
 
 ```
 packages/api/src/auth/
-├── index.ts          # buildAuth(providers): the configured better-auth instance
+├── index.ts          # buildAuth(deps): the configured better-auth instance
 ├── config.ts         # env parsing: AUTH_* vars → typed AuthConfig (or "stub mode")
-├── provisioning.ts   # signup/sign-in hooks: first-user-admin, invite gate,
-│                     #   org membership, git backfill, provider-token capture
-└── invites.ts        # invite create/validate/consume (Valet-owned table)
+├── provisioning.ts   # hooks: invite gate, first-user-admin, org membership,
+│                     #   name backfill, provider-token → credential-store capture
+├── invites.ts        # invite create/validate/consume (Valet-owned table)
+└── mcp.ts            # /mcp endpoint: withMcpAuth + minimal MCP tool handler
 ```
 
-- The better-auth instance is built once at boot in `main.ts` (alongside `buildProviders`) and mounted on Hono: `app.on(["GET","POST"], "/api/auth/*", (c) => auth.handler(c.req.raw))`. better-auth owns everything under `/api/auth/*`: signup, login, logout, session, OIDC redirect/callback, api-key management endpoints.
-  - Note: v1's worker also used `/api/auth/me` for profile reads; v2 already moved that to `/api/me`, so there is no route collision.
-- `authMiddleware` (existing file) grows the ladder described below and remains the ONLY place that sets `c.var.user`. No route handler changes.
-- The web client uses `better-auth/react` (`createAuthClient`) for `/login` and `/signup` pages and the signed-in session; all other data fetching keeps the existing TanStack Query layer.
+- One better-auth instance built at boot in `main.ts` (alongside `buildProviders`), mounted on Hono:
+  ```ts
+  app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+  app.get("/.well-known/oauth-authorization-server", (c) => oAuthDiscoveryMetadata(auth)(c.req.raw));
+  app.get("/.well-known/oauth-protected-resource", (c) => oAuthProtectedResourceMetadata(auth)(c.req.raw));
+  app.all("/mcp", (c) => mcpHandler(auth)(c.req.raw));   // auth/mcp.ts, withMcpAuth-guarded
+  ```
+  better-auth owns everything under `/api/auth/*`: signup, login, logout, session, social + SSO redirects/callbacks, api-key endpoints, MCP authorize/token/register/consent. (v2 already moved profile reads to `/api/me`, so no collision with v1's `/api/auth/me`.)
+- `authMiddleware` (existing file) grows the ladder below and remains the ONLY place that sets `c.var.user`. No route handler changes.
+- The web client uses `createAuthClient` from `better-auth/react` with `inferAdditionalFields`, `ssoClient()`, and `apiKeyClient()` plugins, for `/login`, `/signup`, and the API-keys settings section. All other data fetching keeps the existing TanStack Query layer.
 
 ### Config (`config.ts`)
 
 | Env var | Meaning |
 |---|---|
-| `BETTER_AUTH_SECRET` | Required to enable real auth. Absent → auth runs in stub-only mode (today's behavior). |
-| `BETTER_AUTH_URL` | External base URL of the api (cookie domain / redirect base). Defaults to `http://localhost:8788`. |
-| `AUTH_OIDC_ISSUER` | OIDC issuer URL (e.g. `https://kc.example.com/realms/valet`). Optional. |
-| `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Client credentials. Required iff issuer is set. |
-| `AUTH_OIDC_NAME` | Display name for the login button (default: `SSO`). |
+| `BETTER_AUTH_SECRET` | Required to enable real auth. Absent → stub-only mode (today's behavior). |
+| `BETTER_AUTH_URL` | External base URL of the api. Default `http://localhost:8788`. |
+| `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Enterprise OIDC (Keycloak). All three required together. |
+| `AUTH_OIDC_NAME` | Login button label (default `SSO`). |
+| `AUTH_OIDC_DOMAIN` | Email domain for the SSO provider registration (the sso plugin requires one; also enables domain-matched sign-in). |
+| `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Optional social provider. |
+| `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | Optional social provider. |
+| `AUTH_TRUSTED_ORIGINS` | Comma-separated extra origins (dev default adds `http://localhost:5173` for the Vite proxy). |
 
-If `AUTH_OIDC_ISSUER` is set, boot registers it with the SSO plugin (providerId `oidc`, discovery + PKCE handled by the plugin); the login page shows "Continue with {AUTH_OIDC_NAME}". If not, password-only.
+Keycloak is configured via the sso plugin's **`defaultSSO` option** (config-only, idempotent, takes precedence over DB rows — no `sso_provider` seeding, no `registerSSOProvider` call, which requires a session and is non-idempotent). Set `trustEmailVerified: true` on the plugin: we trust the enterprise IdP's `email_verified` claim.
+
+Keycloak client config gets redirect URI `{BETTER_AUTH_URL}/api/auth/sso/callback/oidc`; social providers use `{BETTER_AUTH_URL}/api/auth/callback/{google|github}`. Google is configured with `accessType: "offline"` + `prompt: "select_account consent"` so a refresh token is captured.
+
+Rate limiting: better-auth's built-in limiter (enabled in production; `/sign-in/email` 3 req/10s built-in rule). In-memory storage is acceptable — the api is a single Node process.
 
 ## Schema
 
-better-auth's `user` model **is** our `users` table — one identity source. Our existing columns (`role`, `default_model`, `name`, `email`, timestamps) map onto better-auth's expected fields plus `additionalFields` (`role`, `defaultModel`); `org_members.user_id` keeps pointing at the same ids. New tables (all in the api `0000` migration, Drizzle schema in `packages/api/src/schema/`):
+better-auth's `user` model **is** our `users` table. The existing table is reshaped to better-auth's expected columns (`name` NOT NULL, `email` unique, `email_verified`, `image`, ms-epoch `created_at`/`updated_at`) plus our `additionalFields`: `role` (`required, input: false` — set by provisioning, never by clients) and `default_model` (nullable). `org_members.user_id` keeps pointing at the same ids.
 
-- `session` — better-auth sessions (token hashed by the library, expiry, ip/user-agent).
-- `account` — password hashes AND linked OIDC identities (providerId + accountId per user; this is what makes "same email via Keycloak and via password" one user with two accounts).
-- `verification` — better-auth's short-lived verification rows (state, tokens).
-- `sso_provider` — the SSO plugin's provider registration row(s); seeded from env at boot, not user-editable.
-- `apikey` — better-auth apiKey plugin table (hashed key, prefix, name, last-used, expiry, revocation).
-- `invites` — **Valet-owned**, not a better-auth table: `id`, `code_hash` (SHA-256 of the invite code), `email` (nullable — when set, the invite auto-matches that address), `role` (`admin` | `member`), `created_by`, `created_at`, `expires_at`, `accepted_by` (nullable), `accepted_at` (nullable).
+New tables, transcribed verbatim from the CLI-generated Drizzle schema (research §1) into the api `0000` migration + `packages/api/src/schema/`:
 
-Exact column shapes for the better-auth tables come from `npx @better-auth/cli generate` output at plan time and are transcribed into the 0000 migration + Drizzle schema (we do not adopt the CLI's migration flow — pre-1.0 rule 10).
+- `session`, `account`, `verification` — core. `account` holds password hashes AND linked social/SSO identities per user, including IdP tokens (`access_token`, `refresh_token`, `id_token`, expiries, `scope`) — this is what makes "same email via Google and via password" one user with two accounts, and what feeds the credential-capture hook.
+- `sso_provider` — sso plugin (table required even though we configure via `defaultSSO`).
+- `apikey` — api-key plugin. Note: owner column is `reference_id` (not `user_id`), plus `config_id` (default `"default"`), `start` (displayable first chars), `prefix`, `last_request`, `expires_at`, `enabled`, rate-limit columns.
+- `oauth_application`, `oauth_access_token`, `oauth_consent` — MCP plugin (dynamic client registration + issued tokens + consent records).
+- `invites` — **Valet-owned**: `id`, `code_hash` (SHA-256 of the invite code), `email` (nullable — when set, the invite auto-matches that address; required path for social signups), `role` (`admin` | `member`), `created_by`, `created_at`, `expires_at`, `accepted_by` (nullable), `accepted_at` (nullable).
 
-Dependency alignment: better-auth peers on `better-sqlite3 ^12` and `drizzle-orm ^0.45.2`; bump `packages/api` + `packages/store-sqlite` accordingly (Node 22 satisfies both).
+Dependency alignment: bump `better-sqlite3` to `^12` and `drizzle-orm` to `^0.45.2` in `packages/api` + `packages/store-sqlite` (better-auth peer ranges; Node 22 satisfies both).
 
 ## Middleware ladder
 
 `authMiddleware` — first match wins:
 
-1. **Internal token**: valid `x-valet-internal` → pass through without `c.var.user` (unchanged, memory routes only).
-2. **Session**: `auth.api.getSession({ headers })` resolves → `c.var.user = { id, email, name, role, orgId }`. `role` comes from the user row; `orgId` from the single org row (cached lookup).
-3. **API key**: `x-api-key` header → apiKey plugin verification → key owner's user row → same `c.var.user` shape. Verification updates `last_used_at`.
+1. **Internal token**: valid `x-valet-internal` → pass through without `c.var.user` (unchanged).
+2. **Session**: `auth.api.getSession({ headers })` → `{ session, user } | null`; on hit, `c.var.user = { id, email, name, role, orgId }` (`role`/`defaultModel` ride on the returned user via additionalFields; `orgId` from the single org row, cached).
+3. **API key**: `x-api-key` header present → `auth.api.verifyApiKey({ body: { key } })` → on `valid`, load the owner via `key.referenceId` → same `c.var.user` shape. The plugin updates `last_request` itself.
 4. **Dev stub**: `VALET_LOCAL_AUTH=1` → today's hardcoded local user (and the separately-gated test impersonation header).
 5. Otherwise → 401 `{ error: "unauthorized" }`.
 
-Rungs 2–3 exist only when `BETTER_AUTH_SECRET` is configured; without it the ladder is exactly today's behavior. Real auth and the dev stub may coexist (a dev running real auth locally still gets the stub as fallback only if they explicitly set `VALET_LOCAL_AUTH=1`).
+Rungs 2–3 exist only when `BETTER_AUTH_SECRET` is configured; without it the ladder is exactly today's behavior.
 
-## Provisioning & invites (`provisioning.ts`)
+MCP requests do not use this ladder: the `/mcp` endpoint is guarded by `withMcpAuth` (Bearer tokens from the `oauth_access_token` table), and the handler derives the acting user from the MCP session's `userId`.
 
-Implemented as better-auth lifecycle hooks; the logic ports v1's `finalizeIdentityLogin` semantics:
+## Provisioning & invites
 
-**Signup gate (before-hook on email/password signup):**
-- Zero users in the db → allow; after creation, promote to `role='admin'`, create the org row if absent (name: `"My organization"`, features default), insert `org_members` row with `role='admin'`.
-- Otherwise → require an invite: a `code` provided at signup, or an unexpired unaccepted invite matching the signup email. No invite → reject with `"an invite is required to join this deployment"`.
-- On success: mark the invite accepted (`accepted_by`, `accepted_at`), create `org_members` row with the invite's role, set `users.role` to the invite's role.
+Ports v1's `finalizeIdentityLogin` semantics onto better-auth's verified hook points:
 
-**OIDC sign-in (after-hook on SSO sign-in creating a new user):**
-- No invite required (decision 5). New users join as `member` (org_members row created). First-ever user via OIDC still gets the first-user-admin promotion.
-- If the IdP returned provider tokens and the provider maps to a known integration service, store them into the v2 `SqliteCredentialStore` for that user (the v1 "login doubles as connecting the integration" hook). For plain Keycloak this is a no-op; the seam exists for Google/GitHub-style IdPs later.
+**Invite gate — `hooks.before`** (`createAuthMiddleware`, sees the raw body): on `ctx.path === "/sign-up/email"`, allow if the db has zero users; otherwise require `ctx.body.inviteCode` (extra body keys pass schema validation and are not persisted) to match a valid invite, or an unexpired invite matching the email. Reject with `APIError("FORBIDDEN", { message: "an invite is required to join this deployment" })`.
 
-**Both paths:** backfill `git_name`/`git_email`-equivalent profile fields from the identity when we grow them (today v2's users table has `name`/`email` only — backfill `name` if empty; the git fields arrive with a later sessions pass and reuse this hook).
+**Creation gate for OAuth paths — `databaseHooks.user.create.before`**: receives `(user, context)`; `context?.path` distinguishes the flow — `"/sign-up/email"` (already gated above), `"/callback/:id"` / `"/sign-in/social"` (social), `"/sso/callback/:providerId"` (enterprise SSO). For social paths: allow if zero users, else require an unexpired invite matching `user.email`; otherwise return `false` (aborts creation). SSO paths always pass. This hook also returns `{ data }` to stamp `role`: `admin` for the first user, else the invite's role, else `member` (SSO).
 
-**Invite management (Valet routes, org-admin only):**
-- `POST /api/org/invites` `{ email?, role }` → generates a URL-safe code (shown once, hash stored), default expiry 7 days → `{ id, code, email, role, expiresAt }`.
-- `GET /api/org/invites` → pending invites (no codes — only prefix hints).
+**Post-create provisioning — `databaseHooks.user.create.after`**: create the org row if absent; insert the `org_members` row with the resolved role; mark the matched invite accepted (`accepted_by`, `accepted_at`).
+
+**Provider-token capture — `databaseHooks.account.create.after`** (+ sso plugin's `provisionUser` callback): when a social/SSO account row carries tokens and the provider maps to a known integration service (google → the Google plugins' service, github → github), copy tokens into the v2 `SqliteCredentialStore` for that user — v1's "login doubles as connecting the integration". For plain Keycloak this is a no-op; the seam is the point.
+
+**Name backfill**: identity name → `users.name` when empty (better-auth handles this on OAuth flows; the hook covers edge cases). Git-config fields arrive with a later sessions pass and will reuse this hook.
+
+**Invite management (Valet routes, org-admin gated via existing `isOrgAdmin`):**
+- `POST /api/org/invites` `{ email?, role }` → URL-safe code (shown once, hash stored), 7-day default expiry → `{ id, code, email, role, expiresAt }`.
+- `GET /api/org/invites` → pending invites (no codes).
 - `DELETE /api/org/invites/:id` → revoke.
-- The Members settings page gains an **Invite** action (dialog: optional email, role picker, produces a copyable link `{web}/signup?invite={code}`), and a pending-invites list with revoke. Copy follows the settings spec's voice; the promised string "Invites arrive with real login." is retired by this feature.
+- Members settings page gains an **Invite** action (dialog: optional email, role picker, copyable link `{web}/signup?invite={code}`) and a pending-invites list with revoke. An email-targeted invite is required for invitees who'll sign in with Google/GitHub — the dialog copy says so.
 
 ## API keys
 
-- Settings → **You** → new **API keys** section: create (name it, secret displayed once), list (`prefix` hint `vlt_xxxx…`, created, last used, expiry if set), revoke.
-- better-auth apiKey plugin config: prefix `vlt_`, metadata disabled, rate-limit defaults.
-- Wire: requests authenticate with `x-api-key: vlt_…` (rung 3).
+- Settings → **You** → new **API keys** section: create (named, secret displayed once), list (`start` hint, created, last used, expiry), revoke. Backed by the plugin's own endpoints via `apiKeyClient()`.
+- Server config: `apiKey({ defaultPrefix: "vlt_", rateLimit: { enabled: false } })` — Valet keys are power-user credentials; better-auth's per-key rate limiting defaults (10 req/day) are wrong for us.
+- Wire: `x-api-key: vlt_…` (middleware rung 3).
+
+## Valet MCP server (walking skeleton)
+
+- `mcp({ loginPage: "/login" })` plugin on the instance; discovery + OAuth endpoints as in Architecture.
+- `auth/mcp.ts`: an `app.all("/mcp")` handler wrapped in `withMcpAuth(auth, handler)`. The handler speaks MCP Streamable HTTP via `@modelcontextprotocol/sdk` server primitives and exposes:
+  - `whoami` → the acting user's id/email/role.
+  - `list_sessions` → the user's sessions (id, title, status) via the existing session service.
+- Acting user = `session.userId` from the validated OAuth token; tool handlers reuse existing services (no bespoke queries).
+- Success criterion: Claude (or MCP inspector) completes dynamic client registration + OAuth against Valet and calls both tools.
 
 ## Frontend (`packages/web`)
 
-- New public routes `/login` and `/signup` (and `/signup?invite=…`), designed under the frontend-design skill in the app's established idiom. Login: email/password form + "Continue with {AUTH_OIDC_NAME}" button when the api reports SSO configured (a tiny unauthenticated `GET /api/auth-config` returning `{ ssoName? , stub? }` drives this).
-- Route guard: when the api answers 401 and stub mode is off, redirect to `/login`. When stub mode is on, behavior is unchanged (no login wall in `make dev-local`).
-- Signed-in chrome: user menu gains Sign out (better-auth `signOut()`).
-- Session transport is better-auth's cookie; the existing WS connection authenticates by riding the same cookie on the upgrade request (same-origin dev proxy already forwards cookies).
+- New public routes `/login` and `/signup` (and `/signup?invite=…`), designed under the frontend-design skill in the app's established idiom. Login: email/password form, then social buttons (Google/GitHub) and "Continue with {AUTH_OIDC_NAME}" as configured. A tiny unauthenticated `GET /api/auth-config` returns `{ stub: boolean, social: ("google"|"github")[], sso?: { name } }` and drives which controls render.
+- Signup accepts the invite code (prefilled from the URL); social/SSO buttons appear there too (social signup succeeds only with an email-targeted invite; copy explains a rejected social signup).
+- Route guard: api 401 + stub off → redirect to `/login`. Stub on → unchanged (no login wall in `make dev-local`).
+- Signed-in chrome: user menu gains Sign out (`authClient.signOut()`).
+- Session transport is better-auth's cookie (`better-auth.session_token`, SameSite=Lax, httpOnly). The Vite dev proxy keeps everything same-origin; `AUTH_TRUSTED_ORIGINS` covers the direct-origin case. The WS upgrade rides the same cookie.
 
 ## Testing
 
-- **Middleware matrix** (route-level): session cookie / api key / internal token / stub / nothing→401; stub disabled when `VALET_LOCAL_AUTH≠1`.
-- **Signup gate**: first user becomes admin + org created; second signup without invite rejected; with code-invite joins with invite role; with email-matched invite auto-consumes; expired/revoked/accepted invites rejected; invite single-use.
-- **OIDC provisioning hook**: unit-tested against a fake SSO sign-in event (new user → member + org_members row; token capture writes to credential store).
-- **API keys**: create/list/revoke round-trip; revoked key 401s; `last_used_at` updates; secret never re-readable.
-- **E2E**: boot with `BETTER_AUTH_SECRET` set and `VALET_LOCAL_AUTH` off → signup → login → cookie-authed `GET /api/me` → API key create → key-authed request.
-- Existing fleet: entire current suite must stay green with no env changes (stub path untouched).
+- **Middleware matrix**: session cookie / api key / internal token / stub / nothing→401; stub disabled when `VALET_LOCAL_AUTH≠1`; rungs 2–3 absent in stub-only mode.
+- **Signup gates**: first user (password) → admin + org + membership; second password signup without invite rejected; with code-invite joins with invite role; email-matched invite auto-consumes; expired/revoked/accepted invites rejected; single-use enforced. Social-path creation hook: rejected without email-matched invite, admitted with one (unit-tested by invoking the hook with a synthesized social context). SSO-path: admitted without invite as member.
+- **Provisioning**: role stamping via `create.before` data; org_members rows; invite acceptance bookkeeping; account-token capture writes to the credential store (fake account row with tokens).
+- **API keys**: create/list/revoke round-trip via plugin endpoints; revoked/expired key fails rung 3; `verifyApiKey` path sets the right user; secret never re-readable.
+- **MCP**: discovery endpoints serve metadata; `withMcpAuth` rejects missing/invalid Bearer; with a token minted through the OAuth flow (or directly seeded `oauth_access_token` row), `whoami` and `list_sessions` return the acting user's data.
+- **E2E**: boot with `BETTER_AUTH_SECRET`, `VALET_LOCAL_AUTH` off → signup → login → cookie-authed `GET /api/me` → API key create → key-authed request.
+- Existing fleet: entire current suite stays green with no env changes (stub path untouched).
 
 ## Non-goals (this pass)
 
 - Multi-tenant / per-org IdP configuration; IdP admin UI.
 - SAML terminating at Valet (Keycloak brokers it).
-- API-key scopes; org-level login-provider toggles; email delivery of invites (link-sharing only); password reset email flow (requires a mailer — follow-up; better-auth supports it when one exists).
+- API-key scopes/permissions; org-level login-provider toggles; email delivery of invites (link-sharing only); password reset / email verification flows (need a mailer — follow-up; better-auth supports both when one exists).
+- The full Valet MCP tool surface (own design pass; this pass proves the OAuth plumbing with two tools).
 - Narrowing the internal-token bypass; sandbox gateway JWTs (`deriveSandboxJwtSecret` stays a v1 reference for the future sandbox pass).
 - Multi-org.
