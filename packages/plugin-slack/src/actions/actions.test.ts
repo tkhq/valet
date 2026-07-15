@@ -520,6 +520,44 @@ describe('slackActions send_message', () => {
     });
   });
 
+  it('appends an owner-attribution context block on non-DM posts when owner_slack_user_id is set', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'C001' }));
+
+    await slackActions.execute('slack.send_message', {
+      channel: 'C001',
+      text: 'hello team',
+    }, {
+      credentials: { bot_token: 'xoxb-token', owner_slack_user_id: 'U9999' },
+      userId: 'user-1',
+    });
+
+    const body = mocks.slackFetch.mock.calls[0][2] as Record<string, unknown>;
+    expect(body.text).toBe('hello team');
+    const blocks = body.blocks as Record<string, unknown>[];
+    expect(Array.isArray(blocks)).toBe(true);
+    expect(blocks[blocks.length - 1]).toEqual({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: '↳ <@U9999>' }],
+    });
+  });
+
+  it('does not append the attribution block when the target is a DM', async () => {
+    mockPublicChannel();
+    mocks.slackFetch.mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'D001' }));
+
+    await slackActions.execute('slack.send_message', {
+      channel: 'D001',
+      text: 'hi',
+    }, {
+      credentials: { bot_token: 'xoxb-token', owner_slack_user_id: 'U9999' },
+      userId: 'user-1',
+    });
+
+    const body = mocks.slackFetch.mock.calls[0][2] as Record<string, unknown>;
+    expect(body).not.toHaveProperty('blocks');
+  });
+
   it('forwards unfurl_links=true when explicitly requested', async () => {
     mockPublicChannel();
     mocks.slackFetch.mockResolvedValueOnce(slackResponse({ ts: '1780887543.189519', channel: 'C001' }));

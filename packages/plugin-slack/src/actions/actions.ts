@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { ActionDefinition, ActionSource, ActionContext, ActionResult } from '@valet/sdk';
 import { slackFetch, slackGet } from './api.js';
 import { checkPrivateChannelAccess } from './channel-access.js';
-import { buildContentBlocks, SLACK_TEXT_LIMIT } from '../message-chunking.js';
+import { buildContentBlocks, SLACK_MAX_BLOCKS, SLACK_TEXT_LIMIT } from '../message-chunking.js';
 
 /** Build a descriptive error from a Slack API response. */
 async function slackError(res: Response, data?: { ok: boolean; error?: string }): Promise<ActionResult> {
@@ -948,9 +948,12 @@ async function executeAction(
         const body: Record<string, unknown> = { channel: channelId, text: p.text };
         if (p.thread_ts) body.thread_ts = p.thread_ts;
 
+        let userBlocks: Record<string, unknown>[] | undefined;
         if (p.blocks) {
           try {
-            body.blocks = JSON.parse(p.blocks);
+            const parsed = JSON.parse(p.blocks);
+            if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array' };
+            userBlocks = parsed as Record<string, unknown>[];
           } catch {
             return { success: false, error: 'blocks must be valid JSON' };
           }
@@ -962,9 +965,26 @@ async function executeAction(
         if (ctx.callerIdentity?.name) body.username = ctx.callerIdentity.name;
         if (ctx.callerIdentity?.avatar) body.icon_url = ctx.callerIdentity.avatar;
 
-        if (!p.blocks && p.text.length > SLACK_TEXT_LIMIT) {
-          body.blocks = buildContentBlocks(p.text, p.text);
-          body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+        // Attribute non-DM posts to the session owner (mirrors the channel
+        // transport's attribution context block on agent-authored replies).
+        const ownerSlackId = ctx.credentials.owner_slack_user_id;
+        const hasAttribution = Boolean(ownerSlackId) && !channelId.startsWith('D');
+        const needsLongBlocks = !userBlocks && p.text.length > SLACK_TEXT_LIMIT;
+
+        if (hasAttribution || needsLongBlocks) {
+          const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
+          const contentBlocks = userBlocks
+            ? userBlocks.slice(0, blockBudget)
+            : buildContentBlocks(p.text, p.text, blockBudget);
+          if (hasAttribution) {
+            contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
+          }
+          body.blocks = contentBlocks;
+          if (needsLongBlocks) {
+            body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+          }
+        } else if (userBlocks) {
+          body.blocks = userBlocks;
         }
 
         const res = await slackFetch('chat.postMessage', token, body);
