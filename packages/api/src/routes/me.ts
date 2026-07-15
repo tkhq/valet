@@ -19,6 +19,7 @@ import { eq, and } from "drizzle-orm";
 import { getModels } from "@mariozechner/pi-ai";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
 import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
@@ -54,13 +55,17 @@ async function loadMeResponse(
 }
 
 meRouter.get("/", async (c) => {
+  const user = requireUser(c);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
   const { db } = c.var.providers;
-  const body = await loadMeResponse(db, c.var.user);
+  const body = await loadMeResponse(db, user);
   if (!body) return c.json({ error: "user not found" }, 404);
   return c.json(body);
 });
 
 meRouter.patch("/", async (c) => {
+  const user = requireUser(c);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
   const { db } = c.var.providers;
 
   let raw: Record<string, unknown>;
@@ -105,10 +110,10 @@ meRouter.patch("/", async (c) => {
   }
 
   if (Object.keys(update).length > 0) {
-    db.update(users).set(update).where(eq(users.id, c.var.user.id)).run();
+    db.update(users).set(update).where(eq(users.id, user.id)).run();
   }
 
-  const body = await loadMeResponse(db, c.var.user);
+  const body = await loadMeResponse(db, user);
   if (!body) return c.json({ error: "user not found" }, 404);
   const resp: PatchMeResponse = body;
   return c.json(resp);

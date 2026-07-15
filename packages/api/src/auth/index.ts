@@ -31,6 +31,82 @@ export interface BuildAuthOpts {
 }
 
 /**
+ * Session row shape returned by `auth.api.getSession`, transcribed from
+ * `better-auth`'s `api/routes/session.d.mts` (`getSession`'s success
+ * branch) — the fields every deployment gets regardless of `session`
+ * plugin config, since `ValetAuth` doesn't carry the `Option` type
+ * parameter the real endpoint is generic over.
+ */
+export interface ValetAuthSession {
+  id: string;
+  createdAt: Date;
+  updatedAt: Date;
+  userId: string;
+  expiresAt: Date;
+  token: string;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+}
+
+/**
+ * User row shape returned by `auth.api.getSession`, base fields plus the
+ * `role`/`defaultModel` `additionalFields` this instance configures below
+ * (see `buildAuth`'s `user.additionalFields`).
+ */
+export interface ValetAuthSessionUser {
+  id: string;
+  createdAt: Date;
+  updatedAt: Date;
+  email: string;
+  emailVerified: boolean;
+  name: string;
+  image?: string | null;
+  role: string;
+  defaultModel?: string | null;
+}
+
+/**
+ * `apikey` row shape returned by `auth.api.verifyApiKey`'s `key` field,
+ * transcribed from `@better-auth/api-key`'s `ApiKey` type minus the
+ * `key`/`configId` fields the endpoint's `Omit<ApiKey, "key">` return type
+ * excludes (the hashed key value is never handed back to a caller that
+ * only proved possession of the plaintext once, at creation).
+ */
+export interface ValetApiKeyRecord {
+  id: string;
+  name: string | null;
+  start: string | null;
+  prefix: string | null;
+  referenceId: string;
+  refillInterval: number | null;
+  refillAmount: number | null;
+  lastRefillAt: Date | null;
+  enabled: boolean;
+  rateLimitEnabled: boolean;
+  rateLimitTimeWindow: number | null;
+  rateLimitMax: number | null;
+  requestCount: number;
+  remaining: number | null;
+  lastRequest: Date | null;
+  expiresAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  metadata: Record<string, unknown> | null;
+  permissions?: Record<string, string[]> | null;
+}
+
+/** `auth.api.verifyApiKey`'s return shape (the four-way discriminated
+ * union upstream collapses to this: `key` is only non-null when `valid` is
+ * true, `error` only non-null when `valid` is false — callers narrow on
+ * `valid`/`key` together, same as `@better-auth/api-key`'s own README
+ * examples). */
+export interface ValetVerifyApiKeyResult {
+  valid: boolean;
+  error: { message: string | undefined; code: string; cause?: unknown } | null;
+  key: ValetApiKeyRecord | null;
+}
+
+/**
  * Hand-written surface, not `ReturnType<typeof betterAuth>`. The real
  * inferred instance type is two things at once, in this composite
  * (`declaration: true`) project:
@@ -42,17 +118,24 @@ export interface BuildAuthOpts {
  *     every endpoint's inferred `User` shape a strict superset of the base
  *     `User`, which fails in the contravariant (body/param) positions.
  * This interface declares only what call sites in this package actually
- * use: `handler` (the catch-all mount) and the two `mcp` plugin endpoints
+ * use: `handler` (the catch-all mount), the two `mcp` plugin endpoints
  * `oAuthDiscoveryMetadata`/`oAuthProtectedResourceMetadata` require
  * structurally (both declared `(...args: any) => any` upstream, so a
  * looser `unknown[]`/`unknown` signature here still satisfies their
- * generic constraint). `buildAuth` casts the real instance down to it below.
+ * generic constraint), and the two endpoints the auth middleware ladder
+ * (Task 7) calls directly: `getSession` (cookie/session-header auth) and
+ * `verifyApiKey` (the `apiKey` plugin's key-verification endpoint).
+ * `buildAuth` casts the real instance down to it below.
  */
 export interface ValetAuth {
   handler: (request: Request) => Promise<Response>;
   api: {
     getMcpOAuthConfig: (...args: unknown[]) => unknown;
     getMCPProtectedResource: (...args: unknown[]) => unknown;
+    getSession: (opts: {
+      headers: Headers;
+    }) => Promise<{ session: ValetAuthSession; user: ValetAuthSessionUser } | null>;
+    verifyApiKey: (opts: { body: { key: string } }) => Promise<ValetVerifyApiKeyResult>;
   };
 }
 

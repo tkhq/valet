@@ -12,7 +12,7 @@ import { createNodeWebSocket } from "@hono/node-ws";
 import type { AppEnv } from "./env.js";
 import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
-import { authMiddleware } from "./middleware/auth.js";
+import { buildAuthMiddleware } from "./middleware/auth.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import type { AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse } from "./wire/types.js";
@@ -94,7 +94,7 @@ export function createApp(providers: Providers, authWiring: AuthWiring = {}): Cr
   });
 
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
-  app.use("/api/*", authMiddleware);
+  app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
 
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads share /api/sessions/:id/* — mounted under same prefix.

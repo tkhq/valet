@@ -1,9 +1,13 @@
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { eq } from "drizzle-orm";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { users } from "../schema/index.js";
+import type { AppDb } from "../lib/drizzle.js";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
+import { ensureOrg } from "../services/org.js";
+import type { ValetAuth } from "../auth/index.js";
+import { verifySandboxToken } from "../auth/sandbox-tokens.js";
 
 export interface AuthUser {
   id: string;
@@ -14,64 +18,176 @@ export interface AuthUser {
 }
 
 /**
- * Auth is intentionally stub-only in this package. Real OAuth lives in the
- * legacy worker; here, requests run as a single hardcoded local user by
- * default.
+ * Single-org id memo (auth-v2 design assumes exactly one org, same as
+ * `services/org.ts`'s `ensureOrg`). Keyed by `AppDb` instance rather than a
+ * bare module-level value — the API integration suite boots many independent
+ * in-memory dbs in one process (`bootTestApi` per test), and a single shared
+ * memo would leak the first test's org id into every later test's requests.
+ * A `WeakMap` lets each db's entry be garbage-collected with it.
+ */
+const orgIdMemo = new WeakMap<AppDb, string>();
+
+function resolveOrgId(db: AppDb): string {
+  const cached = orgIdMemo.get(db);
+  if (cached) return cached;
+  const { id } = ensureOrg(db);
+  orgIdMemo.set(db, id);
+  return id;
+}
+
+/** Narrows better-auth's loosely-typed (`type: "string"`) `role`
+ * additional field down to our real enum. The db column is declared
+ * `enum: ["admin", "member"]` so this should always take the first branch;
+ * the fallback exists only so a malformed/legacy row can't produce a value
+ * outside `AuthUser["role"]`'s type. */
+function normalizeRole(role: string): "admin" | "member" {
+  return role === "admin" ? "admin" : "member";
+}
+
+/**
+ * Guards a route body that reads `c.var.user`. `AppVariables.user` is typed
+ * as always-present (`AuthUser`, not `AuthUser | undefined`) so the ~50
+ * existing call sites across routers don't all need an existence check —
+ * but the auth ladder below only actually sets it on the session/api-key/
+ * stub rungs, never on the internal-token or sandbox rungs. This reads the
+ * variable through its true runtime type and returns `undefined` instead of
+ * letting an unguarded `c.var.user.id` throw a raw `TypeError` into the
+ * global 500 handler when a sandbox-only (or internal-token) request hits a
+ * user-scoped route.
+ */
+export function requireUser(c: Context<AppEnv>): AuthUser | undefined {
+  // Bridging Hono's context typing gap described above — see doc comment.
+  return c.var.user as AuthUser | undefined;
+}
+
+export interface BuildAuthMiddlewareOpts {
+  /** The real better-auth instance, or `null` when `BETTER_AUTH_SECRET`
+   * isn't configured (stub-only mode). */
+  auth: ValetAuth | null;
+  db: AppDb;
+}
+
+/**
+ * Auth middleware ladder (auth-v2 design). First match wins:
  *
- * Test-only escape hatch: an `x-valet-test-user-id` header swaps the identity
- * to any user row already seeded in the app db (looked up by id), so
- * integration tests can exercise role-gated routes (e.g. admin-only) without
- * a real auth provider. Ignored silently if the id doesn't resolve to a row.
+ *   1. `x-valet-internal` valid → `next()`, no `c.var.user`/`c.var.sandbox`.
+ *   2. `x-valet-sandbox` present → `verifySandboxToken`; valid sets
+ *      `c.var.sandbox`; invalid 401s even in stub mode — an explicit
+ *      credential beats every fallback below it.
+ *   3. `auth` configured and a valid session (cookie or session header)
+ *      resolves → `c.var.user`.
+ *   4. `auth` configured and `x-api-key` present → `verifyApiKey`; invalid
+ *      401s (same "explicit credential beats fallback" rule as #2).
+ *   5. `VALET_LOCAL_AUTH=1` → stub identity (+ `VALET_TEST_AUTH_HEADER`
+ *      impersonation), verbatim from the pre-ladder implementation.
+ *   6. 401 `{ error: "unauthorized" }`.
  *
- * Set `VALET_LOCAL_AUTH=1` to opt in to the stub-auth path at all. Without
- * it, every `/api/*` request 401s.
- *
- * The impersonation header above is additionally gated behind
- * `VALET_TEST_AUTH_HEADER=1` — a separate, narrower flag so that flipping on
- * `VALET_LOCAL_AUTH` alone (e.g. on a shared dev/staging box) never also
- * grants any-user impersonation. Only the API test bootstrap sets this var;
- * it must never be added to the Makefile, `.env`, or any dev target.
+ * Test-only escape hatch: an `x-valet-test-user-id` header (rung 5) swaps
+ * the identity to any user row already seeded in the app db (looked up by
+ * id), so integration tests can exercise role-gated routes (e.g. admin-only)
+ * without a real auth provider. Ignored silently if the id doesn't resolve
+ * to a row. Gated behind `VALET_TEST_AUTH_HEADER=1`, separate from
+ * `VALET_LOCAL_AUTH`, so flipping on stub auth alone never also grants
+ * any-user impersonation. Only the API test bootstrap sets this var; it
+ * must never be added to the Makefile, `.env`, or any dev target.
  *
  * Internal-token bypass (decision 15): a request carrying a valid
  * `x-valet-internal` token (constant-time compared — see
- * `lib/internal-auth.ts`) skips the `VALET_LOCAL_AUTH` gate entirely and
- * falls straight through to the route without `c.var.user` being set —
- * only the memory routes accept this header this phase, and they derive
- * their owner tuple from `x-valet-owner`/`x-valet-actor` instead of the
- * session user.
+ * `lib/internal-auth.ts`) skips every rung below it and falls straight
+ * through to the route without `c.var.user`/`c.var.sandbox` set — only the
+ * memory routes accept this header this phase, and they derive their owner
+ * tuple from `x-valet-owner`/`x-valet-actor` headers instead.
  */
-export const authMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
-  if (isValidInternalToken(c.req.header("x-valet-internal"))) {
-    await next();
-    return;
-  }
+export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHandler<AppEnv> {
+  const { auth, db } = opts;
 
-  if (process.env.VALET_LOCAL_AUTH !== "1") {
-    return c.json({ error: "auth not configured (set VALET_LOCAL_AUTH=1)" }, 401);
-  }
+  return async (c, next) => {
+    // 1. Internal token — unconditional bypass.
+    if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+      await next();
+      return;
+    }
 
-  const testUserId = process.env.VALET_TEST_AUTH_HEADER === "1" ? c.req.header("x-valet-test-user-id") : undefined;
-  if (testUserId) {
-    const row = await c.var.providers.db.select().from(users).where(eq(users.id, testUserId)).get();
-    if (row) {
+    // 2. Sandbox token — explicit credential, invalid always 401s.
+    const sandboxHeader = c.req.header("x-valet-sandbox");
+    if (sandboxHeader !== undefined) {
+      const principal = verifySandboxToken(db, sandboxHeader);
+      if (!principal) {
+        return c.json({ error: "invalid sandbox token" }, 401);
+      }
+      c.set("sandbox", principal);
+      await next();
+      return;
+    }
+
+    if (auth) {
+      // 3. Session (cookie or session header).
+      const sessionResult = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (sessionResult) {
+        c.set("user", {
+          id: sessionResult.user.id,
+          email: sessionResult.user.email,
+          name: sessionResult.user.name,
+          role: normalizeRole(sessionResult.user.role),
+          orgId: resolveOrgId(db),
+        } satisfies AuthUser);
+        await next();
+        return;
+      }
+
+      // 4. API key — explicit credential, invalid always 401s.
+      const apiKeyHeader = c.req.header("x-api-key");
+      if (apiKeyHeader) {
+        const result = await auth.api.verifyApiKey({ body: { key: apiKeyHeader } });
+        if (!result.valid || !result.key) {
+          return c.json({ error: "invalid api key" }, 401);
+        }
+        const row = await db.select().from(users).where(eq(users.id, result.key.referenceId)).get();
+        if (!row) {
+          return c.json({ error: "invalid api key" }, 401);
+        }
+        c.set("user", {
+          id: row.id,
+          email: row.email,
+          name: row.name ?? undefined,
+          role: row.role,
+          orgId: resolveOrgId(db),
+        } satisfies AuthUser);
+        await next();
+        return;
+      }
+    }
+
+    // 5. Stub auth.
+    if (process.env.VALET_LOCAL_AUTH === "1") {
+      const testUserId = process.env.VALET_TEST_AUTH_HEADER === "1" ? c.req.header("x-valet-test-user-id") : undefined;
+      if (testUserId) {
+        const row = await db.select().from(users).where(eq(users.id, testUserId)).get();
+        if (row) {
+          c.set("user", {
+            id: row.id,
+            email: row.email,
+            name: row.name ?? undefined,
+            role: row.role,
+            orgId: LOCAL_ORG.id,
+          } satisfies AuthUser);
+          await next();
+          return;
+        }
+      }
+
       c.set("user", {
-        id: row.id,
-        email: row.email,
-        name: row.name ?? undefined,
-        role: row.role,
+        id: LOCAL_USER.id,
+        email: LOCAL_USER.email,
+        name: LOCAL_USER.name,
+        role: LOCAL_USER.role,
         orgId: LOCAL_ORG.id,
       } satisfies AuthUser);
       await next();
       return;
     }
-  }
 
-  c.set("user", {
-    id: LOCAL_USER.id,
-    email: LOCAL_USER.email,
-    name: LOCAL_USER.name,
-    role: LOCAL_USER.role,
-    orgId: LOCAL_ORG.id,
-  } satisfies AuthUser);
-  await next();
-};
+    // 6. Nothing matched.
+    return c.json({ error: "unauthorized" }, 401);
+  };
+}

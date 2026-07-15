@@ -55,6 +55,15 @@ function resolveScope(c: Context<AppEnv>): MemoryScope {
     return { owner, actorUserId: actorHeader };
   }
 
+  // Sandbox principal (Task 7): the owner tuple derives from the verified
+  // token, never from headers — a sandbox always acts as the session's
+  // owning user, so any `x-valet-owner`/`x-valet-actor` headers on this
+  // request are ignored.
+  const sandbox = c.var.sandbox;
+  if (sandbox) {
+    return { owner: { type: "user", id: sandbox.userId }, actorUserId: sandbox.userId };
+  }
+
   const user = c.var.user;
   return { owner: { type: "user", id: user.id }, actorUserId: user.id };
 }
