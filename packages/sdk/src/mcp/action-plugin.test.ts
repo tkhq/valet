@@ -327,6 +327,163 @@ describe('mcpActionPlugin generated action execute', () => {
     expect(result).toEqual({ success: false, error: 'zone not found' });
   });
 
+  it('does not share an Mcp-Session-Id across two callers with different tokens', async () => {
+    const initializeCalls: CapturedRequest[] = [];
+    let sessionCounter = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
+        const headers: Record<string, string> = {};
+        if (init?.headers) {
+          for (const [k, v] of Object.entries(init.headers as Record<string, string>)) headers[k] = v;
+        }
+        if (body.method === 'initialize') {
+          sessionCounter += 1;
+          initializeCalls.push({ url: String(url), headers, body });
+          return jsonResponse(
+            {
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test-server', version: '1.0.0' } },
+            },
+            { 'mcp-session-id': `sess-${sessionCounter}` },
+          );
+        }
+        if (body.method === 'notifications/initialized') return jsonResponse({});
+        if (body.method === 'tools/list') {
+          return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { tools: [fixtureTools[0]] } });
+        }
+        if (body.method === 'tools/call') {
+          return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+        }
+        throw new Error(`unexpected MCP method in test fixture: ${body.method}`);
+      }),
+    );
+
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel: 'medium',
+    });
+
+    // Two "users" sharing the process-wide singleton McpClient (the bug
+    // scenario), each with their own credential provider / token.
+    const credsA = fakeCredentialProvider({ accessToken: 'tok-user-a' });
+    const credsB = fakeCredentialProvider({ accessToken: 'tok-user-b' });
+    const [actionA] = await plugin.resolveActions!({ credentials: credsA });
+    const [actionB] = await plugin.resolveActions!({ credentials: credsB });
+
+    await actionA.execute({}, fakeContext(credsA));
+    await actionB.execute({}, fakeContext(credsB));
+
+    expect(initializeCalls).toHaveLength(2); // one handshake per distinct credential
+    const sentSessionIds = initializeCalls.map((c) => c.headers['Mcp-Session-Id']);
+    // Neither initialize call should carry the other credential's session id.
+    expect(sentSessionIds.every((id) => id === undefined)).toBe(true);
+  });
+
+  it('reuses the cached session for repeated calls with the same token (one initialize)', async () => {
+    let initializeCount = 0;
+    let toolsCallCount = 0;
+    const seenSessionIds = new Set<string | undefined>();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
+        const headers: Record<string, string> = {};
+        if (init?.headers) {
+          for (const [k, v] of Object.entries(init.headers as Record<string, string>)) headers[k] = v;
+        }
+        if (body.method === 'initialize') {
+          initializeCount += 1;
+          return jsonResponse(
+            {
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test-server', version: '1.0.0' } },
+            },
+            { 'mcp-session-id': 'sess-shared' },
+          );
+        }
+        if (body.method === 'notifications/initialized') return jsonResponse({});
+        if (body.method === 'tools/list') {
+          return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { tools: [fixtureTools[0]] } });
+        }
+        if (body.method === 'tools/call') {
+          toolsCallCount += 1;
+          seenSessionIds.add(headers['Mcp-Session-Id']);
+          return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+        }
+        throw new Error(`unexpected MCP method in test fixture: ${body.method}`);
+      }),
+    );
+
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel: 'medium',
+    });
+    const creds = fakeCredentialProvider({ accessToken: 'tok-same' });
+    const [action1] = await plugin.resolveActions!({ credentials: creds });
+    const [action2] = await plugin.resolveActions!({ credentials: creds });
+
+    await action1.execute({}, fakeContext(creds));
+    await action2.execute({}, fakeContext(creds));
+
+    expect(initializeCount).toBe(1);
+    expect(toolsCallCount).toBe(2);
+    expect(seenSessionIds).toEqual(new Set(['sess-shared']));
+  });
+
+  it('noAuth callers still initialize and call tools successfully (anon cache key)', async () => {
+    let initializeCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
+        if (body.method === 'initialize') {
+          initializeCount += 1;
+          return jsonResponse(
+            {
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test-server', version: '1.0.0' } },
+            },
+            { 'mcp-session-id': 'sess-anon' },
+          );
+        }
+        if (body.method === 'notifications/initialized') return jsonResponse({});
+        if (body.method === 'tools/list') return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { tools: [fixtureTools[0]] } });
+        if (body.method === 'tools/call') {
+          return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+        }
+        throw new Error(`unexpected MCP method in test fixture: ${body.method}`);
+      }),
+    );
+
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.deepwiki.com/mcp',
+      serviceName: 'deepwiki',
+      defaultRiskLevel: 'low',
+      noAuth: true,
+    });
+    const credentials: CredentialProvider = {
+      get: vi.fn(async () => {
+        throw new Error('credentials.get() should not be called when noAuth is set');
+      }),
+      request: vi.fn(),
+    };
+
+    const [action] = await plugin.resolveActions!({ credentials });
+    const result1 = await action.execute({}, fakeContext(credentials));
+    const result2 = await action.execute({}, fakeContext(credentials));
+
+    expect(result1).toEqual({ success: true, data: 'ok' });
+    expect(result2).toEqual({ success: true, data: 'ok' });
+    expect(initializeCount).toBe(1); // anon key cached across calls
+  });
+
   it('maps an empty MCP response to a failed PluginActionResult (legacy parity)', async () => {
     vi.stubGlobal(
       'fetch',

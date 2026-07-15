@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { McpTool, McpToolResult, JsonRpcRequest, JsonRpcResponse } from './types.js';
 
 /**
@@ -17,7 +18,15 @@ export class McpClient {
   /** When set, token is sent as a URL query parameter instead of Authorization header. */
   private authQueryParam?: string;
 
-  /** Per-service session IDs to avoid re-initializing on every call. */
+  /**
+   * Per-credential session IDs to avoid re-initializing on every call.
+   * Keyed by a hash of the bearer token (never the raw token — see credentialKey()),
+   * so that concurrent callers with different tokens never share an
+   * `Mcp-Session-Id`. A single McpClient instance is a singleton per service
+   * across all requests in the process, so keying on serviceName alone would
+   * let one user's session (and thus session-scoped authorization context) be
+   * reused for another user's tools/list + tools/call requests.
+   */
   private sessions = new Map<string, string | null>();
 
   constructor(opts: { url: string; serviceName: string; authQueryParam?: string }) {
@@ -138,16 +147,30 @@ export class McpClient {
     });
   }
 
+  /** Derive a cache key from the credential identity — a short hash of the bearer
+   *  token, never the raw token itself. `"anon"` is used for the no-auth / no-token
+   *  case. This client instance is a per-service singleton shared across all
+   *  callers in the process, so the key must be scoped to the credential, not just
+   *  the service — otherwise one user's session (and its server-side authorization
+   *  context) would be reused for another user's requests. */
+  private credentialKey(token?: string): string {
+    if (!token) return 'anon';
+    return createHash('sha256').update(token).digest('hex').slice(0, 16);
+  }
+
   /**
    * Ensure the session is initialized for this token.
    * MCP Streamable HTTP spec requires initialize before other methods.
    * Falls back to no-session mode if initialize fails (some servers don't require it).
    */
   private async ensureInitialized(token?: string): Promise<string | null> {
-    // Key on service name — sessions are server-side and survive token rotation.
-    // Using the token as key caused cache misses on every OAuth refresh, forcing
-    // redundant initialize + notify round-trips to the MCP server.
-    const cacheKey = this.serviceName;
+    // Key on a hash of the credential (per credentialKey()), not just service name.
+    // Sessions are server-side and are re-initialized whenever the credential
+    // changes — including on token rotation, since we can't tell a rotated token
+    // apart from a different user's token without re-running initialize. That's an
+    // accepted cost: it trades a few extra initialize + notify round-trips for never
+    // reusing one caller's session (and authorization context) for another's calls.
+    const cacheKey = this.credentialKey(token);
     if (this.sessions.has(cacheKey)) {
       return this.sessions.get(cacheKey) ?? null;
     }
