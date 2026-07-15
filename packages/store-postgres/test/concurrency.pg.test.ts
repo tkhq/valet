@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runConcurrencyContract } from "@valet/engine/test-helpers";
 import type { MessageEntry, QueueItem } from "@valet/engine";
 import { isPgDeadlock, pgDbFromPglite, pgDbFromPool, type PgDb } from "../src/db.js";
@@ -73,9 +73,32 @@ describe("Concurrency contract (PGlite)", () => {
 });
 
 describe.skipIf(!process.env.TEST_DATABASE_URL)("Concurrency contract (docker-pg)", () => {
-  const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
+  // Sized to comfortably exceed the fence-less contract test's burst
+  // (FENCELESS_N in concurrency-contract.ts) so every racer in that burst
+  // gets its own already-established connection (see the warmup below)
+  // instead of a chunk of them waiting on cold `pool.connect()` calls,
+  // which staggers their queries just enough that a removed
+  // seq-serialization lock (event-stream.ts) tends to only manifest as a
+  // single 23505 per collision — exactly what the store's retry-once
+  // absorbs. Real simultaneity is what makes a *second* collision (which
+  // escapes) overwhelmingly likely.
+  // 70 stays comfortably under postgres:17's default max_connections (100)
+  // even with other suites/files in this package holding a handful of
+  // connections, while exceeding FENCELESS_N (60, in concurrency-contract.ts)
+  // so the fence-less burst never waits on a cold `pool.connect()`.
+  const POOL_MAX = 70;
+  const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL, max: POOL_MAX });
   const db = pgDbFromPool(pool);
   const { factory } = makeHarness(db);
+
+  beforeAll(async () => {
+    // Pre-warm the pool: open (and immediately release) `max` physical
+    // connections before any contract test runs, so later concurrent
+    // bursts hit idle, already-connected sockets rather than paying
+    // per-connection TCP/auth setup cost inline with the race itself.
+    const clients = await Promise.all(Array.from({ length: POOL_MAX }, () => pool.connect()));
+    for (const client of clients) client.release();
+  });
 
   afterAll(async () => {
     await db.close();

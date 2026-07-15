@@ -46,6 +46,26 @@ export interface ConcurrencyContractContext {
 
 const N = 25;
 
+/**
+ * N for the fence-less same-session append test (test (a) below) only.
+ *
+ * That test is the sole dedicated guard of `PgEventStream.append`'s
+ * `engine_sessions ... FOR UPDATE` seq-serialization lock: remove the lock
+ * and two concurrent appends can both compute the same `MAX(seq)+1`, but
+ * `append`'s belt-and-suspenders retry-once-on-23505 silently converts a
+ * *single* collision into eventual success. At the default node-postgres
+ * pool size (10), N=25 only produces ~2-3 windows of real cross-connection
+ * concurrency, which mutation testing showed catches the removed lock only
+ * ~60% of the time — not a reliable guard. Raising to 60+ appends, all
+ * released from a single start gate so they hit the pool at once rather
+ * than trickling in as the synchronous `Array.from` loop constructs them,
+ * produces ~6 contention windows instead of ~2-3: with the lock removed,
+ * the odds that *some* window has 3+ transactions racing the same
+ * `MAX(seq)+1` (so a retried loser collides a second time and its 23505
+ * escapes) become overwhelming.
+ */
+const FENCELESS_N = 60;
+
 function turnEndEvent(sessionId: string, threadId: string, key: number): {
   sessionId: string;
   threadId: string;
@@ -133,23 +153,34 @@ export function runConcurrencyContract(name: string, ctx: ConcurrencyContractCon
   const d = supportsConcurrency ? describe : describe.skip;
 
   d(`Concurrency contract: ${name}`, () => {
-    it(`N=${N} concurrent same-session fence-less appends yield gapless unique seqs 1..${N}`, async () => {
+    it(`N=${FENCELESS_N} concurrent same-session fence-less appends yield gapless unique seqs 1..${FENCELESS_N}`, async () => {
       const { store, stream } = await ctx.factory();
       const sessionId = "conc-fenceless";
       await store.saveSession(baseSession(sessionId));
       await store.saveThread(sessionId, baseThread(sessionId, "th-1"));
 
-      const appends = Array.from({ length: N }, (_, i) =>
-        stream.append(turnEndEvent(sessionId, "th-1", i), `key-${i}`),
-      );
+      // Start gate: every appender awaits the same not-yet-resolved promise
+      // before calling `append`, so all FENCELESS_N calls are genuinely
+      // released at once (they queue on the pg pool together) instead of
+      // trickling in as the `Array.from` callback runs synchronously.
+      let release: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const appends = Array.from({ length: FENCELESS_N }, async (_, i) => {
+        await gate;
+        return stream.append(turnEndEvent(sessionId, "th-1", i), `key-${i}`);
+      });
+      release!();
       await Promise.all(appends);
 
-      const { events } = await stream.read(sessionId, { limit: N + 10 });
+      const { events } = await stream.read(sessionId, { limit: FENCELESS_N + 10 });
       const seqs = events.map((e) => Number(e.offset)).sort((x, y) => x - y);
-      expect(seqs).toHaveLength(N);
-      expect(new Set(seqs).size).toBe(N);
+      expect(seqs).toHaveLength(FENCELESS_N);
+      expect(new Set(seqs).size).toBe(FENCELESS_N);
       expect(seqs[0]).toBe(1);
-      expect(seqs[N - 1]).toBe(N);
+      expect(seqs[FENCELESS_N - 1]).toBe(FENCELESS_N);
     });
 
     it(`concurrent appends fenced on two different queue items of one session yield gapless unique seqs 1..${N}`, async () => {
