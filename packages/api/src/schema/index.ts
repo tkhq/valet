@@ -5,6 +5,9 @@ import { sqliteTable, text, integer, index, primaryKey, uniqueIndex } from "driz
 export const orgs = sqliteTable("orgs", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  // JSON object of feature flags, e.g. `{ organizations: boolean }`. Absent
+  // key reads as false (split-settings design, "Feature gate").
+  features: text("features").notNull().default("{}"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -14,6 +17,9 @@ export const users = sqliteTable("users", {
   name: text("name"),
   avatarUrl: text("avatar_url"),
   role: text("role", { enum: ["admin", "member"] }).notNull(),
+  // Nullable user preference feeding `EngineHost`'s model override seam;
+  // null falls back to the host default (split-settings design, decision 9).
+  defaultModel: text("default_model"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -23,6 +29,7 @@ export const orgMembers = sqliteTable(
     orgId: text("org_id").notNull(),
     userId: text("user_id").notNull(),
     role: text("role", { enum: ["admin", "member"] }).notNull(),
+    createdAt: integer("created_at"),
   },
   (t) => [primaryKey({ columns: [t.orgId, t.userId] })],
 );

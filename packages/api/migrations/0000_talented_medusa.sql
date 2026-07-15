@@ -157,12 +157,14 @@ CREATE TABLE `org_members` (
 	`org_id` text NOT NULL,
 	`user_id` text NOT NULL,
 	`role` text NOT NULL,
+	`created_at` integer,
 	PRIMARY KEY(`org_id`, `user_id`)
 );
 --> statement-breakpoint
 CREATE TABLE `orgs` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
+	`features` text DEFAULT '{}' NOT NULL,
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint
@@ -180,6 +182,7 @@ CREATE TABLE `users` (
 	`name` text,
 	`avatar_url` text,
 	`role` text NOT NULL,
+	`default_model` text,
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint

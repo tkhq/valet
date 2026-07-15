@@ -25,6 +25,7 @@ import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { teamMembers, teams, type TeamRow } from "../schema/index.js";
+import { isOrgAdmin } from "../services/org.js";
 import {
   addMember,
   createTeam,
@@ -82,8 +83,9 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
 
 /**
  * Gates the four mutation routes (delete team, add/set-role/remove member):
- * the caller must be a team admin of `teamId`, or an org admin. Org admin is
- * a deliberate recovery path (e.g. the team's last admin left the org) —
+ * the caller must be a team admin of `teamId`, or an org admin (per
+ * `org_members.role`, not the global `users.role` operator flag). Org admin
+ * is a deliberate recovery path (e.g. the team's last admin left the org) —
  * not a general-purpose bypass, so keep it narrow and don't extend it to
  * plain org membership.
  */
@@ -92,7 +94,7 @@ async function canMutateTeam(
   teamId: string,
   user: AuthUser,
 ): Promise<boolean> {
-  if (user.role === "admin") return true;
+  if (await isOrgAdmin(db, user.orgId, user.id)) return true;
   const member = await db
     .select()
     .from(teamMembers)
