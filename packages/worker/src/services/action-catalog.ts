@@ -153,24 +153,6 @@ export async function buildValidatorToolContext(
   return { knownToolActions, toolOutputSchemas };
 }
 
-/**
- * Back-compat wrapper: some callers only need the action-existence map.
- * Prefer `buildValidatorToolContext` for save/validate/publish which
- * want both.
- */
-export async function buildKnownToolActions(env: Env, db: AppDb): Promise<Map<string, Set<string>>> {
-  const catalog = await buildActionCatalog(env, db);
-  const known = new Map<string, Set<string>>();
-  for (const entry of catalog) {
-    let actions = known.get(entry.service);
-    if (!actions) {
-      actions = new Set<string>();
-      known.set(entry.service, actions);
-    }
-    actions.add(entry.actionId);
-  }
-  return known;
-}
 
 /**
  * Look up a single action within a service, or `null` if it doesn't exist.

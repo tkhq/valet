@@ -794,12 +794,15 @@ function validateForeachItemSources(
       // payload's shape is opaque, so we can't prove the named path is
       // iterable — the workflow is one malformed trigger call away from
       // a runtime explosion. The author must declare the trigger schema
-      // and name an array field there. Surfaced as a hard error (not a
-      // warning) so programmatic authors calling workflows.validate or
-      // workflows.save_draft see a real signal — warnings are invisible
-      // to that loop and the agent will happily ship broken workflows.
+      // and name an array field there. Surfaced as a HARD ERROR (distinct
+      // code from the node-source case) — trigger is fully author-owned,
+      // so untyped-array here always indicates a definition bug we can
+      // catch at authoring time. The node-source case is a warning
+      // because the tool catalog often lacks a schema for arbitrary-query
+      // tools, and false-positive-hard-error would be worse than a
+      // runtime failure with a clear message.
       if (arrayPaths.has(formatPathSegments(segments))) continue;
-      errors.push(foreachUntypedArrayError(node.id, node.items));
+      errors.push(foreachTriggerUntypedError(node.id, node.items));
       continue;
     }
 
@@ -838,6 +841,21 @@ function foreachUntypedArrayError(
     path: 'items',
     code: 'foreach_items_untyped_array_output',
     message: foreachUntypedArrayMessage(nodeId, items, sourceNodeType, sourceNodeId),
+  };
+}
+
+/**
+ * Distinct code for trigger-source untyped foreach so it stays a hard
+ * error while node-source cases (which can false-positive on tools
+ * without registered schemas) get downgraded to warning.
+ */
+function foreachTriggerUntypedError(nodeId: string, items: string): WorkflowValidationError {
+  return {
+    scope: 'field',
+    nodeId,
+    path: 'items',
+    code: 'foreach_items_trigger_untyped',
+    message: foreachUntypedArrayMessage(nodeId, items, undefined, undefined),
   };
 }
 

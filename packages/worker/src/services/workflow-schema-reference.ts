@@ -130,7 +130,7 @@ export function getWorkflowSchemaReference() {
               note: 'Google Workspace actions are NOT service-prefixed.',
             },
           },
-          verify: 'workflows.save_draft (with validate=true) and workflows.validate now hard-error on unknown_tool_service / unknown_tool_action with a nearest-match suggestion. If a save validates clean, the ids resolve.',
+          verify: 'workflows.save_draft (with validate=true) and workflows.validate check both. `unknown_tool_action` (typo on a KNOWN service) is a hard error with a nearest-match suggestion — a clean save proves the action id resolves. `unknown_tool_service` is a WARNING, not a hard block, because the catalog may not see per-user custom MCP connectors; check the warnings list to catch it.',
         },
       },
       {
@@ -185,6 +185,7 @@ export function getWorkflowSchemaReference() {
             { source: 'orchestrator/session', template: '{{nodes.<id>.data.output.<field>}}', precondition: 'wait.mode === "until_idle" AND outputSchema declares field as array. Note the `.data.output.<field>` nesting — llm/tool go direct at `.data.<field>`.' },
             { source: 'orchestrator/session', template: '{{nodes.<id>.data.transcript}}', precondition: 'resultMode === "transcript"' },
             { source: 'foreach', template: '{{nodes.<id>.data.items}}', precondition: 'Always valid (nested-foreach chaining).' },
+            { source: 'project', template: '{{nodes.<id>.data}}', precondition: 'Always valid — a project node\'s output IS the 2D array. Use `.data` at the root, NOT `.data.<field>`.' },
           ],
         },
         // Downstream nodes reading a foreach's output must know the

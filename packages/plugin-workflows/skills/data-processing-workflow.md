@@ -166,7 +166,7 @@ The validator rejects `{{...}}` expressions whose type it can't statically verif
 
 ### Foreach body allows exactly one node
 
-Types: `llm`, `tool`, `set`, `stop`, `orchestrator`, `session`. **No** nested `if`, `wait`, `approval`, `trigger`, or `foreach`. If you need "classify then write" per item, use two sequential foreach nodes (tier_loop → write_loop as above), not one loop with two bodies.
+Types: `llm`, `tool`, `set`, `stop`, `orchestrator`, `session`, `project`. **No** nested `if`, `wait`, `approval`, `trigger`, or `foreach`. If you need "classify then write" per item, use two sequential foreach nodes (tier_loop → write_loop as above), not one loop with two bodies.
 
 ### Approvals
 

@@ -371,20 +371,21 @@ describe('validateDefinition', () => {
       ],
     });
 
-    // foreach_items_untyped_array_output is a warning (not blocker) — the
-    // engine still surfaces it, but doesn't hard-fail the workflow.
-    expect(validateDefinition(def)).toEqual(expect.arrayContaining([
+    // Trigger source keeps a DISTINCT hard-error code
+    // (foreach_items_trigger_untyped) — the author owns trigger.dataSchema
+    // entirely, so we can and should hard-block. Only node-source untyped
+    // paths are downgraded to warnings (see foreach_items_untyped_array_output).
+    expect(blockingErrors(validateDefinition(def))).toEqual([
       expect.objectContaining({
-        code: 'foreach_items_untyped_array_output',
+        code: 'foreach_items_trigger_untyped',
         nodeId: 'sweep',
         path: 'items',
         message: expect.stringContaining('foreach "sweep" uses {{trigger.data.names}}, but it is not a typed array output'),
       }),
-    ]));
-    expect(blockingErrors(validateDefinition(def))).toEqual([]);
+    ]);
   });
 
-  it('surfaces (as a warning) foreach items that reference a trigger field declared as a non-array type', () => {
+  it('rejects foreach items that reference a trigger field declared as a non-array type', () => {
     const def = definition({
       nodes: [
         { id: 'trigger', type: 'trigger', dataSchema: { names: { type: 'string' } } },
@@ -402,13 +403,13 @@ describe('validateDefinition', () => {
       ],
     });
 
-    expect(validateDefinition(def)).toEqual(expect.arrayContaining([
+    // Trigger source stays a hard error under the distinct code.
+    expect(blockingErrors(validateDefinition(def))).toEqual([
       expect.objectContaining({
-        code: 'foreach_items_untyped_array_output',
+        code: 'foreach_items_trigger_untyped',
         nodeId: 'sweep',
       }),
-    ]));
-    expect(blockingErrors(validateDefinition(def))).toEqual([]);
+    ]);
   });
 
   it('accepts foreach items that reference a trigger field declared as an array', () => {
