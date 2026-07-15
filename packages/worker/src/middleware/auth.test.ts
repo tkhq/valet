@@ -113,16 +113,13 @@ describe('authMiddleware', () => {
     expect(body.code).toBe('AUTH_INVALID');
   });
 
-  it('extends expires_at on every authenticated request (sliding window)', async () => {
-    const app = buildApp();
-    const writes: string[] = [];
-
-    const db: DbStub = {
+  function buildSessionDb(expiresAt: string, writes: string[]): DbStub {
+    return {
       prepare: (sql: string) => ({
         bind: () => ({
           first: async <T>() =>
             (sql.includes('FROM auth_sessions')
-              ? { id: 'user-1', email: 'u@example.com', role: 'member' }
+              ? { id: 'user-1', email: 'u@example.com', role: 'member', expires_at: expiresAt }
               : null) as T | null,
           run: async () => {
             writes.push(sql);
@@ -130,22 +127,109 @@ describe('authMiddleware', () => {
         }),
       }),
     };
+  }
+
+  function fakeCtx(): ExecutionContext {
+    return {
+      waitUntil: (p: Promise<unknown>) => {
+        void p;
+      },
+      passThroughOnException: () => {},
+      props: {},
+    } as unknown as ExecutionContext;
+  }
+
+  it('slides expires_at when less than half the TTL remains', async () => {
+    const app = buildApp();
+    const writes: string[] = [];
+    // 5 days from now — well below the 15-day half-life threshold.
+    const soonExpiry = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
 
     const res = await app.fetch(
       new Request('http://localhost/api/sessions/session-1/messages', {
         headers: { Authorization: 'Bearer valid-token' },
       }),
-      { DB: db } as any,
+      { DB: buildSessionDb(soonExpiry, writes) } as any,
+      fakeCtx(),
     );
 
     expect(res.status).toBe(200);
-
-    // The middleware fires the UPDATE fire-and-forget; wait a tick for it.
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const slidingUpdate = writes.find((sql) => sql.includes('UPDATE auth_sessions'));
     expect(slidingUpdate).toBeDefined();
     expect(slidingUpdate).toContain('expires_at');
     expect(slidingUpdate).toContain("datetime('now', '+30 days')");
+  });
+
+  it('does NOT slide when the session still has more than half the TTL', async () => {
+    const app = buildApp();
+    const writes: string[] = [];
+    // 25 days from now — above the 15-day half-life threshold, so the
+    // sliding-window UPDATE should be skipped entirely (avoids write
+    // amplification on every request).
+    const farExpiry = new Date(Date.now() + 25 * 24 * 60 * 60 * 1000).toISOString();
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer valid-token' },
+      }),
+      { DB: buildSessionDb(farExpiry, writes) } as any,
+      fakeCtx(),
+    );
+
+    expect(res.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(writes.find((sql) => sql.includes('UPDATE auth_sessions'))).toBeUndefined();
+  });
+
+  it('accepts both ISO and SQLite datetime formats when deciding whether to slide', async () => {
+    const app = buildApp();
+    const writes: string[] = [];
+    // SQLite-format datetime (as returned after the first slide) that's
+    // clearly within the half-life window.
+    const now = new Date();
+    const past = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const sqliteFormat = past.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer valid-token' },
+      }),
+      { DB: buildSessionDb(sqliteFormat, writes) } as any,
+      fakeCtx(),
+    );
+
+    expect(res.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(writes.some((sql) => sql.includes('UPDATE auth_sessions'))).toBe(true);
+  });
+
+  it('registers the sliding-window UPDATE with waitUntil so Workers does not cancel it', async () => {
+    const app = buildApp();
+    const writes: string[] = [];
+    const waited: Promise<unknown>[] = [];
+    const soonExpiry = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => {
+        waited.push(p);
+      },
+      passThroughOnException: () => {},
+      props: {},
+    } as unknown as ExecutionContext;
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer valid-token' },
+      }),
+      { DB: buildSessionDb(soonExpiry, writes) } as any,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    expect(waited.length).toBeGreaterThan(0);
   });
 });

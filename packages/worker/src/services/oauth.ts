@@ -6,11 +6,9 @@ import { storeCredential } from './credentials.js';
 import { hashPassword, verifyPassword } from '@valet/plugin-email-auth/identity';
 import { verifyGoogleIdToken } from '@valet/plugin-google-auth/identity';
 import { getGitHubConfig } from './github-config.js';
+import { SESSION_TTL_MS } from '../middleware/auth.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-/** Session TTL. Must stay in sync with SESSION_SLIDING_WINDOW_SQL in auth middleware. */
-export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function generateSessionToken(): string {
   const bytes = new Uint8Array(32);
@@ -109,9 +107,10 @@ async function finalizeUserLogin(
     }
   }
 
-  // Generate session token. Initial expiry matches the sliding window in
-  // authMiddleware so the two never disagree; every authenticated request
-  // subsequently extends `expires_at` back to now + SESSION_TTL_MS.
+  // Generate session token. Initial expiry uses the same TTL as the
+  // sliding-window UPDATE in authMiddleware; every authenticated request
+  // subsequently slides `expires_at` when the remaining window drops below
+  // half the TTL.
   const sessionToken = generateSessionToken();
   const tokenHash = await hashToken(sessionToken);
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();

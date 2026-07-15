@@ -4,11 +4,16 @@ import type { Env, Variables } from '../env.js';
 import { extractBearerToken } from '../lib/ws-auth.js';
 
 /**
- * Session sliding window: every authenticated request pushes `expires_at`
- * this far into the future. A user who touches the app at least once per
- * window stays logged in indefinitely.
+ * Session lifetime. `SESSION_TTL_MS` is the single source of truth; the SQL
+ * fragment is derived from it. Every authenticated request slides
+ * `expires_at` forward when less than half the window remains, so an active
+ * user stays logged in indefinitely without generating a D1 write per
+ * request.
  */
-export const SESSION_SLIDING_WINDOW_SQL = "datetime('now', '+30 days')";
+export const SESSION_TTL_DAYS = 30;
+export const SESSION_TTL_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
+export const SESSION_SLIDING_WINDOW_SQL = `datetime('now', '+${SESSION_TTL_DAYS} days')`;
+const SESSION_SLIDE_THRESHOLD_MS = SESSION_TTL_MS / 2;
 
 /**
  * Authentication middleware supporting:
@@ -44,15 +49,24 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env; Variables: Varia
 
   const tokenHash = await hashToken(bearerToken);
 
+  // Hono throws when `executionCtx` is unavailable (some test envs); the
+  // waitUntil registration is best-effort so a missing ctx is fine.
+  let ctx: ExecutionContext | undefined;
+  try {
+    ctx = c.executionCtx;
+  } catch {
+    ctx = undefined;
+  }
+
   // Try auth_sessions first (OAuth session tokens)
-  const sessionUser = await validateAuthSession(tokenHash, c.env);
+  const sessionUser = await validateAuthSession(tokenHash, c.env, ctx);
   if (sessionUser) {
     c.set('user', sessionUser);
     return next();
   }
 
   // Fall back to api_tokens (programmatic API keys)
-  const apiKeyUser = await validateAPIKey(tokenHash, c.env);
+  const apiKeyUser = await validateAPIKey(tokenHash, c.env, ctx);
   if (apiKeyUser) {
     c.set('user', apiKeyUser);
     return next();
@@ -61,34 +75,57 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env; Variables: Varia
   throw new UnauthorizedError('Invalid or expired authentication', ErrorCodes.AUTH_INVALID);
 };
 
+/** Fire-and-forget a D1 write. Registers with waitUntil when available so
+ *  Workers doesn't cancel the pending I/O when the response is sent. */
+function scheduleWrite(ctx: ExecutionContext | undefined, promise: Promise<unknown>): void {
+  const swallowed = promise.catch(() => {});
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(swallowed);
+  }
+}
+
+/** True when the row's `expires_at` is within the sliding-half-life of now.
+ *  Handles both SQLite's `YYYY-MM-DD HH:MM:SS` (UTC) and ISO 8601 formats;
+ *  the initial insert in oauth.ts writes ISO, subsequent slides write SQLite. */
+function needsSlide(expiresAt: string): boolean {
+  const iso = expiresAt.includes('T') ? expiresAt : expiresAt.replace(' ', 'T') + 'Z';
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return true; // unparseable → slide defensively
+  return ms - Date.now() < SESSION_SLIDE_THRESHOLD_MS;
+}
+
 async function validateAuthSession(
   tokenHash: string,
-  env: Env
+  env: Env,
+  ctx: ExecutionContext | undefined,
 ): Promise<{ id: string; email: string; role: 'admin' | 'member' } | null> {
   try {
     const result = await env.DB.prepare(
-      `SELECT u.id, u.email, u.role
+      `SELECT u.id, u.email, u.role, s.expires_at
        FROM auth_sessions s
        JOIN users u ON s.user_id = u.id
        WHERE s.token_hash = ?
          AND s.expires_at > datetime('now')`
     )
       .bind(tokenHash)
-      .first<{ id: string; email: string; role: string }>();
+      .first<{ id: string; email: string; role: string; expires_at: string }>();
 
-    if (result) {
-      // Slide the session window on every use: an active user should never
-      // hit the expiry cliff. Fire-and-forget — a failed write just means
-      // the session slides on the next request.
-      env.DB.prepare(
-        `UPDATE auth_sessions
-         SET last_used_at = datetime('now'),
-             expires_at = ${SESSION_SLIDING_WINDOW_SQL}
-         WHERE token_hash = ?`,
-      )
-        .bind(tokenHash)
-        .run()
-        .catch(() => {});
+    if (result && needsSlide(result.expires_at)) {
+      // Half-life gate: only slide when less than half the TTL remains.
+      // Bounds writes to at most one per session per (TTL/2) days regardless
+      // of request volume, while still guaranteeing an active user never
+      // hits the expiry cliff.
+      scheduleWrite(
+        ctx,
+        env.DB.prepare(
+          `UPDATE auth_sessions
+           SET last_used_at = datetime('now'),
+               expires_at = ${SESSION_SLIDING_WINDOW_SQL}
+           WHERE token_hash = ?`,
+        )
+          .bind(tokenHash)
+          .run(),
+      );
     }
 
     return result ? { id: result.id, email: result.email, role: (result.role || 'member') as 'admin' | 'member' } : null;
@@ -99,7 +136,8 @@ async function validateAuthSession(
 
 async function validateAPIKey(
   tokenHash: string,
-  env: Env
+  env: Env,
+  ctx: ExecutionContext | undefined,
 ): Promise<{ id: string; email: string; role: 'admin' | 'member' } | null> {
   try {
     const result = await env.DB.prepare(
@@ -114,10 +152,12 @@ async function validateAPIKey(
       .first<{ id: string; email: string; role: string }>();
 
     if (result) {
-      env.DB.prepare("UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ?")
-        .bind(tokenHash)
-        .run()
-        .catch(() => {});
+      scheduleWrite(
+        ctx,
+        env.DB.prepare("UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ?")
+          .bind(tokenHash)
+          .run(),
+      );
     }
 
     return result ? { id: result.id, email: result.email, role: (result.role || 'member') as 'admin' | 'member' } : null;

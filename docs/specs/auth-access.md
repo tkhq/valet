@@ -207,7 +207,7 @@ Both GitHub and Google follow the same pattern. Routes are mounted at `/auth` (n
 6. SHA-256 hash the token, store in `auth_sessions` with a 30-day initial expiry.
 7. Redirect to `${FRONTEND_URL}/auth/callback?token=...&provider=...`.
 
-**Session lifetime:** Rolling 30-day sliding window. Every authenticated request extends `expires_at` to `now + 30 days` via the same fire-and-forget UPDATE that touches `last_used_at`. A user who touches the app at least once every 30 days stays logged in indefinitely. The TTL constant `SESSION_TTL_MS` in `services/oauth.ts` and `SESSION_SLIDING_WINDOW_SQL` in `middleware/auth.ts` must stay in sync.
+**Session lifetime:** Rolling 30-day sliding window. When an authenticated request finds that the session has less than half the TTL remaining (i.e., less than 15 days to expiry), the middleware slides `expires_at` back to `now + 30 days` via a fire-and-forget UPDATE that also touches `last_used_at`. The half-life gate bounds writes to at most one per session per ~15 days regardless of request volume, while still guaranteeing an active user never hits the expiry cliff. The UPDATE is registered with `ctx.waitUntil` so Workers does not cancel it after the response. Single source of truth for the TTL: `SESSION_TTL_MS` in `middleware/auth.ts` (also imported by `services/oauth.ts` for initial insert).
 
 **Token refresh:** Not implemented as a separate endpoint — the sliding window replaces it. Google refresh tokens are stored but only used to refresh Google API access, never the Valet session. GitHub tokens do not expire by default.
 
@@ -234,11 +234,11 @@ Protects all `/api/*` routes. Applied at the app level in `index.ts`.
 **Validation chain:**
 1. If no bearer token is present: throw `UnauthorizedError` with code `AUTH_MISSING`.
 2. SHA-256 hash the token.
-3. Try `auth_sessions`: match `token_hash`, check `expires_at > now`. On success, fire-and-forget UPDATE that sets `last_used_at = now` and slides `expires_at = now + 30 days`.
-4. Fall back to `api_tokens`: match `token_hash`, check not expired, check not revoked. Update `last_used_at`. API tokens are **not** slid — they have their own admin-set expiry.
+3. Try `auth_sessions`: match `token_hash`, check `expires_at > now`. On success, if less than half the TTL remains, `waitUntil` a fire-and-forget UPDATE that sets `last_used_at = now` and slides `expires_at = now + 30 days`.
+4. Fall back to `api_tokens`: match `token_hash`, check not expired, check not revoked. `waitUntil` an update of `last_used_at`. API tokens are **not** slid — they have their own admin-set expiry.
 5. If neither validates: `UnauthorizedError` with code `AUTH_INVALID`.
 
-**Error codes:** The auth middleware is the only site that returns `AUTH_MISSING` / `AUTH_INVALID`. Route-level 401s (session ownership, webhook signatures, trigger tokens) use route-specific error bodies without an auth-tier code. The client (`packages/client/src/api/client.ts`) treats only auth-tier codes as "your login is dead" and clears local auth state; every other 401 surfaces as an ordinary error without logging the user out.
+**Error codes:** The middleware is the only site that emits `AUTH_MISSING` / `AUTH_INVALID`. The generic `UNAUTHORIZED` code (the default on `UnauthorizedError` when no explicit code is passed) is **not** in `AUTH_FAILURE_CODES` — a route handler that throws `new UnauthorizedError('...')` for a route-level authorization failure will surface as a 401 but will not log the user out on the client. For route-level authorization denials, prefer `ForbiddenError` (403). The client (`packages/client/src/api/client.ts` and the parallel handler in `api/copilot.ts`) clears local auth state and redirects to `/login` only for `AUTH_MISSING` / `AUTH_INVALID`; every other 401 surfaces as an ordinary error.
 
 **Context set:** `c.set('user', { id, email, role })`.
 

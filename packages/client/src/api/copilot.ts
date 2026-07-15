@@ -12,6 +12,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { api } from './client';
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
+import { isAuthFailureCode } from '@valet/shared';
 
 export const copilotKeys = {
   all: ['copilot'] as const,
@@ -193,27 +194,30 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
       });
 
       if (!resp.ok) {
-        // Auth expiry: replicate the apiClient behaviour — clear auth
-        // state and bounce to /login. Otherwise the user gets stuck on
-        // the editor with a "session expired" toast and no recovery.
-        if (resp.status === 401) {
+        const body = await resp.text().catch(() => '');
+        let parsed: { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> }; code?: string } = {};
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          /* leave parsed empty */
+        }
+
+        // Auth expiry: mirror apiClient — only clear auth on auth-tier
+        // codes emitted by the auth middleware. Route-level 401s (e.g.
+        // copilot workflow-ownership checks) surface as ordinary errors.
+        if (resp.status === 401 && isAuthFailureCode(parsed.code)) {
           useAuthStore.getState().clearAuth();
           void router.navigate({ to: '/login' });
           return;
         }
-        const body = await resp.text().catch(() => '');
+
         let friendly = body || `HTTP ${resp.status}`;
-        try {
-          const parsed = JSON.parse(body) as { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> } };
-          if (typeof parsed.error === 'string') {
-            friendly = parsed.error;
-          } else if (parsed.error && Array.isArray(parsed.error.issues)) {
-            friendly = parsed.error.issues
-              .map((i) => `${i.message ?? ''}${i.path ? ` (${i.path.join('.')})` : ''}`)
-              .join('; ');
-          }
-        } catch {
-          /* leave friendly as raw body */
+        if (typeof parsed.error === 'string') {
+          friendly = parsed.error;
+        } else if (parsed.error && Array.isArray(parsed.error.issues)) {
+          friendly = parsed.error.issues
+            .map((i) => `${i.message ?? ''}${i.path ? ` (${i.path.join('.')})` : ''}`)
+            .join('; ');
         }
         throw new Error(friendly);
       }

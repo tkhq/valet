@@ -103,10 +103,17 @@ describe('UnauthorizedError', () => {
 });
 
 describe('isAuthFailureCode', () => {
-  it('matches all auth-tier codes', () => {
-    expect(isAuthFailureCode('UNAUTHORIZED')).toBe(true);
+  it('matches auth-tier codes emitted by the auth middleware', () => {
     expect(isAuthFailureCode('AUTH_MISSING')).toBe(true);
     expect(isAuthFailureCode('AUTH_INVALID')).toBe(true);
+  });
+
+  it('does NOT match the generic UNAUTHORIZED default', () => {
+    // A route handler throwing `new UnauthorizedError()` without an explicit
+    // code is expressing a route-level authorization failure — it must not
+    // wipe the user's login. Route-level auth denials should use
+    // ForbiddenError (403) instead.
+    expect(isAuthFailureCode('UNAUTHORIZED')).toBe(false);
   });
 
   it('rejects resource-level 401 codes and unknown values', () => {

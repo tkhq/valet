@@ -80,10 +80,17 @@ export class UnauthorizedError extends ValetError {
   }
 }
 
+/**
+ * Codes that mean "the caller's identity itself is unknown/expired" — the
+ * only 401s that should wipe local auth state and bounce the user to /login.
+ * Deliberately excludes the generic `UNAUTHORIZED` default: route handlers
+ * that throw `new UnauthorizedError('...')` without an explicit code express
+ * a route-level authorization failure and must not log the user out. Those
+ * should use `ForbiddenError` (403) or pass an explicit auth-tier code.
+ */
 export const AUTH_FAILURE_CODES: readonly ErrorCode[] = [
   ErrorCodes.AUTH_MISSING,
   ErrorCodes.AUTH_INVALID,
-  ErrorCodes.UNAUTHORIZED,
 ];
 
 export function isAuthFailureCode(code: string | undefined): boolean {
