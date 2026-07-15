@@ -82,37 +82,38 @@ function scheduleWrite(ctx: ExecutionContext | undefined, promise: Promise<unkno
   }
 }
 
+// NOTE: these validators deliberately let DB errors propagate. A thrown
+// D1 error must surface as a 500 (retriable), NOT as `null` → AUTH_INVALID
+// → the client wiping local auth state. Swallowing errors here would make
+// every transient D1 hiccup log users out.
+
 async function validateAuthSession(
   tokenHash: string,
   env: Env,
   ctx: ExecutionContext | undefined,
 ): Promise<{ id: string; email: string; role: 'admin' | 'member' } | null> {
-  try {
-    const result = await env.DB.prepare(
-      `SELECT u.id, u.email, u.role
-       FROM auth_sessions s
-       JOIN users u ON s.user_id = u.id
-       WHERE s.token_hash = ?
-         AND s.expires_at > datetime('now')`
-    )
-      .bind(tokenHash)
-      .first<{ id: string; email: string; role: string }>();
+  const result = await env.DB.prepare(
+    `SELECT u.id, u.email, u.role
+     FROM auth_sessions s
+     JOIN users u ON s.user_id = u.id
+     WHERE s.token_hash = ?
+       AND s.expires_at > datetime('now')`
+  )
+    .bind(tokenHash)
+    .first<{ id: string; email: string; role: string }>();
 
-    if (result) {
-      // Touch last_used_at for observability. Session expiry is NOT slid —
-      // the 7-day cap from creation is deliberate.
-      scheduleWrite(
-        ctx,
-        env.DB.prepare("UPDATE auth_sessions SET last_used_at = datetime('now') WHERE token_hash = ?")
-          .bind(tokenHash)
-          .run(),
-      );
-    }
-
-    return result ? { id: result.id, email: result.email, role: (result.role || 'member') as 'admin' | 'member' } : null;
-  } catch {
-    return null;
+  if (result) {
+    // Touch last_used_at for observability. Session expiry is NOT slid —
+    // the 7-day cap from creation is deliberate.
+    scheduleWrite(
+      ctx,
+      env.DB.prepare("UPDATE auth_sessions SET last_used_at = datetime('now') WHERE token_hash = ?")
+        .bind(tokenHash)
+        .run(),
+    );
   }
+
+  return result ? { id: result.id, email: result.email, role: (result.role || 'member') as 'admin' | 'member' } : null;
 }
 
 async function validateAPIKey(
@@ -120,31 +121,27 @@ async function validateAPIKey(
   env: Env,
   ctx: ExecutionContext | undefined,
 ): Promise<{ id: string; email: string; role: 'admin' | 'member' } | null> {
-  try {
-    const result = await env.DB.prepare(
-      `SELECT u.id, u.email, u.role
-       FROM api_tokens t
-       JOIN users u ON t.user_id = u.id
-       WHERE t.token_hash = ?
-         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
-         AND t.revoked_at IS NULL`
-    )
-      .bind(tokenHash)
-      .first<{ id: string; email: string; role: string }>();
+  const result = await env.DB.prepare(
+    `SELECT u.id, u.email, u.role
+     FROM api_tokens t
+     JOIN users u ON t.user_id = u.id
+     WHERE t.token_hash = ?
+       AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
+       AND t.revoked_at IS NULL`
+  )
+    .bind(tokenHash)
+    .first<{ id: string; email: string; role: string }>();
 
-    if (result) {
-      scheduleWrite(
-        ctx,
-        env.DB.prepare("UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ?")
-          .bind(tokenHash)
-          .run(),
-      );
-    }
-
-    return result ? { id: result.id, email: result.email, role: (result.role || 'member') as 'admin' | 'member' } : null;
-  } catch {
-    return null;
+  if (result) {
+    scheduleWrite(
+      ctx,
+      env.DB.prepare("UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ?")
+        .bind(tokenHash)
+        .run(),
+    );
   }
+
+  return result ? { id: result.id, email: result.email, role: (result.role || 'member') as 'admin' | 'member' } : null;
 }
 
 async function hashToken(token: string): Promise<string> {

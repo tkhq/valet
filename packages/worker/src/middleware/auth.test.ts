@@ -129,6 +129,35 @@ describe('authMiddleware', () => {
     };
   }
 
+  it('surfaces a DB failure as a 500, not AUTH_INVALID', async () => {
+    const app = buildApp();
+
+    // A transient D1 error must NOT be translated into "your token is
+    // invalid" — the client clears local auth on AUTH_INVALID, so a DB
+    // hiccup would log every active user out.
+    const throwingDb: DbStub = {
+      prepare: () => ({
+        bind: () => ({
+          first: async () => {
+            throw new Error('D1_ERROR: network');
+          },
+          run: async () => {},
+        }),
+      }),
+    };
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer valid-token' },
+      }),
+      { DB: throwingDb } as any,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('INTERNAL_ERROR');
+  });
+
   it('updates last_used_at on every authenticated request but does NOT slide expires_at', async () => {
     const app = buildApp();
     const writes: string[] = [];

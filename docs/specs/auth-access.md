@@ -238,6 +238,8 @@ Protects all `/api/*` routes. Applied at the app level in `index.ts`.
 4. Fall back to `api_tokens`: match `token_hash`, check not expired, check not revoked. `waitUntil` an update of `last_used_at`.
 5. If neither validates: `UnauthorizedError` with code `AUTH_INVALID`.
 
+DB errors during validation propagate as 500s (`INTERNAL_ERROR`) rather than being swallowed into `AUTH_INVALID` — a transient D1 failure must surface as retriable, not as "your token is dead" (which would make the client wipe local auth state).
+
 **Error codes:** The middleware is the only site that emits `AUTH_MISSING` / `AUTH_INVALID`. The generic `UNAUTHORIZED` code (the default on `UnauthorizedError` when no explicit code is passed) is **not** in `AUTH_FAILURE_CODES` — a route handler that throws `new UnauthorizedError('...')` for a route-level authorization failure will surface as a 401 but will not log the user out on the client. For route-level authorization denials, prefer `ForbiddenError` (403). The client (`packages/client/src/api/client.ts` and the parallel handler in `api/copilot.ts`) clears local auth state and redirects to `/login` only for `AUTH_MISSING` / `AUTH_INVALID`; every other 401 surfaces as an ordinary error.
 
 **Context set:** `c.set('user', { id, email, role })`.
