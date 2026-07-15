@@ -108,6 +108,10 @@ const providers = await buildNodeProviders({
   workflowCrashAt,
   sandboxJwtMaster: authConfig?.sandboxJwtMaster,
   sandboxApiUrl: authConfig?.baseUrl,
+  // Real auth configured → skip seeding the local-dev identity so the
+  // "zero users → first signup becomes admin" provisioning rule can fire
+  // (see `NodeProviderOpts.seedLocalIdentity`).
+  seedLocalIdentity: !authConfig,
 });
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →

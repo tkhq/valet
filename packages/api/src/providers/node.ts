@@ -91,6 +91,16 @@ export interface NodeProviderOpts {
    * host falls back to the local dev default).
    */
   sandboxApiUrl?: string;
+  /**
+   * Seed the `local-user`/`local-org` stub identity (default `true`, for
+   * backward compat with every existing stub-mode caller/test). Must be
+   * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
+   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
+   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * fresh real deployment could never mint its first admin and every real
+   * signup would land in the seeded "Local Dev" org.
+   */
+  seedLocalIdentity?: boolean;
 }
 
 export const LOCAL_USER = {
@@ -128,17 +138,21 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const db = buildAppDb(sqlite);
   const engineDb = drizzle(sqlite);
 
-  // Seed the local-dev identity. Idempotent.
-  const now = Date.now();
-  db.insert(orgs).values({ id: LOCAL_ORG.id, name: LOCAL_ORG.name, createdAt: now }).onConflictDoNothing().run();
-  db.insert(users)
-    .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
-    .onConflictDoNothing()
-    .run();
-  db.insert(orgMembers)
-    .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
-    .onConflictDoNothing()
-    .run();
+  // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
+  // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
+  // `authConfig` resolves) — see `NodeProviderOpts.seedLocalIdentity`.
+  if (opts.seedLocalIdentity ?? true) {
+    const now = Date.now();
+    db.insert(orgs).values({ id: LOCAL_ORG.id, name: LOCAL_ORG.name, createdAt: now }).onConflictDoNothing().run();
+    db.insert(users)
+      .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
+      .onConflictDoNothing()
+      .run();
+    db.insert(orgMembers)
+      .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
+      .onConflictDoNothing()
+      .run();
+  }
 
   const engineStore = new SqliteSessionStore(engineDb);
   const blobs = new FsBlobStore(opts.blobsRoot);

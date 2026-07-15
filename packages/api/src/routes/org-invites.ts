@@ -30,7 +30,7 @@ async function requireOrgAdmin(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const user = c.var.user;
   if (!(await isOrgAdmin(db, user.orgId, user.id))) {
-    return c.json({ error: "admin only" }, 403);
+    return c.json({ error: "org admin required" }, 403);
   }
   return undefined;
 }
