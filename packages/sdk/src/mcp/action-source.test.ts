@@ -157,6 +157,102 @@ describe('McpActionSource', () => {
     expect(result.data).toEqual({ canonical: 'use me', count: 42 });
   });
 
+  it('decodes TOON-formatted text tool results into structured data', async () => {
+    // Attio's MCP server emits TOON (see https://attio.com/engineering/blog/building-the-attio-mcp-server)
+    // for token efficiency and never populates structuredContent.
+    // JSON.parse fails on TOON, so without a TOON decode fallback every
+    // downstream template path against Attio outputs resolves to null.
+    const toonPayload = '[1]:\n  - record_id: abc-123\n    attributes:\n      name: BVNK\n      domains[1]: bvnk.com';
+    const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const rpc = await readRpc(init);
+      if (rpc.method === 'initialize') {
+        return jsonResponse({
+          jsonrpc: '2.0', id: rpc.id,
+          result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'fake', version: '1.0.0' } },
+        }, { headers: { 'mcp-session-id': 'session-1' } });
+      }
+      if (rpc.method === 'notifications/initialized') return new Response(null, { status: 202 });
+      return jsonResponse({
+        jsonrpc: '2.0', id: rpc.id,
+        result: { content: [{ type: 'text', text: toonPayload }] },
+      });
+    });
+
+    const source = new McpActionSource({ mcpUrl: 'https://mcp.example.com', serviceName: 'attio', noAuth: true, fetch: fakeFetch });
+    const result = await source.execute('attio.get-records-by-ids', {}, { credentials: {}, userId: 'u' });
+    expect(result.success).toBe(true);
+    expect(Array.isArray(result.data)).toBe(true);
+    const arr = result.data as Array<{ record_id: string; attributes: { name: string; domains: string[] } }>;
+    expect(arr[0]?.record_id).toBe('abc-123');
+    expect(arr[0]?.attributes.name).toBe('BVNK');
+    expect(arr[0]?.attributes.domains).toEqual(['bvnk.com']);
+  });
+
+  it('prefers JSON parsing over TOON decoding when text is valid JSON', async () => {
+    // TOON is lenient enough to decode a JSON string into a mangled
+    // object (e.g. `{"records":[...]}` → `{'"records"': '[...]'}`).
+    // JSON must win. This test picks a payload where the TOON decode
+    // WOULD produce a different (and clearly wrong) shape, so a future
+    // reorder or gate change would break the assertion loudly.
+    const jsonText = '{"records":[{"Name":"Stripe"}]}';
+    const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const rpc = await readRpc(init);
+      if (rpc.method === 'initialize') {
+        return jsonResponse({
+          jsonrpc: '2.0', id: rpc.id,
+          result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'fake', version: '1.0.0' } },
+        }, { headers: { 'mcp-session-id': 'session-1' } });
+      }
+      if (rpc.method === 'notifications/initialized') return new Response(null, { status: 202 });
+      return jsonResponse({
+        jsonrpc: '2.0', id: rpc.id,
+        result: { content: [{ type: 'text', text: jsonText }] },
+      });
+    });
+
+    const source = new McpActionSource({ mcpUrl: 'https://mcp.example.com', serviceName: 'custom', noAuth: true, fetch: fakeFetch });
+    const result = await source.execute('custom.query', {}, { credentials: {}, userId: 'u' });
+    // Precise shape: an array of records, not the string-keyed object
+    // shape TOON would produce.
+    const data = result.data as { records: Array<{ Name: string }> };
+    expect(Array.isArray(data.records)).toBe(true);
+    expect(data.records[0]?.Name).toBe('Stripe');
+  });
+
+  it('does not decode plain-text output containing a colon as TOON', async () => {
+    // Regression guard: TOON accepts `"Error: Invalid input"` and
+    // returns `{Error: 'Invalid input'}`. Without the TOON structural-
+    // marker gate, any text tool response with a colon on the first
+    // line would silently coerce into an object, corrupting downstream
+    // consumers that expect a string. The gate requires a `[N]:` /
+    // `field[N]:` / `field[N]{...}:` marker before decoding.
+    const cases = [
+      'Error: Invalid input',
+      'Summary: My take is that this workflow is fine',
+      'Overview:\n  status: ok\n  count: 3',
+    ];
+    for (const text of cases) {
+      const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const rpc = await readRpc(init);
+        if (rpc.method === 'initialize') {
+          return jsonResponse({
+            jsonrpc: '2.0', id: rpc.id,
+            result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'fake', version: '1.0.0' } },
+          }, { headers: { 'mcp-session-id': 'session-1' } });
+        }
+        if (rpc.method === 'notifications/initialized') return new Response(null, { status: 202 });
+        return jsonResponse({
+          jsonrpc: '2.0', id: rpc.id,
+          result: { content: [{ type: 'text', text }] },
+        });
+      });
+      const source = new McpActionSource({ mcpUrl: 'https://mcp.example.com', serviceName: 'custom', noAuth: true, fetch: fakeFetch });
+      const result = await source.execute('custom.echo', {}, { credentials: {}, userId: 'u' });
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(text);
+    }
+  });
+
   it('preserves plain-text output that is not JSON', async () => {
     const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const rpc = await readRpc(init);

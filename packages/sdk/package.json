@@ -45,6 +45,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@toon-format/toon": "^2.1.0",
     "@valet/shared": "workspace:*",
     "zod": "^3.22.4"
   },
