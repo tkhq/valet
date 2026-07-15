@@ -27,14 +27,24 @@ import type {
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
+  ListModelsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   AuthMeResponse,
+  MeResponse,
+  OrgMembersResponse,
+  OrgResponse,
+  PatchMeRequest,
+  PatchMeResponse,
   PatchOrchestratorInfoRequest,
   PatchOrchestratorInfoResponse,
+  PatchOrgMemberRequest,
+  PatchOrgMemberResponse,
+  PatchOrgRequest,
+  PatchOrgResponse,
   PatchSessionRequest,
   PatchSessionResponse,
   PatchThreadRequest,
@@ -231,6 +241,20 @@ export const api = {
     request<CancelWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
+    ),
+
+  // settings shell (split-settings design): per-user profile, org, models
+  getMe: () => request<MeResponse>("GET", "/me"),
+  patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
+  listModels: () => request<ListModelsResponse>("GET", "/models"),
+  getOrg: () => request<OrgResponse>("GET", "/org"),
+  patchOrg: (body: PatchOrgRequest) => request<PatchOrgResponse>("PATCH", "/org", body),
+  getOrgMembers: () => request<OrgMembersResponse>("GET", "/org/members"),
+  patchOrgMember: (userId: string, body: PatchOrgMemberRequest) =>
+    request<PatchOrgMemberResponse>(
+      "PATCH",
+      `/org/members/${encodeURIComponent(userId)}`,
+      body,
     ),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
