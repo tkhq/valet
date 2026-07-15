@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import Database from "better-sqlite3";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import type { AppDb } from "../lib/drizzle.js";
 import {
   mintSandboxToken,
   verifySandboxToken,
@@ -11,59 +11,54 @@ import {
 } from "./sandbox-tokens.js";
 
 describe("sandbox tokens", () => {
-  let sqlite: Database.Database;
   let db: AppDb;
 
-  beforeEach(() => {
-    sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    applyAppMigrations(sqlite);
-    db = buildAppDb(sqlite);
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
   });
 
-  it("mint -> verify round-trips to the principal", () => {
-    const { token } = mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+  it("mint -> verify round-trips to the principal", async () => {
+    const { token } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
     expect(token).toMatch(/^st_[0-9a-f]{48}$/);
 
-    const principal = verifySandboxToken(db, token);
+    const principal = await verifySandboxToken(db, token);
     expect(principal).toEqual({ sessionId: "sess1", userId: "user1", orgId: "org1" });
   });
 
-  it("a wrong token returns null", () => {
-    mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
-    expect(verifySandboxToken(db, "st_deadbeef")).toBeNull();
+  it("a wrong token returns null", async () => {
+    await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+    expect(await verifySandboxToken(db, "st_deadbeef")).toBeNull();
   });
 
-  it("an expired token returns null", () => {
-    const { token } = mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1", ttlMs: -1 });
-    expect(verifySandboxToken(db, token)).toBeNull();
+  it("an expired token returns null", async () => {
+    const { token } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1", ttlMs: -1 });
+    expect(await verifySandboxToken(db, token)).toBeNull();
   });
 
-  it("a revoked token returns null", () => {
-    const { token } = mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
-    revokeSandboxTokens(db, "sess1");
-    expect(verifySandboxToken(db, token)).toBeNull();
+  it("a revoked token returns null", async () => {
+    const { token } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+    await revokeSandboxTokens(db, "sess1");
+    expect(await verifySandboxToken(db, token)).toBeNull();
   });
 
-  it("re-minting for a session revokes that session's prior live tokens", () => {
-    const { token: first } = mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
-    const { token: second } = mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+  it("re-minting for a session revokes that session's prior live tokens", async () => {
+    const { token: first } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+    const { token: second } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
 
-    expect(verifySandboxToken(db, first)).toBeNull();
-    expect(verifySandboxToken(db, second)).toEqual({ sessionId: "sess1", userId: "user1", orgId: "org1" });
+    expect(await verifySandboxToken(db, first)).toBeNull();
+    expect(await verifySandboxToken(db, second)).toEqual({ sessionId: "sess1", userId: "user1", orgId: "org1" });
   });
 
-  it("re-minting for a different session does not revoke the other session's token", () => {
-    const { token: sess1Token } = mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
-    mintSandboxToken(db, { sessionId: "sess2", userId: "user2", orgId: "org1" });
+  it("re-minting for a different session does not revoke the other session's token", async () => {
+    const { token: sess1Token } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+    await mintSandboxToken(db, { sessionId: "sess2", userId: "user2", orgId: "org1" });
 
-    expect(verifySandboxToken(db, sess1Token)).toEqual({ sessionId: "sess1", userId: "user1", orgId: "org1" });
+    expect(await verifySandboxToken(db, sess1Token)).toEqual({ sessionId: "sess1", userId: "user1", orgId: "org1" });
   });
 
-  it("defaults ttl to 24h", () => {
+  it("defaults ttl to 24h", async () => {
     const before = Date.now();
-    const { expiresAt } = mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+    const { expiresAt } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
     const dayMs = 24 * 60 * 60 * 1000;
     expect(expiresAt).toBeGreaterThanOrEqual(before + dayMs);
     expect(expiresAt).toBeLessThanOrEqual(Date.now() + dayMs + 5_000);

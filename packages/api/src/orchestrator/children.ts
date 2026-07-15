@@ -78,8 +78,7 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
   const runningChildren = await db
     .select({ childSessionId: childWatches.childSessionId })
     .from(childWatches)
-    .where(and(eq(childWatches.parentSessionId, parentSessionId), eq(childWatches.settled, 0)))
-    .all();
+    .where(and(eq(childWatches.parentSessionId, parentSessionId), eq(childWatches.settled, false)));
 
   if (runningChildren.length >= MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR) {
     const ids = runningChildren.map((r) => r.childSessionId).join(", ");
@@ -96,13 +95,11 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
   const [{ n: unsettledChildrenOrgWide }] = await db
     .select({ n: count() })
     .from(childWatches)
-    .where(and(eq(childWatches.orgId, orgId), eq(childWatches.settled, 0)))
-    .all();
+    .where(and(eq(childWatches.orgId, orgId), eq(childWatches.settled, false)));
   const [{ n: liveSessionsOrgWide }] = await db
     .select({ n: count() })
     .from(agentSessions)
-    .where(and(eq(agentSessions.orgId, orgId), ne(agentSessions.status, "deleted")))
-    .all();
+    .where(and(eq(agentSessions.orgId, orgId), ne(agentSessions.status, "deleted")));
   const total = Number(unsettledChildrenOrgWide ?? 0) + Number(liveSessionsOrgWide ?? 0);
   if (total >= ORG_ACTIVE_SESSION_CEILING) {
     const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + live sessions), limit ${ORG_ACTIVE_SESSION_CEILING}`;
@@ -170,8 +167,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         ownerId: ctx.owner.id,
         createdAt: now,
         updatedAt: now,
-      })
-      .run();
+      });
 
     const receipt = await childSession.prompt(req.prompt, {
       author: { id: ctx.actorUserId },
@@ -186,10 +182,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         parentThreadId: ctx.parentThreadId,
         actorUserId: ctx.actorUserId,
         orgId,
-        settled: 0,
+        settled: false,
         createdAt: now,
-      })
-      .run();
+      });
 
     watcher.arm({
       childSessionId,
@@ -359,12 +354,12 @@ export class ChildWatcher {
     // Optional title attribute (decision 11): the spawn request's title is
     // mirrored onto the child's agent_sessions row — read it back from there
     // rather than widening child_watches with a redundant column.
-    const appRow = await this.deps.db
+    const appRows = await this.deps.db
       .select({ title: agentSessions.title })
       .from(agentSessions)
       .where(eq(agentSessions.id, watch.childSessionId))
-      .get();
-    const title = appRow?.title ?? undefined;
+      .limit(1);
+    const title = appRows[0]?.title ?? undefined;
 
     await admitSignal(this.deps, {
       from: { sessionId: watch.childSessionId, owner: childData.owner },
@@ -389,9 +384,8 @@ export class ChildWatcher {
   private async markSettled(childSessionId: string): Promise<void> {
     await this.deps.db
       .update(childWatches)
-      .set({ settled: 1 })
-      .where(eq(childWatches.childSessionId, childSessionId))
-      .run();
+      .set({ settled: true })
+      .where(eq(childWatches.childSessionId, childSessionId));
   }
 
   /**
@@ -401,7 +395,7 @@ export class ChildWatcher {
    * resolves immediately once re-armed.
    */
   async rearm(): Promise<void> {
-    const rows = await this.deps.db.select().from(childWatches).where(eq(childWatches.settled, 0)).all();
+    const rows = await this.deps.db.select().from(childWatches).where(eq(childWatches.settled, false));
     for (const row of rows) this.arm(watchRowToArgs(row));
   }
 }

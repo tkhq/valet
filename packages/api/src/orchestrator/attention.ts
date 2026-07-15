@@ -92,16 +92,14 @@ async function fetchMembership(db: AppDb, owner: Principal): Promise<Membership>
     const rows = await db
       .select({ userId: teamMembers.userId, role: teamMembers.role })
       .from(teamMembers)
-      .where(eq(teamMembers.teamId, owner.id))
-      .all();
+      .where(eq(teamMembers.teamId, owner.id));
     return { teamMembers: rows };
   }
   if (owner.type === "org") {
     const rows = await db
       .select({ userId: orgMembers.userId })
       .from(orgMembers)
-      .where(and(eq(orgMembers.orgId, owner.id), eq(orgMembers.role, "admin")))
-      .all();
+      .where(and(eq(orgMembers.orgId, owner.id), eq(orgMembers.role, "admin")));
     return { orgAdmins: rows.map((r) => r.userId) };
   }
   return {};
@@ -109,13 +107,14 @@ async function fetchMembership(db: AppDb, owner: Principal): Promise<Membership>
 
 /** Web-delivery preference for `userId`/`kind`. Default enabled when no row exists. */
 async function isWebEnabled(db: AppDb, userId: string, kind: AttentionKind): Promise<boolean> {
-  const row = await db
+  const rows = await db
     .select({ web: userNotificationPreferences.web })
     .from(userNotificationPreferences)
     .where(and(eq(userNotificationPreferences.userId, userId), eq(userNotificationPreferences.kind, kind)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return true;
-  return row.web !== 0;
+  return row.web;
 }
 
 function notificationId(event: AttentionEvent, userId: string): string {
@@ -152,7 +151,6 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
         createdAt: now,
         readAt: null,
       })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
   }
 }

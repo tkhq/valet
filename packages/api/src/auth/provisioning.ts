@@ -7,7 +7,7 @@
 import { createAuthMiddleware, APIError } from "better-auth/api";
 import type { Account, BetterAuthOptions, User } from "better-auth";
 import type { CredentialStore } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, users } from "../schema/index.js";
 import { ensureOrg } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
@@ -17,8 +17,9 @@ export type Admission =
   | { allowed: true; role: "admin" | "member"; inviteId?: string }
   | { allowed: false };
 
-function countUsers(db: AppDb): number {
-  return db.select({ id: users.id }).from(users).all().length;
+async function countUsers(db: AppQueryable): Promise<number> {
+  const rows = await db.select({ id: users.id }).from(users);
+  return rows.length;
 }
 
 function domainOf(email: string): string | undefined {
@@ -34,8 +35,13 @@ function domainOf(email: string): string | undefined {
  *   3. a valid invite matching by code, else by email → the invite's role
  *   4. otherwise → denied
  */
-export function evaluateAdmission(db: AppDb, cfg: AuthConfig, email: string, inviteCode?: string): Admission {
-  if (countUsers(db) === 0) {
+export async function evaluateAdmission(
+  db: AppQueryable,
+  cfg: AuthConfig,
+  email: string,
+  inviteCode?: string,
+): Promise<Admission> {
+  if ((await countUsers(db)) === 0) {
     return { allowed: true, role: "admin" };
   }
 
@@ -44,7 +50,7 @@ export function evaluateAdmission(db: AppDb, cfg: AuthConfig, email: string, inv
     return { allowed: true, role: "member" };
   }
 
-  const invite = (inviteCode && findValidInviteByCode(db, inviteCode)) || findValidInviteByEmail(db, email);
+  const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
   if (invite) {
     return { allowed: true, role: invite.role, inviteId: invite.id };
   }
@@ -135,7 +141,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     if (ctx.path !== "/sign-up/email") return;
     const body = (ctx.body ?? undefined) as Record<string, unknown> | undefined;
     const email = typeof body?.email === "string" ? body.email : "";
-    const admission = evaluateAdmission(db, cfg, email, readInviteCode(body));
+    const admission = await evaluateAdmission(db, cfg, email, readInviteCode(body));
     if (!admission.allowed) {
       throw new APIError("FORBIDDEN", { message: INVITE_REQUIRED_MESSAGE });
     }
@@ -150,16 +156,16 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
 
     if (isSsoPath(path)) {
       // SSO always passes regardless of admission's verdict (see roleFromAdmission).
-      admission = evaluateAdmission(db, cfg, user.email);
+      admission = await evaluateAdmission(db, cfg, user.email);
     } else if (isSocialPath(path)) {
-      admission = evaluateAdmission(db, cfg, user.email);
+      admission = await evaluateAdmission(db, cfg, user.email);
       if (!admission.allowed) return false;
     } else {
       // "/sign-up/email" (already gated by beforeHook, above) or a null/internal
       // context (trusted caller) — re-run the same rule, with the invite code
       // from this request's body if one is available, to resolve the role to
       // stamp and to hand the matched invite (if any) to `.after`.
-      admission = evaluateAdmission(db, cfg, user.email, readInviteCode(context?.body));
+      admission = await evaluateAdmission(db, cfg, user.email, readInviteCode(context?.body));
     }
 
     if (admission.allowed) {
@@ -174,12 +180,12 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     const admission = pendingAdmissions.get(key);
     pendingAdmissions.delete(key);
 
-    const org = ensureOrg(db);
+    const org = await ensureOrg(db);
     const role: "admin" | "member" = user.role === "admin" ? "admin" : "member";
-    db.insert(orgMembers).values({ orgId: org.id, userId: user.id, role, createdAt: Date.now() }).run();
+    await db.insert(orgMembers).values({ orgId: org.id, userId: user.id, role, createdAt: Date.now() });
 
     if (admission?.allowed && admission.inviteId) {
-      acceptInvite(db, admission.inviteId, user.id);
+      await acceptInvite(db, admission.inviteId, user.id);
     }
   };
 

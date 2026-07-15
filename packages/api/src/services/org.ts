@@ -41,61 +41,49 @@ export const MEMBER_NOT_FOUND_ERROR = "member not found";
  * (`auth/provisioning.ts`) to guarantee an org exists before the first
  * `org_members` row is inserted — this app has exactly one org today.
  */
-export function ensureOrg(db: AppDb): { id: string } {
-  const existing = db.select({ id: orgs.id }).from(orgs).get();
+export async function ensureOrg(db: AppQueryable): Promise<{ id: string }> {
+  const existingRows = await db.select({ id: orgs.id }).from(orgs).limit(1);
+  const existing = existingRows[0];
   if (existing) return existing;
 
   const id = `org_${randomUUID()}`;
-  db.insert(orgs).values({ id, name: "My organization", createdAt: Date.now() }).run();
+  await db.insert(orgs).values({ id, name: "My organization", createdAt: Date.now() });
   return { id };
 }
 
 /** True when `userId` holds `org_members.role === "admin"` in `orgId`. */
 export async function isOrgAdmin(db: AppQueryable, orgId: string, userId: string): Promise<boolean> {
-  const row = db
+  const rows = await db
     .select({ role: orgMembers.role })
     .from(orgMembers)
     .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
-    .get();
-  return row?.role === "admin";
+    .limit(1);
+  return rows[0]?.role === "admin";
 }
 
-function parseFeatures(raw: string): OrgFeatures {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = {};
-  }
-  const organizations =
-    typeof parsed === "object" && parsed !== null && "organizations" in parsed
-      ? Boolean((parsed as Record<string, unknown>).organizations)
-      : false;
-  return { organizations };
-}
-
-/** Reads `orgs.features`, parsed; an absent `organizations` key reads as false. */
-export async function getOrgFeatures(db: AppDb, orgId: string): Promise<OrgFeatures> {
-  const row = db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).get();
-  if (!row) return { organizations: false };
-  return parseFeatures(row.features);
+/** Reads `orgs.features` (jsonb); an absent `organizations` key reads as false. */
+export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<OrgFeatures> {
+  const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
+  const row = rows[0];
+  if (!row?.features) return { organizations: false };
+  return { organizations: Boolean((row.features as Record<string, unknown>).organizations) };
 }
 
 /** Merges `features` into `orgs.features` (partial update — only provided keys change). */
-export async function setOrgFeatures(db: AppDb, orgId: string, features: Partial<OrgFeatures>): Promise<void> {
+export async function setOrgFeatures(db: AppQueryable, orgId: string, features: Partial<OrgFeatures>): Promise<void> {
   const current = await getOrgFeatures(db, orgId);
   const merged: OrgFeatures = { ...current, ...features };
-  db.update(orgs).set({ features: JSON.stringify(merged) }).where(eq(orgs.id, orgId)).run();
+  await db.update(orgs).set({ features: merged }).where(eq(orgs.id, orgId));
 }
 
 /** Updates `orgs.name`. */
-export async function renameOrg(db: AppDb, orgId: string, name: string): Promise<void> {
-  db.update(orgs).set({ name }).where(eq(orgs.id, orgId)).run();
+export async function renameOrg(db: AppQueryable, orgId: string, name: string): Promise<void> {
+  await db.update(orgs).set({ name }).where(eq(orgs.id, orgId));
 }
 
 /** Lists every member of `orgId`, joined against `users`. */
 export async function listOrgMembers(db: AppDb, orgId: string): Promise<OrgMemberSummary[]> {
-  const rows = db
+  const rows = await db
     .select({
       userId: orgMembers.userId,
       role: orgMembers.role,
@@ -108,8 +96,7 @@ export async function listOrgMembers(db: AppDb, orgId: string): Promise<OrgMembe
     .from(orgMembers)
     .innerJoin(users, eq(orgMembers.userId, users.id))
     .where(eq(orgMembers.orgId, orgId))
-    .orderBy(users.createdAt)
-    .all();
+    .orderBy(users.createdAt);
 
   return rows.map((r) => ({
     userId: r.userId,
@@ -117,19 +104,18 @@ export async function listOrgMembers(db: AppDb, orgId: string): Promise<OrgMembe
     name: r.name,
     avatarUrl: r.avatarUrl,
     role: r.role,
-    // `users.createdAt` is a `timestamp_ms`-mode column (Date at the JS
+    // `users.createdAt` is a `timestamp`-mode column (Date at the JS
     // boundary); `org_members.createdAt` is a plain ms-epoch integer. Both
     // collapse to a ms-epoch number here.
     joinedAt: r.memberCreatedAt ?? r.userCreatedAt.getTime(),
   }));
 }
 
-function countOrgAdmins(db: AppQueryable, orgId: string): number {
-  const rows = db
+async function countOrgAdmins(db: AppQueryable, orgId: string): Promise<number> {
+  const rows = await db
     .select({ userId: orgMembers.userId })
     .from(orgMembers)
-    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.role, "admin")))
-    .all();
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.role, "admin")));
   return rows.length;
 }
 
@@ -144,31 +130,29 @@ export async function setOrgMemberRole(
   userId: string,
   role: OrgRole,
 ): Promise<SetOrgMemberRoleResult> {
-  let result: SetOrgMemberRoleResult = { ok: true };
-  db.transaction((tx) => {
-    const member = tx
+  return db.transaction(async (tx) => {
+    const memberRows = await tx
       .select({ role: orgMembers.role })
       .from(orgMembers)
       .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
-      .get();
+      .limit(1);
+    const member = memberRows[0];
 
     if (!member) {
-      result = { ok: false, reason: "not_found", error: MEMBER_NOT_FOUND_ERROR };
-      return;
+      return { ok: false, reason: "not_found", error: MEMBER_NOT_FOUND_ERROR };
     }
 
     if (member.role === "admin" && role === "member") {
-      const admins = countOrgAdmins(tx, orgId);
+      const admins = await countOrgAdmins(tx, orgId);
       if (admins <= 1) {
-        result = { ok: false, reason: "last_admin", error: LAST_ADMIN_ERROR };
-        return;
+        return { ok: false, reason: "last_admin", error: LAST_ADMIN_ERROR };
       }
     }
 
-    tx.update(orgMembers)
+    await tx
+      .update(orgMembers)
       .set({ role })
-      .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
-      .run();
+      .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)));
+    return { ok: true };
   });
-  return result;
 }

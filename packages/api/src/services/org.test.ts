@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import Database from "better-sqlite3";
 import { eq } from "drizzle-orm";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import {
   getOrgFeatures,
@@ -13,27 +13,20 @@ import {
   setOrgMemberRole,
 } from "./org.js";
 
-function seedUser(db: AppDb, id: string, orgId: string, role: "admin" | "member", createdAt: number) {
-  db.insert(users)
-    .values({ id, email: `${id}@x.test`, name: id, role: "member", createdAt: new Date(createdAt) })
-    .run();
-  db.insert(orgMembers).values({ orgId, userId: id, role, createdAt }).run();
+async function seedUser(db: AppDb, id: string, orgId: string, role: "admin" | "member", createdAt: number) {
+  await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member", createdAt: new Date(createdAt) });
+  await db.insert(orgMembers).values({ orgId, userId: id, role, createdAt });
 }
 
 describe("org service", () => {
-  let sqlite: Database.Database;
   let db: AppDb;
   const orgId = "org1";
 
-  beforeEach(() => {
-    sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    applyAppMigrations(sqlite);
-    db = buildAppDb(sqlite);
-    db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() }).run();
-    seedUser(db, "admin1", orgId, "admin", 1_000);
-    seedUser(db, "member1", orgId, "member", 2_000);
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+    await seedUser(db, "admin1", orgId, "admin", 1_000);
+    await seedUser(db, "member1", orgId, "member", 2_000);
   });
 
   describe("isOrgAdmin", () => {
@@ -64,8 +57,8 @@ describe("org service", () => {
   describe("renameOrg", () => {
     it("updates the org name", async () => {
       await renameOrg(db, orgId, "New Name");
-      const row = db.select().from(orgs).where(eq(orgs.id, orgId)).get();
-      expect(row?.name).toBe("New Name");
+      const rows = await db.select().from(orgs).where(eq(orgs.id, orgId)).limit(1);
+      expect(rows[0]?.name).toBe("New Name");
     });
   });
 
@@ -85,7 +78,7 @@ describe("org service", () => {
     });
 
     it("allows demoting once a second admin exists", async () => {
-      seedUser(db, "admin2", orgId, "admin", 3_000);
+      await seedUser(db, "admin2", orgId, "admin", 3_000);
       const result = await setOrgMemberRole(db, orgId, "admin1", "member");
       expect(result).toEqual({ ok: true });
       expect(await isOrgAdmin(db, orgId, "admin1")).toBe(false);

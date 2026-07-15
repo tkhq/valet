@@ -141,7 +141,7 @@ describe("admitSignal edge ACL", () => {
       .select()
       .from(eventDropLog)
       .where(eq(eventDropLog.conversationKey, "d-user-to-user"))
-      .all();
+      ;
     expect(rows).toHaveLength(1);
     expect(rows[0]?.reason).toBe("edge_denied");
   });
@@ -171,7 +171,7 @@ describe("admitSignal edge ACL", () => {
       .select()
       .from(eventDropLog)
       .where(eq(eventDropLog.conversationKey, "d-cross-org"))
-      .all();
+      ;
     expect(rows).toHaveLength(1);
     expect(rows[0]?.reason).toBe("edge_denied");
   });
@@ -216,7 +216,7 @@ describe("admitSignal edge ACL", () => {
       .select()
       .from(eventDropLog)
       .where(eq(eventDropLog.conversationKey, "d-dead-thread"))
-      .all();
+      ;
     expect(rows).toHaveLength(1);
     expect(rows[0]?.reason).toBe("edge_denied");
     expect(rows[0]?.detail).toContain(deadThreadId);

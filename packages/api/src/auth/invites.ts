@@ -7,7 +7,7 @@
  */
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppQueryable } from "../lib/drizzle.js";
 import { invites } from "../schema/index.js";
 
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -47,10 +47,10 @@ function toRecord(row: {
 
 /** Issues a new invite. Returns the record plus the plaintext code — the
  * only place the code is ever available; only its hash is stored. */
-export function createInvite(
-  db: AppDb,
+export async function createInvite(
+  db: AppQueryable,
   opts: { email?: string; role: InviteRole; createdBy: string; ttlMs?: number },
-): { invite: InviteRecord; code: string } {
+): Promise<{ invite: InviteRecord; code: string }> {
   const code = randomBytes(16).toString("hex");
   const now = Date.now();
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
@@ -63,57 +63,47 @@ export function createInvite(
     createdAt: new Date(now),
     expiresAt: new Date(now + ttlMs),
   };
-  db.insert(invites).values(row).run();
+  await db.insert(invites).values(row);
   return { invite: toRecord(row), code };
 }
 
 /** Looks up an unexpired, unaccepted invite by its plaintext code (hashed
  * before the lookup — the plaintext is never stored or compared directly). */
-export function findValidInviteByCode(db: AppDb, code: string): InviteRecord | null {
+export async function findValidInviteByCode(db: AppQueryable, code: string): Promise<InviteRecord | null> {
   const now = new Date();
-  const row = db
+  const rows = await db
     .select()
     .from(invites)
     .where(and(eq(invites.codeHash, hashCode(code)), isNull(invites.acceptedBy)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row || row.expiresAt <= now) return null;
   return toRecord(row);
 }
 
 /** Looks up an unexpired, unaccepted invite by email, case-insensitively. */
-export function findValidInviteByEmail(db: AppDb, email: string): InviteRecord | null {
+export async function findValidInviteByEmail(db: AppQueryable, email: string): Promise<InviteRecord | null> {
   const now = new Date();
   const target = email.toLowerCase();
-  const rows = db
-    .select()
-    .from(invites)
-    .where(isNull(invites.acceptedBy))
-    .all();
+  const rows = await db.select().from(invites).where(isNull(invites.acceptedBy));
   const row = rows.find((r) => r.email !== null && r.email.toLowerCase() === target && r.expiresAt > now);
   return row ? toRecord(row) : null;
 }
 
 /** Marks an invite accepted — single-use: once set, `findValidInviteBy*`
  * will no longer return it. */
-export function acceptInvite(db: AppDb, inviteId: string, userId: string): void {
-  db.update(invites)
-    .set({ acceptedBy: userId, acceptedAt: new Date() })
-    .where(eq(invites.id, inviteId))
-    .run();
+export async function acceptInvite(db: AppQueryable, inviteId: string, userId: string): Promise<void> {
+  await db.update(invites).set({ acceptedBy: userId, acceptedAt: new Date() }).where(eq(invites.id, inviteId));
 }
 
 /** Deletes an invite. Returns false if no row matched. */
-export function revokeInvite(db: AppDb, inviteId: string): boolean {
-  const result = db.delete(invites).where(eq(invites.id, inviteId)).run();
-  return result.changes > 0;
+export async function revokeInvite(db: AppQueryable, inviteId: string): Promise<boolean> {
+  const result = await db.delete(invites).where(eq(invites.id, inviteId)).returning({ id: invites.id });
+  return result.length > 0;
 }
 
 /** Lists every invite that hasn't been accepted yet, regardless of expiry. */
-export function listPendingInvites(db: AppDb): InviteRecord[] {
-  return db
-    .select()
-    .from(invites)
-    .where(isNull(invites.acceptedBy))
-    .all()
-    .map(toRecord);
+export async function listPendingInvites(db: AppQueryable): Promise<InviteRecord[]> {
+  const rows = await db.select().from(invites).where(isNull(invites.acceptedBy));
+  return rows.map(toRecord);
 }

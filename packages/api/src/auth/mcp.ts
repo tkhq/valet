@@ -46,7 +46,8 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
       "whoami",
       { description: "Returns the authenticated user's identity: userId, email, role." },
       async () => {
-        const user = await db.select().from(users).where(eq(users.id, session.userId)).get();
+        const rows = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
+        const user = rows[0];
         if (!user) {
           return { content: [{ type: "text", text: `no user found for id ${session.userId}` }], isError: true };
         }

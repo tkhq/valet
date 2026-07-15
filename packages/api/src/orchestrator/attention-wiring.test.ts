@@ -73,11 +73,11 @@ describe("wireAttentionRouter", () => {
     await eventStream.append(event, `test-stuck-${randomUUID()}`);
 
     await waitFor(async () => {
-      const rows = await db.select().from(notifications).where(eq(notifications.kind, "escalation")).all();
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "escalation"));
       return rows.length > 0;
     });
 
-    const rows = await db.select().from(notifications).where(eq(notifications.kind, "escalation")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.kind, "escalation"));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.userId).toBe("local-user");
     expect(rows[0]?.sessionId).toBe(sessionId);
@@ -86,7 +86,7 @@ describe("wireAttentionRouter", () => {
     // Re-emitting the same stuck alarm (same queueItemId) must not double-insert.
     await eventStream.append(event, `test-stuck-again-${randomUUID()}`);
     await new Promise((r) => setTimeout(r, 100));
-    const rowsAfter = await db.select().from(notifications).where(eq(notifications.kind, "escalation")).all();
+    const rowsAfter = await db.select().from(notifications).where(eq(notifications.kind, "escalation"));
     expect(rowsAfter).toHaveLength(1);
   });
 
@@ -139,11 +139,11 @@ describe("wireAttentionRouter", () => {
     await eventStream.append(event, `test-gate-${randomUUID()}`);
 
     await waitFor(async () => {
-      const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval")).all();
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
       return rows.length > 0;
     });
 
-    const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.userId).toBe("local-user");
     expect(rows[0]?.title).toBe("Approve deploy?");
@@ -185,7 +185,7 @@ describe("wireAttentionRouter", () => {
     await eventStream.append(event, `test-gate-noop-${randomUUID()}`);
     await new Promise((r) => setTimeout(r, 100));
 
-    const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
     expect(rows).toHaveLength(0);
   });
 });

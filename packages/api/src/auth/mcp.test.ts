@@ -78,47 +78,41 @@ describe("MCP endpoint", () => {
     const { db } = api.providers;
 
     const now = Date.now();
-    db.insert(users)
-      .values({
-        id: "mcp-user-1",
-        name: "MCP User",
-        email: "mcp-user@nowhere.test",
-        role: "member",
-        createdAt: new Date(now),
-        updatedAt: new Date(now),
-      })
-      .run();
+    await db.insert(users).values({
+      id: "mcp-user-1",
+      name: "MCP User",
+      email: "mcp-user@nowhere.test",
+      role: "member",
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
 
     const accessToken = "mcp-test-access-token";
-    db.insert(oauthAccessToken)
-      .values({
-        id: "mcp-token-1",
-        accessToken,
-        refreshToken: "mcp-refresh-token-1",
-        accessTokenExpiresAt: new Date(now + 60_000),
-        refreshTokenExpiresAt: new Date(now + 3_600_000),
-        clientId: null,
-        userId: "mcp-user-1",
-        scopes: "mcp",
-        createdAt: new Date(now),
-        updatedAt: new Date(now),
-      })
-      .run();
+    await db.insert(oauthAccessToken).values({
+      id: "mcp-token-1",
+      accessToken,
+      refreshToken: "mcp-refresh-token-1",
+      accessTokenExpiresAt: new Date(now + 60_000),
+      refreshTokenExpiresAt: new Date(now + 3_600_000),
+      clientId: null,
+      userId: "mcp-user-1",
+      scopes: "mcp",
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
 
-    db.insert(agentSessions)
-      .values({
-        id: "mcp-session-1",
-        userId: "mcp-user-1",
-        orgId: "mcp-org-1",
-        workspace: "/tmp/mcp-session-1",
-        title: "My session",
-        status: "active",
-        ownerType: "user",
-        ownerId: "mcp-user-1",
-        createdAt: now,
-        updatedAt: now,
-      })
-      .run();
+    await db.insert(agentSessions).values({
+      id: "mcp-session-1",
+      userId: "mcp-user-1",
+      orgId: "mcp-org-1",
+      workspace: "/tmp/mcp-session-1",
+      title: "My session",
+      status: "active",
+      ownerType: "user",
+      ownerId: "mcp-user-1",
+      createdAt: now,
+      updatedAt: now,
+    });
 
     const initRes = await mcpRequest(api.baseUrl, accessToken, {
       jsonrpc: "2.0",
@@ -178,33 +172,29 @@ describe("MCP endpoint", () => {
     const { db } = api.providers;
 
     const now = Date.now();
-    db.insert(users)
-      .values({
-        id: "mcp-user-expired",
-        name: "MCP Expired User",
-        email: "mcp-expired@nowhere.test",
-        role: "member",
-        createdAt: new Date(now),
-        updatedAt: new Date(now),
-      })
-      .run();
+    await db.insert(users).values({
+      id: "mcp-user-expired",
+      name: "MCP Expired User",
+      email: "mcp-expired@nowhere.test",
+      role: "member",
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
 
     const accessToken = "mcp-test-access-token-expired";
-    db.insert(oauthAccessToken)
-      .values({
-        id: "mcp-token-expired",
-        accessToken,
-        refreshToken: "mcp-refresh-token-expired",
-        // Expired: expiry is in the past.
-        accessTokenExpiresAt: new Date(now - 60_000),
-        refreshTokenExpiresAt: new Date(now + 3_600_000),
-        clientId: null,
-        userId: "mcp-user-expired",
-        scopes: "mcp",
-        createdAt: new Date(now - 120_000),
-        updatedAt: new Date(now - 120_000),
-      })
-      .run();
+    await db.insert(oauthAccessToken).values({
+      id: "mcp-token-expired",
+      accessToken,
+      refreshToken: "mcp-refresh-token-expired",
+      // Expired: expiry is in the past.
+      accessTokenExpiresAt: new Date(now - 60_000),
+      refreshTokenExpiresAt: new Date(now + 3_600_000),
+      clientId: null,
+      userId: "mcp-user-expired",
+      scopes: "mcp",
+      createdAt: new Date(now - 120_000),
+      updatedAt: new Date(now - 120_000),
+    });
 
     const res = await mcpRequest(api.baseUrl, accessToken, {
       jsonrpc: "2.0",

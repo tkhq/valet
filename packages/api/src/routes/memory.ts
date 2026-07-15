@@ -134,15 +134,14 @@ memoryRouter.get("/tree", async (c) => {
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)))
-    .all();
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
 
   const entries: MemoryTreeEntry[] = rows
     .map((r) => ({
       path: r.path,
       title: r.title,
       type: r.type,
-      pinned: r.pinned === 1,
+      pinned: r.pinned,
       updatedAt: r.updatedAt,
       dir: false,
     }))

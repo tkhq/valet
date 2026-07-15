@@ -44,7 +44,7 @@ rmSync(ROOT, { recursive: true, force: true });
 mkdirSync(WORKSPACE, { recursive: true });
 
 const providers = await buildNodeProviders({
-  dbPath: resolve(DATA_DIR, "app.db"),
+  pgDataDir: resolve(DATA_DIR, "pg"),
   blobsRoot: resolve(DATA_DIR, "blobs"),
   encryptionKey: "dev",
   anthropicApiKey: ANTHROPIC_API_KEY,

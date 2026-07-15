@@ -25,12 +25,12 @@ describe("buildNodeProviders seedLocalIdentity", () => {
   it("seeds the local-dev identity by default (backward compat)", async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "valet-node-providers-test-"));
     const providers = await buildNodeProviders({
-      dbPath: join(tmpDir, "app.db"),
+      pgDataDir: join(tmpDir, "pg"),
       blobsRoot: join(tmpDir, "blobs"),
       encryptionKey: "test-key",
       plugins: [],
     });
-    const rows = providers.db.select({ id: users.id }).from(users).all();
+    const rows = await providers.db.select({ id: users.id }).from(users);
     expect(rows.length).toBe(1);
     expect(rows[0]?.id).toBe("local-user");
   });
@@ -38,13 +38,13 @@ describe("buildNodeProviders seedLocalIdentity", () => {
   it("seeds no users when seedLocalIdentity is false", async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "valet-node-providers-test-"));
     const providers = await buildNodeProviders({
-      dbPath: join(tmpDir, "app.db"),
+      pgDataDir: join(tmpDir, "pg"),
       blobsRoot: join(tmpDir, "blobs"),
       encryptionKey: "test-key",
       plugins: [],
       seedLocalIdentity: false,
     });
-    const rows = providers.db.select({ id: users.id }).from(users).all();
+    const rows = await providers.db.select({ id: users.id }).from(users);
     expect(rows.length).toBe(0);
   });
 });

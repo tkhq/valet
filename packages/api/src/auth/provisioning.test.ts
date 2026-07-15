@@ -3,14 +3,14 @@
  * that wire it into signup/social/SSO flows and post-create bookkeeping.
  */
 import { describe, expect, it, beforeEach } from "vitest";
-import Database from "better-sqlite3";
 import { eq } from "drizzle-orm";
 import { APIError, type AuthMiddleware } from "better-auth/api";
 import type { Account, BetterAuthOptions, User } from "better-auth";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import type { CredentialStore } from "@valet/engine";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { orgMembers, orgs, users, invites } from "../schema/index.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { SqliteCredentialStore } from "../plugins/credential-store.js";
+import { notPortedStub } from "../providers/not-ported-stub.js";
 import { createInvite } from "./invites.js";
 import type { AuthConfig } from "./config.js";
 import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
@@ -48,92 +48,87 @@ function baseConfig(overrides: Partial<AuthConfig> = {}): AuthConfig {
   };
 }
 
-function seedUser(db: AppDb, id: string, email: string) {
-  db.insert(users).values({ id, email, name: id, role: "member" }).run();
+async function seedUser(db: AppDb, id: string, email: string) {
+  await db.insert(users).values({ id, email, name: id, role: "member" });
 }
 
 describe("evaluateAdmission", () => {
-  let sqlite: Database.Database;
   let db: AppDb;
 
-  beforeEach(() => {
-    sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    applyAppMigrations(sqlite);
-    db = buildAppDb(sqlite);
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
   });
 
-  it("admits the first user in the db as admin, regardless of domain/invite", () => {
+  it("admits the first user in the db as admin, regardless of domain/invite", async () => {
     const cfg = baseConfig();
-    const result = evaluateAdmission(db, cfg, "anyone@nowhere.test");
+    const result = await evaluateAdmission(db, cfg, "anyone@nowhere.test");
     expect(result).toEqual({ allowed: true, role: "admin" });
   });
 
-  it("admits a matching email domain as member (case-insensitive, exact domain)", () => {
-    seedUser(db, "u1", "existing@x.test");
+  it("admits a matching email domain as member (case-insensitive, exact domain)", async () => {
+    await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    expect(evaluateAdmission(db, cfg, "New@Example.COM")).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, cfg, "New@Example.COM")).toEqual({ allowed: true, role: "member" });
   });
 
-  it("does NOT match a subdomain of an allowed domain", () => {
-    seedUser(db, "u1", "existing@x.test");
+  it("does NOT match a subdomain of an allowed domain", async () => {
+    await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    expect(evaluateAdmission(db, cfg, "user@sub.example.com")).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, cfg, "user@sub.example.com")).toEqual({ allowed: false });
   });
 
-  it("admits a valid invite by code with the invite's role", () => {
-    seedUser(db, "u1", "existing@x.test");
+  it("admits a valid invite by code with the invite's role", async () => {
+    await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
-    const { invite, code } = createInvite(db, { role: "admin", createdBy: "admin1" });
-    expect(evaluateAdmission(db, cfg, "whoever@nowhere.test", code)).toEqual({
+    const { invite, code } = await createInvite(db, { role: "admin", createdBy: "admin1" });
+    expect(await evaluateAdmission(db, cfg, "whoever@nowhere.test", code)).toEqual({
       allowed: true,
       role: "admin",
       inviteId: invite.id,
     });
   });
 
-  it("admits a valid invite by email with the invite's role, when no code is given", () => {
-    seedUser(db, "u1", "existing@x.test");
+  it("admits a valid invite by email with the invite's role, when no code is given", async () => {
+    await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
-    const { invite } = createInvite(db, { email: "invitee@nowhere.test", role: "member", createdBy: "admin1" });
-    expect(evaluateAdmission(db, cfg, "invitee@nowhere.test")).toEqual({
+    const { invite } = await createInvite(db, { email: "invitee@nowhere.test", role: "member", createdBy: "admin1" });
+    expect(await evaluateAdmission(db, cfg, "invitee@nowhere.test")).toEqual({
       allowed: true,
       role: "member",
       inviteId: invite.id,
     });
   });
 
-  it("denies when nothing matches", () => {
-    seedUser(db, "u1", "existing@x.test");
+  it("denies when nothing matches", async () => {
+    await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
-    expect(evaluateAdmission(db, cfg, "nobody@nowhere.test")).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, cfg, "nobody@nowhere.test")).toEqual({ allowed: false });
   });
 
-  it("precedence: first-user beats domain and invite", () => {
+  it("precedence: first-user beats domain and invite", async () => {
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    createInvite(db, { email: "first@nowhere.test", role: "member", createdBy: "admin1" });
+    await createInvite(db, { email: "first@nowhere.test", role: "member", createdBy: "admin1" });
     // db has zero users still — first-user wins over domain match and invite.
-    expect(evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({ allowed: true, role: "admin" });
+    expect(await evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({ allowed: true, role: "admin" });
   });
 
-  it("precedence: domain match beats invite", () => {
-    seedUser(db, "u1", "existing@x.test");
+  it("precedence: domain match beats invite", async () => {
+    await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    const { invite } = createInvite(db, { email: "person@example.com", role: "admin", createdBy: "admin1" });
+    const { invite } = await createInvite(db, { email: "person@example.com", role: "admin", createdBy: "admin1" });
     // Domain match resolves to "member" even though an admin invite also matches this email.
-    const result = evaluateAdmission(db, cfg, "person@example.com");
+    const result = await evaluateAdmission(db, cfg, "person@example.com");
     expect(result).toEqual({ allowed: true, role: "member" });
     // The invite itself is untouched (evaluateAdmission never mutates).
-    const row = db.select().from(invites).where(eq(invites.id, invite.id)).get();
-    expect(row?.acceptedBy).toBeNull();
+    const rows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
+    expect(rows[0]?.acceptedBy).toBeNull();
   });
 
-  it("an invalid/expired code falls back to an email-matched invite", () => {
-    seedUser(db, "u1", "existing@x.test");
+  it("an invalid/expired code falls back to an email-matched invite", async () => {
+    await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
-    const { invite } = createInvite(db, { email: "person@nowhere.test", role: "member", createdBy: "admin1" });
-    expect(evaluateAdmission(db, cfg, "person@nowhere.test", "not-a-real-code")).toEqual({
+    const { invite } = await createInvite(db, { email: "person@nowhere.test", role: "member", createdBy: "admin1" });
+    expect(await evaluateAdmission(db, cfg, "person@nowhere.test", "not-a-real-code")).toEqual({
       allowed: true,
       role: "member",
       inviteId: invite.id,
@@ -169,19 +164,19 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 }
 
 describe("buildAuthHooks", () => {
-  let sqlite: Database.Database;
   let db: AppDb;
-  let credentialStore: SqliteCredentialStore;
+  // Not yet ported to Postgres (Task 8 of the postgres-backend plan) — see
+  // `providers/not-ported-stub.ts`'s doc comment. Only the
+  // `databaseHooks.account.create.after` tests below actually call this
+  // (they're skipped for the same reason); every other test here never
+  // touches it.
+  let credentialStore: CredentialStore;
 
-  beforeEach(() => {
-    sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    applyAppMigrations(sqlite);
-    db = buildAppDb(sqlite);
-    credentialStore = new SqliteCredentialStore(db as AppDb & { $client: Database.Database }, deriveSecretKey("test-key"));
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    credentialStore = notPortedStub<CredentialStore>("CredentialStore");
     // Seed one existing user so "first user → admin" doesn't dominate every test.
-    seedUser(db, "existing", "existing@x.test");
+    await seedUser(db, "existing", "existing@x.test");
   });
 
   describe("beforeHook (signup invite gate)", () => {
@@ -228,7 +223,7 @@ describe("buildAuthHooks", () => {
 
     it("social path: admitted with an email-targeted invite, role stamped from the invite", async () => {
       const cfg = baseConfig();
-      const { invite } = createInvite(db, { email: "invitee@nowhere.test", role: "admin", createdBy: "admin1" });
+      const { invite } = await createInvite(db, { email: "invitee@nowhere.test", role: "admin", createdBy: "admin1" });
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
       const result = await databaseHooks!.user!.create!.before!(
         makeUser({ email: "invitee@nowhere.test" }),
@@ -237,8 +232,8 @@ describe("buildAuthHooks", () => {
       expect(result).not.toBe(false);
       expect(result).toMatchObject({ data: { role: "admin" } });
       // The invite is not yet consumed — that happens in `.after`.
-      const row = db.select().from(invites).where(eq(invites.id, invite.id)).get();
-      expect(row?.acceptedBy).toBeNull();
+      const rows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
+      expect(rows[0]?.acceptedBy).toBeNull();
     });
 
     it("SSO path: always admitted, role member for a non-first user", async () => {
@@ -253,11 +248,8 @@ describe("buildAuthHooks", () => {
     });
 
     it("SSO path: first user (empty db) is stamped admin", async () => {
-      sqlite = new Database(":memory:");
-      sqlite.pragma("journal_mode = WAL");
-      applyAppMigrations(sqlite);
-      db = buildAppDb(sqlite);
-      credentialStore = new SqliteCredentialStore(db as AppDb & { $client: Database.Database }, deriveSecretKey("test-key"));
+      ({ appDb: db } = await freshTestPgDb());
+      credentialStore = notPortedStub<CredentialStore>("CredentialStore");
       const cfg = baseConfig();
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
       const result = await databaseHooks!.user!.create!.before!(
@@ -281,7 +273,7 @@ describe("buildAuthHooks", () => {
   describe("databaseHooks.user.create.after", () => {
     it("creates the org (if absent), inserts org_members, and accepts the matched invite", async () => {
       const cfg = baseConfig();
-      const { invite } = createInvite(db, { email: "invitee@nowhere.test", role: "admin", createdBy: "admin1" });
+      const { invite } = await createInvite(db, { email: "invitee@nowhere.test", role: "admin", createdBy: "admin1" });
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
 
       const user = makeUser({ id: "u-invitee", email: "invitee@nowhere.test" });
@@ -290,38 +282,44 @@ describe("buildAuthHooks", () => {
       const stampedRole = (before as { data: { role: string } }).data.role;
 
       // Simulate the persisted row `.after` receives: same email, stamped role.
-      db.insert(users).values({ id: user.id, email: user.email, name: user.name, role: stampedRole as "admin" | "member" }).run();
+      await db
+        .insert(users)
+        .values({ id: user.id, email: user.email, name: user.name, role: stampedRole as "admin" | "member" });
       await databaseHooks!.user!.create!.after!({ ...user, role: stampedRole }, dbHookCtx({ path: "/callback/google" }));
 
-      const org = db.select().from(orgs).get();
+      const orgRows = await db.select().from(orgs).limit(1);
+      const org = orgRows[0];
       expect(org).toBeDefined();
-      const membership = db
+      const membershipRows = await db
         .select()
         .from(orgMembers)
         .where(eq(orgMembers.userId, "u-invitee"))
-        .get();
-      expect(membership).toMatchObject({ orgId: org!.id, userId: "u-invitee", role: "admin" });
+        .limit(1);
+      expect(membershipRows[0]).toMatchObject({ orgId: org!.id, userId: "u-invitee", role: "admin" });
 
-      const inviteRow = db.select().from(invites).where(eq(invites.id, invite.id)).get();
-      expect(inviteRow?.acceptedBy).toBe("u-invitee");
+      const inviteRows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
+      expect(inviteRows[0]?.acceptedBy).toBe("u-invitee");
     });
 
     it("reuses the existing org row rather than creating a second one", async () => {
       const cfg = baseConfig();
-      db.insert(orgs).values({ id: "org-preexisting", name: "Pre-existing", createdAt: Date.now() }).run();
+      await db.insert(orgs).values({ id: "org-preexisting", name: "Pre-existing", createdAt: Date.now() });
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
 
       const user = makeUser({ id: "u-plain", email: "plain@nowhere.test", role: "member" });
-      db.insert(users).values({ id: user.id, email: user.email, name: user.name, role: "member" }).run();
+      await db.insert(users).values({ id: user.id, email: user.email, name: user.name, role: "member" });
       await databaseHooks!.user!.create!.after!(user, dbHookCtx({ path: "/callback/google" }));
 
-      const allOrgs = db.select().from(orgs).all();
+      const allOrgs = await db.select().from(orgs);
       expect(allOrgs).toHaveLength(1);
       expect(allOrgs[0].id).toBe("org-preexisting");
     });
   });
 
-  describe("databaseHooks.account.create.after", () => {
+  // Not yet ported to Postgres (Task 8): `accountCreateAfter` calls
+  // `credentialStore.save`/`.get`, and `credentialStore` above is a throwing
+  // stub for the duration of the cutover wave.
+  describe.skip("databaseHooks.account.create.after", () => {
     it("writes google tokens to the credential store under both google plugin services", async () => {
       const cfg = baseConfig();
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });

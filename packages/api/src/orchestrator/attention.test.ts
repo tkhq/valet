@@ -62,7 +62,7 @@ describe("routeAttention (DB-backed)", () => {
       { kind: "notification", owner: { type: "user", id: "local-user" }, title: "hello" },
     );
 
-    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user"));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.title).toBe("hello");
     expect(rows[0]?.readAt).toBeNull();
@@ -73,21 +73,20 @@ describe("routeAttention (DB-backed)", () => {
     const { db } = api.providers;
 
     const now = Date.now();
-    await db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Platform", createdAt: now }).run();
+    await db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Platform", createdAt: now });
     await db
       .insert(teamMembers)
       .values([
         { teamId: "team-1", userId: "local-user", role: "admin" },
         { teamId: "team-1", userId: "test-member", role: "member" },
-      ])
-      .run();
+      ]);
 
     await routeAttention({ db }, { kind: "escalation", owner: { type: "team", id: "team-1" }, title: "stuck" });
-    const escalationRecipients = await db.select().from(notifications).where(eq(notifications.kind, "escalation")).all();
+    const escalationRecipients = await db.select().from(notifications).where(eq(notifications.kind, "escalation"));
     expect(escalationRecipients.map((r) => r.userId)).toEqual(["local-user"]);
 
     await routeAttention({ db }, { kind: "notification", owner: { type: "team", id: "team-1" }, title: "fyi" });
-    const fyiRecipients = await db.select().from(notifications).where(eq(notifications.kind, "notification")).all();
+    const fyiRecipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
     expect(fyiRecipients.map((r) => r.userId).sort()).toEqual(["local-user", "test-member"]);
   });
 
@@ -96,7 +95,7 @@ describe("routeAttention (DB-backed)", () => {
     const { db } = api.providers;
 
     await routeAttention({ db }, { kind: "notification", owner: { type: "org", id: "local-org" }, title: "org-wide" });
-    const rows = await db.select().from(notifications).where(eq(notifications.kind, "notification")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
     // local-user and test-admin are seeded org admins (see _setup.ts); test-member is not.
     expect(rows.map((r) => r.userId).sort()).toEqual(["local-user", "test-admin"]);
   });
@@ -107,8 +106,7 @@ describe("routeAttention (DB-backed)", () => {
 
     await db
       .insert(userNotificationPreferences)
-      .values({ userId: "local-user", kind: "notification", web: 0 })
-      .run();
+      .values({ userId: "local-user", kind: "notification", web: false });
 
     await routeAttention(
       { db },
@@ -119,7 +117,7 @@ describe("routeAttention (DB-backed)", () => {
       { kind: "escalation", owner: { type: "user", id: "local-user" }, title: "should land (different kind)" },
     );
 
-    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user"));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.kind).toBe("escalation");
   });
@@ -144,7 +142,7 @@ describe("routeAttention (DB-backed)", () => {
       { kind: "escalation", owner: { type: "user", id: "local-user" }, title: "should land" },
     );
 
-    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user"));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.kind).toBe("escalation");
   });
@@ -162,7 +160,7 @@ describe("routeAttention (DB-backed)", () => {
     await routeAttention({ db }, event);
     await routeAttention({ db }, event);
 
-    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user")).all();
+    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user"));
     expect(rows).toHaveLength(1);
   });
 });

@@ -326,8 +326,7 @@ describe("api integration: plugin system exit criteria — workflow tool node (u
       const invocationRows = await api.providers.db
         .select()
         .from(actionInvocations)
-        .where(eq(actionInvocations.invocationId, invocationId))
-        .all();
+        .where(eq(actionInvocations.invocationId, invocationId));
       expect(invocationRows).toHaveLength(1);
     },
     30_000,

@@ -193,7 +193,7 @@ export class EngineHost {
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const model = await this.resolveModelForBuild(existing, meta.userId);
-    const sandboxEnv = this.mintSandboxEnv(sessionId, meta.userId, meta.orgId);
+    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -255,9 +255,9 @@ export class EngineHost {
    * db up) — sandboxes then provision with no extra env, same as before
    * this wiring existed.
    */
-  private mintSandboxEnv(sessionId: string, userId: string, orgId: string): Record<string, string> | undefined {
+  private async mintSandboxEnv(sessionId: string, userId: string, orgId: string): Promise<Record<string, string> | undefined> {
     if (!this.opts.db) return undefined;
-    const { token } = mintSandboxToken(this.opts.db, { sessionId, userId, orgId });
+    const { token } = await mintSandboxToken(this.opts.db, { sessionId, userId, orgId });
     const secret = deriveSandboxJwtSecret(this.resolveSandboxJwtMaster(), sessionId);
     return {
       VALET_SANDBOX_TOKEN: token,
@@ -349,7 +349,7 @@ export class EngineHost {
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
-    const sandboxEnv = this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId);
+    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -421,7 +421,7 @@ export class EngineHost {
     orgId: string,
     sessionId: string,
   ): Promise<void> {
-    const existing = await db
+    const existingRows = await db
       .select()
       .from(orchestratorIdentities)
       .where(
@@ -431,8 +431,8 @@ export class EngineHost {
           eq(orchestratorIdentities.ownerId, principal.id),
         ),
       )
-      .get();
-    if (existing) return;
+      .limit(1);
+    if (existingRows[0]) return;
 
     await db
       .insert(orchestratorIdentities)
@@ -444,8 +444,7 @@ export class EngineHost {
         sessionId,
         createdAt: Date.now(),
       })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
   }
 
   /**
@@ -465,7 +464,7 @@ export class EngineHost {
     orgId: string,
     principal: Principal,
   ): Promise<string> {
-    const identity = await db
+    const identityRows = await db
       .select()
       .from(orchestratorIdentities)
       .where(
@@ -475,7 +474,8 @@ export class EngineHost {
           eq(orchestratorIdentities.ownerId, principal.id),
         ),
       )
-      .get();
+      .limit(1);
+    const identity = identityRows[0];
     const name = identity?.handle;
     if (!name) return "";
 
@@ -509,7 +509,7 @@ export class EngineHost {
       await entry.session.destroy();
     } finally {
       this.cache.delete(sessionId);
-      if (this.opts.db) revokeSandboxTokens(this.opts.db, sessionId);
+      if (this.opts.db) await revokeSandboxTokens(this.opts.db, sessionId);
     }
   }
 
@@ -603,12 +603,12 @@ export class EngineHost {
    */
   private async userDefaultModel(userId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
-    const row = await this.opts.db
+    const rows = await this.opts.db
       .select({ defaultModel: users.defaultModel })
       .from(users)
       .where(eq(users.id, userId))
-      .get();
-    return row?.defaultModel ?? undefined;
+      .limit(1);
+    return rows[0]?.defaultModel ?? undefined;
   }
 
   /**
@@ -687,7 +687,7 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
-    const sandboxEnv = this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId);
+    const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -774,7 +774,7 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(sessionId);
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
-    const sandboxEnv = this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId);
+    const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,

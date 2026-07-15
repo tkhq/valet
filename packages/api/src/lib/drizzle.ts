@@ -1,21 +1,39 @@
-import type Database from "better-sqlite3";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+/**
+ * Application Drizzle handle, backed by either `drizzle-orm/node-postgres`
+ * or `drizzle-orm/pglite` — both are structurally assignable to
+ * `PgDatabase<PgQueryResultHKT, typeof schema>` in the installed
+ * drizzle-orm 0.45.2 (their `NodePgQueryResultHKT`/`PgliteQueryResultHKT`
+ * both extend the shared `PgQueryResultHKT`), so `AppDb` uses the real
+ * common base rather than `PgDatabase<any, any, any>` (forbidden by the
+ * no-`any` rule — decision 8 of docs/specs/2026-07-15-postgres-backend-design.md).
+ *
+ * Mirrors `packages/store-postgres/src/migrate.ts`'s conventions
+ * (`information_schema` probe, `__valet_*_migrations` tracker, one
+ * transaction per migration file, `import.meta.url` dir resolution): async
+ * throughout, `--> statement-breakpoint`-delimited multi-statement files, no
+ * sqlite-style backfill path (decision 10: no pg database predates the
+ * tracker).
+ */
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
+import { drizzle as drizzleNodePg } from "drizzle-orm/node-postgres";
+import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import type { Pool } from "pg";
+import { pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as schema from "../schema/index.js";
+
+/** Application Drizzle handle. The engine's session store has its own
+ * Drizzle handle over the same connection source — both reach the same
+ * pg database. */
+export type AppDb = PgDatabase<PgQueryResultHKT, typeof schema>;
 
 /**
- * Application Drizzle handle. Backed by better-sqlite3. The engine's session
- * store has its own Drizzle handle over the same connection — both reach the
- * same sqlite file.
- */
-export type AppDb = BetterSQLite3Database<Record<string, never>>;
-
-/**
- * The transaction handle Drizzle's better-sqlite3 driver passes to
+ * The transaction handle Drizzle's pg drivers pass to
  * `db.transaction(tx => ...)` callbacks. Derived from `AppDb["transaction"]`
- * (rather than importing the internal `BetterSQLiteTransaction` class name)
+ * (rather than importing internal driver-specific transaction class names)
  * so services that need to run reads + writes atomically can type their
  * helpers to accept either `AppDb` or this transaction handle without a
  * type assertion.
@@ -25,74 +43,70 @@ export type AppTx = Parameters<AppDb["transaction"]>[0] extends (tx: infer T) =>
 /** Either a top-level `AppDb` handle or an in-flight transaction on one. */
 export type AppQueryable = AppDb | AppTx;
 
-export function buildAppDb(sqlite: Database.Database): AppDb {
-  return drizzle(sqlite, { casing: "snake_case" });
+/**
+ * Builds the app Drizzle instance over either connection source. `source`
+ * is the raw driver object (a `pg.Pool` or an `@electric-sql/pglite`
+ * `PGlite` instance) — NOT the `PgDb` query wrapper, since each drizzle
+ * driver needs its own native client, not the normalized `PgQueryable`
+ * surface `PgDb` exposes (`buildAppQueryable` below wraps the SAME
+ * underlying object separately, for the raw-SQL stores that share a
+ * connection source with this Drizzle instance).
+ */
+export function buildAppDb(source: Pool | PGlite): AppDb {
+  if (source instanceof PGlite) {
+    return drizzlePglite(source, { schema, casing: "snake_case" });
+  }
+  return drizzleNodePg(source, { schema, casing: "snake_case" });
+}
+
+/** Wraps a raw connection source in the shared `PgDb` query interface
+ * (decision 4) — the same source `buildAppDb` above builds a Drizzle
+ * instance over, so raw-SQL call sites (migrations, the memory service's
+ * tsvector queries) and Drizzle call sites share one physical connection. */
+export function buildAppQueryable(source: Pool | PGlite): PgDb {
+  return source instanceof PGlite ? pgDbFromPglite(source) : pgDbFromPool(source);
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const migrationsDir = join(__dirname, "..", "..", "migrations", "pg");
 
 /**
- * Apply migrations from `packages/api/migrations/` to the open sqlite db.
+ * Apply this package's postgres migrations to an open `PgDb`.
  *
  * Tracks applied migrations in `__valet_app_migrations` (filename + timestamp)
  * so re-runs across server restarts are no-ops. Each migration runs in a
  * transaction — partial application leaves the tracker untouched.
  */
-export function applyAppMigrations(sqlite: Database.Database): void {
-  sqlite.exec(`
+export async function applyAppMigrations(db: PgDb): Promise<void> {
+  await db.query(`
     CREATE TABLE IF NOT EXISTS __valet_app_migrations (
-      filename TEXT PRIMARY KEY,
-      applied_at INTEGER NOT NULL
+      filename text PRIMARY KEY,
+      applied_at bigint NOT NULL
     )
   `);
 
-  const migrationsDir = join(__dirname, "..", "..", "migrations");
   const files = readdirSync(migrationsDir)
     .filter((f) => f.endsWith(".sql"))
     .sort();
 
-  // Backfill: if the schema tables already exist (db pre-dates the tracker)
-  // but the tracker is empty, assume every migration has run and mark them
-  // applied without re-executing. One-time bootstrap; harmless on fresh dbs.
-  const trackerRows = sqlite
-    .prepare("SELECT COUNT(*) as n FROM __valet_app_migrations")
-    .get() as { n: number };
-  if (trackerRows.n === 0) {
-    const schemaSeed = sqlite
-      .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_sessions'",
-      )
-      .get();
-    if (schemaSeed) {
-      const seed = sqlite.prepare<[string, number]>(
-        "INSERT OR IGNORE INTO __valet_app_migrations (filename, applied_at) VALUES (?, ?)",
-      );
-      const now = Date.now();
-      for (const file of files) seed.run(file, now);
-    }
-  }
-
-  const isApplied = sqlite.prepare<[string]>(
-    "SELECT 1 FROM __valet_app_migrations WHERE filename = ?",
-  );
-  const recordApplied = sqlite.prepare<[string, number]>(
-    "INSERT INTO __valet_app_migrations (filename, applied_at) VALUES (?, ?)",
-  );
-
   for (const file of files) {
-    if (isApplied.get(file)) continue;
+    const applied = await db.query("SELECT 1 FROM __valet_app_migrations WHERE filename = $1", [file]);
+    if (applied.rows.length > 0) continue;
 
     const sql = readFileSync(join(migrationsDir, file), "utf8");
-    // drizzle-kit emits multiple statements separated by `--> statement-breakpoint`.
-    const statements = sql.split(/-->\s*statement-breakpoint/);
+    const statements = sql
+      .split(/-->\s*statement-breakpoint/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
 
-    const runMigration = sqlite.transaction(() => {
+    await db.transaction(async (tx) => {
       for (const stmt of statements) {
-        const trimmed = stmt.trim();
-        if (trimmed) sqlite.exec(trimmed);
+        await tx.query(stmt);
       }
-      recordApplied.run(file, Date.now());
+      await tx.query("INSERT INTO __valet_app_migrations (filename, applied_at) VALUES ($1, $2)", [
+        file,
+        Date.now(),
+      ]);
     });
-    runMigration();
   }
 }

@@ -32,14 +32,16 @@ async function loadMeResponse(
   db: AppDb,
   user: { id: string; email: string; role: "admin" | "member"; orgId: string },
 ): Promise<MeResponse | undefined> {
-  const row = await db.select().from(users).where(eq(users.id, user.id)).get();
+  const rows = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
+  const row = rows[0];
   if (!row) return undefined;
 
-  const membership = await db
+  const membershipRows = await db
     .select({ role: orgMembers.role })
     .from(orgMembers)
     .where(and(eq(orgMembers.orgId, user.orgId), eq(orgMembers.userId, user.id)))
-    .get();
+    .limit(1);
+  const membership = membershipRows[0];
 
   return {
     id: row.id,
@@ -109,7 +111,7 @@ meRouter.patch("/", async (c) => {
   }
 
   if (Object.keys(update).length > 0) {
-    db.update(users).set(update).where(eq(users.id, user.id)).run();
+    await db.update(users).set(update).where(eq(users.id, user.id));
   }
 
   const body = await loadMeResponse(db, user);

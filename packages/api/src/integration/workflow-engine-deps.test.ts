@@ -47,11 +47,10 @@ describeIfKey("api integration: workflow engine-deps", () => {
             ownerType: "user",
             ownerId: LOCAL_USER.id,
             name: "engine-deps-test",
-            definition: JSON.stringify({ version: "dag/v1", nodes: [], edges: [] }),
+            definition: { version: "dag/v1", nodes: [], edges: [] },
             createdAt: now,
             updatedAt: now,
-          })
-          .run();
+          });
         await workflowStore.createRun(
           runId,
           { workflowId, definitionVersionId: "v1" },

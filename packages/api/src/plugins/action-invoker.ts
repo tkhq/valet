@@ -89,9 +89,8 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
 
     await opts.db
       .insert(actionInvocations)
-      .values({ invocationId: req.invocationId, result: JSON.stringify(result), createdAt: clock() })
-      .onConflictDoNothing()
-      .run();
+      .values({ invocationId: req.invocationId, result, createdAt: clock() })
+      .onConflictDoNothing();
 
     // Re-select rather than trusting the freshly-computed `result` directly
     // — a concurrent duplicate call may have won the insert race with a
@@ -106,28 +105,28 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
 }
 
 async function selectStoredResult(db: AppDb, invocationId: string): Promise<WorkflowInvokeActionResult | undefined> {
-  const row = await db
+  const rows = await db
     .select({ result: actionInvocations.result })
     .from(actionInvocations)
     .where(eq(actionInvocations.invocationId, invocationId))
-    .get();
+    .limit(1);
+  const row = rows[0];
   return row ? parseStoredResult(row.result) : undefined;
 }
 
-/** Runtime-validated parse — this is our own serialization, but crossing the JSON boundary still needs a narrowing check rather than a blind cast. */
-function parseStoredResult(json: string): WorkflowInvokeActionResult {
-  const parsed: unknown = JSON.parse(json);
-  if (typeof parsed !== "object" || parsed === null || !("ok" in parsed)) {
-    throw new Error(`action-invoker: corrupt stored result: ${json}`);
+/** Runtime-validated narrowing — `result` is a native jsonb value now, but crossing the DB boundary still needs a check rather than a blind cast. */
+function parseStoredResult(value: unknown): WorkflowInvokeActionResult {
+  if (typeof value !== "object" || value === null || !("ok" in value)) {
+    throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
   }
-  const record = parsed as Record<string, unknown>;
+  const record = value as Record<string, unknown>;
   if (record.ok === true) {
     return { ok: true, result: record.result };
   }
   if (record.ok === false && typeof record.error === "string") {
     return { ok: false, error: record.error };
   }
-  throw new Error(`action-invoker: corrupt stored result: ${json}`);
+  throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
 }
 
 async function computeResult(

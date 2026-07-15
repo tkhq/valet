@@ -31,29 +31,27 @@ function hashToken(token: string): string {
 /** Mints a new sandbox token for a session, revoking any prior live tokens
  * for that session. Returns the plaintext token — the only place it's ever
  * available; only its hash is stored. */
-export function mintSandboxToken(
+export async function mintSandboxToken(
   db: AppDb,
   opts: { sessionId: string; userId: string; orgId: string; ttlMs?: number },
-): { token: string; expiresAt: number } {
-  revokeSandboxTokens(db, opts.sessionId);
+): Promise<{ token: string; expiresAt: number }> {
+  await revokeSandboxTokens(db, opts.sessionId);
 
   const token = `st_${randomBytes(24).toString("hex")}`;
   const now = Date.now();
   const ttlMs = opts.ttlMs ?? TOKEN_TTL_MS;
   const expiresAt = now + ttlMs;
 
-  db.insert(sandboxTokens)
-    .values({
-      id: `sbtok_${randomUUID()}`,
-      tokenHash: hashToken(token),
-      sessionId: opts.sessionId,
-      userId: opts.userId,
-      orgId: opts.orgId,
-      createdAt: new Date(now),
-      expiresAt: new Date(expiresAt),
-      revokedAt: null,
-    })
-    .run();
+  await db.insert(sandboxTokens).values({
+    id: `sbtok_${randomUUID()}`,
+    tokenHash: hashToken(token),
+    sessionId: opts.sessionId,
+    userId: opts.userId,
+    orgId: opts.orgId,
+    createdAt: new Date(now),
+    expiresAt: new Date(expiresAt),
+    revokedAt: null,
+  });
 
   return { token, expiresAt };
 }
@@ -61,23 +59,24 @@ export function mintSandboxToken(
 /** Looks up an unexpired, unrevoked sandbox token by its plaintext value
  * (hashed before the lookup — the plaintext is never stored or compared
  * directly). Returns the principal it was minted for, or null. */
-export function verifySandboxToken(db: AppDb, token: string): SandboxPrincipal | null {
+export async function verifySandboxToken(db: AppDb, token: string): Promise<SandboxPrincipal | null> {
   const now = new Date();
-  const row = db
+  const rows = await db
     .select()
     .from(sandboxTokens)
     .where(and(eq(sandboxTokens.tokenHash, hashToken(token)), isNull(sandboxTokens.revokedAt)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row || row.expiresAt <= now) return null;
   return { sessionId: row.sessionId, userId: row.userId, orgId: row.orgId };
 }
 
 /** Sets `revoked_at` on every live (unrevoked) sandbox token for a session. */
-export function revokeSandboxTokens(db: AppDb, sessionId: string): void {
-  db.update(sandboxTokens)
+export async function revokeSandboxTokens(db: AppDb, sessionId: string): Promise<void> {
+  await db
+    .update(sandboxTokens)
     .set({ revokedAt: new Date() })
-    .where(and(eq(sandboxTokens.sessionId, sessionId), isNull(sandboxTokens.revokedAt)))
-    .run();
+    .where(and(eq(sandboxTokens.sessionId, sessionId), isNull(sandboxTokens.revokedAt)));
 }
 
 /**

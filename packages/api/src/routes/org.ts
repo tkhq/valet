@@ -43,7 +43,8 @@ function isOrgRole(v: unknown): v is OrgRole {
 }
 
 async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): Promise<OrgResponse | undefined> {
-  const row = await db.select().from(orgs).where(eq(orgs.id, orgId)).get();
+  const rows = await db.select().from(orgs).where(eq(orgs.id, orgId)).limit(1);
+  const row = rows[0];
   if (!row) return undefined;
   const features = await getOrgFeatures(db, orgId);
   return { id: row.id, name: row.name, createdAt: row.createdAt, features, callerRole };

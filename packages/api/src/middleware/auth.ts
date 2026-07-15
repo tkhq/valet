@@ -32,10 +32,10 @@ const orgIdMemo = new WeakMap<AppDb, string>();
  * see rung 2 of the ladder below. */
 const SANDBOX_ALLOWED_PATH_PREFIX = "/api/memory";
 
-function resolveOrgId(db: AppDb): string {
+async function resolveOrgId(db: AppDb): Promise<string> {
   const cached = orgIdMemo.get(db);
   if (cached) return cached;
-  const { id } = ensureOrg(db);
+  const { id } = await ensureOrg(db);
   orgIdMemo.set(db, id);
   return id;
 }
@@ -124,7 +124,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
     // an unguarded TypeError instead of failing cleanly here.
     const sandboxHeader = c.req.header("x-valet-sandbox");
     if (sandboxHeader !== undefined) {
-      const principal = verifySandboxToken(db, sandboxHeader);
+      const principal = await verifySandboxToken(db, sandboxHeader);
       if (!principal) {
         return c.json({ error: "invalid sandbox token" }, 401);
       }
@@ -152,7 +152,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
           email: sessionResult.user.email,
           name: sessionResult.user.name,
           role: normalizeRole(sessionResult.user.role),
-          orgId: resolveOrgId(db),
+          orgId: await resolveOrgId(db),
         } satisfies AuthUser);
         await next();
         return;
@@ -172,7 +172,8 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         if (!result.valid || !result.key) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        const row = await db.select().from(users).where(eq(users.id, result.key.referenceId)).get();
+        const apiKeyRows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
+        const row = apiKeyRows[0];
         if (!row) {
           return c.json({ error: "invalid api key" }, 401);
         }
@@ -181,7 +182,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
           email: row.email,
           name: row.name ?? undefined,
           role: row.role,
-          orgId: resolveOrgId(db),
+          orgId: await resolveOrgId(db),
         } satisfies AuthUser);
         await next();
         return;
@@ -192,7 +193,8 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
     if (process.env.VALET_LOCAL_AUTH === "1") {
       const testUserId = process.env.VALET_TEST_AUTH_HEADER === "1" ? c.req.header("x-valet-test-user-id") : undefined;
       if (testUserId) {
-        const row = await db.select().from(users).where(eq(users.id, testUserId)).get();
+        const testRows = await db.select().from(users).where(eq(users.id, testUserId)).limit(1);
+        const row = testRows[0];
         if (row) {
           c.set("user", {
             id: row.id,

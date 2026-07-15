@@ -68,11 +68,12 @@ export function registerWsRoutes(
           // error frame and close the socket gracefully.
           try {
             // Verify session ownership before subscribing.
-            const row = await providers.db
+            const rows = await providers.db
               .select()
               .from(agentSessions)
               .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.userId, userId)))
-              .get();
+              .limit(1);
+            const row = rows[0];
             if (!row) {
               ws.close(4040, "session not found");
               return;

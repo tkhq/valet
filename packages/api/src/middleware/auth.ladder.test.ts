@@ -42,7 +42,7 @@ describe("auth middleware ladder — stub-mode boots", () => {
   it("a sandbox token reaches memory routes and the owner derives from the token, not headers", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
-    const { token } = mintSandboxToken(db, { sessionId: "sbx-sess", userId: "sbx-user", orgId: "local-org" });
+    const { token } = await mintSandboxToken(db, { sessionId: "sbx-sess", userId: "sbx-user", orgId: "local-org" });
 
     // Write scoped to the sandbox token's userId, even though a bogus
     // x-valet-owner header rides along (must be ignored — the internal
@@ -180,10 +180,11 @@ describe("auth middleware ladder — real-auth boots", () => {
       body: JSON.stringify({ name: "Org Admin", email: "org-admin@nowhere.test", password: "correct-horse-battery" }),
     });
     expect(signUpRes.status).toBe(200);
-    const adminUser = await db.select().from(users).where(eq(users.email, "org-admin@nowhere.test")).get();
+    const adminUserRows = await db.select().from(users).where(eq(users.email, "org-admin@nowhere.test")).limit(1);
+    const adminUser = adminUserRows[0];
     expect(adminUser).toBeDefined();
 
-    const { token } = mintSandboxToken(db, {
+    const { token } = await mintSandboxToken(db, {
       sessionId: "sbx-sess-2",
       userId: adminUser!.id,
       orgId: "does-not-matter",

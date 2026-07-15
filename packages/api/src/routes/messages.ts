@@ -39,12 +39,12 @@ async function loadOwnedSession(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
-  const row = await db
+  const rows = await db
     .select()
     .from(agentSessions)
     .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .get();
-  return row ?? null;
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
@@ -249,8 +249,7 @@ messagesRouter.post("/:id/messages", async (c) => {
   await db
     .update(agentSessions)
     .set({ updatedAt: Date.now() })
-    .where(eq(agentSessions.id, session.id))
-    .run();
+    .where(eq(agentSessions.id, session.id));
 
   const resp: SendPromptResponse = {
     messageId: receipt.queueItemId,

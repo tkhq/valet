@@ -88,12 +88,13 @@ describe("real better-auth instance + mounting", () => {
         body: JSON.stringify({ name: "Org Admin", email: "org-admin@nowhere.test", password: "correct-horse-battery" }),
       });
       expect(firstRes.status).toBe(200);
-      const firstUser = await db.select().from(users).where(eq(users.email, "org-admin@nowhere.test")).get();
+      const firstUserRows = await db.select().from(users).where(eq(users.email, "org-admin@nowhere.test")).limit(1);
+      const firstUser = firstUserRows[0];
       expect(firstUser).toBeDefined();
 
       // Code-only invite: no email target, role "admin" — only a valid
       // `inviteCode` in the signup body can admit it.
-      const { invite, code } = createInvite(db, { role: "admin", createdBy: firstUser!.id });
+      const { invite, code } = await createInvite(db, { role: "admin", createdBy: firstUser!.id });
 
       const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
         method: "POST",
@@ -107,12 +108,13 @@ describe("real better-auth instance + mounting", () => {
       });
       expect(signUpRes.status).toBe(200);
 
-      const invitedUser = await db.select().from(users).where(eq(users.email, "invited-admin@nowhere.test")).get();
+      const invitedUserRows = await db.select().from(users).where(eq(users.email, "invited-admin@nowhere.test")).limit(1);
+      const invitedUser = invitedUserRows[0];
       expect(invitedUser).toBeDefined();
       expect(invitedUser?.role).toBe("admin");
 
-      const inviteRow = await db.select().from(invites).where(eq(invites.id, invite.id)).get();
-      expect(inviteRow?.acceptedBy).toBe(invitedUser!.id);
+      const inviteRows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
+      expect(inviteRows[0]?.acceptedBy).toBe(invitedUser!.id);
     },
   );
 });

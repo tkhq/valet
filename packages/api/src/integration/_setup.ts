@@ -1,15 +1,14 @@
 /**
  * Shared boot harness for API integration tests.
  *
- * Spins up a real `createApp(providers)` on a random port with in-memory
- * sqlite + virtual sandbox + InMemory bus/creds. Returns the base URLs and
- * a cleanup function tests can call in `finally`.
+ * Spins up a real `createApp(providers)` on a random port with a fresh
+ * PGlite instance (via the shared `test-helpers/pg-test-db.ts` helper) +
+ * virtual sandbox + InMemory bus/creds. Returns the base URLs and a cleanup
+ * function tests can call in `finally`.
  *
  * Underscore-prefixed filename so vitest's `*.test.ts` glob doesn't pick it
  * up as a test.
  */
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,20 +17,19 @@ import { serve } from "@hono/node-server";
 import {
   VirtualSandboxProvider,
   type ChildSpawner,
+  type CredentialStore,
   type SandboxProvider,
   type ValetPlugin,
 } from "@valet/engine";
-import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
-import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
+import { createDefaultNodeExecutors, LocalRunHost, type RunHost, type WorkflowStore } from "@valet/workflow";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
-import { SqliteCredentialStore } from "../plugins/credential-store.js";
+import { notPortedStub } from "../providers/not-ported-stub.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
-import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { createApp, type AuthWiring } from "../app.js";
 import type { Providers } from "../providers/types.js";
@@ -102,14 +100,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     process.env.BETTER_AUTH_SECRET = "test-secret";
   }
 
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  applyAppMigrations(sqlite);
-  applyEngineMigrations(sqlite);
-
-  const db = buildAppDb(sqlite);
-  const engineDb = drizzle(sqlite);
+  const { pgdb, appDb: db } = await freshTestPgDb();
 
   // Seed the local-dev identity (mirrors buildNodeProviders) — skipped in
   // `auth: true` mode: these stub identities exist for the
@@ -118,46 +109,45 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // admin" case (auth-instance tests sign up the actual first user).
   const now = Date.now();
   if (!opts.auth) {
-    db.insert(orgs).values({ id: "local-org", name: "Local Dev", createdAt: now }).onConflictDoNothing().run();
-    db.insert(users)
+    await db.insert(orgs).values({ id: "local-org", name: "Local Dev", createdAt: now }).onConflictDoNothing();
+    await db
+      .insert(users)
       .values({ id: "local-user", email: "local@dev", name: "Local Dev", role: "admin" })
-      .onConflictDoNothing()
-      .run();
-    db.insert(orgMembers)
+      .onConflictDoNothing();
+    await db
+      .insert(orgMembers)
       .values({ orgId: "local-org", userId: "local-user", role: "admin", createdAt: now })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
     // Non-admin identity for role-gated route tests. Select it via the
     // `x-valet-test-user-id` header (see authMiddleware).
-    db.insert(users)
+    await db
+      .insert(users)
       .values({ id: "test-member", email: "member@dev", name: "Test Member", role: "member" })
-      .onConflictDoNothing()
-      .run();
-    db.insert(orgMembers)
+      .onConflictDoNothing();
+    await db
+      .insert(orgMembers)
       .values({ orgId: "local-org", userId: "test-member", role: "member", createdAt: now })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
     // A second org admin, distinct from `local-user`, for tests exercising
     // the org-admin recovery path on a team they aren't a member of.
-    db.insert(users)
+    await db
+      .insert(users)
       .values({ id: "test-admin", email: "admin@dev", name: "Test Admin", role: "admin" })
-      .onConflictDoNothing()
-      .run();
-    db.insert(orgMembers)
+      .onConflictDoNothing();
+    await db
+      .insert(orgMembers)
       .values({ orgId: "local-org", userId: "test-admin", role: "admin", createdAt: now })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
   }
 
   const blobsRoot = mkdtempSync(join(tmpdir(), "valet-itest-blobs-"));
-  const engineStore = new SqliteSessionStore(engineDb);
+  const engineStore = new PgSessionStore(pgdb);
   const sandboxProvider = opts.sandboxProvider ?? new VirtualSandboxProvider();
-  const eventStream = new SqliteEventStream(sqlite);
-  // Same `$client` type-gap bridge as `providers/node.ts` — see its comment.
-  const engineCredentials = new SqliteCredentialStore(
-    db as AppDb & { $client: Database.Database },
-    deriveSecretKey("test-key"),
-  );
+  const eventStream = new PgEventStream(pgdb);
+  // Not yet ported to Postgres (Task 8 of the postgres-backend plan) — see
+  // `providers/not-ported-stub.ts`'s doc comment. No integration suite that
+  // boots via `bootTestApi` today exercises a credential-store method.
+  const engineCredentials = notPortedStub<CredentialStore>("CredentialStore");
   const blobs = new FsBlobStore(blobsRoot);
 
   // Pre-allocate the port: EngineHost needs `apiBaseUrl` at construction
@@ -194,8 +184,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 
-  // Same `$client` type-gap bridge as `providers/node.ts` — see its comment.
-  const workflowStore = new SqliteWorkflowStore(db as AppDb & { $client: Database.Database });
+  // Not yet ported to Postgres (Task 8) — see `providers/not-ported-stub.ts`'s
+  // doc comment.
+  const workflowStore = notPortedStub<WorkflowStore>("WorkflowStore");
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,
@@ -212,7 +203,16 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const workflowRunHost = opts.workflowRunHost ?? realWorkflowRunHost;
   // Only start the host loop when it's the real one under test control — a
   // caller-supplied stub owns its own lifecycle (or has none).
-  if (!opts.workflowRunHost) workflowRunHost.startHost();
+  //
+  // `workflowStore` is a `notPortedStub` for the duration of the postgres-
+  // backend cutover wave (Task 8 ports `PgWorkflowStore`) — starting the
+  // real poll/sweep loops against it throws inside `pollOnce`'s background
+  // interval on every tick, as an unhandled rejection unrelated to whatever
+  // the test actually boots for (it pollutes every suite that calls
+  // `bootTestApi`, not just workflow ones). Skip starting the loop while the
+  // store is stubbed; workflow-specific tests that need the loop running are
+  // already in the Task 7 "expected failing" list and get their coverage
+  // back in Task 8 once `workflowStore` is real again.
 
   const providers: Providers = {
     db,

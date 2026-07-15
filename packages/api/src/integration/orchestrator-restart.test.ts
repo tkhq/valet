@@ -33,10 +33,9 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { eq } from "drizzle-orm";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import { InMemoryCredentialStore, VirtualSandboxProvider, type ChildSpawner, type MessageEntry } from "@valet/engine";
-import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
+import { PgSessionStore, PgEventStream, pgDbFromPglite, applyEngineMigrations } from "@valet/store-postgres";
 import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
@@ -58,23 +57,22 @@ async function poll(predicate: () => boolean | Promise<boolean>, timeoutMs: numb
   }
 }
 
-/** Boots a fresh provider stack over `dbPath` — same wiring as
- * `p4-restart-child.ts` and `providers/node.ts`, but with a
- * `VirtualSandboxProvider` (no Docker needed for this test). */
-async function bootRestoredProviders(dbPath: string) {
-  const sqlite = new Database(dbPath);
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  applyAppMigrations(sqlite);
-  applyEngineMigrations(sqlite);
+/** Boots a fresh provider stack over the PGlite instance persisted at
+ * `pgDataDir` — same wiring as `p4-restart-child.ts` and
+ * `providers/node.ts`, but with a `VirtualSandboxProvider` (no Docker
+ * needed for this test). */
+async function bootRestoredProviders(pgDataDir: string) {
+  const pglite = new PGlite(pgDataDir);
+  const pgdb = pgDbFromPglite(pglite);
+  await applyAppMigrations(pgdb);
+  await applyEngineMigrations(pgdb);
 
-  const db = buildAppDb(sqlite);
-  const engineDb = drizzle(sqlite);
-  const engineStore = new SqliteSessionStore(engineDb);
+  const db = buildAppDb(pglite);
+  const engineStore = new PgSessionStore(pgdb);
   const sandboxProvider = new VirtualSandboxProvider();
-  const eventStream = new SqliteEventStream(sqlite);
+  const eventStream = new PgEventStream(pgdb);
   const engineCredentials = new InMemoryCredentialStore();
-  const blobs = new FsBlobStore(join(dirname(dbPath), "blobs"));
+  const blobs = new FsBlobStore(join(dirname(pgDataDir), "blobs"));
 
   let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
@@ -91,11 +89,11 @@ async function bootRestoredProviders(dbPath: string) {
       return spawnerRef(req, ctx);
     },
   });
-  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(dirname(dbPath), "children") };
+  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(dirname(pgDataDir), "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 
-  return { sqlite, db, engineStore, engineHost, childWatcher };
+  return { pglite, db, engineStore, engineHost, childWatcher };
 }
 
 function signalEntries(entries: MessageEntry[], childSessionId: string): MessageEntry[] {
@@ -109,7 +107,7 @@ describeIfKey("api integration: cross-process restart mid-child-run (Phase 4 exi
     "SIGKILL while a child's turn is unsettled -> restart re-arms -> exactly one child.settled signal",
     async () => {
       const dir = await mkdtemp(join(tmpdir(), "valet-p4-restart-"));
-      const dbPath = join(dir, "app.db");
+      const dbPath = join(dir, "pgdata");
 
       // ── Phase 1: child process ensures orchestrator, spawns a child
       //    directly via ChildSpawner, then gets SIGKILLed mid-run. ──
@@ -153,7 +151,8 @@ describeIfKey("api integration: cross-process restart mid-child-run (Phase 4 exi
           // Mirrors main.ts's restoreUnsettledSessions: materialize every
           // unsettled session so the engine's claim loop can resume it.
           for (const id of unsettledIds) {
-            const row = await restored.db.select().from(agentSessions).where(eq(agentSessions.id, id)).get();
+            const rows = await restored.db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
+            const row = rows[0];
             if (!row) continue;
             await restored.engineHost.sessionFor(id, { userId: row.userId, orgId: row.orgId, workspace: row.workspace });
           }
@@ -214,7 +213,7 @@ describeIfKey("api integration: cross-process restart mid-child-run (Phase 4 exi
           expect(JSON.stringify(childEntries)).toContain("p4-restart-ok");
         } finally {
           await restored.engineHost.destroyAll();
-          restored.sqlite.close();
+          await restored.pglite.close();
         }
       } finally {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");

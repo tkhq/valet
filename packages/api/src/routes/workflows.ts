@@ -78,7 +78,7 @@ function rowToDefinition(row: typeof workflowDefinitions.$inferSelect): Workflow
   return {
     id: row.id,
     name: row.name,
-    definition: JSON.parse(row.definition) as unknown,
+    definition: row.definition,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -118,11 +118,10 @@ workflowsRouter.post("/", async (c) => {
       ownerType: "user",
       ownerId: user.id,
       name: body.name,
-      definition: JSON.stringify(body.definition),
+      definition: body.definition,
       createdAt: now,
       updatedAt: now,
-    })
-    .run();
+    });
 
   const resp: CreateWorkflowResponse = {
     id,
@@ -142,8 +141,7 @@ workflowsRouter.get("/", async (c) => {
     .select()
     .from(workflowDefinitions)
     .where(and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .orderBy(desc(workflowDefinitions.updatedAt))
-    .all();
+    .orderBy(desc(workflowDefinitions.updatedAt));
 
   const resp: ListWorkflowsResponse = { workflows: rows.map(rowToDefinition) };
   return c.json(resp);
@@ -154,11 +152,12 @@ workflowsRouter.get("/:id", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const row = await db
+  const rows = await db
     .select()
     .from(workflowDefinitions)
     .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return c.json({ error: "workflow not found" }, 404);
 
   const resp: GetWorkflowResponse = rowToDefinition(row);
@@ -170,11 +169,12 @@ workflowsRouter.put("/:id", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const row = await db
+  const rows = await db
     .select()
     .from(workflowDefinitions)
     .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return c.json({ error: "workflow not found" }, 404);
 
   let body: UpdateWorkflowRequest;
@@ -199,16 +199,15 @@ workflowsRouter.put("/:id", async (c) => {
     .update(workflowDefinitions)
     .set({
       name: body.name ?? row.name,
-      definition: body.definition !== undefined ? JSON.stringify(body.definition) : row.definition,
+      definition: body.definition !== undefined ? body.definition : row.definition,
       updatedAt: now,
     })
-    .where(eq(workflowDefinitions.id, id))
-    .run();
+    .where(eq(workflowDefinitions.id, id));
 
   const resp: UpdateWorkflowResponse = {
     id,
     name: body.name ?? row.name,
-    definition: body.definition !== undefined ? body.definition : (JSON.parse(row.definition) as unknown),
+    definition: body.definition !== undefined ? body.definition : row.definition,
     createdAt: row.createdAt,
     updatedAt: now,
   };
@@ -222,11 +221,12 @@ workflowsRouter.post("/:id/runs", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const row = await db
+  const rows = await db
     .select()
     .from(workflowDefinitions)
     .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return c.json({ error: "workflow not found" }, 404);
 
   let body: StartWorkflowRunRequest = {};
@@ -237,7 +237,7 @@ workflowsRouter.post("/:id/runs", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const definition = JSON.parse(row.definition) as unknown;
+  const definition = row.definition;
   const versionId = definitionVersionId(definition);
   const runId = `wfrun_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -264,11 +264,12 @@ workflowsRouter.get("/:id/runs", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const defRow = await db
+  const defRows = await db
     .select({ id: workflowDefinitions.id })
     .from(workflowDefinitions)
     .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .get();
+    .limit(1);
+  const defRow = defRows[0];
   if (!defRow) return c.json({ error: "workflow not found" }, 404);
 
   // `WorkflowStore` has no "list runs by workflowId" method — it's a small,
@@ -281,8 +282,7 @@ workflowsRouter.get("/:id/runs", async (c) => {
     .select({ id: workflowRuns.id })
     .from(workflowRuns)
     .where(eq(workflowRuns.workflowId, id))
-    .orderBy(desc(workflowRuns.createdAt))
-    .all();
+    .orderBy(desc(workflowRuns.createdAt));
 
   const runs: WorkflowRunSummary[] = [];
   for (const r of runRows) {

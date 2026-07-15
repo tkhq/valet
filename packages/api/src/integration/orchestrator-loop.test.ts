@@ -169,12 +169,13 @@ describeE2E("api integration: phase 4 exit criteria — full orchestrator loop",
       });
       expect(pinRes.status).toBe(200);
 
-      const pinnedRow = await db
+      const pinnedRows = await db
         .select()
         .from(memoryFiles)
         .where(eq(memoryFiles.path, "preferences/style.md"))
-        .get();
-      expect(pinnedRow?.pinned).toBe(1);
+        .limit(1);
+      const pinnedRow = pinnedRows[0];
+      expect(pinnedRow?.pinned).toBe(true);
 
       // ── 2. Ensure orchestrator, no-tool turn, zero sandbox creates + snapshot present ──
       const ensureRes = await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" });
@@ -212,17 +213,17 @@ describeE2E("api integration: phase 4 exit criteria — full orchestrator loop",
         timeoutMs: 90_000,
       });
 
-      const watchRows = await db.select().from(childWatches).where(eq(childWatches.parentSessionId, sessionId)).all();
+      const watchRows = await db.select().from(childWatches).where(eq(childWatches.parentSessionId, sessionId));
       expect(watchRows).toHaveLength(1);
       const watch = watchRows[0];
 
       await waitFor(async () => {
-        const row = await api!.providers.db
+        const rows = await api!.providers.db
           .select()
           .from(childWatches)
           .where(eq(childWatches.childSessionId, watch.childSessionId))
-          .get();
-        return row?.settled === 1;
+          .limit(1);
+        return rows[0]?.settled === true;
       }, 120_000);
 
       const parent = api.providers.engineHost.liveSession(sessionId);

@@ -54,8 +54,8 @@ orchestratorRouter.post("/", async (c) => {
   // requests can both see no existing row and both attempt this insert;
   // `onConflictDoNothing` on the primary key makes the loser a no-op instead
   // of an uncaught unique-constraint 500.
-  const existingRow = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).get();
-  if (!existingRow) {
+  const existingRows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  if (!existingRows[0]) {
     const now = Date.now();
     const data = await session.toData();
     await db
@@ -72,8 +72,7 @@ orchestratorRouter.post("/", async (c) => {
         createdAt: now,
         updatedAt: now,
       })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
   }
 
   const body: EnsureOrchestratorResponse = { sessionId };
@@ -88,7 +87,7 @@ orchestratorRouter.get("/", async (c) => {
   const principal = userPrincipal(user.id);
   const sessionId = orchestratorSessionId(principal);
 
-  const identity = await db
+  const identityRows = await db
     .select()
     .from(orchestratorIdentities)
     .where(
@@ -98,9 +97,9 @@ orchestratorRouter.get("/", async (c) => {
         eq(orchestratorIdentities.ownerId, principal.id),
       ),
     )
-    .get();
+    .limit(1);
 
-  const body: GetOrchestratorResponse = { sessionId, exists: identity !== undefined };
+  const body: GetOrchestratorResponse = { sessionId, exists: identityRows[0] !== undefined };
   return c.json(body);
 });
 
@@ -126,7 +125,7 @@ orchestratorRouter.get("/info", async (c) => {
   const principal = userPrincipal(user.id);
   const sessionId = orchestratorSessionId(principal);
 
-  const identity = await db
+  const identityRows = await db
     .select()
     .from(orchestratorIdentities)
     .where(
@@ -136,8 +135,8 @@ orchestratorRouter.get("/info", async (c) => {
         eq(orchestratorIdentities.ownerId, principal.id),
       ),
     )
-    .get();
-  const name = identity?.handle ?? null;
+    .limit(1);
+  const name = identityRows[0]?.handle ?? null;
 
   // Own-scope only — a team member's `assistant/personality.md` must never
   // leak into this user's persona/info response (`readOwnFile` bypasses
@@ -147,12 +146,12 @@ orchestratorRouter.get("/info", async (c) => {
   const personalityRow = await readOwnFile(db, scope, "assistant/personality.md");
   const personality = personalityRow ? personalityRow.content : null;
 
-  const unsettled = await db
+  const unsettledRows = await db
     .select({ n: count() })
     .from(childWatches)
-    .where(and(eq(childWatches.parentSessionId, sessionId), eq(childWatches.settled, 0)))
-    .get();
-  const activeChildren = unsettled?.n ?? 0;
+    .where(and(eq(childWatches.parentSessionId, sessionId), eq(childWatches.settled, false)))
+    .limit(1);
+  const activeChildren = unsettledRows[0]?.n ?? 0;
 
   let presence: OrchestratorPresence = "idle";
   if (activeChildren > 0) {
@@ -207,8 +206,7 @@ orchestratorRouter.patch("/info", async (c) => {
       .onConflictDoUpdate({
         target: [orchestratorIdentities.orgId, orchestratorIdentities.ownerType, orchestratorIdentities.ownerId],
         set: { handle: body.name },
-      })
-      .run();
+      });
   }
 
   if (body.personality !== undefined) {
@@ -253,14 +251,13 @@ orchestratorRouter.get("/children", async (c) => {
     .from(childWatches)
     .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
     .where(eq(childWatches.parentSessionId, sessionId))
-    .orderBy(desc(childWatches.createdAt))
-    .all();
+    .orderBy(desc(childWatches.createdAt));
 
   const children: OrchestratorChildSummary[] = rows.map((r) => ({
     sessionId: r.sessionId,
     title: r.title ?? r.sessionId,
     parentThreadId: r.parentThreadId,
-    status: r.settled === 1 ? "settled" : "running",
+    status: r.settled ? "settled" : "running",
     createdAt: r.createdAt,
   }));
 

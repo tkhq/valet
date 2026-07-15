@@ -80,8 +80,7 @@ export async function writeDropLog(
       conversationKey: fields.conversationKey ?? null,
       detail: fields.detail,
       createdAt: Date.now(),
-    })
-    .run();
+    });
 }
 
 /**

@@ -14,13 +14,11 @@
  * this phase), relevance boosting, shareable-export filtering, reranking,
  * and tag-similarity hints.
  */
-import { SqliteError } from "better-sqlite3";
-import { and, eq } from "drizzle-orm";
-import { sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
 import { NotFoundError, ValidationError } from "@valet/shared";
-import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { memoryFiles, teamMembers, type MemoryFileRow } from "../schema/index.js";
 import { listTeamsForUser } from "./teams.js";
 import {
@@ -106,41 +104,6 @@ export function renderFile(row: MemoryFileRow): string {
   return renderConcept(rowToRenderable(row));
 }
 
-// ─── FTS sync — the ONE helper every mutation goes through ────────────────
-
-function ftsDescription(row: { description: string; content: string }): string {
-  if (row.description !== "") return row.description;
-  const firstParagraph = row.content.split(/\n\s*\n/)[0]?.trim() ?? "";
-  return firstParagraph;
-}
-
-function ftsTags(tagsJson: string): string {
-  return safeParseArray(tagsJson).join(" ");
-}
-
-/**
- * Deletes any existing `memory_files_fts` row for `rowid`, then (when
- * `row` is non-null) re-inserts it from the current base-row values. Every
- * mutation site (write/patch/delete) calls this — the single fts-sync
- * chokepoint the plan requires.
- */
-function syncFts(db: AppQueryable, rowid: number, row: MemoryFileRow | null): void {
-  db.run(sql`DELETE FROM memory_files_fts WHERE rowid = ${rowid}`);
-  if (row) {
-    db.run(
-      sql`INSERT INTO memory_files_fts (rowid, path, title, description, tags, content)
-          VALUES (${rowid}, ${row.path}, ${row.title}, ${ftsDescription(row)}, ${ftsTags(row.tags)}, ${row.content})`,
-    );
-  }
-}
-
-function getRowid(db: AppQueryable, ownerType: string, ownerId: string, path: string): number | undefined {
-  const r = db.get<{ rowid: number }>(
-    sql`SELECT rowid as rowid FROM memory_files WHERE owner_type = ${ownerType} AND owner_id = ${ownerId} AND path = ${path}`,
-  );
-  return r?.rowid;
-}
-
 // ─── Read-union resolution (decision 14) ──────────────────────────────────
 
 interface ReadableOwner {
@@ -163,12 +126,12 @@ async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<Rea
 }
 
 async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<boolean> {
-  const row = await db
+  const rows = await db
     .select()
     .from(teamMembers)
     .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
-    .get();
-  return row !== undefined;
+    .limit(1);
+  return rows.length > 0;
 }
 
 const TEAM_PREFIX_RE = /^team:([^/]+)\/(.*)$/;
@@ -230,11 +193,12 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     throw new ValidationError("to clear a file use removeFile; to update metadata only, omit content");
   }
 
-  const existing = await db
+  const existingRows = await db
     .select()
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, path)))
-    .get();
+    .limit(1);
+  const existing = existingRows[0];
 
   if (!existing && params.content === undefined) {
     throw new ValidationError(`${path} does not exist — provide content to create it`);
@@ -276,7 +240,7 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     sensitivity: params.sensitivity ?? existing?.sensitivity ?? "private",
     origin: params.origin !== undefined ? params.origin : (existing?.origin ?? ""),
     expires: params.expires !== undefined ? params.expires : (existing?.expires ?? null),
-    pinned: params.pinned !== undefined ? (params.pinned ? 1 : 0) : (existing?.pinned ?? 0),
+    pinned: params.pinned !== undefined ? params.pinned : (existing?.pinned ?? false),
     actorUserId: scope.actorUserId,
     sourceSessionId: existing?.sourceSessionId ?? "",
     orgId: existing?.orgId ?? "",
@@ -285,17 +249,15 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     updatedAt: now,
   };
 
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     if (existing) {
-      tx.update(memoryFiles)
+      await tx
+        .update(memoryFiles)
         .set(row)
-        .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)))
-        .run();
+        .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)));
     } else {
-      tx.insert(memoryFiles).values(row).run();
+      await tx.insert(memoryFiles).values(row);
     }
-    const rowid = getRowid(tx, row.ownerType, row.ownerId, row.path);
-    if (rowid !== undefined) syncFts(tx, rowid, row);
   });
 
   return { file: row, warnings };
@@ -315,11 +277,12 @@ export interface PatchFileParams {
  * `writeFile`, since it delegates there. */
 export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFileParams): Promise<WriteFileResult> {
   const path = normalizePath(params.path);
-  const existing = await db
+  const existingRows = await db
     .select()
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, path)))
-    .get();
+    .limit(1);
+  const existing = existingRows[0];
 
   if (!existing) {
     if (params.oldString !== "") {
@@ -342,22 +305,29 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
 
 export async function removeFile(db: AppDb, scope: MemoryScope, path: string): Promise<void> {
   const normalized = normalizePath(path);
-  const rowid = getRowid(db, scope.owner.type, scope.owner.id, normalized);
-  if (rowid === undefined) {
+  const existingRows = await db
+    .select({ path: memoryFiles.path })
+    .from(memoryFiles)
+    .where(
+      and(
+        eq(memoryFiles.ownerType, scope.owner.type),
+        eq(memoryFiles.ownerId, scope.owner.id),
+        eq(memoryFiles.path, normalized),
+      ),
+    )
+    .limit(1);
+  if (existingRows.length === 0) {
     throw new NotFoundError("memory file", normalized);
   }
-  db.transaction((tx) => {
-    tx.delete(memoryFiles)
-      .where(
-        and(
-          eq(memoryFiles.ownerType, scope.owner.type),
-          eq(memoryFiles.ownerId, scope.owner.id),
-          eq(memoryFiles.path, normalized),
-        ),
-      )
-      .run();
-    syncFts(tx, rowid, null);
-  });
+  await db
+    .delete(memoryFiles)
+    .where(
+      and(
+        eq(memoryFiles.ownerType, scope.owner.type),
+        eq(memoryFiles.ownerId, scope.owner.id),
+        eq(memoryFiles.path, normalized),
+      ),
+    );
 }
 
 // ─── readFile (file or virtual directory index) ───────────────────────
@@ -448,8 +418,7 @@ async function readDirectory(db: AppDb, scope: MemoryScope, path: string): Promi
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)))
-    .all();
+    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)));
 
   const { subdirs: subdirSet0, files } = groupEntries(rows, normalizedReal);
 
@@ -486,11 +455,12 @@ export async function readFile(
   }
   const normalized = normalizePath(target.realPath);
 
-  const row = await db
+  const rowRows = await db
     .select()
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.path, normalized)))
-    .get();
+    .limit(1);
+  const row = rowRows[0];
 
   if (!row) {
     // Fall back to a directory read: a path prefix that matches existing
@@ -498,8 +468,7 @@ export async function readFile(
     const rows = await db
       .select({ path: memoryFiles.path })
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)))
-      .all();
+      .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)));
     const prefix = `${normalized}/`;
     if (rows.some((r) => r.path.startsWith(prefix))) {
       return readDirectory(db, scope, `${path}/`);
@@ -522,12 +491,12 @@ export async function readFile(
  */
 export async function readOwnFile(db: AppDb, scope: MemoryScope, path: string): Promise<MemoryFileRow | null> {
   const normalized = normalizePath(path);
-  const row = await db
+  const rows = await db
     .select()
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, normalized)))
-    .get();
-  return row ?? null;
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 // ─── listFiles ─────────────────────────────────────────────────────────
@@ -552,8 +521,7 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
     const rows = await db
       .select()
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId)))
-      .all();
+      .where(and(eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId)));
     for (const row of rows) {
       const virtualPath = `${owner.prefix}${row.path}`;
       if (opts?.prefix && !virtualPath.startsWith(opts.prefix)) continue;
@@ -562,7 +530,7 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
         title: row.title,
         description: row.description,
         type: row.type,
-        pinned: row.pinned === 1,
+        pinned: row.pinned,
         updatedAt: row.updatedAt,
       });
     }
@@ -586,48 +554,80 @@ export interface SearchResult {
   rank: number;
 }
 
-interface RawSearchRow {
-  path: string;
-  title: string;
-  description: string;
-  type: string;
-  owner_type: string;
-  owner_id: string;
-  rank: number;
+/** Narrows an unknown error to one carrying a string `code` property —
+ * mirrors `@valet/store-postgres`'s `isPgUniqueViolation`-family helpers. */
+function hasStringCode(value: unknown): value is { code: string } {
+  return typeof value === "object" && value !== null && "code" in value && typeof (value as { code: unknown }).code === "string";
 }
 
-/** FTS5 MATCH with bm25 weights `path 5, title 10, description 8, tags 6,
- * content 1` (fts5's `bm25()` takes weights in COLUMN ORDER — the
- * fts5(path, title, description, tags, content) declaration order, not
- * named). Expired rows (`expires < now`) are excluded. Read-union applies:
- * results from team scopes carry the virtual `team:{id}/` prefix. */
+/** True for Postgres's syntax-error-class codes (`42601` syntax_error,
+ * `42804` datatype_mismatch). */
+function isPgSyntaxError(err: unknown): boolean {
+  return hasStringCode(err) && (err.code === "42601" || err.code === "42804");
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * `search_vector` is a `tsvector` GENERATED ALWAYS column (weights: A=title,
+ * B=description, C=path+tags, D=content — see the schema's comment on
+ * `memoryFiles` and the migration) — Drizzle has no column definition for
+ * it, so it's referenced by name through raw `sql` fragments below.
+ * `websearch_to_tsquery` parses forgivingly (unlike fts5's `MATCH`, it does
+ * not raise a syntax error for something like an unbalanced quote — it
+ * degrades to a literal-term search), so the invalid-query catch below is a
+ * defensive backstop for genuine Postgres syntax errors, not a reachable
+ * path for typical malformed user input the way it was under fts5. Expired
+ * rows (`expires < now`) are excluded. Read-union applies: results from team
+ * scopes carry the virtual `team:{id}/` prefix.
+ */
 export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchFilesParams): Promise<SearchResult[]> {
   const owners = await resolveReadableOwners(db, scope);
   const limit = params.limit ?? 20;
   const now = Date.now();
 
-  const ownerConditions = owners.map(
-    (o) => sql`(mf.owner_type = ${o.ownerType} AND mf.owner_id = ${o.ownerId})`,
+  const ownerClause = or(
+    ...owners.map((o) => and(eq(memoryFiles.ownerType, o.ownerType), eq(memoryFiles.ownerId, o.ownerId))),
   );
-  const ownerClause = sql.join(ownerConditions, sql` OR `);
 
-  let rows: RawSearchRow[];
+  const tsQuery = sql`websearch_to_tsquery('english', ${params.query})`;
+  const rankExpr = sql<number>`ts_rank_cd(search_vector, ${tsQuery})`;
+
+  let rows: Array<{
+    path: string;
+    title: string;
+    description: string;
+    type: string;
+    ownerType: string;
+    ownerId: string;
+    rank: number;
+  }>;
   try {
-    rows = db.all<RawSearchRow>(sql`
-      SELECT mf.path as path, mf.title as title, mf.description as description, mf.type as type,
-             mf.owner_type as owner_type, mf.owner_id as owner_id,
-             bm25(memory_files_fts, 5, 10, 8, 6, 1) as rank
-      FROM memory_files_fts
-      JOIN memory_files mf ON mf.rowid = memory_files_fts.rowid
-      WHERE memory_files_fts MATCH ${params.query}
-        AND (${ownerClause})
-        AND (mf.expires IS NULL OR mf.expires > ${now})
-      ORDER BY rank
-      LIMIT ${limit}
-    `);
+    rows = await db
+      .select({
+        path: memoryFiles.path,
+        title: memoryFiles.title,
+        description: memoryFiles.description,
+        type: memoryFiles.type,
+        ownerType: memoryFiles.ownerType,
+        ownerId: memoryFiles.ownerId,
+        rank: rankExpr,
+      })
+      .from(memoryFiles)
+      .where(
+        and(
+          sql`search_vector @@ ${tsQuery}`,
+          ownerClause,
+          or(isNull(memoryFiles.expires), gt(memoryFiles.expires, now)),
+        ),
+      )
+      .orderBy(desc(rankExpr))
+      .limit(limit);
   } catch (err) {
-    if (err instanceof SqliteError && err.code === "SQLITE_ERROR") {
-      throw new ValidationError(`invalid search query: ${err.message}`);
+    if (isPgSyntaxError(err)) {
+      throw new ValidationError(`invalid search query: ${errorMessage(err)}`);
     }
     throw err;
   }
@@ -635,7 +635,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
   const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}`, o.prefix]));
 
   return rows.map((r) => ({
-    path: `${prefixByOwner.get(`${r.owner_type}:${r.owner_id}`) ?? ""}${r.path}`,
+    path: `${prefixByOwner.get(`${r.ownerType}:${r.ownerId}`) ?? ""}${r.path}`,
     title: r.title,
     description: r.description,
     type: r.type,
@@ -660,8 +660,7 @@ export async function exportFiles(db: AppDb, scope: MemoryScope): Promise<Record
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)))
-    .all();
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
 
   const manifest: Record<string, ExportEntry> = {};
   for (const row of rows) {
@@ -777,11 +776,12 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
       warnings.push(`${finalPath}: dropped unknown valet keys: ${parsed.droppedValetKeys.join(", ")}`);
     }
 
-    const existing = await db
+    const existingRows = await db
       .select()
       .from(memoryFiles)
       .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, finalPath)))
-      .get();
+      .limit(1);
+    const existing = existingRows[0];
 
     const sensitivity = params.trusted ? (parsed.valet.sensitivity ?? existing?.sensitivity ?? "private") : "private";
     const origin = params.trusted ? (parsed.valet.origin ?? existing?.origin ?? "") : "imported";
@@ -814,7 +814,7 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
       sensitivity,
       origin,
       expires,
-      pinned: existing?.pinned ?? 0,
+      pinned: existing?.pinned ?? false,
       actorUserId: scope.actorUserId,
       sourceSessionId: params.trusted ? (existing?.sourceSessionId ?? "") : "",
       orgId: existing?.orgId ?? "",
@@ -823,17 +823,15 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
       updatedAt,
     };
 
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       if (existing) {
-        tx.update(memoryFiles)
+        await tx
+          .update(memoryFiles)
           .set(row)
-          .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)))
-          .run();
+          .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)));
       } else {
-        tx.insert(memoryFiles).values(row).run();
+        await tx.insert(memoryFiles).values(row);
       }
-      const rowid = getRowid(tx, row.ownerType, row.ownerId, row.path);
-      if (rowid !== undefined) syncFts(tx, rowid, row);
     });
 
     imported.push(finalPath);

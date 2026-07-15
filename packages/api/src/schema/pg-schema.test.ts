@@ -15,7 +15,7 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
-import { applyAppMigrations, buildAppPgDb } from "../lib/drizzle-pg.js";
+import { applyAppMigrations, buildAppDb as buildAppPgDb } from "../lib/drizzle.js";
 import {
   users,
   session,
@@ -27,7 +27,7 @@ import {
   oauthAccessToken,
   oauthConsent,
   memoryFiles,
-} from "./index.pg.js";
+} from "./index.js";
 
 const APP_TABLES = [
   "orgs",

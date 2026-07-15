@@ -83,7 +83,8 @@ function handleServiceError(err: unknown): { body: { error: string; code?: strin
 }
 
 async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId: string, orgId: string) {
-  const row = await db.select().from(teams).where(eq(teams.id, teamId)).get();
+  const rows = await db.select().from(teams).where(eq(teams.id, teamId)).limit(1);
+  const row = rows[0];
   if (!row || row.orgId !== orgId) return undefined;
   return row;
 }
@@ -102,12 +103,12 @@ async function canMutateTeam(
   user: AuthUser,
 ): Promise<boolean> {
   if (await isOrgAdmin(db, user.orgId, user.id)) return true;
-  const member = await db
+  const members = await db
     .select()
     .from(teamMembers)
     .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, user.id)))
-    .get();
-  return member?.role === "admin";
+    .limit(1);
+  return members[0]?.role === "admin";
 }
 
 /**
@@ -121,12 +122,12 @@ async function canViewTeam(
   user: AuthUser,
 ): Promise<boolean> {
   if (await isOrgAdmin(db, user.orgId, user.id)) return true;
-  const member = await db
+  const members = await db
     .select()
     .from(teamMembers)
     .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, user.id)))
-    .get();
-  return !!member;
+    .limit(1);
+  return members.length > 0;
 }
 
 // ── List ──────────────────────────────────────────────────────────────────

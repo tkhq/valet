@@ -129,10 +129,11 @@ describe("auth v2 — end-to-end deployment flow", () => {
     // 6. Sandbox token minted directly (no HTTP mint endpoint this pass) +
     // a memory-route call authenticates via x-valet-sandbox.
     const { db } = api.providers;
-    const adminRow = await db.select().from(users).where(eq(users.email, "admin@nowhere.test")).get();
+    const adminRows = await db.select().from(users).where(eq(users.email, "admin@nowhere.test")).limit(1);
+    const adminRow = adminRows[0];
     expect(adminRow).toBeDefined();
 
-    const { token: sandboxToken } = mintSandboxToken(db, {
+    const { token: sandboxToken } = await mintSandboxToken(db, {
       sessionId: "e2e-sandbox-session",
       userId: adminRow!.id,
       orgId: adminMe.orgId,

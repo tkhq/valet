@@ -50,7 +50,7 @@ describe("GET /api/orchestrator/info", () => {
     });
 
     // Never creates — no identity row, no agent_sessions row.
-    const identityRows = await api.providers.db.select().from(orchestratorIdentities).all();
+    const identityRows = await api.providers.db.select().from(orchestratorIdentities);
     expect(identityRows).toHaveLength(0);
   });
 
@@ -68,10 +68,9 @@ describe("GET /api/orchestrator/info", () => {
         parentThreadId: "th-1",
         actorUserId: "local-user",
         orgId: "local-org",
-        settled: 0,
+        settled: false,
         createdAt: now,
-      })
-      .run();
+      });
 
     const res = await fetch(`${api.baseUrl}/api/orchestrator/info`);
     const body = (await res.json()) as GetOrchestratorInfoResponse;
@@ -131,10 +130,9 @@ describe("GET /api/orchestrator/info", () => {
         parentThreadId: "th-1",
         actorUserId: "local-user",
         orgId: "local-org",
-        settled: 1,
+        settled: true,
         createdAt: Date.now(),
-      })
-      .run();
+      });
 
     const res = await fetch(`${api.baseUrl}/api/orchestrator/info`);
     const body = (await res.json()) as GetOrchestratorInfoResponse;
@@ -161,8 +159,7 @@ describe("PATCH /api/orchestrator/info", () => {
     const identityRows = await db
       .select()
       .from(orchestratorIdentities)
-      .where(eq(orchestratorIdentities.sessionId, ORCH_SESSION_ID))
-      .all();
+      .where(eq(orchestratorIdentities.sessionId, ORCH_SESSION_ID));
     expect(identityRows).toHaveLength(1);
     expect(identityRows[0]?.handle).toBe("Wren");
 
@@ -174,10 +171,10 @@ describe("PATCH /api/orchestrator/info", () => {
     // The memory file is visible through the ordinary memory route too.
     const memRes = await fetch(`${api.baseUrl}/api/memory?path=assistant/personality.md`);
     expect(memRes.status).toBe(200);
-    const memBody = (await memRes.json()) as { kind: string; file: { content: string; pinned: number; origin: string } };
+    const memBody = (await memRes.json()) as { kind: string; file: { content: string; pinned: boolean; origin: string } };
     expect(memBody.kind).toBe("file");
     expect(memBody.file.content).toBe("Warm and direct.");
-    expect(memBody.file.pinned).toBe(0);
+    expect(memBody.file.pinned).toBe(false);
     expect(memBody.file.origin).toBe("user-stated");
   });
 
@@ -199,8 +196,7 @@ describe("PATCH /api/orchestrator/info", () => {
     const rows = await db
       .select()
       .from(orchestratorIdentities)
-      .where(eq(orchestratorIdentities.sessionId, ORCH_SESSION_ID))
-      .all();
+      .where(eq(orchestratorIdentities.sessionId, ORCH_SESSION_ID));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.handle).toBe("Atlas");
   });
@@ -265,8 +261,7 @@ describe("GET /api/orchestrator/children", () => {
           createdAt: now,
           updatedAt: now,
         },
-      ])
-      .run();
+      ]);
 
     await db
       .insert(childWatches)
@@ -278,7 +273,7 @@ describe("GET /api/orchestrator/children", () => {
           parentThreadId: "th-1",
           actorUserId: "local-user",
           orgId: "local-org",
-          settled: 1,
+          settled: true,
           createdAt: now,
         },
         {
@@ -288,11 +283,10 @@ describe("GET /api/orchestrator/children", () => {
           parentThreadId: "th-1",
           actorUserId: "local-user",
           orgId: "local-org",
-          settled: 0,
+          settled: false,
           createdAt: now + 1,
         },
-      ])
-      .run();
+      ]);
 
     const res = await fetch(`${api.baseUrl}/api/orchestrator/children`);
     expect(res.status).toBe(200);
@@ -332,8 +326,7 @@ describe("GET /api/orchestrator/children", () => {
         ownerId: "local-user",
         createdAt: now,
         updatedAt: now,
-      })
-      .run();
+      });
     await db
       .insert(childWatches)
       .values({
@@ -343,10 +336,9 @@ describe("GET /api/orchestrator/children", () => {
         parentThreadId: "th-1",
         actorUserId: "someone-else",
         orgId: "local-org",
-        settled: 0,
+        settled: false,
         createdAt: now,
-      })
-      .run();
+      });
 
     const res = await fetch(`${api.baseUrl}/api/orchestrator/children`);
     const body = (await res.json()) as GetOrchestratorChildrenResponse;

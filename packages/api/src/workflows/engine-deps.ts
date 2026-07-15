@@ -104,11 +104,12 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   if (!run) throw new Error(`workflow engine-deps: run not found: ${runId}`);
   if (!run.owner) throw new Error(`workflow engine-deps: run ${runId} has no recorded owner`);
 
-  const defRow = await opts.db
+  const defRows = await opts.db
     .select({ orgId: workflowDefinitions.orgId })
     .from(workflowDefinitions)
     .where(eq(workflowDefinitions.id, run.params.workflowId))
-    .get();
+    .limit(1);
+  const defRow = defRows[0];
   if (!defRow) {
     throw new Error(`workflow engine-deps: definition not found: ${run.params.workflowId}`);
   }
@@ -196,11 +197,12 @@ async function ensureOrchestratorSession(
   sessionId: string,
   principal: Principal,
 ) {
-  const row = await opts.db
+  const rows = await opts.db
     .select({ orgId: orchestratorIdentities.orgId })
     .from(orchestratorIdentities)
     .where(eq(orchestratorIdentities.sessionId, sessionId))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) {
     throw new Error(
       `workflow engine-deps: no orchestrator identity recorded for ${sessionId} — ` +

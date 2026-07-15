@@ -1,32 +1,25 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import Database from "better-sqlite3";
-import { ValidationError } from "@valet/shared";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "./teams.js";
 import { parseConcept } from "../lib/okf.js";
 import { listFiles, patchFile, readFile, removeFile, searchFiles, writeFile, type MemoryScope } from "./memory.js";
 
-function seedUser(db: AppDb, id: string, orgId: string) {
-  db.insert(users)
-    .values({ id, email: `${id}@x.test`, name: id, role: "member" })
-    .run();
-  db.insert(orgMembers).values({ orgId, userId: id, role: "member" }).run();
+async function seedUser(db: AppDb, id: string, orgId: string) {
+  await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
+  await db.insert(orgMembers).values({ orgId, userId: id, role: "member" });
 }
 
 describe("memory service", () => {
-  let sqlite: Database.Database;
   let db: AppDb;
   const orgId = "org1";
 
-  beforeEach(() => {
-    sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    applyAppMigrations(sqlite);
-    db = buildAppDb(sqlite);
-    db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() }).run();
-    seedUser(db, "u1", orgId);
-    seedUser(db, "u2", orgId);
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+    await seedUser(db, "u1", orgId);
+    await seedUser(db, "u2", orgId);
   });
 
   function scopeFor(userId: string): MemoryScope {
@@ -259,9 +252,16 @@ describe("memory service", () => {
       expect(results.map((r) => r.path)).toContain(`team:${team.id}/notes/findme.md`);
     });
 
-    it("rejects a malformed FTS5 query (unbalanced quote) with ValidationError instead of throwing raw SqliteError", async () => {
+    it("tolerates syntactically odd input (unbalanced quote) instead of throwing — websearch_to_tsquery parses it as a literal term", async () => {
+      // Under fts5, an unbalanced quote raised a raw SqliteError that this
+      // service mapped to ValidationError. Postgres's websearch_to_tsquery
+      // is deliberately forgiving of "web search" syntax (spec decision 9)
+      // and never raises a syntax error for input like this — it just
+      // degrades to treating it as a literal search term. The
+      // invalid-query -> ValidationError path stays in the implementation as
+      // a defensive backstop, but this specific input no longer exercises it.
       const scope = scopeFor("u1");
-      await expect(searchFiles(db, scope, { query: '"foo' })).rejects.toThrow(ValidationError);
+      await expect(searchFiles(db, scope, { query: '"foo' })).resolves.not.toThrow();
     });
   });
 });

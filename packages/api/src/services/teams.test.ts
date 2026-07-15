@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import Database from "better-sqlite3";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, teams, users } from "../schema/index.js";
 import {
   addMember,
@@ -17,28 +17,21 @@ import {
   TeamNameConflictError,
 } from "./teams.js";
 
-function seedUser(db: AppDb, id: string, orgId: string) {
-  db.insert(users)
-    .values({ id, email: `${id}@x.test`, name: id, role: "member" })
-    .run();
-  db.insert(orgMembers).values({ orgId, userId: id, role: "member" }).run();
+async function seedUser(db: AppDb, id: string, orgId: string) {
+  await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
+  await db.insert(orgMembers).values({ orgId, userId: id, role: "member" });
 }
 
 describe("teams service", () => {
-  let sqlite: Database.Database;
   let db: AppDb;
   const orgId = "org1";
 
-  beforeEach(() => {
-    sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    applyAppMigrations(sqlite);
-    db = buildAppDb(sqlite);
-    db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() }).run();
-    seedUser(db, "u1", orgId);
-    seedUser(db, "u2", orgId);
-    seedUser(db, "u3", orgId);
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+    await seedUser(db, "u1", orgId);
+    await seedUser(db, "u2", orgId);
+    await seedUser(db, "u3", orgId);
   });
 
   it("createTeam auto-admits the creator as admin", async () => {
@@ -59,8 +52,8 @@ describe("teams service", () => {
   });
 
   it("allows the same team name across different orgs", async () => {
-    db.insert(orgs).values({ id: "org2", name: "Org2", createdAt: Date.now() }).run();
-    seedUser(db, "u9", "org2");
+    await db.insert(orgs).values({ id: "org2", name: "Org2", createdAt: Date.now() });
+    await seedUser(db, "u9", "org2");
     await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
     await expect(
       createTeam(db, { orgId: "org2", name: "Platform", creatorUserId: "u9" }),
@@ -170,8 +163,8 @@ describe("teams service", () => {
   });
 
   it("addMember rejects a userId that belongs to a different org", async () => {
-    db.insert(orgs).values({ id: "org2", name: "Org2", createdAt: Date.now() }).run();
-    seedUser(db, "u9", "org2");
+    await db.insert(orgs).values({ id: "org2", name: "Org2", createdAt: Date.now() });
+    await seedUser(db, "u9", "org2");
 
     const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
     await expect(addMember(db, { teamId: team.id, userId: "u9", role: "member" })).rejects.toThrow(
@@ -184,7 +177,7 @@ describe("teams service", () => {
     // conflicting row appearing between an out-of-band check and the
     // transaction — the `teams_org_name` unique index is the real backstop,
     // and a violation must map to TeamNameConflictError, not a raw 500.
-    db.insert(teams).values({ id: "team_preexisting", orgId, name: "Platform", createdAt: Date.now() }).run();
+    await db.insert(teams).values({ id: "team_preexisting", orgId, name: "Platform", createdAt: Date.now() });
 
     await expect(createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" })).rejects.toThrow(
       TeamNameConflictError,

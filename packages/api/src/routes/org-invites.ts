@@ -55,7 +55,7 @@ orgInvitesRouter.post("/", async (c) => {
     return c.json({ error: "email must be a string" }, 400);
   }
 
-  const { invite, code } = createInvite(db, {
+  const { invite, code } = await createInvite(db, {
     email: body.email,
     role: body.role,
     createdBy: user.id,
@@ -76,7 +76,7 @@ orgInvitesRouter.get("/", async (c) => {
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
-  const resp: ListInvitesResponse = { invites: listPendingInvites(db) };
+  const resp: ListInvitesResponse = { invites: await listPendingInvites(db) };
   return c.json(resp);
 });
 
@@ -86,7 +86,7 @@ orgInvitesRouter.delete("/:id", async (c) => {
 
   const { db } = c.var.providers;
   const id = c.req.param("id");
-  const revoked = revokeInvite(db, id);
+  const revoked = await revokeInvite(db, id);
   if (!revoked) return c.json({ error: "invite not found" }, 404);
 
   const resp: RevokeInviteResponse = { ok: true };

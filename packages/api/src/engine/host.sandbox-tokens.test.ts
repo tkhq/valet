@@ -95,11 +95,12 @@ describe("EngineHost sandbox token wiring", () => {
       deriveSandboxJwtSecret(internalToken(), "sbtok-session-1"),
     );
 
-    const row = await db
+    const rows = await db
       .select()
       .from(sandboxTokens)
       .where(and(eq(sandboxTokens.sessionId, "sbtok-session-1"), isNull(sandboxTokens.revokedAt)))
-      .get();
+      .limit(1);
+    const row = rows[0];
     expect(row).toBeDefined();
     expect(row?.userId).toBe("local-user");
     expect(row?.orgId).toBe("local-org");
@@ -120,8 +121,7 @@ describe("EngineHost sandbox token wiring", () => {
     const before = await db
       .select()
       .from(sandboxTokens)
-      .where(eq(sandboxTokens.sessionId, "sbtok-session-2"))
-      .all();
+      .where(eq(sandboxTokens.sessionId, "sbtok-session-2"));
     expect(before.length).toBe(1);
     expect(before[0].revokedAt).toBeNull();
 
@@ -130,8 +130,7 @@ describe("EngineHost sandbox token wiring", () => {
     const after = await db
       .select()
       .from(sandboxTokens)
-      .where(eq(sandboxTokens.sessionId, "sbtok-session-2"))
-      .all();
+      .where(eq(sandboxTokens.sessionId, "sbtok-session-2"));
     expect(after.length).toBe(1);
     expect(after[0].revokedAt).not.toBeNull();
   });
@@ -168,8 +167,7 @@ describe("EngineHost sandbox token wiring", () => {
     const rows = await db
       .select()
       .from(sandboxTokens)
-      .where(eq(sandboxTokens.sessionId, "sbtok-session-3"))
-      .all();
+      .where(eq(sandboxTokens.sessionId, "sbtok-session-3"));
     expect(rows.length).toBe(2);
     const revoked = rows.filter((r) => r.revokedAt !== null);
     const live = rows.filter((r) => r.revokedAt === null);

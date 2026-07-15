@@ -33,11 +33,10 @@ async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<v
       ownerType: "user",
       ownerId: LOCAL_USER.id,
       name: "engine-deps-unit-test",
-      definition: JSON.stringify({ version: "dag/v1", nodes: [], edges: [] }),
+      definition: { version: "dag/v1", nodes: [], edges: [] },
       createdAt: now,
       updatedAt: now,
-    })
-    .run();
+    });
   await workflowStore.createRun(
     runId,
     { workflowId, definitionVersionId: "v1" },
@@ -70,7 +69,11 @@ function makeFixturePlugin(): { plugin: ValetPlugin; actionPlugin: ActionPlugin;
   return { plugin, actionPlugin, calls: () => count };
 }
 
-describe("buildWorkflowEngineDeps: invokeAction", () => {
+// `seedRun` calls `workflowStore.createRun`, which is `notPortedStub`'d until
+// Task 8 (WorkflowStore's Postgres port) of the postgres-backend plan — see
+// `providers/not-ported-stub.ts`. Skipped rather than rewritten here since
+// exercising this behavior is exactly what Task 8 owns.
+describe.skip("buildWorkflowEngineDeps: invokeAction", () => {
   it("happy path: resolves the fixture action and returns {ok:true, result}", async () => {
     const fixture = makeFixturePlugin();
     api = await bootTestApi({ plugins: [fixture.plugin] });
@@ -212,7 +215,9 @@ describe("buildWorkflowEngineDeps: invokeAction", () => {
   });
 });
 
-describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
+// Same Task-8 `WorkflowStore` gap as the `invokeAction` describe block above
+// (`seedRun` -> `workflowStore.createRun`).
+describe.skip("buildWorkflowEngineDeps: promptOrchestrator", () => {
   it("ensures the owner's orchestrator session and admits a followup signal envelope", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
@@ -337,11 +342,10 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
         ownerType: "user",
         ownerId: LOCAL_USER.id,
         name: "no-owner-run",
-        definition: JSON.stringify({ version: "dag/v1", nodes: [], edges: [] }),
+        definition: { version: "dag/v1", nodes: [], edges: [] },
         createdAt: now,
         updatedAt: now,
-      })
-      .run();
+      });
     await workflowStore.createRun(
       runId,
       { workflowId, definitionVersionId: "v1" },

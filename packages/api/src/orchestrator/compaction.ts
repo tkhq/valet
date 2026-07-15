@@ -24,7 +24,7 @@ export function journalCompactionHook(db: AppDb, scope: MemoryScope): Compaction
   return async ({ mode, summary }) => {
     const path = todayJournalPath();
 
-    const existing = await db
+    const existingRows = await db
       .select({ content: memoryFiles.content })
       .from(memoryFiles)
       .where(
@@ -34,7 +34,8 @@ export function journalCompactionHook(db: AppDb, scope: MemoryScope): Compaction
           eq(memoryFiles.path, path),
         ),
       )
-      .get();
+      .limit(1);
+    const existing = existingRows[0];
 
     const dateLabel = path.slice("journal/".length, -".md".length);
     const base = existing?.content ?? `# ${dateLabel}\n`;

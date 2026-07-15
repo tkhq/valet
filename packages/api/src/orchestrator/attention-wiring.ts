@@ -28,11 +28,12 @@ export interface AttentionWiringDeps extends AttentionDeps {
 }
 
 async function sessionLabel(db: AppDb, sessionId: string): Promise<string> {
-  const row = await db
+  const rows = await db
     .select({ title: agentSessions.title })
     .from(agentSessions)
     .where(eq(agentSessions.id, sessionId))
-    .get();
+    .limit(1);
+  const row = rows[0];
   return row?.title || sessionId;
 }
 

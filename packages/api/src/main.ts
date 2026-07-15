@@ -54,11 +54,12 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
       // lookup that rejects (bad row, transient store error) must isolate
       // to this one session, not abort the whole restore pass and
       // crash-loop boot.
-      const row = await providers.db
+      const rows = await providers.db
         .select()
         .from(agentSessions)
         .where(eq(agentSessions.id, sessionId))
-        .get();
+        .limit(1);
+      const row = rows[0];
       return row ? { userId: row.userId, orgId: row.orgId, workspace: row.workspace } : undefined;
     },
     sessionFor: (sessionId, meta) => providers.engineHost.sessionFor(sessionId, meta),
@@ -76,7 +77,8 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
 
 const port = Number.parseInt(process.env.PORT ?? "8787", 10);
 const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
-const dbPath = process.env.VALET_DB_PATH ?? resolve(dataDir, "app.db");
+const databaseUrl = process.env.DATABASE_URL;
+const pgDataDir = process.env.VALET_PG_DATA_DIR ?? resolve(dataDir, "pg");
 const blobsRoot = process.env.VALET_BLOBS_DIR ?? resolve(dataDir, "blobs");
 if (!process.env.VALET_ENCRYPTION_KEY) {
   console.warn("VALET_ENCRYPTION_KEY is unset — using an insecure default. Set it before storing real credentials.");
@@ -100,7 +102,8 @@ const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminali
 const authConfig = loadAuthConfig(process.env);
 
 const providers = await buildNodeProviders({
-  dbPath,
+  databaseUrl,
+  pgDataDir,
   blobsRoot,
   encryptionKey,
   anthropicApiKey,
@@ -145,7 +148,14 @@ await providers.childWatcher.rearm().catch((err) => {
 
 // Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
 // loops so pending/parked runs left over from a prior process pick back up.
-providers.workflowRunHost.startHost();
+//
+// NOT started during the postgres-backend cutover wave (Task 7): the
+// providers' `workflowStore` is a `notPortedStub` until Task 8 lands
+// `PgWorkflowStore`, and starting the loops against it throws on every poll
+// tick as an unhandled rejection. Task 8 restores this call alongside the
+// real store. (`stopHost()` in `shutdown` below is safe on a never-started
+// host.)
+// providers.workflowRunHost.startHost();
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.
@@ -165,7 +175,7 @@ const { app, injectWebSocket } = createApp(providers, authWiring);
 const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`@valet/api listening on http://localhost:${info.port}`);
   console.log(`  data dir: ${dataDir}`);
-  console.log(`  db:       ${dbPath}`);
+  console.log(`  db:       ${databaseUrl ? databaseUrl.replace(/:[^:@]*@/, ":***@") : `pglite:${pgDataDir}`}`);
   console.log(`  blobs:    ${blobsRoot}`);
   console.log(
     `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,

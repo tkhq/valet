@@ -7,7 +7,6 @@
  * context resolution (`resolveRunContext`) those go through is covered
  * separately in `../workflows/engine-deps.test.ts`.
  */
-import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
 import type {
@@ -18,14 +17,13 @@ import type {
   StoredCredential,
   ValetPlugin,
 } from "@valet/engine";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
 
-function makeDb(): AppDb {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("journal_mode = WAL");
-  applyAppMigrations(sqlite);
-  return buildAppDb(sqlite);
+async function makeDb(): Promise<AppDb> {
+  const { appDb } = await freshTestPgDb();
+  return appDb;
 }
 
 /** Minimal in-memory `CredentialStore` — enough to exercise scoping/missing-credential behavior without pulling in `SqliteCredentialStore`'s encryption machinery. */
@@ -101,7 +99,7 @@ describe("buildActionInvoker", () => {
   it("happy path: executes the resolved action and returns {ok:true, result}", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -115,7 +113,7 @@ describe("buildActionInvoker", () => {
   it("dedup: a duplicate invocationId returns the ORIGINAL result without re-invoking execute", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
     const req = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" };
 
     const first = await invoke(req, userOwner);
@@ -127,7 +125,7 @@ describe("buildActionInvoker", () => {
 
   it("unknown service: returns a stable {ok:false} that dedups without ever resolving an action", async () => {
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
     const req = { service: "nope", action: "ping", params: {}, invocationId: "workflow:r1:n1" };
 
     const first = await invoke(req, userOwner);
@@ -140,7 +138,7 @@ describe("buildActionInvoker", () => {
   it("unknown action within a known service: stable {ok:false}, dedup applies", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
     const req = { service: "demo", action: "does_not_exist", params: {}, invocationId: "workflow:r1:n1" };
 
     const first = await invoke(req, userOwner);
@@ -154,7 +152,7 @@ describe("buildActionInvoker", () => {
   it("param validation failure: missing required param never reaches execute", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: {}, invocationId: "workflow:r1:n1" },
@@ -168,7 +166,7 @@ describe("buildActionInvoker", () => {
   it("missing credential: the action still executes and sees credentials.get() === null", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -183,7 +181,7 @@ describe("buildActionInvoker", () => {
     store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "secret-token" });
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: store, actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -198,7 +196,7 @@ describe("buildActionInvoker", () => {
     store.seed({ type: "org", id: "org1" }, "demo", { type: "api_key", apiKey: "org-token" });
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: store, actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -211,7 +209,7 @@ describe("buildActionInvoker", () => {
   it("team-owned run: unsupported owner type returns a deterministic {ok:false} and never invokes execute", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -229,7 +227,7 @@ describe("buildActionInvoker", () => {
       },
     });
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -244,7 +242,7 @@ describe("buildActionInvoker", () => {
       execute: async () => ({ success: false, error: "denied by upstream" }),
     });
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -266,7 +264,7 @@ describe("buildActionInvoker", () => {
       },
     };
     const actionPluginByService = actionPluginByServiceOf("demo", actionPlugin);
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "dyn", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
@@ -287,7 +285,7 @@ describe("buildActionInvoker", () => {
       },
     });
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
     const req = { service: "demo", action: "ping", params: { msg: "race" }, invocationId: "workflow:r1:n1" };
 
     const [a, b] = await Promise.all([invoke(req, userOwner), invoke(req, userOwner)]);

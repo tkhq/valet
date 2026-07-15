@@ -62,8 +62,7 @@ notificationsRouter.get("/", async (c) => {
         : eq(notifications.userId, userId),
     )
     .orderBy(desc(notifications.createdAt))
-    .limit(50)
-    .all();
+    .limit(50);
 
   const body: ListNotificationsResponse = { notifications: rows.map(rowToSummary) };
   return c.json(body);
@@ -74,7 +73,8 @@ notificationsRouter.post("/:id/read", async (c) => {
   const userId = c.var.user.id;
   const id = c.req.param("id");
 
-  const row = await db.select().from(notifications).where(eq(notifications.id, id)).get();
+  const rows = await db.select().from(notifications).where(eq(notifications.id, id)).limit(1);
+  const row = rows[0];
   if (!row || row.userId !== userId) {
     const err = new NotFoundError("notification", id);
     return c.json({ error: err.message, code: err.code }, 404);
@@ -83,8 +83,7 @@ notificationsRouter.post("/:id/read", async (c) => {
   await db
     .update(notifications)
     .set({ readAt: row.readAt ?? Date.now() })
-    .where(eq(notifications.id, id))
-    .run();
+    .where(eq(notifications.id, id));
 
   return c.json({ ok: true });
 });
@@ -96,8 +95,7 @@ notificationsRouter.post("/read-all", async (c) => {
   await db
     .update(notifications)
     .set({ readAt: Date.now() })
-    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)))
-    .run();
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
 
   return c.json({ ok: true });
 });
@@ -109,13 +107,12 @@ notificationsRouter.get("/preferences", async (c) => {
   const rows = await db
     .select()
     .from(userNotificationPreferences)
-    .where(eq(userNotificationPreferences.userId, userId))
-    .all();
+    .where(eq(userNotificationPreferences.userId, userId));
   const byKind = new Map(rows.map((r) => [r.kind, r]));
 
   const preferences = NOTIFICATION_KINDS.map((kind) => ({
     kind,
-    web: (byKind.get(kind)?.web ?? 1) !== 0,
+    web: byKind.get(kind)?.web ?? true,
   }));
 
   const body: ListNotificationPreferencesResponse = { preferences };
@@ -141,12 +138,11 @@ notificationsRouter.put("/preferences", async (c) => {
 
   await db
     .insert(userNotificationPreferences)
-    .values({ userId, kind: body.kind, web: body.web ? 1 : 0 })
+    .values({ userId, kind: body.kind, web: body.web })
     .onConflictDoUpdate({
       target: [userNotificationPreferences.userId, userNotificationPreferences.kind],
-      set: { web: body.web ? 1 : 0 },
-    })
-    .run();
+      set: { web: body.web },
+    });
 
   return c.json({ ok: true });
 });

@@ -1,23 +1,22 @@
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
+import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildSpawner, CredentialStore, Principal, ValetPlugin } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
-import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
+import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import type { WorkflowStore } from "@valet/workflow";
+import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
-import { SqliteCredentialStore } from "../plugins/credential-store.js";
+import { notPortedStub } from "./not-ported-stub.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
-import { SqliteWorkflowStore } from "../workflows/sqlite-store.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { FsBlobStore } from "./blob-fs.js";
 import type { Providers } from "./types.js";
@@ -48,8 +47,17 @@ export function parseValetPluginsEnv(
 }
 
 export interface NodeProviderOpts {
-  /** Path to the sqlite file holding both app + engine schemas. */
-  dbPath: string;
+  /**
+   * Postgres connection string. Set (typically `DATABASE_URL`) → connects
+   * via `pg.Pool`. Unset → boots an embedded PGlite instance at `pgDataDir`
+   * instead (spec decision 4's dev/test default).
+   */
+  databaseUrl?: string;
+  /**
+   * Directory backing the embedded PGlite instance when `databaseUrl` is
+   * unset. Ignored when `databaseUrl` is set.
+   */
+  pgDataDir: string;
   /** Directory root for the filesystem-backed blob store. */
   blobsRoot: string;
   /** Encryption key used by helpers that store sensitive data. */
@@ -116,57 +124,58 @@ export const LOCAL_ORG = {
 };
 
 /**
- * Open the sqlite database, run app + engine migrations, seed the local
- * dev identity, and construct every provider the API + engine need.
+ * Open the Postgres connection (pool or embedded PGlite), run app + engine
+ * migrations, seed the local dev identity, and construct every provider the
+ * API + engine need.
  *
- * The same sqlite file holds both schemas — table names don't collide
- * (`engine_*` vs application names) so they coexist cleanly.
+ * One connection source backs both schemas — table names don't collide
+ * (`engine_*` vs application names) so they coexist in one database.
  */
 export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Providers> {
-  mkdirSync(dirname(opts.dbPath), { recursive: true });
   mkdirSync(opts.blobsRoot, { recursive: true });
 
-  const sqlite = new Database(opts.dbPath);
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
+  let source: Pool | PGlite;
+  if (opts.databaseUrl) {
+    source = new Pool({ connectionString: opts.databaseUrl });
+  } else {
+    mkdirSync(opts.pgDataDir, { recursive: true });
+    source = new PGlite(opts.pgDataDir);
+  }
 
-  applyAppMigrations(sqlite);
-  applyEngineMigrations(sqlite);
+  // Normalized query interface (decision 4) shared by the app's raw-SQL
+  // migration runner and the engine's stores; `db` below is the Drizzle
+  // handle over the SAME connection source.
+  const pgdb = buildAppQueryable(source);
 
-  // Two Drizzle handles: one for the app schema, one for the engine schema.
-  // Same connection underneath; Drizzle's per-handle config is local.
-  const db = buildAppDb(sqlite);
-  const engineDb = drizzle(sqlite);
+  await applyAppMigrations(pgdb);
+  await applyEngineMigrations(pgdb);
+
+  const db = buildAppDb(source);
 
   // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
   // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
   // `authConfig` resolves) — see `NodeProviderOpts.seedLocalIdentity`.
   if (opts.seedLocalIdentity ?? true) {
     const now = Date.now();
-    db.insert(orgs).values({ id: LOCAL_ORG.id, name: LOCAL_ORG.name, createdAt: now }).onConflictDoNothing().run();
-    db.insert(users)
+    await db.insert(orgs).values({ id: LOCAL_ORG.id, name: LOCAL_ORG.name, createdAt: now }).onConflictDoNothing();
+    await db
+      .insert(users)
       .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
-      .onConflictDoNothing()
-      .run();
-    db.insert(orgMembers)
+      .onConflictDoNothing();
+    await db
+      .insert(orgMembers)
       .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
   }
 
-  const engineStore = new SqliteSessionStore(engineDb);
+  const engineStore = new PgSessionStore(pgdb);
   const blobs = new FsBlobStore(opts.blobsRoot);
   const sandboxProvider = new DockerSandboxProvider();
-  // Durable event log over the same better-sqlite3 handle the store uses.
-  const eventStream = new SqliteEventStream(sqlite);
-  // `AppDb`'s drizzle-orm version doesn't declare `$client` in its public
-  // type even though the runtime instance always carries it (same cast
-  // `workflowStore` below uses) — bridging a library type gap, not a real
-  // type mismatch.
-  const engineCredentials = new SqliteCredentialStore(
-    db as AppDb & { $client: Database.Database },
-    deriveSecretKey(opts.encryptionKey),
-  );
+  const eventStream = new PgEventStream(pgdb);
+  // Not yet ported to Postgres (Task 8 of the postgres-backend plan) — see
+  // `not-ported-stub.ts`'s doc comment. Nothing on the current boot/test
+  // path calls a credential-store method.
+  const engineCredentials = notPortedStub<CredentialStore>("CredentialStore");
 
   // Plugin loading (plugin-system-v2 plan Task 4): tests supply `opts.plugins`
   // directly and skip the node_modules scan entirely; the normal boot path
@@ -217,13 +226,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
   // the routes both read/write through — one instance per process, backed
-  // by the same sqlite handle as everything else.
-  //
-  // `AppDb`'s drizzle-orm version doesn't declare `$client` in its public
-  // type even though the runtime instance always carries it (same cast
-  // `sqlite-store.test.ts` uses) — bridging a library type gap, not a real
-  // type mismatch.
-  const workflowStore = new SqliteWorkflowStore(db as AppDb & { $client: Database.Database });
+  // by the same connection source as everything else. Not yet ported to
+  // Postgres (Task 8) — see `not-ported-stub.ts`'s doc comment.
+  const workflowStore = notPortedStub<WorkflowStore>("WorkflowStore");
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,

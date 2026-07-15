@@ -53,7 +53,7 @@ describe("api integration: orchestrator lifecycle", () => {
     expect(secondBody.sessionId).toBe(firstBody.sessionId);
 
     const { db } = api.providers;
-    const sessionRows = await db.select().from(agentSessions).where(eq(agentSessions.id, firstBody.sessionId)).all();
+    const sessionRows = await db.select().from(agentSessions).where(eq(agentSessions.id, firstBody.sessionId));
     expect(sessionRows).toHaveLength(1);
     expect(sessionRows[0]?.title).toBe("Assistant");
     expect(sessionRows[0]?.ownerType).toBe("user");
@@ -62,8 +62,7 @@ describe("api integration: orchestrator lifecycle", () => {
     const identityRows = await db
       .select()
       .from(orchestratorIdentities)
-      .where(eq(orchestratorIdentities.sessionId, firstBody.sessionId))
-      .all();
+      .where(eq(orchestratorIdentities.sessionId, firstBody.sessionId));
     expect(identityRows).toHaveLength(1);
 
     const probe = await fetch(`${api.baseUrl}/api/orchestrator`);

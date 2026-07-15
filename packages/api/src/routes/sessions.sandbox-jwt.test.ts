@@ -35,8 +35,7 @@ describe("POST /api/sessions/:id/sandbox-jwt", () => {
         ownerId: "local-user",
         createdAt: now,
         updatedAt: now,
-      })
-      .run();
+      });
 
     const res = await fetch(`${api.baseUrl}/api/sessions/sbjwt-session-1/sandbox-jwt`, { method: "POST" });
     expect(res.status).toBe(200);
@@ -65,8 +64,7 @@ describe("POST /api/sessions/:id/sandbox-jwt", () => {
         ownerId: "test-member",
         createdAt: now,
         updatedAt: now,
-      })
-      .run();
+      });
 
     const res = await fetch(`${api.baseUrl}/api/sessions/sbjwt-session-2/sandbox-jwt`, { method: "POST" });
     expect(res.status).toBe(404);

@@ -1,32 +1,73 @@
-import { sql } from "drizzle-orm";
-import { sqliteTable, text, integer, index, primaryKey, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  pgTable,
+  text,
+  integer,
+  bigint,
+  boolean,
+  jsonb,
+  timestamp,
+  index,
+  primaryKey,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
+
+// Postgres rewrite of `schema/index.ts` (docs/specs/2026-07-15-postgres-backend-design.md,
+// decision 7). Timestamps convert SELECTIVELY, not blanket:
+//   - Columns services do numeric-ms arithmetic on, or compare against
+//     `Date.now()` directly, stay `bigint` (mode: "number", read as a plain
+//     number) — this is every Valet-owned table below except `invites` and
+//     `sandbox_tokens`.
+//   - Columns the sqlite schema already declared `{ mode: "timestamp_ms" }`
+//     (i.e. genuinely consumed as JS `Date` objects — traced via
+//     `packages/api/src/auth/invites.ts` and `.../sandbox-tokens.ts`, both of
+//     which call `.getTime()` / compare against `new Date()`) become
+//     `timestamp` here: `orgs`... no, `invites`, `sandbox_tokens`, and the
+//     entire better-auth block.
+// JSON-as-text becomes `jsonb` only where a reader `JSON.parse`s the column
+// (traced via grep — see the per-column disposition table in the task
+// report); everything else (e.g. `memory_files.tags`/`.extras`, which Task 9
+// feeds into the tsvector generated column as text) stays `text`.
+// Boolean-as-integer (`0`/`1` flags with no arithmetic) becomes `boolean`.
+// `AUTOINCREMENT` becomes `generated always as identity`.
 
 // ─── Identity ───────────────────────────────────────────────────────────────
 
-export const orgs = sqliteTable("orgs", {
+export const orgs = pgTable("orgs", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
-  // JSON object of feature flags, e.g. `{ organizations: boolean }`. Absent
-  // key reads as false (split-settings design, "Feature gate").
-  features: text("features").notNull().default("{}"),
-  createdAt: integer("created_at").notNull(),
+  // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read as
+  // JSON (`services/org.ts`'s `JSON.parse`/`JSON.stringify`) — jsonb.
+  features: jsonb("features").notNull().default({}),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
 // we keep the Drizzle export name `users` so existing call sites still
-// compile, but the underlying sqlite table is named "user" — do not fight
+// compile, but the underlying table is named "user" — do not fight
 // better-auth with model remapping (auth-v2 design, Schema).
-export const users = sqliteTable("user", {
+//
+// Regenerated via `npx -y @better-auth/cli generate` against a scratch
+// `provider: "pg"` config mirroring `src/auth/index.ts` (same plugins: sso,
+// apiKey, mcp; same `user.additionalFields`). The CLI's own pg output uses
+// plain `timestamp` (no time zone option exists in better-auth's generator
+// for any provider — verified by inspecting the installed 1.6.23 CLI/core
+// dist for a `timezone`/`withTimezone` knob; there is none), so
+// "timestamp with time zone" in the spec's decision 7 is directional (Date-
+// typed vs bigint-ms), not literal — this file transcribes the CLI's actual
+// `timestamp` output verbatim. Only the two `additionalFields` columns
+// (`role`, `defaultModel`) are hand-adjusted to our conventions (role gets
+// the literal union type); every other column, including the `$onUpdate`
+// callbacks the CLI emits for this version, is verbatim.
+export const users = pgTable("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
-  emailVerified: integer("email_verified", { mode: "boolean" }).default(false).notNull(),
+  emailVerified: boolean("email_verified").default(false).notNull(),
   image: text("image"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" })
-    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
-    .notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
-    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date())
     .notNull(),
   role: text("role", { enum: ["admin", "member"] }).notNull().default("member"),
   // Nullable user preference feeding `EngineHost`'s model override seam;
@@ -36,22 +77,21 @@ export const users = sqliteTable("user", {
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────
 //
-// Verbatim transcription of the better-auth CLI-generated schema for our
+// Verbatim transcription of the better-auth CLI-generated pg schema for our
 // enabled plugins (core, sso, api-key, oidc-provider) — see auth-v2 design
-// §Schema. Do not hand-tune column shapes here; regenerate via
-// `npx @better-auth/cli generate` against `auth.ts` and diff instead.
+// §Schema and the file-header note above. Do not hand-tune column shapes
+// here; regenerate via `npx -y @better-auth/cli generate` against a
+// `provider: "pg"` config and diff instead.
 
-export const session = sqliteTable(
+export const session = pgTable(
   "session",
   {
     id: text("id").primaryKey(),
-    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
     token: text("token").notNull().unique(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" })
-      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
-      .notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
-      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .$onUpdate(() => new Date())
       .notNull(),
     ipAddress: text("ip_address"),
     userAgent: text("user_agent"),
@@ -62,7 +102,7 @@ export const session = sqliteTable(
   (t) => [index("session_userId_idx").on(t.userId)],
 );
 
-export const account = sqliteTable(
+export const account = pgTable(
   "account",
   {
     id: text("id").primaryKey(),
@@ -74,38 +114,35 @@ export const account = sqliteTable(
     accessToken: text("access_token"),
     refreshToken: text("refresh_token"),
     idToken: text("id_token"),
-    accessTokenExpiresAt: integer("access_token_expires_at", { mode: "timestamp_ms" }),
-    refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp_ms" }),
+    accessTokenExpiresAt: timestamp("access_token_expires_at"),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at"),
     scope: text("scope"),
     password: text("password"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" })
-      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
-      .notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
-      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .$onUpdate(() => new Date())
       .notNull(),
   },
   (t) => [index("account_userId_idx").on(t.userId)],
 );
 
-export const verification = sqliteTable(
+export const verification = pgTable(
   "verification",
   {
     id: text("id").primaryKey(),
     identifier: text("identifier").notNull(),
     value: text("value").notNull(),
-    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" })
-      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
-      .notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
-      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    expiresAt: timestamp("expires_at").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => new Date())
       .notNull(),
   },
   (t) => [index("verification_identifier_idx").on(t.identifier)],
 );
 
-export const ssoProvider = sqliteTable("sso_provider", {
+export const ssoProvider = pgTable("sso_provider", {
   id: text("id").primaryKey(),
   issuer: text("issuer").notNull(),
   oidcConfig: text("oidc_config"),
@@ -116,7 +153,7 @@ export const ssoProvider = sqliteTable("sso_provider", {
   domain: text("domain").notNull(),
 });
 
-export const apikey = sqliteTable(
+export const apikey = pgTable(
   "apikey",
   {
     id: text("id").primaryKey(),
@@ -128,17 +165,17 @@ export const apikey = sqliteTable(
     key: text("key").notNull(),
     refillInterval: integer("refill_interval"),
     refillAmount: integer("refill_amount"),
-    lastRefillAt: integer("last_refill_at", { mode: "timestamp_ms" }),
-    enabled: integer("enabled", { mode: "boolean" }).default(true),
-    rateLimitEnabled: integer("rate_limit_enabled", { mode: "boolean" }).default(true),
+    lastRefillAt: timestamp("last_refill_at"),
+    enabled: boolean("enabled").default(true),
+    rateLimitEnabled: boolean("rate_limit_enabled").default(true),
     rateLimitTimeWindow: integer("rate_limit_time_window").default(86400000),
     rateLimitMax: integer("rate_limit_max").default(10),
     requestCount: integer("request_count").default(0),
     remaining: integer("remaining"),
-    lastRequest: integer("last_request", { mode: "timestamp_ms" }),
-    expiresAt: integer("expires_at", { mode: "timestamp_ms" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+    lastRequest: timestamp("last_request"),
+    expiresAt: timestamp("expires_at"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
     permissions: text("permissions"),
     metadata: text("metadata"),
   },
@@ -149,7 +186,7 @@ export const apikey = sqliteTable(
   ],
 );
 
-export const oauthApplication = sqliteTable(
+export const oauthApplication = pgTable(
   "oauth_application",
   {
     id: text("id").primaryKey(),
@@ -160,27 +197,27 @@ export const oauthApplication = sqliteTable(
     clientSecret: text("client_secret"),
     redirectUrls: text("redirect_urls"),
     type: text("type"),
-    disabled: integer("disabled", { mode: "boolean" }).default(false),
+    disabled: boolean("disabled").default(false),
     userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
+    createdAt: timestamp("created_at"),
+    updatedAt: timestamp("updated_at"),
   },
   (t) => [index("oauthApplication_userId_idx").on(t.userId)],
 );
 
-export const oauthAccessToken = sqliteTable(
+export const oauthAccessToken = pgTable(
   "oauth_access_token",
   {
     id: text("id").primaryKey(),
     accessToken: text("access_token").unique(),
     refreshToken: text("refresh_token").unique(),
-    accessTokenExpiresAt: integer("access_token_expires_at", { mode: "timestamp_ms" }),
-    refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp_ms" }),
+    accessTokenExpiresAt: timestamp("access_token_expires_at"),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at"),
     clientId: text("client_id").references(() => oauthApplication.clientId, { onDelete: "cascade" }),
     userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
     scopes: text("scopes"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
+    createdAt: timestamp("created_at"),
+    updatedAt: timestamp("updated_at"),
   },
   (t) => [
     index("oauthAccessToken_clientId_idx").on(t.clientId),
@@ -188,16 +225,16 @@ export const oauthAccessToken = sqliteTable(
   ],
 );
 
-export const oauthConsent = sqliteTable(
+export const oauthConsent = pgTable(
   "oauth_consent",
   {
     id: text("id").primaryKey(),
     clientId: text("client_id").references(() => oauthApplication.clientId, { onDelete: "cascade" }),
     userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
     scopes: text("scopes"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
-    consentGiven: integer("consent_given", { mode: "boolean" }),
+    createdAt: timestamp("created_at"),
+    updatedAt: timestamp("updated_at"),
+    consentGiven: boolean("consent_given"),
   },
   (t) => [
     index("oauthConsent_clientId_idx").on(t.clientId),
@@ -206,37 +243,46 @@ export const oauthConsent = sqliteTable(
 );
 
 // ─── Valet-owned auth adjuncts ──────────────────────────────────────────────
+//
+// `invites` and `sandbox_tokens` are Valet-owned (not part of the CLI-
+// regenerated block above) but were declared `{ mode: "timestamp_ms" }` in
+// the sqlite schema, and their readers genuinely consume `Date` objects
+// (`packages/api/src/auth/invites.ts`'s `row.expiresAt.getTime()` /
+// `row.expiresAt <= now` where `now = new Date()`; `sandbox-tokens.ts`'s
+// `new Date(now)` inserts and `row.expiresAt <= now` reads) — decision 7's
+// "columns consumed as Date become timestamp" rule applies to these two
+// tables even though they're not part of the better-auth block.
 
-export const invites = sqliteTable("invites", {
+export const invites = pgTable("invites", {
   id: text("id").primaryKey(),
   codeHash: text("code_hash").notNull().unique(),
   email: text("email"),
   role: text("role", { enum: ["admin", "member"] }).notNull().default("member"),
   createdBy: text("created_by").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: timestamp("created_at").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
   acceptedBy: text("accepted_by"),
-  acceptedAt: integer("accepted_at", { mode: "timestamp_ms" }),
+  acceptedAt: timestamp("accepted_at"),
 });
 
-export const sandboxTokens = sqliteTable("sandbox_tokens", {
+export const sandboxTokens = pgTable("sandbox_tokens", {
   id: text("id").primaryKey(),
   tokenHash: text("token_hash").notNull().unique(),
   sessionId: text("session_id").notNull(),
   userId: text("user_id").notNull(),
   orgId: text("org_id").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-  revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
+  createdAt: timestamp("created_at").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  revokedAt: timestamp("revoked_at"),
 });
 
-export const orgMembers = sqliteTable(
+export const orgMembers = pgTable(
   "org_members",
   {
     orgId: text("org_id").notNull(),
     userId: text("user_id").notNull(),
     role: text("role", { enum: ["admin", "member"] }).notNull(),
-    createdAt: integer("created_at"),
+    createdAt: bigint("created_at", { mode: "number" }),
   },
   (t) => [primaryKey({ columns: [t.orgId, t.userId] })],
 );
@@ -245,10 +291,10 @@ export const orgMembers = sqliteTable(
 //
 // One row per session the user creates from the UI. The engine maintains its
 // own internal state in `engine_sessions`/`engine_threads`/`engine_entries`
-// (managed by @valet/store-sqlite). This table holds only what the UI cares
+// (managed by @valet/store-postgres). This table holds only what the UI cares
 // about: human-visible metadata, workspace path, status.
 
-export const agentSessions = sqliteTable(
+export const agentSessions = pgTable(
   "agent_sessions",
   {
     id: text("id").primaryKey(),
@@ -266,8 +312,8 @@ export const agentSessions = sqliteTable(
     // both explicitly (owner_id = user_id for today's user-owned sessions).
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [
     index("agent_sessions_user").on(t.userId),
@@ -277,21 +323,22 @@ export const agentSessions = sqliteTable(
 
 // Threads — the UI groups messages by thread. The engine has its own thread
 // concept too; here we mirror just the fields the chat list needs.
-export const sessionThreads = sqliteTable(
+export const sessionThreads = pgTable(
   "session_threads",
   {
     id: text("id").primaryKey(),
     sessionId: text("session_id").notNull(),
     title: text("title"),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );
 
 // Messages — the visible chat log. Each row is a single message the UI
-// renders. `parts` is JSON-encoded MessagePart[] (text/tool_use/tool_result).
+// renders. `parts` is JSON-encoded MessagePart[] (text/tool_use/tool_result)
+// — read as JSON (decision 7 names this column explicitly) — jsonb.
 // `content` is the flat-string projection for legacy/simple consumers.
-export const messages = sqliteTable(
+export const messages = pgTable(
   "messages",
   {
     id: text("id").primaryKey(),
@@ -301,9 +348,9 @@ export const messages = sqliteTable(
       enum: ["user", "assistant", "system", "tool"],
     }).notNull(),
     content: text("content").notNull(),
-    parts: text("parts"),
+    parts: jsonb("parts"),
     authorId: text("author_id"),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [
     index("messages_session").on(t.sessionId),
@@ -319,18 +366,18 @@ export const messages = sqliteTable(
 // creator-auto-admin live in service code (`services/teams.ts`), inside one
 // transaction — not expressible as table constraints.
 
-export const teams = sqliteTable(
+export const teams = pgTable(
   "teams",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     name: text("name").notNull(),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [uniqueIndex("teams_org_name").on(t.orgId, t.name)],
 );
 
-export const teamMembers = sqliteTable(
+export const teamMembers = pgTable(
   "team_members",
   {
     teamId: text("team_id").notNull(),
@@ -349,7 +396,7 @@ export const teamMembers = sqliteTable(
 // Unique per (orgId, ownerType, ownerId); handles unique per org (enforced
 // in service code once handles are assigned — no logic this phase).
 
-export const orchestratorIdentities = sqliteTable(
+export const orchestratorIdentities = pgTable(
   "orchestrator_identities",
   {
     id: text("id").primaryKey(),
@@ -358,7 +405,7 @@ export const orchestratorIdentities = sqliteTable(
     ownerId: text("owner_id").notNull(),
     sessionId: text("session_id").notNull(),
     handle: text("handle"),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [
     uniqueIndex("orchestrator_identities_owner").on(t.orgId, t.ownerType, t.ownerId),
@@ -370,9 +417,15 @@ export const orchestratorIdentities = sqliteTable(
 // Durable record of a spawned child session's pending settlement (decision
 // 11). The ChildWatcher (Task 8) arms `awaitResult` per unsettled row and
 // re-arms every unsettled row on boot — this table is the restart-survival
-// mechanism for `child.settled` reporting.
+// mechanism for `child.settled` reporting. `settled` is a plain 0/1 flag
+// with no arithmetic on it (only `eq(childWatches.settled, 0)` equality
+// filters) — boolean per decision 7's "boolean-as-integer" rule. NOTE for
+// Task 7 (cutover): every `eq(childWatches.settled, 0)` call site
+// (`routes/orchestrator.ts`, `orchestrator/children.ts`) must flip to
+// `eq(childWatches.settled, false)`, and `r.settled === 1` (`routes/
+// orchestrator.ts`) to `r.settled`.
 
-export const childWatches = sqliteTable(
+export const childWatches = pgTable(
   "child_watches",
   {
     childSessionId: text("child_session_id").primaryKey(),
@@ -381,8 +434,8 @@ export const childWatches = sqliteTable(
     parentThreadId: text("parent_thread_id").notNull(),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
-    settled: integer("settled").notNull().default(0),
-    createdAt: integer("created_at").notNull(),
+    settled: boolean("settled").notNull().default(false),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [
     index("child_watches_parent").on(t.parentSessionId),
@@ -392,7 +445,7 @@ export const childWatches = sqliteTable(
 
 // ─── Notifications + preferences ────────────────────────────────────────────
 
-export const notifications = sqliteTable(
+export const notifications = pgTable(
   "notifications",
   {
     id: text("id").primaryKey(),
@@ -403,18 +456,23 @@ export const notifications = sqliteTable(
     body: text("body"),
     href: text("href"),
     sessionId: text("session_id"),
-    createdAt: integer("created_at").notNull(),
-    readAt: integer("read_at"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    readAt: bigint("read_at", { mode: "number" }),
   },
   (t) => [index("notifications_user_read").on(t.userId, t.readAt)],
 );
 
-export const userNotificationPreferences = sqliteTable(
+// `web` is a plain 0/1 flag (`select({ web: ... })`, read truthily by the
+// notification-fanout check) — boolean per decision 7. NOTE for Task 7: the
+// insert default flips from `.default(1)` to `.default(true)`, and any
+// call site treating the read value as a number (none found by grep at
+// task time) must switch to boolean comparison.
+export const userNotificationPreferences = pgTable(
   "user_notification_preferences",
   {
     userId: text("user_id").notNull(),
     kind: text("kind").notNull(),
-    web: integer("web").notNull().default(1),
+    web: boolean("web").notNull().default(true),
   },
   (t) => [primaryKey({ columns: [t.userId, t.kind] })],
 );
@@ -428,7 +486,7 @@ export const userNotificationPreferences = sqliteTable(
 // non-member senders, unbound conversations, trigger-mode filtering) once
 // channel routing lands.
 
-export const eventDropLog = sqliteTable(
+export const eventDropLog = pgTable(
   "event_drop_log",
   {
     id: text("id").primaryKey(),
@@ -436,7 +494,7 @@ export const eventDropLog = sqliteTable(
     reason: text("reason").notNull(),
     conversationKey: text("conversation_key"),
     detail: text("detail").notNull(),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("event_drop_log_org").on(t.orgId)],
 );
@@ -447,7 +505,7 @@ export const eventDropLog = sqliteTable(
 // routing logic lands this phase (Phase 6). One binding per external
 // conversation per org is the hard uniqueness rule.
 
-export const channelBindings = sqliteTable(
+export const channelBindings = pgTable(
   "channel_bindings",
   {
     id: text("id").primaryKey(),
@@ -463,34 +521,56 @@ export const channelBindings = sqliteTable(
     createdBy: text("created_by", {
       enum: ["user_link", "admin", "agent_outbound"],
     }).notNull(),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [
     uniqueIndex("channel_bindings_conversation").on(t.orgId, t.channelType, t.conversationKey),
   ],
 );
 
-export const userIdentityLinks = sqliteTable(
+export const userIdentityLinks = pgTable(
   "user_identity_links",
   {
     id: text("id").primaryKey(),
     provider: text("provider").notNull(),
     externalId: text("external_id").notNull(),
     userId: text("user_id").notNull(),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [uniqueIndex("user_identity_links_provider_external").on(t.provider, t.externalId)],
 );
 
 // ─── Memory (OKF) ────────────────────────────────────────────────────────────
 //
-// Owner-tuple scoped memory store (decision 13, exact). `memory_files_fts`
-// is a virtual FTS5 table — Drizzle can't model virtual tables, so it's
-// created via raw SQL in the 0000 migration and intentionally has no
-// Drizzle table definition here. The Task 5 FTS sync helper reads/writes it
-// directly via the raw sqlite handle.
+// Owner-tuple scoped memory store (decision 13, exact). `search_vector` is a
+// `tsvector` GENERATED ALWAYS column — Drizzle's pg-core can't express
+// generated-column expressions with weighted `setweight`/`to_tsvector`
+// calls, so it's created via raw SQL in `migrations/pg/0000_app.sql`
+// (mirrors the old fts5-virtual-table comment: intentionally no Drizzle
+// column definition for it here) plus a GIN index. Weights (spec decision
+// 9): A=title, B=description, C=path+tags, D=content — path must NOT
+// collapse into the same weight class as content, or a path-term match
+// ranks like a body mention. The weight-C expression also runs
+// `path || ' ' || tags` through `regexp_replace(..., '[^a-zA-Z0-9]+', ' ',
+// 'g')` before `to_tsvector` — verified empirically that Postgres's parser
+// otherwise classifies a slash-containing string like
+// `instruments/xylophone/setup.md` as a single opaque "file" token instead
+// of splitting it into searchable words, so a bare path-term query would
+// never match (see the migration's comment for the raw tsvector output that
+// caught this).
+//
+// `tags`/`extras` stay `text` (JSON.stringify'd), NOT jsonb: `tags` feeds
+// the weight-C generated-column expression as a plain string
+// (`coalesce(path,'') || ' ' || coalesce(tags,'')`) — concatenating a jsonb
+// array into a tsvector needs an extra unnest/aggregate step Task 9 (memory
+// service port) owns; keeping `tags` as text keeps the generated-column
+// expression a straight string concat, matching how `ftsTags()` already
+// flattens the JSON array to a space-joined string before feeding fts5
+// today. `expires`/`updatedAt`/`createdAt` stay bigint ms — the service's
+// `expiresMs`/`updatedAtMs` contract (decision 7, named explicitly) reads
+// them as plain numbers, never as `Date`.
 
-export const memoryFiles = sqliteTable(
+export const memoryFiles = pgTable(
   "memory_files",
   {
     ownerType: text("owner_type").notNull(),
@@ -505,14 +585,14 @@ export const memoryFiles = sqliteTable(
     extras: text("extras").notNull().default("{}"),
     sensitivity: text("sensitivity").notNull().default("private"),
     origin: text("origin").notNull().default(""),
-    expires: integer("expires"),
-    pinned: integer("pinned").notNull().default(0),
+    expires: bigint("expires", { mode: "number" }),
+    pinned: boolean("pinned").notNull().default(false),
     actorUserId: text("actor_user_id").notNull().default(""),
     sourceSessionId: text("source_session_id").notNull().default(""),
     orgId: text("org_id").notNull().default(""),
     version: integer("version").notNull().default(1),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
 );
@@ -524,12 +604,15 @@ export const memoryFiles = sqliteTable(
 // ownership + immutable-at-start params/definition snapshot);
 // `workflow_checkpoints`/`workflow_signals` back the `WorkflowStore` port's
 // checkpoint and signal contracts exactly (`packages/api/src/workflows/
-// sqlite-store.ts` implements the port over these three tables plus
-// `workflow_definitions`). JSON columns (`definition`, `params`,
-// `waiting_on`, `result`, `effects`, `payload`, `consumed_by`) are
-// JSON.stringify'd text — no native JSON column type in this sqlite setup.
+// sqlite-store.ts` — ported to a pg store in Task 8 — implements the port
+// over these three tables plus `workflow_definitions`). JSON columns read
+// via `JSON.parse` (`definition`, `params`, `waiting_on`, `result`,
+// `effects`, `payload`, `consumed_by`) are `jsonb` here — decision 7 names
+// "workflow definitions" explicitly, and the same read-as-JSON rule extends
+// to every other JSON.parse'd column in `sqlite-store.ts`. `error` stays
+// `text` — it's a plain error message string, never JSON.parse'd.
 
-export const workflowDefinitions = sqliteTable(
+export const workflowDefinitions = pgTable(
   "workflow_definitions",
   {
     id: text("id").primaryKey(),
@@ -537,35 +620,36 @@ export const workflowDefinitions = sqliteTable(
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
-    definition: text("definition").notNull(),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
+    definition: jsonb("definition").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId)],
 );
 
-export const workflowRuns = sqliteTable(
+export const workflowRuns = pgTable(
   "workflow_runs",
   {
     id: text("id").primaryKey(),
     workflowId: text("workflow_id").notNull(),
     definitionVersionId: text("definition_version_id").notNull(),
-    definition: text("definition").notNull(),
-    params: text("params").notNull(),
+    definition: jsonb("definition").notNull(),
+    params: jsonb("params").notNull(),
     status: text("status", {
       enum: ["pending", "running", "parked", "terminalizing", "settled"],
     })
       .notNull()
       .default("pending"),
     outcome: text("outcome", { enum: ["completed", "failed", "cancelled"] }),
-    waitingOn: text("waiting_on").notNull().default("[]"),
-    wakeAt: integer("wake_at"),
-    wakeRequested: integer("wake_requested").notNull().default(0),
+    waitingOn: jsonb("waiting_on").notNull().default([]),
+    wakeAt: bigint("wake_at", { mode: "number" }),
+    // Plain 0/1 flag (`row.wake_requested !== 0` in sqlite-store.ts) — boolean.
+    wakeRequested: boolean("wake_requested").notNull().default(false),
     // Named `lease_owner_id` (not `owner_id`) to avoid clashing with the
     // principal-ownership `owner_type`/`owner_id` columns below (plan
     // decision 17).
     leaseOwnerId: text("lease_owner_id"),
-    leaseExpiresAt: integer("lease_expires_at"),
+    leaseExpiresAt: bigint("lease_expires_at", { mode: "number" }),
     attempt: integer("attempt").notNull().default(0),
     // Principal ownership, resolved from the parent `workflow_definitions`
     // row by the API layer (Task 10) — the `WorkflowStore` port's
@@ -576,8 +660,8 @@ export const workflowRuns = sqliteTable(
     // path once it resolves the workflow's owner.
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [
     index("workflow_runs_status_updated").on(t.status, t.updatedAt),
@@ -585,7 +669,7 @@ export const workflowRuns = sqliteTable(
   ],
 );
 
-export const workflowCheckpoints = sqliteTable(
+export const workflowCheckpoints = pgTable(
   "workflow_checkpoints",
   {
     runId: text("run_id").notNull(),
@@ -595,10 +679,10 @@ export const workflowCheckpoints = sqliteTable(
     status: text("status", {
       enum: ["intent", "completed", "failed", "skipped"],
     }).notNull(),
-    result: text("result"),
-    effects: text("effects"),
+    result: jsonb("result"),
+    effects: jsonb("effects"),
     error: text("error"),
-    createdAt: integer("created_at").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [
     primaryKey({ columns: [t.runId, t.nodeId, t.iteration] }),
@@ -606,17 +690,17 @@ export const workflowCheckpoints = sqliteTable(
   ],
 );
 
-export const workflowSignals = sqliteTable(
+export const workflowSignals = pgTable(
   "workflow_signals",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
     runId: text("run_id").notNull(),
     signalId: text("signal_id").notNull(),
     signalType: text("signal_type").notNull(),
-    payload: text("payload"),
-    createdAt: integer("created_at").notNull(),
-    consumedAt: integer("consumed_at"),
-    consumedBy: text("consumed_by"),
+    payload: jsonb("payload"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    consumedAt: bigint("consumed_at", { mode: "number" }),
+    consumedBy: jsonb("consumed_by"),
   },
   (t) => [
     uniqueIndex("workflow_signals_run_signal").on(t.runId, t.signalId),
@@ -629,10 +713,10 @@ export const workflowSignals = sqliteTable(
 // Durable, encrypted store backing the engine's `CredentialStore` port
 // (`packages/engine/src/types.ts`). Secret columns hold AES-256-GCM
 // ciphertext produced by `src/lib/secret-crypto.ts` — plaintext tokens are
-// never persisted. `scopes`/`metadata` are JSON text, same convention as
-// the workflow tables above.
+// never persisted. `scopes`/`metadata` are `JSON.parse`'d by
+// `plugins/credential-store.ts` — jsonb.
 
-export const credentials = sqliteTable(
+export const credentials = pgTable(
   "credentials",
   {
     ownerType: text("owner_type").notNull(),
@@ -644,24 +728,24 @@ export const credentials = sqliteTable(
     accessTokenEnc: text("access_token_enc"),
     refreshTokenEnc: text("refresh_token_enc"),
     apiKeyEnc: text("api_key_enc"),
-    expiresAt: integer("expires_at"),
-    scopes: text("scopes"),
-    metadata: text("metadata"),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }),
+    scopes: jsonb("scopes"),
+    metadata: jsonb("metadata"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.service] })],
 );
 
 // `action_invocations` — durable dedup table for the workflow `tool` node's
-// `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is the
-// JSON-serialized `WorkflowInvokeActionResult`; a duplicate `invocationId`
-// (crash-and-retry, concurrent dispatch) reads back the original row rather
-// than re-invoking the action.
-export const actionInvocations = sqliteTable("action_invocations", {
+// `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is
+// `JSON.stringify`'d by `plugins/action-invoker.ts` and `JSON.parse`'d back
+// — jsonb. A duplicate `invocationId` (crash-and-retry, concurrent
+// dispatch) reads back the original row rather than re-invoking the action.
+export const actionInvocations = pgTable("action_invocations", {
   invocationId: text("invocation_id").primaryKey(),
-  result: text("result").notNull(),
-  createdAt: integer("created_at").notNull(),
+  result: jsonb("result").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 
 // ─── Inferred row types ─────────────────────────────────────────────────────

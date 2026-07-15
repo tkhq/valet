@@ -106,21 +106,23 @@ describe("buildChildSpawner", () => {
     const childData = await api.providers.engineStore.getSession(result.childSessionId);
     expect(childData?.parentSessionId).toBe("parent-spawn");
 
-    const appRow = await api.providers.db
+    const appRows = await api.providers.db
       .select()
       .from(agentSessions)
       .where(eq(agentSessions.id, result.childSessionId))
-      .get();
+      .limit(1);
+    const appRow = appRows[0];
     expect(appRow).toBeDefined();
     expect(appRow?.title).toBe("The Thing");
     expect(appRow?.ownerType).toBe("team");
     expect(appRow?.ownerId).toBe("team-x");
 
-    const watchRow = await api.providers.db
+    const watchRows = await api.providers.db
       .select()
       .from(childWatches)
       .where(eq(childWatches.childSessionId, result.childSessionId))
-      .get();
+      .limit(1);
+    const watchRow = watchRows[0];
     expect(watchRow).toBeDefined();
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
@@ -152,10 +154,9 @@ describe("buildChildSpawner", () => {
           parentThreadId: "th-x",
           actorUserId: "local-user",
           orgId: "org-cap-test",
-          settled: 0,
+          settled: false,
           createdAt: now,
-        })
-        .run();
+        });
     }
 
     const attempt = spawner(
@@ -179,8 +180,7 @@ describe("buildChildSpawner", () => {
     const drops = await api.providers.db
       .select()
       .from(eventDropLog)
-      .where(and(eq(eventDropLog.orgId, "org-cap-test"), eq(eventDropLog.reason, "child_cap")))
-      .all();
+      .where(and(eq(eventDropLog.orgId, "org-cap-test"), eq(eventDropLog.reason, "child_cap")));
     expect(drops).toHaveLength(1);
   });
 
@@ -209,8 +209,7 @@ describe("buildChildSpawner", () => {
           ownerId: "local-user",
           createdAt: now,
           updatedAt: now,
-        })
-        .run();
+        });
     }
 
     const attempt = spawner(
@@ -232,8 +231,7 @@ describe("buildChildSpawner", () => {
     const drops = await api.providers.db
       .select()
       .from(eventDropLog)
-      .where(and(eq(eventDropLog.orgId, "org-ceiling-test"), eq(eventDropLog.reason, "org_ceiling")))
-      .all();
+      .where(and(eq(eventDropLog.orgId, "org-ceiling-test"), eq(eventDropLog.reason, "org_ceiling")));
     expect(drops).toHaveLength(1);
   });
 });
@@ -280,18 +278,15 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
-    await db
-      .insert(childWatches)
-      .values({ ...watch, settled: 0, createdAt: Date.now() })
-      .run();
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     // Double-fire: direct arm AND a rearm() pass over the unsettled row.
     watcher.arm(watch);
     await watcher.rearm();
 
     await waitFor(async () => {
-      const row = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-w")).get();
-      return row?.settled === 1;
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-w")).limit(1);
+      return rows[0]?.settled === true;
     });
     // Let any in-flight second admission finish before counting.
     await new Promise((r) => setTimeout(r, 100));
@@ -335,26 +330,22 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
-    await db
-      .insert(childWatches)
-      .values({ ...watch, settled: 0, createdAt: Date.now() })
-      .run();
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
 
     // Let both in-process attempts (and the retry delay between them) run out.
     await new Promise((r) => setTimeout(r, 150));
 
-    const row = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-ghost")).get();
-    expect(row?.settled).toBe(0);
+    const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-ghost")).limit(1);
+    expect(rows[0]?.settled).toBe(false);
 
     // Not a real edge denial, so no edge_denied row — and nothing was
     // actually dropped (the row is still eligible for `rearm()`).
     const drops = await db
       .select()
       .from(eventDropLog)
-      .where(eq(eventDropLog.conversationKey, "qi-ghost"))
-      .all();
+      .where(eq(eventDropLog.conversationKey, "qi-ghost"));
     expect(drops).toHaveLength(0);
   });
 
@@ -404,10 +395,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
-    await db
-      .insert(childWatches)
-      .values({ ...watch, settled: 0, createdAt: Date.now() })
-      .run();
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
 
@@ -415,20 +403,19 @@ describe("ChildWatcher", () => {
       const rows = await db
         .select()
         .from(eventDropLog)
-        .where(and(eq(eventDropLog.reason, "pending_cap"), eq(eventDropLog.conversationKey, itemId)))
-        .all();
+        .where(and(eq(eventDropLog.reason, "pending_cap"), eq(eventDropLog.conversationKey, itemId)));
       return rows.length > 0;
     });
 
     // Give the in-process retries a chance to exhaust; the watch must still
     // NOT be settled — the settlement is not lost, just deferred.
     await new Promise((r) => setTimeout(r, 150));
-    const capped = await db
+    const cappedRows = await db
       .select()
       .from(childWatches)
       .where(eq(childWatches.childSessionId, "child-cap-watch"))
-      .get();
-    expect(capped?.settled).toBe(0);
+      .limit(1);
+    expect(cappedRows[0]?.settled).toBe(false);
 
     // Drain the parent thread and re-arm (the boot backstop) — the signal
     // must now be delivered exactly once.
@@ -440,12 +427,12 @@ describe("ChildWatcher", () => {
     await watcher.rearm();
 
     await waitFor(async () => {
-      const row = await db
+      const rows = await db
         .select()
         .from(childWatches)
         .where(eq(childWatches.childSessionId, "child-cap-watch"))
-        .get();
-      return row?.settled === 1;
+        .limit(1);
+      return rows[0]?.settled === true;
     });
     await new Promise((r) => setTimeout(r, 100));
 
@@ -490,28 +477,24 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
-    await db
-      .insert(childWatches)
-      .values({ ...watch, settled: 0, createdAt: Date.now() })
-      .run();
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
 
     await waitFor(async () => {
-      const row = await db
+      const rows = await db
         .select()
         .from(childWatches)
         .where(eq(childWatches.childSessionId, "child-real-denial"))
-        .get();
-      return row?.settled === 1;
+        .limit(1);
+      return rows[0]?.settled === true;
     });
 
     const dispatchId = `settled:child-real-denial:${itemId}`;
     const drops = await db
       .select()
       .from(eventDropLog)
-      .where(and(eq(eventDropLog.reason, "edge_denied"), eq(eventDropLog.conversationKey, dispatchId)))
-      .all();
+      .where(and(eq(eventDropLog.reason, "edge_denied"), eq(eventDropLog.conversationKey, dispatchId)));
     // Exactly one row — `authorizeEdge` logs it; `ChildWatcher` must not
     // double-log an already-logged permanent denial.
     expect(drops).toHaveLength(1);

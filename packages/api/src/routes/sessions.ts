@@ -52,9 +52,8 @@ export async function listStandaloneSessions(db: AppDb, userId: string) {
       .select()
       .from(agentSessions)
       .where(and(eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
-      .orderBy(desc(agentSessions.updatedAt))
-      .all(),
-    db.select({ childSessionId: childWatches.childSessionId }).from(childWatches).all(),
+      .orderBy(desc(agentSessions.updatedAt)),
+    db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
   ]);
 
   const childIds = new Set(childRows.map((r) => r.childSessionId));
@@ -122,8 +121,7 @@ sessionsRouter.post("/", async (c) => {
       ownerId: user.id,
       createdAt: now,
       updatedAt: now,
-    })
-    .run();
+    });
 
   const detail: CreateSessionResponse = {
     id,
@@ -144,18 +142,18 @@ sessionsRouter.get("/:id", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const row = await db
+  const rows = await db
     .select()
     .from(agentSessions)
     .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return c.json({ error: "session not found" }, 404);
 
   const [{ n }] = await db
     .select({ n: count() })
     .from(messagesTable)
-    .where(eq(messagesTable.sessionId, id))
-    .all();
+    .where(eq(messagesTable.sessionId, id));
 
   // Surface the engine's session-default model. This is best-effort: if
   // the engine session hasn't been materialized yet we just omit the
@@ -186,11 +184,12 @@ sessionsRouter.patch("/:id", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const row = await db
+  const rows = await db
     .select()
     .from(agentSessions)
     .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return c.json({ error: "session not found" }, 404);
 
   let body: { model?: string };
@@ -217,8 +216,7 @@ sessionsRouter.patch("/:id", async (c) => {
   const [{ n }] = await db
     .select({ n: count() })
     .from(messagesTable)
-    .where(eq(messagesTable.sessionId, id))
-    .all();
+    .where(eq(messagesTable.sessionId, id));
   const detail: GetSessionResponse = {
     ...rowToSummary(row),
     messageCount: Number(n ?? 0),
@@ -237,11 +235,12 @@ sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const row = await db
+  const rows = await db
     .select()
     .from(agentSessions)
     .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return c.json({ error: "session not found" }, 404);
 
   const { token, expiresAt } = engineHost.mintSandboxJwtFor(id, userId);
@@ -256,11 +255,12 @@ sessionsRouter.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
-  const row = await db
+  const rows = await db
     .select()
     .from(agentSessions)
     .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return c.json({ error: "session not found" }, 404);
 
   // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
@@ -271,8 +271,7 @@ sessionsRouter.delete("/:id", async (c) => {
   await db
     .update(agentSessions)
     .set({ status: "deleted", updatedAt: Date.now() })
-    .where(eq(agentSessions.id, id))
-    .run();
+    .where(eq(agentSessions.id, id));
 
   return c.json({ ok: true });
 });

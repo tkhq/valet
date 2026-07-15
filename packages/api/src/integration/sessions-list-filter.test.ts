@@ -57,8 +57,7 @@ describe("GET /api/sessions: standalone-only filter", () => {
             createdAt: now,
             updatedAt: now,
           },
-        ])
-        .run();
+        ]);
 
       await db
         .insert(childWatches)
@@ -69,10 +68,9 @@ describe("GET /api/sessions: standalone-only filter", () => {
           parentThreadId: "th-1",
           actorUserId: "local-user",
           orgId: "local-org",
-          settled: 0,
+          settled: false,
           createdAt: now,
-        })
-        .run();
+        });
 
       const res = await fetch(`${api.baseUrl}/api/sessions`);
       expect(res.status).toBe(200);

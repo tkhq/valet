@@ -1,28 +1,22 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import Database from "better-sqlite3";
-import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgs, users } from "../schema/index.js";
 import { exportFiles, importFiles, readFile, searchFiles, writeFile, type MemoryScope } from "./memory.js";
 
-function seedUser(db: AppDb, id: string, orgId: string) {
-  db.insert(users)
-    .values({ id, email: `${id}@x.test`, name: id, role: "member" })
-    .run();
+async function seedUser(db: AppDb, id: string, orgId: string) {
+  await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
 }
 
 describe("memory import/export", () => {
-  let sqlite: Database.Database;
   let db: AppDb;
   const orgId = "org1";
 
-  beforeEach(() => {
-    sqlite = new Database(":memory:");
-    sqlite.pragma("journal_mode = WAL");
-    applyAppMigrations(sqlite);
-    db = buildAppDb(sqlite);
-    db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() }).run();
-    seedUser(db, "u1", orgId);
-    seedUser(db, "u2", orgId);
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+    await seedUser(db, "u1", orgId);
+    await seedUser(db, "u2", orgId);
   });
 
   function scopeFor(userId: string): MemoryScope {

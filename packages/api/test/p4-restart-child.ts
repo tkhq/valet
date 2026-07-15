@@ -2,13 +2,17 @@
  * Child entrypoint for the Phase 4 exit-criteria cross-process restart proof
  * (`orchestrator-restart.test.ts`). Mirrors the structure of
  * `packages/engine/test/kill-gate-child.ts`: this script boots a real API
- * provider stack (sqlite file at argv[0], VirtualSandboxProvider so no
- * Docker is required — decision 11's restart-survival mechanism is
- * orthogonal to which sandbox backend the child uses) over the SAME
- * `deps` shape `children.test.ts` builds by hand, ensures the orchestrator,
- * and spawns a child session by calling the `ChildSpawner` DIRECTLY
- * (bypassing the `task` tool / LLM turn on the parent — determinism per
- * decision 24's task-10 brief) with a real-model prompt for the CHILD.
+ * provider stack over a PGlite instance backed by a real on-disk data dir at
+ * argv[0] (NOT the shared in-memory test helper — this script specifically
+ * tests restart-across-process-boundary behavior, so process B needs to
+ * reopen the SAME on-disk state process A wrote), with a
+ * `VirtualSandboxProvider` so no Docker is required — decision 11's
+ * restart-survival mechanism is orthogonal to which sandbox backend the
+ * child uses) over the SAME `deps` shape `children.test.ts` builds by hand,
+ * ensures the orchestrator, and spawns a child session by calling the
+ * `ChildSpawner` DIRECTLY (bypassing the `task` tool / LLM turn on the
+ * parent — determinism per decision 24's task-10 brief) with a real-model
+ * prompt for the CHILD.
  *
  * `buildChildSpawner` inserts the durable `child_watches` row and calls
  * `watcher.arm()` (fire-and-forget) before returning — the exact
@@ -21,26 +25,26 @@
  * kill-from-parent idiom as kill-mid-gate.test.ts, safer than a self-kill
  * racing stdout flush).
  *
- * argv: [dbPath]
+ * argv: [pgDataDir]
  */
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   InMemoryCredentialStore,
   VirtualSandboxProvider,
   type ChildSpawner,
 } from "@valet/engine";
-import { SqliteSessionStore, SqliteEventStream, applyEngineMigrations } from "@valet/store-sqlite";
+import { PgSessionStore, PgEventStream, applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import { applyAppMigrations, buildAppDb } from "../src/lib/drizzle.js";
 import { EngineHost } from "../src/engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../src/orchestrator/children.js";
 import { FsBlobStore } from "../src/providers/blob-fs.js";
+import { orgMembers, orgs, users } from "../src/schema/index.js";
 
-const [dbPath] = process.argv.slice(2);
-if (!dbPath) {
-  process.stderr.write("usage: p4-restart-child.ts <dbPath>\n");
+const [pgDataDir] = process.argv.slice(2);
+if (!pgDataDir) {
+  process.stderr.write("usage: p4-restart-child.ts <pgDataDir>\n");
   process.exit(2);
 }
 if (!process.env.ANTHROPIC_API_KEY) {
@@ -49,31 +53,31 @@ if (!process.env.ANTHROPIC_API_KEY) {
 }
 
 async function main(): Promise<void> {
-  mkdirSync(dirname(dbPath), { recursive: true });
-  const sqlite = new Database(dbPath);
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  applyAppMigrations(sqlite);
-  applyEngineMigrations(sqlite);
+  mkdirSync(pgDataDir, { recursive: true });
+  const pglite = new PGlite(pgDataDir);
+  const pgdb = pgDbFromPglite(pglite);
+
+  await applyAppMigrations(pgdb);
+  await applyEngineMigrations(pgdb);
+
+  const db = buildAppDb(pglite);
 
   const now = Date.now();
-  sqlite
-    .prepare("INSERT OR IGNORE INTO orgs (id, name, created_at) VALUES (?, ?, ?)")
-    .run("local-org", "Local Dev", now);
-  sqlite
-    .prepare("INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)")
-    .run("local-user", "local@dev", "Local Dev", "admin", now);
-  sqlite
-    .prepare("INSERT OR IGNORE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)")
-    .run("local-org", "local-user", "admin");
+  await db.insert(orgs).values({ id: "local-org", name: "Local Dev", createdAt: now }).onConflictDoNothing();
+  await db
+    .insert(users)
+    .values({ id: "local-user", email: "local@dev", name: "Local Dev", role: "admin" })
+    .onConflictDoNothing();
+  await db
+    .insert(orgMembers)
+    .values({ orgId: "local-org", userId: "local-user", role: "admin", createdAt: now })
+    .onConflictDoNothing();
 
-  const db = buildAppDb(sqlite);
-  const engineDb = drizzle(sqlite);
-  const engineStore = new SqliteSessionStore(engineDb);
+  const engineStore = new PgSessionStore(pgdb);
   const sandboxProvider = new VirtualSandboxProvider();
-  const eventStream = new SqliteEventStream(sqlite);
+  const eventStream = new PgEventStream(pgdb);
   const engineCredentials = new InMemoryCredentialStore();
-  const blobs = new FsBlobStore(join(dirname(dbPath), "blobs"));
+  const blobs = new FsBlobStore(join(pgDataDir, "blobs"));
 
   let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
@@ -94,7 +98,7 @@ async function main(): Promise<void> {
     },
   });
 
-  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(dirname(dbPath), "children") };
+  const childrenDeps = { db, engineHost, engineStore, workspaceRoot: join(pgDataDir, "children") };
   const watcher = new ChildWatcher(childrenDeps);
   const spawner = buildChildSpawner(childrenDeps, watcher);
   spawnerRef = spawner;
