@@ -47,7 +47,7 @@ underlying signal is written reliably on every relevant path.
    optional `error_code` on the `error`/`recovery_exhausted` paths. Hardens cost-per-task,
    separates "abandoned" from "done", and makes time-to-done trustworthy. The DO-emitted
    outcomes are persisted the moment they fire: `emitSessionOutcome` writes the event to the
-   DO-local buffer and then `await`s a `flushMetrics()` to D1, so a terminal session that
+   DO-local buffer and then `await`s a `flushAnalyticsEvents()` to D1, so a terminal session that
    never runs another flush doesn't leave the row at `flushed = 0`.
    **Plus a GitHub-webhook-driven terminal outcome:** `properties.reason = 'pr_merged'`
    (`{ repo, prNumber }`), written when a `pull_request` webhook reports a merge for a session
@@ -62,11 +62,14 @@ underlying signal is written reliably on every relevant path.
    **Consumer semantics:** `hibernated` recurs across a single session's life (hibernate →
    wake → run → hibernate again is normal), so a session can have several `session.outcome`
    rows. Consumers must take the **last** outcome per session (by `created_at` / event id):
-   a later wake-and-run supersedes a prior `hibernated`, and a subsequent `terminated` or
-   `error` supersedes everything before it. `recovery_exhausted` is a distinct terminal
-   reason even though it routes through the same `handleStop` termination path as
-   `terminated`. `pr_merged` is asynchronous to the DO lifecycle and can arrive after any
-   terminal outcome — it is a positive-value marker, not part of the supersession chain.
+   a subsequent `terminated` or `error` supersedes everything before it. `hibernated` is
+   **not** self-superseding — no outcome is emitted when a hibernated session wakes and runs,
+   so a live, actively-running woken session still reads last-outcome=`hibernated`. Consumers
+   that need liveness must join `sessions.status`, not infer it from the last outcome.
+   `recovery_exhausted` is a distinct terminal reason even though it routes through the same
+   `handleStop` termination path as `terminated`. `pr_merged` is asynchronous to the DO
+   lifecycle and can arrive after any terminal outcome — it is a positive-value marker, not
+   part of the supersession chain.
 6. **Webhook delivery health** — receipt/processing outcome per webhook. Doubles as
    automation debugging and a freshness guarantee for the PR metrics (a stale merge rate
    should look stale, not wrong).

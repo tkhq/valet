@@ -4646,6 +4646,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      await this.flushMetrics();
       await this.emitSessionOutcome('error', 'sandbox_spawn_failed');
       const errId = crypto.randomUUID();
       this.messageStore.writeMessage({
@@ -5920,6 +5921,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      await this.flushMetrics();
       await this.emitSessionOutcome('error', 'recover_missing_config');
       this.broadcastToClients({ type: 'status', data: { status: 'error' } });
       this.broadcastToClients({ type: 'error', error: 'Cannot recover: missing spawn configuration' });
@@ -6097,6 +6099,7 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      await this.flushMetrics();
       await this.emitSessionOutcome('error', 'wake_missing_config');
       this.broadcastToClients({ type: 'status', data: { status: 'error' } });
       this.broadcastToClients({ type: 'error', error: errorText });
@@ -6543,13 +6546,13 @@ export class SessionAgentDO {
 
     const userId = this.sessionState.userId || null;
     for (;;) {
-      const unflushed = this.ctx.storage.sql
-        .exec('SELECT id, event_type, turn_id, duration_ms, channel, model, queue_mode, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, tool_name, error_code, summary, actor_id, properties, created_at FROM analytics_events WHERE flushed = 0 ORDER BY id ASC LIMIT 100')
-        .toArray();
-
-      if (unflushed.length === 0) return;
-
       try {
+        const unflushed = this.ctx.storage.sql
+          .exec('SELECT id, event_type, turn_id, duration_ms, channel, model, queue_mode, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, tool_name, error_code, summary, actor_id, properties, created_at FROM analytics_events WHERE flushed = 0 ORDER BY id ASC LIMIT 100')
+          .toArray();
+
+        if (unflushed.length === 0) return;
+
         await batchInsertAnalyticsEvents(this.env.DB, sessionId, userId, unflushed.map((row) => ({
           id: `${sessionId}:${row.id as number}`,
           eventType: row.event_type as string,
@@ -6683,19 +6686,22 @@ export class SessionAgentDO {
    * Consumer semantics: `hibernated` recurs across a single session's life —
    * a session can hibernate, wake, run, and hibernate again, so multiple
    * `session.outcome` rows per session are expected and correct. Consumers
-   * take the LAST outcome per session (by created_at / event id); a later
-   * wake-and-run supersedes a prior `hibernated`, and a subsequent
-   * `terminated`/`error` supersedes everything before it. `recovery_exhausted`
-   * is a distinct terminal reason even though it routes through the same
-   * termination path as `terminated`.
+   * take the LAST outcome per session (by created_at / event id); a
+   * subsequent `terminated`/`error` supersedes everything before it.
+   * `hibernated` is NOT self-superseding: no outcome is emitted when a
+   * hibernated session wakes and runs, so a live, actively-running woken
+   * session still reads last-outcome=`hibernated`. Consumers needing
+   * liveness must join `sessions.status`, not infer it from the last
+   * outcome. `recovery_exhausted` is a distinct terminal reason even though
+   * it routes through the same termination path as `terminated`.
    *
    * `emitEvent` only writes the DO-local SQLite buffer (`flushed = 0`); a
    * terminal session may never flush again, so we drain the buffer here to
    * persist the row to D1 immediately. We flush only the analytics buffer
-   * (not the full `flushMetrics`) because the terminal paths that reach here
-   * (stop/hibernate) already flushed message/tool metrics just before, and
-   * those counts are unchanged. Callers must `await` this so the flush
-   * completes before the terminal path tears the DO down.
+   * (not the full `flushMetrics`) because every terminal path that reaches
+   * here already flushed message/tool metrics just before, and those counts
+   * are unchanged. Callers must `await` this so the flush completes before
+   * the terminal path tears the DO down.
    */
   private async emitSessionOutcome(
     reason: 'terminated' | 'hibernated' | 'error' | 'recovery_exhausted',
