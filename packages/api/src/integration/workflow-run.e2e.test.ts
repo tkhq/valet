@@ -25,7 +25,7 @@
  *
  * Final assertions (decision 21): each `workflow:{runId}:{nodeId}[:repair]`
  * dispatchId maps to exactly one `engine_queue_items` row (queried directly
- * against the engine sqlite tables — the schema's own partial unique index
+ * against the engine's pg tables — the schema's own partial unique index
  * on `(session_id, dispatch_id)` is what *guarantees* this, but the
  * assertion is the exit criterion's explicit ask); each `(runId, nodeId,
  * iteration)` has exactly one `workflow_checkpoints` row; the session
@@ -43,7 +43,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
+import { PGlite } from "@electric-sql/pglite";
 import type {
   CreateWorkflowResponse,
   GetWorkflowRunResponse,
@@ -92,16 +92,15 @@ interface ApiProcess {
  * on-disk db/blobs paths, and wait for it to report "listening". */
 async function spawnApi(opts: {
   port: number;
-  dbPath: string;
+  pgDataDir: string;
   blobsRoot: string;
   crashAt?: "terminalizing";
 }): Promise<ApiProcess> {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PORT: String(opts.port),
-    VALET_DB_PATH: opts.dbPath,
+    VALET_PG_DATA_DIR: opts.pgDataDir,
     VALET_BLOBS_DIR: opts.blobsRoot,
-    VALET_DATA_DIR: dirname(opts.dbPath),
     VALET_ENCRYPTION_KEY: "test-key",
     VALET_LOCAL_AUTH: "1",
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
@@ -286,6 +285,12 @@ function removeContainers(ids: Iterable<string>): void {
 }
 
 // ── Engine store dispatchId query surface (decision 21) ───────────────────
+//
+// These inspect the on-disk PGlite data dir directly, via a short-lived
+// PGlite instance pointed at the same `VALET_PG_DATA_DIR` the spawned api
+// process used. PGlite is single-connection (Task 0 finding), so this only
+// runs AFTER the api process under inspection has fully exited — see the
+// call site below, which kills the process before opening this reader.
 
 interface QueueDispatchCount {
   dispatchId: string;
@@ -294,22 +299,16 @@ interface QueueDispatchCount {
 
 /** Every dispatchId under `workflow:{runId}:` must map to exactly one
  * `engine_queue_items` row — queried directly against the on-disk engine
- * sqlite tables. */
-function countQueueItemsByDispatchId(dbPath: string, runId: string): QueueDispatchCount[] {
-  const sqlite = new Database(dbPath, { readonly: true });
-  try {
-    const rows = sqlite
-      .prepare(
-        `SELECT dispatch_id as dispatchId, COUNT(*) as count
-         FROM engine_queue_items
-         WHERE dispatch_id LIKE ?
-         GROUP BY dispatch_id`,
-      )
-      .all(`workflow:${runId}:%`) as QueueDispatchCount[];
-    return rows;
-  } finally {
-    sqlite.close();
-  }
+ * pg tables. */
+async function countQueueItemsByDispatchId(pglite: PGlite, runId: string): Promise<QueueDispatchCount[]> {
+  const result = await pglite.query<{ dispatch_id: string; count: string }>(
+    `SELECT dispatch_id, COUNT(*) as count
+     FROM engine_queue_items
+     WHERE dispatch_id LIKE $1
+     GROUP BY dispatch_id`,
+    [`workflow:${runId}:%`],
+  );
+  return result.rows.map((r) => ({ dispatchId: r.dispatch_id, count: Number(r.count) }));
 }
 
 interface CheckpointRow {
@@ -320,35 +319,27 @@ interface CheckpointRow {
 
 /** Every `(runId, nodeId, iteration)` must map to exactly one
  * `workflow_checkpoints` row. */
-function countCheckpointsByNode(dbPath: string, runId: string): CheckpointRow[] {
-  const sqlite = new Database(dbPath, { readonly: true });
-  try {
-    const rows = sqlite
-      .prepare(
-        `SELECT node_id, iteration, COUNT(*) as count
-         FROM workflow_checkpoints
-         WHERE run_id = ?
-         GROUP BY node_id, iteration`,
-      )
-      .all(runId) as CheckpointRow[];
-    return rows;
-  } finally {
-    sqlite.close();
-  }
+async function countCheckpointsByNode(pglite: PGlite, runId: string): Promise<CheckpointRow[]> {
+  const result = await pglite.query<{ node_id: string; iteration: number; count: string }>(
+    `SELECT node_id, iteration, COUNT(*) as count
+     FROM workflow_checkpoints
+     WHERE run_id = $1
+     GROUP BY node_id, iteration`,
+    [runId],
+  );
+  return result.rows.map((r) => ({ node_id: r.node_id, iteration: r.iteration, count: Number(r.count) }));
 }
 
-function getSessionNodeResult(dbPath: string, runId: string, nodeId: string): unknown {
-  const sqlite = new Database(dbPath, { readonly: true });
-  try {
-    const row = sqlite
-      .prepare(
-        `SELECT result FROM workflow_checkpoints WHERE run_id = ? AND node_id = ? AND status = 'completed'`,
-      )
-      .get(runId, nodeId) as { result: string | null } | undefined;
-    return row?.result ? JSON.parse(row.result) : undefined;
-  } finally {
-    sqlite.close();
-  }
+async function getSessionNodeResult(pglite: PGlite, runId: string, nodeId: string): Promise<unknown> {
+  const result = await pglite.query<{ result: unknown }>(
+    `SELECT result FROM workflow_checkpoints WHERE run_id = $1 AND node_id = $2 AND status = 'completed'`,
+    [runId, nodeId],
+  );
+  const row = result.rows[0];
+  if (!row || row.result === null || row.result === undefined) return undefined;
+  // jsonb columns come back already parsed by the driver; tolerate a raw
+  // string defensively (see pg-store.ts's doc comment on the same asymmetry).
+  return typeof row.result === "string" ? JSON.parse(row.result) : row.result;
 }
 
 /** Narrow the session node's persisted result (`SessionSettledResult`,
@@ -374,14 +365,14 @@ describeIfKey("api integration: workflow run host E2E (Phase 5 exit criterion)",
     "kill/restart at mid-node, parked-on-approval, and terminalizing — no duplicate dispatch",
     async () => {
       const dir = await mkdtemp(join(tmpdir(), "valet-wf-e2e-"));
-      const dbPath = join(dir, "app.db");
+      const pgDataDir = join(dir, "pgdata");
       const blobsRoot = join(dir, "blobs");
       const port = 20000 + Math.floor(Math.random() * 10000);
 
       let api: ApiProcess | undefined;
       try {
         // ── Boot process A (no crash hook). Create the definition + run 1. ──
-        api = await spawnApi({ port, dbPath, blobsRoot });
+        api = await spawnApi({ port, pgDataDir, blobsRoot });
 
         const workflowId = await createWorkflow(api.baseUrl, "e2e-restart-test", workflowDefinition());
         const runId1 = await startRun(api.baseUrl, workflowId);
@@ -401,8 +392,8 @@ describeIfKey("api integration: workflow run host E2E (Phase 5 exit criterion)",
         // ── Restart process B over the same db (the mid-node restart). The
         // session's turn (already dispatched, unsettled) resumes because
         // `restoreUnsettledSessions` + the workflow host's poll loop both
-        // pick the in-flight work back up against the same sqlite file. ──
-        api = await spawnApi({ port, dbPath, blobsRoot });
+        // pick the in-flight work back up against the same PGlite data dir. ──
+        api = await spawnApi({ port, pgDataDir, blobsRoot });
 
         // ── Restart point (b): parked-on-approval. Poll until the session
         // node completed and the run parked on the approval's signal wait,
@@ -418,7 +409,7 @@ describeIfKey("api integration: workflow run host E2E (Phase 5 exit criterion)",
 
         // ── Restart process C. Resolve the approval over HTTP, then poll
         // until the run proceeds through the 2s wait and settles. ──
-        api = await spawnApi({ port, dbPath, blobsRoot });
+        api = await spawnApi({ port, pgDataDir, blobsRoot });
 
         await poll(
           () => getRun(api!.baseUrl, runId1),
@@ -445,7 +436,7 @@ describeIfKey("api integration: workflow run host E2E (Phase 5 exit criterion)",
         // that resolves to `stop`). ──
         await killAndWait(api);
 
-        api = await spawnApi({ port, dbPath, blobsRoot, crashAt: "terminalizing" });
+        api = await spawnApi({ port, pgDataDir, blobsRoot, crashAt: "terminalizing" });
 
         const runId2 = await startRun(api.baseUrl, workflowId);
 
@@ -468,7 +459,7 @@ describeIfKey("api integration: workflow run host E2E (Phase 5 exit criterion)",
         // `terminalizing` with a dead owner's lease; the poll loop's
         // expired-lease reclaim (leaseMs=30s default) picks it back up and
         // finishes the two-phase settle. ──
-        api = await spawnApi({ port, dbPath, blobsRoot });
+        api = await spawnApi({ port, pgDataDir, blobsRoot });
 
         const run2Final = await poll(
           () => getRun(api!.baseUrl, runId2),
@@ -478,26 +469,37 @@ describeIfKey("api integration: workflow run host E2E (Phase 5 exit criterion)",
         );
         expect(run2Final.run.outcome).toBe("completed");
 
-        // ── Final assertions (decision 21) — both runs. ──
-        for (const runId of [runId1, runId2]) {
-          const dispatchCounts = countQueueItemsByDispatchId(dbPath, runId);
-          expect(dispatchCounts.length).toBeGreaterThan(0);
-          for (const { dispatchId, count } of dispatchCounts) {
-            expect(count, `dispatchId ${dispatchId} must map to exactly one queue item`).toBe(1);
-          }
+        // ── Final assertions (decision 21) — both runs. Kill process D
+        // first: PGlite is single-connection (Task 0 finding), so the data
+        // dir can only be safely reopened for the raw table inspection below
+        // once nothing else holds it. ──
+        await killAndWait(api);
+        api = undefined;
 
-          const checkpointCounts = countCheckpointsByNode(dbPath, runId);
-          expect(checkpointCounts.length).toBeGreaterThan(0);
-          for (const { node_id, iteration, count } of checkpointCounts) {
-            expect(count, `(${runId}, ${node_id}, ${iteration}) must have exactly one checkpoint row`).toBe(1);
-          }
+        const pglite = new PGlite(pgDataDir);
+        try {
+          for (const runId of [runId1, runId2]) {
+            const dispatchCounts = await countQueueItemsByDispatchId(pglite, runId);
+            expect(dispatchCounts.length).toBeGreaterThan(0);
+            for (const { dispatchId, count } of dispatchCounts) {
+              expect(count, `dispatchId ${dispatchId} must map to exactly one queue item`).toBe(1);
+            }
 
-          const sessionResult = getSessionNodeResult(dbPath, runId, "ask");
-          expect(sessionResult).toBeDefined();
-          // Schema-validated output present on the session node's checkpoint
-          // (decision 21) — a non-empty string satisfies `{answer: string}`;
-          // not pinned to the exact value to avoid flaking on model phrasing.
-          expect(extractAnswer(sessionResult)).toEqual(expect.any(String));
+            const checkpointCounts = await countCheckpointsByNode(pglite, runId);
+            expect(checkpointCounts.length).toBeGreaterThan(0);
+            for (const { node_id, iteration, count } of checkpointCounts) {
+              expect(count, `(${runId}, ${node_id}, ${iteration}) must have exactly one checkpoint row`).toBe(1);
+            }
+
+            const sessionResult = await getSessionNodeResult(pglite, runId, "ask");
+            expect(sessionResult).toBeDefined();
+            // Schema-validated output present on the session node's checkpoint
+            // (decision 21) — a non-empty string satisfies `{answer: string}`;
+            // not pinned to the exact value to avoid flaking on model phrasing.
+            expect(extractAnswer(sessionResult)).toEqual(expect.any(String));
+          }
+        } finally {
+          await pglite.close();
         }
       } catch (err) {
         // Surface the current child process's output — the tmp dir (and with

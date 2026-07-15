@@ -3,21 +3,22 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildSpawner, CredentialStore, Principal, ValetPlugin } from "@valet/engine";
+import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
-import type { WorkflowStore } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
-import { notPortedStub } from "./not-ported-stub.js";
 import { assemblePlugins } from "../plugins/assemble.js";
+import { PgCredentialStore } from "../plugins/credential-store.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { FsBlobStore } from "./blob-fs.js";
 import type { Providers } from "./types.js";
 
@@ -172,10 +173,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const blobs = new FsBlobStore(opts.blobsRoot);
   const sandboxProvider = new DockerSandboxProvider();
   const eventStream = new PgEventStream(pgdb);
-  // Not yet ported to Postgres (Task 8 of the postgres-backend plan) — see
-  // `not-ported-stub.ts`'s doc comment. Nothing on the current boot/test
-  // path calls a credential-store method.
-  const engineCredentials = notPortedStub<CredentialStore>("CredentialStore");
+  const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
 
   // Plugin loading (plugin-system-v2 plan Task 4): tests supply `opts.plugins`
   // directly and skip the node_modules scan entirely; the normal boot path
@@ -226,9 +224,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
   // the routes both read/write through — one instance per process, backed
-  // by the same connection source as everything else. Not yet ported to
-  // Postgres (Task 8) — see `not-ported-stub.ts`'s doc comment.
-  const workflowStore = notPortedStub<WorkflowStore>("WorkflowStore");
+  // by the same connection source as everything else.
+  const workflowStore = new PgWorkflowStore(pgdb);
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,

@@ -10,7 +10,8 @@ import type { CredentialStore } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgMembers, orgs, users, invites } from "../schema/index.js";
-import { notPortedStub } from "../providers/not-ported-stub.js";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createInvite } from "./invites.js";
 import type { AuthConfig } from "./config.js";
 import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
@@ -165,16 +166,12 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 
 describe("buildAuthHooks", () => {
   let db: AppDb;
-  // Not yet ported to Postgres (Task 8 of the postgres-backend plan) — see
-  // `providers/not-ported-stub.ts`'s doc comment. Only the
-  // `databaseHooks.account.create.after` tests below actually call this
-  // (they're skipped for the same reason); every other test here never
-  // touches it.
   let credentialStore: CredentialStore;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
-    credentialStore = notPortedStub<CredentialStore>("CredentialStore");
+    const fresh = await freshTestPgDb();
+    db = fresh.appDb;
+    credentialStore = new PgCredentialStore(fresh.pgdb, deriveSecretKey("test-key"));
     // Seed one existing user so "first user → admin" doesn't dominate every test.
     await seedUser(db, "existing", "existing@x.test");
   });
@@ -248,8 +245,9 @@ describe("buildAuthHooks", () => {
     });
 
     it("SSO path: first user (empty db) is stamped admin", async () => {
-      ({ appDb: db } = await freshTestPgDb());
-      credentialStore = notPortedStub<CredentialStore>("CredentialStore");
+      const fresh = await freshTestPgDb();
+      db = fresh.appDb;
+      credentialStore = new PgCredentialStore(fresh.pgdb, deriveSecretKey("test-key"));
       const cfg = baseConfig();
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
       const result = await databaseHooks!.user!.create!.before!(
@@ -316,10 +314,7 @@ describe("buildAuthHooks", () => {
     });
   });
 
-  // Not yet ported to Postgres (Task 8): `accountCreateAfter` calls
-  // `credentialStore.save`/`.get`, and `credentialStore` above is a throwing
-  // stub for the duration of the cutover wave.
-  describe.skip("databaseHooks.account.create.after", () => {
+  describe("databaseHooks.account.create.after", () => {
     it("writes google tokens to the credential store under both google plugin services", async () => {
       const cfg = baseConfig();
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });

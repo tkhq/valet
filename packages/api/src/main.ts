@@ -148,14 +148,7 @@ await providers.childWatcher.rearm().catch((err) => {
 
 // Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
 // loops so pending/parked runs left over from a prior process pick back up.
-//
-// NOT started during the postgres-backend cutover wave (Task 7): the
-// providers' `workflowStore` is a `notPortedStub` until Task 8 lands
-// `PgWorkflowStore`, and starting the loops against it throws on every poll
-// tick as an unhandled rejection. Task 8 restores this call alongside the
-// real store. (`stopHost()` in `shutdown` below is safe on a never-started
-// host.)
-// providers.workflowRunHost.startHost();
+providers.workflowRunHost.startHost();
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.

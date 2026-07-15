@@ -1,46 +1,99 @@
 /**
  * `CredentialStore` port (`@valet/engine`'s `packages/engine/src/types.ts`)
- * implemented over the app sqlite DB (plugin-system-v2 plan Task 3).
+ * implemented over the app Postgres DB (Task 8 of the postgres-backend
+ * plan, docs/specs/2026-07-15-postgres-backend-design.md — replaces the
+ * sqlite-backed `SqliteCredentialStore`).
  *
- * Backed by the raw better-sqlite3 handle underneath the app's Drizzle
- * instance (`AppDb["$client"]`) — mirrors `packages/api/src/workflows/
- * sqlite-store.ts`'s house idiom: prepared statements, single conditional
- * upserts, JSON-text columns for `scopes`/`metadata`.
+ * Backed by the shared `PgQueryable` query interface (decision 4) — every
+ * method here is a single statement (`save`'s `ON CONFLICT (owner_type,
+ * owner_id, service) DO UPDATE` upsert is one atomic round trip; no
+ * multi-statement sequence needs `transaction(fn)`).
  *
  * Secret fields (`accessToken`, `refreshToken`, `apiKey`) are encrypted at
- * rest with `src/lib/secret-crypto.ts`'s AES-256-GCM helpers — the sqlite
- * row never holds plaintext.
+ * rest with `src/lib/secret-crypto.ts`'s AES-256-GCM helpers (byte-identical
+ * `v1:{iv}:{tag}:{ct}` format) — the row never holds plaintext.
+ * `scopes`/`metadata` are `jsonb` columns (schema/index.ts): written as
+ * `JSON.stringify`'d text, read back already-parsed by the driver (no
+ * `JSON.parse` on read — see `pg-store.ts`'s doc comment for the same
+ * jsonb-read-vs-write asymmetry).
  */
-import type Database from "better-sqlite3";
+import type { PgQueryable } from "@valet/store-postgres";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
 
 interface CredentialRow {
-  owner_type: string;
-  owner_id: string;
+  ownerType: string;
+  ownerId: string;
   service: string;
   type: StoredCredential["type"];
-  access_token_enc: string | null;
-  refresh_token_enc: string | null;
-  api_key_enc: string | null;
-  expires_at: number | null;
-  scopes: string | null;
-  metadata: string | null;
-  created_at: number;
-  updated_at: number;
+  accessTokenEnc: string | null;
+  refreshTokenEnc: string | null;
+  apiKeyEnc: string | null;
+  expiresAt: number | null;
+  scopes: unknown;
+  metadata: unknown;
+  createdAt: number;
+  updatedAt: number;
 }
 
-export class SqliteCredentialStore implements CredentialStore {
-  private readonly sqlite: Database.Database;
+function toNum(value: unknown, field: string): number {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const n = Number(value);
+    if (Number.isNaN(n)) throw new Error(`expected numeric value for ${field}, got non-numeric string ${JSON.stringify(value)}`);
+    return n;
+  }
+  throw new Error(`expected numeric value for ${field}, got ${typeof value}`);
+}
 
+function toNumOrNull(value: unknown, field: string): number | null {
+  return value === null || value === undefined ? null : toNum(value, field);
+}
+
+function asString(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new Error(`expected string for ${field}, got ${typeof value}`);
+  return value;
+}
+
+function asStringOrNull(value: unknown, field: string): string | null {
+  return value === null || value === undefined ? null : asString(value, field);
+}
+
+/** `undefined` in → SQL `NULL` param out; every other value → `JSON.stringify`'d text (Postgres coerces it into the target jsonb column). */
+function jsonToParam(value: unknown): string | null {
+  return value === undefined ? null : JSON.stringify(value);
+}
+
+/** Reads a nullable jsonb column: `null` → `undefined`; an already-parsed JS value passes through; a raw string (defensive) is `JSON.parse`'d. */
+function fromJsonColumn<T>(value: unknown): T | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string") return JSON.parse(value) as T;
+  return value as T;
+}
+
+function rawToCredentialRow(raw: Record<string, unknown>): CredentialRow {
+  return {
+    ownerType: asString(raw.owner_type, "owner_type"),
+    ownerId: asString(raw.owner_id, "owner_id"),
+    service: asString(raw.service, "service"),
+    type: asString(raw.type, "type") as StoredCredential["type"],
+    accessTokenEnc: asStringOrNull(raw.access_token_enc, "access_token_enc"),
+    refreshTokenEnc: asStringOrNull(raw.refresh_token_enc, "refresh_token_enc"),
+    apiKeyEnc: asStringOrNull(raw.api_key_enc, "api_key_enc"),
+    expiresAt: toNumOrNull(raw.expires_at, "expires_at"),
+    scopes: raw.scopes,
+    metadata: raw.metadata,
+    createdAt: toNum(raw.created_at, "created_at"),
+    updatedAt: toNum(raw.updated_at, "updated_at"),
+  };
+}
+
+export class PgCredentialStore implements CredentialStore {
   constructor(
-    db: AppDb & { $client: Database.Database },
+    private readonly db: PgQueryable,
     private readonly key: Buffer,
     private readonly clock: () => number = () => Date.now(),
-  ) {
-    this.sqlite = db.$client;
-  }
+  ) {}
 
   private encrypt(value: string | undefined): string | null {
     return value === undefined ? null : encryptSecret(value, this.key);
@@ -51,39 +104,40 @@ export class SqliteCredentialStore implements CredentialStore {
   }
 
   async get(owner: CredentialOwner, service: string): Promise<StoredCredential | null> {
-    const row = this.sqlite
-      .prepare(`SELECT * FROM credentials WHERE owner_type = ? AND owner_id = ? AND service = ?`)
-      .get(owner.type, owner.id, service) as CredentialRow | undefined;
-    if (!row) return null;
+    const result = await this.db.query(
+      `SELECT * FROM credentials WHERE owner_type = $1 AND owner_id = $2 AND service = $3`,
+      [owner.type, owner.id, service],
+    );
+    const raw = result.rows[0];
+    if (!raw) return null;
+    const row = rawToCredentialRow(raw);
     return {
       type: row.type,
-      accessToken: this.decrypt(row.access_token_enc),
-      refreshToken: this.decrypt(row.refresh_token_enc),
-      apiKey: this.decrypt(row.api_key_enc),
-      expiresAt: row.expires_at ?? undefined,
-      scopes: row.scopes === null ? undefined : (JSON.parse(row.scopes) as string[]),
-      metadata: row.metadata === null ? undefined : (JSON.parse(row.metadata) as Record<string, unknown>),
+      accessToken: this.decrypt(row.accessTokenEnc),
+      refreshToken: this.decrypt(row.refreshTokenEnc),
+      apiKey: this.decrypt(row.apiKeyEnc),
+      expiresAt: row.expiresAt ?? undefined,
+      scopes: fromJsonColumn<string[]>(row.scopes),
+      metadata: fromJsonColumn<Record<string, unknown>>(row.metadata),
     };
   }
 
   async save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void> {
     const now = this.clock();
-    this.sqlite
-      .prepare(
-        `INSERT INTO credentials
-           (owner_type, owner_id, service, type, access_token_enc, refresh_token_enc, api_key_enc, expires_at, scopes, metadata, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(owner_type, owner_id, service) DO UPDATE SET
-           type = excluded.type,
-           access_token_enc = excluded.access_token_enc,
-           refresh_token_enc = excluded.refresh_token_enc,
-           api_key_enc = excluded.api_key_enc,
-           expires_at = excluded.expires_at,
-           scopes = excluded.scopes,
-           metadata = excluded.metadata,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
+    await this.db.query(
+      `INSERT INTO credentials
+         (owner_type, owner_id, service, type, access_token_enc, refresh_token_enc, api_key_enc, expires_at, scopes, metadata, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (owner_type, owner_id, service) DO UPDATE SET
+         type = EXCLUDED.type,
+         access_token_enc = EXCLUDED.access_token_enc,
+         refresh_token_enc = EXCLUDED.refresh_token_enc,
+         api_key_enc = EXCLUDED.api_key_enc,
+         expires_at = EXCLUDED.expires_at,
+         scopes = EXCLUDED.scopes,
+         metadata = EXCLUDED.metadata,
+         updated_at = EXCLUDED.updated_at`,
+      [
         owner.type,
         owner.id,
         service,
@@ -92,27 +146,34 @@ export class SqliteCredentialStore implements CredentialStore {
         this.encrypt(credential.refreshToken),
         this.encrypt(credential.apiKey),
         credential.expiresAt ?? null,
-        credential.scopes === undefined ? null : JSON.stringify(credential.scopes),
-        credential.metadata === undefined ? null : JSON.stringify(credential.metadata),
+        jsonToParam(credential.scopes),
+        jsonToParam(credential.metadata),
         now,
         now,
-      );
+      ],
+    );
   }
 
   async delete(owner: CredentialOwner, service: string): Promise<void> {
-    this.sqlite
-      .prepare(`DELETE FROM credentials WHERE owner_type = ? AND owner_id = ? AND service = ?`)
-      .run(owner.type, owner.id, service);
+    await this.db.query(`DELETE FROM credentials WHERE owner_type = $1 AND owner_id = $2 AND service = $3`, [
+      owner.type,
+      owner.id,
+      service,
+    ]);
   }
 
   async list(owner: CredentialOwner): Promise<{ service: string; scopes?: string[]; connectedAt: string }[]> {
-    const rows = this.sqlite
-      .prepare(`SELECT * FROM credentials WHERE owner_type = ? AND owner_id = ? ORDER BY created_at ASC`)
-      .all(owner.type, owner.id) as CredentialRow[];
-    return rows.map((row) => ({
-      service: row.service,
-      scopes: row.scopes === null ? undefined : (JSON.parse(row.scopes) as string[]),
-      connectedAt: new Date(row.created_at).toISOString(),
-    }));
+    const result = await this.db.query(`SELECT * FROM credentials WHERE owner_type = $1 AND owner_id = $2 ORDER BY created_at ASC`, [
+      owner.type,
+      owner.id,
+    ]);
+    return result.rows.map((raw) => {
+      const row = rawToCredentialRow(raw);
+      return {
+        service: row.service,
+        scopes: fromJsonColumn<string[]>(row.scopes),
+        connectedAt: new Date(row.createdAt).toISOString(),
+      };
+    });
   }
 }

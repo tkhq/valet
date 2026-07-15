@@ -604,13 +604,14 @@ export const memoryFiles = pgTable(
 // ownership + immutable-at-start params/definition snapshot);
 // `workflow_checkpoints`/`workflow_signals` back the `WorkflowStore` port's
 // checkpoint and signal contracts exactly (`packages/api/src/workflows/
-// sqlite-store.ts` — ported to a pg store in Task 8 — implements the port
-// over these three tables plus `workflow_definitions`). JSON columns read
-// via `JSON.parse` (`definition`, `params`, `waiting_on`, `result`,
-// `effects`, `payload`, `consumed_by`) are `jsonb` here — decision 7 names
-// "workflow definitions" explicitly, and the same read-as-JSON rule extends
-// to every other JSON.parse'd column in `sqlite-store.ts`. `error` stays
-// `text` — it's a plain error message string, never JSON.parse'd.
+// pg-store.ts` implements the port over these three tables plus
+// `workflow_definitions`). JSON columns (`definition`, `params`,
+// `waiting_on`, `result`, `effects`, `payload`, `consumed_by`) are `jsonb`
+// here — decision 7 names "workflow definitions" explicitly, and the same
+// read-as-JSON rule extends to every other jsonb column `pg-store.ts`
+// touches (written `JSON.stringify`'d, read back already-parsed — see that
+// file's doc comment). `error` stays `text` — it's a plain error message
+// string, never parsed as JSON.
 
 export const workflowDefinitions = pgTable(
   "workflow_definitions",
