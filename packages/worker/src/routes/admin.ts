@@ -14,6 +14,7 @@ import {
   listCustomProviders,
   deleteCustomProvider,
   getOrchestratorIdentity,
+  deleteUserAuthSessions,
 } from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
 import * as adminService from '../services/admin.js';
@@ -215,6 +216,18 @@ adminRouter.delete('/users/:id', async (c) => {
     }
   }
 
+  return c.json({ ok: true });
+});
+
+/**
+ * Revoke all live login sessions for a user. Existing browser sessions
+ * for that user will be logged out on their next request (the middleware
+ * returns AUTH_INVALID, the client clears local auth state). Does not
+ * delete the user or API tokens — use `DELETE /users/:id` for that.
+ */
+adminRouter.post('/users/:id/revoke-sessions', async (c) => {
+  const userId = c.req.param('id');
+  await deleteUserAuthSessions(c.get('db'), userId);
   return c.json({ ok: true });
 });
 

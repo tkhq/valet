@@ -19,6 +19,7 @@ import {
   useOrgUsers,
   useUpdateUserRole,
   useRemoveUser,
+  useRevokeUserSessions,
   useAdminOrchestrators,
   useAdminActionLog,
   useRefreshOrchestrator,
@@ -1973,7 +1974,10 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
   const { data: users, isLoading } = useOrgUsers();
   const updateRole = useUpdateUserRole();
   const removeUser = useRemoveUser();
+  const revokeSessions = useRevokeUserSessions();
   const [confirmDelete, setConfirmDelete] = React.useState<string | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = React.useState<string | null>(null);
+  const [revokedForUser, setRevokedForUser] = React.useState<string | null>(null);
 
   const adminCount = users?.filter((u) => u.role === 'admin').length ?? 0;
 
@@ -2034,10 +2038,36 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                       {formatDate(u.createdAt)}
                     </td>
                     <td className="py-2 text-right">
-                      {!isSelf && !isLastAdmin && (
-                        <>
-                          {confirmDelete === u.id ? (
-                            <div className="flex items-center gap-2 justify-end">
+                      <div className="flex items-center gap-2 justify-end">
+                        {confirmRevoke === u.id ? (
+                          <>
+                            <span className="text-xs text-red-600 dark:text-red-400">Confirm?</span>
+                            <Button
+                              variant="secondary"
+                              onClick={() => {
+                                revokeSessions.mutate(u.id, {
+                                  onSuccess: () => setRevokedForUser(u.id),
+                                  onSettled: () => setConfirmRevoke(null),
+                                });
+                              }}
+                              disabled={revokeSessions.isPending}
+                            >
+                              Revoke
+                            </Button>
+                            <Button variant="secondary" onClick={() => setConfirmRevoke(null)}>
+                              Cancel
+                            </Button>
+                          </>
+                        ) : revokedForUser === u.id ? (
+                          <span className="text-xs text-neutral-500 dark:text-neutral-400">Sessions revoked</span>
+                        ) : (
+                          <Button variant="secondary" onClick={() => setConfirmRevoke(u.id)}>
+                            Revoke sessions
+                          </Button>
+                        )}
+                        {!isSelf && !isLastAdmin && (
+                          confirmDelete === u.id ? (
+                            <>
                               <span className="text-xs text-red-600 dark:text-red-400">Confirm?</span>
                               <Button
                                 variant="secondary"
@@ -2051,14 +2081,14 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                               <Button variant="secondary" onClick={() => setConfirmDelete(null)}>
                                 Cancel
                               </Button>
-                            </div>
+                            </>
                           ) : (
                             <Button variant="secondary" onClick={() => setConfirmDelete(u.id)}>
                               Remove
                             </Button>
-                          )}
-                        </>
-                      )}
+                          )
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -2078,6 +2108,11 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
         {removeUser.isError && (
           <p className="text-sm text-red-600 dark:text-red-400">
             Failed to remove user. {(removeUser.error as Error)?.message}
+          </p>
+        )}
+        {revokeSessions.isError && (
+          <p className="text-sm text-red-600 dark:text-red-400">
+            Failed to revoke sessions. {(revokeSessions.error as Error)?.message}
           </p>
         )}
       </div>

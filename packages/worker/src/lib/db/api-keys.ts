@@ -51,3 +51,7 @@ export async function revokeApiToken(db: AppDb, id: string, userId: string): Pro
 
   return (result.meta?.changes ?? 0) > 0;
 }
+
+export async function deleteUserApiTokens(db: AppDb, userId: string): Promise<void> {
+  await db.delete(apiTokens).where(eq(apiTokens.userId, userId));
+}

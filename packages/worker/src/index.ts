@@ -418,6 +418,26 @@ const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) 
       return { deleted };
     });
 
+    // Delete auth_sessions past their expires_at. Rows are otherwise
+    // untouched — nothing else purges them, so the table would grow
+    // monotonically with every login.
+    await runSweep(env, 'nightly_auth_session_expiry', async () => {
+      const now = new Date().toISOString();
+      let totalDeleted = 0;
+      let deleted: number;
+      do {
+        const result = await env.DB.prepare(
+          'DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE expires_at < ? LIMIT 1000)'
+        ).bind(now).run();
+        deleted = result.meta.changes ?? 0;
+        totalDeleted += deleted;
+      } while (deleted >= 1000);
+      if (totalDeleted > 0) {
+        console.log(`Auth session expiry: deleted ${totalDeleted} rows past expires_at`);
+      }
+      return { deleted: totalDeleted };
+    });
+
     // Prune schedule tick dedup rows older than 7 days (only needed for ~4h catch-up window, batched to avoid D1 timeout)
     await runSweep(env, 'nightly_schedule_tick_retention', async () => {
       const tickCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();

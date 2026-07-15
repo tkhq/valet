@@ -139,6 +139,13 @@ export function useRemoveUser() {
   });
 }
 
+export function useRevokeUserSessions() {
+  return useMutation({
+    mutationFn: (userId: string) =>
+      api.post<{ ok: boolean }>(`/admin/users/${userId}/revoke-sessions`),
+  });
+}
+
 // --- Orchestrators ---
 
 export interface AdminOrchestrator {
