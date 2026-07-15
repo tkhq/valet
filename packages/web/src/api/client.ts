@@ -134,7 +134,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     try {
       payload = JSON.parse(text);
     } catch {}
-    if (res.status === 401 && path !== "/auth-config") {
+    if (res.status === 401) {
       void maybeRedirectToLogin();
     }
     throw new ApiError(res.status, `${method} ${path} → ${res.status}`, payload);

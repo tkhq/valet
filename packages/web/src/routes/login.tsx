@@ -101,7 +101,7 @@ export function LoginPage() {
                 type="button"
                 variant="secondary"
                 className="w-full"
-                onClick={() => authClient.signIn.sso({ providerId: "oidc" })}
+                onClick={() => authClient.signIn.sso({ providerId: "oidc", callbackURL: "/" })}
               >
                 Continue with {sso.name}
               </Button>

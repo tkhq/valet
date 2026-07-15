@@ -1,7 +1,6 @@
 /**
  * `/api/me` — settings-shell per-user profile surface (split-settings
- * design). Distinct from `/api/auth/me` (`AuthMeResponse`, session-probe
- * shape used by the app boot check).
+ * design). Returns `MeResponse` with user profile and org membership info.
  *
  * `GET` joins `users` with `org_members` for `orgRole` — a caller with no
  * membership row (shouldn't happen outside tests, but the query doesn't

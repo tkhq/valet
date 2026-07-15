@@ -92,7 +92,7 @@ describe("LoginPage", () => {
   it("clicking the SSO button calls signIn.sso with providerId oidc", () => {
     render(<LoginPage />);
     fireEvent.click(screen.getByRole("button", { name: "Continue with Keycloak" }));
-    expect(signInSso).toHaveBeenCalledWith({ providerId: "oidc" });
+    expect(signInSso).toHaveBeenCalledWith({ providerId: "oidc", callbackURL: "/" });
   });
 
   it("shows better-auth's error message inline on failed sign-in and does not navigate", async () => {
