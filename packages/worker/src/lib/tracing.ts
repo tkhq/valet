@@ -28,7 +28,8 @@ export function isTracingEnabled(env: TracingEnv): boolean {
  * Values are percent-decoded to match the backend parser (backend/tracing.py):
  * one OTEL_EXPORTER_OTLP_HEADERS value (e.g. the Grafana Cloud `Authorization=
  * Basic%20<token>` form) must yield the same auth header on both exporters.
- * Malformed sequences are left verbatim, mirroring Python's lenient unquote().
+ * Malformed escapes are left literal per-sequence, mirroring Python's lenient
+ * unquote() — see percentDecode.
  */
 export function parseOtlpHeaders(raw: string | undefined): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -43,12 +44,41 @@ export function parseOtlpHeaders(raw: string | undefined): Record<string, string
   return headers;
 }
 
+const HEX_PAIR = /^[0-9A-Fa-f]{2}$/;
+
+/**
+ * Percent-decode a single header value with the same per-sequence leniency as
+ * Python's `urllib.parse.unquote` (backend/tracing.py). Splitting on `%`, each
+ * fragment whose first two chars are valid hex contributes that byte and keeps
+ * the rest literal; any other fragment keeps its leading `%` literal. The
+ * assembled bytes are decoded as UTF-8 with replacement, so a stray `%` (or an
+ * invalid UTF-8 byte) stays local to its own sequence instead of voiding the
+ * whole value — `decodeURIComponent` would throw and drop the entire string,
+ * making the two exporters derive different auth headers from one config.
+ */
 function percentDecode(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
+  if (!value.includes('%')) return value;
+  const encoder = new TextEncoder();
+  const bits = value.split('%');
+  const chunks: Uint8Array[] = [encoder.encode(bits[0])];
+  for (let i = 1; i < bits.length; i++) {
+    const item = bits[i];
+    const hex = item.slice(0, 2);
+    if (HEX_PAIR.test(hex)) {
+      chunks.push(Uint8Array.of(parseInt(hex, 16)));
+      chunks.push(encoder.encode(item.slice(2)));
+    } else {
+      chunks.push(encoder.encode(`%${item}`));
+    }
   }
+  const total = chunks.reduce((n, chunk) => n + chunk.length, 0);
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 // Secrets that sit in the URL PATH rather than the query — e.g. the Telegram bot token

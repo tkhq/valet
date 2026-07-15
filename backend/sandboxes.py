@@ -208,24 +208,34 @@ class SandboxManager:
                 type(exc).__name__, sandbox_id, exc,
             )
             raise
-        try:
-            with tracing.span("modal.sandbox.snapshot", attributes={"sandbox_id": sandbox_id}):
+        already_finished = False
+        with tracing.span("modal.sandbox.snapshot", attributes={"sandbox_id": sandbox_id}):
+            try:
                 image = await sandbox.snapshot_filesystem.aio(timeout=55)
-        except Exception as exc:
-            # Sandbox already exited (e.g. idle timeout) — can't snapshot.
-            # Use the resolved _ConflictError type when available, otherwise
-            # fall back to duck-typing the exception for resilience across
-            # Modal runtime SDK versions.
-            if self._is_already_finished_error(exc):
-                raise SandboxAlreadyFinishedError(sandbox_id)
-            snapshot_message = self._snapshot_failure_message(exc)
-            if snapshot_message:
-                raise SandboxSnapshotFailedError(sandbox_id, snapshot_message)
-            logger.warning(
-                "snapshot_and_terminate: unhandled %s for sandbox %s: %s",
-                type(exc).__name__, sandbox_id, exc,
-            )
-            raise
+            except Exception as exc:
+                # Sandbox already exited (e.g. idle timeout) — can't snapshot.
+                # Use the resolved _ConflictError type when available, otherwise
+                # fall back to duck-typing the exception for resilience across
+                # Modal runtime SDK versions.
+                #
+                # An already-finished exit is a normal lifecycle outcome, not a
+                # span error: detect it inside the span and raise the 409
+                # sentinel after the span closes OK, mirroring the hibernate
+                # endpoint span (app.py). Genuine failures re-raise here so the
+                # snapshot span is still marked ERROR.
+                if self._is_already_finished_error(exc):
+                    already_finished = True
+                else:
+                    snapshot_message = self._snapshot_failure_message(exc)
+                    if snapshot_message:
+                        raise SandboxSnapshotFailedError(sandbox_id, snapshot_message)
+                    logger.warning(
+                        "snapshot_and_terminate: unhandled %s for sandbox %s: %s",
+                        type(exc).__name__, sandbox_id, exc,
+                    )
+                    raise
+        if already_finished:
+            raise SandboxAlreadyFinishedError(sandbox_id)
         await sandbox.terminate.aio()
         return image.object_id
 

@@ -32,6 +32,12 @@ describe('parseOtlpHeaders', () => {
   it('leaves a malformed percent-sequence verbatim', () => {
     expect(parseOtlpHeaders('k=100%')).toEqual({ k: '100%' });
   });
+  it('decodes valid escapes and keeps malformed ones literal per-sequence, matching Python unquote', () => {
+    // Python: unquote('a%zzb%20c') == 'a%zzb c' — the bad '%zz' stays literal
+    // while the valid '%20' still decodes to a space. decodeURIComponent would
+    // instead throw and leave the whole value ('a%zzb%20c') undecoded.
+    expect(parseOtlpHeaders('k=a%zzb%20c')).toEqual({ k: 'a%zzb c' });
+  });
 });
 
 describe('buildTraceConfig', () => {
