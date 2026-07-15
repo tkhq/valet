@@ -40,7 +40,18 @@ export async function buildActionCatalog(
   serviceFilter?: string,
 ): Promise<ActionCatalogEntry[]> {
   const packages = integrationRegistry.listPackages();
-  const customContext = await loadCustomMcpConnectorContext(env, db, 'default');
+  // Custom MCP connector D1 read is best-effort: a transient failure
+  // must NOT tank save/validate/publish (all three now build this
+  // catalog in the hot path). Fall back to an empty connector set —
+  // the built-in package catalog still works, and the validator
+  // treats unknown services as warnings, not blockers.
+  let customContext: Awaited<ReturnType<typeof loadCustomMcpConnectorContext>>;
+  try {
+    customContext = await loadCustomMcpConnectorContext(env, db, 'default');
+  } catch (err) {
+    console.warn('[action-catalog] custom MCP connector load failed:', err instanceof Error ? err.message : String(err));
+    customContext = { orgId: 'default', connectors: new Map(), fetch };
+  }
 
   // Build a lookup of provider display names by service for cache entries.
   const displayNameMap = new Map<string, string>();

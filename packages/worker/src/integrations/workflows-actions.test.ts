@@ -101,6 +101,16 @@ describe('workflowActions', () => {
       nodes: expect.arrayContaining([
         expect.objectContaining({ type: 'llm', required: expect.arrayContaining(['id', 'type', 'prompt']) }),
         expect.objectContaining({ type: 'foreach', required: expect.arrayContaining(['id', 'type', 'items', 'body']) }),
+        // Regression: keep the project node visible in the schema output.
+        // This action once diverged from the copilot's system-prompt
+        // reference; delegating to `getWorkflowSchemaReference` fixed
+        // that, and this assertion guarantees it stays that way.
+        expect.objectContaining({ type: 'project', required: expect.arrayContaining(['id', 'type', 'source', 'columns']) }),
+        // Ensure the optional lists include the newly-added outputSchema
+        // fields so agents authoring set/tool nodes with per-node schemas
+        // see them as valid.
+        expect.objectContaining({ type: 'tool', optional: expect.arrayContaining(['outputSchema']) }),
+        expect.objectContaining({ type: 'set', optional: expect.arrayContaining(['outputSchema']) }),
       ]),
     });
   });

@@ -1359,6 +1359,30 @@ describe('validateDefinitionWithContext — tool service:action existence', () =
     ).toEqual([]);
   });
 
+  it('rejects project column paths with empty/whitespace segments (\".\", \"x.\", \"x..y\") that pass zod min(1) but resolve weirdly at runtime', () => {
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { records: { type: 'array' } } },
+        {
+          id: 'rows',
+          type: 'project',
+          source: '{{trigger.data.records}}',
+          columns: [
+            { header: 'A', path: '.' },
+            { header: 'B', path: 'x.' },
+            { header: 'C', path: 'x..y' },
+            { header: 'OK', path: 'Account.Name' }, // valid
+          ],
+        },
+      ],
+      edges: [{ from: 'trigger', to: 'rows' }],
+    };
+    const errs = blockingErrors(validateDefinition(def));
+    const bad = errs.filter((e) => e.code === 'project_column_path_malformed');
+    expect(bad.map((e) => e.path)).toEqual(['columns.0.path', 'columns.1.path', 'columns.2.path']);
+  });
+
   it('accepts a foreach whose items reference a project node (its output IS the array)', () => {
     const def: WorkflowDefinition = {
       version: 'dag/v1',

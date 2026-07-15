@@ -576,6 +576,26 @@ function validateNode(
       // `source` is a template resolving to an array; parse-check it here
       // like other single-template fields.
       tryParseTemplate(node.id, 'source', node.source, errors);
+      // Column paths: reject empty segments so authoring mistakes like
+      // "." (splits to no segments → whole record becomes the cell),
+      // "x." (silent trailing-dot strip), or "x..y" (silent middle-dot
+      // collapse) are caught at validate time instead of surprising at
+      // runtime. The zod schema's `min(1)` enforces one CHARACTER, not
+      // one segment — "." passes zod but is meaningless here.
+      for (let i = 0; i < node.columns.length; i++) {
+        const col = node.columns[i]!;
+        const rawSegments = col.path.split('.');
+        const nonEmpty = rawSegments.filter((s) => s.trim().length > 0);
+        if (nonEmpty.length === 0 || nonEmpty.length !== rawSegments.length) {
+          errors.push({
+            scope: 'field',
+            nodeId: node.id,
+            path: `columns.${i}.path`,
+            code: 'project_column_path_malformed',
+            message: `project node "${node.id}" column ${i} has malformed path "${col.path}" — paths must be non-empty dotted segments (e.g. "Account.Name"). Rejected: leading/trailing dot, empty segments, whitespace-only segments.`,
+          });
+        }
+      }
       break;
   }
 }
