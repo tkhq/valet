@@ -38,6 +38,58 @@ function makeParams(definition: WorkflowDefinition, overrides: Partial<WorkflowR
   };
 }
 
+describe('foreach — retry policy', () => {
+  it('wraps non-step-driven body executors in a NO_RETRY step.do', async () => {
+    // Same reasoning as the runtime.ts test: a deterministic throw in
+    // a pure body (`set`/`project`/`if`/`stop`) under CF's default 5x
+    // retry would silently stall the iteration for minutes before
+    // writing `failed`. Every foreach body invocation must pass
+    // NO_RETRY to the outer step.do.
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{trigger.data.items}}',
+          body: { id: 'render', type: 'set', values: { line: 'item={{item}}' } },
+          maxOutputTokens: 100,
+        } as unknown as WorkflowDefinition['nodes'][number],
+        { id: 'done', type: 'stop' },
+      ],
+      edges: [{ from: 'loop', to: 'done' }],
+    };
+
+    const bodyStepConfigs: WorkflowStepConfig[] = [];
+    const step: WorkflowStep = {
+      async do<T>(name: string, configOrFn: WorkflowStepConfig | (() => Promise<T>), maybeFn?: () => Promise<T>): Promise<T> {
+        // The foreach body step is named `node:<foreachId>:i:<n>`.
+        if (name.startsWith('node:loop:i:') && typeof configOrFn === 'object') {
+          bodyStepConfigs.push(configOrFn);
+        }
+        const fn = typeof configOrFn === 'function' ? configOrFn : maybeFn!;
+        return fn();
+      },
+      async sleep() {},
+      async sleepUntil() {},
+      async waitForEvent() { throw new Error('not used'); },
+    } as unknown as WorkflowStep;
+
+    const { writer } = makeTraceWriter();
+    await runDag(
+      stubEnv,
+      makeParams(def, { trigger: { type: 'manual', timestamp: '2026-06-12T00:00:00.000Z', data: { items: ['a', 'b'] }, metadata: {} } }),
+      step,
+      writer,
+    );
+
+    expect(bodyStepConfigs).toHaveLength(2);
+    for (const cfg of bodyStepConfigs) {
+      expect(cfg).toMatchObject({ retries: { limit: 1, delay: '1 second' } });
+    }
+  });
+});
+
 describe('foreach — sequential', () => {
   it('iterates over a static array and exposes item/index aliases', async () => {
     const def: WorkflowDefinition = {

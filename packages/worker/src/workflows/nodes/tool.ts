@@ -62,8 +62,11 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
 
   // 1. Preflight reads (disabled-action + action definition) — cached
   // so a replay returns the same risk level and disabled state without
-  // re-reading D1 or re-listing integration actions.
-  const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, async () => {
+  // re-reading D1 or re-listing integration actions. NO_RETRY: every
+  // throw here is deterministic (action disabled, no package, action
+  // not found, no credentials); CF's default 5x backoff would silently
+  // stall the node for minutes before writing `failed`.
+  const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, { retries: { ...NO_RETRY } }, async () => {
     if (await isActionDisabled(db, node.service, node.action)) {
       throw new Error(`tool node "${node.id}": action ${node.service}.${node.action} is disabled`);
     }
@@ -73,7 +76,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       throw new Error(`tool node "${node.id}": no integration package for service "${node.service}"`);
     }
     const provider = integrationRegistry.getProvider(node.service, customCtx);
-    let listCtx: { credentials: { access_token: string } } | undefined;
+    let credentials: { access_token: string } | undefined;
     // MCP servers advertise actions dynamically and credential-gated servers
     // return no definitions unless the owner's token is supplied. Static
     // integration packages ignore this context, so avoid an unnecessary
@@ -86,11 +89,29 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       if (!credentialResult.ok) {
         throw new Error(`tool node "${node.id}": no credentials for ${node.service}: ${credentialResult.error.message}`);
       }
-      listCtx = { credentials: { access_token: credentialResult.credential.accessToken } };
+      credentials = { access_token: credentialResult.credential.accessToken };
     }
-    const defs = await source.listActions(listCtx);
+    let listError: string | null = null;
+    const defs = await source.listActions({
+      ...(credentials ? { credentials } : {}),
+      onListError: (err) => { listError = err; },
+    });
     const def = defs.find((a) => a.id === node.action);
     if (!def) {
+      // Distinguish "action truly doesn't exist" from "listActions
+      // failed transiently" (expired OAuth token, network hiccup, MCP
+      // server down). McpActionSource swallows listTools errors and
+      // returns an empty array; the per-call onListError sink above
+      // captures the underlying error. Without this branch, an OAuth
+      // refresh failure surfaced as "action not found" — misleading,
+      // because save-time validation had passed (it reads
+      // mcp_tool_cache, not a live listTools call) and the author
+      // knows the id is right.
+      if (listError) {
+        throw new Error(
+          `tool node "${node.id}": listing actions for "${node.service}" failed — the action id is correct in the tool catalog, but the live MCP server call returned no results. Underlying error: ${listError}. This usually means the ${node.service} credential expired or the MCP server is unreachable; re-connect the integration in the UI to refresh the token.`,
+        );
+      }
       throw new Error(`tool node "${node.id}": action "${node.action}" not found in ${node.service} package`);
     }
     return JSON.stringify({ riskLevel: def.riskLevel ?? 'medium' });

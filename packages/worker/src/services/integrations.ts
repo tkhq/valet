@@ -172,23 +172,14 @@ async function testCustomMcpUserCredential(
     throw new IntegrationError(`Failed to connect to ${displayName}: no action source configured`, ErrorCodes.INTEGRATION_AUTH_FAILED);
   }
 
-  await actionSource.listActions({ credentials: { access_token: token } });
-  const listError = getActionSourceListError(actionSource);
+  let listError: string | null = null;
+  await actionSource.listActions({
+    credentials: { access_token: token },
+    onListError: (err) => { listError = err; },
+  });
   if (listError) {
     throw new IntegrationError(`Failed to connect to ${displayName}: ${listError}`, ErrorCodes.INTEGRATION_AUTH_FAILED);
   }
-}
-
-function getActionSourceListError(actionSource: unknown): string | null {
-  if (
-    typeof actionSource === 'object'
-    && actionSource !== null
-    && 'getLastListError' in actionSource
-    && typeof actionSource.getLastListError === 'function'
-  ) {
-    return (actionSource as { getLastListError: () => string | null }).getLastListError();
-  }
-  return null;
 }
 
 async function deleteIncompatibleCustomCredentialRows(

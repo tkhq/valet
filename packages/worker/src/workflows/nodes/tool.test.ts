@@ -153,6 +153,20 @@ describe('executeTool', () => {
     await expect(executeTool(args(node))).rejects.toThrow(/not found in slack package/);
   });
 
+  it('surfaces a credential/network error when listActions failed transiently', async () => {
+    // McpActionSource swallows listTools errors and returns []; when the
+    // action is truly cached but the live list call failed (expired OAuth,
+    // MCP server down), the preflight should name credentials as the
+    // likely cause instead of the misleading "action not found." The
+    // failure is reported through the per-call onListError sink.
+    listActionsMock.mockImplementation(async (ctx?: { onListError?: (err: string) => void }) => {
+      ctx?.onListError?.('401 Unauthorized from https://mcp.example.test');
+      return [];
+    });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
+    await expect(executeTool(args(node))).rejects.toThrow(/listing actions for "slack" failed.*401 Unauthorized.*re-connect the integration/i);
+  });
+
   it('fails when the action-policy resolves to denied', async () => {
     invokeWorkflowActionMock.mockResolvedValue({ outcome: 'denied', invocationId: 'inv-1', mode: 'deny', policyId: null });
     const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
@@ -225,7 +239,9 @@ describe('executeTool', () => {
 
     await executeTool(args(node));
 
-    expect(listActionsMock).toHaveBeenCalledWith({ credentials: { access_token: 'tok-1' } });
+    expect(listActionsMock).toHaveBeenCalledWith(expect.objectContaining({
+      credentials: { access_token: 'tok-1' },
+    }));
   });
 
   it('injects owner_slack_user_id from identity links for slack service', async () => {

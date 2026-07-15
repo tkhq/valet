@@ -156,7 +156,10 @@ body {
   min-height: 2.75rem;
   padding: 0 1rem;
   text-decoration: none;
-  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    color 160ms ease;
 }
 
 .valet-button-primary {
@@ -264,7 +267,9 @@ body {
   min-height: 6.7rem;
   padding: 0.85rem;
   text-decoration: none;
-  transition: border-color 160ms ease, transform 160ms ease;
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease;
 }
 
 .valet-hero-cue:hover {
@@ -371,7 +376,9 @@ body {
   padding: 1.1rem;
   position: relative;
   text-decoration: none;
-  transition: border-color 160ms ease, transform 160ms ease;
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease;
 }
 
 .valet-feature-card {
@@ -399,7 +406,18 @@ body {
 
 .valet-card-mark {
   background: var(--valet-gold);
-  clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+  clip-path: polygon(
+    50% 0%,
+    61% 35%,
+    98% 35%,
+    68% 57%,
+    79% 91%,
+    50% 70%,
+    21% 91%,
+    32% 57%,
+    2% 35%,
+    39% 35%
+  );
   display: block;
   height: 1.3rem;
   width: 1.3rem;
@@ -476,6 +494,253 @@ body {
   min-height: 8.5rem;
 }
 
+/* Architecture overview: a small, responsive system map for the Engineering entry page. */
+.valet-architecture-map {
+  background:
+    linear-gradient(rgba(23, 71, 230, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 71, 230, 0.045) 1px, transparent 1px),
+    var(--valet-paper);
+  background-size: 28px 28px;
+  border: 1px solid var(--valet-line);
+  border-radius: 12px;
+  margin: 1.5rem 0;
+  overflow: hidden;
+  padding: 1.5rem;
+}
+
+.valet-architecture-map-heading {
+  border-bottom: 1px solid var(--valet-line);
+  margin-bottom: 1.35rem;
+  padding-bottom: 1.15rem;
+}
+
+.valet-architecture-map-heading .valet-eyebrow {
+  margin-bottom: 0.5rem;
+}
+
+.valet-architecture-map-heading p {
+  color: #414760;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  margin: 0;
+  max-width: 45rem;
+}
+
+.valet-architecture-flow {
+  align-items: stretch;
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.16fr) auto minmax(
+      0,
+      1fr
+    );
+}
+
+.valet-architecture-stage {
+  background: rgba(250, 247, 236, 0.94);
+  border: 1px solid var(--valet-line);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 15.5rem;
+  padding: 1rem;
+  position: relative;
+}
+
+.valet-architecture-stage-start {
+  border-top: 3px solid #6a6e85;
+}
+
+.valet-architecture-stage-control {
+  border-top: 3px solid var(--valet-blue);
+  box-shadow: 0 8px 24px rgba(23, 71, 230, 0.08);
+}
+
+.valet-architecture-stage-execute {
+  border-top: 3px solid var(--valet-gold);
+}
+
+.valet-architecture-stage-number,
+.valet-architecture-stage-label {
+  color: var(--valet-blue);
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.valet-architecture-stage-number {
+  color: var(--valet-muted);
+  margin-bottom: 0.4rem;
+}
+
+.valet-architecture-stage h3 {
+  color: var(--valet-ink);
+  font-size: 1.06rem;
+  line-height: 1.25;
+  margin: 0.4rem 0 0;
+}
+
+.valet-architecture-stage p {
+  color: var(--valet-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  margin: 0.55rem 0 0;
+}
+
+.valet-architecture-chips,
+.valet-architecture-components {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  margin-top: auto;
+  padding-top: 1rem;
+}
+
+.valet-architecture-chips span,
+.valet-architecture-components span {
+  background: rgba(23, 71, 230, 0.08);
+  border: 1px solid rgba(23, 71, 230, 0.14);
+  border-radius: 999px;
+  color: var(--valet-ink);
+  font-size: 0.72rem;
+  font-weight: 650;
+  line-height: 1.2;
+  padding: 0.35rem 0.52rem;
+}
+
+.valet-architecture-stage-start .valet-architecture-chips span {
+  background: rgba(106, 110, 133, 0.09);
+  border-color: rgba(106, 110, 133, 0.17);
+}
+
+.valet-architecture-stage-execute .valet-architecture-components span {
+  background: rgba(242, 200, 74, 0.18);
+  border-color: rgba(190, 144, 20, 0.26);
+}
+
+.valet-architecture-connector {
+  align-items: center;
+  color: var(--valet-muted);
+  display: flex;
+  flex-direction: column;
+  font-size: 0.64rem;
+  font-weight: 700;
+  justify-content: center;
+  line-height: 1.25;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.valet-architecture-connector i {
+  color: var(--valet-blue);
+  font-size: 1.55rem;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1;
+  margin-top: 0.35rem;
+}
+
+.valet-architecture-return {
+  align-items: center;
+  background: var(--valet-navy);
+  border-radius: 8px;
+  color: var(--valet-white);
+  display: flex;
+  gap: 0.8rem;
+  margin-top: 1rem;
+  padding: 0.8rem 1rem;
+}
+
+.valet-architecture-return-mark {
+  color: var(--valet-gold);
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.valet-architecture-return div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.6rem;
+}
+
+.valet-architecture-return strong,
+.valet-architecture-return span:not(.valet-architecture-return-mark) {
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.valet-architecture-return span:not(.valet-architecture-return-mark) {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.dark .valet-architecture-map {
+  background:
+    linear-gradient(rgba(91, 127, 245, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(91, 127, 245, 0.1) 1px, transparent 1px),
+    rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.dark .valet-architecture-map-heading {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.dark .valet-architecture-map-heading p,
+.dark .valet-architecture-stage p {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.dark .valet-architecture-stage {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.dark .valet-architecture-stage h3,
+.dark .valet-architecture-chips span,
+.dark .valet-architecture-components span {
+  color: var(--valet-white);
+}
+
+.dark .valet-architecture-chips span,
+.dark .valet-architecture-components span {
+  background: rgba(91, 127, 245, 0.16);
+  border-color: rgba(91, 127, 245, 0.28);
+}
+
+@media (max-width: 920px) {
+  .valet-architecture-flow {
+    gap: 0.75rem;
+    grid-template-columns: 1fr;
+  }
+
+  .valet-architecture-stage {
+    min-height: 0;
+  }
+
+  .valet-architecture-connector {
+    flex-direction: row;
+    gap: 0.5rem;
+  }
+
+  .valet-architecture-connector i {
+    margin-top: 0;
+    transform: rotate(90deg);
+  }
+}
+
+@media (max-width: 560px) {
+  .valet-architecture-map {
+    padding: 1rem;
+  }
+
+  .valet-architecture-return {
+    align-items: flex-start;
+  }
+}
+
 .valet-mascot-note {
   --valet-note-accent: var(--valet-blue);
   --valet-note-disc: rgba(23, 71, 230, 0.12);
@@ -520,7 +785,18 @@ body {
 
 .valet-mascot-note-icon::before {
   background: currentColor;
-  clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+  clip-path: polygon(
+    50% 0%,
+    61% 35%,
+    98% 35%,
+    68% 57%,
+    79% 91%,
+    50% 70%,
+    21% 91%,
+    32% 57%,
+    2% 35%,
+    39% 35%
+  );
   content: "";
   height: 11px;
   width: 11px;
@@ -946,5 +1222,4 @@ body {
   .valet-mascot-note-body {
     font-size: 0.86rem;
   }
-
 }

@@ -9,6 +9,17 @@ export interface ToolNode {
   summary?: string;
   onPolicyDeny?: 'fail' | 'skip';
   retries?: number;
+  /**
+   * Optional JSON-schema description of the shape the action returns
+   * under `nodes.<id>.data`. Consumed by the validator's typed-array
+   * derivation, so a tool node can act as a `foreach.items` source
+   * without needing a service-wide `toolOutputSchemas` registration.
+   * Solves the arbitrary-query tool class (SOQL, raw SQL, HTTP fetch)
+   * where the shape is query-dependent and the tool author can't
+   * declare it statically. When both this and a service-level schema
+   * are present, this per-node override wins.
+   */
+  outputSchema?: Record<string, unknown>;
 }
 
 export function createDefaultToolNode(id: string): ToolNode {

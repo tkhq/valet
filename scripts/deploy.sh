@@ -38,6 +38,9 @@ PAGES_DEPLOY_BRANCH="${PAGES_DEPLOY_BRANCH:-main}"
 FRONTEND_PREVIEW_ORIGIN_SUFFIX="${FRONTEND_PREVIEW_ORIGIN_SUFFIX:-${PAGES_PROJECT_NAME}.pages.dev}"
 D1_DATABASE_NAME="${D1_DATABASE_NAME:-${PROJECT_NAME}-db}"
 R2_BUCKET_NAME="${R2_BUCKET_NAME:-${PROJECT_NAME}-storage}"
+# Cloudflare Workflows are scoped by name at the account level, so this must be
+# per-env or one env's deploy claims the workflow for all of them.
+WORKFLOW_NAME="${WORKFLOW_NAME:-${PROJECT_NAME}-workflow-interpreter}"
 MODAL_APP_NAME="${MODAL_APP_NAME:-${PROJECT_NAME}-backend}"
 MODAL_LABEL_PREFIX="${MODAL_LABEL_PREFIX:-${ENVIRONMENT}-}"
 ALLOWED_EMAILS="${ALLOWED_EMAILS:-}"
@@ -48,14 +51,24 @@ API_PUBLIC_URL="${API_PUBLIC_URL:-}"
 # necessarily the workspace slug, so auto-discovery builds the wrong URL.
 MODAL_WORKSPACE="${MODAL_WORKSPACE:-}"
 # Client build mode: production | development. Empty preserves the historical
-# default (production only when ENVIRONMENT=prod).
+# default (production only when ENVIRONMENT=prod). Resolve and validate it here,
+# before any deploy work, so a bad value fails fast instead of aborting cmd_all
+# mid-way — after remote D1 migrations and the Worker/Modal deploy have applied.
 CLIENT_BUILD_MODE="${CLIENT_BUILD_MODE:-}"
+if [ -z "$CLIENT_BUILD_MODE" ]; then
+    if [ "${ENVIRONMENT}" = "prod" ]; then CLIENT_BUILD_MODE="production"; else CLIENT_BUILD_MODE="development"; fi
+fi
+if [ "$CLIENT_BUILD_MODE" != "production" ] && [ "$CLIENT_BUILD_MODE" != "development" ]; then
+    echo -e "${RED}Invalid CLIENT_BUILD_MODE='${CLIENT_BUILD_MODE}' (expected: production | development)${NC}"
+    exit 1
+fi
 
 # MODAL_WORKSPACE sets the endpoint-URL slug; MODAL_PROFILE (sourced under set -a
 # above, so the modal CLI sees it) picks which workspace the backend deploys to.
 # Setting only one risks pointing the Worker at a workspace the backend was never
 # deployed to — a profile name is not necessarily its workspace slug — so warn
-# when they are not set together.
+# when they are not set together. Both unset is the legitimate default: the
+# single-workspace auto-discovery path in discover_modal_url, so it is not warned.
 if { [ -n "${MODAL_WORKSPACE:-}" ] && [ -z "${MODAL_PROFILE:-}" ]; } \
     || { [ -z "${MODAL_WORKSPACE:-}" ] && [ -n "${MODAL_PROFILE:-}" ]; }; then
     echo -e "${YELLOW}Warning: set MODAL_WORKSPACE and MODAL_PROFILE together for team workspaces; only one is set, so the Worker's endpoint URL may not match the deploy target.${NC}"
@@ -151,6 +164,7 @@ generate_wrangler_config() {
         -e "s|\${D1_DATABASE_NAME}|$(sed_escape "${D1_DATABASE_NAME}")|g" \
         -e "s|\${D1_DATABASE_ID}|$(sed_escape "${D1_DATABASE_ID}")|g" \
         -e "s|\${R2_BUCKET_NAME}|$(sed_escape "${R2_BUCKET_NAME}")|g" \
+        -e "s|\${WORKFLOW_NAME}|$(sed_escape "${WORKFLOW_NAME}")|g" \
         -e "s|\${ALLOWED_EMAILS}|$(sed_escape "${ALLOWED_EMAILS}")|g" \
         -e "s|\${API_PUBLIC_URL}|$(sed_escape "${API_PUBLIC_URL}")|g" \
         -e "s|\${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|$(sed_escape "${FRONTEND_PREVIEW_ORIGIN_SUFFIX}")|g" \
@@ -180,14 +194,8 @@ build_client() {
 
     build_commit_hash=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "unknown")
 
+    # Resolved and validated at config time.
     local client_mode="${CLIENT_BUILD_MODE}"
-    if [ -z "$client_mode" ]; then
-        if [ "${ENVIRONMENT}" = "prod" ]; then client_mode="production"; else client_mode="development"; fi
-    fi
-    if [ "$client_mode" != "production" ] && [ "$client_mode" != "development" ]; then
-        echo -e "${RED}Invalid CLIENT_BUILD_MODE='${CLIENT_BUILD_MODE}' (expected: production | development)${NC}"
-        exit 1
-    fi
 
     if [ "$client_mode" = "production" ]; then
         build_version_tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)

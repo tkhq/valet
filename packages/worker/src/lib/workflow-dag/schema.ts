@@ -23,6 +23,7 @@ export const WORKFLOW_NODE_TYPES = [
   'orchestrator',
   'session',
   'stop',
+  'project',
 ] as const;
 
 export const FOREACH_BODY_NODE_TYPES = [
@@ -32,6 +33,7 @@ export const FOREACH_BODY_NODE_TYPES = [
   'stop',
   'orchestrator',
   'session',
+  'project',
 ] as const;
 
 export const LEGACY_NODE_TYPE_ALIASES = {
@@ -136,6 +138,10 @@ export const setNodeSchema = z.object({
   id: idSchema,
   type: z.literal('set'),
   values: jsonValueSchema,
+  // Optional JSON-schema description of the shape produced under
+  // `nodes.<id>.data`. Consumed by validator.deriveTypedArrayOutputPaths
+  // so set nodes can act as deterministic reshape sources for foreach.
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const stopNodeSchema = z.object({
@@ -144,6 +150,23 @@ export const stopNodeSchema = z.object({
   outcome: z.enum(['success', 'failure']).optional(),
   output: z.unknown().optional(),
   message: z.string().optional(),
+});
+
+// Project: deterministic array-of-records → 2D array reshape.
+// Emits `Array<Array<unknown>>` under nodes.<id>.data (optionally
+// prefixed by a header row derived from `columns[].header`).
+export const projectColumnSchema = z.object({
+  header: z.string().min(1),
+  path: z.string().min(1),
+  default: z.unknown().optional(),
+});
+
+export const projectNodeSchema = z.object({
+  id: idSchema,
+  type: z.literal('project'),
+  source: z.string().min(1),
+  columns: z.array(projectColumnSchema).min(1),
+  includeHeader: z.boolean().optional(),
 });
 
 export const toolNodeSchema = z.object({
@@ -155,6 +178,11 @@ export const toolNodeSchema = z.object({
   summary: z.string().optional(),
   onPolicyDeny: z.enum(['fail', 'skip']).optional(),
   retries: z.number().int().min(0).max(10).optional(),
+  // Per-node override of the tool action's output shape. Feeds the
+  // validator's typed-array derivation for foreach sources. When
+  // present, this beats any service-level schema registered via
+  // context.toolOutputSchemas.
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
 });
 
 const waitConfigSchema = z.object({
@@ -227,6 +255,7 @@ export const foreachBodySchema = z.union([
   stopNodeSchema,
   orchestratorNodeSchema,
   sessionNodeSchema,
+  projectNodeSchema,
 ]);
 
 export const foreachNodeSchema = z.object({
@@ -255,7 +284,35 @@ export const workflowNodeSchema = z.union([
   toolNodeSchema,
   orchestratorNodeSchema,
   sessionNodeSchema,
+  projectNodeSchema,
 ]);
+
+/**
+ * Per-type registry of zod schemas. Sibling to the union above;
+ * consistency.test.ts walks this to verify each node type in
+ * `WORKFLOW_NODE_TYPES` has a schema AND a shared discriminated-union
+ * type AND a NODE_DOCS entry AND a factory AND a reference-doc entry.
+ * Keep in sync with `workflowNodeSchema` — the consistency test
+ * catches drift.
+ *
+ * `session` uses `startSessionNodeSchema` as the representative shape
+ * for `.shape` walks (the `prompt` variant is a subset of `start`
+ * minus `workspace`; enumerating `start` gives the fuller schema).
+ */
+export const NODE_SCHEMAS_BY_TYPE = {
+  trigger: triggerNodeSchema,
+  llm: llmNodeSchema,
+  tool: toolNodeSchema,
+  set: setNodeSchema,
+  if: ifNodeSchema,
+  wait: waitNodeSchema,
+  approval: approvalNodeSchema,
+  foreach: foreachNodeSchema,
+  orchestrator: orchestratorNodeSchema,
+  session: startSessionNodeSchema,
+  stop: stopNodeSchema,
+  project: projectNodeSchema,
+} as const;
 
 // ─── Policy + editor metadata ───────────────────────────────────────────────
 

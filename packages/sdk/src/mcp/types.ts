@@ -20,6 +20,12 @@ export interface McpTool {
 export interface McpToolResult {
   content: Array<{ type: string; text?: string; [key: string]: unknown }>;
   isError?: boolean;
+  /**
+   * MCP spec 2025-06-18 field: the parsed structured result matching the
+   * tool's advertised outputSchema. Servers advertising an outputSchema
+   * SHOULD populate this; we prefer it over parsing content[].text.
+   */
+  structuredContent?: unknown;
 }
 
 /** JSON-RPC 2.0 request envelope. */

@@ -41,6 +41,29 @@ export interface ForeachResult {
 
 const DEFAULT_MAX_ITEMS = 100;
 const DEFAULT_CONCURRENCY = 1;
+
+/**
+ * Human-readable description of a foreach.items value that's not an
+ * array. When it's an object, list its top-level keys so authors can
+ * spot the wrapper shape (`{totalSize, done, records}` etc.) and fix
+ * the template path without a trace round-trip.
+ */
+function describeForeachItemsMismatch(value: unknown): string {
+  if (value === null) return 'got null';
+  if (value === undefined) return 'got undefined — the path resolved to nothing; check the source node id and field name';
+  if (typeof value === 'string') {
+    const preview = value.length > 40 ? `${value.slice(0, 37)}...` : value;
+    return `got string ${JSON.stringify(preview)} — tool outputs are sometimes JSON-encoded text; if so, the source tool needs a structured output`;
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>);
+    if (keys.length === 0) return 'got empty object';
+    const preview = keys.slice(0, 6).join(', ');
+    const ellipsis = keys.length > 6 ? ', ...' : '';
+    return `got object with keys [${preview}${ellipsis}] — try appending .<key> to your items template if one of those is the array`;
+  }
+  return `got ${typeof value}`;
+}
 // Per spec §"Retry, Concurrency, And Quota": the 5001st cumulative
 // foreach iteration across the entire execution aborts the workflow.
 const CUMULATIVE_ITERATION_CAP = 5000;
@@ -51,7 +74,9 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
   // Resolve items expression to an array.
   const rendered = renderTemplate(args.node.items, ctx);
   if (!Array.isArray(rendered)) {
-    throw new Error(`foreach "${args.node.id}": items expression did not resolve to an array (got ${typeof rendered})`);
+    throw new Error(
+      `foreach "${args.node.id}": items expression ${JSON.stringify(args.node.items)} did not resolve to an array (${describeForeachItemsMismatch(rendered)}). Check that (a) the source node's field is actually an array at runtime, and (b) the template path descends to the array — e.g. tool nodes often wrap their result as \`{totalSize, done, records:[...]}\`, so \`{{nodes.<id>.data.records}}\` (not just \`{{nodes.<id>.data}}\`) is usually what you want.`,
+    );
   }
   const inputItems = rendered as unknown[];
 
@@ -217,13 +242,13 @@ async function runIteration(
         ...(recordWaiting ? { recordWaiting } : {}),
       });
     } else {
-      // Side-effectful non-step-driven body types (currently just llm)
-      // need NO_RETRY to match the top-level runtime policy. Without
-      // this, CF's default 5-retry policy would duplicate billed model
-      // calls and re-render user-visible content on a transient error.
-      // Mirrors runtime.ts:executeNodeStep — the policy must hold for a
-      // node wherever it appears in the graph.
-      const stepConfig = args.node.body.type === 'llm' ? { retries: { ...NO_RETRY } } : undefined;
+      // NO_RETRY applies to every non-step-driven body type — same
+      // reasoning as runtime.ts:executeNodeStep. Pure executors (set/
+      // project/if/stop) throw deterministically, so retrying is
+      // guaranteed to throw the same error; side-effectful ones (llm)
+      // shouldn't fire duplicated billed calls on transient errors.
+      // The policy must hold for a node wherever it appears in the
+      // graph, so foreach bodies inherit it here.
       const callback = async () => {
         const out = await dispatchNode(args.node.body, {
           node: args.node.body,
@@ -237,9 +262,7 @@ async function runIteration(
         });
         return JSON.stringify(out ?? null);
       };
-      const json = stepConfig
-        ? await args.step.do(stepName, stepConfig, callback)
-        : await args.step.do(stepName, callback);
+      const json = await args.step.do(stepName, { retries: { ...NO_RETRY } }, callback);
       data = JSON.parse(json) as unknown;
     }
     return { status: 'completed', data };
