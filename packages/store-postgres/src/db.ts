@@ -99,7 +99,14 @@ export function pgDbFromPool(pool: Pool): PgDb {
         await client.query("COMMIT");
         return result;
       } catch (err) {
-        await client.query("ROLLBACK");
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // A failed ROLLBACK (e.g. connection drop) must not mask the
+          // original error — the caller needs the real fencing/business
+          // failure. The client is released below either way; node-postgres
+          // discards broken connections on release(err-less) via pool checks.
+        }
         throw err;
       } finally {
         client.release();
