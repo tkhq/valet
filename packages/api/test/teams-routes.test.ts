@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
-import type { CreateTeamResponse, ListTeamsResponse } from "../src/wire/types.js";
+import type { CreateTeamResponse, ListTeamMembersResponse, ListTeamsResponse } from "../src/wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -209,6 +209,130 @@ describe("teams routes", () => {
       // test-member is a plain org member, not on this team at all.
       const res = await fetch(`${baseUrl}/api/teams/${team.id}`, { method: "DELETE", headers: MEMBER_HEADERS });
       expect(res.status).toBe(404);
+    });
+  });
+
+  describe("GET /:id/members authorization", () => {
+    // Note: this harness always runs with VALET_LOCAL_AUTH=1, so every
+    // request resolves to a concrete `AuthUser` (local-user by default, or
+    // whoever `x-valet-test-user-id` impersonates) — there is no route path
+    // that produces a real 401 here. Unauthenticated access is covered by
+    // `authMiddleware`'s own gate on `VALET_LOCAL_AUTH`, not by this suite.
+
+    it("a team member can view the roster", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+
+      const createRes = await createTeam(baseUrl, "Platform");
+      const { team } = (await createRes.json()) as CreateTeamResponse;
+      await fetch(`${baseUrl}/api/teams/${team.id}/members`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ userId: "test-member", role: "member" }),
+      });
+
+      const res = await fetch(`${baseUrl}/api/teams/${team.id}/members`, { headers: MEMBER_HEADERS });
+      expect(res.status).toBe(200);
+      const { members } = (await res.json()) as ListTeamMembersResponse;
+      expect(members.map((m) => m.userId).sort()).toEqual(["local-user", "test-member"]);
+    });
+
+    it("an org admin who isn't on the team can still view the roster", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+
+      const createRes = await createTeam(baseUrl, "Platform");
+      const { team } = (await createRes.json()) as CreateTeamResponse;
+
+      const res = await fetch(`${baseUrl}/api/teams/${team.id}/members`, { headers: ADMIN_HEADERS });
+      expect(res.status).toBe(200);
+      const { members } = (await res.json()) as ListTeamMembersResponse;
+      expect(members.map((m) => m.userId)).toEqual(["local-user"]);
+    });
+
+    it("a plain org member who isn't on the team gets 404, not the roster", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+
+      // local-user creates the team; test-member is a plain org member
+      // (not an org admin) and is never added to this team.
+      const createRes = await createTeam(baseUrl, "Platform");
+      const { team } = (await createRes.json()) as CreateTeamResponse;
+
+      const res = await fetch(`${baseUrl}/api/teams/${team.id}/members`, { headers: MEMBER_HEADERS });
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { members?: unknown };
+      expect(body.members).toBeUndefined();
+    });
+
+    it("404s on a nonexistent team id", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+
+      const res = await fetch(`${baseUrl}/api/teams/does-not-exist/members`, { headers: HEADERS });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("GET /teams admin-vs-member scoping", () => {
+    it("an org admin sees every team in the org, including ones they aren't a member of", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+
+      // local-user creates two teams; test-admin (org admin) is never added
+      // to either.
+      const platform = (await (await createTeam(baseUrl, "Platform")).json()) as CreateTeamResponse;
+      const growth = (await (await createTeam(baseUrl, "Growth")).json()) as CreateTeamResponse;
+
+      const res = await fetch(`${baseUrl}/api/teams`, { headers: ADMIN_HEADERS });
+      expect(res.status).toBe(200);
+      const { teams } = (await res.json()) as ListTeamsResponse;
+      const ids = teams.map((t) => t.id);
+      expect(ids).toContain(platform.team.id);
+      expect(ids).toContain(growth.team.id);
+    });
+
+    it("a plain member sees only the teams they belong to", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+
+      // test-member is added to Platform only; Growth stays out of reach.
+      const platform = (await (await createTeam(baseUrl, "Platform")).json()) as CreateTeamResponse;
+      const growth = (await (await createTeam(baseUrl, "Growth")).json()) as CreateTeamResponse;
+      await fetch(`${baseUrl}/api/teams/${platform.team.id}/members`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ userId: "test-member", role: "member" }),
+      });
+
+      const res = await fetch(`${baseUrl}/api/teams`, { headers: MEMBER_HEADERS });
+      expect(res.status).toBe(200);
+      const { teams } = (await res.json()) as ListTeamsResponse;
+      const ids = teams.map((t) => t.id);
+      expect(ids).toContain(platform.team.id);
+      expect(ids).not.toContain(growth.team.id);
+    });
+
+    it("memberCount reflects the actual roster size on the JSON boundary", async () => {
+      api = await bootTestApi();
+      const { baseUrl } = api;
+
+      const createRes = await createTeam(baseUrl, "Platform");
+      const { team } = (await createRes.json()) as CreateTeamResponse;
+
+      let listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
+      let { teams } = (await listRes.json()) as ListTeamsResponse;
+      expect(teams.find((t) => t.id === team.id)?.memberCount).toBe(1);
+
+      await fetch(`${baseUrl}/api/teams/${team.id}/members`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ userId: "test-member", role: "member" }),
+      });
+
+      listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
+      ({ teams } = (await listRes.json()) as ListTeamsResponse);
+      expect(teams.find((t) => t.id === team.id)?.memberCount).toBe(2);
     });
   });
 
