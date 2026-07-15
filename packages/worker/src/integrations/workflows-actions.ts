@@ -44,8 +44,13 @@ import {
   validateAgainstAvailableModels,
   validateAgainstEnvironment,
   validateDefinition,
+  validateDefinitionWithContext,
   type GroupedWorkflowValidation,
 } from '../lib/workflow-dag/validator.js';
+// buildValidatorToolContext is imported dynamically inside functions to
+// avoid a circular import: action-catalog → integrationRegistry →
+// workflows-actions (this file). Match the same pattern the HTTP
+// routes use.
 import { resolveAvailableModels } from '../services/model-catalog.js';
 import { allowedIfOperations } from '../lib/workflow-dag/if-operations.js';
 import {
@@ -1040,7 +1045,14 @@ async function saveDraftAction(
       validation: await validateWorkflowDefinitionInput(db, params.draft, env),
     };
   }
-  const structuralErrors = validateDefinition(params.draft).filter((issue) => !isValidationWarning(issue));
+  // Match the HTTP save_draft path: build the tool catalog so
+  // unknown_tool_action hard-blocks here too. Otherwise the MCP
+  // copilot path becomes the weak link — the exact hole the
+  // adversarial review flagged.
+  const { buildValidatorToolContext } = await import('../services/action-catalog.js');
+  const toolContext = await buildValidatorToolContext(env, db);
+  const structuralErrors = validateDefinitionWithContext(params.draft, toolContext)
+    .filter((issue) => !isValidationWarning(issue));
   if (structuralErrors.length > 0) {
     return {
       ok: false,
@@ -1094,8 +1106,10 @@ async function validateWorkflowDefinition(db: AppDb, definition: WorkflowDefinit
   const providerEnv = await assembleLlmProviderEnv(db, env);
   const validationEnv = { ...env, ...providerEnv } as Env;
   const availableModels = await resolveAvailableModels(db, validationEnv);
+  const { buildValidatorToolContext } = await import('../services/action-catalog.js');
+  const toolContext = await buildValidatorToolContext(env, db);
   return groupWorkflowValidationResults([
-    ...validateDefinition(definition),
+    ...validateDefinitionWithContext(definition, toolContext),
     ...validateAgainstEnvironment(definition, validationEnv, { availableModels }),
   ]);
 }
@@ -1128,10 +1142,14 @@ async function publishWorkflowAction(
   const providerEnv = await assembleLlmProviderEnv(db, env);
   const validationEnv = { ...env, ...providerEnv } as Env;
   const availableModels = await resolveAvailableModels(db, validationEnv);
+  const { buildValidatorToolContext } = await import('../services/action-catalog.js');
+  const { knownToolActions, toolOutputSchemas } = await buildValidatorToolContext(env, db);
   return publishDraft(db, id, {
     userId,
     env: validationEnv,
     availableModels,
+    knownToolActions,
+    toolOutputSchemas,
     ...(params.publishNote ? { publishNote: params.publishNote } : {}),
   });
 }

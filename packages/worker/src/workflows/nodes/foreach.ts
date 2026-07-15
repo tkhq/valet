@@ -248,6 +248,11 @@ async function runIteration(
       // calls and re-render user-visible content on a transient error.
       // Mirrors runtime.ts:executeNodeStep — the policy must hold for a
       // node wherever it appears in the graph.
+      //
+      // Pure non-step-driven body types (`set`, `project`) don't need
+      // NO_RETRY: their executors are deterministic and idempotent, so
+      // CF's default retries are safe and even useful (transient
+      // template-render / DO-comms hiccups get retried for free).
       const stepConfig = args.node.body.type === 'llm' ? { retries: { ...NO_RETRY } } : undefined;
       const callback = async () => {
         const out = await dispatchNode(args.node.body, {

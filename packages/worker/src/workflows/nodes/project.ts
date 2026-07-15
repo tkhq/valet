@@ -36,9 +36,16 @@ export async function executeProject(args: NodeExecutorArgs<ProjectNode>): Promi
 }
 
 /**
- * Resolve a dotted path against a record. Empty string for null/undefined
- * unless the column carries an explicit `default`. Non-object intermediate
- * segments abort the walk (they can't have children by definition).
+ * Resolve a dotted path against a record. Non-object intermediate segments
+ * abort the walk (they can't have children by definition). Own-property
+ * only — never walks into `__proto__` / `constructor` / other inherited
+ * keys, so an attacker-controlled column path can't leak prototype internals
+ * into a spreadsheet cell.
+ *
+ * Missing / undefined resolves to `fallback` when provided; when `fallback`
+ * itself is undefined (author omitted the field), we emit empty string so
+ * cell types stay consistent across a row. An explicit `null` fallback is
+ * preserved as-is — a user who says `default: null` gets `null`, not `''`.
  */
 function resolveCell(record: unknown, path: string, fallback: unknown): unknown {
   const segments = path.split('.').map((s) => s.trim()).filter((s) => s.length > 0);
@@ -52,10 +59,16 @@ function resolveCell(record: unknown, path: string, fallback: unknown): unknown 
       cur = undefined;
       break;
     }
+    if (!Object.prototype.hasOwnProperty.call(cur, seg)) {
+      cur = undefined;
+      break;
+    }
     cur = (cur as Record<string, unknown>)[seg];
   }
-  if (cur === null || cur === undefined) {
-    return fallback ?? '';
+  if (cur === undefined || cur === null) {
+    // `fallback` is undefined when the author didn't specify one → empty string.
+    // Explicit `null` (or any other value) passes through verbatim.
+    return fallback === undefined ? '' : fallback;
   }
   return cur;
 }

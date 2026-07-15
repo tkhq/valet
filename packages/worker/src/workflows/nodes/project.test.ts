@@ -14,7 +14,8 @@ function makeState(nodeData: unknown): WorkflowDagState {
         completedAt: new Date(0).toISOString(),
       },
     },
-  } as WorkflowDagState;
+    skipped: {},
+  };
 }
 
 function args(node: ProjectNode, state: WorkflowDagState): NodeExecutorArgs<ProjectNode> {
@@ -91,6 +92,43 @@ describe('executeProject', () => {
       ['Stripe', 0, ''],
       ['', 0, ''],
     ]);
+  });
+
+  it('preserves an explicit null default (does not coerce to empty string)', async () => {
+    const state = makeState({ records: [{}] });
+    const result = await executeProject(args(
+      {
+        id: 'r',
+        type: 'project',
+        source: '{{nodes.query.data.records}}',
+        includeHeader: false,
+        columns: [{ header: 'Vertical', path: 'Account.Vertical', default: null }],
+      },
+      state,
+    ));
+    // The author explicitly asked for null; we must not silently coerce.
+    expect(result).toEqual([[null]]);
+  });
+
+  it('does not walk into inherited/prototype properties for attacker-controlled column paths', async () => {
+    const state = makeState({ records: [{ safe: 'value' }] });
+    const result = await executeProject(args(
+      {
+        id: 'r',
+        type: 'project',
+        source: '{{nodes.query.data.records}}',
+        includeHeader: false,
+        columns: [
+          { header: 'A', path: '__proto__' },
+          { header: 'B', path: 'constructor.name' },
+          { header: 'C', path: 'toString' },
+          { header: 'D', path: 'safe' },
+        ],
+      },
+      state,
+    ));
+    // Own-property only: none of the inherited paths resolve; the safe path does.
+    expect(result).toEqual([['', '', '', 'value']]);
   });
 
   it('throws with a clear message when source resolves to a non-array', async () => {
