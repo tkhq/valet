@@ -351,10 +351,22 @@ CREATE TABLE "user_identity_links" (
 	"provider" text NOT NULL,
 	"external_id" text NOT NULL,
 	"user_id" text NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"notify_attention" boolean DEFAULT true NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "user_identity_links_provider_external" ON "user_identity_links" ("provider","external_id");
+--> statement-breakpoint
+CREATE TABLE "identity_link_codes" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"provider" text NOT NULL,
+	"code_hash" text NOT NULL,
+	"expires_at" bigint NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "identity_link_codes_provider" ON "identity_link_codes" ("provider","code_hash");
 --> statement-breakpoint
 CREATE TABLE "memory_files" (
 	"owner_type" text NOT NULL,

@@ -536,8 +536,24 @@ export const userIdentityLinks = pgTable(
     externalId: text("external_id").notNull(),
     userId: text("user_id").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    notifyAttention: boolean("notify_attention").notNull().default(true),
   },
   (t) => [uniqueIndex("user_identity_links_provider_external").on(t.provider, t.externalId)],
+);
+
+// Single-use, short-lived codes for linking an external chat identity to a
+// Valet user (deep-link /start flow). Only the sha256 hash is stored.
+export const identityLinkCodes = pgTable(
+  "identity_link_codes",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    provider: text("provider").notNull(),
+    codeHash: text("code_hash").notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("identity_link_codes_provider").on(t.provider, t.codeHash)],
 );
 
 // ─── Memory (OKF) ────────────────────────────────────────────────────────────
@@ -776,6 +792,7 @@ export type UserNotificationPreferenceRow = typeof userNotificationPreferences.$
 export type EventDropLogRow = typeof eventDropLog.$inferSelect;
 export type ChannelBindingRow = typeof channelBindings.$inferSelect;
 export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
+export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
 export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
 export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
