@@ -158,6 +158,14 @@ await providers.childWatcher.rearm().catch((err) => {
   console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
 });
 
+// Channel ingress (Task 8): resolves credentials into transports, then
+// starts webhook registration or the long-poll loop per transport. A
+// failure here must never block boot — channels are best-effort.
+await providers.channelHost.start().catch((err) => {
+  console.error("boot restore: channelHost.start failed (continuing to serve):", err);
+});
+console.log("channel host started");
+
 // Workflow run host (Phase 5 plan Task 10): begin the poll + lost-wake-sweep
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
@@ -212,6 +220,11 @@ async function shutdown(signal: NodeJS.Signals) {
     await providers.workflowRunHost.stopHost();
   } catch (err) {
     console.error("workflowRunHost.stopHost failed:", err);
+  }
+  try {
+    await providers.channelHost.stop();
+  } catch (err) {
+    console.error("channelHost.stop failed:", err);
   }
   try {
     // Evict, never destroy: Session.destroy() deletes the session's durable

@@ -11,6 +11,7 @@ import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
+import type { ChannelHost } from "../channels/host.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -33,6 +34,8 @@ export interface Providers {
   engineHost: EngineHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
+  /** Inbound/outbound channel transport routing (Task 8); `start()`/`stop()` called from main.ts. */
+  channelHost: ChannelHost;
 
   // Workflow run host (Phase 5 plan Task 10) — leased worker loop over the
   // sqlite-backed WorkflowStore. `workflowRunHost.startHost()`/`stopHost()`

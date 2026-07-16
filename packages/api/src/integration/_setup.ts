@@ -25,6 +25,8 @@ import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/w
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { ChannelHost } from "../channels/host.js";
+import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -74,6 +76,18 @@ export interface BootTestApiOpts {
    * decision 3) point this at a temp dir with a fixture `index.html`. Unset
    * by every other caller, matching dev's unmounted-static behavior. */
   webDistDir?: string;
+  /** Public base URL forwarded to the constructed `ChannelHost` (Task 8) —
+   * unset by default (long-poll/inert mode). Webhook-mode route tests set
+   * this so the host registers webhook transports instead. */
+  channelPublicUrl?: string;
+  /**
+   * Start the constructed `ChannelHost` immediately (Task 8). Default
+   * `false` — the host is always constructed and included in `providers`,
+   * but by default zero transports exist (`plugins: []` default) so
+   * starting it is a no-op most callers skip. Webhook/poll-loop tests opt
+   * in here (or call `providers.channelHost.start()` themselves).
+   */
+  startChannelHost?: boolean;
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -187,6 +201,20 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 
+  const channelHost = new ChannelHost({
+    db,
+    engineHost,
+    engineStore,
+    eventStream,
+    engineCredentials,
+    plugins,
+    publicUrl: opts.channelPublicUrl,
+    resolveOrgId: () => resolveOrgId(db),
+  });
+  if (opts.startChannelHost) {
+    await channelHost.start();
+  }
+
   const workflowStore = new PgWorkflowStore(pgdb);
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
@@ -218,6 +246,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     engineHost,
     childWatcher,
+    channelHost,
     workflowStore,
     workflowRunHost,
     plugins,
@@ -246,6 +275,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     providers,
     async cleanup() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await channelHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });

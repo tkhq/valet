@@ -32,6 +32,7 @@ import { modelsRouter } from "./routes/models.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { registerWsRoutes } from "./routes/ws.js";
+import { channelsRouter } from "./routes/channels.js";
 import { mountWebStatic } from "./static-web.js";
 
 export interface CreatedApp {
@@ -82,6 +83,13 @@ export function createApp(
     }),
   );
   app.use("*", providersMiddleware(providers));
+
+  // Public channel ingress (webhooks) — verification is transport-level
+  // (`ChannelHost.handleWebhook` → `transport.verifyWebhook`), not the auth
+  // gate below, since the caller is the provider (Telegram etc.), not a
+  // logged-in Valet user. Mounting BEFORE `buildAuthMiddleware` is what
+  // makes this route public — do not move it below that line.
+  app.route("/api/channels", channelsRouter);
 
   // Public health check (no auth).
   app.get("/api/health", (c) =>

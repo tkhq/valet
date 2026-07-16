@@ -5,7 +5,7 @@ import { users } from "../schema/index.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import { ensureOrg } from "../services/org.js";
+import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
 
@@ -17,28 +17,10 @@ export interface AuthUser {
   orgId: string;
 }
 
-/**
- * Single-org id memo (auth-v2 design assumes exactly one org, same as
- * `services/org.ts`'s `ensureOrg`). Keyed by `AppDb` instance rather than a
- * bare module-level value — the API integration suite boots many independent
- * in-memory dbs in one process (`bootTestApi` per test), and a single shared
- * memo would leak the first test's org id into every later test's requests.
- * A `WeakMap` lets each db's entry be garbage-collected with it.
- */
-const orgIdMemo = new WeakMap<AppDb, string>();
-
 /** The only route prefix that consumes `c.var.sandbox` today. Must match
  * the mount point in `app.ts` (`app.route("/api/memory", memoryRouter)`) —
  * see rung 2 of the ladder below. */
 const SANDBOX_ALLOWED_PATH_PREFIX = "/api/memory";
-
-async function resolveOrgId(db: AppDb): Promise<string> {
-  const cached = orgIdMemo.get(db);
-  if (cached) return cached;
-  const { id } = await ensureOrg(db);
-  orgIdMemo.set(db, id);
-  return id;
-}
 
 /** Narrows better-auth's loosely-typed (`type: "string"`) `role`
  * additional field down to our real enum. The db column is declared

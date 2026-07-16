@@ -18,6 +18,8 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { resolveOrgId } from "../lib/org.js";
+import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { buildSandboxProvider } from "./sandbox-backend.js";
 import type { Providers } from "./types.js";
@@ -224,6 +226,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const childWatcher = new ChildWatcher({ db, engineHost, engineStore });
   spawnerRef = buildChildSpawner({ db, engineHost, engineStore }, childWatcher);
 
+  const channelHost = new ChannelHost({
+    db,
+    engineHost,
+    engineStore,
+    eventStream,
+    engineCredentials,
+    plugins,
+    publicUrl: publicUrlFromEnv(process.env),
+    resolveOrgId: () => resolveOrgId(db),
+  });
+
   // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
   // the routes both read/write through — one instance per process, backed
@@ -286,6 +299,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     engineHost,
     childWatcher,
+    channelHost,
     workflowStore,
     workflowRunHost,
     plugins,

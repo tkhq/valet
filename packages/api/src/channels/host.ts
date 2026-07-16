@@ -12,6 +12,7 @@
  * lands in Task 8; `start` here only resolves credentials and constructs
  * transports.
  */
+import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
   orchestratorSessionId,
@@ -67,6 +68,35 @@ function gateResolutionLabel(actions: DecisionAction[], resolution: DecisionReso
   return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}`;
 }
 
+const LOCALDEV_SUFFIX = ".localdev";
+
+/**
+ * Resolves the process's own public base URL (Task 8): `VALET_PUBLIC_URL`
+ * verbatim if set, else `BETTER_AUTH_URL` when it parses as a public
+ * `https:` URL (not localhost/127.0.0.1/*.localdev — those aren't reachable
+ * FROM a provider's webhook delivery), else `undefined` — the long-poll
+ * default.
+ */
+export function publicUrlFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.VALET_PUBLIC_URL) return env.VALET_PUBLIC_URL;
+  const authUrl = env.BETTER_AUTH_URL;
+  if (!authUrl) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(authUrl);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "https:") return undefined;
+  if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname.endsWith(LOCALDEV_SUFFIX)) {
+    return undefined;
+  }
+  return authUrl;
+}
+
+/** Result of `ChannelHost.handleWebhook` — mirrors the HTTP status the route maps it to. */
+export type HandleWebhookResult = "ok" | "rejected" | "unknown_channel";
+
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
 function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & { getMe(): Promise<{ username?: string }> } {
   return typeof (transport as { getMe?: unknown }).getMe === "function";
@@ -92,6 +122,13 @@ export class ChannelHost {
   private outboundUnsub: Unsubscribe | null = null;
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
+  /** Per-boot webhook secrets, keyed by channelType — kept only in memory
+   * (Task 8's locked decision), never persisted. */
+  private webhookSecrets = new Map<string, string>();
+  /** One AbortController for every poll-mode transport's `runPollLoop`. */
+  private pollControllers = new Map<string, AbortController>();
+  /** Tracks each poll loop's promise so `stop()` can await its exit. */
+  private pollLoops: Promise<void>[] = [];
 
   constructor(private readonly deps: ChannelHostDeps) {}
 
@@ -140,14 +177,109 @@ export class ChannelHost {
             console.error(`[channels] ${factory.channelType}: getMe probe failed`, err);
           }
         }
+        await this.startIngress(factory.channelType, transport);
       }
     }
     this.startOutbound();
   }
 
+  /**
+   * Mode selection (Task 8): webhook when `deps.publicUrl` is set, else
+   * long-poll when the transport implements `poll`. Neither → no inbound
+   * ingress for this transport (outbound-only, or a transport under test
+   * that implements neither).
+   */
+  private async startIngress(channelType: string, transport: ChannelTransport): Promise<void> {
+    if (this.deps.publicUrl) {
+      const secret = randomBytes(24).toString("hex");
+      this.webhookSecrets.set(channelType, secret);
+      try {
+        await transport.registerWebhook?.(`${this.deps.publicUrl}/api/channels/${channelType}/webhook`, secret);
+      } catch (err) {
+        console.error(`[channels] ${channelType}: registerWebhook failed`, err);
+      }
+      return;
+    }
+    if (!transport.poll) return;
+    const controller = new AbortController();
+    this.pollControllers.set(channelType, controller);
+    this.pollLoops.push(this.runPollLoop(channelType, transport, controller.signal));
+  }
+
+  /**
+   * For-await over `transport.poll(signal)`, feeding each raw update through
+   * `parseUpdate` → `handleUpdate`. An outer try/catch + 5s sleep + retry
+   * ensures a transport crash never kills the host — it just backs off and
+   * resumes. Exits cleanly when `signal` aborts.
+   */
+  private async runPollLoop(channelType: string, transport: ChannelTransport, signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        const iterable = transport.poll?.(signal);
+        if (!iterable) return;
+        for await (const raw of iterable) {
+          if (signal.aborted) break;
+          const event = transport.parseUpdate(raw);
+          if (event) await this.handleUpdate(channelType, event);
+        }
+        if (signal.aborted) return;
+      } catch (err) {
+        if (signal.aborted) return;
+        console.error(`[channels] ${channelType}: poll loop error, retrying in 5s`, err);
+        await this.sleepOrAbort(5_000, signal);
+      }
+    }
+  }
+
+  private sleepOrAbort(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   async stop(): Promise<void> {
+    for (const controller of this.pollControllers.values()) controller.abort();
+    await Promise.all(this.pollLoops);
+    this.pollControllers.clear();
+    this.pollLoops = [];
     this.stopOutbound();
-    // Task 8 adds poll abort + transport-loop teardown.
+  }
+
+  /**
+   * Webhook ingress entry point (Task 8): verifies the raw request via the
+   * transport's own `verifyWebhook` (host-held secrets only — this is the
+   * ONLY place `webhookSecrets` is read), then fires-and-forgets each parsed
+   * update through `handleUpdate` so the provider gets a fast response
+   * (Telegram in particular expects the webhook ack within seconds).
+   */
+  async handleWebhook(
+    channelType: string,
+    req: { headers: Record<string, string>; rawBody: Uint8Array },
+  ): Promise<HandleWebhookResult> {
+    const transport = this.transports.get(channelType);
+    if (!transport) return "unknown_channel";
+
+    const secret = this.webhookSecrets.get(channelType);
+    const raws = transport.verifyWebhook(req, secret ? { webhookSecret: secret } : {});
+    if (raws === null) {
+      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+      await this.dropLog(orgId, "verify_failed", undefined, `${channelType} webhook verification failed`);
+      return "rejected";
+    }
+
+    for (const raw of raws) {
+      const event = transport.parseUpdate(raw);
+      if (event) void this.handleUpdate(channelType, event);
+    }
+    return "ok";
   }
 
   /**
