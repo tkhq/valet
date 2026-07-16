@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
+import { ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 
@@ -74,6 +75,31 @@ export async function setOrgFeatures(db: AppQueryable, orgId: string, features: 
   const current = await getOrgFeatures(db, orgId);
   const merged: OrgFeatures = { ...current, ...features };
   await db.update(orgs).set({ features: merged }).where(eq(orgs.id, orgId));
+}
+
+/** Reads `orgs.model_preferences` (jsonb); absent/missing reads as `[]`. */
+export async function getOrgModelPreferences(db: AppQueryable, orgId: string): Promise<string[]> {
+  const rows = await db
+    .select({ modelPreferences: orgs.modelPreferences })
+    .from(orgs)
+    .where(eq(orgs.id, orgId))
+    .limit(1);
+  const value = rows[0]?.modelPreferences;
+  if (!Array.isArray(value)) return [];
+  return value as string[];
+}
+
+/**
+ * Overwrites `orgs.model_preferences` with `prefs` (an ordered, namespaced
+ * model-id list). Rejects non-array input — this is the runtime guard the
+ * task brief pins tests against, since the jsonb column has no schema-level
+ * array constraint.
+ */
+export async function setOrgModelPreferences(db: AppQueryable, orgId: string, prefs: string[]): Promise<void> {
+  if (!Array.isArray(prefs)) {
+    throw new ValidationError("modelPreferences must be an array of strings");
+  }
+  await db.update(orgs).set({ modelPreferences: prefs }).where(eq(orgs.id, orgId));
 }
 
 /** Updates `orgs.name`. */

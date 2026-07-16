@@ -2,6 +2,7 @@ CREATE TABLE "orgs" (
 	"id" text PRIMARY KEY NOT NULL,
 	"name" text NOT NULL,
 	"features" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"model_preferences" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
@@ -509,3 +510,18 @@ CREATE TABLE "action_invocations" (
 	"result" jsonb NOT NULL,
 	"created_at" bigint NOT NULL
 );
+--> statement-breakpoint
+CREATE TABLE "llm_providers" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"kind" text NOT NULL,
+	"name" text NOT NULL,
+	"base_url" text,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"models" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "llm_providers_org" ON "llm_providers" ("org_id");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "llm_providers_org_kind_singleton" ON "llm_providers" ("org_id","kind") WHERE "kind" <> 'openai_compatible';

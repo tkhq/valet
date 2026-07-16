@@ -1,15 +1,18 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
+import { ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import {
   getOrgFeatures,
+  getOrgModelPreferences,
   isOrgAdmin,
   listOrgMembers,
   MEMBER_NOT_FOUND_ERROR,
   renameOrg,
   setOrgFeatures,
+  setOrgModelPreferences,
   setOrgMemberRole,
 } from "./org.js";
 
@@ -88,6 +91,25 @@ describe("org service", () => {
       const result = await setOrgMemberRole(db, orgId, "member1", "admin");
       expect(result).toEqual({ ok: true });
       expect(await isOrgAdmin(db, orgId, "member1")).toBe(true);
+    });
+  });
+
+  describe("getOrgModelPreferences / setOrgModelPreferences", () => {
+    it("defaults to an empty array", async () => {
+      expect(await getOrgModelPreferences(db, orgId)).toEqual([]);
+    });
+
+    it("round-trips a set list", async () => {
+      await setOrgModelPreferences(db, orgId, ["anthropic:claude-opus-4", "openai:gpt-5"]);
+      expect(await getOrgModelPreferences(db, orgId)).toEqual(["anthropic:claude-opus-4", "openai:gpt-5"]);
+    });
+
+    it("rejects a non-array value", async () => {
+      // Parsed from JSON rather than cast, to exercise the runtime guard the
+      // way a malformed request body would (no `any`/`as` needed — JSON.parse
+      // returns `any` implicitly, which is how untrusted input arrives).
+      const bogus = JSON.parse('"not-an-array"');
+      await expect(setOrgModelPreferences(db, orgId, bogus)).rejects.toThrow(ValidationError);
     });
   });
 

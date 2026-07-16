@@ -27,6 +27,8 @@ import {
   oauthAccessToken,
   oauthConsent,
   memoryFiles,
+  llmProviders,
+  orgs,
 } from "./index.js";
 
 const APP_TABLES = [
@@ -62,6 +64,7 @@ const APP_TABLES = [
   "workflow_signals",
   "credentials",
   "action_invocations",
+  "llm_providers",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -199,6 +202,82 @@ describe("pg app schema + migrations", () => {
         "instruments/xylophone/setup.md",
         "notes/unrelated.md",
       ]);
+    });
+  });
+
+  describe("llm_providers", () => {
+    const now = Date.now();
+
+    it("round-trips an insert/select incl. jsonb models shape", async () => {
+      await drizzleDb.insert(orgs).values({ id: "org-llm-1", name: "Org LLM", createdAt: now });
+      await drizzleDb.insert(llmProviders).values({
+        id: "prov_1",
+        orgId: "org-llm-1",
+        kind: "openai_compatible",
+        name: "Local vLLM",
+        baseUrl: "http://localhost:8000/v1",
+        enabled: true,
+        models: [{ id: "llama-3", name: "Llama 3", contextWindow: 8192 }],
+        createdAt: now,
+      });
+
+      const rows = await drizzleDb.select().from(llmProviders).where(eq(llmProviders.id, "prov_1"));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        id: "prov_1",
+        orgId: "org-llm-1",
+        kind: "openai_compatible",
+        name: "Local vLLM",
+        baseUrl: "http://localhost:8000/v1",
+        enabled: true,
+        models: [{ id: "llama-3", name: "Llama 3", contextWindow: 8192 }],
+        createdAt: now,
+      });
+    });
+
+    it("enforces one row per known kind per org via the partial unique index", async () => {
+      await drizzleDb.insert(orgs).values({ id: "org-llm-2", name: "Org LLM 2", createdAt: now });
+      await drizzleDb.insert(llmProviders).values({
+        id: "prov_2",
+        orgId: "org-llm-2",
+        kind: "anthropic",
+        name: "Anthropic",
+        enabled: true,
+        models: [],
+        createdAt: now,
+      });
+
+      await expect(
+        drizzleDb.insert(llmProviders).values({
+          id: "prov_3",
+          orgId: "org-llm-2",
+          kind: "anthropic",
+          name: "Anthropic dupe",
+          enabled: true,
+          models: [],
+          createdAt: now,
+        }),
+      ).rejects.toThrow();
+
+      // openai_compatible is exempt from the singleton constraint.
+      await drizzleDb.insert(llmProviders).values({
+        id: "prov_4",
+        orgId: "org-llm-2",
+        kind: "openai_compatible",
+        name: "Custom A",
+        enabled: true,
+        models: [],
+        createdAt: now,
+      });
+      await drizzleDb.insert(llmProviders).values({
+        id: "prov_5",
+        orgId: "org-llm-2",
+        kind: "openai_compatible",
+        name: "Custom B",
+        enabled: true,
+        models: [],
+        createdAt: now,
+      });
     });
   });
 

@@ -38,6 +38,11 @@ export const orgs = pgTable("orgs", {
   // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read as
   // JSON (`services/org.ts`'s `JSON.parse`/`JSON.stringify`) — jsonb.
   features: jsonb("features").notNull().default({}),
+  // Ordered list of namespaced model ids (e.g. `"anthropic:claude-opus-4"`)
+  // the org has opted into, most-preferred first. Read/written as JSON
+  // (`services/org.ts`'s `getOrgModelPreferences`/`setOrgModelPreferences`)
+  // — jsonb, mirroring the `features` column above.
+  modelPreferences: jsonb("model_preferences").notNull().default([]),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 
@@ -771,6 +776,44 @@ export const actionInvocations = pgTable("action_invocations", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 
+// ─── LLM providers (org BYO keys + custom providers) ────────────────────────
+//
+// One row per org-configured LLM provider. The three known kinds
+// (`anthropic`/`openai`/`google`) are per-org singletons — enforced here via
+// a partial unique index (Drizzle's pg-core has no portable way to express
+// a `WHERE` clause on a `uniqueIndex()`, so it's declared in
+// `migrations/pg/0000_app.sql` directly) AND in `services/org.ts` /
+// the Task 3-5 provider service (the service-layer check is the one tests
+// pin — see task brief). `openai_compatible` rows are custom providers and
+// may have any number per org. `models` is only populated for
+// `openai_compatible` providers (known kinds resolve their model list from
+// the engine's built-in catalog) — read/written as JSON, jsonb per the
+// `features`/`modelPreferences` convention above.
+
+export interface LlmProviderModel {
+  id: string;
+  name: string;
+  contextWindow?: number;
+  pricing?: { input: number; output: number };
+}
+
+export const llmProviders = pgTable(
+  "llm_providers",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    kind: text("kind", {
+      enum: ["anthropic", "openai", "google", "openai_compatible"],
+    }).notNull(),
+    name: text("name").notNull(),
+    baseUrl: text("base_url"),
+    enabled: boolean("enabled").notNull().default(true),
+    models: jsonb("models").notNull().default([]).$type<LlmProviderModel[]>(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("llm_providers_org").on(t.orgId)],
+);
+
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -806,3 +849,4 @@ export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
 export type WorkflowSignalRow = typeof workflowSignals.$inferSelect;
 export type CredentialRow = typeof credentials.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
+export type LlmProviderRow = typeof llmProviders.$inferSelect;
