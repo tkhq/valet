@@ -7,6 +7,7 @@ import type { Env, Variables } from '../env.js';
 import { repoProviderRegistry, stripProviderSuffix } from '../repos/registry.js';
 import { getDb } from '../lib/drizzle.js';
 import { getCredential } from '../services/credentials.js';
+import { pickBranchAuthorSessionId } from '../services/webhooks.js';
 import {
   getGithubInstallationByLogin,
   listGithubInstallationsByAccountType,
@@ -449,16 +450,20 @@ reposRouter.post('/pull-request', zValidator('json', createPRSchema), async (c) 
   try {
     const appDb = getDb(c.env.DB);
     const matches = await findSessionsByRepoBranch(appDb, `${owner}/${repo}`, body.branch);
-    for (const m of matches.results ?? []) {
-      if (m.pr_number == null) {
-        await updateSessionGitState(appDb, m.session_id, {
-          prNumber: pr.number,
-          prTitle: pr.title,
-          prUrl: pr.html_url,
-          prState: pr.draft ? 'draft' : 'open',
-          ...(pr.created_at ? { prCreatedAt: pr.created_at } : {}),
-        });
-      }
+    // Link exactly one session, chosen by the same rule the merge webhook uses.
+    // The request carries no session id, so the head branch is the only signal —
+    // but stamping every session on the branch would give one PR several
+    // authors, and the merge webhook credits each linked session with its own
+    // session.outcome{ pr_merged }, inflating the shipped-value signal.
+    const authorId = pickBranchAuthorSessionId((matches.results ?? []).filter((m) => m.pr_number == null));
+    if (authorId) {
+      await updateSessionGitState(appDb, authorId, {
+        prNumber: pr.number,
+        prTitle: pr.title,
+        prUrl: pr.html_url,
+        prState: pr.draft ? 'draft' : 'open',
+        ...(pr.created_at ? { prCreatedAt: pr.created_at } : {}),
+      });
     }
   } catch (err) {
     console.error('Failed to link created PR to session git state:', err);

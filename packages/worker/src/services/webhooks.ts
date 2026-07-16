@@ -391,27 +391,43 @@ export async function dispatchWebhookForTrigger(
 // ─── Pull Request Webhook Handler ───────────────────────────────────────────
 
 /**
+ * Read a session timestamp as UTC milliseconds. `sessions.last_active_at` is a
+ * text column written by `datetime('now')` ("2026-07-16 02:14:18"), but nothing
+ * in the schema stops an ISO-8601 value being stored instead. Comparing the raw
+ * strings would silently invert same-date ordering across the two shapes, since
+ * ' ' (0x20) sorts below 'T' (0x54) — an hour-old session would lose to a
+ * day-old one. Normalising both to a number removes the coupling. Unparseable
+ * or absent values sort oldest.
+ */
+function sessionActiveAtMs(value: string | null | undefined): number {
+  if (!value) return 0;
+  // A bare SQLite datetime has no zone and is UTC by definition; make that explicit.
+  const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/**
  * Pick the single session credited with authoring a merged PR when several
  * unlinked sessions share its head branch (continuation / multiplayer work on
- * one branch). Choosing the session with the most commits on the branch ties
- * the pr_merged value signal to the biggest contributor; the session-id
- * tie-break keeps the choice deterministic, so GitHub redeliveries and
- * concurrent deliveries pick the same winner and dedupe cleanly. Returns
- * undefined when there are no candidates.
+ * one branch).
+ *
+ * Most commits on the branch wins, which ties the pr_merged value signal to the
+ * biggest contributor. `commit_count` stays null until the runner reports it, so
+ * a merge landing before that would tie every candidate at zero; the most
+ * recently active session breaks that tie, since it is the best available proxy
+ * for who was working the branch. The session id is the last resort and carries
+ * no meaning — it is there so concurrent deliveries and GitHub redeliveries
+ * converge on the same winner and dedupe cleanly. Returns undefined when there
+ * are no candidates.
  */
 export function pickBranchAuthorSessionId(
   candidates: Array<{ session_id: string; commit_count: number | null; last_active_at?: string | null }>,
 ): string | undefined {
-  let best: { sessionId: string; commits: number; activeAt: string } | undefined;
+  let best: { sessionId: string; commits: number; activeAt: number } | undefined;
   for (const c of candidates) {
     const commits = c.commit_count ?? 0;
-    const activeAt = c.last_active_at ?? '';
-    // Most commits wins. commit_count stays null until the runner reports it,
-    // so a merge that lands first would otherwise tie every candidate at 0 and
-    // hand the PR to whichever session id sorts first — which is unrelated to
-    // who pushed. Fall back to the most recently active session on the branch,
-    // and only then to the id, which is there purely so concurrent deliveries
-    // and redeliveries converge on the same winner rather than to mean anything.
+    const activeAt = sessionActiveAtMs(c.last_active_at);
     const better =
       !best ||
       commits > best.commits ||

@@ -388,6 +388,29 @@ describe('pickBranchAuthorSessionId — deterministic single-author selection', 
     ).toBe('a');
   });
 
+  it('orders recency by instant, not by the stored timestamp format', () => {
+    // last_active_at is a text column: datetime('now') writes "YYYY-MM-DD HH:MM:SS"
+    // while an ISO value carries a 'T'. Compared as strings, ' ' (0x20) sorts
+    // below 'T' (0x54), so on a shared date the space form would always lose
+    // however recent it is. Session b is two hours newer and must win.
+    expect(
+      pickBranchAuthorSessionId([
+        { session_id: 'a', commit_count: null, last_active_at: '2026-07-16T01:00:00.000Z' },
+        { session_id: 'b', commit_count: null, last_active_at: '2026-07-16 03:00:00' },
+      ]),
+    ).toBe('b');
+  });
+
+  it('sorts an unparseable or absent timestamp oldest rather than throwing', () => {
+    expect(
+      pickBranchAuthorSessionId([
+        { session_id: 'a', commit_count: null, last_active_at: 'not-a-date' },
+        { session_id: 'b', commit_count: null, last_active_at: null },
+        { session_id: 'c', commit_count: null, last_active_at: '2026-07-16 03:00:00' },
+      ]),
+    ).toBe('c');
+  });
+
   it('treats null commit_count as zero and breaks ties by session id', () => {
     expect(
       pickBranchAuthorSessionId([

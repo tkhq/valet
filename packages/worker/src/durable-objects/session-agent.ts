@@ -54,6 +54,9 @@ import { channelScopeKey } from '@valet/shared';
 
 const MAX_CHANNEL_FOLLOWUP_REMINDERS = 3;
 const PARENT_IDLE_DEBOUNCE_MS = 10_000;
+// Batches of 100 per pass, so this drains 50k buffered events — far beyond any
+// real backlog, while still bounding a buffer that refuses to drain.
+const MAX_ANALYTICS_FLUSH_PASSES = 500;
 const PROMPT_ATTACHMENT_R2_PREFIX = 'prompt-attachments';
 export const ACTION_APPROVAL_EXPIRY_MS = 240 * 1000;
 
@@ -6561,11 +6564,23 @@ export class SessionAgentDO {
    * persistent error can't spin forever.
    */
   private async flushAnalyticsEvents(): Promise<void> {
+    // No session row means the events have nothing to attribute to and D1 would
+    // reject them, so leave them buffered rather than dropping them: a session
+    // id is assigned before any terminal path runs in practice, and if one ever
+    // is not, the rows stay recoverable on the next flush instead of vanishing.
     const sessionId = this.sessionState.sessionId;
-    if (!sessionId) return;
+    if (!sessionId) {
+      console.warn('[SessionAgentDO] flushAnalyticsEvents skipped: no sessionId; events stay buffered');
+      return;
+    }
 
     const userId = this.sessionState.userId || null;
-    for (;;) {
+    // Bound the drain. Each pass must mark its batch flushed, so a pass that
+    // marks nothing means the buffer is not draining (an id the UPDATE cannot
+    // match, or a concurrent drain from the other caller). Without a bound that
+    // re-selects the same rows forever and hangs the terminal path that is
+    // awaiting this.
+    for (let pass = 0; pass < MAX_ANALYTICS_FLUSH_PASSES; pass++) {
       try {
         const unflushed = this.ctx.storage.sql
           .exec('SELECT id, event_type, turn_id, duration_ms, channel, model, queue_mode, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, tool_name, error_code, summary, actor_id, properties, created_at FROM analytics_events WHERE flushed = 0 ORDER BY id ASC LIMIT 100')
@@ -6595,15 +6610,22 @@ export class SessionAgentDO {
         })));
         const flushedIds = unflushed.map((r) => r.id as number);
         const placeholders = flushedIds.map(() => '?').join(',');
-        this.ctx.storage.sql.exec(
+        const marked = this.ctx.storage.sql.exec(
           `UPDATE analytics_events SET flushed = 1 WHERE id IN (${placeholders})`,
           ...flushedIds,
-        );
+        ).rowsWritten;
+        // The rows just sent are still unflushed if this marked nothing, so the
+        // next pass would re-select and re-send the same batch indefinitely.
+        if (marked === 0) {
+          console.error(`[SessionAgentDO] Analytics flush marked 0 of ${flushedIds.length} rows; stopping to avoid a re-send loop`);
+          return;
+        }
       } catch (flushErr) {
         console.error('[SessionAgentDO] Failed to flush analytics events to D1:', flushErr);
         return;
       }
     }
+    console.error(`[SessionAgentDO] Analytics flush hit the ${MAX_ANALYTICS_FLUSH_PASSES}-pass cap; events remain buffered`);
   }
 
   /**
