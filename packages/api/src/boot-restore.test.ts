@@ -17,8 +17,8 @@ function makeDeps(overrides: Partial<RestoreSessionDeps> = {}): {
   const ensureWorkflowSession = vi.fn(async (sessionId: string) => ({ id: sessionId }));
   const lookupAgentSession = vi.fn(
     async () =>
-      ({ userId: "u1", orgId: "o1", workspace: "/tmp/ws" }) as
-        | { userId: string; orgId: string; workspace: string }
+      ({ userId: "u1", orgId: "o1", workspace: "/tmp/ws", profile: "headless" }) as
+        | { userId: string; orgId: string; workspace: string; profile: "headless" | "full" }
         | undefined,
   );
   const sessionFor = vi.fn(async () => undefined);
@@ -48,7 +48,12 @@ describe("restoreOneSession", () => {
 
     expect(ensureWorkflowSession).not.toHaveBeenCalled();
     expect(lookupAgentSession).toHaveBeenCalledWith("sess-abc");
-    expect(sessionFor).toHaveBeenCalledWith("sess-abc", { userId: "u1", orgId: "o1", workspace: "/tmp/ws" });
+    expect(sessionFor).toHaveBeenCalledWith("sess-abc", {
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/tmp/ws",
+      profile: "headless",
+    });
   });
 
   it("skips a non-wf session id with no app row without calling sessionFor", async () => {

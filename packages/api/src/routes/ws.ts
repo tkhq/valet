@@ -89,6 +89,7 @@ export function registerWsRoutes(
               userId: row.userId,
               orgId: row.orgId,
               workspace: row.workspace,
+              profile: row.profile,
             });
             await engineSession.ensureDefaultThread();
 
@@ -104,6 +105,7 @@ export function registerWsRoutes(
                 // Reserved field; populating accurately requires a count
                 // query and the UI doesn't currently render this number.
                 messageCount: 0,
+                profile: row.profile,
               },
             });
 

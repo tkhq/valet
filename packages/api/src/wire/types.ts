@@ -43,6 +43,12 @@ export interface AuthConfigResponse {
 
 export type SessionStatus = "active" | "archived" | "deleted";
 
+/** Interactive-service profile (sandbox auth gateway plan, Task 5).
+ * "headless" (default) is agent-only; "full" additionally runs ttyd +
+ * code-server + the auth gateway inside the sandbox. Only web-created
+ * interactive sessions may request "full". */
+export type SandboxProfile = "headless" | "full";
+
 export interface SessionSummary {
   id: string;
   workspace: string;
@@ -56,6 +62,7 @@ export interface SessionDetail extends SessionSummary {
   messageCount: number;
   /** Session-default model id. Threads inherit when they have no override. */
   model?: string;
+  profile: SandboxProfile;
 }
 
 export interface CreateSessionRequest {
@@ -63,6 +70,8 @@ export interface CreateSessionRequest {
   title?: string;
   /** Optional first user prompt; if set, server enqueues immediately after creation. */
   initialPrompt?: string;
+  /** Defaults to "headless" server-side when omitted. */
+  profile?: SandboxProfile;
 }
 
 export interface ListSessionsResponse {

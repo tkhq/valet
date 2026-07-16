@@ -312,6 +312,12 @@ export const agentSessions = pgTable(
     // both explicitly (owner_id = user_id for today's user-owned sessions).
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
+    // Interactive-service profile (sandbox auth gateway plan, Task 5).
+    // "headless" (default) is agent-only; "full" additionally runs
+    // ttyd + code-server + the auth gateway inside the sandbox. Only
+    // web-created interactive sessions may request "full" — orchestrator,
+    // child, and workflow sessions always hardcode "headless".
+    profile: text("profile", { enum: ["headless", "full"] }).notNull().default("headless"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

@@ -217,6 +217,7 @@ CREATE TABLE "agent_sessions" (
 	"status" text DEFAULT 'active' NOT NULL,
 	"owner_type" text DEFAULT 'user' NOT NULL,
 	"owner_id" text DEFAULT '' NOT NULL,
+	"profile" text DEFAULT 'headless' NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

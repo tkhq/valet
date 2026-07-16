@@ -60,7 +60,7 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
         .where(eq(agentSessions.id, sessionId))
         .limit(1);
       const row = rows[0];
-      return row ? { userId: row.userId, orgId: row.orgId, workspace: row.workspace } : undefined;
+      return row ? { userId: row.userId, orgId: row.orgId, workspace: row.workspace, profile: row.profile } : undefined;
     },
     sessionFor: (sessionId, meta) => providers.engineHost.sessionFor(sessionId, meta),
   };

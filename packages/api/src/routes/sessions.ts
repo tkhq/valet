@@ -87,6 +87,10 @@ sessionsRouter.post("/", async (c) => {
   if (!isAbsolute(body.workspace)) {
     return c.json({ error: "workspace must be an absolute path" }, 400);
   }
+  if (body.profile !== undefined && body.profile !== "headless" && body.profile !== "full") {
+    return c.json({ error: "profile must be 'headless' or 'full'" }, 400);
+  }
+  const profile = body.profile ?? "headless";
 
   // Auto-create the workspace dir if it doesn't exist; reject if the path
   // exists but is a file (Docker bind-mount needs a directory).
@@ -119,6 +123,7 @@ sessionsRouter.post("/", async (c) => {
       status: "active",
       ownerType: "user",
       ownerId: user.id,
+      profile,
       createdAt: now,
       updatedAt: now,
     });
@@ -131,6 +136,7 @@ sessionsRouter.post("/", async (c) => {
     createdAt: now,
     updatedAt: now,
     messageCount: 0,
+    profile,
   };
   return c.json(detail, 201);
 });
@@ -165,6 +171,7 @@ sessionsRouter.get("/:id", async (c) => {
       userId: row.userId,
       orgId: row.orgId,
       workspace: row.workspace,
+      profile: row.profile,
     });
     model = engineSession.options.model.id;
   }
@@ -173,6 +180,7 @@ sessionsRouter.get("/:id", async (c) => {
     ...rowToSummary(row),
     messageCount: Number(n ?? 0),
     model,
+    profile: row.profile,
   };
   return c.json(detail);
 });
@@ -206,6 +214,7 @@ sessionsRouter.patch("/:id", async (c) => {
     userId: row.userId,
     orgId: row.orgId,
     workspace: row.workspace,
+    profile: row.profile,
   });
   try {
     await engineSession.setModel(body.model);
@@ -221,6 +230,7 @@ sessionsRouter.patch("/:id", async (c) => {
     ...rowToSummary(row),
     messageCount: Number(n ?? 0),
     model: engineSession.options.model.id,
+    profile: row.profile,
   };
   return c.json(detail);
 });

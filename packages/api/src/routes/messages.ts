@@ -90,6 +90,7 @@ async function loadEngineSession(
     userId: session.userId,
     orgId: session.orgId,
     workspace: session.workspace,
+    profile: session.profile,
   });
   return { session, engineSession };
 }

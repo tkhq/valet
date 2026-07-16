@@ -103,6 +103,9 @@ export interface SessionMeta {
   userId: string;
   orgId: string;
   workspace: string;
+  /** Interactive-service profile (sandbox auth gateway plan, Task 5).
+   * Defaults to "headless" when omitted. */
+  profile?: "headless" | "full";
 }
 
 interface CacheEntry {
@@ -193,7 +196,8 @@ export class EngineHost {
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const model = await this.resolveModelForBuild(existing, meta.userId);
-    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId);
+    const profile = meta.profile ?? "headless";
+    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -201,7 +205,7 @@ export class EngineHost {
             userId: meta.userId,
             orgId: meta.orgId,
             workspace: meta.workspace,
-            sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv },
+            sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile },
             model,
             systemPrompt: SYSTEM_PROMPT,
             tools: extras.tools.length ? extras.tools : undefined,
@@ -214,7 +218,7 @@ export class EngineHost {
           userId: meta.userId,
           orgId: meta.orgId,
           workspace: meta.workspace,
-          sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv },
+          sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile },
           model,
           systemPrompt: SYSTEM_PROMPT,
           tools: extras.tools.length ? extras.tools : undefined,
@@ -243,19 +247,29 @@ export class EngineHost {
   /**
    * Mints a fresh long-lived sandbox bearer token (revoking any prior live
    * one for this session — `mintSandboxToken`'s own contract) and derives
-   * this session's JWT secret, returning the three env vars every sandbox
+   * this session's JWT secret, returning the five env vars every sandbox
    * gets at provision time: `VALET_SANDBOX_TOKEN`, `VALET_API_URL`,
-   * `VALET_SANDBOX_JWT_SECRET` (Task 8, auth-v2 plan). Called once per
-   * session BUILD (create or restore) — not per sandbox re-provision within
-   * a build's lifetime, since the `SandboxCreateOpts` object handed to
-   * `engine.createSession`/`restoreSession` is captured once and reused by
-   * the attachment for every (re-)provision until the next build.
+   * `VALET_SANDBOX_JWT_SECRET` (Task 8, auth-v2 plan), plus `VALET_SESSION_ID`
+   * and `VALET_SANDBOX_PROFILE` (sandbox auth gateway plan, Task 5).
+   * `VALET_SESSION_ID` must equal `sessionId` — it's the same id
+   * `mintSandboxJwt` puts in the JWT's `sid` claim, and the gateway daemon
+   * inside "full"-profile sandboxes enforces `sid === VALET_SESSION_ID`.
+   * Called once per session BUILD (create or restore) — not per sandbox
+   * re-provision within a build's lifetime, since the `SandboxCreateOpts`
+   * object handed to `engine.createSession`/`restoreSession` is captured
+   * once and reused by the attachment for every (re-)provision until the
+   * next build.
    *
    * Returns `undefined` when `opts.db` is absent (tests that don't wire a
    * db up) — sandboxes then provision with no extra env, same as before
    * this wiring existed.
    */
-  private async mintSandboxEnv(sessionId: string, userId: string, orgId: string): Promise<Record<string, string> | undefined> {
+  private async mintSandboxEnv(
+    sessionId: string,
+    userId: string,
+    orgId: string,
+    profile: "headless" | "full",
+  ): Promise<Record<string, string> | undefined> {
     if (!this.opts.db) return undefined;
     const { token } = await mintSandboxToken(this.opts.db, { sessionId, userId, orgId });
     const secret = deriveSandboxJwtSecret(this.resolveSandboxJwtMaster(), sessionId);
@@ -263,6 +277,8 @@ export class EngineHost {
       VALET_SANDBOX_TOKEN: token,
       VALET_API_URL: this.opts.sandboxApiUrl ?? "http://localhost:8788",
       VALET_SANDBOX_JWT_SECRET: secret,
+      VALET_SESSION_ID: sessionId,
+      VALET_SANDBOX_PROFILE: profile,
     };
   }
 
@@ -349,7 +365,7 @@ export class EngineHost {
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
-    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId);
+    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -357,7 +373,7 @@ export class EngineHost {
       purpose: "orchestrator" as const,
       owner: principal,
       queueMode,
-      sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv },
+      sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
       systemPrompt: personaPrefix + orchestratorPersona(principal),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -687,7 +703,7 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
-    const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId);
+    const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -696,7 +712,7 @@ export class EngineHost {
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
-      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv },
+      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
@@ -774,14 +790,14 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(sessionId);
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
 
-    const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId);
+    const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "workflow" as const,
       owner: opts.owner,
-      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv },
+      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,

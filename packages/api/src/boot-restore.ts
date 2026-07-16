@@ -19,10 +19,12 @@ export interface RestoreSessionDeps {
   ensureWorkflowSession: (sessionId: string) => Promise<{ id: string }>;
   lookupAgentSession: (
     sessionId: string,
-  ) => Promise<{ userId: string; orgId: string; workspace: string } | undefined>;
+  ) => Promise<
+    { userId: string; orgId: string; workspace: string; profile: "headless" | "full" } | undefined
+  >;
   sessionFor: (
     sessionId: string,
-    meta: { userId: string; orgId: string; workspace: string },
+    meta: { userId: string; orgId: string; workspace: string; profile: "headless" | "full" },
   ) => Promise<unknown>;
 }
 
