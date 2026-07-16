@@ -16,6 +16,11 @@ export interface SandboxContractContext {
    * filesystem survival across a provider-level destroy/recreate cycle.
    */
   recreate?: (sandbox: Sandbox) => Promise<{ sandbox: Sandbox; cleanup?: () => Promise<void> }>;
+  /**
+   * Expected shape of gatewayEndpoint(). Omit to skip the case entirely
+   * (existing callers stay byte-identical).
+   */
+  gatewayEndpoint?: "service-fqdn" | "mapped-port" | "null";
 }
 
 export function runSandboxContract(name: string, ctx: SandboxContractContext) {
@@ -204,6 +209,27 @@ export function runSandboxContract(name: string, ctx: SandboxContractContext) {
         const poll = await sb.pollJob(execId, 0);
         expect(poll.status).not.toBe("running");
       }));
+
+    if (ctx.gatewayEndpoint) {
+      it("gatewayEndpoint reflects the provider's reachability model", async () => {
+        const { sandbox, cleanup } = await ctx.factory();
+        try {
+          if (ctx.gatewayEndpoint === "null") {
+            // absent method or null return, both acceptable
+            const ep = sandbox.gatewayEndpoint ? await sandbox.gatewayEndpoint() : null;
+            expect(ep).toBeNull();
+          } else {
+            if (!sandbox.gatewayEndpoint) throw new Error("expected gatewayEndpoint implemented");
+            const ep = await sandbox.gatewayEndpoint();
+            expect(ep).not.toBeNull();
+            expect(typeof ep?.host).toBe("string");
+            expect(ep?.port).toBeGreaterThan(0);
+          }
+        } finally {
+          await cleanup?.();
+        }
+      });
+    }
 
     if (ctx.capabilities.persistentWorkspace) {
       it("workspace survives a provider-level destroy + recreate", async () => {

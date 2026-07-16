@@ -578,6 +578,11 @@ export interface JobPoll {
   nextOffset: number;
 }
 
+export interface GatewayEndpoint {
+  host: string;
+  port: number;
+}
+
 export interface Sandbox {
   id: string;
   readFile(path: string): Promise<string>;
@@ -597,6 +602,12 @@ export interface Sandbox {
   execJob?(command: string, opts?: ExecOpts): Promise<ExecJobHandle>;
   pollJob?(execId: string, offset: number): Promise<JobPoll>;
   cancelJob?(execId: string): Promise<void>;
+  /**
+   * The in-sandbox auth gateway's reachable endpoint, or null when this
+   * sandbox has no gateway (headless profile / providers without interactive
+   * services). Absent method === always null — existing paths unchanged.
+   */
+  gatewayEndpoint?(): Promise<GatewayEndpoint | null>;
 }
 
 export interface SandboxCreateOpts {
@@ -606,6 +617,9 @@ export interface SandboxCreateOpts {
   timeout?: number;
   resources?: { cpu?: number; memory?: string };
   metadata?: Record<string, unknown>;
+  /** Interactive-service profile. Default "headless" (agent-only). "full"
+   * additionally runs ttyd + code-server + the auth gateway. */
+  profile?: "headless" | "full";
 }
 
 /**
