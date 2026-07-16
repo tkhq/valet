@@ -124,3 +124,98 @@ export interface SandboxCR {
   };
   spec: SandboxCRSpec;
 }
+
+/**
+ * Types below back `src/lifecycle.ts` — the CustomObjectsApi/CoreV1Api
+ * wrapper (Task 2). Verified against Task 3's live-cluster observations
+ * (`deploy/agent-sandbox/README.md` "Smoke test observations"):
+ *
+ *   - the pod-name annotation (`agents.x-k8s.io/pod-name`) lives on the
+ *     Sandbox object's own `metadata.annotations`, not on the pod;
+ *   - `status.conditions` is a standard Kubernetes conditions array; the
+ *     only condition observed in the smoke test was `type: Ready`,
+ *     `status: "True"`, `reason: DependenciesReady`;
+ *   - `status.selector` is a label-selector string
+ *     (`agents.x-k8s.io/sandbox-name-hash=<hash>`) the controller puts on
+ *     the backing pod — usable as a list-fallback selector distinct from
+ *     our own `valet.dev/session-id` label (which is NOT guaranteed to be
+ *     propagated onto the pod by the controller).
+ */
+
+/** Standard Kubernetes condition shape (`type/status/reason/message/
+ * lastTransitionTime/observedGeneration`). Only `type` and `status` are
+ * required by us; the rest are surfaced when present since they carry the
+ * human-readable detail for `SandboxStatus.error`. */
+export interface SandboxCondition {
+  type: string;
+  status: "True" | "False" | "Unknown";
+  reason?: string;
+  message?: string;
+  lastTransitionTime?: string;
+  observedGeneration?: number;
+}
+
+/** `status` subset of the read-back Sandbox CR — only the fields the
+ * lifecycle module consumes (conditions for status mapping, selector as a
+ * resolvePodName list fallback). The full CRD status has more fields
+ * (`nodeName`, `podIPs`, `service`, `serviceFQDN`) that we intentionally
+ * don't type since nothing here reads them yet. */
+export interface SandboxCRStatus {
+  conditions?: SandboxCondition[];
+  selector?: string;
+}
+
+/** `metadata` subset of the read-back Sandbox CR — a superset of the
+ * write-shape `SandboxCR["metadata"]` (adds the server-populated fields:
+ * `resourceVersion` for optimistic-concurrency replace, `uid`,
+ * `annotations` for the pod-name annotation). */
+export interface SandboxCRMetadata {
+  name: string;
+  namespace?: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  resourceVersion?: string;
+  uid?: string;
+}
+
+/** `spec` subset of the read-back Sandbox CR. `podTemplate` and
+ * `volumeClaimTemplates` are typed `unknown` deliberately — the lifecycle
+ * module only ever *validates their presence* on a GET response (never
+ * their internal shape), because it never reads into `podTemplate.spec`
+ * from a read-back CR: `applySandbox`'s replace path re-sends the
+ * caller's own already-typed `SandboxCRSpec`, it never round-trips a GET
+ * response's spec back to the server. Claiming the fully-typed
+ * `SandboxCRSpec` here would be dishonest precision this module doesn't
+ * actually check. */
+export interface SandboxCRReadSpec {
+  podTemplate: unknown;
+  volumeClaimTemplates: unknown[];
+  shutdownPolicy?: "Delete" | "Retain";
+  operatingMode?: "Running" | "Suspended";
+}
+
+/** The shape returned by GET/create/replace against the live API server —
+ * `SandboxCR` plus the server-populated `metadata` fields, `status`, and a
+ * deliberately looser `spec` (see `SandboxCRReadSpec`). Hand-written and
+ * intentionally partial (see field-level docs above); not a full
+ * deserialization of the CRD schema. */
+export interface SandboxCRRead {
+  apiVersion: typeof SANDBOX_CR_API_VERSION;
+  kind: "Sandbox";
+  metadata: SandboxCRMetadata;
+  spec: SandboxCRReadSpec;
+  status?: SandboxCRStatus;
+}
+
+/** Minimal pod projection `resolvePodName`'s list-fallback needs — just
+ * enough to match a pod back to its owning Sandbox CR via `ownerReferences`. */
+export interface PodOwnerReference {
+  kind: string;
+  name: string;
+  controller?: boolean;
+}
+
+export interface PodSummary {
+  name: string;
+  ownerReferences?: PodOwnerReference[];
+}
