@@ -17,15 +17,18 @@ import type {
   CreateThreadResponse,
   GetSessionResponse,
   ListDecisionsResponse,
+  ListIdentityLinksResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListSessionsResponse,
   ListThreadsResponse,
+  PatchIdentityLinkRequest,
   PatchSessionResponse,
   PatchThreadResponse,
   ResolveDecisionRequest,
   SetNotificationPreferenceRequest,
+  StartIdentityLinkResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
 
@@ -42,6 +45,7 @@ export const qk = {
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
+  identityLinks: () => ["identityLinks"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -255,6 +259,46 @@ export function useSetNotificationPreference() {
     // toggle that's touched rarely; no need for optimistic update plumbing.
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.notificationPreferences() });
+    },
+  });
+}
+
+// ── Identity links (channel-link Phase 7) — per-user Telegram linking ───
+
+export function useIdentityLinks(opts?: UseQueryOptions<ListIdentityLinksResponse>) {
+  return useQuery<ListIdentityLinksResponse>({
+    queryKey: qk.identityLinks(),
+    queryFn: () => api.listIdentityLinks(),
+    ...opts,
+  });
+}
+
+export function useStartIdentityLink() {
+  const qc = useQueryClient();
+  return useMutation<StartIdentityLinkResponse, Error, string>({
+    mutationFn: (provider) => api.startIdentityLink(provider),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.identityLinks() });
+    },
+  });
+}
+
+export function useSetLinkNotify() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, PatchIdentityLinkRequest>({
+    mutationFn: (body) => api.patchIdentityLink("telegram", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.identityLinks() });
+    },
+  });
+}
+
+export function useUnlinkIdentity() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, void>({
+    mutationFn: () => api.deleteIdentityLink("telegram"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
   });
 }

@@ -30,6 +30,7 @@ import type {
   GetWorkflowRunResponse,
   ListCredentialsResponse,
   ListDecisionsResponse,
+  ListIdentityLinksResponse,
   ListInvitesResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
@@ -51,6 +52,7 @@ import type {
   PatchOrchestratorInfoResponse,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
+  PatchIdentityLinkRequest,
   PatchOrgRequest,
   PatchOrgResponse,
   PatchSessionRequest,
@@ -66,6 +68,7 @@ import type {
   SendPromptRequest,
   SendPromptResponse,
   SetNotificationPreferenceRequest,
+  StartIdentityLinkResponse,
   SetTeamMemberRoleRequest,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
@@ -355,6 +358,18 @@ export const api = {
       "DELETE",
       `/credentials/${encodeURIComponent(service)}`,
     ),
+
+  // identity links (channel-link Phase 7): per-user Telegram account linking
+  listIdentityLinks: () => request<ListIdentityLinksResponse>("GET", "/me/identity-links"),
+  startIdentityLink: (provider: string) =>
+    request<StartIdentityLinkResponse>(
+      "POST",
+      `/me/identity-links/${encodeURIComponent(provider)}/start`,
+    ),
+  patchIdentityLink: (provider: string, body: PatchIdentityLinkRequest) =>
+    request<{ ok: true }>("PATCH", `/me/identity-links/${encodeURIComponent(provider)}`, body),
+  deleteIdentityLink: (provider: string) =>
+    request<{ ok: true }>("DELETE", `/me/identity-links/${encodeURIComponent(provider)}`),
 };
 
 export { ApiError };

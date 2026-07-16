@@ -22,6 +22,7 @@ const YOU_ITEMS = [
   { to: "/settings/assistant", label: "Assistant" },
   { to: "/settings/appearance", label: "Appearance" },
   { to: "/settings/notifications", label: "Notifications" },
+  { to: "/settings/connected-accounts", label: "Connected accounts" },
   { to: "/settings/api-keys", label: "API keys" },
 ] as const;
 
