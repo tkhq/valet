@@ -149,8 +149,10 @@ export function createApp(
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
   app.route("/api/credentials", credentialsRouter);
-  // Mounted BEFORE /api/me so the longer, more specific prefix wins under
-  // Hono's route matching (see routes/identity-links.ts).
+  // Mounted BEFORE /api/me — defensive ordering only: meRouter today
+  // registers just GET / and PATCH / (no wildcard/param routes), so there is
+  // no actual collision to lose. Revisit this ordering if /api/me ever grows
+  // a catch-all route that could shadow /api/me/identity-links.
   app.route("/api/me/identity-links", identityLinksRouter);
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);

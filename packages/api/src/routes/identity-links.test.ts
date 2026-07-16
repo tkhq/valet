@@ -185,16 +185,23 @@ describe("DELETE /api/me/identity-links/telegram", () => {
   });
 });
 
-describe("mount order", () => {
-  it("/api/me/identity-links is served by the identity-links router, not swallowed by /api/me", async () => {
+describe("identity-links and /api/me coexist", () => {
+  // NOTE: this does NOT prove mount order matters — meRouter today registers
+  // only GET / and PATCH / (no wildcard/param routes), so there is no actual
+  // collision for ordering to resolve; this mount is BEFORE /api/me purely
+  // defensively (see app.ts's comment). This test just confirms both routers
+  // are reachable and return their own distinct response shapes.
+  it("GET /api/me/identity-links returns the links shape; GET /api/me still returns the profile shape", async () => {
     api = await bootTestApi();
 
-    const res = await fetch(`${api.baseUrl}/api/me/identity-links`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as ListIdentityLinksResponse;
-    // meRouter's GET / returns a MeResponse shape (id/email/orgId/...), not
-    // { links: [...] } — this proves the longer prefix router handled it.
-    expect(body).toHaveProperty("links");
-    expect(Array.isArray(body.links)).toBe(true);
+    const linksRes = await fetch(`${api.baseUrl}/api/me/identity-links`);
+    expect(linksRes.status).toBe(200);
+    const linksBody = (await linksRes.json()) as ListIdentityLinksResponse;
+    expect(Array.isArray(linksBody.links)).toBe(true);
+
+    const meRes = await fetch(`${api.baseUrl}/api/me`);
+    expect(meRes.status).toBe(200);
+    const meBody = (await meRes.json()) as { id: string; email: string };
+    expect(meBody).toMatchObject({ id: "local-user", email: "local@dev" });
   });
 });
