@@ -131,8 +131,9 @@ function notificationId(event: AttentionEvent, userId: string): string {
 /**
  * Resolves the audience for `event.owner`, gates each recipient by their
  * web preference for `event.kind`, and inserts one `notifications` row per
- * surviving recipient. Web-only delivery this phase (decision 19) — no
- * channel posting.
+ * surviving recipient. Channel deliverers (`deps.channels`) additionally
+ * fire per recipient, independent of the web preference — that pref governs
+ * web notifications only.
  */
 export async function routeAttention(deps: AttentionDeps, event: AttentionEvent): Promise<void> {
   const membership = await fetchMembership(deps.db, event.owner);
