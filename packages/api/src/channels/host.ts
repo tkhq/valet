@@ -54,6 +54,7 @@ export interface ChannelHostDeps {
 const DEDUP_CAP = 2048;
 const UNLINKED_REPLY_COOLDOWN_MS = 60 * 60_000;
 const DELIVERED_CAP = 2048;
+const VERIFY_FAILED_LOG_COOLDOWN_MS = 60_000;
 
 /** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️. */
 function gateResolutionLabel(actions: DecisionAction[], resolution: DecisionResolution): string {
@@ -129,6 +130,11 @@ export class ChannelHost {
   private pollControllers = new Map<string, AbortController>();
   /** Tracks each poll loop's promise so `stop()` can await its exit. */
   private pollLoops: Promise<void>[] = [];
+  /** Rate-limits `verify_failed` drop-log writes, keyed by channelType —
+   * same cooldown pattern as `unlinkedReplyAt`: an attacker hammering an
+   * unauthenticated webhook endpoint with bad secrets still gets 403 every
+   * time, but only writes one drop-log row per channelType per cooldown. */
+  private verifyFailedLoggedAt = new Map<string, number>();
 
   constructor(private readonly deps: ChannelHostDeps) {}
 
@@ -270,8 +276,7 @@ export class ChannelHost {
     const secret = this.webhookSecrets.get(channelType);
     const raws = transport.verifyWebhook(req, secret ? { webhookSecret: secret } : {});
     if (raws === null) {
-      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
-      await this.dropLog(orgId, "verify_failed", undefined, `${channelType} webhook verification failed`);
+      await this.maybeLogVerifyFailed(channelType);
       return "rejected";
     }
 
@@ -518,6 +523,19 @@ export class ChannelHost {
     await transport?.send(event.conversationKey, {
       markdown: "✅ Linked! You're chatting with your Valet assistant.",
     });
+  }
+
+  /** Writes a `verify_failed` drop-log row at most once per channelType per
+   * `VERIFY_FAILED_LOG_COOLDOWN_MS` — the caller still returns "rejected"
+   * (403) on every call; only the DB insert is throttled, so a burst of bad
+   * webhook posts can't flood `event_drop_log`. */
+  private async maybeLogVerifyFailed(channelType: string): Promise<void> {
+    const now = this.now();
+    const last = this.verifyFailedLoggedAt.get(channelType);
+    if (last !== undefined && now - last < VERIFY_FAILED_LOG_COOLDOWN_MS) return;
+    this.verifyFailedLoggedAt.set(channelType, now);
+    const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+    await this.dropLog(orgId, "verify_failed", undefined, `${channelType} webhook verification failed`);
   }
 
   private async maybeReplyUnlinked(transport: ChannelTransport | undefined, conversationKey: string): Promise<void> {

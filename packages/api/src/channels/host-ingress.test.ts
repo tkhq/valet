@@ -235,11 +235,13 @@ class WebhookFakeTransport implements ChannelTransport {
   readonly channelType = "fake";
   registeredUrl?: string;
   registeredSecret?: string;
+  verifyWebhookCalls = 0;
 
   verifyWebhook(
     req: { headers: Record<string, string>; rawBody: Uint8Array },
     secrets: Record<string, string>,
   ): RawChannelUpdate[] | null {
+    this.verifyWebhookCalls++;
     if (req.headers["x-webhook-secret"] !== secrets.webhookSecret) return null;
     const body = JSON.parse(Buffer.from(req.rawBody).toString("utf8")) as RawChannelUpdate;
     return [body];
@@ -327,5 +329,38 @@ describe("webhook mode", () => {
       body: "{}",
     });
     expect(res.status).toBe(404);
+  });
+
+  it("oversized body → 413, host never invoked", async () => {
+    const oversized = "x".repeat(1_048_577);
+    const res = await fetch(`${api.baseUrl}/api/channels/fake/webhook`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "payload too large" });
+    expect(transport.verifyWebhookCalls).toBe(0);
+  });
+
+  it("two bad-secret posts in quick succession → both 403, exactly one verify_failed drop row", async () => {
+    const post = () =>
+      fetch(`${api.baseUrl}/api/channels/fake/webhook`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-webhook-secret": "wrong" },
+        body: JSON.stringify(inbound()),
+      });
+
+    const [resA, resB] = await Promise.all([post(), post()]);
+    expect(resA.status).toBe(403);
+    expect(resB.status).toBe(403);
+
+    await waitFor(async () => {
+      const drops = await api.providers.db.select().from(eventDropLog);
+      return drops.some((d) => d.reason === "verify_failed");
+    });
+
+    const drops = await api.providers.db.select().from(eventDropLog);
+    expect(drops.filter((d) => d.reason === "verify_failed")).toHaveLength(1);
   });
 });
