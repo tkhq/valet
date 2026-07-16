@@ -194,6 +194,10 @@ make dev-local          # @valet/api on :8788 + @valet/web on :5173
                         # optional OIDC/social via AUTH_* vars — see
                         # docs/specs/2026-07-14-auth-v2-design.md). Unset, VALET_LOCAL_AUTH=1
                         # keeps the stub behaving as before.
+                        # Channel transports (e.g. Telegram) default to long-poll mode with no
+                        # extra config. Setting VALET_PUBLIC_URL (or a public BETTER_AUTH_URL —
+                        # not localhost/*.localdev) flips ChannelHost to webhook mode instead;
+                        # see docs/specs/2026-07-15-telegram-channel-design.md decision 3.
 
 # Legacy stack (Cloudflare Worker + old client)
 make dev-worker         # Cloudflare Worker on :8787

@@ -1,7 +1,7 @@
 # Telegram Channel Design — first v2 channel plugin (Phase 7)
 
 **Date:** 2026-07-15
-**Status:** Draft
+**Status:** Implemented
 **Scope:** The v2 `ChannelTransport` contract (engine), the API's channel ingress + routing layer (webhook and long-poll), Telegram identity linking, and the Telegram transport itself: orchestrator-first DMs with text, media, decision-gate inline buttons, and attention-router notifications. Group chats, Slack, and per-user bots are out of scope.
 
 ## Context
@@ -65,7 +65,15 @@ Against a real BotFather bot on local dev (long-poll mode, no tunnel): link an a
 - **Transport unit tests** against a local fake Bot API server (Hono fixture): webhook verify accept/reject, `getUpdates` offset/backoff behavior, parse of message/command/callback/media updates, markdown formatting edge cases, gate keyboard construction + edit.
 - **Ingress/routing integration** (real engine, in-memory/PGlite store, fake Bot API): linked sender → orchestrator prompt admitted on `telegram:{chatId}` thread; unlinked → drop log + rate-limited reply; duplicate `update_id` admitted once; gate round-trip callback → resolved + message edited; api restart → poller resumes without redelivery.
 - **Contract:** `validateValetPlugin` accepts/rejects `transports` shapes; registry generation picks up the flipped plugin.
-- **Live e2e** gated on `TELEGRAM_TEST_BOT_TOKEN`: link → DM → reply round trip.
+- **Live e2e** gated on `TELEGRAM_TEST_BOT_TOKEN` and `TELEGRAM_TEST_CHAT_ID` (`packages/api/src/integration/telegram.e2e.test.ts`): boots the real plugin + credential, links `local-user` to the test chat via the mint/consume-code path, then proves outbound reachability against the real Bot API via both `attentionDeliverer().deliver()` and a direct `transport.send()` call (the latter throws on a rejected send, which is the actual reachability proof — `deliver` swallows errors by design). Full inbound (a human DMing the bot) is exercised only by the manual dogfood below, not by an automated test.
+
+## Deviations from this design (recorded at implementation, Task 12)
+
+1. **Gate callback correlation is `(chatId, messageId)`, not `{gateId, optionId}` in `callback_data`.** Decision 8 above describes `callback_query` carrying `{gateId, optionId}`; Telegram's 64-byte `callback_data` limit makes that impossible for the engine's actual gate ids. `ChannelHost` instead keeps an in-memory `gateRefs` map keyed by `${conversationKey}#${messageId}` (populated when the prompt is sent) and looks up `{gateId, sessionId}` from the inbound `(chatId, messageId)` pair; `callback_data` itself carries only `g|{actionId}`. This is in-memory state, sanctioned by decision 7 — an api restart loses the map, so stale buttons pressed after a restart get "This approval has expired — resolve it on the web" instead of resolving.
+2. **Outbound delivers turn-final assistant messages only.** `deliverAssistantMessage` requires `entry.stopReason === "end_turn"` in addition to the `message_end` event firing — `message_end` fires for every non-abort assistant message, including mid-turn narration before a tool call, but only the turn's genuine final message persists `stopReason: "end_turn"`. Mid-turn narration ("Let me check that...") is suppressed rather than mirrored to Telegram.
+3. **No engine change was needed for inbound attachments.** Decision 10's contingency ("if prompt admission lacks attachment parts, this pass adds them to the engine") did not fire — `PromptContent`/`submitPrompt` already accepted an `attachments` array; `ChannelHost.handleMessage` uses it directly.
+4. **Webhook ingress hardening beyond the design's decision 3:** the webhook route enforces a 1 MiB request body cap, and `verify_failed` drop-log rows are rate-limited to one per `channelType` per 60s (`ChannelHost.maybeLogVerifyFailed`) so a burst of unauthenticated bad-secret POSTs can't flood `event_drop_log`.
+5. **`VALET_PUBLIC_URL` is a new env var** (see `publicUrlFromEnv` in `packages/api/src/channels/host.ts`), read verbatim when set; otherwise the host falls back to `BETTER_AUTH_URL` only when it parses as `https:` and isn't `localhost`/`127.0.0.1`/`*.localdev` (those aren't reachable *from* a provider's webhook delivery). Long-poll mode — the `make dev-local` default — needs neither var.
 
 ## Non-goals
 

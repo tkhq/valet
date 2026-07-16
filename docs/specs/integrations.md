@@ -224,6 +224,8 @@ Token retrieval: decrypts from `oauth_tokens` table using `ENCRYPTION_KEY`.
 
 ## Telegram Bot
 
+> **Superseded by the v2 channel transport.** Everything below this note describes the legacy Cloudflare Worker path (`packages/worker`, `packages/client`) — per-user bot tokens, D1-backed `user_telegram_config`, `/telegram/webhook/:userId`. It is frozen but still the deployed production path (`packages/worker` is pinned to commit `35b398e5`; see root `CLAUDE.md`). The greenfield `packages/api` stack (`ChannelHost` in `packages/api/src/channels/host.ts`, `TelegramTransport` in `packages/plugin-telegram/src/transport/`) implements the same integration as an org-level `ChannelTransport` plugin instead: one org-owned bot token via the generic credential store (no per-user `user_telegram_config`), config-driven webhook-or-long-poll ingress, and orchestrator-first DM routing. See `docs/specs/2026-07-15-telegram-channel-design.md` (Status: Implemented) for the current design, and `docs/specs/2026-07-11-orchestrator-engine-design.md`'s "Channel Bindings and Routing" section for how it plugs into the v2 orchestrator.
+
 ### Setup Flow
 
 1. User provides bot token via `POST /api/me/telegram`.
