@@ -20,7 +20,11 @@ metadata:
 rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    # `update` is required by the create-is-upsert adopt path: on a 409 the
+    # provider re-asserts the CR via replaceNamespacedCustomObject (HTTP PUT),
+    # which is the `update` verb — this is the workspace-preserving
+    # re-provision path (decision 5), so omitting it 403s exactly there.
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "delete"]

@@ -59,10 +59,16 @@ done
 for verb in create get list watch delete; do
   echo "$ROLE_BLOCK" | grep -q "\"$verb\"" || fail "Role missing verb: $verb"
 done
+# The sandboxes rule specifically needs `update`: the adopt-on-409 path calls
+# replaceNamespacedCustomObject (PUT = update). A generic whole-Role grep for
+# "update" is not enough — assert it on the sandboxes rule's own verb line.
+SANDBOX_VERBS=$(echo "$ROLE_BLOCK" | grep -A2 '"sandboxes"' | grep 'verbs:')
+echo "$SANDBOX_VERBS" | grep -q '"update"' \
+  || fail "sandboxes rule missing 'update' verb — adopt/re-provision (replaceNamespacedCustomObject PUT) would 403"
 if echo "$ROLE_BLOCK" | grep -qE '"?persistentvolumeclaims"?'; then
   fail "Role grants persistentvolumeclaims — agent-sandbox controller owns PVC lifecycle, api must not"
 fi
-pass "Role has exactly the expected sandbox/pods/exec/log verbs, no PVC verbs"
+pass "Role has the expected sandbox/pods/exec/log verbs incl. sandboxes:update, no PVC verbs"
 
 # --- DATABASE_URL wiring: bundled vs external ---------------------------
 grep -q 'name: DATABASE_URL' "$TMP_DIR/bundled.yaml" || fail "bundled render: api Deployment missing DATABASE_URL env"
