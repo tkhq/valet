@@ -97,6 +97,20 @@ export function isAuthFailureCode(code: string | undefined): boolean {
   return typeof code === 'string' && (AUTH_FAILURE_CODES as readonly string[]).includes(code);
 }
 
+/**
+ * Client-side decision: should a 401 response clear local auth state and
+ * bounce to /login? Yes when the code is auth-tier (AUTH_MISSING /
+ * AUTH_INVALID) OR when the body carries no recognizable code at all
+ * (bare 401 from a DO, the Cloudflare edge, or a proxy — nothing else
+ * can plausibly return 401 to an authenticated caller, so the safer
+ * default is to force re-auth). Explicit `UNAUTHORIZED` (route-level
+ * authorization denial) does NOT clear.
+ */
+export function shouldClearAuthOn401(code: string | undefined): boolean {
+  if (isAuthFailureCode(code)) return true;
+  return code === undefined || code === null || code === '';
+}
+
 export class ForbiddenError extends ValetError {
   constructor(message = 'Forbidden') {
     super(message, ErrorCodes.FORBIDDEN, 403);

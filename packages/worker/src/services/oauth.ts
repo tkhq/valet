@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword } from '@valet/plugin-email-auth/identity'
 import { verifyGoogleIdToken } from '@valet/plugin-google-auth/identity';
 import { getGitHubConfig } from './github-config.js';
 import { SESSION_TTL_MS } from '../middleware/auth.js';
+import { sha256Hex } from '../lib/hash.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -16,14 +17,6 @@ function generateSessionToken(): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-}
-
-async function hashToken(token: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(token);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ─── Email Gating ───────────────────────────────────────────────────────────
@@ -112,7 +105,7 @@ async function finalizeUserLogin(
   // authenticated request but deliberately does NOT slide `expires_at`,
   // so the user re-authenticates through the identity provider weekly.
   const sessionToken = generateSessionToken();
-  const tokenHash = await hashToken(sessionToken);
+  const tokenHash = await sha256Hex(sessionToken);
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 
   await db.createAuthSession(appDb, {

@@ -1,6 +1,6 @@
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
-import { isAuthFailureCode } from '@valet/shared';
+import { shouldClearAuthOn401 } from '@valet/shared';
 
 // In production, use the worker URL. In development, proxy through Vite.
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -99,11 +99,13 @@ export async function apiClient<T>(
     const { parsed } = await readErrorBody(response);
     const errorData: { error?: string; code?: string; details?: unknown } = parsed ?? {};
 
-    // Only treat 401 as "your login is dead" when the response carries an
-    // auth-tier error code from our auth middleware. Resource-authorization
-    // 401s from individual routes (session ownership checks, webhook
-    // signature failures) should surface as errors, not log the user out.
-    if (response.status === 401 && isAuthFailureCode(errorData.code)) {
+    // Clear local auth on 401 when either the middleware told us the
+    // identity is dead (AUTH_MISSING / AUTH_INVALID) OR the response
+    // carries no recognizable code at all — bare 401s from a DO, the
+    // Cloudflare edge, or a proxy that never ran through auth middleware.
+    // An explicit `UNAUTHORIZED` code (route-level authorization denial)
+    // does not clear.
+    if (response.status === 401 && shouldClearAuthOn401(errorData.code)) {
       useAuthStore.getState().clearAuth();
       router.navigate({ to: '/login' });
     }

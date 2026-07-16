@@ -1996,6 +1996,20 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
     setRowAction(next);
   }, [removeUser, revokeSessions]);
 
+  // The 'revoked' state is a transient success indicator — auto-clear
+  // it after a few seconds so the row returns to its idle state and
+  // admins can re-revoke the same user during an incident without
+  // having to click on another row first.
+  React.useEffect(() => {
+    if (rowAction?.kind !== 'revoked') return;
+    const t = setTimeout(() => {
+      setRowAction((current) =>
+        current?.kind === 'revoked' && current.userId === rowAction.userId ? null : current,
+      );
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [rowAction]);
+
   const adminCount = users?.filter((u) => u.role === 'admin').length ?? 0;
 
   return (

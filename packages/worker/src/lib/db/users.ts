@@ -206,16 +206,23 @@ export async function listUsers(db: AppDb): Promise<User[]> {
 }
 
 export async function deleteUser(db: AppDb, userId: string): Promise<void> {
-  // Clean up user-owned credentials (no longer cascade-deleted after migration 0066)
-  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
-  // Revoke live login sessions and API tokens explicitly. The `auth_sessions`
-  // and `api_tokens` FKs on user_id already declare ON DELETE CASCADE, but the
-  // explicit deletes make the security-sensitive intent visible in code and
-  // defend against future FK changes (see migration 0066 which removed the
+  // Delete the users row FIRST so the `auth_sessions` and `api_tokens`
+  // FK cascades atomically revoke live access. If anything below fails,
+  // the user is already fully de-authed — never left in a half-deleted
+  // state where sessions/tokens are gone but the user row survives
+  // (which would lock them out without an audit trail). The subsequent
+  // explicit deletes are idempotent-safe belt-and-suspenders: they
+  // keep the security-sensitive intent visible in code and defend
+  // against future FK changes (see migration 0066 which removed the
   // credentials cascade).
+  await db.delete(users).where(eq(users.id, userId));
   await deleteUserAuthSessions(db, userId);
   await deleteUserApiTokens(db, userId);
-  await db.delete(users).where(eq(users.id, userId));
+  // credentials no longer cascade-deletes after migration 0066, so clean
+  // up explicitly. If this fails we leave orphan credentials rows for a
+  // user that no longer exists — a nightly sweep can garbage-collect
+  // them; the security-critical revocation has already succeeded.
+  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
 }
 
 // ─── DO Helpers ──────────────────────────────────────────────────────────────

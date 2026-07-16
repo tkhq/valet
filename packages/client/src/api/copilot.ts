@@ -12,7 +12,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { api, readErrorBody } from './client';
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
-import { isAuthFailureCode } from '@valet/shared';
+import { shouldClearAuthOn401 } from '@valet/shared';
 
 export const copilotKeys = {
   all: ['copilot'] as const,
@@ -198,10 +198,25 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
         const { text: body, parsed: parsedRaw } = await readErrorBody(resp);
         const parsed = (parsedRaw ?? {}) as ErrBody;
 
-        // Auth expiry: mirror apiClient — only clear auth on auth-tier
-        // codes emitted by the auth middleware. Route-level 401s (e.g.
-        // copilot workflow-ownership checks) surface as ordinary errors.
-        if (resp.status === 401 && isAuthFailureCode(parsed.code)) {
+        // Auth expiry: mirror apiClient — clear on auth-tier codes and
+        // on bare 401s that carry no code (bare 401s from a DO, the
+        // Cloudflare edge, or a proxy). Route-level 401s (workflow
+        // ownership check with an explicit UNAUTHORIZED code) surface
+        // as ordinary errors. Before navigating we drop the optimistic
+        // empty assistant bubble and reset status so, if the /login
+        // navigation is racy or the user comes back, the hook is not
+        // wedged in `status === 'streaming'` (which line-161 uses to
+        // early-return from send()).
+        if (resp.status === 401 && shouldClearAuthOn401(parsed.code)) {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === 'assistant' && last.parts.length === 0) {
+              return prev.slice(0, -1);
+            }
+            return prev;
+          });
+          setStatus('idle');
+          setError(null);
           useAuthStore.getState().clearAuth();
           void router.navigate({ to: '/login' });
           return;

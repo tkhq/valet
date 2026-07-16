@@ -311,20 +311,26 @@ export async function createInvite(
   };
 }
 
+// `invites.expires_at` is stored as ISO-8601 (`Date.toISOString()`).
+// SQLite's `datetime('now')` returns a space-separated string without
+// the trailing Z, which sorts inconsistently under BINARY collation on
+// the same UTC date — bind ISO-to-ISO instead.
 export async function getInviteByEmail(db: AppDb, email: string): Promise<Invite | null> {
+  const nowIso = new Date().toISOString();
   const row = await db
     .select()
     .from(invites)
-    .where(and(eq(invites.email, email), isNull(invites.acceptedAt), gt(invites.expiresAt, sql`datetime('now')`)))
+    .where(and(eq(invites.email, email), isNull(invites.acceptedAt), gt(invites.expiresAt, nowIso)))
     .get();
   return row ? rowToInvite(row) : null;
 }
 
 export async function getInviteByCode(db: AppDb, code: string): Promise<Invite | null> {
+  const nowIso = new Date().toISOString();
   const row = await db
     .select()
     .from(invites)
-    .where(and(eq(invites.code, code), isNull(invites.acceptedAt), gt(invites.expiresAt, sql`datetime('now')`)))
+    .where(and(eq(invites.code, code), isNull(invites.acceptedAt), gt(invites.expiresAt, nowIso)))
     .get();
   return row ? rowToInvite(row) : null;
 }

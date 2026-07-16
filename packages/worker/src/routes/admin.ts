@@ -208,11 +208,19 @@ adminRouter.delete('/users/:id', async (c) => {
 
   const result = await adminService.deleteUserSafe(c.get('db'), userId, currentUser.id);
   if (!result.ok) {
-    if (result.error === 'self_delete') {
-      throw new ValidationError('Cannot delete yourself');
-    }
-    if (result.error === 'last_admin') {
-      throw new ValidationError('Cannot delete the last admin');
+    switch (result.error) {
+      case 'self_delete':
+        throw new ValidationError('Cannot delete yourself');
+      case 'last_admin':
+        throw new ValidationError('Cannot delete the last admin');
+      default: {
+        // Exhaustive switch — if a future error variant is added to
+        // `DeleteUserResult`, TS flags this line. Without a default
+        // throw, control would fall through to `ok: true` and silently
+        // report success on a failed delete.
+        const _exhaustive: never = result.error;
+        throw new Error(`unhandled deleteUserSafe error: ${String(_exhaustive)}`);
+      }
     }
   }
 
@@ -235,11 +243,15 @@ adminRouter.post('/users/:id/revoke-sessions', async (c) => {
 
   const result = await adminService.revokeUserSessionsSafe(c.get('db'), userId, currentUser.id);
   if (!result.ok) {
-    if (result.error === 'self_revoke') {
-      throw new ValidationError('Cannot revoke your own sessions from the admin panel — use logout instead');
-    }
-    if (result.error === 'user_not_found') {
-      throw new NotFoundError('User', userId);
+    switch (result.error) {
+      case 'self_revoke':
+        throw new ValidationError('Cannot revoke your own sessions from the admin panel — use logout instead');
+      case 'user_not_found':
+        throw new NotFoundError('User', userId);
+      default: {
+        const _exhaustive: never = result.error;
+        throw new Error(`unhandled revokeUserSessionsSafe error: ${String(_exhaustive)}`);
+      }
     }
   }
 

@@ -9,6 +9,7 @@ import {
   IntegrationError,
   ErrorCodes,
   isAuthFailureCode,
+  shouldClearAuthOn401,
 } from './errors.js';
 
 describe('ErrorCodes', () => {
@@ -121,6 +122,31 @@ describe('isAuthFailureCode', () => {
     expect(isAuthFailureCode('SESSION_NOT_FOUND')).toBe(false);
     expect(isAuthFailureCode(undefined)).toBe(false);
     expect(isAuthFailureCode('')).toBe(false);
+  });
+});
+
+describe('shouldClearAuthOn401', () => {
+  it('clears on auth-tier codes from the middleware', () => {
+    expect(shouldClearAuthOn401('AUTH_MISSING')).toBe(true);
+    expect(shouldClearAuthOn401('AUTH_INVALID')).toBe(true);
+  });
+
+  it('clears on bare 401s that carry no code', () => {
+    // Bare 401s from a DO, the Cloudflare edge, or a proxy never went
+    // through the auth middleware. The safest default is to force
+    // re-auth rather than leave the client retrying a dead token.
+    expect(shouldClearAuthOn401(undefined)).toBe(true);
+    expect(shouldClearAuthOn401('')).toBe(true);
+  });
+
+  it('does NOT clear on explicit UNAUTHORIZED (route-level authz denial)', () => {
+    expect(shouldClearAuthOn401('UNAUTHORIZED')).toBe(false);
+  });
+
+  it('does NOT clear on unrelated resource errors', () => {
+    expect(shouldClearAuthOn401('FORBIDDEN')).toBe(false);
+    expect(shouldClearAuthOn401('SESSION_NOT_FOUND')).toBe(false);
+    expect(shouldClearAuthOn401('VALIDATION_ERROR')).toBe(false);
   });
 });
 

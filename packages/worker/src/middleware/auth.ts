@@ -2,6 +2,7 @@ import type { MiddlewareHandler } from 'hono';
 import { ErrorCodes, UnauthorizedError } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import { extractBearerToken } from '../lib/ws-auth.js';
+import { sha256Hex } from '../lib/hash.js';
 
 /**
  * Session lifetime. Fixed 7-day expiry from creation — no sliding, no
@@ -45,7 +46,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env; Variables: Varia
     throw new UnauthorizedError('Missing authentication', ErrorCodes.AUTH_MISSING);
   }
 
-  const tokenHash = await hashToken(bearerToken);
+  const tokenHash = await sha256Hex(bearerToken);
 
   // Hono throws when `executionCtx` is unavailable (some test envs); the
   // waitUntil registration is best-effort so a missing ctx is fine.
@@ -153,10 +154,3 @@ async function validateAPIKey(
   return result ? { id: result.id, email: result.email, role: (result.role || 'member') as 'admin' | 'member' } : null;
 }
 
-async function hashToken(token: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(token);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
