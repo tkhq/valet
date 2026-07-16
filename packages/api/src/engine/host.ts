@@ -1,4 +1,4 @@
-import { getModel, type Model } from "@mariozechner/pi-ai";
+import type { Model } from "@mariozechner/pi-ai";
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -17,8 +17,11 @@ import {
   type Session,
   type SessionData,
   type SessionStore,
+  type ResolvedModel,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import { getOrgModelPreferences } from "../services/org.js";
+import { resolveModelSpec } from "../services/model-resolution.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orchestratorIdentities, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -195,7 +198,8 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, meta.userId);
+    const model = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
+    const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     const session = existing
@@ -207,6 +211,7 @@ export class EngineHost {
             workspace: meta.workspace,
             sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile },
             model,
+            resolveModel,
             systemPrompt: SYSTEM_PROMPT,
             tools: extras.tools.length ? extras.tools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
@@ -220,6 +225,7 @@ export class EngineHost {
           workspace: meta.workspace,
           sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile },
           model,
+          resolveModel,
           systemPrompt: SYSTEM_PROMPT,
           tools: extras.tools.length ? extras.tools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
@@ -359,7 +365,7 @@ export class EngineHost {
     const personaPrefix = await this.resolvePersonaPrefix(db, scope, meta.orgId, principal);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, meta.actorUserId);
+    const model = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // Built FRESH per session build, never cached on the host — see the
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
@@ -375,6 +381,7 @@ export class EngineHost {
       queueMode,
       sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      resolveModel: this.makeResolveModel(meta.orgId),
       systemPrompt: personaPrefix + orchestratorPersona(principal),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
@@ -595,18 +602,39 @@ export class EngineHost {
     return this.cache.get(sessionId)?.session ?? null;
   }
 
-  private resolveModel(overrideId?: string): Model<any> {
-    const id = overrideId ?? this.opts.defaultModelId ?? "claude-haiku-4-5";
-    // pi-ai's getModel is typed against its compile-time MODELS table; we
-    // accept user-configurable ids and cast at the boundary. The engine
-    // accepts Model<any> so the api-level type stays open.
-    const model = getModel("anthropic", id as "claude-haiku-4-5");
-    if (!model) {
-      throw new Error(
-        `EngineHost: unknown anthropic model "${id}" — check pi-ai MODELS or VALET_MODEL env`,
-      );
+  /**
+   * The host `resolveModel` seam (engine `ResolvedModel`, Task 1) bound to one
+   * org's provider config — passed into every `createSession`/`restoreSession`
+   * options object so the engine resolves the effective model spec + per-turn
+   * API key through the org catalog on every turn. Built per session build,
+   * capturing `orgId`; keys are read fresh on each call (never cached) so a
+   * rotated org credential applies on the next turn.
+   */
+  private makeResolveModel(orgId: string): (spec: string) => Promise<ResolvedModel | null> {
+    return (spec: string) => resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+  }
+
+  /**
+   * Resolve a model spec to a concrete `Model` for `options.model` at build
+   * time, via the same catalog-aware bridge the per-turn seam uses. A `null`
+   * return means the spec names no known model — surfaced as an error so a
+   * session never silently boots on the wrong model.
+   */
+  private async resolveModelObject(orgId: string, spec: string): Promise<Model<any>> {
+    const resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+    if (!resolved) {
+      throw new Error(`EngineHost: unknown model "${spec}" — not in the org catalog or pi-ai registry`);
     }
-    return model;
+    return resolved.model;
+  }
+
+  /** `orgs.modelPreferences[0]` (the org default model), or `undefined` when
+   * unset or the host has no `db`. Uncached — a preferences change applies on
+   * the very next session build (split-settings decision 9). */
+  private async orgPreferredModel(orgId: string): Promise<string | undefined> {
+    if (!this.opts.db) return undefined;
+    const prefs = await getOrgModelPreferences(this.opts.db, orgId);
+    return prefs[0];
   }
 
   /**
@@ -646,11 +674,17 @@ export class EngineHost {
   private async resolveModelForBuild(
     existing: SessionData | null,
     userId: string,
+    orgId: string,
     overrideId?: string,
   ): Promise<Model<any>> {
-    if (existing?.model) return this.resolveModel(existing.model);
-    const id = overrideId ?? (await this.userDefaultModel(userId));
-    return this.resolveModel(id);
+    if (existing?.model) return this.resolveModelObject(orgId, existing.model);
+    const id =
+      overrideId ??
+      (await this.userDefaultModel(userId)) ??
+      (await this.orgPreferredModel(orgId)) ??
+      this.opts.defaultModelId ??
+      "claude-haiku-4-5";
+    return this.resolveModelObject(orgId, id);
   }
 
   /**
@@ -701,7 +735,7 @@ export class EngineHost {
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
-    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
+    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const sessionOptions = {
@@ -714,6 +748,7 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
@@ -788,7 +823,7 @@ export class EngineHost {
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.modelId);
+    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const sessionOptions = {
@@ -799,6 +834,7 @@ export class EngineHost {
       owner: opts.owner,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
