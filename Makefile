@@ -21,7 +21,8 @@
         release deploy deploy-worker deploy-modal deploy-migrate deploy-client generate-registries \
         secrets-set secrets-list \
         image-build image-push \
-        destroy destroy-worker destroy-d1 destroy-r2 destroy-pages destroy-modal
+        destroy destroy-worker destroy-d1 destroy-r2 destroy-pages destroy-modal \
+        k8s-sandbox-install k8s-sandbox-uninstall
 
 # Configuration
 # =============
@@ -125,6 +126,44 @@ dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	$(PNPM) --filter @valet/api dogfood
+
+# ==========================================
+# agent-sandbox (vendored, Rancher Desktop only)
+# ==========================================
+# CONTEXT SAFETY: the machine's default kubectl context may point at a
+# PRODUCTION cluster. Every command below pins --context rancher-desktop
+# explicitly and never touches the ambient current-context. See
+# deploy/agent-sandbox/README.md.
+
+AGENT_SANDBOX_VERSION ?= v0.5.1
+AGENT_SANDBOX_MANIFEST = deploy/agent-sandbox/$(AGENT_SANDBOX_VERSION)/manifest.yaml
+KUBECTL_RANCHER = kubectl --context rancher-desktop
+
+k8s-sandbox-install: ## Install vendored agent-sandbox controller + CRD + webhook into Rancher Desktop
+	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \
+		echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)Applying $(AGENT_SANDBOX_MANIFEST) to context rancher-desktop$(NC)"
+	$(KUBECTL_RANCHER) apply -f $(AGENT_SANDBOX_MANIFEST)
+	@echo "$(GREEN)Waiting for agent-sandbox-controller Deployment to be Available$(NC)"
+	$(KUBECTL_RANCHER) -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=120s
+	$(KUBECTL_RANCHER) -n agent-sandbox-system wait --for=condition=Available deployment/agent-sandbox-controller --timeout=120s
+	@echo "$(GREEN)Waiting for agent-sandbox-webhook-service to have endpoints (webhook Ready)$(NC)"
+	@for i in $$(seq 1 30); do \
+		EP=$$($(KUBECTL_RANCHER) -n agent-sandbox-system get endpoints agent-sandbox-webhook-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null); \
+		if [ -n "$$EP" ]; then echo "$(GREEN)Webhook Ready ($$EP)$(NC)"; exit 0; fi; \
+		sleep 2; \
+	done; \
+	echo "$(RED)Timed out waiting for agent-sandbox-webhook-service endpoints$(NC)"; exit 1
+
+k8s-sandbox-uninstall: ## Remove vendored agent-sandbox controller + CRD + webhook from Rancher Desktop
+	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \
+		echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(YELLOW)Deleting $(AGENT_SANDBOX_MANIFEST) from context rancher-desktop$(NC)"
+	$(KUBECTL_RANCHER) delete -f $(AGENT_SANDBOX_MANIFEST) --ignore-not-found
 
 # Manual kill-mid-turn recovery proof (Engine v2 Phase 1 exit criterion).
 # The automated cross-process SIGKILL test lives at
