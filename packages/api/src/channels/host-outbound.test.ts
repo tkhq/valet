@@ -1,0 +1,348 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { Type } from "typebox";
+import {
+  fauxAssistantMessage,
+  fauxToolCall,
+  registerFauxProvider,
+  type FauxProviderRegistration,
+} from "@mariozechner/pi-ai";
+import {
+  VirtualSandboxProvider,
+  orchestratorSessionId,
+  type BusEvent,
+  type ChannelGatePrompt,
+  type ChannelGateResolution,
+  type ChannelTransport,
+  type DecisionGate,
+  type GatePromptRef,
+  type InboundChannelEvent,
+  type OutboundChannelAttachment,
+  type OutboundChannelMessage,
+  type ValetPlugin,
+} from "@valet/engine";
+import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
+import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { EngineHost } from "../engine/host.js";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { linkIdentity } from "./identity-links.js";
+import { ChannelHost } from "./host.js";
+
+const ORG_ID = "local-org";
+const USER_ID = "local-user";
+
+class FakeTransport implements ChannelTransport {
+  readonly channelType = "fake";
+  sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
+  media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
+  gatePrompts: Array<{ conversationKey: string; prompt: ChannelGatePrompt; messageId: string }> = [];
+  gateEdits: Array<{ ref: GatePromptRef; resolution: ChannelGateResolution }> = [];
+  answered: Array<{ callbackId: string; text?: string }> = [];
+  private nextMessageId = 1;
+
+  verifyWebhook(): null {
+    return null;
+  }
+  parseUpdate(): null {
+    return null;
+  }
+  async send(conversationKey: string, message: OutboundChannelMessage) {
+    this.sent.push({ conversationKey, message });
+    return { conversationKey, messageId: String(this.nextMessageId++) };
+  }
+  async sendMedia(conversationKey: string, attachment: OutboundChannelAttachment) {
+    this.media.push({ conversationKey, attachment });
+    return { conversationKey, messageId: String(this.nextMessageId++) };
+  }
+  async sendGatePrompt(conversationKey: string, prompt: ChannelGatePrompt) {
+    const messageId = String(this.nextMessageId++);
+    this.gatePrompts.push({ conversationKey, prompt, messageId });
+    return { conversationKey, messageId };
+  }
+  async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution) {
+    this.gateEdits.push({ ref, resolution });
+  }
+  async answerCallback(callbackId: string, text?: string) {
+    this.answered.push({ callbackId, text });
+  }
+}
+
+function inbound(overrides: Partial<InboundChannelEvent> = {}): InboundChannelEvent {
+  return {
+    dispatchId: `fake:${Math.floor(Math.random() * 1e9)}`,
+    conversationKey: "fake:dm:99",
+    sender: { externalId: "77", displayName: "Ada" },
+    kind: "message",
+    text: "hello",
+    raw: {},
+    ...overrides,
+  };
+}
+
+describe("ChannelHost outbound delivery", () => {
+  let testDb: TestPgDb;
+  let engineHost: EngineHost;
+  let host: ChannelHost;
+  let fakeTransport: FakeTransport;
+  let faux: FauxProviderRegistration;
+  let eventStream: PgEventStream;
+  let engineStore: PgSessionStore;
+
+  beforeEach(async () => {
+    // See host.test.ts / task-6-report.md: registerFauxProvider overwrites
+    // pi-ai's internal "anthropic-messages" stream implementation so
+    // EngineHost's real Model resolution (getModel("anthropic", ...)) still
+    // resolves the real claude-haiku-4-5 Model object, but streaming is
+    // intercepted — no ANTHROPIC_API_KEY / network needed.
+    faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    faux.setResponses([fauxAssistantMessage("ok")]);
+
+    testDb = await freshTestPgDb();
+    const { pgdb, appDb } = testDb;
+
+    engineStore = new PgSessionStore(pgdb);
+    const sandboxProvider = new VirtualSandboxProvider();
+    eventStream = new PgEventStream(pgdb);
+    const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+
+    fakeTransport = new FakeTransport();
+    const fakePlugin: ValetPlugin = {
+      name: "fake",
+      version: "0",
+      transports: [{ channelType: "fake", create: () => fakeTransport }],
+      actions: [
+        {
+          service: "fake",
+          actions: [
+            {
+              id: "fake.do_thing",
+              name: "Do thing",
+              description: "a risky action that requires approval",
+              riskLevel: "high",
+              parameters: Type.Object({}),
+              execute: async () => ({ success: true, data: "done" }),
+            },
+          ],
+        },
+      ],
+    };
+
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", {
+      type: "bot_token",
+      accessToken: "fake-bot-token",
+    });
+
+    engineHost = new EngineHost({
+      engineStore,
+      sandboxProvider,
+      eventStream,
+      engineCredentials,
+      db: appDb,
+      apiBaseUrl: "http://127.0.0.1:1",
+      plugins: [fakePlugin],
+    });
+
+    host = new ChannelHost({
+      db: appDb,
+      engineHost,
+      engineStore,
+      eventStream,
+      engineCredentials,
+      plugins: [fakePlugin],
+      resolveOrgId: async () => ORG_ID,
+    });
+    await host.start();
+
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+  });
+
+  afterEach(async () => {
+    host.stopOutbound();
+    await engineHost.destroyAll();
+    faux.unregister();
+  });
+
+  it("delivers a completed assistant message on a channel-keyed thread", async () => {
+    faux.setResponses([fauxAssistantMessage("orchestrator says hi")]);
+
+    await host.handleUpdate("fake", inbound({ dispatchId: `fake:${randomUUID()}` }));
+
+    await vi.waitFor(
+      () => {
+        expect(fakeTransport.sent.some((s) => s.message.markdown.includes("orchestrator says hi"))).toBe(true);
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("ignores message_end on non-channel threads", async () => {
+    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const thread = session.thread("web:default");
+    faux.setResponses([fauxAssistantMessage("web only reply")]);
+    await thread.submitPrompt({ text: "hi" }, { dispatchId: `web:${randomUUID()}` });
+
+    // Give the turn time to complete; no send should ever land on fakeTransport.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("does not deliver the same messageId twice", async () => {
+    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
+    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(sessionId, threadId, [
+      {
+        type: "message",
+        id: "dup-msg-1",
+        sessionId,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "duplicate delivery test",
+        stopReason: "end_turn",
+      },
+    ]);
+
+    const event: BusEvent = {
+      sessionId,
+      threadId,
+      timestamp: Date.now(),
+      event: { type: "message_end", threadId, messageId: "dup-msg-1", reason: "end_turn" },
+    };
+    await eventStream.append(event, `dup-1-${randomUUID()}`);
+    await eventStream.append(event, `dup-2-${randomUUID()}`);
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("duplicate delivery test"))).toBe(true);
+    });
+    // Give a second pass an opportunity to double-deliver before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("duplicate delivery test"))).toHaveLength(1);
+  });
+
+  it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
+    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
+    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`,
+      sessionId,
+      threadId,
+      queueItemId: "qi-1",
+      resumeKey: "rk-1",
+      ordinal: 1,
+      type: "approval",
+      title: "Approve the thing?",
+      body: "please confirm",
+      actions: [
+        { id: "approve", label: "Approve", style: "primary" },
+        { id: "deny", label: "Deny", style: "danger" },
+      ],
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    await eventStream.append(
+      { sessionId, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      `gate-open-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+    });
+    expect(fakeTransport.gatePrompts[0]?.prompt).toMatchObject({ gateId: gate.id, title: gate.title });
+
+    const ref = fakeTransport.gatePrompts[0]
+      ? { conversationKey: fakeTransport.gatePrompts[0].conversationKey, messageId: fakeTransport.gatePrompts[0].messageId }
+      : null;
+    expect(ref).not.toBeNull();
+    if (ref) {
+      const mapped = host.gateForRef(ref);
+      expect(mapped).toMatchObject({ gateId: gate.id, sessionId });
+    }
+
+    await eventStream.append(
+      {
+        sessionId,
+        threadId,
+        timestamp: Date.now(),
+        event: {
+          type: "decision_gate_resolved",
+          threadId,
+          gateId: gate.id,
+          resolution: { actionId: "approve", resolvedBy: USER_ID, resolvedAt: Date.now() },
+        },
+      },
+      `gate-resolve-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("✅");
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("Approve");
+
+    // All three gate maps must be cleared after the edit.
+    expect(ref ? host.gateForRef(ref) : null).toBeNull();
+  });
+
+  it("gate_callback round trip resolves the real gate", async () => {
+
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "do the thing" }, { id: "tc1" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("acknowledged"),
+    ]);
+
+    await host.handleUpdate("fake", inbound({ dispatchId: `fake:${randomUUID()}`, text: "do the risky thing" }));
+
+    await vi.waitFor(
+      () => {
+        expect(fakeTransport.gatePrompts).toHaveLength(1);
+      },
+      { timeout: 3000 },
+    );
+
+    const promptRef = {
+      conversationKey: fakeTransport.gatePrompts[0]?.conversationKey ?? "",
+      messageId: fakeTransport.gatePrompts[0]?.messageId ?? "",
+    };
+    const mapped = host.gateForRef(promptRef);
+    expect(mapped).not.toBeNull();
+    const gateId = mapped?.gateId;
+    expect(gateId).toBeTruthy();
+
+    // `pendingDecisionGates` lists every gate row for the session regardless
+    // of status; assert on the gate's own status field, not presence.
+    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    expect((await session.pendingDecisionGates()).find((g) => g.id === gateId)?.status).toBe("pending");
+
+    await host.handleUpdate(
+      "fake",
+      inbound({
+        dispatchId: `fake:${randomUUID()}`,
+        kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId: "cb1", ref: promptRef },
+      }),
+    );
+
+    await vi.waitFor(
+      async () => {
+        const pending = await session.pendingDecisionGates();
+        expect(pending.find((g) => g.id === gateId)?.status).toBe("resolved");
+      },
+      { timeout: 3000 },
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("✅");
+    expect(fakeTransport.answered.some((a) => a.callbackId === "cb1")).toBe(true);
+  });
+});

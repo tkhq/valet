@@ -17,11 +17,16 @@ import {
   orchestratorSessionId,
   type ChannelTransport,
   type CredentialStore,
+  type DecisionAction,
+  type DecisionGate,
+  type DecisionResolution,
+  type DeliveredBusEvent,
   type EventStream,
   type GatePromptRef,
   type InboundChannelEvent,
   type PromptAttachment,
   type SessionStore,
+  type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
@@ -47,6 +52,20 @@ export interface ChannelHostDeps {
 
 const DEDUP_CAP = 2048;
 const UNLINKED_REPLY_COOLDOWN_MS = 60 * 60_000;
+const DELIVERED_CAP = 2048;
+
+/** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️. */
+function gateResolutionLabel(actions: DecisionAction[], resolution: DecisionResolution): string {
+  const action = actions.find((a) => a.id === resolution.actionId);
+  const actionLabel = action?.label;
+  if (resolution.actionId === "approve" || action?.style === "primary") {
+    return `✅ ${actionLabel ?? resolution.actionId ?? "Resolved"}`;
+  }
+  if (resolution.actionId === "deny" || action?.style === "danger") {
+    return `❌ ${actionLabel ?? resolution.actionId ?? "Resolved"}`;
+  }
+  return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}`;
+}
 
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
 function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & { getMe(): Promise<{ username?: string }> } {
@@ -68,7 +87,11 @@ export class ChannelHost {
   private unlinkedReplyAt = new Map<string, number>();
   private gateRefs = new Map<string, { gateId: string; sessionId: string }>();
   private gatePrompts = new Map<string, GatePromptRef>();
+  private gateActions = new Map<string, DecisionAction[]>();
   private orgId: string | null = null;
+  private outboundUnsub: Unsubscribe | null = null;
+  private delivered = new Set<string>();
+  private deliveredOrder: string[] = [];
 
   constructor(private readonly deps: ChannelHostDeps) {}
 
@@ -119,10 +142,154 @@ export class ChannelHost {
         }
       }
     }
+    this.startOutbound();
   }
 
   async stop(): Promise<void> {
-    // Task 8 adds poll abort + subscription teardown.
+    this.stopOutbound();
+    // Task 8 adds poll abort + transport-loop teardown.
+  }
+
+  /**
+   * Rule 1: subscribe once (no sessionId filter) to the three outbound event
+   * types. Live subscription only — no replay from a stored offset — which
+   * satisfies "high-water mark initializes to now" on restart.
+   */
+  startOutbound(): void {
+    if (this.outboundUnsub) return;
+    this.outboundUnsub = this.deps.eventStream.subscribe(
+      { eventTypes: ["message_end", "decision_gate", "decision_gate_resolved"] },
+      (event) => {
+        void this.handleOutboundEvent(event);
+      },
+    );
+  }
+
+  stopOutbound(): void {
+    this.outboundUnsub?.();
+    this.outboundUnsub = null;
+  }
+
+  /** Rule 5: every callback body try/caught — errors logged, never thrown into the stream. */
+  private async handleOutboundEvent(event: DeliveredBusEvent): Promise<void> {
+    try {
+      const e = event.event;
+      if (e.type === "message_end") {
+        await this.deliverAssistantMessage(event.sessionId, e.threadId, e.messageId, e.reason);
+      } else if (e.type === "decision_gate") {
+        await this.deliverGatePrompt(event.sessionId, e.gate);
+      } else if (e.type === "decision_gate_resolved") {
+        await this.deliverGateResolution(e.gateId, e.resolution);
+      }
+    } catch (err) {
+      console.error("[channels] outbound delivery failed", err);
+    }
+  }
+
+  /** Locked convention: split `key` on the FIRST `:`; the first segment must name a running transport. */
+  channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
+    const idx = key.indexOf(":");
+    if (idx === -1) return null;
+    const channelType = key.slice(0, idx);
+    const rest = key.slice(idx + 1);
+    if (rest === "" || !this.isRunning(channelType)) return null;
+    return { channelType, conversationKey: `${channelType}:dm:${rest}` };
+  }
+
+  private markDelivered(dedupeKey: string): void {
+    this.delivered.add(dedupeKey);
+    this.deliveredOrder.push(dedupeKey);
+    if (this.deliveredOrder.length > DELIVERED_CAP) {
+      const evict = this.deliveredOrder.shift();
+      if (evict !== undefined) this.delivered.delete(evict);
+    }
+  }
+
+  /** Rule 2: message_end (end_turn only) → resolve the entry, dedup, send text + media attachments. */
+  private async deliverAssistantMessage(
+    sessionId: string,
+    threadId: string,
+    messageId: string,
+    reason: "end_turn" | "error" | "abort",
+  ): Promise<void> {
+    if (reason !== "end_turn") return;
+    const thread = await this.deps.engineStore.getThread(sessionId, threadId);
+    if (!thread) return;
+    const mapped = this.channelThreadFor(thread.key);
+    if (!mapped) return;
+
+    const dedupeKey = `${sessionId}:${messageId}`;
+    if (this.delivered.has(dedupeKey)) return;
+
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
+    if (!entry || entry.type !== "message") return;
+
+    this.markDelivered(dedupeKey);
+
+    const transport = this.transports.get(mapped.channelType);
+    if (!transport) return;
+
+    if (entry.content) {
+      await transport.send(mapped.conversationKey, { markdown: entry.content });
+    }
+    for (const part of entry.parts ?? []) {
+      if (part.type !== "attachment") continue;
+      const attachment = part.attachment;
+      if (attachment.type === "image") {
+        await transport.sendMedia(mapped.conversationKey, {
+          type: "image",
+          data: attachment.data,
+          mimeType: attachment.mimeType,
+          name: attachment.name,
+        });
+      } else if (attachment.type === "file") {
+        await transport.sendMedia(mapped.conversationKey, {
+          type: "file",
+          data: attachment.data,
+          mimeType: attachment.mimeType,
+          name: attachment.name,
+        });
+      }
+      // "text" ToolAttachment variant is skipped (rule 2).
+    }
+  }
+
+  /** Rule 3: decision_gate → sendGatePrompt, record refs for the inbound gate_callback path. */
+  private async deliverGatePrompt(sessionId: string, gate: DecisionGate): Promise<void> {
+    const thread = await this.deps.engineStore.getThread(sessionId, gate.threadId);
+    if (!thread) return;
+    const mapped = this.channelThreadFor(thread.key);
+    if (!mapped) return;
+    const transport = this.transports.get(mapped.channelType);
+    if (!transport) return;
+
+    const ref = await transport.sendGatePrompt(mapped.conversationKey, {
+      gateId: gate.id,
+      title: gate.title,
+      body: gate.body,
+      actions: gate.actions,
+    });
+    this.gateActions.set(gate.id, gate.actions);
+    this.recordGatePrompt(gate.id, ref, sessionId);
+  }
+
+  /** Rule 4: decision_gate_resolved → edit the prompt message with the outcome label, then clear all gate maps. */
+  private async deliverGateResolution(gateId: string, resolution: DecisionResolution): Promise<void> {
+    const ref = this.gatePrompts.get(gateId);
+    if (!ref) return;
+    const actions = this.gateActions.get(gateId) ?? [];
+    const label = gateResolutionLabel(actions, resolution);
+
+    const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
+    const transport = this.transports.get(channelType);
+    if (transport) {
+      await transport.updateGatePrompt(ref, { actionId: resolution.actionId, label });
+    }
+
+    this.gatePrompts.delete(gateId);
+    this.gateActions.delete(gateId);
+    this.gateRefs.delete(`${ref.conversationKey}#${ref.messageId}`);
   }
 
   /** Rule 1: in-memory LRU dedup, cap `DEDUP_CAP`, FIFO eviction. */
