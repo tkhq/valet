@@ -224,6 +224,12 @@ export class ChannelHost {
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
     const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
     if (!entry || entry.type !== "message") return;
+    // message_end fires with reason "end_turn" for every non-abort assistant
+    // message, including mid-turn narration before a tool call. Only the
+    // turn's genuine final message persists stopReason "end_turn" — mid-turn
+    // messages persist with stopReason undefined. Without this check a turn
+    // like "Let me check." + tool call + final answer double-delivers.
+    if (entry.stopReason !== "end_turn") return;
 
     this.markDelivered(dedupeKey);
 

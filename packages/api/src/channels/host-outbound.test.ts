@@ -222,6 +222,47 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("duplicate delivery test"))).toHaveLength(1);
   });
 
+  it("skips mid-turn assistant messages (message_end fires per-message, not just at turn end)", async () => {
+    // message_end fires with reason "end_turn" for every non-abort assistant
+    // message the engine persists, including mid-turn narration before a
+    // tool call — only the turn's genuine final message persists
+    // stopReason "end_turn" on the entry itself. A mid-turn entry (no
+    // stopReason) paired with a message_end("end_turn") event must not be
+    // delivered.
+    const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
+    const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(sessionId, threadId, [
+      {
+        type: "message",
+        id: "mid-turn-msg-1",
+        sessionId,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "Let me check.",
+        // No stopReason: this is a mid-turn narration message, not the
+        // turn's final one.
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "mid-turn-msg-1", reason: "end_turn" },
+      },
+      `mid-turn-${randomUUID()}`,
+    );
+
+    // Give the (would-be, buggy) delivery a real window to happen before
+    // asserting its absence.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Let me check."))).toBe(false);
+  });
+
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
     const sessionId = orchestratorSessionId({ type: "user", id: USER_ID });
     const session = await engineHost.orchestratorSessionFor({ type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
