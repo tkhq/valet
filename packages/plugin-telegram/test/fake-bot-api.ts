@@ -13,6 +13,9 @@ export interface FakeBotApi {
   breakDownload(fileId: string): void;
   /** Make the next call to `method` return `{ ok: false }` once, then resume normal behavior. */
   failNext(method: string): void;
+  /** Delay the response to the next call to `method` by `ms` before resolving normally —
+   * used to give a test a window to abort an in-flight request. */
+  delayNext(method: string, ms: number): void;
   close(): Promise<void>;
 }
 
@@ -22,6 +25,7 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
   const files = new Map<string, { filePath: string; bytes: Uint8Array; fileSize?: number }>();
   const brokenDownloads = new Set<string>();
   const pendingFailures = new Set<string>();
+  const pendingDelays = new Map<string, number>();
   let nextMessageId = 1000;
 
   const app = new Hono();
@@ -39,6 +43,11 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
     if (pendingFailures.has(method)) {
       pendingFailures.delete(method);
       return c.json({ ok: false, error_code: 400, description: `simulated failure for ${method}` }, 400);
+    }
+    const delay = pendingDelays.get(method);
+    if (delay !== undefined) {
+      pendingDelays.delete(method);
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
     if (method === "getMe") {
       return c.json({ ok: true, result: { id: 42, is_bot: true, username: "valet_test_bot" } });
@@ -85,6 +94,7 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
     addFile: (fileId, filePath, bytes, fileSize) => files.set(fileId, { filePath, bytes, fileSize }),
     breakDownload: (fileId) => brokenDownloads.add(fileId),
     failNext: (method) => pendingFailures.add(method),
+    delayNext: (method, ms) => pendingDelays.set(method, ms),
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

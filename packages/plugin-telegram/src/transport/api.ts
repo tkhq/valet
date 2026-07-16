@@ -24,11 +24,12 @@ export class TelegramApi {
     private readonly baseUrl = "https://api.telegram.org",
   ) {}
 
-  private async call(method: string, body: Record<string, unknown>): Promise<unknown> {
+  private async call(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     });
     const parsed = (await res.json()) as TgResponse;
     if (!parsed.ok) throw new TelegramApiError(method, parsed.description ?? `http ${res.status}`, parsed.error_code);
@@ -46,12 +47,16 @@ export class TelegramApi {
     return (await this.call("getMe", {})) as TgUser;
   }
 
-  async getUpdates(opts: { offset?: number; timeoutSeconds?: number }): Promise<unknown[]> {
-    const result = await this.call("getUpdates", {
-      offset: opts.offset,
-      timeout: opts.timeoutSeconds ?? 30,
-      allowed_updates: ["message", "callback_query"],
-    });
+  async getUpdates(opts: { offset?: number; timeoutSeconds?: number; signal?: AbortSignal }): Promise<unknown[]> {
+    const result = await this.call(
+      "getUpdates",
+      {
+        offset: opts.offset,
+        timeout: opts.timeoutSeconds ?? 30,
+        allowed_updates: ["message", "callback_query"],
+      },
+      opts.signal,
+    );
     return Array.isArray(result) ? result : [];
   }
 

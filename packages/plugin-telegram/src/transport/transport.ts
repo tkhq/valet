@@ -105,9 +105,12 @@ export class TelegramTransport implements ChannelTransport {
     while (!signal.aborted) {
       let updates: unknown[];
       try {
-        updates = await this.api.getUpdates({ offset, timeoutSeconds: 30 });
+        updates = await this.api.getUpdates({ offset, timeoutSeconds: 30, signal });
         backoffMs = 1000;
       } catch {
+        // An abort during the in-flight getUpdates request rejects fetch
+        // with an AbortError — exit the generator cleanly rather than
+        // falling into the backoff/retry path below.
         if (signal.aborted) return;
         await new Promise((r) => setTimeout(r, backoffMs));
         backoffMs = Math.min(backoffMs * 2, 60_000);

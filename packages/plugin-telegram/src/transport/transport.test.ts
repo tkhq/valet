@@ -198,4 +198,30 @@ describe("TelegramTransport", () => {
     const calls = fake.calls.filter((c) => c.method === "getUpdates");
     expect(calls[1]?.body.offset).toBe(3); // last update_id + 1
   });
+
+  it("aborting during an in-flight getUpdates terminates poll promptly (no backoff)", async () => {
+    // Delay the server's response well beyond the abort so the generator is
+    // definitely suspended awaiting the in-flight fetch when ctrl.abort() fires.
+    fake.delayNext("getUpdates", 500);
+    const ctrl = new AbortController();
+    const seen: unknown[] = [];
+
+    const started = Date.now();
+    const drain = (async () => {
+      for await (const raw of transport.poll(ctrl.signal)) {
+        seen.push(raw);
+      }
+    })();
+    setTimeout(() => ctrl.abort(), 20);
+
+    await Promise.race([
+      drain,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("poll did not exit promptly on abort")), 2000)),
+    ]);
+
+    // Terminated well before the fake's 500ms delayed response would have
+    // resolved, and without ever falling into the 1s backoff/retry path.
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(seen).toEqual([]);
+  });
 });
