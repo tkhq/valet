@@ -167,7 +167,16 @@ const authWiring: AuthWiring = authConfig
 // baked-in `packages/web/dist`) — unset in `make dev-local`, where Vite's
 // own dev server serves the web app. See `static-web.ts`.
 const webDistDir = process.env.VALET_WEB_DIST_DIR;
-const { app, injectWebSocket } = createApp(providers, authWiring, { webDistDir });
+const { app, injectWebSocket, webServed } = createApp(providers, authWiring, { webDistDir });
+// A set-but-unmounted dist means the bundled image shipped without a valid
+// build (missing/incomplete web/dist/index.html) — the api would boot and
+// silently 404 JSON at `/` instead of serving the SPA. Fail loud at boot.
+if (webDistDir && !webServed) {
+  console.error(
+    `FATAL: VALET_WEB_DIST_DIR="${webDistDir}" is set but has no index.html — the web build is missing from the image.`,
+  );
+  process.exit(1);
+}
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`@valet/api listening on http://localhost:${info.port}`);
@@ -177,7 +186,7 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(
     `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
   );
-  console.log(`  web:      ${webDistDir ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
+  console.log(`  web:      ${webServed ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
 });
 
 // Attach the WS upgrade handler to the running http server.

@@ -38,6 +38,10 @@ export interface CreatedApp {
   app: Hono<AppEnv>;
   /** Call after `serve()` to attach the WS upgrade handler to the http server. */
   injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
+  /** True when `opts.webDistDir` pointed at a real build and the SPA was
+   * mounted. `false` when unset (dev mode) OR set-but-missing-index.html —
+   * the caller distinguishes those two (a set-but-unmounted dist is fatal). */
+  webServed: boolean;
 }
 
 export interface CreateAppOpts {
@@ -149,8 +153,8 @@ export function createApp(
 
   // Web app static serving + SPA fallback — registered LAST (decision 3):
   // every real route above must get first crack at a request. No-op unless
-  // `opts.webDistDir` points at a real build.
-  mountWebStatic(app, opts.webDistDir);
+  // `opts.webDistDir` points at a real build (has index.html).
+  const webServed = mountWebStatic(app, opts.webDistDir);
 
   // Default 404 for anything no route (or the SPA fallback above) claimed —
   // JSON, not Hono's plain-text default, so `/api/*` typos and unmounted
@@ -171,7 +175,7 @@ export function createApp(
     );
   });
 
-  return { app, injectWebSocket };
+  return { app, injectWebSocket, webServed };
 }
 
 export type App = ReturnType<typeof createApp>["app"];

@@ -148,6 +148,13 @@ K8S_API_IMAGE ?= valet-api:dev
 K8S_SANDBOX_IMAGE ?= valet-sandbox:dev
 
 k8s-build: ## Build the api (+ bundled web) and sandbox images for the local k3s reference env
+	@docker info >/dev/null 2>&1 || { \
+	  echo "$(YELLOW)docker daemon not reachable.$(NC) This target uses plain 'docker build'"; \
+	  echo "  because our reference env runs Rancher Desktop in MOBY mode (decision 2)."; \
+	  echo "  If you switched Rancher Desktop to CONTAINERD mode, there is no docker socket —"; \
+	  echo "  build with 'nerdctl --namespace k8s.io build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .'"; \
+	  echo "  (and likewise for docker/Dockerfile.sandbox-k8s) so the images reach k3s pods."; \
+	  exit 1; }
 	@echo "$(GREEN)Building $(K8S_API_IMAGE) from docker/Dockerfile.api$(NC)"
 	docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
 	@echo "$(GREEN)Building $(K8S_SANDBOX_IMAGE) from docker/Dockerfile.sandbox-k8s$(NC)"
