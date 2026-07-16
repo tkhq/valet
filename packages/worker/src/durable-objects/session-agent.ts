@@ -160,7 +160,13 @@ function baseChannelId(channelId: string): string {
  * Strictest by default: only the originating channel is permitted. There is no
  * existing cross-post authorization setting to relax it. When no originating
  * channel is known (web/thread sessions, or scheduled/workflow dispatch with no
- * inbound channel) there is nothing to enforce against and the reply proceeds.
+ * inbound channel) the reply fails CLOSED — `channel_reply` is defined as a reply
+ * to the channel the current prompt arrived on, so a session with no such channel
+ * has no legitimate target. This matches the interactive/approval dispatch path,
+ * which likewise refuses to deliver without a known origin, and closes a
+ * prompt-injection exfiltration vector where an origin-less session could be
+ * steered into posting to an arbitrary channel. Genuine proactive posting has its
+ * own action (e.g. `slack.send_message`), which is unaffected by this guard.
  *
  * Returns `null` when the target is allowed, or an error string when it must be
  * rejected.
@@ -170,7 +176,15 @@ export function checkChannelReplyOrigin(
   targetChannelType: string,
   targetChannelId: string,
 ): string | null {
-  if (!origin) return null;
+  if (!origin) {
+    return (
+      `channel_reply rejected: this session has no originating channel, so there is ` +
+      `nothing to reply to. channel_reply only delivers to the channel the current ` +
+      `prompt arrived on; to post to ${targetChannelType} channel ` +
+      `${baseChannelId(targetChannelId)} proactively, use a dedicated send action ` +
+      `(e.g. slack.send_message) instead.`
+    );
+  }
   const originChannel = baseChannelId(origin.channelId);
   const targetChannel = baseChannelId(targetChannelId);
   if (origin.channelType !== targetChannelType || originChannel !== targetChannel) {

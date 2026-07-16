@@ -1149,6 +1149,39 @@ describe('SlackTransport', () => {
       expect(completeBody.initial_comment).toBe('Here is the file');
     });
 
+    it('de-dups when the outbound carries the text as both markdown and caption', async () => {
+      // The transport-agnostic outbound builder sets the reply text on both
+      // `markdown` and the attachment caption so the text survives on transports
+      // that caption inline. Slack must still send exactly one message: deliver
+      // the caption as initial_comment and skip the standalone chat.postMessage.
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ ok: true, upload_url: 'https://upload.example.com', file_id: 'F1' }),
+      );
+      mockFetch.mockResolvedValueOnce(new Response('OK', { status: 200 }));
+      mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+      const result = await transport.sendMessage(
+        { channelType: 'slack', channelId: 'C456' },
+        {
+          markdown: 'Here is the file',
+          attachments: [{
+            type: 'file' as const,
+            url: 'data:application/pdf;base64,JVBERi0=',
+            mimeType: 'application/pdf',
+            fileName: 'report.pdf',
+            caption: 'Here is the file',
+          }],
+        },
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      // Only the 3 upload calls — the markdown must NOT be posted a second time.
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      const postedUrls = mockFetch.mock.calls.map((call) => call[0]);
+      expect(postedUrls).not.toContain('https://slack.com/api/chat.postMessage');
+    });
+
     it('returns error when file upload fails at getUploadURLExternal', async () => {
       mockFetch.mockResolvedValueOnce(
         jsonResponse({ ok: false, error: 'not_allowed' }),

@@ -509,18 +509,25 @@ export class SlackTransport implements ChannelTransport {
     };
 
     // Upload file attachments first
+    let captionDelivered = false;
     if (message.attachments && message.attachments.length > 0) {
       for (const attachment of message.attachments) {
         const uploadResult = await this.uploadFile(target, attachment, ctx.token);
         if (!uploadResult.success) {
           return { success: false, error: uploadResult.error };
         }
+        // The caption ships as the upload's initial_comment. Outbound messages
+        // carry the reply text as both markdown and the attachment caption so the
+        // text survives on transports that caption inline. Here, having already
+        // delivered it via initial_comment, we must not post it again below.
+        if (attachment.caption) captionDelivered = true;
       }
     }
 
-    // Send text message (or return early if attachment-only)
+    // Send text message (or return early if attachment-only or the text was
+    // already delivered as an attachment caption).
     const text = message.markdown || message.text || '';
-    if (!text) {
+    if (!text || captionDelivered) {
       await clearShimmerIfNeeded();
       return { success: true };
     }

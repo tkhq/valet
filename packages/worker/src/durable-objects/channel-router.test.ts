@@ -145,10 +145,12 @@ describe('ChannelRouter', () => {
       expect(outbound.attachments).toHaveLength(1);
       expect(outbound.attachments[0].type).toBe('file');
       expect(outbound.attachments[0].fileName).toBe('doc.pdf');
-      // The message rides along only as the attachment caption. It must NOT also
-      // populate `markdown`, or the transport would post the text a second time.
+      // The text is transport-agnostic: it rides along as both the attachment
+      // caption and the markdown body. Transports that caption inline (Telegram)
+      // read the caption; the Slack transport de-dups so the captioned upload is
+      // not also posted as a standalone message.
       expect(outbound.attachments[0].caption).toBe('see file');
-      expect(outbound.markdown).toBeUndefined();
+      expect(outbound.markdown).toBe('see file');
     });
 
     it('normalizes legacy imageBase64 to file attachment', async () => {

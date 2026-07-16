@@ -353,6 +353,60 @@ describe('TelegramTransport', () => {
       const [url] = mockFetch.mock.calls[0];
       expect(url).toBe('https://api.telegram.org/botbot-token-123/sendPhoto');
     });
+
+    it('delivers the reply text as the photo caption for an image + message reply', async () => {
+      // The transport-agnostic outbound builder carries the reply text on both
+      // `markdown` and the attachment caption. Telegram captions its photo from
+      // `markdown`/`text`, not from attachments[].caption, so the text must not
+      // be lost: an image reply keeps its message as the photo's caption.
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ ok: true, result: { message_id: 104 } })
+      );
+
+      const result = await transport.sendMessage(target, {
+        markdown: 'Here is the chart',
+        attachments: [{
+          type: 'image',
+          url: 'data:image/jpeg;base64,/9j/4AAQ',
+          mimeType: 'image/jpeg',
+          caption: 'Here is the chart',
+        }],
+      }, ctx);
+
+      expect(result.success).toBe(true);
+      const [url, opts] = mockFetch.mock.calls[0];
+      expect(url).toBe('https://api.telegram.org/botbot-token-123/sendPhoto');
+      // sendPhoto uses multipart FormData; the caption carries the reply text.
+      const form = opts.body as FormData;
+      expect(form.get('caption')).toBe('Here is the chart');
+    });
+
+    it('sends a non-empty message for a file + message reply', async () => {
+      // Telegram has no document-upload path, so a file reply falls through to
+      // the text branch. Because the reply text is preserved on `markdown`, the
+      // message body is non-empty and Telegram does not reject it.
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ ok: true, result: { message_id: 105 } })
+      );
+
+      const result = await transport.sendMessage(target, {
+        markdown: 'Report attached',
+        attachments: [{
+          type: 'file',
+          url: 'data:application/pdf;base64,JVBERi0=',
+          mimeType: 'application/pdf',
+          fileName: 'report.pdf',
+          caption: 'Report attached',
+        }],
+      }, ctx);
+
+      expect(result.success).toBe(true);
+      const [url, opts] = mockFetch.mock.calls[0];
+      expect(url).toBe('https://api.telegram.org/botbot-token-123/sendMessage');
+      const body = JSON.parse(opts.body);
+      expect(body.text).toBe('Report attached');
+      expect(body.text.length).toBeGreaterThan(0);
+    });
   });
 
   // ─── editMessage ──────────────────────────────────────────────────

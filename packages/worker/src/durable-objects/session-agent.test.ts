@@ -3454,8 +3454,11 @@ describe('SessionAgentDO', () => {
       ).not.toBeNull();
     });
 
-    it('allows any target when the originating channel is unknown', () => {
-      expect(checkChannelReplyOrigin(null, 'slack', 'C_ANY')).toBeNull();
+    it('rejects any target when the originating channel is unknown (fails closed)', () => {
+      const err = checkChannelReplyOrigin(null, 'slack', 'C_ANY');
+      expect(err).not.toBeNull();
+      expect(err).toContain('no originating channel');
+      expect(err).toContain('C_ANY');
     });
   });
 

@@ -170,11 +170,14 @@ export class ChannelRouter {
     const attachName = opts.fileName;
 
     if (attachBase64) {
-      // The message rides along as the attachment caption (delivered as the
-      // file's initial_comment). Do NOT also set `markdown`: that would make the
-      // transport post the same text a second time as a standalone message,
-      // double-posting the reply.
+      // Keep the text transport-agnostic: carry it as both the markdown body and
+      // the attachment caption. Transports that caption their attachment inline
+      // (Telegram photo captions) read the caption; text-only transports read
+      // markdown. The Slack transport de-dups: when it uploads an attachment with
+      // a caption as initial_comment it skips the standalone markdown post, so a
+      // Slack file reply is still delivered as a single message.
       return {
+        markdown: opts.message || undefined,
         attachments: [
           {
             type: attachMime.startsWith('image/') ? 'image' : 'file',
