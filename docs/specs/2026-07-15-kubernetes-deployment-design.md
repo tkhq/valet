@@ -1,7 +1,7 @@
 # Kubernetes Deployment Design — local k3s reference environment (sub-project B)
 
 **Date:** 2026-07-15
-**Status:** Approved for planning (executes after sub-project A: `docs/specs/2026-07-15-postgres-backend-design.md`)
+**Status:** Implemented (2026-07-15) — dogfooded end-to-end on Rancher Desktop k3s; see the "Dogfood evidence" note below and `.superpowers/sdd/task-9-report.md`.
 **Scope:** Everything needed to run Valet v2 on Kubernetes: a `sandbox-kubernetes` provider (session sandboxes as pods), api+web+sandbox container images, a Helm chart (api, bundled Postgres, RBAC, ingress), and the fully local reference environment on Rancher Desktop's k3s that we iterate toward production with. Cloudflare adapters are a separate future direction.
 
 ## Decisions (locked)
@@ -43,6 +43,34 @@ On a clean Rancher Desktop k3s: `make k8s-build k8s-up`, then in the browser —
 - Unit: Sandbox CR manifest construction (pure functions — image/env/resources/labels/storage), CRD-status→SandboxStatus mapping, exec framing (base64 round-trips, exit-code capture), job file protocol (offset math shared with docker's — extract to a shared helper if identical).
 - Chart: `helm lint` + `helm template` golden-file assertions (RBAC scoped to the sandbox namespace; api env carries DATABASE_URL from bundled vs external correctly; no Secret values in ConfigMaps).
 - The full existing fleet stays green untouched (this pass adds packages/files; it does not modify engine/store behavior).
+
+## Dogfood evidence (2026-07-15)
+
+Ran the full exit-criteria checklist above against a live Rancher Desktop
+k3s cluster, driven via curl + `kubectl` (no browser — API-level evidence,
+see `.superpowers/sdd/task-9-report.md` for the full transcript):
+
+- Signup #1 became org admin (`/api/me` → `role: "admin"`); a prompt
+  invoking the `bash` tool provisioned a `Sandbox` CR + backing pod in
+  `valet-sandboxes`, labeled `valet.dev/session-id`; a `sleep 75` command
+  (>60s) completed via the job-mode exec path; `kubectl delete pod` on the
+  backing pod mid-session was healed by the agent-sandbox controller onto a
+  fresh pod with the same CR/PVC, and a file written before the delete was
+  still present after; an invite → second signup landed as `member` in the
+  same org; `kubectl rollout restart deployment/valet-api` preserved the
+  session, its full message history, and both users' auth sessions across
+  the restart (bundled Postgres boot restore).
+- One naming/observability gap found, not fixed (working-as-designed, not a
+  wiring bug): the `valet.dev/session-id` label's value is the sanitized
+  **workspace path** (`sandboxCrName`/`buildSandboxManifest` in
+  `packages/sandbox-kubernetes/src/manifest.ts`), not the engine's session
+  id — `SandboxCreateOpts` has no `sessionId` field by design (mirrors
+  `sandbox-docker`'s workspace-as-identity model). Two sessions whose
+  workspace paths sanitize to the same RFC1123 string would collide on one
+  CR, and `kubectl get sandbox -l valet.dev/session-id=<real session id>`
+  does not work as the label name suggests. Left as a follow-up; not a
+  blocker for this pass since workspace-derived identity is deterministic
+  and consistent with the existing docker provider.
 
 ## Non-goals
 

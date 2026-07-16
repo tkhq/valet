@@ -22,7 +22,7 @@
         secrets-set secrets-list \
         image-build image-push \
         destroy destroy-worker destroy-d1 destroy-r2 destroy-pages destroy-modal \
-        k8s-sandbox-install k8s-sandbox-uninstall k8s-build
+        k8s-sandbox-install k8s-sandbox-uninstall k8s-build k8s-up k8s-down k8s-logs
 
 # Configuration
 # =============
@@ -191,6 +191,47 @@ k8s-sandbox-uninstall: ## Remove vendored agent-sandbox controller + CRD + webho
 	fi
 	@echo "$(YELLOW)Deleting $(AGENT_SANDBOX_MANIFEST) from context rancher-desktop$(NC)"
 	$(KUBECTL_RANCHER) delete -f $(AGENT_SANDBOX_MANIFEST) --ignore-not-found
+
+# ==========================================
+# Local k3s reference environment (Rancher Desktop)
+# ==========================================
+# CONTEXT SAFETY: same rule as above — every kubectl/helm invocation below
+# pins --context/--kube-context rancher-desktop explicitly. Never operate on
+# the ambient current-context (it may be a production cluster).
+
+K8S_NAMESPACE ?= valet
+HELM_RELEASE ?= valet
+HELM_RANCHER = helm --kube-context rancher-desktop
+
+k8s-up: ## Install agent-sandbox (if needed) + helm upgrade --install the valet chart onto Rancher Desktop
+	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \
+		echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
+		exit 1; \
+	fi
+	@$(MAKE) k8s-sandbox-install
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
+	echo "$(GREEN)helm upgrade --install $(HELM_RELEASE) onto context rancher-desktop, namespace $(K8S_NAMESPACE)$(NC)"; \
+	$(HELM_RANCHER) upgrade --install $(HELM_RELEASE) deploy/chart/valet \
+	  --namespace $(K8S_NAMESPACE) --create-namespace \
+	  --set api.secrets.anthropicApiKey="$$ANTHROPIC_API_KEY" \
+	  --wait --timeout 5m
+	@echo "$(GREEN)Deployed. Port-forward with:$(NC) kubectl --context rancher-desktop -n $(K8S_NAMESPACE) port-forward svc/$(HELM_RELEASE)-api 8080:80"
+	@echo "  or add '127.0.0.1 valet.localdev' to /etc/hosts and open https://valet.localdev (self-signed cert)."
+
+k8s-down: ## helm uninstall the valet release from Rancher Desktop (PVCs survive — see deploy/chart/valet/README.md for a full reset)
+	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \
+		echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(YELLOW)helm uninstall $(HELM_RELEASE) from context rancher-desktop, namespace $(K8S_NAMESPACE)$(NC)"
+	-$(HELM_RANCHER) uninstall $(HELM_RELEASE) --namespace $(K8S_NAMESPACE)
+	@echo "$(YELLOW)Note: bundled-postgres PVCs and any leftover Sandbox CRs survive by design.$(NC)"
+	@echo "  Full reset: kubectl --context rancher-desktop -n $(K8S_NAMESPACE) delete pvc -l app.kubernetes.io/instance=$(HELM_RELEASE)"
+	@echo "  kubectl --context rancher-desktop delete ns $(K8S_NAMESPACE) --ignore-not-found"
+
+k8s-logs: ## Tail the valet api pod logs on Rancher Desktop
+	$(KUBECTL_RANCHER) -n $(K8S_NAMESPACE) logs -l app.kubernetes.io/instance=$(HELM_RELEASE),app.kubernetes.io/component=api -f --tail=200
 
 # Manual kill-mid-turn recovery proof (Engine v2 Phase 1 exit criterion).
 # The automated cross-process SIGKILL test lives at

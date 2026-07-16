@@ -206,6 +206,14 @@ make dev-all
 # Dogfood the new API end-to-end (real Anthropic + Docker round-trip)
 make dogfood-api
 
+# Kubernetes (local k3s, Rancher Desktop) — full runbook: deploy/README.md
+make k8s-sandbox-install # Install vendored agent-sandbox CRD/controller (idempotent, run first)
+make k8s-build           # docker build valet-api:dev + valet-sandbox:dev (moby mode, ~15-20 min cold)
+make k8s-up              # helm upgrade --install onto rancher-desktop, namespace valet
+kubectl --context rancher-desktop -n valet port-forward svc/valet-api 8080:80  # or https://valet.localdev via /etc/hosts
+make k8s-logs            # tail the api pod
+make k8s-down            # helm uninstall (PVCs + Sandbox CRs survive by design — see deploy/README.md for a full reset)
+
 # Database
 make db-migrate         # Run D1 migrations locally
 make db-seed            # Seed test data
@@ -233,6 +241,8 @@ make deploy              # Deploy worker + modal + client (includes migrations)
 make deploy-migrate      # Apply D1 migrations to production only
 make release             # Full idempotent release: install, build, push image, deploy
 ```
+
+**Kubernetes context safety (binding).** The developer machine's default/ambient `kubectl` context may point at a PRODUCTION cluster (verified — a GKE prod cluster). Every `make k8s-*` target and every command in `deploy/README.md` pins `--context rancher-desktop` (`--kube-context rancher-desktop` for `helm`) explicitly. Never run a bare `kubectl`/`helm` command against this workflow — go through the `make` targets or add the context flag yourself. `VALET_SANDBOX_BACKEND=kubernetes` is what the chart sets to switch the api off the `docker` default onto `packages/sandbox-kubernetes` (session sandboxes become `Sandbox` CRs + pods instead of local Docker containers); `make dev-local` stays on `docker`.
 
 **`packages/worker` is excluded from root `pnpm typecheck`.** It's frozen (kept only for the legacy prod Cloudflare deploy) and was dropped from `tsconfig.json`'s project references as part of the plugin-system-v2 conversion, once the worker's own `src/integrations/packages.ts`/`src/channels/packages.ts` registries stopped being regenerated (plugins now self-declare v2 manifests consumed by `packages/api`, not the worker). Worker deploys pin the last commit before that conversion started: `35b398e5`. Run `cd packages/worker && pnpm typecheck` directly if you need to typecheck it in isolation — root `pnpm typecheck` passing is no longer evidence either way for the worker.
 
