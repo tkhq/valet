@@ -21,6 +21,7 @@
     { "path": "./packages/store-postgres" },
     { "path": "./packages/sandbox-local" },
     { "path": "./packages/sandbox-docker" },
+    { "path": "./packages/sandbox-kubernetes" },
     { "path": "./packages/sdk" },
     { "path": "./packages/plugin-github" },
     { "path": "./packages/plugin-slack" },
