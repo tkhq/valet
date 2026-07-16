@@ -267,4 +267,35 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
     expect(status).toBe("done");
     expect(output).toBe("hi\u{1F680}END");
   }, 20_000);
+
+  it("execJob honors maxOutputBytes — a job emitting more than the cap is truncated to the cap, matching sandbox-docker's execJob cap semantics", async () => {
+    const execId = `job-${nextJobId++}`;
+    await execJobInPod(
+      deps,
+      podName,
+      execId,
+      "yes x | head -c 2000 | tr -d '\\n'; printf ''; exit 0",
+      { maxOutputBytes: 200 },
+    );
+
+    let offset = 0;
+    let output = "";
+    let status: "running" | "done" | "failed" = "running";
+    let exitCode: number | undefined;
+    for (let i = 0; i < 100 && status === "running"; i++) {
+      const poll = await pollJobInPod(deps, podName, execId, offset);
+      output += poll.output;
+      offset = poll.nextOffset;
+      status = poll.status;
+      exitCode = poll.exitCode;
+      if (status === "running") await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(status).toBe("done");
+    // Clean exit — the capping filter's trailing `cat > /dev/null` drains
+    // (rather than SIGPIPE-killing) output past the cap, so the job runs
+    // to its own `exit 0`, not a signal-shaped termination.
+    expect(exitCode).toBe(0);
+    expect(output).toBe("x".repeat(200));
+    expect(output.length).toBe(200);
+  }, 20_000);
 });

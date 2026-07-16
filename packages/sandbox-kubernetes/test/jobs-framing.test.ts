@@ -62,6 +62,46 @@ describe("jobKickoffCommand", () => {
     expect(cmd).toContain("has quotes");
     expect(cmd).toContain("exit 9");
   });
+
+  it("without maxOutputBytes, redirects the job's exec output directly to OUT and captures $? after it (unchanged/uncapped path)", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi");
+    expect(cmd).toContain("exec sh -c");
+    expect(cmd).not.toContain("head -c");
+    expect(cmd).toMatch(/> '[^']+\.out' 2>&1 < \/dev\/null; echo \$\? > '[^']+\.exit'/);
+  });
+
+  it("with maxOutputBytes, pipes the job's output through a head/cat capping filter instead of a direct redirect", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi", 1024);
+    expect(cmd).toContain(`head -c 1024 > ${shQuote(`${JOBS_DIR}/job-1.out`)}`);
+    // `cat > /dev/null` keeps draining (discarding) output past the cap so
+    // the job's process never sees a broken pipe / SIGPIPE.
+    expect(cmd).toContain("cat > /dev/null");
+    // No `exec` tail-call in the capped branch — the inner script has to
+    // run *after* the job to write EXIT, so it can't replace itself via exec.
+    expect(cmd).not.toContain("exec sh -c");
+  });
+
+  it("with maxOutputBytes, the job's own exit code is written from inside the piped script, not from the outer pipeline (whose own status would be the capping filter's, not the job's)", () => {
+    const cmd = jobKickoffCommand("job-1", "exit 5", 1024);
+    // `echo $? > .../job-1.exit` must appear BEFORE the pipe (` | (`), i.e.
+    // inside the piped-from side, not chained after the whole pipeline with
+    // `;` — the (re-quoted) exit-file path still shows up verbatim inside
+    // the doubly-shQuoted inner script, same rationale as the "embeds the
+    // inner command's text" test above.
+    const pipeIdx = cmd.indexOf(" | (");
+    const echoExitIdx = cmd.indexOf("echo $?");
+    const exitPathIdx = cmd.indexOf("job-1.exit");
+    expect(pipeIdx).toBeGreaterThan(-1);
+    expect(echoExitIdx).toBeGreaterThan(-1);
+    expect(exitPathIdx).toBeGreaterThan(-1);
+    expect(echoExitIdx).toBeLessThan(pipeIdx);
+    expect(exitPathIdx).toBeLessThan(pipeIdx);
+  });
+
+  it("floors and clamps a fractional/negative maxOutputBytes to a safe non-negative integer", () => {
+    expect(jobKickoffCommand("job-1", "echo hi", 10.9)).toContain("head -c 10 >");
+    expect(jobKickoffCommand("job-1", "echo hi", -5)).toContain("head -c 0 >");
+  });
 });
 
 describe("pollCommand", () => {

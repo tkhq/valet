@@ -47,6 +47,31 @@
  * UTF-8 decode can never corrupt it, and `pollJobInPod` decodes the
  * `base64`-recovered raw bytes back to UTF-8 itself, in raw-byte offset
  * space, with the actual holdback logic described below.
+ *
+ * `maxOutputBytes` (decision 9's cap, matching `sandbox-docker`'s
+ * `DockerJobState.output` growth cap — see that module's `execJob`): capped
+ * here at the KICKOFF, not the poll. `jobKickoffCommand`, when given a
+ * limit, pipes the job's combined stdout+stderr through `head -c LIMIT`
+ * before it ever reaches `.out`, so the file itself never grows past the
+ * cap — this is what actually bounds `.out` on the pod's (small, ephemeral)
+ * filesystem, and it transitively bounds every `pollCommand`'s `tail -c`
+ * fetch too (it can never read more than LIMIT bytes total across the
+ * job's lifetime, since the file never holds more than that). A plain
+ * `head -c LIMIT > OUT` would SIGPIPE-kill the job's process the moment it
+ * writes past the cap (the reader side of its stdout pipe would vanish
+ * once `head` exits) — instead the capping filter is `head -c LIMIT > OUT;
+ * cat > /dev/null`, so once `head` has captured the first LIMIT bytes, the
+ * trailing `cat` keeps draining (and discarding) the rest of the pipe for
+ * the job's full natural lifetime. That matches docker's own posture:
+ * capping stops accumulation, it does not kill the process early.
+ *
+ * The exit-code capture has to move as a result: a POSIX-sh pipeline's own
+ * exit status is the LAST command's (the capping filter's `cat`), not the
+ * job's, so `pollJobInPod`'s `EXIT` file can no longer be written by the
+ * outer `; echo $? > EXIT` that follows the pipeline. Instead, when capping
+ * is active, the exit code is written from INSIDE the piped-through script,
+ * as a direct file write that never touches the stdout pipe at all — see
+ * `jobKickoffCommand`'s capped branch.
  */
 import type { ExecJobHandle, ExecOpts, JobPoll } from "@valet/engine";
 import { buildShellCommand, execInPod, JOBS_DIR, shQuote, type ExecDeps } from "./exec.js";
@@ -105,19 +130,41 @@ function jobPidPath(execId: string): string {
  * `echo $? > EXIT` still runs even when e.g. `setsid` itself failed to
  * exec, which would otherwise never write `PID` and hang this loop for the
  * full 5s on every such failure).
+ *
+ * `maxOutputBytes`, when provided, switches to the capped branch (see the
+ * module docblock's "maxOutputBytes" section): the job's stdout+stderr are
+ * piped through `head -c LIMIT > OUT; cat > /dev/null` instead of
+ * redirected directly to `OUT`, and — because a pipeline's own exit status
+ * isn't the job's — the exit code is written by the inner script itself
+ * (`; echo $? > EXIT`, a plain file write that never touches the pipe)
+ * instead of by the outer wrapper. This also means the job can no longer be
+ * `exec`'d into as a tail call (something has to run *after* it to write
+ * `EXIT`), so the capped branch runs it as a plain `sh -c` instead —
+ * harmless: `setsid`'s process group still covers it, so `cancelJob`'s
+ * group-kill is unaffected.
  */
-export function jobKickoffCommand(execId: string, innerCommand: string): string {
+export function jobKickoffCommand(execId: string, innerCommand: string, maxOutputBytes?: number): string {
   const outFile = jobOutPath(execId);
   const exitFile = jobExitPath(execId);
   const pidFile = jobPidPath(execId);
 
-  const pidAndExec = `echo $$ > ${shQuote(pidFile)}; exec sh -c ${shQuote(innerCommand)}`;
-  const wrapped =
-    `setsid sh -c ${shQuote(pidAndExec)} > ${shQuote(outFile)} 2>&1 < /dev/null; ` + `echo $? > ${shQuote(exitFile)}`;
-
   const waitForPid =
     `i=0; while [ ! -f ${shQuote(pidFile)} ] && [ ! -f ${shQuote(exitFile)} ] && [ "$i" -lt 500 ]; do ` +
     `sleep 0.01; i=$((i+1)); done`;
+
+  let wrapped: string;
+  if (maxOutputBytes === undefined) {
+    const pidAndExec = `echo $$ > ${shQuote(pidFile)}; exec sh -c ${shQuote(innerCommand)}`;
+    wrapped =
+      `setsid sh -c ${shQuote(pidAndExec)} > ${shQuote(outFile)} 2>&1 < /dev/null; ` +
+      `echo $? > ${shQuote(exitFile)}`;
+  } else {
+    const limit = Math.max(0, Math.floor(maxOutputBytes));
+    const pidAndRun =
+      `echo $$ > ${shQuote(pidFile)}; sh -c ${shQuote(innerCommand)}; echo $? > ${shQuote(exitFile)}`;
+    const cappingFilter = `head -c ${limit} > ${shQuote(outFile)}; cat > /dev/null`;
+    wrapped = `setsid sh -c ${shQuote(pidAndRun)} 2>&1 < /dev/null | ( ${cappingFilter} )`;
+  }
 
   return (
     `mkdir -p ${shQuote(JOBS_DIR)} && : > ${shQuote(outFile)} && ` +
@@ -185,7 +232,7 @@ export async function execJobInPod(
   opts?: ExecOpts,
 ): Promise<ExecJobHandle> {
   const inner = buildShellCommand(command, opts);
-  const kickoff = jobKickoffCommand(execId, inner);
+  const kickoff = jobKickoffCommand(execId, inner, opts?.maxOutputBytes);
   const result = await execInPod(deps, podName, kickoff);
   if (result.exitCode !== 0) {
     throw new Error(`execJob kickoff failed (exit ${result.exitCode}): ${result.stderr.trim()}`);

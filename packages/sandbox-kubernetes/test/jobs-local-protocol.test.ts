@@ -223,6 +223,42 @@ describe.skipIf(!hasSetsid || !hasBase64W0)("job-mode shell protocol against a r
     expect(output).toBe("hi\u{1F680}END");
   }, 10_000);
 
+  it("maxOutputBytes caps accumulated output at the limit — a job emitting more than the cap is truncated, matching docker's execJob cap semantics", async () => {
+    const execId = newExecId();
+    // Emit 500 bytes of 'x' but cap at 100 — the .out file (and therefore
+    // everything pollToCompletion can ever read) must never exceed 100
+    // bytes, and the job must still exit cleanly (0), not be SIGPIPE-killed
+    // by the capping filter.
+    const kickoff = sh(jobKickoffCommand(execId, "yes x | head -c 500 | tr -d '\\n'; printf ''; exit 0", 100));
+    expect(kickoff.status).toBe(0);
+
+    const { output, exitCode } = await pollToCompletion(execId);
+    expect(output).toBe("x".repeat(100));
+    expect(output.length).toBe(100);
+    expect(exitCode).toBe(0);
+  }, 10_000);
+
+  it("maxOutputBytes does not kill a slow producer early — the job keeps running to its natural exit past the cap", async () => {
+    const execId = newExecId();
+    // Two writes straddling the cap (60 + 60 = 120 bytes into a 50-byte
+    // cap), with a real command *after* the point where the cap is
+    // exceeded — if the capping filter SIGPIPE'd the job, this trailing
+    // `echo done-marker` would never run and the exit code would be
+    // signal-shaped instead of the clean 0 from `exit 0`.
+    const kickoff = sh(
+      jobKickoffCommand(
+        execId,
+        "printf '%060d' 1; sleep 0.1; printf '%060d' 2; echo done-marker; exit 0",
+        50,
+      ),
+    );
+    expect(kickoff.status).toBe(0);
+
+    const { output, exitCode } = await pollToCompletion(execId);
+    expect(output.length).toBe(50);
+    expect(exitCode).toBe(0); // clean exit, not signal-killed by a broken pipe
+  }, 10_000);
+
   it("cancelCommand kills a running job immediately after kickoff returns — zero-delay, no pidfile race", async () => {
     const execId = newExecId();
     const kickoff = sh(jobKickoffCommand(execId, "sleep 30; echo should-not-appear"));
