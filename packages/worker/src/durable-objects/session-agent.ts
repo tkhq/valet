@@ -4381,6 +4381,18 @@ export class SessionAgentDO {
     }
   }
 
+  /** Drop the persisted poison suspect once the prompt it names is no longer
+   *  live. The capture is taken while a prompt is in flight and is deliberately
+   *  retained across a revert to 'queued' (the crash path re-dispatches the same
+   *  row), but it must not outlive the prompt itself: a suspect that has since
+   *  completed is evidence of nothing, and leaving it behind lets a later,
+   *  unrelated sandbox loss inherit it and quarantine a healthy prompt. */
+  private forgetRecoveryCapture(id: string | undefined | null): void {
+    if (id && this.sessionState.lastRecoveryPromptId === id) {
+      this.sessionState.lastRecoveryPromptId = '';
+    }
+  }
+
   private async handlePromptComplete(
     messageId?: string,
     ackChannelType?: string,
@@ -4439,8 +4451,13 @@ export class SessionAgentDO {
       let processingCount = 0;
       if (messageId) {
         processingCount = this.promptQueue.markCompletedById(messageId);
+        // The prompt finished, so it is not the poison suspect any more.
+        // Only a successful completion invalidates the capture: a no-op here
+        // means the row had already left 'processing' by some other path.
+        if (processingCount > 0) this.forgetRecoveryCapture(messageId);
       } else if (completedChannelKey) {
         const completedId = this.promptQueue.markCompletedMostRecentByChannel(completedChannelKey);
+        this.forgetRecoveryCapture(completedId);
         processingCount = completedId ? 1 : 0;
       }
 
@@ -5225,6 +5242,7 @@ export class SessionAgentDO {
 
       if (shouldSkip) {
         this.promptQueue.dropEntry(prompt.id);
+        this.forgetRecoveryCapture(prompt.id);
         prompt = this.promptQueue.dequeueNext(skippedBusyIds);
         continue;
       }
@@ -5888,7 +5906,17 @@ export class SessionAgentDO {
     // — on the dominant sandbox-crash path the 5s grace revert has already moved
     // it to 'queued', so getOldestProcessingId would return null here. Persist it
     // so backoff retries keep quarantining the same prompt.
-    const poisonPromptId = this.promptQueue.getOldestProcessingId() ?? this.sessionState.lastRecoveryPromptId;
+    // The fallback is only trustworthy while the captured row is still live.
+    // Completion clears the capture at the source, but a row can also leave the
+    // queue wholesale (clearAll on session stop, clearQueued as an incident
+    // mitigation) without passing through a completion path, so re-check
+    // liveness here rather than enumerate every deletion site.
+    const capturedId = this.sessionState.lastRecoveryPromptId;
+    if (capturedId && !this.promptQueue.isPending(capturedId)) {
+      this.sessionState.lastRecoveryPromptId = '';
+    }
+    const poisonPromptId =
+      this.promptQueue.getOldestProcessingId() ?? this.sessionState.lastRecoveryPromptId;
     if (poisonPromptId) this.sessionState.lastRecoveryPromptId = poisonPromptId;
     const stuckProcessing = this.promptQueue.processingCount;
     if (stuckProcessing > 0) {
@@ -5960,7 +5988,7 @@ export class SessionAgentDO {
         // The suspect is quarantined — clear the persisted id so a later,
         // unrelated idle loss (no in-flight prompt) can't fall back to and
         // re-dead-letter this stale id from a prior incident.
-        this.sessionState.lastRecoveryPromptId = '';
+        this.forgetRecoveryCapture(poisonPromptId);
       }
 
       const isOrchestrator = sessionId?.startsWith('orchestrator:') ?? false;

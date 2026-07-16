@@ -386,19 +386,49 @@ export class PromptQueue {
     return rows.length > 0 ? (rows[0].id as string) : null;
   }
 
+  /** True when `id` still names live work — a row that is queued or processing.
+   *  A prompt that completed (row deleted), was cleared, or was already
+   *  dead-lettered is not live, so a poison-suspect id captured against it is
+   *  stale and must not be acted on. */
+  isPending(id: string): boolean {
+    const rows = this.sql
+      .exec(
+        "SELECT 1 AS ok FROM prompt_queue WHERE id = ? AND status IN ('queued', 'processing') LIMIT 1",
+        id,
+      )
+      .toArray();
+    return rows.length > 0;
+  }
+
   /** Move entries into the terminal 'dead_letter' state so they are never
    *  dispatched again. Used by the recovery circuit breaker to quarantine a
    *  prompt that repeatedly crashes the sandbox — the queue drain only selects
    *  'queued' rows, so a dead-lettered row stays as an inert diagnostic record.
-   *  Returns the number of ids quarantined. */
+   *  Returns the number of ids actually quarantined.
+   *
+   *  The `status IN ('queued', 'processing')` guard matches every other UPDATE
+   *  here: only work that is still live can be quarantined. Without it a stale
+   *  poison-suspect id — one whose prompt already finished — would rewrite an
+   *  unrelated terminal row, flipping a 'completed' prompt to 'dead_letter'
+   *  and misreporting a healthy turn as quarantined. */
   deadLetter(ids: readonly string[]): number {
+    let quarantined = 0;
     for (const id of ids) {
+      const countRow = this.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM prompt_queue WHERE id = ? AND status IN ('queued', 'processing')",
+          id,
+        )
+        .toArray();
+      if (((countRow[0]?.count as number) ?? 0) === 0) continue;
+
       this.sql.exec(
-        "UPDATE prompt_queue SET status = 'dead_letter', dispatched_at = NULL WHERE id = ?",
+        "UPDATE prompt_queue SET status = 'dead_letter', dispatched_at = NULL WHERE id = ? AND status IN ('queued', 'processing')",
         id,
       );
+      quarantined++;
     }
-    return ids.length;
+    return quarantined;
   }
 
   /** Drop a single entry — marks completed and DELETEs in one step so the

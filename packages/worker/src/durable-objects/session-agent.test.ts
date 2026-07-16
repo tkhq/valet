@@ -967,6 +967,63 @@ describe('SessionAgentDO', () => {
       expect(sql.queue.get('healthy-b')?.status).toBe('queued');
     });
 
+    it('a prompt that completed after a runner blip is not quarantined by a later, unrelated loss', async () => {
+      const { agent, sql } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      (agent as any).promptQueue.enqueue({ id: 'A', content: 'harmless', status: 'processing', channelKey: 'web:default' });
+
+      // A brief runner blip captures A as the poison suspect while it is in flight.
+      await crashRunner(agent);
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('A');
+
+      // The runner reconnects inside the grace window, so A is never reverted —
+      // it just finishes. No recovery ran, so recoveryAttemptCount stays 0 and
+      // none of the resetRecoveryState() paths (which are all gated on a
+      // non-zero count, a breaker trip, or a start) would clear the capture.
+      clock += 2_000;
+      await (agent as any).runnerHandlers.complete({ type: 'complete', messageId: 'A' });
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(0);
+      expect(sql.queue.get('A')).toBeUndefined();
+      // Completion is what retires the suspicion: A demonstrably did not crash
+      // the sandbox, so the capture must not survive it.
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('');
+
+      // Much later the sandbox dies repeatedly while the session sits idle.
+      // Nothing is in flight, so there is no poison suspect to inherit and the
+      // trip must quarantine nothing rather than reach back for A.
+      clock += 3_600_000;
+      for (let i = 0; i < 4; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+      }
+
+      expect((agent as any).sessionState.status).toBe('backoff');
+      expect((agent as any).emitAuditEvent).not.toHaveBeenCalledWith(
+        'recovery.dead_letter',
+        expect.any(String),
+      );
+      expect(sql.queue.get('A')).toBeUndefined();
+    });
+
+    it('drops a capture whose prompt was cleared from the queue rather than completed', async () => {
+      const { agent } = await armRecovery();
+      const clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      (agent as any).promptQueue.enqueue({ id: 'A', content: 'boom', status: 'processing', channelKey: 'web:default' });
+      await crashRunner(agent);
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('A');
+
+      // The clear-queue mitigation deletes the row outright — it never passes
+      // through a completion path, so recovery has to re-check liveness.
+      (agent as any).promptQueue.clearAll();
+
+      await (agent as any).performRecovery('sandbox_lost');
+
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('');
+    });
+
     it('a clean idle-hibernation within the stable window clears a lingering breaker count', async () => {
       const { agent } = await armRecovery();
       const clock = 1_779_300_000_000;

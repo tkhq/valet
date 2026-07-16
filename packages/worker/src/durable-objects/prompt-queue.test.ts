@@ -1099,3 +1099,85 @@ describe('prompt_queue dead_letter migration (real SQLite)', () => {
     db.close();
   });
 });
+
+// ─── deadLetter status guard (real SQLite) ───────────────────────────────────
+//
+// deadLetter is the one write the circuit breaker aims at a remembered id, so
+// it is the one write most likely to be handed an id that no longer names live
+// work. Every other UPDATE in prompt-queue.ts scopes itself to the status it
+// expects to find; these drive the same guard on the quarantine path against a
+// real table, since the Map-backed mock does not interpret `status IN (...)`.
+describe('prompt_queue deadLetter status guard (real SQLite)', () => {
+  function freshQueue(): { db: DatabaseType; pq: PromptQueue } {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE prompt_queue (
+      id TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      queue_type TEXT NOT NULL DEFAULT 'prompt' CHECK(queue_type IN ('prompt', 'workflow_execute')),
+      status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'processing', 'completed', 'dead_letter')),
+      channel_key TEXT,
+      dispatched_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );`);
+    db.exec('CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
+    const pq = new PromptQueue(createRealSql(db));
+    pq.runMigrations();
+    return { db, pq };
+  }
+
+  const statusOf = (db: DatabaseType, id: string): string | undefined =>
+    (db.prepare('SELECT status FROM prompt_queue WHERE id = ?').get(id) as { status: string } | undefined)?.status;
+
+  it('quarantines live work in either queued or processing', () => {
+    const { db, pq } = freshQueue();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('q', 'waiting', 'queued')").run();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('p', 'in flight', 'processing')").run();
+
+    expect(pq.deadLetter(['q', 'p'])).toBe(2);
+    expect(statusOf(db, 'q')).toBe('dead_letter');
+    expect(statusOf(db, 'p')).toBe('dead_letter');
+    db.close();
+  });
+
+  it('refuses to rewrite a completed row and reports nothing quarantined', () => {
+    const { db, pq } = freshQueue();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('done', 'finished cleanly', 'completed')").run();
+
+    expect(pq.deadLetter(['done'])).toBe(0);
+    expect(statusOf(db, 'done')).toBe('completed');
+    db.close();
+  });
+
+  it('is a no-op for an id whose row is gone', () => {
+    const { db, pq } = freshQueue();
+    expect(pq.deadLetter(['vanished'])).toBe(0);
+    expect(db.prepare('SELECT COUNT(*) AS c FROM prompt_queue').get()).toEqual({ c: 0 });
+    db.close();
+  });
+
+  it('counts only the ids it actually quarantined out of a mixed batch', () => {
+    const { db, pq } = freshQueue();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('live', 'in flight', 'processing')").run();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('done', 'finished', 'completed')").run();
+
+    expect(pq.deadLetter(['live', 'done', 'missing'])).toBe(1);
+    expect(statusOf(db, 'live')).toBe('dead_letter');
+    expect(statusOf(db, 'done')).toBe('completed');
+    db.close();
+  });
+
+  it('reports liveness so a caller can tell a stale capture from a live one', () => {
+    const { db, pq } = freshQueue();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('q', 'waiting', 'queued')").run();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('p', 'in flight', 'processing')").run();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('done', 'finished', 'completed')").run();
+    db.prepare("INSERT INTO prompt_queue (id, content, status) VALUES ('dl', 'quarantined', 'dead_letter')").run();
+
+    expect(pq.isPending('q')).toBe(true);
+    expect(pq.isPending('p')).toBe(true);
+    expect(pq.isPending('done')).toBe(false);
+    expect(pq.isPending('dl')).toBe(false);
+    expect(pq.isPending('missing')).toBe(false);
+    db.close();
+  });
+});
