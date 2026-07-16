@@ -209,6 +209,11 @@ export function ChatInput({
   useEffect(() => {
     if (externalValue != null && externalValue !== '') {
       setValue(externalValue);
+      // Injected content is a fresh draft, so abandon any in-progress history
+      // browse — otherwise the composer holds the new text while still parked at
+      // a recall position, and the next ArrowUp/Escape discards it.
+      setRecallIndex(null);
+      recallDraftRef.current = '';
       onExternalValueConsumed?.();
       // Focus the textarea after injecting value
       requestAnimationFrame(() => textareaRef.current?.focus());
