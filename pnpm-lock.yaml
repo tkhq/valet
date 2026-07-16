@@ -95,6 +95,9 @@ importers:
       '@valet/plugin-stripe':
         specifier: workspace:*
         version: link:../plugin-stripe
+      '@valet/plugin-telegram':
+        specifier: workspace:*
+        version: link:../plugin-telegram
       '@valet/plugin-typefully':
         specifier: workspace:*
         version: link:../plugin-typefully

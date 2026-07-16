@@ -42,6 +42,7 @@
     "@valet/plugin-sentry": "workspace:*",
     "@valet/plugin-slack": "workspace:*",
     "@valet/plugin-stripe": "workspace:*",
+    "@valet/plugin-telegram": "workspace:*",
     "@valet/plugin-typefully": "workspace:*",
     "@valet/plugin-workflows": "workspace:*",
     "@valet/sandbox-docker": "workspace:*",

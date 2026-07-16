@@ -3,9 +3,3 @@ version: 0.0.1
 description: Telegram bot messaging and transport
 icon: "\U0001F4F1"
 v2: true
-# Manifest exists so Phase 7 only has to add the transport, but the package
-# is intentionally excluded from the bundled registry until then: it has no
-# actions/skills yet, and scripts/generate-v2-registry.ts includes any
-# `v2: true` manifest with a valid package.json unless `enabled: false` is
-# set. Remove this once Phase 7 lands the real transport.
-enabled: false
