@@ -163,7 +163,11 @@ const authWiring: AuthWiring = authConfig
     }
   : {};
 
-const { app, injectWebSocket } = createApp(providers, authWiring);
+// Bundled production image only (docker/Dockerfile.api sets this to the
+// baked-in `packages/web/dist`) — unset in `make dev-local`, where Vite's
+// own dev server serves the web app. See `static-web.ts`.
+const webDistDir = process.env.VALET_WEB_DIST_DIR;
+const { app, injectWebSocket } = createApp(providers, authWiring, { webDistDir });
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`@valet/api listening on http://localhost:${info.port}`);
@@ -173,6 +177,7 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(
     `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
   );
+  console.log(`  web:      ${webDistDir ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
 });
 
 // Attach the WS upgrade handler to the running http server.

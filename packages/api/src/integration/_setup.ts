@@ -69,6 +69,11 @@ export interface BootTestApiOpts {
    * option existed.
    */
   auth?: boolean;
+  /** Passed through to `createApp`'s `CreateAppOpts.webDistDir` — route
+   * tests for the SPA static-serve/fallback (kubernetes-deployment design
+   * decision 3) point this at a temp dir with a fixture `index.html`. Unset
+   * by every other caller, matching dev's unmounted-static behavior. */
+  webDistDir?: string;
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -229,7 +234,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     authWiring = { auth: buildAuth({ db, cfg: authConfig, hooks }), authConfig };
   }
 
-  const { app, injectWebSocket } = createApp(providers, authWiring);
+  const { app, injectWebSocket } = createApp(providers, authWiring, { webDistDir: opts.webDistDir });
   const server = serve({ fetch: app.fetch, port });
   injectWebSocket(server);
 

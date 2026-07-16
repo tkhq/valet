@@ -22,7 +22,7 @@
         secrets-set secrets-list \
         image-build image-push \
         destroy destroy-worker destroy-d1 destroy-r2 destroy-pages destroy-modal \
-        k8s-sandbox-install k8s-sandbox-uninstall
+        k8s-sandbox-install k8s-sandbox-uninstall k8s-build
 
 # Configuration
 # =============
@@ -138,6 +138,26 @@ dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
 AGENT_SANDBOX_VERSION ?= v0.5.1
 AGENT_SANDBOX_MANIFEST = deploy/agent-sandbox/$(AGENT_SANDBOX_VERSION)/manifest.yaml
 KUBECTL_RANCHER = kubectl --context rancher-desktop
+
+# Image tags — concrete (never `:latest`) so the chart's
+# `imagePullPolicy: IfNotPresent` never tries a registry pull; k3s (cri-
+# dockerd, moby mode) sees images built straight into the local Docker
+# daemon's image store. See docs/specs/2026-07-15-kubernetes-deployment-design.md
+# decision 2.
+K8S_API_IMAGE ?= valet-api:dev
+K8S_SANDBOX_IMAGE ?= valet-sandbox:dev
+
+k8s-build: ## Build the api (+ bundled web) and sandbox images for the local k3s reference env
+	@echo "$(GREEN)Building $(K8S_API_IMAGE) from docker/Dockerfile.api$(NC)"
+	docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
+	@echo "$(GREEN)Building $(K8S_SANDBOX_IMAGE) from docker/Dockerfile.sandbox-k8s$(NC)"
+	docker build -f docker/Dockerfile.sandbox-k8s -t $(K8S_SANDBOX_IMAGE) .
+	@echo "$(GREEN)Built $(K8S_API_IMAGE) and $(K8S_SANDBOX_IMAGE)$(NC)"
+	@echo "$(YELLOW)Containerd-mode note:$(NC) this target uses plain 'docker build' (Rancher"
+	@echo "  Desktop in moby mode, our default — see decision 2 in the k8s design doc)."
+	@echo "  If you've switched Rancher Desktop to containerd mode instead, these images"
+	@echo "  won't be visible to k3s pods; use 'nerdctl --namespace k8s.io build' in place"
+	@echo "  of 'docker build' above (documented as a variant, not the default)."
 
 k8s-sandbox-install: ## Install vendored agent-sandbox controller + CRD + webhook into Rancher Desktop
 	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \

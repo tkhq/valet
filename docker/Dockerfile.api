@@ -1,0 +1,72 @@
+# Valet API image — @valet/api serving @valet/web (kubernetes-deployment
+# design decision 3: one pod, one Service, no separate web deployment).
+#
+# Build with plain `docker build` (decision 2 — the reference environment
+# runs Rancher Desktop in moby mode, where k3s uses cri-dockerd and
+# docker-built images are directly visible to pods; do NOT use nerdctl here).
+# From the repo root:
+#
+#   docker build -f docker/Dockerfile.api -t valet-api:dev .
+#
+# Runtime notes:
+#   - Node 22 + a slim Debian base is sufficient: sqlite (native
+#     better-sqlite3) is retired from this stack — the api's stores are
+#     PGlite (wasm) or `pg` (pure JS) — so no build toolchain is needed at
+#     runtime, and none of @valet/api's dependency tree pulls in a
+#     node-gyp-built native addon (verified: no `"gypfile": true` package in
+#     the resolved tree).
+#   - The api runs its TypeScript source directly via `tsx` (same as `pnpm
+#     --filter @valet/api start` in dev) rather than a separate `tsc`
+#     compile step — `tsx` is a runtime dependency of @valet/api for exactly
+#     this reason.
+#   - `pnpm deploy --prod` (pnpm's workspace-aware "produce one deployable
+#     package dir" command) resolves every `workspace:*` dependency and
+#     copies only production dependencies — the packages that ship
+#     compiled `dist/` output (`@valet/shared`, `@valet/plugin-*`) must be
+#     built BEFORE the deploy step runs, since deploy only copies what's
+#     already on disk.
+
+# ─── Stage 1: install + build ──────────────────────────────────────────
+FROM node:22-bookworm-slim AS builder
+
+RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
+
+WORKDIR /repo
+
+# Full monorepo source (root .dockerignore excludes node_modules, .git,
+# legacy build artifacts). A single COPY + install keeps this Dockerfile
+# simple; it is not layer-cache-optimized for partial dependency changes —
+# acceptable for a pre-1.0 local/CI image, revisit if build times bite.
+COPY . .
+
+RUN pnpm install --frozen-lockfile
+
+# Packages @valet/api consumes as compiled `dist/` output (not raw TS via
+# tsx) — must exist before `pnpm deploy` below.
+RUN pnpm --filter @valet/shared --filter "@valet/plugin-*" run build
+
+# The web SPA baked into this image (decision 3).
+RUN pnpm --filter @valet/web run build
+
+# Self-contained production-only deploy of @valet/api: resolves every
+# workspace dependency to real files (not symlinks) and installs with
+# --prod, so devDependencies (typescript, vitest, drizzle-kit, ...) are
+# excluded from what ships.
+RUN pnpm --filter @valet/api deploy --prod /out/api
+
+# ─── Stage 2: runtime ───────────────────────────────────────────────────
+FROM node:22-bookworm-slim AS runtime
+
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY --from=builder /out/api ./
+COPY --from=builder /repo/packages/web/dist ./web/dist
+
+# Gates `static-web.ts`'s SPA mount — unset in `make dev-local` (Vite dev
+# server serves the web app there instead). See packages/api/src/main.ts.
+ENV VALET_WEB_DIST_DIR=/app/web/dist
+ENV PORT=8787
+EXPOSE 8787
+
+ENTRYPOINT ["node_modules/.bin/tsx", "src/main.ts"]

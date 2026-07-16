@@ -1,0 +1,39 @@
+# Session sandbox image for the `sandbox-kubernetes` provider (kubernetes-
+# deployment design decision 2). This is the pod the k8s provider's manifest
+# builder runs — NOT the legacy OpenCode/VNC/code-server dev-environment
+# image at `docker/Dockerfile.sandbox` (that one backs the Modal/docker-
+# compose "opencode" stack and is intentionally left untouched).
+#
+# `packages/sandbox-kubernetes/src/manifest.ts` sets the pod's `command` to
+# a non-terminating tail (mirroring sandbox-docker's default `node:20-
+# bookworm` container), so this image's ENTRYPOINT/CMD never actually runs —
+# what matters is the TOOLING baked in: a shell, coreutils (incl. base64,
+# used for binary-safe file ops over `pods/exec` — see the design doc's
+# "File ops ride exec" section), git, ripgrep, ca-certificates, and Node
+# (the engine's exec-based tool calls assume these are on PATH).
+#
+# Build with plain `docker build` (decision 2 — moby mode, not nerdctl):
+#
+#   docker build -f docker/Dockerfile.sandbox-k8s -t valet-sandbox:dev .
+
+FROM node:22-bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ripgrep \
+    ca-certificates \
+    coreutils \
+    curl \
+    procps \
+    bash \
+    openssh-client \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+
+# No CMD/ENTRYPOINT override needed — the k8s provider's PodSpec always sets
+# `command` explicitly (the non-terminating tail). A bare shell is a
+# reasonable fallback for `docker run`-based smoke tests of this image on
+# its own.
+CMD ["/bin/bash"]

@@ -32,11 +32,22 @@ import { modelsRouter } from "./routes/models.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { registerWsRoutes } from "./routes/ws.js";
+import { mountWebStatic } from "./static-web.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
   /** Call after `serve()` to attach the WS upgrade handler to the http server. */
   injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
+}
+
+export interface CreateAppOpts {
+  /**
+   * Absolute path to the built `@valet/web` output (`vite build`'s `dist`).
+   * Only set by `main.ts` in the bundled production image via
+   * `VALET_WEB_DIST_DIR` — unset in `make dev-local`, where Vite's own dev
+   * server serves the web app. See `static-web.ts`.
+   */
+  webDistDir?: string;
 }
 
 /**
@@ -50,7 +61,11 @@ export interface AuthWiring {
   authConfig?: AuthConfig;
 }
 
-export function createApp(providers: Providers, authWiring: AuthWiring = {}): CreatedApp {
+export function createApp(
+  providers: Providers,
+  authWiring: AuthWiring = {},
+  opts: CreateAppOpts = {},
+): CreatedApp {
   const app = new Hono<AppEnv>();
   const { auth, authConfig } = authWiring;
 
@@ -131,6 +146,17 @@ export function createApp(providers: Providers, authWiring: AuthWiring = {}): Cr
   // after serve().
   const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
   registerWsRoutes(app, upgradeWebSocket);
+
+  // Web app static serving + SPA fallback — registered LAST (decision 3):
+  // every real route above must get first crack at a request. No-op unless
+  // `opts.webDistDir` points at a real build.
+  mountWebStatic(app, opts.webDistDir);
+
+  // Default 404 for anything no route (or the SPA fallback above) claimed —
+  // JSON, not Hono's plain-text default, so `/api/*` typos and unmounted
+  // `/mcp`/`/.well-known/*` routes 404 as JSON rather than falling through
+  // to an HTML page.
+  app.notFound((c) => c.json({ error: "not found" }, 404));
 
   // Final fallback for anything thrown out of a route handler. Without this,
   // Hono returns a generic 500 with the HTML error page; we want JSON.
