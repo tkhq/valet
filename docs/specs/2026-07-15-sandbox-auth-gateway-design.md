@@ -1,7 +1,7 @@
 # Sandbox Auth Gateway Design — terminal + VS Code behind service JWTs
 
 **Date:** 2026-07-15
-**Status:** Draft
+**Status:** Implemented
 **Scope:** The in-sandbox auth gateway that consumes the service-JWT primitives auth v2 shipped: a `full` sandbox image profile carrying ttyd + code-server + a gateway daemon, a browser→sandbox reachability path (api reverse-proxy over a per-sandbox Service), and the web UI surfaces (Terminal / VS Code tabs). VNC/browser display is deferred; headless sandboxes are unchanged.
 
 ## Context
@@ -60,3 +60,17 @@ On the live Rancher Desktop k3s deployment: start an interactive session (full p
 - Gateway-managed tunnels (legacy `/t/:name` routes) and cloudflared.
 - Rotating the per-session JWT secret mid-session (rotation = re-provision; the RPC-rotation idea from the runtime-v2 sketch is dropped with the JWKS model).
 - Auth for `pods/exec` (already cluster-RBAC'd; unrelated to browser traffic).
+
+## Deviations
+
+Implementation choices where the shipped code diverges from this spec's text (Tasks 1-7, commits `d606d0d1..a0adfe89`):
+
+- **The api's WS proxy hop is an outbound `ws`-client pump, not a raw socket pipe.** `@hono/node-ws` never exposes the underlying TCP socket, so `packages/api/src/routes/gateway-proxy.ts` dials the sandbox gateway with a `ws` client, buffers frames sent before that connection opens (pre-open buffering), and pumps `onMessage` in both directions rather than piping raw sockets together as decision 3's "bidirectional pipe after upgrade" phrasing implies.
+- **ttyd binds `127.0.0.1` explicitly (`ttyd -W -i 127.0.0.1 -p 7681`)** in `docker/start-full.sh`, a deliberate hardening step vs. the legacy runner gateway's ttyd invocation (which bound all interfaces and relied on the container network boundary alone).
+- **The gateway is bundled into the image via a `pnpm --filter @valet/sandbox-gateway deploy --prod /out/gateway` Docker build stage**, not esbuild. `docker/Dockerfile.sandbox-k8s`'s `gateway-build` stage runs `pnpm run build` (tsc) then `pnpm deploy --prod`, producing a pruned, workspace-resolved `node_modules` — the gateway's deps (hono, `@hono/node-server`, `@hono/node-ws`, `ws`) are plain CJS/ESM packages with no native addons, so this matches how `@valet/api` itself is already shipped rather than adding a bundler config.
+- **`docker/start-full.sh` backgrounds all three services (code-server, ttyd, gateway) and traps `SIGTERM`/`SIGINT`** to forward to all three PIDs, then re-waits on the gateway PID in a loop so its exit code becomes the script's. The spec/plan sketch of exec'ing the gateway as PID 1 with the OS forwarding signals directly doesn't hold when three processes need to shut down together as PID 1 — nothing forwards signals to backgrounded children by default, so an explicit trap was required (see `18f3be35`, filed as a same-day fix to `112bc430`).
+- **The api reads the live sandbox handle via a new engine getter, `SandboxAttachment.current()` (`packages/engine/src/sandbox/attachment.ts`), not `Session.sandbox`.** `Session.sandbox` is `PolicySandbox`-backed and force-provisions on access; the proxy route (and its 409 `{wake:true}` semantics) must be able to observe "no sandbox attached" without triggering a cold start. `current()` is a read-only peek: `null` unless the attachment state is already `ready`, never kicks `ensureReady`.
+- **HTTP header forwarding to the sandbox is an explicit allowlist plus a `gateway_session`-only cookie filter** (`packages/api/src/routes/gateway-proxy.ts`, `createProxyHeaders`/`filteredGatewaySessionCookie`), not the blanket copy decision 3 leaves ambiguous — the browser's real valet auth cookies/headers (`x-api-key`, `x-valet-test-user-id`, session cookies) must never cross into the semi-trusted sandbox.
+- **Web tabs precede the iframe `src` set with a same-origin `fetch` status check** (`packages/web/src/components/session/sandbox-tabs.tsx`) rather than relying on the iframe alone, since an iframe has no way to report the HTTP status of what it loaded. A 401 from that precheck triggers one silent JWT re-mint + retry (matching decision 6's "UI silently re-mints + reloads the iframe once"); a 502 renders inline as the "service down" error state.
+
+Verified against `git log --oneline d606d0d1^..a0adfe89` and the corresponding diffs; no additional undocumented deviations found beyond the above.

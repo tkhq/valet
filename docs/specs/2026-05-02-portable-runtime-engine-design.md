@@ -1633,9 +1633,11 @@ All requests include `Authorization: Bearer <sandbox-rpc-token>`. Tokens are sco
 | `POST` | `/exec` | `{ command, cwd?, env?, stdin?, timeout?, maxOutputBytes?, mode?: 'job' }` | `ExecResult` \| `{ execId }` (job mode) |
 | `GET` | `/exec/:execId?offset=N` | none | `{ status: 'running' \| 'done' \| 'failed', exitCode?, output, nextOffset }` |
 | `DELETE` | `/exec/:execId` | none | `{ ok: true }` (cancel; two-tier cancellation contract) |
-| `PUT` | `/auth/keys` | JWKS key set | `{ ok: true }` (gateway JWT rotation; auth = RPC bearer) |
+| `PUT` | `/auth/keys` | JWKS key set | `{ ok: true }` (gateway JWT rotation; auth = RPC bearer) — **superseded**, see below |
 | `POST` | `/snapshot` | none | `{ snapshotId }` |
 | `GET` | `/tunnels` | none | `{ tunnels: Record<string, string> }` |
+
+**`/auth/keys` superseded:** the JWKS/`kid` key-set rotation sketch this row describes was dropped by `docs/specs/2026-07-15-sandbox-auth-gateway-design.md` decision 2/6 in favor of the HS256 per-session-secret model (`VALET_SANDBOX_JWT_SECRET`, no key set, no rotation RPC — rotation means re-provisioning). No `/auth/keys` route was implemented.
 
 RPC implementations must enforce output limits, command timeouts, workspace path policy, and token/epoch validation. Sync `exec` is non-interactive; the engine's bash tool uses job mode past a timeout threshold (default 60s) so long execs survive intermediary idle timeouts (sandbox runtime spec, Long-Running Exec). Interactive terminal sessions remain a sandbox UI concern exposed through tunnels, not an engine tool protocol.
 

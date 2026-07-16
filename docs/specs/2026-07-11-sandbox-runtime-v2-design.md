@@ -83,7 +83,9 @@ Dev services are **never** on the readiness path. Readiness means the data plane
 In `full` profile, `sandboxd` also serves the gateway role on its single exposed port:
 
 - Routes `/vscode/*` → code-server, `/vnc/*` → noVNC, `/ttyd/*` → ttyd (loopback-bound internal services; only the gateway port is exposed).
-- Browser access authenticates with a short-lived JWT issued by the app layer, carrying claims `sessionId`, `userId`, and `exp`. The gateway validates against a **key set** with `kid`-based key selection: the initial set arrives via the provider's create-time env, and the app layer pushes updated sets through an authenticated RPC route (auth: the current RPC bearer) — signing-key rotation never strands a long-lived sandbox.
+- Browser access authenticates with a short-lived JWT issued by the app layer, carrying claims `sessionId`, `userId`, and `exp`.
+- **SUPERSEDED (see `docs/specs/2026-07-15-sandbox-auth-gateway-design.md`):** the paragraph below sketched a `kid`-based key-set model with app-layer-pushed rotation. The implemented sandbox auth gateway instead validates against the existing HS256 per-session secret (`VALET_SANDBOX_JWT_SECRET = HMAC-SHA256(master, sessionId)`, already injected at create time) plus a cross-session `sid === VALET_SESSION_ID` check — no key set, no `kid`, no rotation RPC. Mid-session secret rotation is a non-goal there; rotation means re-provisioning the sandbox. The struck-through text is kept for history only:
+  - ~~The gateway validates against a **key set** with `kid`-based key selection: the initial set arrives via the provider's create-time env, and the app layer pushes updated sets through an authenticated RPC route (auth: the current RPC bearer) — signing-key rotation never strands a long-lived sandbox.~~
 - The RPC route group accepts only the attachment bearer token. The two credential planes never cross.
 - WebSocket upgrade pass-through for all three services.
 - Tunnel registry: `GET /tunnels` reports provider tunnel URLs plus any dev-server ports the agent registered for user preview.
