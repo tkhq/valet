@@ -1855,6 +1855,13 @@ export class Thread {
         model,
         toolOutputMaxChars: cfg?.toolOutputMaxChars,
         previousSummary,
+        // Reactive compaction fires WITHIN a claimed turn (and proactive
+        // just after runAgent, still before the turn's finally clears it),
+        // so `turnApiKey` is live here. Without this, a BYO-key session
+        // whose only key comes from the host `resolveModel` seam would fail
+        // the summarizer completion on first context overflow. Undefined
+        // when no resolver is wired (env-fallback path) — behavior unchanged.
+        apiKey: this.turnApiKey,
       });
     } catch (err) {
       await session.emit(

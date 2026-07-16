@@ -10,6 +10,7 @@ import {
   VirtualSandboxProvider,
   type BusEvent,
   type CompactionEntry,
+  type ResolvedModel,
 } from "../src/index.js";
 
 function makeEngine() {
@@ -139,6 +140,63 @@ describe("compaction: proactive (token threshold)", () => {
     expect(compEnd).toBeDefined();
 
     faux2.unregister();
+  });
+
+  it("summarizer honors the per-turn resolver apiKey (BYO-key compaction)", async () => {
+    // Same proactive setup, but with a host `resolveModel` seam supplying a
+    // per-turn key. The summarizer's one-shot completion must run with that
+    // key — otherwise a BYO-key session dies on first context overflow.
+    const seenKeys: Array<string | undefined> = [];
+    const faux = registerFauxProvider({
+      provider: "compact-byo-key",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    const record = (_ctx: unknown, opts: { apiKey?: string } | undefined) => {
+      seenKeys.push(opts?.apiKey);
+      return fauxAssistantMessage("third response");
+    };
+    const recordSummary = (_ctx: unknown, opts: { apiKey?: string } | undefined) => {
+      seenKeys.push(opts?.apiKey);
+      return fauxAssistantMessage(
+        "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      );
+    };
+    faux.setResponses([record, recordSummary]);
+
+    const model = faux.getModel("tiny")!;
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (_spec: string): Promise<ResolvedModel | null> => ({
+        model,
+        apiKey: "org-key-xyz",
+      }),
+      compaction: { tailTurns: 1 },
+    });
+
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "e-2", type: "message", role: "user", content: "second prompt", createdAt: 3 },
+      { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "second response", createdAt: 4 },
+    ]);
+
+    const receipt = await session.prompt("third prompt");
+    await waitFor(() =>
+      events.some(
+        (e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId,
+      ),
+    );
+
+    // Two completions ran (turn + summarizer); both saw the resolver key.
+    expect(seenKeys).toEqual(["org-key-xyz", "org-key-xyz"]);
+
+    faux.unregister();
   });
 });
 
