@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { orchestratorSessionId, type Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, childWatches, orchestratorIdentities } from "../schema/index.js";
+import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
 import { readOwnFile, writeFile, type MemoryScope } from "../services/memory.js";
 import type {
   EnsureOrchestratorResponse,
@@ -40,40 +41,10 @@ orchestratorRouter.post("/", async (c) => {
   const user = c.var.user;
   const principal = userPrincipal(user.id);
 
-  const session = await engineHost.orchestratorSessionFor(principal, {
+  const { sessionId } = await ensureOrchestratorSession({ db, engineHost }, principal, {
     actorUserId: user.id,
     orgId: user.orgId,
   });
-  const sessionId = session.id;
-
-  // Mirror POST /api/sessions: an `agent_sessions` app row is what makes the
-  // existing /api/sessions/:id/* routes (messages, threads, decisions) work
-  // against this session id too. Idempotent — a second ensure call finds the
-  // row from the first and skips the insert. `sessionId` is deterministic
-  // per principal (`orchestratorSessionId`), so two concurrent first-ensure
-  // requests can both see no existing row and both attempt this insert;
-  // `onConflictDoNothing` on the primary key makes the loser a no-op instead
-  // of an uncaught unique-constraint 500.
-  const existingRows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
-  if (!existingRows[0]) {
-    const now = Date.now();
-    const data = await session.toData();
-    await db
-      .insert(agentSessions)
-      .values({
-        id: sessionId,
-        userId: user.id,
-        orgId: user.orgId,
-        workspace: data.workspace,
-        title: "Assistant",
-        status: "active",
-        ownerType: principal.type,
-        ownerId: principal.id,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .onConflictDoNothing();
-  }
 
   const body: EnsureOrchestratorResponse = { sessionId };
   return c.json(body, 200);
