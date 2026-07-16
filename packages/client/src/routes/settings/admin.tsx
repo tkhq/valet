@@ -2059,7 +2059,7 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                         <div className="flex items-center gap-2 justify-end">
                           {rowAction?.kind === 'confirm-revoke' && rowAction.userId === u.id ? (
                             <>
-                              <span className="text-xs text-red-600 dark:text-red-400">Confirm?</span>
+                              <span className="text-xs text-red-600 dark:text-red-400">Confirm revoke?</span>
                               <Button
                                 variant="secondary"
                                 onClick={() => {
@@ -2090,7 +2090,7 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                           {!isSelf && !isLastAdmin && (
                             rowAction?.kind === 'confirm-remove' && rowAction.userId === u.id ? (
                               <>
-                                <span className="text-xs text-red-600 dark:text-red-400">Confirm?</span>
+                                <span className="text-xs text-red-600 dark:text-red-400">Confirm remove?</span>
                                 <Button
                                   variant="secondary"
                                   onClick={() => {

@@ -92,14 +92,20 @@ async function validateAuthSession(
   env: Env,
   ctx: ExecutionContext | undefined,
 ): Promise<{ id: string; email: string; role: 'admin' | 'member' } | null> {
+  // Compare ISO to ISO. `expires_at` is stored as `Date.toISOString()`
+  // (T separator, Z suffix, ms precision); SQLite's `datetime('now')`
+  // returns a space-separated string without Z, so under BINARY collation
+  // it would sort *less* than any same-date ISO value and let expired
+  // rows authenticate until the UTC date rolled over.
+  const nowIso = new Date().toISOString();
   const result = await env.DB.prepare(
     `SELECT u.id, u.email, u.role
      FROM auth_sessions s
      JOIN users u ON s.user_id = u.id
      WHERE s.token_hash = ?
-       AND s.expires_at > datetime('now')`
+       AND s.expires_at > ?`
   )
-    .bind(tokenHash)
+    .bind(tokenHash, nowIso)
     .first<{ id: string; email: string; role: string }>();
 
   if (result) {
@@ -107,8 +113,8 @@ async function validateAuthSession(
     // the 7-day cap from creation is deliberate.
     scheduleWrite(
       ctx,
-      env.DB.prepare("UPDATE auth_sessions SET last_used_at = datetime('now') WHERE token_hash = ?")
-        .bind(tokenHash)
+      env.DB.prepare('UPDATE auth_sessions SET last_used_at = ? WHERE token_hash = ?')
+        .bind(nowIso, tokenHash)
         .run(),
     );
   }
@@ -121,22 +127,25 @@ async function validateAPIKey(
   env: Env,
   ctx: ExecutionContext | undefined,
 ): Promise<{ id: string; email: string; role: 'admin' | 'member' } | null> {
+  // See validateAuthSession — compare ISO-to-ISO instead of mixing
+  // `Date.toISOString()` with SQLite's space-separated `datetime('now')`.
+  const nowIso = new Date().toISOString();
   const result = await env.DB.prepare(
     `SELECT u.id, u.email, u.role
      FROM api_tokens t
      JOIN users u ON t.user_id = u.id
      WHERE t.token_hash = ?
-       AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
+       AND (t.expires_at IS NULL OR t.expires_at > ?)
        AND t.revoked_at IS NULL`
   )
-    .bind(tokenHash)
+    .bind(tokenHash, nowIso)
     .first<{ id: string; email: string; role: string }>();
 
   if (result) {
     scheduleWrite(
       ctx,
-      env.DB.prepare("UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ?")
-        .bind(tokenHash)
+      env.DB.prepare('UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ?')
+        .bind(nowIso, tokenHash)
         .run(),
     );
   }

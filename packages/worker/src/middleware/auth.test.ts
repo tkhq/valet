@@ -158,6 +158,54 @@ describe('authMiddleware', () => {
     expect(body.code).toBe('INTERNAL_ERROR');
   });
 
+  it('compares expires_at against an ISO timestamp, not SQLite datetime()', async () => {
+    // Regression: `expires_at` is stored as `Date.toISOString()`
+    // (T-separated, Z-suffixed), but the original query used SQLite's
+    // `datetime('now')`, which returns a space-separated string without
+    // the trailing Z. Under BINARY collation those two formats do not
+    // compare correctly — a session that expired earlier on the same
+    // UTC date would continue to authenticate until the date advanced.
+    // The middleware must now bind an ISO-formatted `now` and compare
+    // like-for-like.
+    const app = buildApp();
+
+    const captured: { sql: string; params: unknown[] }[] = [];
+    const capturingDb: DbStub = {
+      prepare: (sql: string) => ({
+        bind: (...params: unknown[]) => ({
+          first: async <T>() => {
+            captured.push({ sql, params });
+            return null as T | null;
+          },
+          run: async () => {},
+        }),
+      }),
+    };
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer some-token' },
+      }),
+      { DB: capturingDb } as any,
+    );
+
+    expect(res.status).toBe(401);
+    const authSessionQuery = captured.find((c) => c.sql.includes('FROM auth_sessions'));
+    expect(authSessionQuery).toBeDefined();
+    expect(authSessionQuery!.sql).not.toContain("datetime('now')");
+    const nowParam = authSessionQuery!.params[1];
+    expect(typeof nowParam).toBe('string');
+    // ISO-8601: `YYYY-MM-DDTHH:MM:SS.sssZ`. The prior bug came from the
+    // stored ISO value being compared against SQLite's space-separated
+    // `datetime('now')`; both sides must now use the same shape.
+    expect(nowParam as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+    const apiTokenQuery = captured.find((c) => c.sql.includes('FROM api_tokens'));
+    expect(apiTokenQuery).toBeDefined();
+    expect(apiTokenQuery!.sql).not.toContain("datetime('now')");
+    expect(apiTokenQuery!.params[1]).toBe(nowParam);
+  });
+
   it('updates last_used_at on every authenticated request but does NOT slide expires_at', async () => {
     const app = buildApp();
     const writes: string[] = [];
