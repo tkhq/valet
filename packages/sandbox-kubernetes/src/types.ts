@@ -122,6 +122,12 @@ export interface SandboxCRSpec {
   volumeClaimTemplates: VolumeClaimTemplate[];
   shutdownPolicy?: "Delete" | "Retain";
   operatingMode?: "Running" | "Suspended";
+  /** When true, the agent-sandbox controller provisions a ClusterIP Service
+   * fronting the pod (Task 3: `full`-profile sandboxes expose the in-pod
+   * auth gateway on :9000 this way). Omitted entirely for headless sandboxes
+   * — undefined, not false, to keep the manifest byte-identical to the
+   * pre-Task-3 shape when no service is requested. */
+  service?: boolean;
 }
 
 export interface SandboxCR {
@@ -172,6 +178,12 @@ export interface SandboxCondition {
 export interface SandboxCRStatus {
   conditions?: SandboxCondition[];
   selector?: string;
+  /** Name of the controller-provisioned Service (set only when `spec.service`
+   * was requested and the controller has reconciled it). */
+  service?: string;
+  /** Cluster-internal FQDN of that Service — what `KubernetesSandbox.gatewayEndpoint()`
+   * resolves against, port 9000 (Task 2 daemon default). */
+  serviceFQDN?: string;
 }
 
 /** `metadata` subset of the read-back Sandbox CR — a superset of the
@@ -201,6 +213,11 @@ export interface SandboxCRReadSpec {
   volumeClaimTemplates: unknown[];
   shutdownPolicy?: "Delete" | "Retain";
   operatingMode?: "Running" | "Suspended";
+  /** Mirrors `SandboxCRSpec.service` — whether this CR requested the
+   * controller-provisioned Service. Read back so `gatewayEndpoint()` can
+   * gate on "was a service actually requested" rather than inferring it
+   * from `status.serviceFQDN` alone. */
+  service?: boolean;
 }
 
 /** The shape returned by GET/create/replace against the live API server —

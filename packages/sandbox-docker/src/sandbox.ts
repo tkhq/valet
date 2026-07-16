@@ -5,6 +5,7 @@ import type {
   ExecJobHandle,
   ExecOpts,
   ExecResult,
+  GatewayEndpoint,
   JobPoll,
   Sandbox,
   SandboxCapabilities,
@@ -129,6 +130,58 @@ export interface DockerSandboxOptions {
 }
 
 const CONTAINER_WORKSPACE = "/workspace";
+
+/** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
+const GATEWAY_PORT = 9000;
+
+export interface BuildDockerRunArgsOpts {
+  containerName: string;
+  image: string;
+  /** Resolved (realpath'd) host path bind-mounted at CONTAINER_WORKSPACE. */
+  workspaceHostPath: string;
+  network: string;
+  env?: Record<string, string>;
+  resources?: { cpu?: number; memory?: string };
+  /** Interactive-service profile. Default "headless" — no ports published.
+   * "full" additionally publishes the gateway port to an ephemeral loopback
+   * port so `DockerSandbox.gatewayEndpoint()` can resolve it via `docker
+   * inspect`. */
+  profile?: "headless" | "full";
+}
+
+/**
+ * Pure `docker run` argv builder — extracted out of
+ * `DockerSandboxProvider.create` (the "extract pure function" pattern, see
+ * CLAUDE.md) so the flag-composition logic is unit-testable without a live
+ * Docker daemon. No I/O, no defaults resolved elsewhere (callers pass
+ * already-resolved values — image/network defaults, workspace realpath,
+ * etc. are `create()`'s job).
+ */
+export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
+  const runArgs: string[] = ["run", "-d", "--name", opts.containerName];
+  runArgs.push("--workdir", CONTAINER_WORKSPACE);
+  runArgs.push("-v", `${opts.workspaceHostPath}:${CONTAINER_WORKSPACE}`);
+  if (opts.network !== "bridge") runArgs.push("--network", opts.network);
+  if (opts.env) {
+    for (const [k, v] of Object.entries(opts.env)) {
+      runArgs.push("--env", `${k}=${v}`);
+    }
+  }
+  if (opts.resources?.cpu) runArgs.push("--cpus", String(opts.resources.cpu));
+  if (opts.resources?.memory) runArgs.push("--memory", opts.resources.memory);
+  if (opts.profile === "full") {
+    // Ephemeral loopback-only port — never exposed beyond the host, matches
+    // the auth-gateway's JWT-fronted access model (spec: sandbox auth
+    // gateway plan). `DockerSandbox.gatewayEndpoint()` resolves the actual
+    // assigned port via `docker inspect`.
+    runArgs.push("-p", `127.0.0.1::${GATEWAY_PORT}`);
+  }
+  // Keep the container alive — most images exit immediately if PID 1 is
+  // an interactive shell and there's no TTY. `tail -f /dev/null` is a
+  // tiny long-running placeholder; `docker exec` does the actual work.
+  runArgs.push(opts.image, "sh", "-c", "tail -f /dev/null");
+  return runArgs;
+}
 
 export class DockerSandbox implements Sandbox {
   readonly id: string;
@@ -429,6 +482,30 @@ export class DockerSandbox implements Sandbox {
     state.child.kill("SIGKILL");
     await state.closed;
   }
+
+  /**
+   * The in-sandbox auth gateway's reachable endpoint (Task 3). Resolves the
+   * host port `-p 127.0.0.1::9000` was mapped to via `docker inspect` —
+   * headless containers never publish the port, so the Go template resolves
+   * to nothing (or `docker inspect` itself errors on a torn-down container)
+   * and this returns `null` for both cases rather than throwing.
+   */
+  async gatewayEndpoint(): Promise<GatewayEndpoint | null> {
+    const result = await execProcess(
+      "docker",
+      [
+        "inspect",
+        "-f",
+        `{{with index .NetworkSettings.Ports "${GATEWAY_PORT}/tcp"}}{{(index . 0).HostPort}}{{end}}`,
+        this.containerId,
+      ],
+      {},
+    );
+    if (result.exitCode !== 0) return null;
+    const port = Number(result.stdout.trim());
+    if (!Number.isInteger(port) || port <= 0) return null;
+    return { host: "127.0.0.1", port };
+  }
 }
 
 interface ExecProcessOpts {
@@ -566,22 +643,15 @@ export class DockerSandboxProvider implements SandboxProvider {
       await ensureImage(image);
     }
 
-    const runArgs: string[] = ["run", "-d", "--name", containerName];
-    runArgs.push("--workdir", CONTAINER_WORKSPACE);
-    runArgs.push("-v", `${abs}:${CONTAINER_WORKSPACE}`);
-    if (network !== "bridge") runArgs.push("--network", network);
-    if (dockerOpts.env) {
-      for (const [k, v] of Object.entries(dockerOpts.env)) {
-        runArgs.push("--env", `${k}=${v}`);
-      }
-    }
-    if (opts.resources?.cpu) runArgs.push("--cpus", String(opts.resources.cpu));
-    if (opts.resources?.memory) runArgs.push("--memory", opts.resources.memory);
-    runArgs.push(image);
-    // Keep the container alive — most images exit immediately if PID 1 is
-    // an interactive shell and there's no TTY. `tail -f /dev/null` is a
-    // tiny long-running placeholder; `docker exec` does the actual work.
-    runArgs.push("sh", "-c", "tail -f /dev/null");
+    const runArgs = buildDockerRunArgs({
+      containerName,
+      image,
+      workspaceHostPath: abs,
+      network,
+      env: dockerOpts.env,
+      resources: opts.resources,
+      profile: opts.profile,
+    });
 
     const startResult = await execProcess("docker", runArgs, {});
     if (startResult.exitCode !== 0) {

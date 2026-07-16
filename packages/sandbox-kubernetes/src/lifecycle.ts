@@ -288,6 +288,8 @@ function parseStatus(value: unknown): SandboxCRStatus | undefined {
     status.conditions = conditions;
   }
   if (typeof value.selector === "string") status.selector = value.selector;
+  if (typeof value.service === "string") status.service = value.service;
+  if (typeof value.serviceFQDN === "string") status.serviceFQDN = value.serviceFQDN;
   return status;
 }
 
@@ -344,6 +346,9 @@ export function parseSandboxCRRead(value: unknown): SandboxCRRead {
   }
   if (specValue.operatingMode === "Running" || specValue.operatingMode === "Suspended") {
     spec.operatingMode = specValue.operatingMode;
+  }
+  if (typeof specValue.service === "boolean") {
+    spec.service = specValue.service;
   }
 
   return {

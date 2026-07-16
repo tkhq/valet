@@ -18,6 +18,13 @@ const MAX_NAME_LENGTH = 63;
 const HASH_SUFFIX_LENGTH = 8;
 const DEFAULT_STORAGE = "2Gi";
 
+/** `full`-profile container command — starts the interactive services (ttyd,
+ * code-server, auth gateway) instead of the bare `tail -f /dev/null`
+ * placeholder. The image ENTRYPOINT is bypassed by this explicit `command`.
+ * `/start-full.sh` is added to the image in Task 4; referenced here ahead of
+ * that landing per the Task 3 brief. */
+const FULL_PROFILE_COMMAND = ["/bin/bash", "/start-full.sh"];
+
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
@@ -121,6 +128,34 @@ export function buildSandboxManifest(
     container.resources = { requests: resourceList, limits: resourceList };
   }
 
+  const isFullProfile = opts.profile === "full";
+  if (isFullProfile) {
+    container.command = FULL_PROFILE_COMMAND;
+  }
+
+  const spec: SandboxCR["spec"] = {
+    podTemplate: {
+      spec: {
+        containers: [container],
+        restartPolicy: "Always",
+      },
+    },
+    volumeClaimTemplates: [
+      {
+        metadata: { name: WORKSPACE_VOLUME_NAME },
+        spec: {
+          accessModes: ["ReadWriteOnce"],
+          resources: {
+            requests: { storage: cfg.defaultStorage ?? DEFAULT_STORAGE },
+          },
+        },
+      },
+    ],
+  };
+  if (isFullProfile) {
+    spec.service = true;
+  }
+
   return {
     apiVersion: cfg.apiVersion,
     kind: "Sandbox",
@@ -128,24 +163,6 @@ export function buildSandboxManifest(
       name,
       labels: { [SESSION_LABEL_KEY]: name },
     },
-    spec: {
-      podTemplate: {
-        spec: {
-          containers: [container],
-          restartPolicy: "Always",
-        },
-      },
-      volumeClaimTemplates: [
-        {
-          metadata: { name: WORKSPACE_VOLUME_NAME },
-          spec: {
-            accessModes: ["ReadWriteOnce"],
-            resources: {
-              requests: { storage: cfg.defaultStorage ?? DEFAULT_STORAGE },
-            },
-          },
-        },
-      ],
-    },
+    spec,
   };
 }

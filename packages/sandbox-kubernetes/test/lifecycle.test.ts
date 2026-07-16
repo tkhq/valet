@@ -356,6 +356,30 @@ describe("parseSandboxCRRead", () => {
     expect(parsed.status?.selector).toBe("agents.x-k8s.io/sandbox-name-hash=deadbeef");
   });
 
+  it("surfaces status.serviceFQDN and status.service when present", () => {
+    const parsed = parseSandboxCRRead({
+      metadata: { name: "sess-1" },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+      status: {
+        conditions: [],
+        service: "sess-1-gateway",
+        serviceFQDN: "sess-1-gateway.valet-sandboxes.svc.cluster.local",
+      },
+    });
+    expect(parsed.status?.service).toBe("sess-1-gateway");
+    expect(parsed.status?.serviceFQDN).toBe("sess-1-gateway.valet-sandboxes.svc.cluster.local");
+  });
+
+  it("leaves status.serviceFQDN/service undefined when absent", () => {
+    const parsed = parseSandboxCRRead({
+      metadata: { name: "sess-1" },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+      status: { conditions: [] },
+    });
+    expect(parsed.status?.service).toBeUndefined();
+    expect(parsed.status?.serviceFQDN).toBeUndefined();
+  });
+
   it("drops a malformed condition (missing status) rather than throwing", () => {
     const parsed = parseSandboxCRRead({
       metadata: { name: "sess-1" },

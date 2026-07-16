@@ -197,4 +197,37 @@ describe("buildSandboxManifest", () => {
     const second = buildSandboxManifest(baseConfig, "sess-1", opts);
     expect(first).toEqual(second);
   });
+
+  describe("profile: full", () => {
+    it("sets spec.service = true", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "full" });
+      expect(manifest.spec.service).toBe(true);
+    });
+
+    it("replaces the container command with the full-profile service entrypoint (not the bare tail placeholder)", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "full" });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command).toEqual(["/bin/bash", "/start-full.sh"]);
+      expect(container?.command?.join(" ")).not.toContain("tail -f /dev/null");
+    });
+  });
+
+  describe("profile omitted / headless — byte-identical pin", () => {
+    it("leaves spec.service undefined when profile is omitted", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
+      expect(manifest.spec.service).toBeUndefined();
+    });
+
+    it("leaves spec.service undefined when profile is explicitly headless", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "headless" });
+      expect(manifest.spec.service).toBeUndefined();
+    });
+
+    it("keeps the bare tail placeholder command when profile is omitted/headless", () => {
+      const omitted = buildSandboxManifest(baseConfig, "sess-1", opts);
+      const headless = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "headless" });
+      expect(omitted.spec.podTemplate.spec.containers[0]?.command).toEqual(["sh", "-c", "tail -f /dev/null"]);
+      expect(headless.spec.podTemplate.spec.containers[0]?.command).toEqual(["sh", "-c", "tail -f /dev/null"]);
+    });
+  });
 });

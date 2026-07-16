@@ -155,5 +155,15 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
     capabilities: provider.capabilities(),
     supportsAbort: true,
     shell: "full",
+    // This suite's factory always creates headless (profile omitted)
+    // sandboxes, so "null" is the honest expectation here — not
+    // "service-fqdn". A full-profile CR needs a working `/start-full.sh`
+    // entrypoint (Task 4, not yet landed) to actually reach Ready; forcing
+    // profile: "full" through this shared factory would break every other
+    // case in this suite (readFile/exec/etc.) against a live cluster today.
+    // The full-profile "service-fqdn" path is covered directly against a
+    // live CR's spec/status in provider.cluster.test.ts, which doesn't
+    // require the pod to actually become Ready.
+    gatewayEndpoint: "null",
   });
 });

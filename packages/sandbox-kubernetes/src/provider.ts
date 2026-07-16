@@ -69,6 +69,7 @@ import type {
   ExecJobHandle,
   ExecOpts,
   ExecResult,
+  GatewayEndpoint,
   JobPoll,
   Sandbox,
   SandboxCapabilities,
@@ -110,6 +111,9 @@ import type { K8sProviderConfig } from "./types.js";
  * importing it, since this module has no dependency on the policy layer. */
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
+
+/** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
+const GATEWAY_PORT = 9000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -407,6 +411,22 @@ export class KubernetesSandbox implements Sandbox {
   async cancelJob(execId: string): Promise<void> {
     assertSafeExecId(execId);
     return this.withPod((pod) => cancelJobInPod(this.execDeps(), pod, execId));
+  }
+
+  /**
+   * The in-sandbox auth gateway's reachable endpoint (Task 3). Returns
+   * `null` when this CR never requested a Service (`spec.service` unset —
+   * the headless-profile case) or when the controller hasn't reconciled
+   * `status.serviceFQDN` yet. GETs the CR fresh rather than caching —
+   * mirrors every other accessor on this class (`resolvePodContext` etc.),
+   * consistent with decision 5's "never cache pod/CR state across calls".
+   */
+  async gatewayEndpoint(): Promise<GatewayEndpoint | null> {
+    const cr = await getSandbox(this.deps.objectsApi, this.deps.cfg, this.id);
+    if (cr === null || !cr.spec.service) return null;
+    const serviceFQDN = cr.status?.serviceFQDN;
+    if (!serviceFQDN) return null;
+    return { host: serviceFQDN, port: GATEWAY_PORT };
   }
 }
 

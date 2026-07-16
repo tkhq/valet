@@ -340,4 +340,32 @@ describeDocker("DockerSandbox", () => {
     expect((await provider.status(sb.id)).state).toBe("released");
     expect((await provider.status("does-not-exist")).state).toBe("released");
   });
+
+  it("gatewayEndpoint() returns null for a headless (profile omitted) container", async () => {
+    const sb = await makeSandbox();
+    try {
+      await expect(sb.gatewayEndpoint()).resolves.toBeNull();
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("gatewayEndpoint() returns a mapped loopback port for a full-profile container", async () => {
+    const sb = await makeSandbox({ profile: "full" });
+    try {
+      const ep = await sb.gatewayEndpoint();
+      expect(ep).not.toBeNull();
+      expect(ep?.host).toBe("127.0.0.1");
+      expect(ep?.port).toBeGreaterThan(0);
+      expect(ep?.port).not.toBe(9000); // ephemeral, not the fixed in-container port
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("gatewayEndpoint() returns null after the container is destroyed", async () => {
+    const sb = await makeSandbox({ profile: "full" });
+    await provider.destroy(sb.id);
+    await expect(sb.gatewayEndpoint()).resolves.toBeNull();
+  });
 });

@@ -33,4 +33,5 @@ runSandboxContract("local", {
   capabilities: provider.capabilities(),
   supportsAbort: true,
   shell: "full",
+  gatewayEndpoint: "null",
 });

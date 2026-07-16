@@ -11,4 +11,5 @@ runSandboxContract("virtual", {
   capabilities: provider.capabilities(),
   supportsAbort: false,
   shell: "virtual",
+  gatewayEndpoint: "null",
 });

@@ -17,17 +17,18 @@ import { spawnSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CONTAINER_DEATH_PATTERN } from "@valet/engine";
-import { SANDBOX_CR_API_VERSION, sandboxCrName } from "../src/index.js";
+import { SANDBOX_CR_API_VERSION, buildSandboxManifest, sandboxCrName } from "../src/index.js";
 import type { K8sProviderConfig } from "../src/index.js";
 import {
   RANCHER_DESKTOP_CONTEXT,
+  applySandbox,
   customObjectsApiAdapter,
   loadRancherDesktopKubeConfig,
   podStatusApiAdapter,
   podsApiAdapter,
 } from "../src/lifecycle.js";
 import { podExecApiAdapter } from "../src/exec.js";
-import { KubernetesSandboxProvider, podLivenessApiAdapter } from "../src/provider.js";
+import { KubernetesSandbox, KubernetesSandboxProvider, podLivenessApiAdapter } from "../src/provider.js";
 import { SandboxStartupError } from "@valet/engine";
 
 function kubectl(args: string[]): { status: number | null; stdout: string; stderr: string } {
@@ -53,6 +54,12 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
   };
 
   let provider: KubernetesSandboxProvider;
+  let rawDeps: {
+    objectsApi: ReturnType<typeof customObjectsApiAdapter>;
+    podsApi: ReturnType<typeof podsApiAdapter>;
+    execApi: ReturnType<typeof podExecApiAdapter>;
+    livenessApi: ReturnType<typeof podLivenessApiAdapter>;
+  };
 
   beforeAll(() => {
     const created = kubectl(["create", "namespace", namespace]);
@@ -66,6 +73,7 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
     const livenessApi = podLivenessApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
     const podStatusApi = podStatusApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
     provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi }, cfg);
+    rawDeps = { objectsApi, podsApi, execApi, livenessApi };
   }, 30_000);
 
   afterAll(() => {
@@ -268,6 +276,60 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
         expect(status.error ?? "").toMatch(/image pull failed/i);
       } finally {
         await provider.destroy(name);
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "gatewayEndpoint() reads spec.service + status.serviceFQDN off the live API server (Task 3)",
+    async () => {
+      // A full-profile CR's container command (`/bin/bash /start-full.sh`)
+      // has no working entrypoint until Task 4 lands the script into the
+      // image, so `provider.create()`'s `waitReady` would never observe
+      // Ready and this test can't drive gatewayEndpoint() through the
+      // normal create() path yet. Bypass waitReady: apply the CR directly
+      // with `applySandbox` (this is exactly what buildSandboxManifest
+      // produces for profile: "full" — spec.service: true), and simulate
+      // the controller having reconciled a Service by patching the CR's
+      // status subresource directly. This proves gatewayEndpoint()'s
+      // parsing/wiring against the REAL CRD schema (status.service /
+      // status.serviceFQDN are confirmed top-level status fields per
+      // `kubectl explain sandbox.status`) without depending on Task 4.
+      const identity = `gateway-${randomUUID()}`;
+      const name = sandboxCrName(identity);
+      const manifest = buildSandboxManifest(cfg, name, { workspace: identity, image: "busybox:stable", profile: "full" });
+      expect(manifest.spec.service).toBe(true);
+      await applySandbox(rawDeps.objectsApi, cfg, manifest);
+
+      try {
+        const sandbox = new KubernetesSandbox(
+          { objectsApi: rawDeps.objectsApi, podsApi: rawDeps.podsApi, execApi: rawDeps.execApi, livenessApi: rawDeps.livenessApi, cfg },
+          name,
+        );
+
+        // Before the controller (here: our patch, standing in for it) sets
+        // status.serviceFQDN, gatewayEndpoint() must report null even
+        // though spec.service is true — the Service isn't reachable yet.
+        await expect(sandbox.gatewayEndpoint?.()).resolves.toBeNull();
+
+        const fqdn = `${name}.${namespace}.svc.cluster.local`;
+        const patch = kubectl([
+          "-n",
+          namespace,
+          "patch",
+          "sandbox",
+          name,
+          "--type=merge",
+          "--subresource=status",
+          "-p",
+          JSON.stringify({ status: { service: name, serviceFQDN: fqdn } }),
+        ]);
+        expect(patch.status).toBe(0);
+
+        await expect(sandbox.gatewayEndpoint?.()).resolves.toEqual({ host: fqdn, port: 9000 });
+      } finally {
+        await kubectl(["-n", namespace, "delete", "sandbox", name, "--ignore-not-found"]);
       }
     },
     60_000,

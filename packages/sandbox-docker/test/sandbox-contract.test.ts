@@ -40,7 +40,13 @@ describe.skipIf(!(await dockerAvailable()))("docker sandbox contract", () => {
   runSandboxContract("docker", {
     factory: async () => {
       workspace = await mkdtemp(join(tmpdir(), "valet-docker-contract-"));
-      const sandbox = await provider.create({ workspace, image: "alpine:3.20" });
+      // profile: "full" so the gatewayEndpoint case below has a mapped port
+      // to observe. Unlike sandbox-kubernetes, docker's "full" profile only
+      // affects `docker run` flags (`-p 127.0.0.1::9000`) — the container
+      // command stays `tail -f /dev/null`, so this doesn't disturb any of
+      // the other FS/exec assertions this suite runs against the same
+      // factory.
+      const sandbox = await provider.create({ workspace, image: "alpine:3.20", profile: "full" });
       return {
         sandbox,
         cleanup: async () => {
@@ -51,7 +57,7 @@ describe.skipIf(!(await dockerAvailable()))("docker sandbox contract", () => {
     },
     recreate: async (sandbox) => {
       await provider.destroy(sandbox.id);
-      const recreated = await provider.create({ workspace, image: "alpine:3.20" });
+      const recreated = await provider.create({ workspace, image: "alpine:3.20", profile: "full" });
       return {
         sandbox: recreated,
         cleanup: async () => {
@@ -63,5 +69,6 @@ describe.skipIf(!(await dockerAvailable()))("docker sandbox contract", () => {
     capabilities: provider.capabilities(),
     supportsAbort: true,
     shell: "full",
+    gatewayEndpoint: "mapped-port",
   });
 });
