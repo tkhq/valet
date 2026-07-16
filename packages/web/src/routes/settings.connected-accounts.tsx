@@ -7,6 +7,7 @@ import {
   useStartIdentityLink,
   useUnlinkIdentity,
 } from "~/api/queries";
+import { ApiError } from "~/api/client";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Button, Spinner, Switch } from "~/components/primitives";
@@ -29,12 +30,25 @@ function formatLinkedSince(createdAt: number | undefined): string {
   });
 }
 
+/** Server sends `{ error: "telegram bot not configured" }` for the one
+ * documented failure (bot token removed between load and click); fall back
+ * to a generic message for anything else (network failure, unexpected
+ * shape). */
+function extractStartLinkError(err: unknown): string {
+  if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
+    const message = (err.payload as Record<string, unknown>).error;
+    if (typeof message === "string" && message) return message;
+  }
+  return "Couldn't start the Telegram link. Try again.";
+}
+
 export function ConnectedAccountsPage() {
   const linksQ = useIdentityLinks();
   const startLink = useStartIdentityLink();
   const setNotify = useSetLinkNotify();
   const unlink = useUnlinkIdentity();
   const [pendingLink, setPendingLink] = useState<StartIdentityLinkResponse | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   const telegram = linksQ.data?.links.find((l) => l.provider === "telegram");
 
@@ -69,12 +83,18 @@ export function ConnectedAccountsPage() {
               variant="secondary"
               disabled={startLink.isPending}
               onClick={async () => {
-                const res = await startLink.mutateAsync("telegram");
-                setPendingLink(res);
+                try {
+                  const res = await startLink.mutateAsync("telegram");
+                  setPendingLink(res);
+                  setConnectError(null);
+                } catch (err) {
+                  setConnectError(extractStartLinkError(err));
+                }
               }}
             >
               {startLink.isPending ? "Connecting…" : "Connect Telegram"}
             </Button>
+            {connectError && <p className="text-sm text-danger-500">{connectError}</p>}
             {pendingLink && (
               <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3 text-sm">
                 <a
@@ -97,7 +117,7 @@ export function ConnectedAccountsPage() {
 
       {telegram && telegram.channelReady && telegram.linked && (
         <>
-          <FieldRow label="Telegram" hint={`Connected as ${telegram.externalId ?? "—"}`}>
+          <FieldRow label="Telegram">
             <div className="space-y-1 text-sm text-ink">
               <div>{telegram.externalId}</div>
               {telegram.createdAt && (

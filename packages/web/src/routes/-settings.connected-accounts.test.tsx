@@ -9,6 +9,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { IdentityLinkStatus } from "@valet/api/wire";
+import { ApiError } from "~/api/client";
 
 const startMutateAsync = vi.fn();
 const setNotifyMutate = vi.fn();
@@ -82,6 +83,23 @@ describe("ConnectedAccountsPage", () => {
     ).toHaveProperty("href", "https://t.me/valet_bot?start=abc123");
     expect(screen.getByText("https://t.me/valet_bot?start=abc123")).toBeTruthy();
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
+  });
+
+  it("shows an inline error and no deep link when the start mutation fails", async () => {
+    linksData = {
+      links: [{ provider: "telegram", linked: false, channelReady: true }],
+    };
+    startMutateAsync.mockRejectedValue(
+      new ApiError(409, "POST /me/identity-links/telegram/start → 409", {
+        error: "telegram bot not configured",
+      }),
+    );
+    render(<ConnectedAccountsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Connect Telegram" }));
+
+    expect(await screen.findByText("telegram bot not configured")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Open Telegram and press Start" })).toBeNull();
   });
 
   it("linked state shows externalId, linked-since, a notify switch, and disconnect", () => {
