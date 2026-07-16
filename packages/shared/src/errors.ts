@@ -105,10 +105,10 @@ export function isAuthFailureCode(code: string | undefined): boolean {
  *
  *  1. `isAuthFailureCode(code)` — the auth middleware told us the
  *     identity is dead (AUTH_MISSING / AUTH_INVALID).
- *  2. `hasJsonBody` is true and the code is missing/empty — a bare
- *     401 from a Valet response (DO or handler) that shaped its body
- *     as JSON but didn't set a `code` field. Still evidence the app
- *     itself answered.
+ *  2. `hasJsonBody` is true and the code is missing/empty (undefined,
+ *     null, or ''): a bare 401 from a Valet response that shaped its
+ *     body as JSON but didn't set a `code` field. `JSON.parse` can
+ *     produce a literal `null` on the field, so we accept that too.
  *
  * If the response body was non-JSON (`hasJsonBody === false`), we
  * assume an intermediary served the 401 and leave auth state alone
@@ -118,12 +118,13 @@ export function isAuthFailureCode(code: string | undefined): boolean {
  * clear — that's a route decision, not an identity failure.
  */
 export function shouldClearAuthOn401(opts: {
-  code: string | undefined;
+  code: string | null | undefined;
   hasJsonBody: boolean;
 }): boolean {
   const { code, hasJsonBody } = opts;
-  if (isAuthFailureCode(code)) return true;
-  if (hasJsonBody && (code === undefined || code === '')) return true;
+  if (typeof code === 'string' && isAuthFailureCode(code)) return true;
+  // Loose equality intentionally matches both null and undefined.
+  if (hasJsonBody && (code == null || code === '')) return true;
   return false;
 }
 

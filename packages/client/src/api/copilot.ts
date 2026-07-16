@@ -9,7 +9,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { api, readErrorBody } from './client';
+import { api, readErrorBody, authClearSignalFrom } from './client';
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
 import { shouldClearAuthOn401 } from '@valet/shared';
@@ -194,7 +194,7 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
       });
 
       if (!resp.ok) {
-        type ErrBody = { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> }; code?: string };
+        type ErrBody = { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> } };
         const { text: body, parsed: parsedRaw } = await readErrorBody(resp);
         const parsed = (parsedRaw ?? {}) as ErrBody;
 
@@ -203,29 +203,19 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
         // Non-JSON 401 bodies (CF WAF interstitial, proxy text/plain)
         // are attributed to an intermediary and left alone. Route-level
         // 401s (workflow ownership check with an explicit UNAUTHORIZED
-        // code) surface as ordinary errors. Before navigating we drop
-        // the optimistic empty assistant bubble and reset status so, if
-        // the /login navigation is racy or the user comes back, the
-        // hook is not wedged in `status === 'streaming'` (which line
-        // 161 uses to early-return from send()). We keep the user's
-        // just-sent prompt in the transcript and set an error message
-        // so the UI isn't silent if navigation races.
+        // code) surface as ordinary errors. We throw after clearing
+        // auth so send() rejects consistently with every other error
+        // path — callers that `await send(...)` before firing follow-up
+        // work must not see a silent resolution on auth failure. The
+        // outer catch handles the shared cleanup (drop the empty
+        // assistant bubble, set status/error).
         if (
           resp.status === 401 &&
-          shouldClearAuthOn401({ code: parsed.code, hasJsonBody: parsedRaw !== null })
+          shouldClearAuthOn401(authClearSignalFrom(parsedRaw))
         ) {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === 'assistant' && last.parts.length === 0) {
-              return prev.slice(0, -1);
-            }
-            return prev;
-          });
-          setStatus('error');
-          setError('Your session has expired — please sign in again.');
           useAuthStore.getState().clearAuth();
           void router.navigate({ to: '/login' });
-          return;
+          throw new Error('Your session has expired — please sign in again.');
         }
 
         let friendly = body || `HTTP ${resp.status}`;

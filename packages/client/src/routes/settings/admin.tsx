@@ -1996,25 +1996,32 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
     setRowAction(next);
   }, [removeUser, revokeSessions]);
 
+  // Mirror rowAction into a ref so the auto-clear timer below can read
+  // the freshest value without depending on it — a functional setState
+  // updater is not allowed to have side effects (React runs it twice
+  // under StrictMode/concurrent), and resetRowAction fires two mutation
+  // .reset() calls plus its own setState.
+  const rowActionRef = React.useRef<RowAction>(rowAction);
+  React.useEffect(() => {
+    rowActionRef.current = rowAction;
+  }, [rowAction]);
+
   // The 'revoked' state is a transient success indicator — auto-clear
   // it after a few seconds so the row returns to its idle state and
   // admins can re-revoke the same user during an incident without
   // having to click on another row first.
   React.useEffect(() => {
     if (rowAction?.kind !== 'revoked') return;
-    const userId = rowAction.userId;
+    const armedUserId = rowAction.userId;
     const t = setTimeout(() => {
-      // Only clear if the same 'revoked' row is still active — the user
-      // may have moved on to another row before the timer fired.
-      setRowAction((current) => {
-        if (current?.kind === 'revoked' && current.userId === userId) {
-          // Route through resetRowAction so mutation .reset() fires; the
-          // functional setter above is a no-op returning `current` since
-          // resetRowAction updates the state itself.
-          resetRowAction(null);
-        }
-        return current;
-      });
+      // Only clear if the same 'revoked' row is still active — the
+      // user may have moved on to another row between fire and
+      // callback. Read fresh state via the ref rather than closing
+      // over the stale rowAction snapshot.
+      const current = rowActionRef.current;
+      if (current?.kind === 'revoked' && current.userId === armedUserId) {
+        resetRowAction(null);
+      }
     }, 4000);
     return () => clearTimeout(t);
   }, [rowAction, resetRowAction]);

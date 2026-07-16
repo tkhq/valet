@@ -206,22 +206,28 @@ export async function listUsers(db: AppDb): Promise<User[]> {
 }
 
 export async function deleteUser(db: AppDb, userId: string): Promise<void> {
-  // Clean up credentials FIRST. After migration 0066 the `credentials`
-  // table no longer cascade-deletes with `users`, so if we deleted the
-  // user first and then failed here we'd leave orphan encrypted-secret
-  // rows pointing at a nonexistent owner with no way to recover them.
-  // Doing credentials first means: if this step fails the user row is
-  // still intact and the admin can safely retry `DELETE /users/:id`.
-  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
-  // Now delete the users row. The `auth_sessions` and `api_tokens` FK
-  // cascades atomically revoke live access as part of this statement,
-  // so a crash after this point still leaves the user fully de-authed.
+  // Ordering here is deliberate: security > referential integrity.
+  //
+  // The primary use case for deleteUser is an admin revoking a compromised
+  // account during an incident. The worst possible outcome is a user that
+  // has been "deleted" but still holds a valid auth_session or api_token.
+  // We therefore drop the users row FIRST — the ON DELETE CASCADE on
+  // `auth_sessions` and `api_tokens` revokes all live access atomically
+  // as part of this single statement, making de-auth the very first
+  // observable side effect.
   await db.delete(users).where(eq(users.id, userId));
-  // Idempotent belt-and-suspenders: keeps the security-sensitive intent
-  // visible in code and defends against a future migration silently
-  // dropping the ON DELETE CASCADE on these tables.
+  // Idempotent belt-and-suspenders in case a future migration silently
+  // drops the ON DELETE CASCADE on these tables. No-ops after the cascade.
   await deleteUserAuthSessions(db, userId);
   await deleteUserApiTokens(db, userId);
+  // Credentials cleanup runs LAST. Migration 0066 removed the cascade on
+  // `credentials` so that an admin can review an ex-user's stored secrets
+  // before purging them; the tradeoff is that if this step fails we leave
+  // orphan credentials rows (encrypted blobs with no valid owner — largely
+  // inert since there's no user id to authenticate against). Recovery is
+  // straightforward: re-insert a row into `users` with the same id and
+  // re-run `DELETE /users/:id` to clean them up.
+  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
 }
 
 // ─── DO Helpers ──────────────────────────────────────────────────────────────

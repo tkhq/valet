@@ -140,6 +140,8 @@ describe('shouldClearAuthOn401', () => {
     // as identity failure and force re-auth.
     expect(shouldClearAuthOn401({ code: undefined, hasJsonBody: true })).toBe(true);
     expect(shouldClearAuthOn401({ code: '', hasJsonBody: true })).toBe(true);
+    // JSON.parse can yield a literal null on the `code` field.
+    expect(shouldClearAuthOn401({ code: null, hasJsonBody: true })).toBe(true);
   });
 
   it('does NOT clear when the body was non-JSON (intermediary 401)', () => {

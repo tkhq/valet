@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { createTestDb } from '../../test-utils/db.js';
-import { users, authSessions, apiTokens } from '../schema/index.js';
+import { users, authSessions, apiTokens, credentials } from '../schema/index.js';
 import { deleteUser } from './users.js';
 
 describe('deleteUser', () => {
@@ -60,5 +60,28 @@ describe('deleteUser', () => {
     // Unrelated user's rows are untouched.
     expect(db.select().from(authSessions).where(eq(authSessions.userId, 'u2')).all()).toHaveLength(1);
     expect(db.select().from(apiTokens).where(eq(apiTokens.userId, 'u2')).all()).toHaveLength(1);
+  });
+
+  it('credentials do NOT cascade when the owning users row is deleted', () => {
+    // Migration 0066 deliberately dropped the cascade on `credentials` so an
+    // admin can review a deleted user's encrypted secrets before purging.
+    // This test pins that intent: deleting the users row directly must
+    // leave the credentials row intact.
+    const { db, sqlite } = createTestDb();
+
+    db.insert(users).values({ id: 'u1', email: 'u1@example.com', role: 'member' }).run();
+
+    sqlite.exec(
+      "INSERT INTO credentials (id, owner_type, owner_id, provider, credential_type, encrypted_data) " +
+      "VALUES ('c-u1-a', 'user', 'u1', 'github', 'oauth2', 'ENCRYPTED_BLOB')",
+    );
+
+    // Sanity: the row exists before we delete the user.
+    expect(db.select().from(credentials).where(eq(credentials.ownerId, 'u1')).all()).toHaveLength(1);
+
+    sqlite.exec("DELETE FROM users WHERE id = 'u1'");
+
+    // Credentials row survives — no cascade.
+    expect(db.select().from(credentials).where(eq(credentials.ownerId, 'u1')).all()).toHaveLength(1);
   });
 });

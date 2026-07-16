@@ -35,7 +35,7 @@ export async function isEmailAllowed(
 
   // If a valid invite code is provided, always allow
   if (inviteCode) {
-    const invite = await db.getValidInviteByCode(appDb, inviteCode);
+    const invite = await db.getInviteByCode(appDb, inviteCode);
     if (invite) return true;
   }
 
@@ -62,7 +62,7 @@ export async function isEmailAllowed(
     }
 
     // Check for a valid invite by email
-    const invite = await db.getValidInviteByEmail(appDb, emailLower);
+    const invite = await db.getInviteByEmail(appDb, emailLower);
     if (invite) return true;
   } catch {
     // DB not available or table doesn't exist yet — fall through to env var

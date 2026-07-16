@@ -57,6 +57,22 @@ export async function readErrorBody(
   return { text, parsed: null };
 }
 
+/**
+ * Derive the inputs `shouldClearAuthOn401` needs from a parsed error
+ * body. Kept separate from `readErrorBody` so the reader stays a plain
+ * body parser — this helper is the single place that knows how to
+ * translate a parsed JSON body into an auth-clear signal, and both the
+ * REST client and the copilot streaming client call through it.
+ */
+export function authClearSignalFrom(
+  parsed: Record<string, unknown> | null,
+): { code: string | null | undefined; hasJsonBody: boolean } {
+  const rawCode = parsed?.code;
+  const code =
+    typeof rawCode === 'string' ? rawCode : rawCode === null ? null : undefined;
+  return { code, hasJsonBody: parsed !== null };
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -109,7 +125,7 @@ export async function apiClient<T>(
     // (route-level authorization denial) also does not clear.
     if (
       response.status === 401 &&
-      shouldClearAuthOn401({ code: errorData.code, hasJsonBody: parsed !== null })
+      shouldClearAuthOn401(authClearSignalFrom(parsed))
     ) {
       useAuthStore.getState().clearAuth();
       router.navigate({ to: '/login' });

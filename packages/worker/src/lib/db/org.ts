@@ -315,7 +315,7 @@ export async function createInvite(
 // SQLite's `datetime('now')` returns a space-separated string without
 // the trailing Z, which sorts inconsistently under BINARY collation on
 // the same UTC date — bind ISO-to-ISO instead.
-export async function findValidInviteRow(
+async function findValidInviteRow(
   db: AppDb,
   by: { code: string } | { email: string }
 ): Promise<typeof invites.$inferSelect | null> {
