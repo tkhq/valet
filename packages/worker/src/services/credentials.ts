@@ -78,6 +78,110 @@ function extractAccessToken(data: CredentialData): string | undefined {
   return data.access_token || data.api_key || data.bot_token || data.token;
 }
 
+/** Refreshes fire this long before the real expiry so a token can't die mid-request. */
+const EXPIRY_BUFFER_MS = 60_000;
+
+function isExpiringSoon(expiresAt: string | null | undefined): boolean {
+  if (!expiresAt) return false;
+  const ts = new Date(expiresAt).getTime();
+  if (Number.isNaN(ts)) return false;
+  return ts - Date.now() < EXPIRY_BUFFER_MS;
+}
+
+/**
+ * The credential type a provider's refreshable row is stored under. Every
+ * refresh path writes 'oauth2', and for GitHub that filter is load-bearing
+ * rather than cosmetic, so re-reads have to apply the same one `getCredential`
+ * does or they may match a different row than the one being refreshed.
+ */
+function credentialTypeFilter(provider: string): string | undefined {
+  return provider === 'github' ? 'oauth2' : undefined;
+}
+
+/**
+ * Pull an expiry out of whatever a provider's refresh handler returned.
+ * `IntegrationCredentials` is an untyped string bag, so providers report expiry
+ * either as an `expires_at` timestamp or an `expires_in` lifetime in seconds.
+ */
+function resolveRefreshedExpiry(creds: Record<string, string>): string | undefined {
+  if (creds.expires_at) {
+    const at = new Date(creds.expires_at);
+    if (!Number.isNaN(at.getTime())) return at.toISOString();
+  }
+  if (creds.expires_in) {
+    const seconds = Number(creds.expires_in);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return new Date(Date.now() + seconds * 1000).toISOString();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Re-read the stored credential and report whether somebody else has already
+ * rotated it away from the refresh token this caller set out to spend.
+ *
+ * GitHub and most MCP providers issue single-use refresh tokens, so two callers
+ * that read the same row end up racing to spend the same token: one wins and
+ * writes a fresh pair, and the other is told its token was already consumed.
+ * The loser must not read that as a broken connection, because the row it would
+ * report on — or delete — now holds the winner's working credential. Comparing
+ * what is stored against what we spent separates the two cases. A different
+ * token means somebody refreshed underneath us and their credential is the
+ * right answer to return; an unchanged token means nothing moved and the
+ * failure is real.
+ *
+ * Returns null when the caller should treat its own outcome as authoritative.
+ */
+async function readRotatedCredential(
+  env: Env,
+  ownerType: string,
+  ownerId: string,
+  provider: string,
+  refreshedFrom: string | undefined,
+): Promise<CredentialResult | null> {
+  if (!refreshedFrom) return null;
+
+  const db = getDb(env.DB);
+  const row = await credentialDb.getCredentialRow(
+    db,
+    ownerType,
+    ownerId,
+    provider,
+    credentialTypeFilter(provider),
+  );
+  if (!row) return null;
+
+  let data: CredentialData;
+  try {
+    data = await decryptCredentialData(row.encryptedData, env.ENCRYPTION_KEY);
+  } catch {
+    return null;
+  }
+
+  if (data.refresh_token === refreshedFrom) return null;
+
+  const accessToken = extractAccessToken(data);
+  if (!accessToken || isExpiringSoon(row.expiresAt)) return null;
+
+  return {
+    ok: true,
+    credential: {
+      accessToken,
+      refreshToken: data.refresh_token,
+      expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
+      scopes: row.scopes?.split(' ') ?? undefined,
+      credentialType: row.credentialType as CredentialType,
+      // Reported as refreshed because it is: the caller asked for a token newer
+      // than the one it held and is getting exactly that, just rotated by
+      // somebody else. The refresh cron counts this flag to tell a working
+      // sweep from a failing one, so a race it benefits from must not read as
+      // a failure.
+      refreshed: true,
+    },
+  };
+}
+
 // ─── Google OAuth Refresh ───────────────────────────────────────────────────
 
 async function refreshGoogleToken(
@@ -208,8 +312,16 @@ async function refreshGitHubToken(
         refreshed: true,
       },
     };
-  } catch (err) {
-    // Refresh failed — delete credential row so the user is forced to reconnect
+  } catch {
+    // Losing a race to spend a single-use refresh token lands here just like a
+    // genuinely dead connection does, so check which one happened before
+    // touching the row: deleting the winner's freshly written credential would
+    // wipe a working token and force a pointless reconnect.
+    const rotated = await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token);
+    if (rotated) return rotated;
+
+    // Nothing moved underneath us, so the refresh token really is spent and the
+    // row is unusable. Drop it and make the user reconnect.
     await credentialDb.deleteCredential(db, ownerType, ownerId, provider, 'oauth2');
     return {
       ok: false,
@@ -438,8 +550,13 @@ async function attemptRefresh(
       refresh_token: newCreds.refresh_token || data.refresh_token,
     };
 
+    // Providers report the new token's lifetime and this path used to discard
+    // it, which did more than lose a column: the upsert writes expires_at
+    // unconditionally, so every refresh nulled it. A credential with no expiry
+    // never looks like it is expiring, so nothing refreshed it again and the
+    // user was silently logged out once the token died for real.
+    const expiresAt = resolveRefreshedExpiry(newCreds);
     const encrypted = await encryptCredentialData(newData, env.ENCRYPTION_KEY);
-    const db = getDb(env.DB);
     await credentialDb.upsertCredential(db, {
       id: crypto.randomUUID(),
       ownerType,
@@ -447,6 +564,7 @@ async function attemptRefresh(
       provider,
       credentialType: 'oauth2',
       encryptedData: encrypted,
+      expiresAt,
     });
 
     return {
@@ -454,6 +572,7 @@ async function attemptRefresh(
       credential: {
         accessToken: newCreds.access_token,
         refreshToken: newCreds.refresh_token || data.refresh_token,
+        expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         credentialType: 'oauth2',
         refreshed: true,
       },
@@ -468,6 +587,64 @@ async function attemptRefresh(
       },
     };
   }
+}
+
+// ─── Single-Flight Refresh ──────────────────────────────────────────────────
+
+/**
+ * Refreshes currently running, keyed by owner and provider.
+ *
+ * Resolving a credential is a read, an expiry check, a refresh and a write, and
+ * nothing about that sequence is atomic. Concurrent callers for the same user
+ * therefore read the same row and each try to spend the same single-use refresh
+ * token, which leaves the losers holding an error about a token the winner
+ * already replaced. Coalescing the refreshes means the second caller waits for
+ * the first instead of racing it, and both get the winner's token.
+ *
+ * A Worker isolate is not the whole world, so this map is a large reduction in
+ * the race rather than a lock: two isolates can still refresh the same
+ * credential at once. That residual race is what `readRotatedCredential` is
+ * for, and correctness rests on it rather than on this map.
+ */
+const inflightRefreshes = new Map<string, Promise<CredentialResult>>();
+
+/**
+ * Refresh a credential, joining an in-flight refresh for the same owner and
+ * provider when one exists.
+ */
+async function refreshCredential(
+  env: Env,
+  ownerType: string,
+  ownerId: string,
+  provider: string,
+  data: CredentialData,
+): Promise<CredentialResult> {
+  const key = `${ownerType}:${ownerId}:${provider}`;
+  const inflight = inflightRefreshes.get(key);
+  if (inflight) return inflight;
+
+  const attempt = (async (): Promise<CredentialResult> => {
+    // Double-checked read: the credential may have been refreshed between the
+    // caller's read and this point — by a holder that has already finished, or
+    // by another isolate entirely. Spending our copy of the refresh token now
+    // would invalidate the token that replaced it, so return theirs instead.
+    const alreadyRotated = await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token);
+    if (alreadyRotated) return alreadyRotated;
+
+    const result = await attemptRefresh(env, ownerType, ownerId, provider, data);
+    if (result.ok) return result;
+
+    // The refresh failed, which is also what losing a cross-isolate race looks
+    // like from here. If the stored token has moved on, the credential is fine
+    // and only this attempt failed.
+    return (await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token)) ?? result;
+  })();
+
+  const tracked = attempt.finally(() => {
+    inflightRefreshes.delete(key);
+  });
+  inflightRefreshes.set(key, tracked);
+  return tracked;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -568,12 +745,12 @@ async function getCredentialInner(
     };
   }
 
-  const expiresSoon = row.expiresAt && new Date(row.expiresAt).getTime() - Date.now() < 60_000;
+  const expiresSoon = isExpiringSoon(row.expiresAt);
 
   // Force refresh if requested (e.g. after a 401 from the API indicates the token is invalid)
   if (options?.forceRefresh) {
     if (data.refresh_token) {
-      const refreshed = await attemptRefresh(env, ownerType, ownerId, provider, data);
+      const refreshed = await refreshCredential(env, ownerType, ownerId, provider, data);
       if (refreshed.ok) return refreshed;
     }
     return {
@@ -589,9 +766,7 @@ async function getCredentialInner(
   // Check expiration (with 60-second buffer)
   if (expiresSoon) {
     if (data.refresh_token) {
-      const refreshed = await attemptRefresh(env, ownerType, ownerId, provider, data);
-      if (refreshed.ok) return refreshed;
-      return refreshed;
+      return refreshCredential(env, ownerType, ownerId, provider, data);
     }
     return {
       ok: false,

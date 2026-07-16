@@ -21,6 +21,10 @@ vi.mock('./custom-mcp-connectors.js', () => ({
   getCustomMcpOAuthConnector: vi.fn(),
 }));
 
+vi.mock('./github-app.js', () => ({
+  loadGitHubApp: vi.fn(),
+}));
+
 // Mock the crypto layer
 vi.mock('../lib/crypto.js', () => ({
   encryptStringPBKDF2: vi.fn(),
@@ -38,6 +42,7 @@ vi.mock('../lib/drizzle.js', () => ({
 
 import * as credentialDb from '../lib/db/credentials.js';
 import * as mcpOAuthDb from '../lib/db/mcp-oauth.js';
+import { loadGitHubApp } from './github-app.js';
 import { getCustomMcpOAuthConfig, getCustomMcpOAuthConnector } from './custom-mcp-connectors.js';
 import { encryptStringPBKDF2, decryptStringPBKDF2 } from '../lib/crypto.js';
 import {
@@ -59,6 +64,7 @@ const mockDb = credentialDb as unknown as {
   getExpiringCredentials: ReturnType<typeof vi.fn>;
 };
 const mockGetMcpOAuthClient = vi.mocked(mcpOAuthDb.getMcpOAuthClient);
+const mockLoadGitHubApp = loadGitHubApp as ReturnType<typeof vi.fn>;
 const mockEncrypt = encryptStringPBKDF2 as ReturnType<typeof vi.fn>;
 const mockDecrypt = decryptStringPBKDF2 as ReturnType<typeof vi.fn>;
 const mockGetCustomMcpOAuthConfig = getCustomMcpOAuthConfig as ReturnType<typeof vi.fn>;
@@ -510,6 +516,158 @@ describe('getCredential', () => {
       },
     });
     expect(mockGetCustomMcpOAuthConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('getCredential — concurrent refresh', () => {
+  const EXPIRED = new Date(Date.now() - 60_000).toISOString();
+  const NOT_EXPIRING = new Date(Date.now() + 3_600_000).toISOString();
+
+  /** A stored github row; `encryptedData` selects which payload `decrypt` hands back. */
+  function githubRow(encryptedData: string, expiresAt: string) {
+    return {
+      id: 'cred-1',
+      ownerType: 'user',
+      ownerId: 'user-1',
+      provider: 'github',
+      credentialType: 'oauth2',
+      encryptedData,
+      metadata: null,
+      scopes: null,
+      expiresAt,
+      lastFailureReason: null,
+      lastFailureAt: null,
+      createdAt: '2025-01-01T00:00:00Z',
+      updatedAt: '2025-01-01T00:00:00Z',
+    };
+  }
+
+  // 'stale' is what a caller reads before the race; 'winner' is what the caller
+  // that spent the single-use refresh token first left behind.
+  function decryptByBlob(blob: string) {
+    if (blob === 'stale-blob') {
+      return JSON.stringify({ access_token: 'stale-access', refresh_token: 'stale-refresh' });
+    }
+    if (blob === 'winner-blob') {
+      return JSON.stringify({ access_token: 'winner-access', refresh_token: 'winner-refresh' });
+    }
+    throw new Error(`unexpected blob: ${blob}`);
+  }
+
+  beforeEach(() => {
+    mockDecrypt.mockImplementation(async (blob: string) => decryptByBlob(blob));
+    mockEncrypt.mockResolvedValue('rotated-blob');
+  });
+
+  it('spends a single-use refresh token once when callers race for the same credential', async () => {
+    mockDb.getCredentialRow.mockResolvedValue(githubRow('stale-blob', EXPIRED));
+    const refreshToken = vi.fn().mockResolvedValue({
+      authentication: { token: 'rotated-access', refreshToken: 'rotated-refresh', expiresAt: NOT_EXPIRING },
+    });
+    mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
+
+    const results = await Promise.all([
+      getCredential(fakeEnv, 'user', 'user-1', 'github'),
+      getCredential(fakeEnv, 'user', 'user-1', 'github'),
+    ]);
+
+    // The second caller joins the in-flight refresh rather than spending the
+    // same token again, so GitHub sees one refresh and D1 sees one write.
+    expect(refreshToken).toHaveBeenCalledTimes(1);
+    expect(mockDb.upsertCredential).toHaveBeenCalledTimes(1);
+    expect(mockDb.deleteCredential).not.toHaveBeenCalled();
+    for (const result of results) {
+      expect(result).toMatchObject({
+        ok: true,
+        credential: { accessToken: 'rotated-access', refreshed: true },
+      });
+    }
+  });
+
+  it('returns the credential another holder refreshed instead of spending a stale token', async () => {
+    mockDb.getCredentialRow
+      .mockResolvedValueOnce(githubRow('stale-blob', EXPIRED))
+      .mockResolvedValue(githubRow('winner-blob', NOT_EXPIRING));
+    const refreshToken = vi.fn();
+    mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
+
+    const result = await getCredential(fakeEnv, 'user', 'user-1', 'github');
+
+    // The re-read inside the lock shows the token already moved on, so there is
+    // nothing left to refresh and spending our copy would only invalidate the
+    // token that replaced it.
+    expect(refreshToken).not.toHaveBeenCalled();
+    expect(mockDb.upsertCredential).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      ok: true,
+      credential: { accessToken: 'winner-access', refreshToken: 'winner-refresh', refreshed: true },
+    });
+  });
+
+  it('does not delete the winner credential when a losing racer is told its token was consumed', async () => {
+    mockDb.getCredentialRow
+      // The caller's read, then the re-read inside the lock: nothing has
+      // rotated yet, so this caller goes on to spend its token and loses.
+      .mockResolvedValueOnce(githubRow('stale-blob', EXPIRED))
+      .mockResolvedValueOnce(githubRow('stale-blob', EXPIRED))
+      // By the time the failure comes back, the winner has written its pair.
+      .mockResolvedValue(githubRow('winner-blob', NOT_EXPIRING));
+    const refreshToken = vi.fn().mockRejectedValue(new Error('refresh token already consumed'));
+    mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
+
+    const result = await getCredential(fakeEnv, 'user', 'user-1', 'github');
+
+    expect(mockDb.deleteCredential).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      ok: true,
+      credential: { accessToken: 'winner-access', refreshed: true },
+    });
+  });
+
+  it('deletes the credential when a refresh fails and nothing rotated underneath it', async () => {
+    mockDb.getCredentialRow.mockResolvedValue(githubRow('stale-blob', EXPIRED));
+    const refreshToken = vi.fn().mockRejectedValue(new Error('bad credentials'));
+    mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
+
+    const result = await getCredential(fakeEnv, 'user', 'user-1', 'github');
+
+    expect(mockDb.deleteCredential).toHaveBeenCalledWith(fakeDrizzleDb, 'user', 'user-1', 'github', 'oauth2');
+    expect(result).toMatchObject({ ok: false, error: { reason: 'refresh_failed' } });
+  });
+
+  it('keeps the provider-reported expiry when refreshing through the generic path', async () => {
+    mockDb.getCredentialRow.mockResolvedValue({
+      id: 'cred-1',
+      ownerType: 'user',
+      ownerId: 'user-1',
+      provider: 'google_workspace',
+      credentialType: 'oauth2',
+      encryptedData: 'stale-blob',
+      metadata: null,
+      scopes: null,
+      expiresAt: EXPIRED,
+      lastFailureReason: null,
+      lastFailureAt: null,
+      createdAt: '2025-01-01T00:00:00Z',
+      updatedAt: '2025-01-01T00:00:00Z',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      access_token: 'new-access',
+      expires_in: 3600,
+      token_type: 'Bearer',
+    })));
+
+    const env = { ...fakeEnv, GOOGLE_CLIENT_ID: 'client-id', GOOGLE_CLIENT_SECRET: 'client-secret' } as Env;
+    const result = await getCredential(env, 'user', 'user-1', 'google_workspace');
+
+    // The upsert writes expires_at unconditionally, so an omitted expiry does
+    // not merely go unrecorded — it nulls the column and leaves a credential
+    // that never looks due for refresh again.
+    const written = mockDb.upsertCredential.mock.calls[0][1] as { expiresAt?: string };
+    expect(written.expiresAt).toBeTruthy();
+    expect(new Date(written.expiresAt as string).getTime()).toBeGreaterThan(Date.now());
+    expect(result).toMatchObject({ ok: true, credential: { accessToken: 'new-access', refreshed: true } });
+    if (result.ok) expect(result.credential.expiresAt).toBeInstanceOf(Date);
   });
 });
 

@@ -4,6 +4,8 @@ import * as db from './db.js';
 import type { AppDb } from './drizzle.js';
 import { decryptString } from './crypto.js';
 import { getCredential } from '../services/credentials.js';
+import { getServiceMetadata } from './db/service-configs.js';
+import type { GitHubServiceMetadata } from '../services/github-config.js';
 import { repoProviderRegistry, stripProviderSuffix } from '../repos/registry.js';
 import { assembleLlmProviderEnv } from './llm/provider-env.js';
 
@@ -304,7 +306,23 @@ export async function assembleRepoEnv(
   // 3. No user OAuth credential — try installation token fallback.
   // Org-level GitHub App installations can mint short-lived (1-hour) tokens
   // scoped to the installation's configured permissions.
-  if (credentialProvider === 'github' && repoOwner) {
+  //
+  // An installation belongs to the org, not to whoever is asking. Selecting one
+  // on the repo owner parsed out of the URL is therefore not an authorization
+  // check: any user could name a repo under a login the app happens to be
+  // installed on and be handed a push-capable token for it. Minting is gated on
+  // the same org setting the GitHub credential resolver enforces
+  // (integrations/resolvers/github.ts), so both paths hand out installation
+  // access under one policy instead of two. Absent metadata denies, matching
+  // the resolver.
+  const anonymousAccessAllowed =
+    credentialProvider === 'github' &&
+    repoOwner !== undefined &&
+    (await getServiceMetadata<GitHubServiceMetadata>(appDb, 'github')
+      .then((meta) => meta?.allowAnonymousGitHubAccess === true)
+      .catch(() => false));
+
+  if (anonymousAccessAllowed && repoOwner) {
     try {
       const { loadGitHubApp, mintInstallationToken } = await import('../services/github-app.js');
       const { getGithubInstallationByLogin } = await import('./db/github-installations.js');
