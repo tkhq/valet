@@ -106,6 +106,11 @@ export function buildSandboxManifest(
     // container's PID 1 alive.
     command: ["sh", "-c", "tail -f /dev/null"],
     volumeMounts: [{ name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH }],
+    // See SandboxContainer.workingDir's docblock (types.ts) — the k8s
+    // pods/exec API has no per-call --workdir, so this container-level
+    // default is what makes relative-path exec/file ops land on the
+    // persistent /workspace volume instead of the ephemeral rootfs.
+    workingDir: WORKSPACE_MOUNT_PATH,
   };
 
   if (opts.env && Object.keys(opts.env).length > 0) {

@@ -96,3 +96,14 @@ export {
   pollCommand,
   pollJobInPod,
 } from "./jobs.js";
+
+export {
+  KubernetesSandbox,
+  KubernetesSandboxProvider,
+  assertSafeExecId,
+  looksSignalKilled,
+  podLivenessApiAdapter,
+  type KubernetesSandboxDeps,
+  type KubernetesSandboxProviderDeps,
+  type PodLivenessApi,
+} from "./provider.js";

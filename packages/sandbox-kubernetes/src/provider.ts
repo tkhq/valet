@@ -1,0 +1,501 @@
+/**
+ * `SandboxProvider`/`Sandbox` assembly (Task 5) — wires Tasks 1/2/4 (manifest
+ * construction, CRD lifecycle, exec/files/job-mode) into the engine's
+ * contract (`@valet/engine`'s `Sandbox`/`SandboxProvider`, see
+ * `packages/engine/src/types.ts`).
+ *
+ * ── Teardown semantics (spec decision 5, NON-NEGOTIABLE) ────────────────
+ * `create(opts)` is upsert-shaped: it calls `applySandbox`, which adopts an
+ * existing CR of the same name rather than erroring (the attachment layer's
+ * failure-recovery path calls `provider.create()` again with the same
+ * opts). `restore(id)` GETs the CR and never creates. `destroy(id)` is
+ * TERMINAL (deletes the CR, cascading to pod+PVC) and is the only method
+ * that may delete a CR. The conformance suite's `recreate` callback
+ * (below, in test/conformance.cluster.test.ts) is pod-recreate under the
+ * SAME retained CR — never destroy+create — proving workspace survival the
+ * way decision 5 mandates.
+ *
+ * ── Session identity → CR name ───────────────────────────────────────────
+ * `SandboxCreateOpts` has no dedicated `sessionId` field (checked: neither
+ * the engine's attachment layer nor `packages/api/src/engine/host.ts`'s
+ * `provider.create()` call sites carry one — see host.ts's
+ * `sandbox: { workspace, image, env }` construction). `opts.workspace` is
+ * the one field every call site already populates with a
+ * session-unique value (a per-session directory path, e.g.
+ * `~/.valet/orchestrator/{principal}` or a per-session workspace dir) —
+ * exactly mirroring how `DockerSandboxProvider.create` requires
+ * `opts.workspace` as its own identity/addressing input (there: a host
+ * bind-mount path; here: the string fed to `sandboxCrName` for a
+ * deterministic CR name). Required, just like docker's.
+ *
+ * ── Liveness / SandboxUnavailableError translation ───────────────────────
+ * This module never imports or constructs `SandboxUnavailableError` itself
+ * — neither does `sandbox-docker`. Both providers throw a plain `Error`
+ * whose message matches the engine's `CONTAINER_DEATH_PATTERN`
+ * (`/No such container|is not running|Connection refused|socket hang up/i`,
+ * `packages/engine/src/sandbox/policy.ts`); `PolicySandbox.dispatch` is the
+ * ONE place that classifies that pattern match and wraps it as
+ * `SandboxUnavailableError` before rethrowing. See `looksSignalKilled`/
+ * `translateDeath` below for the k8s-specific detection this mirrors from
+ * `packages/sandbox-docker/src/sandbox.ts`'s `looksSignalKilled`/
+ * `isContainerAlive` pair — empirically verified against the live cluster
+ * (see that pair's docblock) that `kubectl delete pod` mid-`exec` does NOT
+ * fail the `pods/exec` WebSocket transport; the apiserver instead reports
+ * the container's SIGKILL as an ordinary exit-137 status on the SAME
+ * status channel a real in-container `kill -9` would use — ambiguous
+ * exactly like docker's own exec-mid-`docker rm -f` case, so the same
+ * "signal-shaped exit code → confirm via a liveness probe" disambiguation
+ * applies.
+ */
+import type * as k8s from "@kubernetes/client-node";
+import { CONTAINER_DEATH_PATTERN } from "@valet/engine";
+import type {
+  ExecJobHandle,
+  ExecOpts,
+  ExecResult,
+  JobPoll,
+  Sandbox,
+  SandboxCapabilities,
+  SandboxCreateOpts,
+  SandboxProvider,
+  SandboxStatus,
+} from "@valet/engine";
+import { execInPod, type ExecDeps, type PodExecApi } from "./exec.js";
+import {
+  mkdirInPod,
+  PodFileOpError,
+  readBinaryInPod,
+  readFileInPod,
+  readdirInPod,
+  rmInPod,
+  statInPod,
+  writeBinaryInPod,
+  writeFileInPod,
+} from "./files.js";
+import { cancelJobInPod, execJobInPod, pollJobInPod } from "./jobs.js";
+import {
+  applySandbox,
+  deleteSandbox,
+  getSandbox,
+  resolvePodName,
+  sandboxStatus,
+  type SandboxCustomObjectsApi,
+  type SandboxPodsApi,
+} from "./lifecycle.js";
+import { buildSandboxManifest, SANDBOX_CONTAINER_NAME, sandboxCrName } from "./manifest.js";
+import type { K8sProviderConfig } from "./types.js";
+
+/** How long `create()`/`restore()` polls for the CR to reach `Ready` before
+ * giving up. Generous relative to Task 3's empirical ~15s pod-recreate
+ * observation, since a from-scratch `create` also pays image-pull latency
+ * on top of that. Mirrors the engine's own `SANDBOX_READY_TIMEOUT_MS`
+ * default (60s, `packages/engine/src/sandbox/policy.ts`) rather than
+ * importing it, since this module has no dependency on the policy layer. */
+const READY_TIMEOUT_MS = 60_000;
+const READY_POLL_INTERVAL_MS = 1_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── Pod liveness (mirrors sandbox-docker's `isContainerAlive`) ─────────
+
+/** Minimal pod-liveness query — the k8s analog of docker's
+ * `docker inspect -f '{{.State.Running}}'`. Deliberately NOT folded into
+ * `lifecycle.ts`'s `SandboxPodsApi` (that interface is scoped to
+ * `resolvePodName`'s ownerReference-scan fallback, a CRD-adjacent concern);
+ * this is plain `CoreV1Api` pod-status polling, the same layer
+ * `sandbox-docker`'s liveness check lives at (directly in `sandbox.ts`, not
+ * a separate lifecycle module).
+ *
+ * Returns `metadata.uid`, not `status.phase` — empirically (live-cluster
+ * probe, see provider.ts's death-detection docblock above), a Kubernetes
+ * pod's `status.phase` stays `"Running"` throughout a `kubectl delete pod`
+ * (there is no distinct "Terminating" *phase* value — only a
+ * `metadata.deletionTimestamp`), AND the agent-sandbox controller
+ * reconciles a brand-new pod under the exact same NAME within seconds
+ * (Task 3's finding). A phase-only check can observe the *new* pod as
+ * "Running" moments after the *old* one died and wrongly conclude nothing
+ * happened. Comparing `uid` (immutable per pod object, changes on every
+ * recreate) against a baseline captured at dispatch time is the only
+ * reliable "is this still the pod I dispatched against" signal. */
+export interface PodLivenessApi {
+  /** Returns the pod's current `metadata.uid`, or `null` if the pod does
+   * not exist (a 404 from the API server). */
+  getPodUid(namespace: string, podName: string): Promise<string | null>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isNotFoundError(err: unknown): boolean {
+  return isRecord(err) && typeof err.code === "number" && err.code === 404;
+}
+
+/** Wraps a real `k8s.CoreV1Api` instance. */
+export function podLivenessApiAdapter(api: k8s.CoreV1Api): PodLivenessApi {
+  return {
+    async getPodUid(namespace, podName) {
+      try {
+        const pod = await api.readNamespacedPod({ name: podName, namespace });
+        return pod.metadata?.uid ?? null;
+      } catch (err) {
+        if (isNotFoundError(err)) return null;
+        throw err;
+      }
+    },
+  };
+}
+
+/**
+ * True when the failure looks like the process was killed by a signal
+ * (exit code `128 + signal`), the same narrow band `sandbox-docker`'s
+ * `looksSignalKilled` flags as worth an extra liveness round-trip before
+ * deciding it's ordinary command behavior vs. transport failure. Exported
+ * for unit testing.
+ */
+export function looksSignalKilled(exitCode: number): boolean {
+  return exitCode > 128 && exitCode <= 128 + 64;
+}
+
+/** Best-effort extraction of a trailing `"(exit N)"` marker from an error
+ * message (the shape both `PodFileOpError` and jobs.ts's kickoff-failure
+ * `Error` use). Returns `undefined` when no such marker is present. */
+function extractExitCodeFromMessage(message: string): number | undefined {
+  const match = /\(exit (\d+)\)/.exec(message);
+  return match ? Number(match[1]) : undefined;
+}
+
+/** execId format guard (carried forward from Task 4 review): generated
+ * execIds are provider-owned counters, never user input, but this is
+ * asserted defensively anyway so a malformed id can never be interpolated
+ * into a `/tmp/valet-jobs/{execId}.*` path and traverse out of that
+ * directory (no `/`, no `.`, no whitespace). Exported for unit testing. */
+const EXEC_ID_PATTERN = /^job-[0-9]+$/;
+
+export function assertSafeExecId(execId: string): void {
+  if (!EXEC_ID_PATTERN.test(execId)) {
+    throw new Error(`invalid execId ${JSON.stringify(execId)}: expected to match ${EXEC_ID_PATTERN}`);
+  }
+}
+
+/** Builds the transport-failure-shaped `Error` PolicySandbox's
+ * `CONTAINER_DEATH_PATTERN` match expects — "is not running" is one of the
+ * pattern's literal alternatives. */
+function podUnavailableError(sandboxId: string, detail: string): Error {
+  return new Error(`No such container: sandbox "${sandboxId}" is not running (${detail})`);
+}
+
+export interface KubernetesSandboxDeps {
+  objectsApi: SandboxCustomObjectsApi;
+  podsApi: SandboxPodsApi;
+  execApi: PodExecApi;
+  livenessApi: PodLivenessApi;
+  cfg: K8sProviderConfig;
+}
+
+/**
+ * `Sandbox` implementation over a single Sandbox CR's backing pod. Every
+ * operation re-resolves the pod name fresh (never caches it across calls —
+ * decision 5's exec-targeting note: the controller mints a fresh pod object
+ * after pod-level recovery, same name string but a new backing pod).
+ */
+export class KubernetesSandbox implements Sandbox {
+  readonly id: string;
+  private readonly deps: KubernetesSandboxDeps;
+  private nextJobId = 1;
+
+  constructor(deps: KubernetesSandboxDeps, id: string) {
+    this.deps = deps;
+    this.id = id;
+  }
+
+  private execDeps(): ExecDeps {
+    return { api: this.deps.execApi, namespace: this.deps.cfg.namespace, containerName: SANDBOX_CONTAINER_NAME };
+  }
+
+  private nextExecId(): string {
+    return `job-${this.nextJobId++}`;
+  }
+
+  /** Resolves the current backing pod name PLUS its `uid` baseline (the
+   * `uid` is captured here, at dispatch time, so a later signal-killed
+   * exit can tell "the pod I ran against was recreated/removed" apart from
+   * "a process inside the still-alive pod was killed" — see
+   * `PodLivenessApi`'s docblock for why `uid`, not `status.phase`). Throws
+   * a transport-failure-shaped Error (see `podUnavailableError`) when the
+   * CR is gone or has no backing pod yet/anymore. */
+  private async resolvePodContext(): Promise<{ podName: string; uid: string | null }> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.deps.cfg, this.id);
+    if (podName === null) {
+      throw podUnavailableError(this.id, "no backing pod");
+    }
+    const uid = await this.deps.livenessApi.getPodUid(this.deps.cfg.namespace, podName);
+    return { podName, uid };
+  }
+
+  /** True when the pod identified by `podName` is no longer the SAME pod
+   * object `dispatchUid` was captured from — either it's gone entirely, or
+   * a fresh pod (new uid) now answers to that name. A `null` `dispatchUid`
+   * (uid lookup itself raced the dispatch) never reports "died" — a
+   * missing baseline can't prove death, so this stays best-effort rather
+   * than a false positive. */
+  private async podDiedSince(podName: string, dispatchUid: string | null): Promise<boolean> {
+    if (dispatchUid === null) return false;
+    const currentUid = await this.deps.livenessApi.getPodUid(this.deps.cfg.namespace, podName);
+    return currentUid === null || currentUid !== dispatchUid;
+  }
+
+  /**
+   * Classifies a rejection from `op`: a message already matching
+   * `CONTAINER_DEATH_PATTERN` passes through unchanged (nothing further to
+   * do — PolicySandbox will catch it). A `PodFileOpError`/generic error
+   * whose (best-effort-extracted) exit code looks signal-killed is
+   * confirmed against `podDiedSince` before being translated — never
+   * trusted outright, matching docker's `looksSignalKilled` +
+   * `isContainerAlive` disambiguation (a legitimate in-pod `kill -9 $$`
+   * must NOT be misreported as sandbox death). Anything else rethrows
+   * unchanged (a genuine application-level failure, e.g. `PodFileOpError`
+   * for a missing file).
+   */
+  private async translateDeath(podName: string, dispatchUid: string | null, err: unknown): Promise<never> {
+    const error = err instanceof Error ? err : new Error(String(err));
+    if (CONTAINER_DEATH_PATTERN.test(error.message)) throw error;
+
+    // PodFileOpError carries its exit code as a typed field; jobs.ts's
+    // kickoff-failure Error ("execJob kickoff failed (exit N): ...", see
+    // ./jobs.ts's execJobInPod) embeds it in the message text only — the
+    // trailing "(exit N)" extraction covers that shape generically without
+    // requiring jobs.ts to grow its own typed error class.
+    const exitCode =
+      error instanceof PodFileOpError ? error.exitCode : extractExitCodeFromMessage(error.message);
+    if (exitCode === undefined || !looksSignalKilled(exitCode)) throw error;
+
+    const died = await this.podDiedSince(podName, dispatchUid);
+    if (!died) throw error;
+    throw podUnavailableError(this.id, `${error.message} — backing pod was recreated or removed`);
+  }
+
+  /** Resolve the pod (capturing its dispatch-time `uid`), run `op` against
+   * it, and translate any death signal (thrown OR — for callers that check
+   * the return value themselves, e.g. `exec()`'s `ExecResult.exitCode` —
+   * left to the caller via `checkExitForDeath`) into the transport-failure
+   * shape the attachment layer expects. */
+  private async withPodContext<T>(op: (ctx: { podName: string; uid: string | null }) => Promise<T>): Promise<T> {
+    const ctx = await this.resolvePodContext();
+    try {
+      return await op(ctx);
+    } catch (err) {
+      return this.translateDeath(ctx.podName, ctx.uid, err);
+    }
+  }
+
+  private async withPod<T>(op: (podName: string) => Promise<T>): Promise<T> {
+    return this.withPodContext((ctx) => op(ctx.podName));
+  }
+
+  /** Checks a resolved `ExecResult`/`JobPoll` exit code for a signal-killed
+   * shape and, if the backing pod has actually been recreated/removed
+   * since dispatch, throws the transport-failure error instead of letting
+   * a misleading "the command exited 137" result flow back as a normal
+   * outcome. No-op (returns) when the exit code isn't signal-shaped or the
+   * pod is unchanged. */
+  private async checkExitForDeath(podName: string, dispatchUid: string | null, exitCode: number | undefined): Promise<void> {
+    if (exitCode === undefined || !looksSignalKilled(exitCode)) return;
+    const died = await this.podDiedSince(podName, dispatchUid);
+    if (!died) return;
+    throw podUnavailableError(this.id, `exec exited ${exitCode} — backing pod was recreated or removed`);
+  }
+
+  async readFile(path: string): Promise<string> {
+    return this.withPod((pod) => readFileInPod(this.execDeps(), pod, path));
+  }
+
+  async readBinary(path: string): Promise<Uint8Array> {
+    return this.withPod((pod) => readBinaryInPod(this.execDeps(), pod, path));
+  }
+
+  async writeFile(path: string, content: string): Promise<void> {
+    return this.withPod((pod) => writeFileInPod(this.execDeps(), pod, path, content));
+  }
+
+  async writeBinary(path: string, data: Uint8Array): Promise<void> {
+    return this.withPod((pod) => writeBinaryInPod(this.execDeps(), pod, path, data));
+  }
+
+  async readdir(path: string): Promise<string[]> {
+    return this.withPod((pod) => readdirInPod(this.execDeps(), pod, path));
+  }
+
+  async stat(path: string): Promise<{ isFile: boolean; isDirectory: boolean; size: number }> {
+    return this.withPod((pod) => statInPod(this.execDeps(), pod, path));
+  }
+
+  async mkdir(path: string): Promise<void> {
+    return this.withPod((pod) => mkdirInPod(this.execDeps(), pod, path));
+  }
+
+  async rm(path: string, opts?: { recursive?: boolean }): Promise<void> {
+    return this.withPod((pod) => rmInPod(this.execDeps(), pod, path, opts));
+  }
+
+  async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
+    return this.withPodContext(async ({ podName, uid }) => {
+      const result = await execInPod(this.execDeps(), podName, command, opts);
+      if (!result.timedOut) await this.checkExitForDeath(podName, uid, result.exitCode);
+      return result;
+    });
+  }
+
+  // `snapshot` is intentionally NOT implemented — `capabilities().snapshot`
+  // is `"none"` (decision 5), and `Sandbox.snapshot` is optional precisely
+  // so a provider without the capability can omit it rather than fake a
+  // value or throw.
+
+  async tunnels(): Promise<Record<string, string>> {
+    return {};
+  }
+
+  async destroy(): Promise<void> {
+    // Intentionally a no-op: destroy semantics for a Sandbox CR are TERMINAL
+    // (decision 5) and live on the PROVIDER (`KubernetesSandboxProvider.destroy`),
+    // driven by the engine's `SandboxAttachment`/session-deletion path — not
+    // by the raw `Sandbox` handle. Recovery/re-provision paths
+    // (`reportFailure`) call `provider.destroy(sandbox.id)` only when a
+    // `Sandbox.destroy` method is ABSENT (see attachment.ts's `destroy()`);
+    // defining one here that actually deleted the CR would make ordinary
+    // epoch degradation destroy the workspace, which decision 5 forbids.
+  }
+
+  async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
+    const execId = this.nextExecId();
+    return this.withPod(async (pod) => {
+      const handle = await execJobInPod(this.execDeps(), pod, execId, command, opts);
+      return handle;
+    });
+  }
+
+  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+    assertSafeExecId(execId);
+    return this.withPodContext(async ({ podName, uid }) => {
+      const poll = await pollJobInPod(this.execDeps(), podName, execId, offset);
+      if (poll.status === "done") await this.checkExitForDeath(podName, uid, poll.exitCode);
+      return poll;
+    });
+  }
+
+  async cancelJob(execId: string): Promise<void> {
+    assertSafeExecId(execId);
+    return this.withPod((pod) => cancelJobInPod(this.execDeps(), pod, execId));
+  }
+}
+
+// ── Provider ─────────────────────────────────────────────────────────
+
+export interface KubernetesSandboxProviderDeps {
+  objectsApi: SandboxCustomObjectsApi;
+  podsApi: SandboxPodsApi;
+  execApi: PodExecApi;
+  livenessApi: PodLivenessApi;
+}
+
+export class KubernetesSandboxProvider implements SandboxProvider {
+  readonly backend = "kubernetes";
+  private readonly deps: KubernetesSandboxProviderDeps;
+  private readonly cfg: K8sProviderConfig;
+
+  constructor(deps: KubernetesSandboxProviderDeps, cfg: K8sProviderConfig) {
+    this.deps = deps;
+    this.cfg = cfg;
+  }
+
+  /** Spec decision 5's capabilities constant. `persistentWorkspace: true`
+   * is honest under these semantics because recovery/re-provision always
+   * rides `applySandbox`/pod-recreate under the retained CR — never
+   * destroy+create — so the workspace PVC survives every non-terminal
+   * failure path. */
+  capabilities(): SandboxCapabilities {
+    return {
+      snapshot: "none",
+      persistentWorkspace: true,
+      tunnels: false,
+      warmPool: false,
+      coldStartEstimateMs: 8000,
+    };
+  }
+
+  /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an
+   * existing CR of the same name rather than erroring, so the attachment
+   * layer's failure-recovery path (which calls `create()` again with the
+   * same opts after `reportFailure`) never fails on "already exists". */
+  async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    if (!opts.workspace) {
+      throw new Error(
+        "KubernetesSandboxProvider.create: opts.workspace is required " +
+          "(used as the session-identity input to the deterministic CR name — see provider.ts's module docblock).",
+      );
+    }
+    const name = sandboxCrName(opts.workspace);
+    const manifest = buildSandboxManifest(this.cfg, name, opts);
+    await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+    await this.waitReady(name);
+    return this.makeSandbox(name);
+  }
+
+  /** Re-asserts (GETs) the same CR name — never creates. The engine
+   * persists `sandboxId` (== the CR name) and calls this at boot; unlike
+   * `sandbox-docker`'s in-memory `Map` (which does not survive an api
+   * restart), this provider is cluster-backed and needs no local registry. */
+  async restore(id: string): Promise<Sandbox> {
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+    if (cr === null) {
+      throw new Error(`KubernetesSandboxProvider.restore: Sandbox CR "${id}" not found`);
+    }
+    return this.makeSandbox(id);
+  }
+
+  /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
+   * pod + PVC via the controller's owner references. Only the
+   * session-deletion path may call this. */
+  async destroy(id: string): Promise<void> {
+    await deleteSandbox(this.deps.objectsApi, this.cfg, id);
+  }
+
+  async status(id: string): Promise<SandboxStatus> {
+    return sandboxStatus(this.deps.objectsApi, this.cfg, id);
+  }
+
+  private makeSandbox(id: string): KubernetesSandbox {
+    return new KubernetesSandbox(
+      {
+        objectsApi: this.deps.objectsApi,
+        podsApi: this.deps.podsApi,
+        execApi: this.deps.execApi,
+        livenessApi: this.deps.livenessApi,
+        cfg: this.cfg,
+      },
+      id,
+    );
+  }
+
+  /** Polls `sandboxStatus` until `ready` (or `error`/timeout). The engine's
+   * `SandboxAttachment` treats a resolved `provider.create()` as
+   * immediately ready (it does not itself poll `status()` post-create — see
+   * `packages/engine/src/sandbox/attachment.ts`'s `doProvision`), so this
+   * provider must not return until the CR has actually reconciled. */
+  private async waitReady(name: string): Promise<void> {
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    for (;;) {
+      const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name);
+      if (status.state === "ready") return;
+      if (status.state === "error") {
+        throw new Error(`Sandbox CR "${name}" reported error: ${status.error ?? "unknown"}`);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${status.state})`);
+      }
+      await sleep(READY_POLL_INTERVAL_MS);
+    }
+  }
+}

@@ -80,6 +80,15 @@ export interface SandboxContainer {
   env?: EnvVar[];
   resources?: ResourceRequirements;
   volumeMounts?: VolumeMount[];
+  /** `corev1.Container.workingDir` — set to `WORKSPACE_MOUNT_PATH` by the
+   * manifest builder so relative paths in `exec`/file ops resolve against
+   * the persistent `/workspace` volume by default (the k8s `pods/exec` API
+   * has no per-call `--workdir` the way `docker exec` does; without this,
+   * `exec`'s default working directory is the container's ephemeral
+   * rootfs, and any relative-path write silently lands off the PVC and is
+   * lost on pod recreate — caught live by the conformance suite's
+   * "workspace survives destroy + recreate" case). */
+  workingDir?: string;
 }
 
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */

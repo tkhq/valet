@@ -30,11 +30,24 @@ import { execInPod, shQuote, type ExecDeps } from "./exec.js";
 /** Directory listing errors (`ls`/`test` non-zero), stat probe failures,
  * and any other non-zero exec result from a file op surface as this —
  * consistent with the docker provider surfacing node:fs's own rejections
- * unchanged (no bespoke error type there either). */
+ * unchanged (no bespoke error type there either).
+ *
+ * `exitCode` is exposed publicly (not just embedded in the message text) so
+ * `provider.ts`'s death-detection can distinguish a genuine application-level
+ * failure (e.g. exit 2, "no such file") from a signal-shaped exit (137, a
+ * `SIGKILL`) worth confirming against pod liveness before deciding whether
+ * to translate this into a transport-failure the attachment layer degrades
+ * on — mirrors sandbox-docker's `looksSignalKilled` heuristic (see
+ * ./provider.ts), just triggered off this error's exit code instead of a
+ * raw `ExecResult`.
+ */
 export class PodFileOpError extends Error {
+  readonly exitCode: number;
+
   constructor(op: string, path: string, exitCode: number, stderr: string) {
     super(`${op} ${path} failed (exit ${exitCode}): ${stderr.trim() || "<no stderr>"}`);
     this.name = "PodFileOpError";
+    this.exitCode = exitCode;
   }
 }
 
