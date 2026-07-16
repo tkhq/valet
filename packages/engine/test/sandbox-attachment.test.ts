@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   SandboxAttachment,
   PolicySandbox,
+  SandboxStartupError,
   WorkspaceProvisioningError,
   SandboxSupersededError,
   SandboxUnavailableError,
@@ -172,6 +173,48 @@ describe("SandboxAttachment", () => {
     const elapsed = Date.now() - start;
     expect(elapsed).toBeLessThan(400);
     expect(attachment.state).toBe("provisioning");
+  });
+
+  it("4b. terminal startup failure: create() rejects with SandboxStartupError -> pending ensureReady waiters are rejected with it immediately (fast fail, not a generic timeout)", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 60_000 });
+    const d = provider.nextDeferred();
+
+    const startupErr = new SandboxStartupError("sess-1", "image pull failed (ImagePullBackOff): valet-sandbox:dev");
+    const start = Date.now();
+    const opPromise = wrapper.readFile("/x.txt");
+    setTimeout(() => d.reject(startupErr), 20);
+
+    await expect(opPromise).rejects.toBe(startupErr);
+    const elapsed = Date.now() - start;
+    // Must resolve on the create() rejection itself, not the (deliberately
+    // huge, 60s) readyTimeoutMs — proves the fast-fail path, not the
+    // generic-timeout path.
+    expect(elapsed).toBeLessThan(1000);
+    expect(attachment.state).toBe("error");
+  });
+
+  it("4c. non-terminal create() failure (plain Error) keeps the swallow behavior: waiter is not force-rejected, it hits its OWN ensureReady timeout instead (pins docker/local semantics unchanged)", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 100 });
+    const d = provider.nextDeferred();
+
+    const start = Date.now();
+    const opPromise = wrapper.readFile("/x.txt");
+    // A generic transient failure (e.g. docker/local's plain Error) rejects
+    // create() almost immediately...
+    setTimeout(() => d.reject(new Error("docker run failed (1): some transient error")), 10);
+
+    // ...but the waiter must NOT see that rejection directly — it should
+    // still be waiting until its own 100ms ensureReady timeout fires with
+    // WorkspaceProvisioningError, exactly like case 4's never-resolving
+    // scenario.
+    await expect(opPromise).rejects.toBeInstanceOf(WorkspaceProvisioningError);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(90);
+    expect(attachment.state).toBe("error");
   });
 
   it("5. degradation + re-provision: transport-death exec error triggers reprovision to epoch 2", async () => {

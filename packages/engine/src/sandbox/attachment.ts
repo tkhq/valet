@@ -1,5 +1,5 @@
 import type { Sandbox, SandboxCreateOpts, SandboxProvider } from "../types.js";
-import { SandboxUnavailableError, WorkspaceProvisioningError } from "../errors.js";
+import { SandboxStartupError, SandboxUnavailableError, WorkspaceProvisioningError } from "../errors.js";
 
 /**
  * Attachment lifecycle states (spec decision 2). `detached` = never
@@ -286,13 +286,22 @@ export class SandboxAttachment {
       this._state = "ready";
       this.emitStatus();
       this.flushWaiters();
-    } catch {
+    } catch (err) {
       if (this.destroyed) return;
       this._state = "error";
       this.emitStatus();
       // Waiters are not force-failed here — a slow/failed provision still
       // lets each caller's own ensureReady timeout govern its wait, per the
-      // spec's "timeout is not degradation" rule (test case 4).
+      // spec's "timeout is not degradation" rule (test case 4). The ONE
+      // exception is a `SandboxStartupError`: that's a definite, terminal
+      // startup failure (bad image, crash-loop, unschedulable pod) — not a
+      // "still working" condition — so waiters get the real cause now
+      // instead of a generic timeout later.
+      if (err instanceof SandboxStartupError) {
+        const waiters = [...this.waiters];
+        this.waiters.clear();
+        for (const w of waiters) w.reject(err);
+      }
     } finally {
       this.inFlight = null;
     }

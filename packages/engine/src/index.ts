@@ -9,6 +9,7 @@ export {
   WorkspaceProvisioningError,
   SandboxSupersededError,
   SandboxUnavailableError,
+  SandboxStartupError,
 } from "./errors.js";
 export {
   parseMarkdownArtifact,

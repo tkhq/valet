@@ -137,6 +137,29 @@ export class SandboxSupersededError extends Error {
 }
 
 /**
+ * Thrown by a `SandboxProvider.create` implementation when a sandbox
+ * definitively FAILED to start (a terminal condition — image pull failure,
+ * crash-loop, unschedulable pod, pod failed) as opposed to merely being slow
+ * to provision. Unlike `WorkspaceProvisioningError` (a timeout — "still
+ * working, retry shortly"), this is NOT retry-shaped: the underlying cause
+ * will not resolve itself on its own. `SandboxAttachment.doProvision`
+ * rejects any pending `ensureReady` waiters with this error (instead of the
+ * usual "swallow and let each waiter hit its own timeout" behavior) so the
+ * real cause reaches the caller fast instead of after a generic timeout.
+ */
+export class SandboxStartupError extends Error {
+  readonly code = "sandbox_startup_failed";
+
+  constructor(
+    public readonly sandboxId: string,
+    public readonly reason: string,
+  ) {
+    super(`sandbox failed to start: ${reason}`);
+    this.name = "SandboxStartupError";
+  }
+}
+
+/**
  * Thrown by `PolicySandbox` when a raw op rejects with a transport-level
  * failure (container death, connection loss) — as opposed to a normal
  * command-level or filesystem error, which rethrows untouched. The
