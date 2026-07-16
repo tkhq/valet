@@ -13,8 +13,8 @@
  * the api process runs either (a) IN-CLUSTER as a pod, where the only
  * correct credential source is the mounted service-account
  * (`KubeConfig.loadFromCluster()`), or (b) out-of-cluster in dev, where the
- * right behavior is "use the kubeconfig's already-selected context, or an
- * operator-pinned one via `VALET_KUBE_CONTEXT`" — never a hardcoded
+ * context MUST be named explicitly via `VALET_KUBE_CONTEXT` — we never ride
+ * the ambient current-context (decision 2, binding) and never hardcode a
  * personal dev-cluster name.
  */
 import * as k8s from "@kubernetes/client-node";
@@ -56,13 +56,16 @@ export function parseSandboxBackend(value: string | undefined): SandboxBackend {
  * `loadFromCluster()`.
  *
  * OUT-OF-CLUSTER (dev, or any host process): loads the default kubeconfig
- * (`~/.kube/config` / `$KUBECONFIG`) and, if `VALET_KUBE_CONTEXT` is set,
- * pins that context explicitly — mirroring
- * `loadRancherDesktopKubeConfig`'s "never silently ride the ambient
- * current-context" caution, but driven by an operator-supplied env var
- * instead of a hardcoded dev-cluster name. When `VALET_KUBE_CONTEXT` is
- * unset, the kubeconfig's own `current-context` is used as-is (the
- * standard kubectl default).
+ * (`~/.kube/config` / `$KUBECONFIG`) and pins the context named by
+ * `VALET_KUBE_CONTEXT`, which is **REQUIRED** in this mode. Decision 2 is
+ * binding: "nothing ever operates on the ambient current-context." A
+ * developer's ambient `current-context` is routinely a production cluster
+ * (on the reference machine it is a prod GKE cluster), so silently riding
+ * it would create/destroy sandbox pods in production the moment someone
+ * runs the api locally with `VALET_SANDBOX_BACKEND=kubernetes` and forgets
+ * to pin a context. We therefore refuse to guess — out-of-cluster callers
+ * must name the context explicitly. In-cluster there is no ambient-context
+ * hazard (the only credential is the pod's own service account).
  */
 export function resolveKubeConfig(env: NodeJS.ProcessEnv): k8s.KubeConfig {
   const kc = new k8s.KubeConfig();
@@ -72,12 +75,17 @@ export function resolveKubeConfig(env: NodeJS.ProcessEnv): k8s.KubeConfig {
   }
   kc.loadFromDefault();
   const context = env.VALET_KUBE_CONTEXT;
-  if (context) {
-    if (kc.getContextObject(context) === null) {
-      throw new Error(`VALET_KUBE_CONTEXT="${context}" is not a configured kubectl context.`);
-    }
-    kc.setCurrentContext(context);
+  if (!context) {
+    throw new Error(
+      "VALET_KUBE_CONTEXT is required when VALET_SANDBOX_BACKEND=kubernetes and the api runs out-of-cluster. " +
+        "Refusing to use the ambient kubectl current-context (it may point at a production cluster). " +
+        "Set VALET_KUBE_CONTEXT to the intended context, or run the api in-cluster.",
+    );
   }
+  if (kc.getContextObject(context) === null) {
+    throw new Error(`VALET_KUBE_CONTEXT="${context}" is not a configured kubectl context.`);
+  }
+  kc.setCurrentContext(context);
   return kc;
 }
 

@@ -142,4 +142,12 @@ describe("resolveKubeConfig", () => {
       /VALET_KUBE_CONTEXT="definitely-not-a-real-context-xyz" is not a configured kubectl context/,
     );
   });
+
+  it("REFUSES the ambient current-context out-of-cluster (decision 2): throws when VALET_KUBE_CONTEXT is unset", () => {
+    // The whole point: a dev machine's ambient current-context is routinely
+    // a production cluster. Out-of-cluster + backend=kubernetes with no
+    // pinned context must throw, never silently target prod. No env vars →
+    // not in-cluster (KUBERNETES_SERVICE_HOST absent), no pinned context.
+    expect(() => resolveKubeConfig({})).toThrow(/VALET_KUBE_CONTEXT is required/);
+  });
 });
