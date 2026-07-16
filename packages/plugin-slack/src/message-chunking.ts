@@ -98,18 +98,34 @@ function markTableLines(lines: string[]): boolean[] {
  * lines that already end in an explicit hard break.
  */
 export function normalizeSoftBreaks(text: string): string {
-  const lines = text.split('\n');
+  const lines = text.split(/\r?\n/);
   const inTable = markTableLines(lines);
-  let inFence = false;
+  // Track the fence marker (character and run length) that opened the current
+  // code block, or null when outside a fence. CommonMark closes a fence only on
+  // a line using the same character, at least as long as the opener, with no
+  // trailing content — so a ``` block is not closed by a ~~~ (or shorter) line.
+  let openFence: { char: string; length: number } | null = null;
 
   for (let i = 0; i < lines.length - 1; i++) {
     const line = lines[i];
 
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
+    const fence = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1];
+      if (openFence === null) {
+        openFence = { char: marker[0], length: marker.length };
+        continue;
+      }
+      if (
+        marker[0] === openFence.char &&
+        marker.length >= openFence.length &&
+        /^\s*(`{3,}|~{3,})\s*$/.test(line)
+      ) {
+        openFence = null;
+        continue;
+      }
     }
-    if (inFence || inTable[i] || inTable[i + 1]) continue;
+    if (openFence !== null || inTable[i] || inTable[i + 1]) continue;
 
     // A blank line on either side already ends the block: nothing to hold together.
     if (line.trim() === '' || lines[i + 1].trim() === '') continue;

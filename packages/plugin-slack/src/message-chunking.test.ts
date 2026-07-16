@@ -30,6 +30,21 @@ describe('normalizeSoftBreaks', () => {
     expect(normalizeSoftBreaks(text)).toBe('before  \n```ts\nconst a = 1;\nconst b = 2;\n```\nafter');
   });
 
+  it('does not let a ~~~ line close a ```-opened block', () => {
+    // The tilde line and the code lines around it live inside the backtick
+    // fence; only the matching ``` closes it. Nothing inside is soft-broken.
+    const text = 'before\n```\nfirst code\n~~~\nsecond code\n```\nafter';
+    expect(normalizeSoftBreaks(text)).toBe('before  \n```\nfirst code\n~~~\nsecond code\n```\nafter');
+  });
+
+  it('normalizes CRLF line endings before applying hard breaks', () => {
+    expect(normalizeSoftBreaks('alpha\r\nbravo\r\ncharlie')).toBe('alpha  \nbravo  \ncharlie');
+  });
+
+  it('does not double-mark a CRLF line that already ends in a hard break', () => {
+    expect(normalizeSoftBreaks('alpha  \r\nbravo')).toBe('alpha  \nbravo');
+  });
+
   it('leaves tables intact so the markdown block still renders them natively', () => {
     const table = '| Name | Count |\n| --- | --- |\n| a | 1 |\n| b | 2 |';
     expect(normalizeSoftBreaks(table)).toBe(table);
