@@ -2002,13 +2002,22 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
   // having to click on another row first.
   React.useEffect(() => {
     if (rowAction?.kind !== 'revoked') return;
+    const userId = rowAction.userId;
     const t = setTimeout(() => {
-      setRowAction((current) =>
-        current?.kind === 'revoked' && current.userId === rowAction.userId ? null : current,
-      );
+      // Only clear if the same 'revoked' row is still active — the user
+      // may have moved on to another row before the timer fired.
+      setRowAction((current) => {
+        if (current?.kind === 'revoked' && current.userId === userId) {
+          // Route through resetRowAction so mutation .reset() fires; the
+          // functional setter above is a no-op returning `current` since
+          // resetRowAction updates the state itself.
+          resetRowAction(null);
+        }
+        return current;
+      });
     }, 4000);
     return () => clearTimeout(t);
-  }, [rowAction]);
+  }, [rowAction, resetRowAction]);
 
   const adminCount = users?.filter((u) => u.role === 'admin').length ?? 0;
 

@@ -4,6 +4,7 @@ import type { Env, Variables } from '../env.js';
 import * as db from '../lib/db.js';
 import { ValidationError } from '@valet/shared';
 import { storeCredential, listCredentials, revokeCredential, hasCredential } from '../services/credentials.js';
+import { sha256Hex } from '../lib/hash.js';
 
 export const authRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -139,12 +140,7 @@ authRouter.post('/logout', async (c) => {
   const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
   if (token) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(token);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const tokenHash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-
+    const tokenHash = await sha256Hex(token);
     await db.deleteAuthSession(c.get('db'), tokenHash);
   }
 

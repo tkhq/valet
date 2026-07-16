@@ -99,16 +99,32 @@ export function isAuthFailureCode(code: string | undefined): boolean {
 
 /**
  * Client-side decision: should a 401 response clear local auth state and
- * bounce to /login? Yes when the code is auth-tier (AUTH_MISSING /
- * AUTH_INVALID) OR when the body carries no recognizable code at all
- * (bare 401 from a DO, the Cloudflare edge, or a proxy — nothing else
- * can plausibly return 401 to an authenticated caller, so the safer
- * default is to force re-auth). Explicit `UNAUTHORIZED` (route-level
- * authorization denial) does NOT clear.
+ * bounce to /login? Requires *evidence* the 401 came from the Valet app
+ * itself, not from an intermediary (Cloudflare WAF interstitial HTML,
+ * a text/plain "Unauthorized" from a proxy, etc.). Two cases clear:
+ *
+ *  1. `isAuthFailureCode(code)` — the auth middleware told us the
+ *     identity is dead (AUTH_MISSING / AUTH_INVALID).
+ *  2. `hasJsonBody` is true and the code is missing/empty — a bare
+ *     401 from a Valet response (DO or handler) that shaped its body
+ *     as JSON but didn't set a `code` field. Still evidence the app
+ *     itself answered.
+ *
+ * If the response body was non-JSON (`hasJsonBody === false`), we
+ * assume an intermediary served the 401 and leave auth state alone
+ * so a CF WAF blip or edge failure can't log the user out mid-session.
+ *
+ * Explicit `UNAUTHORIZED` (route-level authorization denial) does NOT
+ * clear — that's a route decision, not an identity failure.
  */
-export function shouldClearAuthOn401(code: string | undefined): boolean {
+export function shouldClearAuthOn401(opts: {
+  code: string | undefined;
+  hasJsonBody: boolean;
+}): boolean {
+  const { code, hasJsonBody } = opts;
   if (isAuthFailureCode(code)) return true;
-  return code === undefined || code === null || code === '';
+  if (hasJsonBody && (code === undefined || code === '')) return true;
+  return false;
 }
 
 export class ForbiddenError extends ValetError {

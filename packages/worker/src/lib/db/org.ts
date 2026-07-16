@@ -315,23 +315,27 @@ export async function createInvite(
 // SQLite's `datetime('now')` returns a space-separated string without
 // the trailing Z, which sorts inconsistently under BINARY collation on
 // the same UTC date — bind ISO-to-ISO instead.
-export async function getInviteByEmail(db: AppDb, email: string): Promise<Invite | null> {
+export async function findValidInviteRow(
+  db: AppDb,
+  by: { code: string } | { email: string }
+): Promise<typeof invites.$inferSelect | null> {
   const nowIso = new Date().toISOString();
+  const field = 'code' in by ? eq(invites.code, by.code) : eq(invites.email, by.email);
   const row = await db
     .select()
     .from(invites)
-    .where(and(eq(invites.email, email), isNull(invites.acceptedAt), gt(invites.expiresAt, nowIso)))
+    .where(and(field, isNull(invites.acceptedAt), gt(invites.expiresAt, nowIso)))
     .get();
+  return row ?? null;
+}
+
+export async function getInviteByEmail(db: AppDb, email: string): Promise<Invite | null> {
+  const row = await findValidInviteRow(db, { email });
   return row ? rowToInvite(row) : null;
 }
 
 export async function getInviteByCode(db: AppDb, code: string): Promise<Invite | null> {
-  const nowIso = new Date().toISOString();
-  const row = await db
-    .select()
-    .from(invites)
-    .where(and(eq(invites.code, code), isNull(invites.acceptedAt), gt(invites.expiresAt, nowIso)))
-    .get();
+  const row = await findValidInviteRow(db, { code });
   return row ? rowToInvite(row) : null;
 }
 

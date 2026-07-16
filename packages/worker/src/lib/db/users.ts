@@ -206,23 +206,22 @@ export async function listUsers(db: AppDb): Promise<User[]> {
 }
 
 export async function deleteUser(db: AppDb, userId: string): Promise<void> {
-  // Delete the users row FIRST so the `auth_sessions` and `api_tokens`
-  // FK cascades atomically revoke live access. If anything below fails,
-  // the user is already fully de-authed — never left in a half-deleted
-  // state where sessions/tokens are gone but the user row survives
-  // (which would lock them out without an audit trail). The subsequent
-  // explicit deletes are idempotent-safe belt-and-suspenders: they
-  // keep the security-sensitive intent visible in code and defend
-  // against future FK changes (see migration 0066 which removed the
-  // credentials cascade).
+  // Clean up credentials FIRST. After migration 0066 the `credentials`
+  // table no longer cascade-deletes with `users`, so if we deleted the
+  // user first and then failed here we'd leave orphan encrypted-secret
+  // rows pointing at a nonexistent owner with no way to recover them.
+  // Doing credentials first means: if this step fails the user row is
+  // still intact and the admin can safely retry `DELETE /users/:id`.
+  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
+  // Now delete the users row. The `auth_sessions` and `api_tokens` FK
+  // cascades atomically revoke live access as part of this statement,
+  // so a crash after this point still leaves the user fully de-authed.
   await db.delete(users).where(eq(users.id, userId));
+  // Idempotent belt-and-suspenders: keeps the security-sensitive intent
+  // visible in code and defends against a future migration silently
+  // dropping the ON DELETE CASCADE on these tables.
   await deleteUserAuthSessions(db, userId);
   await deleteUserApiTokens(db, userId);
-  // credentials no longer cascade-deletes after migration 0066, so clean
-  // up explicitly. If this fails we leave orphan credentials rows for a
-  // user that no longer exists — a nightly sweep can garbage-collect
-  // them; the security-critical revocation has already succeeded.
-  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
 }
 
 // ─── DO Helpers ──────────────────────────────────────────────────────────────

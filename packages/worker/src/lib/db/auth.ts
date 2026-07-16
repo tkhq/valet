@@ -1,6 +1,7 @@
 import type { AppDb } from '../drizzle.js';
-import { eq, and, gt, isNull } from 'drizzle-orm';
-import { authSessions, invites } from '../schema/index.js';
+import { eq } from 'drizzle-orm';
+import { authSessions } from '../schema/index.js';
+import { findValidInviteRow } from './org.js';
 
 export async function createAuthSession(
   db: AppDb,
@@ -23,34 +24,22 @@ export async function deleteUserAuthSessions(db: AppDb, userId: string): Promise
   await db.delete(authSessions).where(eq(authSessions.userId, userId));
 }
 
-// `invites.expires_at` is written as `new Date(...).toISOString()`
-// (T-separated, Z-suffixed). SQLite's `datetime('now')` returns a
-// space-separated string without the trailing Z, and under BINARY
-// collation the two formats sort inconsistently on the same UTC date —
-// an expired invite would keep validating until the date rolls over.
-// Compare ISO-to-ISO by binding `nowIso` as a parameter.
+// Validity semantics (`acceptedAt IS NULL AND expiresAt > now`) and the
+// ISO-8601 comparison rationale live with the shared `findValidInviteRow`
+// helper in `./org.js`. These wrappers project the full row down to `{ id }`
+// so callers don't pull in the `Invite` mapping.
 export async function getValidInviteByCode(
   db: AppDb,
   code: string
 ): Promise<{ id: string } | null> {
-  const nowIso = new Date().toISOString();
-  const result = await db
-    .select({ id: invites.id })
-    .from(invites)
-    .where(and(eq(invites.code, code), isNull(invites.acceptedAt), gt(invites.expiresAt, nowIso)))
-    .get();
-  return result || null;
+  const row = await findValidInviteRow(db, { code });
+  return row ? { id: row.id } : null;
 }
 
 export async function getValidInviteByEmail(
   db: AppDb,
   email: string
 ): Promise<{ id: string } | null> {
-  const nowIso = new Date().toISOString();
-  const result = await db
-    .select({ id: invites.id })
-    .from(invites)
-    .where(and(eq(invites.email, email), isNull(invites.acceptedAt), gt(invites.expiresAt, nowIso)))
-    .get();
-  return result || null;
+  const row = await findValidInviteRow(db, { email });
+  return row ? { id: row.id } : null;
 }

@@ -32,7 +32,9 @@ export function getWebSocketUrl(path: string): string {
  * the caller side would throw or return misleading values.
  *
  * `apiClient` and the copilot streaming client both gate auth-clear on
- * `parsed.code` via `isAuthFailureCode`, so they must agree on this shape.
+ * `parsed` (via `shouldClearAuthOn401`), so they must agree on this
+ * shape — a null `parsed` means the response wasn't a Valet JSON body
+ * and the 401 likely came from an intermediary.
  */
 export async function readErrorBody(
   response: Response
@@ -99,13 +101,16 @@ export async function apiClient<T>(
     const { parsed } = await readErrorBody(response);
     const errorData: { error?: string; code?: string; details?: unknown } = parsed ?? {};
 
-    // Clear local auth on 401 when either the middleware told us the
-    // identity is dead (AUTH_MISSING / AUTH_INVALID) OR the response
-    // carries no recognizable code at all — bare 401s from a DO, the
-    // Cloudflare edge, or a proxy that never ran through auth middleware.
-    // An explicit `UNAUTHORIZED` code (route-level authorization denial)
-    // does not clear.
-    if (response.status === 401 && shouldClearAuthOn401(errorData.code)) {
+    // Clear local auth on 401 only with evidence the response came from
+    // Valet itself: an auth-tier code (AUTH_MISSING / AUTH_INVALID) or a
+    // JSON-shaped body from the app (even with no code field). A non-JSON
+    // 401 body indicates a Cloudflare WAF interstitial or a proxy — we
+    // must not log the user out on those. Explicit `UNAUTHORIZED`
+    // (route-level authorization denial) also does not clear.
+    if (
+      response.status === 401 &&
+      shouldClearAuthOn401({ code: errorData.code, hasJsonBody: parsed !== null })
+    ) {
       useAuthStore.getState().clearAuth();
       router.navigate({ to: '/login' });
     }

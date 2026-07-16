@@ -199,15 +199,21 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
         const parsed = (parsedRaw ?? {}) as ErrBody;
 
         // Auth expiry: mirror apiClient — clear on auth-tier codes and
-        // on bare 401s that carry no code (bare 401s from a DO, the
-        // Cloudflare edge, or a proxy). Route-level 401s (workflow
-        // ownership check with an explicit UNAUTHORIZED code) surface
-        // as ordinary errors. Before navigating we drop the optimistic
-        // empty assistant bubble and reset status so, if the /login
-        // navigation is racy or the user comes back, the hook is not
-        // wedged in `status === 'streaming'` (which line-161 uses to
-        // early-return from send()).
-        if (resp.status === 401 && shouldClearAuthOn401(parsed.code)) {
+        // on bare 401s from a Valet JSON response with no code field.
+        // Non-JSON 401 bodies (CF WAF interstitial, proxy text/plain)
+        // are attributed to an intermediary and left alone. Route-level
+        // 401s (workflow ownership check with an explicit UNAUTHORIZED
+        // code) surface as ordinary errors. Before navigating we drop
+        // the optimistic empty assistant bubble and reset status so, if
+        // the /login navigation is racy or the user comes back, the
+        // hook is not wedged in `status === 'streaming'` (which line
+        // 161 uses to early-return from send()). We keep the user's
+        // just-sent prompt in the transcript and set an error message
+        // so the UI isn't silent if navigation races.
+        if (
+          resp.status === 401 &&
+          shouldClearAuthOn401({ code: parsed.code, hasJsonBody: parsedRaw !== null })
+        ) {
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (last && last.role === 'assistant' && last.parts.length === 0) {
@@ -215,8 +221,8 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
             }
             return prev;
           });
-          setStatus('idle');
-          setError(null);
+          setStatus('error');
+          setError('Your session has expired — please sign in again.');
           useAuthStore.getState().clearAuth();
           void router.navigate({ to: '/login' });
           return;
