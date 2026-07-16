@@ -3,8 +3,10 @@ import { cn } from "~/lib/cn";
 
 /**
  * The assistant's signature visual element (assistant-centered web UI,
- * decision 10): the name in the display face with a small living dot
- * beneath it. This is the one place the calm-companion language spends
+ * decision 10): the name in the display face with a small living dot. In
+ * the `hero` size the dot breathes beneath the name (the signature look);
+ * in the `nav` size it sits inline beside the name as a compact status
+ * indicator. This is the one place the calm-companion language spends
  * boldness — everything else stays quiet.
  *
  * - `idle`: slow breathing opacity loop (~2.4s), moss.
@@ -64,7 +66,18 @@ const DOT_SIZE: Record<PresenceSize, string> = {
 
 const WRAP_GAP: Record<PresenceSize, string> = {
   hero: "gap-2",
-  nav: "gap-1",
+  nav: "gap-1.5",
+};
+
+/**
+ * `hero` keeps the signature vertical stack (name in the display face with
+ * the living dot breathing beneath it). `nav` lays out horizontally so the
+ * dot reads as a small status indicator beside the name rather than
+ * dangling orphaned on its own line under it.
+ */
+const LAYOUT: Record<PresenceSize, string> = {
+  hero: "flex-col items-start",
+  nav: "flex-row items-center",
 };
 
 export function PresenceMark({
@@ -81,7 +94,7 @@ export function PresenceMark({
   const reducedMotion = usePrefersReducedMotion();
 
   return (
-    <div className={cn("inline-flex flex-col items-start", WRAP_GAP[size], className)}>
+    <div className={cn("inline-flex", LAYOUT[size], WRAP_GAP[size], className)}>
       <span className={NAME_SIZE[size]}>{name}</span>
       <span
         aria-hidden
