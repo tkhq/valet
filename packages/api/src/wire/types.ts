@@ -829,11 +829,20 @@ export interface PatchMeRequest {
 
 export type PatchMeResponse = MeResponse;
 
+/** Namespaced `id` (`{providerKindOrRowId}/{modelId}`, bare = Anthropic
+ * back-compat) — see `services/model-catalog.ts`. `active: false` marks a
+ * configured-but-currently-unusable model (disabled provider, or no
+ * resolvable key); such entries are excluded from `ListModelsResponse`. */
 export interface ModelInfo {
   id: string;
   name: string;
-  contextWindow: number;
-  reasoning: boolean;
+  contextWindow?: number;
+  reasoning?: boolean;
+  providerId: string;
+  providerKind: LlmProviderKindWire;
+  providerName: string;
+  active: boolean;
+  pricing?: { input: number; output: number };
 }
 
 export interface ListModelsResponse {

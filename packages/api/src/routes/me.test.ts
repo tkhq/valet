@@ -2,7 +2,7 @@
  * `/api/me` — settings-shell per-user profile surface (split-settings
  * design). Distinct from `/api/auth/me` (session-probe shape, unchanged).
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { users } from "../schema/index.js";
 import type { MeResponse } from "../wire/types.js";
@@ -77,17 +77,57 @@ describe("PATCH /api/me", () => {
     expect(body.name).toBe("New Name");
   });
 
-  it("accepts a known defaultModel id", async () => {
-    api = await bootTestApi();
+  it("accepts a known defaultModel id (bare Anthropic back-compat, zero-config env fallback)", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
 
-    const patch = await fetch(`${api.baseUrl}/api/me`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
-    });
-    expect(patch.status).toBe(200);
-    const body = (await patch.json()) as MeResponse;
-    expect(body.defaultModel).toBe("claude-haiku-4-5");
+      const patch = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+      });
+      expect(patch.status).toBe(200);
+      const body = (await patch.json()) as MeResponse;
+      expect(body.defaultModel).toBe("claude-haiku-4-5");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("accepts a known defaultModel id in namespaced form", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
+
+      const patch = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-4-5" }),
+      });
+      expect(patch.status).toBe(200);
+      const body = (await patch.json()) as MeResponse;
+      expect(body.defaultModel).toBe("anthropic/claude-haiku-4-5");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("400s a known-shaped model id when it's inactive (no key, no env fallback)", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
+    try {
+      api = await bootTestApi();
+
+      const res = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("400s on an unknown defaultModel id, mentioning the unknown model", async () => {
@@ -104,22 +144,27 @@ describe("PATCH /api/me", () => {
   });
 
   it("clears defaultModel when passed null", async () => {
-    api = await bootTestApi();
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
 
-    await fetch(`${api.baseUrl}/api/me`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
-    });
+      await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+      });
 
-    const patch = await fetch(`${api.baseUrl}/api/me`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ defaultModel: null }),
-    });
-    expect(patch.status).toBe(200);
-    const body = (await patch.json()) as MeResponse;
-    expect(body.defaultModel).toBeNull();
+      const patch = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel: null }),
+      });
+      expect(patch.status).toBe(200);
+      const body = (await patch.json()) as MeResponse;
+      expect(body.defaultModel).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("rejects unknown fields with 400", async () => {

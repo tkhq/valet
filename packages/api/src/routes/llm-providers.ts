@@ -23,6 +23,7 @@ import { getEnvApiKey } from "@mariozechner/pi-ai";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin, getOrgModelPreferences, setOrgModelPreferences } from "../services/org.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import {
   createLlmProvider,
   deleteLlmProvider,
@@ -126,7 +127,7 @@ llmProvidersRouter.put("/preferences", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db } = c.var.providers;
+  const { db, engineCredentials } = c.var.providers;
   const user = c.var.user;
 
   let body: PutLlmProviderPreferencesRequest;
@@ -136,11 +137,17 @@ llmProvidersRouter.put("/preferences", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  // Array-of-strings shape only — validating each id against the org
-  // catalog (namespace exists, model exists) is Task 4's job once the
-  // catalog lands; this route just persists whatever ordered list it's given.
   if (!Array.isArray(body.preferences) || !body.preferences.every((p) => typeof p === "string")) {
     return c.json({ error: "preferences must be an array of strings" }, 400);
+  }
+
+  // Each id must be active in the org catalog — bare ids remain valid
+  // back-compat for Anthropic (services/model-catalog.ts's catalogValidIds).
+  const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
+  const validIds = catalogValidIds(entries);
+  const unknownIds = body.preferences.filter((id) => !validIds.has(id));
+  if (unknownIds.length > 0) {
+    return c.json({ error: `unknown or inactive model id(s): ${unknownIds.join(", ")}` }, 400);
   }
 
   await setOrgModelPreferences(db, user.orgId, body.preferences);

@@ -446,6 +446,11 @@ describe("DELETE /api/org/llm-providers/:id", () => {
   it("409s deleting the provider that is the org default model's provider", async () => {
     api = await bootTestApi();
     const created = await createAnthropicProvider(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
+    });
 
     const prefRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
       method: "PUT",
@@ -470,6 +475,11 @@ describe("DELETE /api/org/llm-providers/:id", () => {
   it("409s deleting the default provider via a bare (unnamespaced) preference id, which means anthropic", async () => {
     api = await bootTestApi();
     const created = await createAnthropicProvider(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
+    });
 
     await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
       method: "PUT",
@@ -504,6 +514,25 @@ describe("GET/PUT /api/org/llm-providers/preferences", () => {
     expect(before.status).toBe(200);
     expect((await before.json()) as GetLlmProviderPreferencesResponse).toEqual({ preferences: [] });
 
+    // Ids must be active in the org catalog — seed keyed providers first.
+    const anthropic = await createAnthropicProvider(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${anthropic.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
+    });
+    const openaiRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openai", name: "OpenAI" }),
+    });
+    const openai = (await openaiRes.json()) as CreateLlmProviderResponse;
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${openai.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "sk-openai-secret-value-1234" }),
+    });
+
     const putRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
       method: "PUT",
       headers: HEADERS,
@@ -518,6 +547,18 @@ describe("GET/PUT /api/org/llm-providers/preferences", () => {
     expect((await after.json()) as GetLlmProviderPreferencesResponse).toEqual({
       preferences: ["anthropic/claude-haiku-4-5", "openai/gpt-5"],
     });
+  });
+
+  it("400s ids that aren't in the org catalog's active set", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ preferences: ["anthropic/claude-haiku-4-5"] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("anthropic/claude-haiku-4-5");
   });
 
   it("400s a non-array-of-strings body", async () => {

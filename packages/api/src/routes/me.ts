@@ -9,22 +9,21 @@
  * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`);
  * any other key 400s rather than being silently ignored, so a typo'd field
  * name in a client doesn't quietly no-op. `defaultModel` (when non-null) is
- * validated against pi-ai's static Anthropic registry — the same set
- * `/api/models` reports — and `null` clears the override back to the host
- * default.
+ * validated against the org model catalog's active id set — the same set
+ * `/api/models` reports (bare Anthropic ids remain valid back-compat, see
+ * `services/model-catalog.ts`'s `catalogValidIds`) — and `null` clears the
+ * override back to the host default.
  */
 import { Hono } from "hono";
 import { eq, and } from "drizzle-orm";
-import { getModels } from "@mariozechner/pi-ai";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
-
-const KNOWN_MODEL_IDS = new Set(getModels("anthropic").map((m) => m.id));
 
 const PATCH_FIELDS = new Set(["name", "avatarUrl", "defaultModel"]);
 
@@ -104,8 +103,13 @@ meRouter.patch("/", async (c) => {
     if (defaultModel !== null && typeof defaultModel !== "string") {
       return c.json({ error: "defaultModel must be a string or null" }, 400);
     }
-    if (defaultModel !== null && !KNOWN_MODEL_IDS.has(defaultModel)) {
-      return c.json({ error: `unknown model: ${defaultModel}` }, 400);
+    if (defaultModel !== null) {
+      const { engineCredentials } = c.var.providers;
+      const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
+      const validIds = catalogValidIds(entries);
+      if (!validIds.has(defaultModel)) {
+        return c.json({ error: `unknown model: ${defaultModel}` }, 400);
+      }
     }
     update.defaultModel = defaultModel;
   }

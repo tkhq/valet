@@ -1,24 +1,24 @@
 /**
- * `/api/models` — pi-ai's static Anthropic model registry (split-settings
- * design, decision 9). No provider API call; the registry is bundled with
- * pi-ai and read once at module load. Anthropic-only for now, matching
- * `EngineHost.resolveModel`.
+ * `/api/models` — the org model catalog (split-settings design, decision 9,
+ * superseded by the llm-providers design doc). Returns only ACTIVE catalog
+ * entries — configured-but-inactive providers (disabled, or no resolvable
+ * key) are visible in `GET /api/org/llm-providers` (admin CRUD), not here;
+ * pickers only ever see usable models. See `services/model-catalog.ts`.
  */
 import { Hono } from "hono";
-import { getModels } from "@mariozechner/pi-ai";
 import type { AppEnv } from "../env.js";
+import { buildOrgCatalog } from "../services/model-catalog.js";
 import type { ListModelsResponse, ModelInfo } from "../wire/types.js";
 
 export const modelsRouter = new Hono<AppEnv>();
 
-const MODELS: ModelInfo[] = getModels("anthropic").map((m) => ({
-  id: m.id,
-  name: m.name,
-  contextWindow: m.contextWindow,
-  reasoning: m.reasoning,
-}));
-
-modelsRouter.get("/", (c) => {
-  const resp: ListModelsResponse = { models: MODELS };
+modelsRouter.get("/", async (c) => {
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
+  const models: ModelInfo[] = entries
+    .filter((e) => e.active)
+    .map(({ resolvable: _resolvable, ...model }) => model);
+  const resp: ListModelsResponse = { models };
   return c.json(resp);
 });
