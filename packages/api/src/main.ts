@@ -101,6 +101,18 @@ const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminali
 // URL it needs at session-provision time — not after boot.
 const authConfig = loadAuthConfig(process.env);
 
+// The URL injected into every sandbox as `VALET_API_URL` (Task 8, auth-v2
+// plan) must be reachable FROM the sandbox, which `BETTER_AUTH_URL` is not
+// guaranteed to be: in the k8s deployment BETTER_AUTH_URL is the public
+// ingress hostname (e.g. https://valet.localdev), which doesn't resolve
+// from inside a cluster-internal sandbox pod. `VALET_SANDBOX_API_URL` is a
+// dedicated env var for the pod-reachable value — the Helm chart sets it to
+// the api Service's in-cluster DNS name (see deploy/chart/valet). Falls
+// back to `authConfig.baseUrl` (the pre-existing behavior) when unset, so
+// deployments that haven't set the dedicated var yet (or don't need to,
+// e.g. sandbox-docker on localhost) keep working unchanged.
+const sandboxApiUrl = process.env.VALET_SANDBOX_API_URL ?? authConfig?.baseUrl;
+
 const providers = await buildNodeProviders({
   databaseUrl,
   pgDataDir,
@@ -110,7 +122,7 @@ const providers = await buildNodeProviders({
   apiBaseUrl: `http://127.0.0.1:${port}`,
   workflowCrashAt,
   sandboxJwtMaster: authConfig?.sandboxJwtMaster,
-  sandboxApiUrl: authConfig?.baseUrl,
+  sandboxApiUrl,
   // Real auth configured → skip seeding the local-dev identity so the
   // "zero users → first signup becomes admin" provisioning rule can fire
   // (see `NodeProviderOpts.seedLocalIdentity`).

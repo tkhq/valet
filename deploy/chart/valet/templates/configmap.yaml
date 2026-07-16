@@ -6,6 +6,12 @@ metadata:
     {{- include "valet.labels" . | nindent 4 }}
 data:
   BETTER_AUTH_URL: {{ .Values.api.betterAuthUrl | quote }}
+  # Injected into every sandbox pod as VALET_API_URL (see
+  # packages/api/src/main.ts / host.ts) — must be reachable FROM a sandbox
+  # pod, unlike BETTER_AUTH_URL (the public ingress hostname). The api
+  # Service's in-cluster DNS name always resolves from any namespace in the
+  # cluster, including .Values.sandbox.namespace.
+  VALET_SANDBOX_API_URL: {{ printf "http://%s-api.%s.svc.cluster.local:%v" (include "valet.fullname" .) .Release.Namespace .Values.service.port | quote }}
   VALET_SANDBOX_BACKEND: "kubernetes"
   VALET_SANDBOX_NAMESPACE: {{ .Values.sandbox.namespace | quote }}
   VALET_SANDBOX_IMAGE: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}

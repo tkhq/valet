@@ -84,6 +84,11 @@ if grep -q 'kind: StatefulSet' "$TMP_DIR/external.yaml"; then
 fi
 pass "external render: DATABASE_URL from externalDatabase.url, bundled postgres resources absent"
 
+# --- VALET_SANDBOX_API_URL: pod-reachable in-cluster Service DNS ---------
+grep -q 'VALET_SANDBOX_API_URL: "http://valet-api.default.svc.cluster.local:80"' "$TMP_DIR/bundled.yaml" \
+  || fail "ConfigMap VALET_SANDBOX_API_URL is not the api Service's in-cluster DNS name"
+pass "VALET_SANDBOX_API_URL carries the api Service's .svc.cluster.local DNS name"
+
 # --- No Secret keys leak into the ConfigMap ------------------------------
 CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/bundled.yaml")
 for secret_key in BETTER_AUTH_SECRET VALET_ENCRYPTION_KEY ANTHROPIC_API_KEY POSTGRES_PASSWORD DATABASE_URL; do
