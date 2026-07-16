@@ -25,13 +25,22 @@
 4. **Retention: admin-configurable, default 90 days.** `orgs` gains a telemetry-retention setting (30/90/365/custom days); the host's existing periodic sweep deletes `telemetry_events` older than the window. Distinct from the engine log's 7-day submission pruning — the projection is precisely what outlives it.
 
 5. **Four tabs, settings → Organization → Usage (admin-gated):**
-   - **Usage:** tokens + cost by model / user / session over a selectable window; totals and top-N tables; cost rows absent (not zero) where pricing was unknown.
+   - **Usage:** tokens + cost by model / user / session over a selectable window; totals and top-N tables; cost rows absent (not zero) where pricing was unknown. Includes sandbox active-time (and sandbox cost when compute rates are configured — decision 6), combined into the hero total like v1.
    - **Performance:** p50/p95 turn duration, queue wait, sandbox provision time, sandbox wake time (the hibernation/warm-pool payoff meter), decision-gate approval latency, error rate. Percentiles computed in SQL (`percentile_cont`).
    - **Events:** cursor-paginated feed with eventType/user/session/time filters; row expand shows properties. The debugging surface.
    - **Value:** outcomes per dollar. Numerator (each shown separately, plus a combined count): submissions settled successfully, tasks completed (`task_end`), workflow runs succeeded, and artifact-shaped action invocations (joined from `action_invocations` by created-side actions — PRs/issues/messages; the join lands once the policies+audit spec ships, tab degrades gracefully without it). Denominator: cost (or tokens where cost unknown). **Explicitly labeled proxy metrics** in the UI copy — the tab is designed to absorb better outcome signals (user feedback, gate approval ratios) later without schema change (`outcome` + `properties` already carry them).
    - Routes: `GET /api/org/usage`, `/api/org/usage/performance`, `/api/org/usage/events`, `/api/org/usage/value` (admin), all window-parameterized.
 
-6. **Session-level mini-surface (non-admin, cheap win):** the session view shows its own turn count / tokens / cost from the same table, access-gated by session access — same query, session-scoped.
+6. **Sandbox compute cost (v1 parity, generalized).** The projector already derives sandbox lifecycle from `sandbox_status` events; it additionally accrues **sandbox active-seconds** per session (ready→released/idle/destroyed spans). Pricing them is deployment-specific: `orgs` telemetry settings gain optional compute rates (`cpuPerCoreSecondUsd`, `memPerGiBSecondUsd`, plus default cores/GiB used when a session has no explicit resources) — **unset by default** (self-hosted k8s has no universal price), in which case the Usage tab shows sandbox active-time without a dollar figure. When set, sandbox cost joins LLM cost in totals and the Value tab's denominator, mirroring v1's combined hero number.
+
+7. **Session-level mini-surface (non-admin, cheap win):** the session view shows its own turn count / tokens / cost from the same table, access-gated by session access — same query, session-scoped.
+
+## Reference: how v1 did cost (worker on `main`)
+
+For continuity, v1's model — and what carries over:
+
+- **LLM pricing came from models.dev** (`packages/worker/src/services/model-catalog.ts`): the external `api.json` catalog fetched per provider, cached in D1 with a 1h TTL, producing a pricing map keyed `provider/modelId` with `inputCostPerMillion`/`outputCostPerMillion`. `computeCost` in `routes/usage.ts` = `(inputTokens×in + outputTokens×out)/1e6`, returning null (not zero) when pricing was unknown. **Cache-read/cache-write tokens were not priced.** v2 instead takes pricing from pi-ai's bundled model registry (and the LLM-providers spec's catalog for custom providers) — no external fetch, and cache tokens ARE priced since pi-ai's cost breakdown includes them. The null-not-zero rule is kept.
+- **Sandbox cost was Modal-specific** (`packages/worker/src/services/sandbox-pricing.ts`): hardcoded per-second rates (`CPU $0.00003942/core-sec`, `mem $0.00000672/GiB-sec`, defaults 1.5 cores / 1 GiB) × sandbox active-seconds, combined with LLM cost into the usage page's hero total and broken down by day/user. v2 generalizes this as decision 6: active-seconds are always tracked; rates are org-configurable instead of hardcoded because k8s/self-hosted deployments have no universal price.
 
 ## Exit criteria (the dogfood)
 
