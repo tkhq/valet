@@ -4,6 +4,7 @@ import { mkdtemp, rm, readFile, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DockerSandboxProvider, type DockerSandboxCreateOpts } from "../src/index.js";
+import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /** Skip the whole suite when Docker isn't available locally. */
 function dockerAvailable(): boolean {
@@ -351,7 +352,10 @@ describeDocker("DockerSandbox", () => {
   });
 
   it("gatewayEndpoint() returns a mapped loopback port for a full-profile container", async () => {
-    const sb = await makeSandbox({ profile: "full" });
+    // profile:"full" now runs /bin/bash /start-full.sh (see buildDockerRunArgs)
+    // — alpine:3.20 has neither, so this needs the bash+script fixture image.
+    const image = await buildFullProfileTestImage();
+    const sb = await makeSandbox({ profile: "full", image });
     try {
       const ep = await sb.gatewayEndpoint();
       expect(ep).not.toBeNull();
@@ -364,7 +368,8 @@ describeDocker("DockerSandbox", () => {
   });
 
   it("gatewayEndpoint() returns null after the container is destroyed", async () => {
-    const sb = await makeSandbox({ profile: "full" });
+    const image = await buildFullProfileTestImage();
+    const sb = await makeSandbox({ profile: "full", image });
     await provider.destroy(sb.id);
     await expect(sb.gatewayEndpoint()).resolves.toBeNull();
   });

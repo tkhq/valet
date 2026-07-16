@@ -176,10 +176,19 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     // assigned port via `docker inspect`.
     runArgs.push("-p", `127.0.0.1::${GATEWAY_PORT}`);
   }
-  // Keep the container alive — most images exit immediately if PID 1 is
-  // an interactive shell and there's no TTY. `tail -f /dev/null` is a
-  // tiny long-running placeholder; `docker exec` does the actual work.
-  runArgs.push(opts.image, "sh", "-c", "tail -f /dev/null");
+  if (opts.profile === "full") {
+    // Full-profile containers run the same startup script the kubernetes
+    // provider uses (packages/sandbox-kubernetes/src/manifest.ts) — it
+    // starts the gateway/ttyd/code-server daemons and keeps the container
+    // alive in the foreground of its own wait loop. Only full-profile
+    // images are guaranteed to carry docker/start-full.sh.
+    runArgs.push(opts.image, "/bin/bash", "/start-full.sh");
+  } else {
+    // Keep the container alive — most images exit immediately if PID 1 is
+    // an interactive shell and there's no TTY. `tail -f /dev/null` is a
+    // tiny long-running placeholder; `docker exec` does the actual work.
+    runArgs.push(opts.image, "sh", "-c", "tail -f /dev/null");
+  }
   return runArgs;
 }
 

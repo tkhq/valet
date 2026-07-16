@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSandboxContract } from "@valet/engine/test-helpers";
 import { DockerSandboxProvider } from "../src/index.js";
+import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /**
  * Memoized `docker info` probe (10s timeout), honoring VALET_SKIP_DOCKER_TESTS=1
@@ -35,18 +36,17 @@ function dockerAvailable(): Promise<boolean> {
 
 const provider = new DockerSandboxProvider();
 let workspace: string;
+const dockerOk = await dockerAvailable();
+const fullProfileImage = dockerOk ? await buildFullProfileTestImage() : "alpine:3.20";
 
-describe.skipIf(!(await dockerAvailable()))("docker sandbox contract", () => {
+describe.skipIf(!dockerOk)("docker sandbox contract", () => {
   runSandboxContract("docker", {
     factory: async () => {
       workspace = await mkdtemp(join(tmpdir(), "valet-docker-contract-"));
       // profile: "full" so the gatewayEndpoint case below has a mapped port
-      // to observe. Unlike sandbox-kubernetes, docker's "full" profile only
-      // affects `docker run` flags (`-p 127.0.0.1::9000`) — the container
-      // command stays `tail -f /dev/null`, so this doesn't disturb any of
-      // the other FS/exec assertions this suite runs against the same
-      // factory.
-      const sandbox = await provider.create({ workspace, image: "alpine:3.20", profile: "full" });
+      // to observe. `fullProfileImage` carries the /bin/bash + /start-full.sh
+      // that buildDockerRunArgs now requires for profile:"full" containers.
+      const sandbox = await provider.create({ workspace, image: fullProfileImage, profile: "full" });
       return {
         sandbox,
         cleanup: async () => {
@@ -57,7 +57,7 @@ describe.skipIf(!(await dockerAvailable()))("docker sandbox contract", () => {
     },
     recreate: async (sandbox) => {
       await provider.destroy(sandbox.id);
-      const recreated = await provider.create({ workspace, image: "alpine:3.20", profile: "full" });
+      const recreated = await provider.create({ workspace, image: fullProfileImage, profile: "full" });
       return {
         sandbox: recreated,
         cleanup: async () => {
