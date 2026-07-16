@@ -7,6 +7,7 @@ vi.mock('../lib/db/credentials.js', () => ({
   setCredentialFailureState: vi.fn(),
   upsertCredential: vi.fn(),
   deleteCredential: vi.fn(),
+  deleteCredentialIfDataMatches: vi.fn(),
   listCredentialsByOwner: vi.fn(),
   hasCredential: vi.fn(),
   getExpiringCredentials: vi.fn(),
@@ -59,6 +60,7 @@ const mockDb = credentialDb as unknown as {
   setCredentialFailureState: ReturnType<typeof vi.fn>;
   upsertCredential: ReturnType<typeof vi.fn>;
   deleteCredential: ReturnType<typeof vi.fn>;
+  deleteCredentialIfDataMatches: ReturnType<typeof vi.fn>;
   listCredentialsByOwner: ReturnType<typeof vi.fn>;
   hasCredential: ReturnType<typeof vi.fn>;
   getExpiringCredentials: ReturnType<typeof vi.fn>;
@@ -624,14 +626,39 @@ describe('getCredential — concurrent refresh', () => {
     });
   });
 
-  it('deletes the credential when a refresh fails and nothing rotated underneath it', async () => {
+  it('deletes the credential when the refresh token is definitively dead and nothing rotated underneath it', async () => {
     mockDb.getCredentialRow.mockResolvedValue(githubRow('stale-blob', EXPIRED));
-    const refreshToken = vi.fn().mockRejectedValue(new Error('bad credentials'));
+    // GitHub's OAuth endpoint reports a spent refresh token as a 400 carrying
+    // the error code — a definitive "this token is invalid" signal.
+    const refreshToken = vi.fn().mockRejectedValue(
+      Object.assign(new Error('The refresh token passed is incorrect or expired. (bad_refresh_token)'), { status: 400 }),
+    );
     mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
 
     const result = await getCredential(fakeEnv, 'user', 'user-1', 'github');
 
-    expect(mockDb.deleteCredential).toHaveBeenCalledWith(fakeDrizzleDb, 'user', 'user-1', 'github', 'oauth2');
+    // Compare-and-delete keyed on the exact blob we read, so a concurrent
+    // refresh that rotates the token cannot be clobbered.
+    expect(mockDb.deleteCredentialIfDataMatches).toHaveBeenCalledWith(
+      fakeDrizzleDb, 'user', 'user-1', 'github', 'oauth2', 'stale-blob',
+    );
+    expect(mockDb.deleteCredential).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, error: { reason: 'refresh_failed' } });
+  });
+
+  it('does NOT delete the credential when the refresh fails transiently (5xx)', async () => {
+    mockDb.getCredentialRow.mockResolvedValue(githubRow('stale-blob', EXPIRED));
+    // A 5xx from GitHub is transport trouble, not proof the token is dead — the
+    // stored credential may still be perfectly good.
+    const refreshToken = vi.fn().mockRejectedValue(
+      Object.assign(new Error('service unavailable'), { status: 503 }),
+    );
+    mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
+
+    const result = await getCredential(fakeEnv, 'user', 'user-1', 'github');
+
+    expect(mockDb.deleteCredentialIfDataMatches).not.toHaveBeenCalled();
+    expect(mockDb.deleteCredential).not.toHaveBeenCalled();
     expect(result).toMatchObject({ ok: false, error: { reason: 'refresh_failed' } });
   });
 

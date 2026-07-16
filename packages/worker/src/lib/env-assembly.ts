@@ -307,14 +307,15 @@ export async function assembleRepoEnv(
   // Org-level GitHub App installations can mint short-lived (1-hour) tokens
   // scoped to the installation's configured permissions.
   //
-  // An installation belongs to the org, not to whoever is asking. Selecting one
-  // on the repo owner parsed out of the URL is therefore not an authorization
-  // check: any user could name a repo under a login the app happens to be
-  // installed on and be handed a push-capable token for it. Minting is gated on
-  // the same org setting the GitHub credential resolver enforces
-  // (integrations/resolvers/github.ts), so both paths hand out installation
-  // access under one policy instead of two. Absent metadata denies, matching
-  // the resolver.
+  // An installation belongs to the account it is installed on, not to whoever is
+  // asking. Selecting one on the repo owner parsed out of the URL is therefore
+  // not an authorization check, and allowAnonymousGitHubAccess is an org-wide
+  // toggle that defaults on — neither proves this caller may use the
+  // installation. Any user could otherwise name a repo under a login the app
+  // happens to be installed on and be handed a push-capable token for it. Mint
+  // only when the installation is linked to the requesting user; an installation
+  // that is not linked to this user falls through to the "no credentials" error
+  // even when allowAnonymousGitHubAccess is on.
   const anonymousAccessAllowed =
     credentialProvider === 'github' &&
     repoOwner !== undefined &&
@@ -327,7 +328,7 @@ export async function assembleRepoEnv(
       const { loadGitHubApp, mintInstallationToken } = await import('../services/github-app.js');
       const { getGithubInstallationByLogin } = await import('./db/github-installations.js');
       const installation = await getGithubInstallationByLogin(appDb, repoOwner);
-      if (installation) {
+      if (installation && installation.linkedUserId === userId) {
         const app = await loadGitHubApp(env, appDb);
         if (app) {
           const { token, expiresAt } = await mintInstallationToken(app, installation.githubInstallationId);

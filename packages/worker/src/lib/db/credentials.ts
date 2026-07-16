@@ -125,6 +125,35 @@ export async function deleteCredential(
     .where(and(...conditions));
 }
 
+/**
+ * Delete a credential only if it still holds exactly `expectedEncryptedData`.
+ *
+ * The refresh token lives inside the encrypted blob, not in its own column, so
+ * this compare-and-delete keys on the ciphertext instead: a concurrent refresh
+ * rewrites the blob (fresh salt/IV on every encrypt), so a stale delete matches
+ * nothing and cannot clobber the row a winning refresh just wrote.
+ */
+export async function deleteCredentialIfDataMatches(
+  db: AppDb,
+  ownerType: string,
+  ownerId: string,
+  provider: string,
+  credentialType: string,
+  expectedEncryptedData: string,
+): Promise<void> {
+  await db
+    .delete(credentials)
+    .where(
+      and(
+        eq(credentials.ownerType, ownerType),
+        eq(credentials.ownerId, ownerId),
+        eq(credentials.provider, provider),
+        eq(credentials.credentialType, credentialType),
+        eq(credentials.encryptedData, expectedEncryptedData),
+      ),
+    );
+}
+
 export async function deleteCredentialsByProvider(
   db: AppDb,
   provider: string,

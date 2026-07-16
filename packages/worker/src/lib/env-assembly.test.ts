@@ -112,8 +112,32 @@ describe('assembleRepoEnv — installation token fallback authorization', () => 
     expect(result.token).toBeUndefined();
   });
 
-  it('mints an installation token once the org has allowed anonymous access', async () => {
+  it('mints no token for an installation not linked to the caller, even with anonymous access on', async () => {
     await seedAliceInstallation();
+    noUserCredential();
+    mockGetServiceMetadata.mockResolvedValue({ allowAnonymousGitHubAccess: true });
+
+    const result = await assembleRepoEnv(db as never, env, USER_ID, undefined, { repoUrl: REPO_URL });
+
+    // The installation belongs to Alice's account and is not linked to user-b.
+    // allowAnonymousGitHubAccess is an org-wide toggle that defaults on, so it is
+    // not authority for user-b to mint a token against someone else's account.
+    expect(mockMintInstallationToken).not.toHaveBeenCalled();
+    expect(result.token).toBeUndefined();
+    expect(result.error).toContain('No github credentials found');
+  });
+
+  it('mints an installation token when the installation is linked to the caller', async () => {
+    // The caller installed the app themselves, so the installation carries their
+    // user id — that link, not the org-wide flag, is the authorization.
+    await upsertGithubInstallation(db, {
+      githubInstallationId: '4242',
+      accountLogin: 'alice',
+      accountId: '1',
+      accountType: 'User',
+      repositorySelection: 'all',
+      linkedUserId: USER_ID,
+    });
     noUserCredential();
     mockGetServiceMetadata.mockResolvedValue({ allowAnonymousGitHubAccess: true });
 

@@ -118,6 +118,54 @@ function resolveRefreshedExpiry(creds: Record<string, string>): string | undefin
 }
 
 /**
+ * Build a "somebody else rotated it" success result from a freshly read row and
+ * its already-decrypted data. Returns null when the stored pair is not actually
+ * usable (missing access token, or already expiring), so the caller falls back
+ * to its own outcome.
+ */
+function rotatedResultFromRow(
+  row: credentialDb.CredentialRow,
+  data: CredentialData,
+): CredentialResult | null {
+  const accessToken = extractAccessToken(data);
+  if (!accessToken || isExpiringSoon(row.expiresAt)) return null;
+
+  return {
+    ok: true,
+    credential: {
+      accessToken,
+      refreshToken: data.refresh_token,
+      expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
+      scopes: row.scopes?.split(' ') ?? undefined,
+      credentialType: row.credentialType as CredentialType,
+      // Reported as refreshed because it is: the caller asked for a token newer
+      // than the one it held and is getting exactly that, just rotated by
+      // somebody else. The refresh cron counts this flag to tell a working
+      // sweep from a failing one, so a race it benefits from must not read as
+      // a failure.
+      refreshed: true,
+    },
+  };
+}
+
+/**
+ * Decide whether a caught refresh error is GitHub telling us the refresh token
+ * itself is invalid, as opposed to a transient transport failure.
+ *
+ * The OAuth refresh endpoint surfaces a dead token as a 400 whose message
+ * carries the error code (`bad_refresh_token` / `invalid_grant`); a 5xx, a 429
+ * or a thrown network error is transient and the stored credential may still be
+ * good. Only the former justifies dropping the row, and an unrecognised failure
+ * is treated as transient so a valid credential is never deleted on a guess.
+ */
+function isDefinitiveRefreshFailure(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null | undefined)?.status;
+  if (typeof status === 'number' && (status >= 500 || status === 429)) return false;
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /invalid_grant|bad_refresh_token|bad_verification_code|unauthorized|bad credentials/i.test(message);
+}
+
+/**
  * Re-read the stored credential and report whether somebody else has already
  * rotated it away from the refresh token this caller set out to spend.
  *
@@ -143,13 +191,20 @@ async function readRotatedCredential(
   if (!refreshedFrom) return null;
 
   const db = getDb(env.DB);
-  const row = await credentialDb.getCredentialRow(
-    db,
-    ownerType,
-    ownerId,
-    provider,
-    credentialTypeFilter(provider),
-  );
+  let row: credentialDb.CredentialRow | null;
+  try {
+    row = await credentialDb.getCredentialRow(
+      db,
+      ownerType,
+      ownerId,
+      provider,
+      credentialTypeFilter(provider),
+    );
+  } catch {
+    // A failed re-read cannot prove anything moved, so degrade to "not rotated"
+    // rather than throwing out of the refresh path.
+    return null;
+  }
   if (!row) return null;
 
   let data: CredentialData;
@@ -161,25 +216,7 @@ async function readRotatedCredential(
 
   if (data.refresh_token === refreshedFrom) return null;
 
-  const accessToken = extractAccessToken(data);
-  if (!accessToken || isExpiringSoon(row.expiresAt)) return null;
-
-  return {
-    ok: true,
-    credential: {
-      accessToken,
-      refreshToken: data.refresh_token,
-      expiresAt: row.expiresAt ? new Date(row.expiresAt) : undefined,
-      scopes: row.scopes?.split(' ') ?? undefined,
-      credentialType: row.credentialType as CredentialType,
-      // Reported as refreshed because it is: the caller asked for a token newer
-      // than the one it held and is getting exactly that, just rotated by
-      // somebody else. The refresh cron counts this flag to tell a working
-      // sweep from a failing one, so a race it benefits from must not read as
-      // a failure.
-      refreshed: true,
-    },
-  };
+  return rotatedResultFromRow(row, data);
 }
 
 // ─── Google OAuth Refresh ───────────────────────────────────────────────────
@@ -312,23 +349,56 @@ async function refreshGitHubToken(
         refreshed: true,
       },
     };
-  } catch {
+  } catch (err) {
     // Losing a race to spend a single-use refresh token lands here just like a
-    // genuinely dead connection does, so check which one happened before
-    // touching the row: deleting the winner's freshly written credential would
-    // wipe a working token and force a pointless reconnect.
-    const rotated = await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token);
-    if (rotated) return rotated;
+    // genuinely dead connection does. Re-read the row once and let that single
+    // snapshot drive both decisions: hand back the winner's credential if the
+    // token rotated underneath us, and delete only when the row still holds the
+    // exact token we tried to spend AND GitHub says that token is invalid. A
+    // transient 5xx or network error leaves the row intact so a later attempt
+    // can still use it.
+    let currentRow: credentialDb.CredentialRow | null = null;
+    try {
+      currentRow = await credentialDb.getCredentialRow(db, ownerType, ownerId, provider, 'oauth2');
+    } catch {
+      currentRow = null;
+    }
 
-    // Nothing moved underneath us, so the refresh token really is spent and the
-    // row is unusable. Drop it and make the user reconnect.
-    await credentialDb.deleteCredential(db, ownerType, ownerId, provider, 'oauth2');
+    let currentData: CredentialData | null = null;
+    if (currentRow) {
+      try {
+        currentData = await decryptCredentialData(currentRow.encryptedData, env.ENCRYPTION_KEY);
+      } catch {
+        currentData = null;
+      }
+    }
+
+    if (currentRow && currentData && currentData.refresh_token !== data.refresh_token) {
+      // Somebody rotated the token; their stored pair is the right answer.
+      const rotated = rotatedResultFromRow(currentRow, currentData);
+      if (rotated) return rotated;
+    } else if (currentRow && currentData && isDefinitiveRefreshFailure(err)) {
+      // Token unchanged and GitHub says it is invalid, so the refresh token
+      // really is spent. Compare-and-delete on the exact blob we just read so a
+      // refresh that rotates the token inside this window is never clobbered.
+      await credentialDb.deleteCredentialIfDataMatches(
+        db,
+        ownerType,
+        ownerId,
+        provider,
+        'oauth2',
+        currentRow.encryptedData,
+      );
+    }
+
     return {
       ok: false,
       error: {
         service: provider,
         reason: 'refresh_failed',
-        message: 'GitHub connection expired, please reconnect',
+        message: isDefinitiveRefreshFailure(err)
+          ? 'GitHub connection expired, please reconnect'
+          : 'GitHub token refresh failed, please try again',
       },
     };
   }
