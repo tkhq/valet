@@ -28,6 +28,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
