@@ -1,7 +1,7 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import { eq, and, or, sql } from 'drizzle-orm';
 import type { AppDb } from '../drizzle.js';
-import { sessionGitState } from '../schema/index.js';
+import { sessionGitState, sessions } from '../schema/index.js';
 
 // ─── Data Access ─────────────────────────────────────────────────────────────
 
@@ -61,13 +61,19 @@ export async function findSessionsByRepoBranch(
   repoFullName: string,
   branch: string
 ) {
+  // last_active_at breaks the tie when several sessions share a branch and none
+  // has a commit count yet (it stays null until the runner reports): without it
+  // the pick would fall back to session id order, which says nothing about who
+  // actually did the work.
   const rows = await db
     .select({
       session_id: sessionGitState.sessionId,
       commit_count: sessionGitState.commitCount,
       pr_number: sessionGitState.prNumber,
+      last_active_at: sessions.lastActiveAt,
     })
     .from(sessionGitState)
+    .leftJoin(sessions, eq(sessions.id, sessionGitState.sessionId))
     .where(
       and(eq(sessionGitState.sourceRepoFullName, repoFullName), eq(sessionGitState.branch, branch))
     );

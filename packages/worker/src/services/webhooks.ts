@@ -400,14 +400,24 @@ export async function dispatchWebhookForTrigger(
  * undefined when there are no candidates.
  */
 export function pickBranchAuthorSessionId(
-  candidates: Array<{ session_id: string; commit_count: number | null }>,
+  candidates: Array<{ session_id: string; commit_count: number | null; last_active_at?: string | null }>,
 ): string | undefined {
-  let best: { sessionId: string; commits: number } | undefined;
+  let best: { sessionId: string; commits: number; activeAt: string } | undefined;
   for (const c of candidates) {
     const commits = c.commit_count ?? 0;
-    if (!best || commits > best.commits || (commits === best.commits && c.session_id < best.sessionId)) {
-      best = { sessionId: c.session_id, commits };
-    }
+    const activeAt = c.last_active_at ?? '';
+    // Most commits wins. commit_count stays null until the runner reports it,
+    // so a merge that lands first would otherwise tie every candidate at 0 and
+    // hand the PR to whichever session id sorts first — which is unrelated to
+    // who pushed. Fall back to the most recently active session on the branch,
+    // and only then to the id, which is there purely so concurrent deliveries
+    // and redeliveries converge on the same winner rather than to mean anything.
+    const better =
+      !best ||
+      commits > best.commits ||
+      (commits === best.commits && activeAt > best.activeAt) ||
+      (commits === best.commits && activeAt === best.activeAt && c.session_id < best.sessionId);
+    if (better) best = { sessionId: c.session_id, commits, activeAt };
   }
   return best?.sessionId;
 }

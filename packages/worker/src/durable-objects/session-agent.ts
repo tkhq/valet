@@ -4798,7 +4798,11 @@ export class SessionAgentDO {
       } else if (reason === 'snapshot_failed' || reason === 'sandbox_exited') {
         await this.emitSessionOutcome('error', reason);
       } else {
-        await this.emitSessionOutcome('terminated');
+        // `user_stopped` is the default close and needs no code. Every other
+        // reason that lands here ('completed', 'parent_stopped') keeps its stop
+        // reason as the errorCode, so a session that finished its work stays
+        // distinguishable from one a user abandoned or a parent cascaded away.
+        await this.emitSessionOutcome('terminated', reason === 'user_stopped' ? undefined : reason);
       }
     }
 
@@ -6077,6 +6081,11 @@ export class SessionAgentDO {
           console.error('[SessionAgentDO] Failed to sync error status to D1:', e),
         );
       }
+      // Drain metrics before the outcome, matching the other terminal error
+      // paths: work emitted after the last flush (instrumentation inside the
+      // snapshot attempt, grant-cleanup side effects) is still buffered
+      // DO-locally and would never reach D1 once this session is terminal.
+      await this.flushMetrics();
       await this.emitSessionOutcome('error', 'hibernate_failed');
       const errId = crypto.randomUUID();
       this.messageStore.writeMessage({

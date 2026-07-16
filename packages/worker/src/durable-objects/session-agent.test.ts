@@ -893,6 +893,40 @@ describe('SessionAgentDO', () => {
       },
     );
 
+    it.each([['completed'], ['parent_stopped']])(
+      'preserves the %s stop reason as the errorCode on the terminated outcome',
+      async (stopReason) => {
+        const { agent } = await createTestAgent();
+        // Only `user_stopped` is a bare close. Any other termination keeps its
+        // reason so the analytics stream can separate a session that finished
+        // its work from one that was abandoned or cascaded away by its parent.
+        (agent as any).sessionState.set('status', 'running');
+        (agent as any).flushMetrics = vi.fn().mockResolvedValue(undefined);
+        (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+        await (agent as any).handleStop(stopReason);
+
+        expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+          errorCode: stopReason,
+          properties: { reason: 'terminated' },
+        });
+      },
+    );
+
+    it('leaves the errorCode unset for a plain user_stopped close', async () => {
+      const { agent } = await createTestAgent();
+      (agent as any).sessionState.set('status', 'running');
+      (agent as any).flushMetrics = vi.fn().mockResolvedValue(undefined);
+      (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+      await (agent as any).handleStop('user_stopped');
+
+      expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+        errorCode: undefined,
+        properties: { reason: 'terminated' },
+      });
+    });
+
     it('does not emit a terminated outcome when stopping an already-errored session', async () => {
       const { agent } = await createTestAgent();
       // A prior spawn/hibernate failure already emitted session.outcome{error}

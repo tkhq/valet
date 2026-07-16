@@ -367,6 +367,27 @@ describe('pickBranchAuthorSessionId — deterministic single-author selection', 
     ).toBe('b');
   });
 
+  it('falls back to the most recently active session when commit counts have not synced', () => {
+    // commit_count stays null until the runner reports it. Session b opened the
+    // PR from its sandbox and is the more recently active, but sorts later by
+    // id — an id-only tie-break would hand the merge to a.
+    expect(
+      pickBranchAuthorSessionId([
+        { session_id: 'a', commit_count: null, last_active_at: '2026-07-01T00:00:00Z' },
+        { session_id: 'b', commit_count: null, last_active_at: '2026-07-02T00:00:00Z' },
+      ]),
+    ).toBe('b');
+  });
+
+  it('keeps commit_count authoritative over recency', () => {
+    expect(
+      pickBranchAuthorSessionId([
+        { session_id: 'a', commit_count: 4, last_active_at: '2026-07-01T00:00:00Z' },
+        { session_id: 'b', commit_count: 1, last_active_at: '2026-07-09T00:00:00Z' },
+      ]),
+    ).toBe('a');
+  });
+
   it('treats null commit_count as zero and breaks ties by session id', () => {
     expect(
       pickBranchAuthorSessionId([
