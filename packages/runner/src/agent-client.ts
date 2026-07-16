@@ -36,7 +36,7 @@ const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const PING_INTERVAL_MS = 30_000;
 const SPAWN_CHILD_TIMEOUT_MS = 60_000;
 const TERMINATE_CHILD_TIMEOUT_MS = 30_000;
-const MESSAGE_OP_TIMEOUT_MS = 15_000;
+const MESSAGE_OP_TIMEOUT_MS = 30_000;
 const TOOL_OP_TIMEOUT_MS = 30_000;
 // If the server rejects the WebSocket upgrade N times in a row (e.g. 401 due to
 // rotated token), stop retrying and exit — the sandbox has been replaced.

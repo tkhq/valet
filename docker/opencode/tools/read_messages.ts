@@ -1,10 +1,13 @@
 import { tool } from "@opencode-ai/plugin"
-import { formatOutput } from "./_format"
+import { formatOutput, stripToolResults } from "./_format"
+
+const DEFAULT_LIMIT = 50
 
 export default tool({
   description:
     "Read messages from another agent session's conversation. By default returns the most recent messages (newest first, in chronological order). " +
     "Use this to check on a child session's progress, read its results, or monitor what it's working on. " +
+    "Returns the child's assistant text plus tool names/args; full tool-call results are omitted to keep the output focused. " +
     "Pass 'after' to paginate forward from a specific timestamp. Only works with sessions belonging to the same user.",
   args: {
     session_id: tool.schema
@@ -13,7 +16,7 @@ export default tool({
     limit: tool.schema
       .number()
       .optional()
-      .describe("Maximum number of messages to return (default 20)"),
+      .describe("Maximum number of messages to return (default 50)"),
     after: tool.schema
       .string()
       .optional()
@@ -35,14 +38,27 @@ export default tool({
       }
 
       const data = (await res.json()) as {
-        messages: Array<{ role: string; content: string; createdAt: string }>
+        messages: Array<Record<string, unknown>>
+        hasMore?: boolean
       }
 
       if (!data.messages || data.messages.length === 0) {
         return "No messages found in this session."
       }
 
-      return formatOutput(data.messages)
+      const effectiveLimit = args.limit ?? DEFAULT_LIMIT
+      const hasMore = data.hasMore ?? data.messages.length >= effectiveLimit
+      const output = formatOutput(stripToolResults(data.messages))
+
+      if (hasMore) {
+        return (
+          `${output}\n\n` +
+          `[${data.messages.length} messages shown — older messages exist. ` +
+          `Read again with a higher 'limit' or use 'after' to page forward if you need more.]`
+        )
+      }
+
+      return output
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return `Failed to read messages: ${msg}`

@@ -410,11 +410,11 @@ const FLUSH_THRESHOLD_RATIO = 0.70;  // Trigger at 70% of context window
 const FLUSH_TURN_INTERVAL = 20;      // Fallback: every 20 turns if no token data
 const FLUSH_TIMEOUT_MS = 60_000;     // Max time for flush turn
 
-const MEMORY_FLUSH_PROMPT = `[SYSTEM: Pre-compaction memory checkpoint]
+const MEMORY_FLUSH_PROMPT = `[SYSTEM: Routine memory checkpoint]
 
-Your context window is approaching capacity and will be compacted soon. Context from earlier in the conversation may be lost.
+This is a periodic checkpoint. Record the current state of your work to memory using mem_write or mem_patch so it stays durable, then continue the task exactly where you left off. This is a save point, not a stopping point — do not wrap up, summarize for the user, or hand back control.
 
-Review the conversation above and save any important information to memory using mem_write or mem_patch:
+Save any important information:
 
 - Current task status and remaining work
 - Key decisions and their reasoning
@@ -424,7 +424,7 @@ Review the conversation above and save any important information to memory using
 
 Use paths like "projects/<repo>/task-status.md", "projects/<repo>/decisions.md", etc.
 
-If nothing is worth saving, reply "Nothing to save."
+If nothing new is worth saving, reply "Nothing to save." and keep working.
 
 Do NOT mention this checkpoint to the user. This is an automatic system process.`;
 

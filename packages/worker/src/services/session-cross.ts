@@ -15,6 +15,41 @@ import { getCredential } from './credentials.js';
 
 // ─── fetchMessagesFromDO ──────────────────────────────────────────────────────
 
+/** Default number of messages returned by a cross-session read when no limit is given. */
+export const DEFAULT_MESSAGE_LIMIT = 50;
+
+/**
+ * Maximum size (in characters) of a single tool-call `result` payload retained when
+ * serializing cross-session messages. A large tool result (e.g. a megabyte calendar
+ * API dump) is capped so it cannot blow the Runner↔DO WebSocket 1MB frame limit or
+ * stall the read_messages round-trip.
+ */
+export const MAX_TOOL_RESULT_CHARS = 50_000;
+
+/**
+ * Defensively cap oversized tool-call `result` fields on a message's parts. Non-tool
+ * parts and small results are returned untouched; an oversized result is truncated and
+ * annotated with a short marker noting how many characters were dropped.
+ */
+export function truncateOversizedParts(parts: unknown): unknown {
+  if (!Array.isArray(parts)) return parts;
+  let mutated = false;
+  const capped = parts.map((part) => {
+    if (!part || typeof part !== 'object') return part;
+    const p = part as Record<string, unknown>;
+    if (p.type !== 'tool-call' || p.result === undefined) return part;
+    const serialized = typeof p.result === 'string' ? p.result : JSON.stringify(p.result);
+    if (!serialized || serialized.length <= MAX_TOOL_RESULT_CHARS) return part;
+    mutated = true;
+    const dropped = serialized.length - MAX_TOOL_RESULT_CHARS;
+    return {
+      ...p,
+      result: `${serialized.slice(0, MAX_TOOL_RESULT_CHARS)}… [truncated ${dropped} chars]`,
+    };
+  });
+  return mutated ? capped : parts;
+}
+
 /** Fetch messages from another session's DO via internal HTTP endpoint. */
 export async function fetchMessagesFromDO(
   env: Env,
@@ -66,7 +101,9 @@ export async function fetchMessagesFromDO(
       createdAt: string;
     }>;
   };
-  return data.messages;
+  return data.messages.map((m) =>
+    m.parts === undefined ? m : { ...m, parts: truncateOversizedParts(m.parts) },
+  );
 }
 
 // ─── spawnChild ───────────────────────────────────────────────────────────────
@@ -316,8 +353,8 @@ export type GetSessionMessagesResult =
       opencodeSessionId?: string;
       threadId?: string;
       createdAt: string;
-    }>; error?: undefined }
-  | { error: string; messages?: undefined };
+    }>; hasMore: boolean; error?: undefined }
+  | { error: string; messages?: undefined; hasMore?: undefined };
 
 export async function getSessionMessages(
   env: Env,
@@ -334,8 +371,13 @@ export async function getSessionMessages(
   }
 
   // Fetch messages from the target DO's local SQLite (not D1)
-  const messages = await fetchMessagesFromDO(env, targetSessionId, limit || 20, after);
-  return { messages };
+  const effectiveLimit = limit || DEFAULT_MESSAGE_LIMIT;
+  const messages = await fetchMessagesFromDO(env, targetSessionId, effectiveLimit, after);
+  // A full page implies the window was capped and older messages remain. This is a
+  // hint for the caller to paginate — the child's final assistant text can sit behind
+  // many tool-call messages, so a too-small page hides the result the orchestrator needs.
+  const hasMore = messages.length >= effectiveLimit;
+  return { messages, hasMore };
 }
 
 // ─── forwardMessages ─────────────────────────────────────────────────────────
