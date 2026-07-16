@@ -141,6 +141,48 @@ export function resolveSlackChannelId(
   return storedReplyId;
 }
 
+/**
+ * Base channel identity, ignoring any thread/message suffix. Channel reply
+ * targets are encoded as `channelId[:threadTs]` (Slack) or a bare id
+ * (Telegram), so the segment before the first colon is the channel itself.
+ */
+function baseChannelId(channelId: string): string {
+  const idx = channelId.indexOf(':');
+  return idx === -1 ? channelId : channelId.slice(0, idx);
+}
+
+/**
+ * Guard that a `channel_reply` only delivers to the channel the current prompt
+ * originated on. The reply tool accepts an arbitrary `channel_id`; without this
+ * check an agent could address any channel it can name (e.g. a DM-originated
+ * session posting into an unrelated shared channel).
+ *
+ * Strictest by default: only the originating channel is permitted. There is no
+ * existing cross-post authorization setting to relax it. When no originating
+ * channel is known (web/thread sessions, or scheduled/workflow dispatch with no
+ * inbound channel) there is nothing to enforce against and the reply proceeds.
+ *
+ * Returns `null` when the target is allowed, or an error string when it must be
+ * rejected.
+ */
+export function checkChannelReplyOrigin(
+  origin: { channelType: string; channelId: string } | null,
+  targetChannelType: string,
+  targetChannelId: string,
+): string | null {
+  if (!origin) return null;
+  const originChannel = baseChannelId(origin.channelId);
+  const targetChannel = baseChannelId(targetChannelId);
+  if (origin.channelType !== targetChannelType || originChannel !== targetChannel) {
+    return (
+      `channel_reply rejected: this session originated on ${origin.channelType} channel ` +
+      `${originChannel}; replies may only target that channel, not ${targetChannelType} ` +
+      `channel ${targetChannel}.`
+    );
+  }
+  return null;
+}
+
 export function buildForwardedParts(
   originalParts: unknown,
   metadata: {
@@ -6686,6 +6728,15 @@ export class SessionAgentDO {
       const effectiveChannelId = resolveSlackChannelId(channelType, channelId, storedReplyId);
       if (effectiveChannelId !== channelId) {
         console.log(`[SessionAgentDO] handleChannelReply: restored thread_ts from prompt context (${channelId} -> ${effectiveChannelId})`);
+      }
+
+      // Only allow replying to the channel this prompt originated on. Prevents an
+      // agent from delivering to an arbitrary channel by passing its id.
+      const originError = checkChannelReplyOrigin(processingChannelContext, channelType, effectiveChannelId);
+      if (originError) {
+        console.warn(`[SessionAgentDO] ${originError}`);
+        this.runnerLink.send({ type: 'channel-reply-result', requestId, error: originError } as any);
+        return;
       }
 
       const result = await this.channelRouter.sendReply({

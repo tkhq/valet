@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ACTION_APPROVAL_EXPIRY_MS, SessionAgentDO, buildActionApprovalPromptActions, buildForwardedParts, resolveSlackChannelId } from './session-agent.js';
+import { ACTION_APPROVAL_EXPIRY_MS, SessionAgentDO, buildActionApprovalPromptActions, buildForwardedParts, checkChannelReplyOrigin, resolveSlackChannelId } from './session-agent.js';
 import { createTestDb } from '../test-utils/db.js';
 import { sessions } from '../lib/schema/sessions.js';
 import { users } from '../lib/schema/users.js';
@@ -1103,6 +1103,43 @@ describe('SessionAgentDO', () => {
       return message.type === 'message' && data?.content === 'No voice note came through on my end.';
     });
     expect(mirrored).toBeUndefined();
+  });
+
+  it('rejects a channel reply addressed to a non-originating channel', async () => {
+    const { agent } = await createTestAgent();
+    const runnerSend = vi.fn();
+    (agent as any).runnerLink.send = runnerSend;
+    (agent as any).channelRouter = {
+      sendReply: vi.fn().mockResolvedValue({ success: true }),
+    };
+    // This session is processing a prompt that arrived in a Slack DM.
+    (agent as any).promptQueue.enqueue({
+      id: 'prompt-dm',
+      content: 'help me draft an update',
+      status: 'processing',
+      channelType: 'slack',
+      channelId: 'D123:1700000000.000100',
+      channelKey: 'slack:D123',
+      threadId: '1700000000.000100',
+      replyChannelType: 'slack',
+      replyChannelId: 'D123:1700000000.000100',
+    });
+
+    // The agent tries to deliver to an unrelated shared channel.
+    await (agent as any).handleChannelReply(
+      'reply-request-cross',
+      'slack',
+      'C_INVESTOR_OUTREACH',
+      'Quarterly numbers are attached.',
+    );
+
+    expect((agent as any).channelRouter.sendReply).not.toHaveBeenCalled();
+    const resultCall = runnerSend.mock.calls.find(
+      ([m]) => m?.type === 'channel-reply-result' && m?.requestId === 'reply-request-cross',
+    );
+    expect(resultCall).toBeDefined();
+    expect(resultCall![0].success).toBeUndefined();
+    expect(resultCall![0].error).toContain('C_INVESTOR_OUTREACH');
   });
 
   it('does not leak thread ID from a Telegram turn into a subsequent web-UI turn', async () => {
@@ -3385,6 +3422,40 @@ describe('SessionAgentDO', () => {
     it('does not apply to non-Slack channel types', () => {
       expect(resolveSlackChannelId('telegram', '12345', '12345:9999'))
         .toBe('12345');
+    });
+  });
+
+  // ─── checkChannelReplyOrigin ──────────────────────────────────────────────────
+
+  describe('checkChannelReplyOrigin', () => {
+    it('allows a reply to the originating channel', () => {
+      expect(checkChannelReplyOrigin({ channelType: 'slack', channelId: 'D123' }, 'slack', 'D123')).toBeNull();
+    });
+
+    it('allows a reply to the originating channel ignoring the thread suffix', () => {
+      expect(
+        checkChannelReplyOrigin({ channelType: 'slack', channelId: 'D123:111.222' }, 'slack', 'D123'),
+      ).toBeNull();
+      expect(
+        checkChannelReplyOrigin({ channelType: 'slack', channelId: 'D123' }, 'slack', 'D123:333.444'),
+      ).toBeNull();
+    });
+
+    it('rejects a reply to a different channel on the same platform', () => {
+      const err = checkChannelReplyOrigin({ channelType: 'slack', channelId: 'D123:111.222' }, 'slack', 'C_INVESTORS');
+      expect(err).not.toBeNull();
+      expect(err).toContain('D123');
+      expect(err).toContain('C_INVESTORS');
+    });
+
+    it('rejects a reply on a different platform', () => {
+      expect(
+        checkChannelReplyOrigin({ channelType: 'slack', channelId: 'D123' }, 'telegram', 'D123'),
+      ).not.toBeNull();
+    });
+
+    it('allows any target when the originating channel is unknown', () => {
+      expect(checkChannelReplyOrigin(null, 'slack', 'C_ANY')).toBeNull();
     });
   });
 

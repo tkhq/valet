@@ -145,6 +145,10 @@ describe('ChannelRouter', () => {
       expect(outbound.attachments).toHaveLength(1);
       expect(outbound.attachments[0].type).toBe('file');
       expect(outbound.attachments[0].fileName).toBe('doc.pdf');
+      // The message rides along only as the attachment caption. It must NOT also
+      // populate `markdown`, or the transport would post the text a second time.
+      expect(outbound.attachments[0].caption).toBe('see file');
+      expect(outbound.markdown).toBeUndefined();
     });
 
     it('normalizes legacy imageBase64 to file attachment', async () => {

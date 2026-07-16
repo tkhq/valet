@@ -170,8 +170,11 @@ export class ChannelRouter {
     const attachName = opts.fileName;
 
     if (attachBase64) {
+      // The message rides along as the attachment caption (delivered as the
+      // file's initial_comment). Do NOT also set `markdown`: that would make the
+      // transport post the same text a second time as a standalone message,
+      // double-posting the reply.
       return {
-        markdown: opts.message || undefined,
         attachments: [
           {
             type: attachMime.startsWith('image/') ? 'image' : 'file',

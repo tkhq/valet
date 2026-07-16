@@ -1113,6 +1113,42 @@ describe('SlackTransport', () => {
       );
     });
 
+    it('sends a file with a caption as exactly one outbound message', async () => {
+      // A file reply carrying its message as the attachment caption must be
+      // delivered once: the caption rides along as the upload's initial_comment,
+      // with no separate chat.postMessage for the same text.
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ ok: true, upload_url: 'https://upload.example.com', file_id: 'F1' }),
+      );
+      mockFetch.mockResolvedValueOnce(new Response('OK', { status: 200 }));
+      mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+      const result = await transport.sendMessage(
+        { channelType: 'slack', channelId: 'C456' },
+        {
+          attachments: [{
+            type: 'file' as const,
+            url: 'data:application/pdf;base64,JVBERi0=',
+            mimeType: 'application/pdf',
+            fileName: 'report.pdf',
+            caption: 'Here is the file',
+          }],
+        },
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      // Exactly the 3 upload calls — no separate chat.postMessage.
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      const postedUrls = mockFetch.mock.calls.map((call) => call[0]);
+      expect(postedUrls).not.toContain('https://slack.com/api/chat.postMessage');
+
+      // The caption is delivered as the file's initial_comment.
+      const completeBody = JSON.parse(mockFetch.mock.calls[2][1].body);
+      expect(mockFetch.mock.calls[2][0]).toBe('https://slack.com/api/files.completeUploadExternal');
+      expect(completeBody.initial_comment).toBe('Here is the file');
+    });
+
     it('returns error when file upload fails at getUploadURLExternal', async () => {
       mockFetch.mockResolvedValueOnce(
         jsonResponse({ ok: false, error: 'not_allowed' }),
