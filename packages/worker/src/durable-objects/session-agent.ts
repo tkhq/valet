@@ -6744,9 +6744,18 @@ export class SessionAgentDO {
         console.log(`[SessionAgentDO] handleChannelReply: restored thread_ts from prompt context (${channelId} -> ${effectiveChannelId})`);
       }
 
-      // Only allow replying to the channel this prompt originated on. Prevents an
-      // agent from delivering to an arbitrary channel by passing its id.
-      const originError = checkChannelReplyOrigin(processingChannelContext, channelType, effectiveChannelId);
+      // Only allow replying to a channel this session is actively processing.
+      // Prevents an agent from delivering to an arbitrary channel by passing its
+      // id. A session can process concurrent prompts from different channels, so
+      // the target is valid when it matches ANY currently-processing origin — not
+      // just the single most-recent one returned by getProcessingChannelContext.
+      // When no processing origin matches (including zero processing rows), we
+      // fall through to the single-context guard purely to produce the right
+      // rejection message; it can only reject here, never allow.
+      const targetBaseChannelId = baseChannelId(effectiveChannelId);
+      const originError = this.promptQueue.hasProcessingOriginForChannel(channelType, targetBaseChannelId)
+        ? null
+        : checkChannelReplyOrigin(processingChannelContext, channelType, effectiveChannelId);
       if (originError) {
         console.warn(`[SessionAgentDO] ${originError}`);
         this.runnerLink.send({ type: 'channel-reply-result', requestId, error: originError } as any);

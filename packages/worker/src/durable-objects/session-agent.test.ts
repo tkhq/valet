@@ -1142,6 +1142,97 @@ describe('SessionAgentDO', () => {
     expect(resultCall![0].error).toContain('C_INVESTOR_OUTREACH');
   });
 
+  it('allows a channel reply to any concurrently-processing origin, not just the newest', async () => {
+    const { agent } = await createTestAgent();
+    const runnerSend = vi.fn();
+    (agent as any).runnerLink.send = runnerSend;
+    (agent as any).channelRouter = {
+      sendReply: vi.fn().mockResolvedValue({ success: true }),
+    };
+
+    // Two concurrent processing prompts from different channels: an older Slack
+    // channel A and a newer Telegram chat B. getProcessingChannelContext resolves
+    // only the newest (Telegram B), but the session legitimately owns both turns.
+    (agent as any).promptQueue.enqueue({
+      id: 'prompt-slack-a',
+      content: 'older slack turn',
+      status: 'processing',
+      channelType: 'slack',
+      channelId: 'C_ALPHA:1700000000.000100',
+      channelKey: 'slack:C_ALPHA',
+      threadId: '1700000000.000100',
+      replyChannelType: 'slack',
+      replyChannelId: 'C_ALPHA:1700000000.000100',
+    });
+    (agent as any).promptQueue.enqueue({
+      id: 'prompt-telegram-b',
+      content: 'newer telegram turn',
+      status: 'processing',
+      channelType: 'telegram',
+      channelId: 'chat-B',
+      channelKey: 'telegram:chat-B',
+      replyChannelType: 'telegram',
+      replyChannelId: 'chat-B',
+    });
+
+    // Replying to the older Slack origin A must be ALLOWED even though Telegram B
+    // is the most-recent processing row (previously this was rejected).
+    await (agent as any).handleChannelReply(
+      'reply-request-a',
+      'slack',
+      'C_ALPHA',
+      'Here is the answer for the Slack turn.',
+    );
+    expect((agent as any).channelRouter.sendReply).toHaveBeenCalledTimes(1);
+    // The reply routes to the base Slack channel A. Thread-ts restoration draws
+    // only from the newest processing context (Telegram B here), so no thread
+    // suffix is reattached — orthogonal to the origin guard under test.
+    expect((agent as any).channelRouter.sendReply).toHaveBeenCalledWith(
+      expect.objectContaining({ channelType: 'slack', channelId: 'C_ALPHA' }),
+    );
+    const allowedResult = runnerSend.mock.calls.find(
+      ([m]) => m?.type === 'channel-reply-result' && m?.requestId === 'reply-request-a',
+    );
+    expect(allowedResult![0].success).toBe(true);
+
+    // A channel the session is NOT processing stays closed (exfiltration vector).
+    await (agent as any).handleChannelReply(
+      'reply-request-c',
+      'slack',
+      'C_GAMMA',
+      'Numbers for an unrelated channel.',
+    );
+    expect((agent as any).channelRouter.sendReply).toHaveBeenCalledTimes(1); // unchanged
+    const rejectedResult = runnerSend.mock.calls.find(
+      ([m]) => m?.type === 'channel-reply-result' && m?.requestId === 'reply-request-c',
+    );
+    expect(rejectedResult![0].success).toBeUndefined();
+    expect(rejectedResult![0].error).toContain('C_GAMMA');
+  });
+
+  it('rejects a channel reply when the session has zero processing prompts (fails closed)', async () => {
+    const { agent } = await createTestAgent();
+    const runnerSend = vi.fn();
+    (agent as any).runnerLink.send = runnerSend;
+    (agent as any).channelRouter = {
+      sendReply: vi.fn().mockResolvedValue({ success: true }),
+    };
+
+    await (agent as any).handleChannelReply(
+      'reply-request-none',
+      'slack',
+      'C_ANY',
+      'Nothing is being processed.',
+    );
+
+    expect((agent as any).channelRouter.sendReply).not.toHaveBeenCalled();
+    const resultCall = runnerSend.mock.calls.find(
+      ([m]) => m?.type === 'channel-reply-result' && m?.requestId === 'reply-request-none',
+    );
+    expect(resultCall![0].success).toBeUndefined();
+    expect(resultCall![0].error).toContain('no originating channel');
+  });
+
   it('does not leak thread ID from a Telegram turn into a subsequent web-UI turn', async () => {
     const runnerSocket = { send: vi.fn() };
     const { agent, broadcasts } = await createTestAgent({ sockets: [runnerSocket] });

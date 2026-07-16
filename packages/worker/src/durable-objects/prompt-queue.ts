@@ -612,6 +612,38 @@ export class PromptQueue {
     return threadId ? { channelType, channelId, threadId } : { channelType, channelId };
   }
 
+  /**
+   * Does any currently-processing prompt originate on the given channel?
+   *
+   * A session can hold multiple concurrent processing rows from different
+   * channels (cross-channel concurrent dispatch), so the single most-recent row
+   * returned by {@link getProcessingChannelContext} is not the only legitimate
+   * reply target. This enumerates every processing row and reports whether one
+   * of them originated on `(targetChannelType, targetBaseChannelId)`.
+   *
+   * Origin channel is resolved the same way as elsewhere — reply_channel_* wins
+   * over channel_*, and 'web'/'thread' rows are not external channels so they
+   * never match. The stored channel id may carry a thread/message suffix
+   * (`id:threadTs`); only the base id (segment before the first colon) is
+   * compared, so `targetBaseChannelId` must already be base-normalized.
+   */
+  hasProcessingOriginForChannel(targetChannelType: string, targetBaseChannelId: string): boolean {
+    const rows = this.sql
+      .exec("SELECT channel_type, channel_id, reply_channel_type, reply_channel_id FROM prompt_queue WHERE status = 'processing'")
+      .toArray();
+    for (const row of rows) {
+      const channelType = (row.reply_channel_type as string) || (row.channel_type as string) || null;
+      const channelId = (row.reply_channel_id as string) || (row.channel_id as string) || null;
+      if (!channelType || !channelId) continue;
+      if (channelType === 'web' || channelType === 'thread') continue;
+      if (channelType !== targetChannelType) continue;
+      const colon = channelId.indexOf(':');
+      const baseId = colon === -1 ? channelId : channelId.slice(0, colon);
+      if (baseId === targetBaseChannelId) return true;
+    }
+    return false;
+  }
+
   // ─── Queue Dispatch State ──────────────────────────────────────────────────
   //
   // These state keys track the runner's busy/idle status and prompt timing.

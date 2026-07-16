@@ -703,6 +703,77 @@ describe('PromptQueue', () => {
     });
   });
 
+  describe('hasProcessingOriginForChannel', () => {
+    it('matches an origin that is not the most-recent processing row', () => {
+      // Two concurrent processing prompts from different channels: an older
+      // slack:A and a newer telegram:B. A reply targeting slack:A must be
+      // recognized even though telegram:B is the most-recent processing row.
+      pq.enqueue({
+        id: 'older', content: 'a', status: 'processing',
+        channelType: 'slack', channelId: 'A', channelKey: 'slack:A',
+      });
+      pq.enqueue({
+        id: 'newer', content: 'b', status: 'processing',
+        channelType: 'telegram', channelId: 'B', channelKey: 'telegram:B',
+      });
+
+      // getProcessingChannelContext resolves only the newest row (telegram:B).
+      expect(pq.getProcessingChannelContext()).toEqual({ channelType: 'telegram', channelId: 'B' });
+
+      // But both active origins are legitimate reply targets.
+      expect(pq.hasProcessingOriginForChannel('slack', 'A')).toBe(true);
+      expect(pq.hasProcessingOriginForChannel('telegram', 'B')).toBe(true);
+      // A channel the session is not processing stays closed.
+      expect(pq.hasProcessingOriginForChannel('slack', 'C')).toBe(false);
+      // Same base id on a different platform does not match.
+      expect(pq.hasProcessingOriginForChannel('telegram', 'A')).toBe(false);
+    });
+
+    it('ignores thread/message suffix on the stored channel id', () => {
+      pq.enqueue({
+        id: 'p1', content: 'a', status: 'processing',
+        channelType: 'slack', channelId: 'C123',
+        replyChannelType: 'slack', replyChannelId: 'C123:1700000000.000100',
+      });
+      expect(pq.hasProcessingOriginForChannel('slack', 'C123')).toBe(true);
+    });
+
+    it('prefers reply_channel_* over channel_* when resolving origin', () => {
+      pq.enqueue({
+        id: 'p1', content: 'a', status: 'processing',
+        channelType: 'thread', channelId: 'th1',
+        replyChannelType: 'slack', replyChannelId: 'C123:ts',
+      });
+      expect(pq.hasProcessingOriginForChannel('slack', 'C123')).toBe(true);
+      expect(pq.hasProcessingOriginForChannel('thread', 'th1')).toBe(false);
+    });
+
+    it('never matches web/thread origins (not external channels)', () => {
+      pq.enqueue({
+        id: 'p-web', content: 'a', status: 'processing',
+        channelType: 'web', channelId: 'session-1',
+      });
+      pq.enqueue({
+        id: 'p-thread', content: 'b', status: 'processing',
+        channelType: 'thread', channelId: 'th1',
+      });
+      expect(pq.hasProcessingOriginForChannel('web', 'session-1')).toBe(false);
+      expect(pq.hasProcessingOriginForChannel('thread', 'th1')).toBe(false);
+    });
+
+    it('does not match queued (non-processing) rows', () => {
+      pq.enqueue({
+        id: 'q1', content: 'a', status: 'queued',
+        channelType: 'slack', channelId: 'A',
+      });
+      expect(pq.hasProcessingOriginForChannel('slack', 'A')).toBe(false);
+    });
+
+    it('fails closed with zero processing rows', () => {
+      expect(pq.hasProcessingOriginForChannel('slack', 'A')).toBe(false);
+    });
+  });
+
   // ─── Queue Dispatch State ─────────────────────────────────────────────
 
   describe('runnerBusy', () => {
