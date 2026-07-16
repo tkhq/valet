@@ -189,11 +189,11 @@ describe('McpActionSource', () => {
   });
 
   it('prefers JSON parsing over TOON decoding when text is valid JSON', async () => {
-    // TOON is lenient enough to decode a JSON string into a mangled
-    // object (e.g. `{"records":[...]}` → `{'"records"': '[...]'}`).
-    // JSON must win. This test picks a payload where the TOON decode
-    // WOULD produce a different (and clearly wrong) shape, so a future
-    // reorder or gate change would break the assertion loudly.
+    // JSON must decode to a real array-of-objects shape. The current
+    // TOON gate is anchored to the first line, so a JSON payload
+    // starting with `{` cannot reach the TOON branch — this test
+    // pins the JSON-win contract as a safety net for future gate
+    // changes.
     const jsonText = '{"records":[{"Name":"Stripe"}]}';
     const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const rpc = await readRpc(init);
@@ -230,6 +230,12 @@ describe('McpActionSource', () => {
       'Error: Invalid input',
       'Summary: My take is that this workflow is fine',
       'Overview:\n  status: ok\n  count: 3',
+      // Markdown link-reference definitions: routine for docs-Q&A MCP
+      // sources (plugin-deepwiki, plugin-turnkey-docs). A whole-blob
+      // regex would admit the payload and TOON would drop the prose.
+      '[1]: https://example.com/guide\n\nSee the guide above.',
+      // Stack traces where the frame text embeds a TOON-shaped marker.
+      'Error: cannot read property\n  at handler (index.js:4)\n  items[0]: null',
     ];
     for (const text of cases) {
       const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {

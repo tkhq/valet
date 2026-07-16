@@ -166,12 +166,29 @@ export class McpActionSource implements ActionSource {
 }
 
 /**
- * A TOON structural marker: an array-count prefix (`[N]:`), an inline
- * array field (`field[N]:`), or a tabular header (`field[N]{col,col}:`).
- * Plain prose that happens to contain a colon does not match — that is
- * the whole point of gating on this marker before attempting a decode.
+ * A TOON structural marker for the first line of a document: an array-
+ * count prefix (`[N]:`), a nested array field (`field[N]:`), or a
+ * tabular header (`field[N]{col,col}:`). The colon must be followed by
+ * end-of-line (whitespace only) — a real TOON header stands alone on
+ * its line with the body on subsequent indented lines. Only matched
+ * against the first non-empty line of the payload.
+ *
+ * The trailing `\s*$` is what rejects markdown link-reference
+ * definitions like `[1]: https://example.com/guide` (routine in
+ * docs-Q&A MCP sources such as plugin-deepwiki and plugin-turnkey-docs)
+ * — those have a URL after the colon. Anchoring to the first line
+ * likewise rejects stack traces or prose that happen to embed
+ * `items[0]:` on a later line.
  */
-const TOON_MARKER = /\[\d+\](?:\{[^}]*\})?:/;
+const TOON_MARKER = /^[\w.-]*\[\d+\](?:\{[^}]*\})?:\s*$/;
+
+function firstNonEmptyLine(text: string): string | undefined {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return undefined;
+}
 
 /** Object/array => structured; primitive/null => undefined. */
 function asStructured(value: unknown): unknown {
@@ -206,7 +223,9 @@ function tryParseJson(text: string): unknown {
  * populates structuredContent.
  */
 function tryDecodeToon(text: string): unknown {
-  if (!text || !TOON_MARKER.test(text)) return undefined;
+  if (!text) return undefined;
+  const firstLine = firstNonEmptyLine(text);
+  if (!firstLine || !TOON_MARKER.test(firstLine)) return undefined;
   try {
     return asStructured(decodeToon(text));
   } catch {
