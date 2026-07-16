@@ -238,6 +238,70 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
     expect(poll.output).not.toContain("should-not-appear");
   }, 15_000);
 
+  // Task-9 whole-phase review, DEFECT 1: cancelCommand's process-group kill
+  // used `kill -KILL -- -"$pid"`, which dash's builtin `kill` (the real
+  // `/bin/sh` on the Debian-slim sandbox image — this pod's `busybox:stable`
+  // image also matters here, exercised below) rejects outright, silently
+  // degrading to killing only the setsid leader and orphaning the job's
+  // real child. The test above only asserts poll()'s reported exit code —
+  // it can't see a leaked child that the *pod's own kernel* is still
+  // running. This test execs directly into the pod after cancelJob and
+  // greps the live process table for the job's marker command, which is
+  // the only way to actually prove the child is gone.
+  it("cancelJob actually reaps the job's child process in the pod — not just the setsid leader (DEFECT 1)", async () => {
+    const execId = `job-${nextJobId++}`;
+    // A distinctive sleep DURATION, not a shell comment, is the marker:
+    // `sh -c` strips comments before exec'ing, so a trailing `# marker`
+    // never reaches the child's own argv — pgrep -f matches process
+    // argv/cmdline, not the shell source that spawned it. A random,
+    // per-test-unique duration is what actually shows up in `ps`/`pgrep`.
+    const marker = `sleep 8${randomBytes(2).readUInt16BE(0) % 1000}`;
+    await execJobInPod(deps, podName, execId, marker);
+
+    const beforeCancel = await execInPod(deps, podName, `pgrep -f ${JSON.stringify(marker)}`);
+    expect(beforeCancel.stdout.trim().length).toBeGreaterThan(0); // sanity: it's actually running
+
+    const start = Date.now();
+    await cancelJobInPod(deps, podName, execId);
+    const elapsedMs = Date.now() - start;
+
+    const afterCancel = await execInPod(deps, podName, `pgrep -f ${JSON.stringify(marker)}`);
+    // pgrep exits 1 (no matches) once the child is gone; stdout is empty.
+    expect(afterCancel.stdout.trim()).toBe("");
+    expect(afterCancel.exitCode).toBe(1);
+    // cancelCommand's own poll-for-EXIT loop caps at ~3s; a prompt kill
+    // should resolve well under that.
+    expect(elapsedMs).toBeLessThan(2000);
+  }, 15_000);
+
+  // Task-9 whole-phase review, DEFECT 2: the output-cap change moved
+  // `echo $? > EXIT` inside the killed process group for capped jobs (the
+  // shape every real job actually uses, since PolicySandbox always sets
+  // maxOutputBytes) — on cancel, EXIT never got written, and
+  // cancelJob's poll-for-EXIT loop spun its full ~3s budget. There was no
+  // capped-cancel test at all before this fix.
+  it("cancelJob stops a CAPPED job promptly too — the job's real child is reaped and EXIT appears without spinning the poll budget (DEFECT 2)", async () => {
+    const execId = `job-${nextJobId++}`;
+    const marker = `sleep 8${randomBytes(2).readUInt16BE(0) % 1000}`;
+    await execJobInPod(deps, podName, execId, marker, { maxOutputBytes: 1024 });
+
+    const beforeCancel = await execInPod(deps, podName, `pgrep -f ${JSON.stringify(marker)}`);
+    expect(beforeCancel.stdout.trim().length).toBeGreaterThan(0);
+
+    const start = Date.now();
+    await cancelJobInPod(deps, podName, execId);
+    const elapsedMs = Date.now() - start;
+    expect(elapsedMs).toBeLessThan(2000); // not the ~3s pre-fix spin
+
+    const afterCancel = await execInPod(deps, podName, `pgrep -f ${JSON.stringify(marker)}`);
+    expect(afterCancel.stdout.trim()).toBe("");
+    expect(afterCancel.exitCode).toBe(1);
+
+    const poll = await pollJobInPod(deps, podName, execId, 0);
+    expect(poll.status).toBe("done");
+    expect(poll.exitCode).not.toBe(0);
+  }, 15_000);
+
   it("reassembles multibyte output losslessly when polled at tight offsets across a mid-codepoint write boundary", async () => {
     const execId = `job-${nextJobId++}`;
     // Rocket emoji (\xF0\x9F\x9A\x80, 4 bytes) written as two separate

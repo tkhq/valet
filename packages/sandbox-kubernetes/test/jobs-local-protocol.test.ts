@@ -12,7 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   cancelCommand,
@@ -26,6 +26,24 @@ import { JOBS_DIR } from "../src/exec.js";
 function sh(command: string): { stdout: string; stderr: string; status: number | null } {
   const r = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
   return { stdout: r.stdout, stderr: r.stderr, status: r.status };
+}
+
+/** True if any process on the machine still belongs to process group
+ * `pgid` — the direct DEFECT 1 repro check: cancelCommand's old
+ * `kill -KILL -- -"$pid"` was rejected by dash's builtin `kill` ("Illegal
+ * number: -"), fell through to killing only the setsid leader, and left the
+ * job's real child (e.g. the `sleep` process itself, forked by the exec'd
+ * `sh -c 'sleep N'`, distinct from the leader's own pid — see this file's
+ * "actually reaps" test) running under `pgid` indefinitely. */
+function pgidStillAlive(pgid: number): boolean {
+  const r = spawnSync("ps", ["-eo", "pid,pgid,args"], { encoding: "utf8" });
+  return r.stdout
+    .split("\n")
+    .slice(1) // header row
+    .some((line) => {
+      const cols = line.trim().split(/\s+/);
+      return cols.length >= 2 && Number(cols[1]) === pgid;
+    });
 }
 
 /** `setsid` (util-linux) is what `jobKickoffCommand` uses to give the job
@@ -277,5 +295,53 @@ describe.skipIf(!hasSetsid || !hasBase64W0)("job-mode shell protocol against a r
     expect(status.status).toBe("done");
     expect(status.exitCode).not.toBe(0); // killed, not a clean exit
     expect(decodePollStdout(poll.stdout).text).not.toContain("should-not-appear");
+  }, 10_000);
+
+  // DEFECT 1's actual repro: the pid recorded in `.pid` is the setsid
+  // LEADER (the `sh -c 'sleep 30'` shell that `exec sh -c innerCommand`
+  // replaced), but dash forks a distinct CHILD process to run `sleep 30`
+  // itself (dash does not tail-call-optimize a single simple command inside
+  // `sh -c`) — so a group-kill that silently degrades to killing only the
+  // leader (the old `kill -KILL -- -"$pid"` behavior under dash) leaves
+  // that child running under the same pgid, invisible to a naive "is the
+  // recorded pid still alive" check.
+  it("cancelCommand reaps the job's ACTUAL child process, not just the setsid leader — DEFECT 1 repro", async () => {
+    const execId = newExecId();
+    const kickoff = sh(jobKickoffCommand(execId, "sleep 30"));
+    expect(kickoff.status).toBe(0);
+    expect(kickoff.stdout.trim()).toBe("started");
+
+    const pgidText = await readFile(`${JOBS_DIR}/${execId}.pid`, "utf8");
+    const pgid = Number(pgidText.trim());
+    expect(Number.isInteger(pgid)).toBe(true);
+    // Sanity: the group must actually be alive before we cancel it, else
+    // the "gone after cancel" assertion below would be vacuously true.
+    expect(pgidStillAlive(pgid)).toBe(true);
+
+    const cancel = sh(cancelCommand(execId));
+    expect(cancel.status).toBe(0);
+
+    expect(pgidStillAlive(pgid)).toBe(false);
+  }, 10_000);
+
+  it("cancelCommand writes EXIT promptly for a CAPPED job too — DEFECT 2 repro (the F1 output-cap change moved the exit-code write inside the killed group; a fifo moves it back outside)", async () => {
+    const execId = newExecId();
+    const kickoff = sh(jobKickoffCommand(execId, "sleep 30", 1024));
+    expect(kickoff.status).toBe(0);
+    expect(kickoff.stdout.trim()).toBe("started");
+
+    const start = Date.now();
+    const cancel = sh(cancelCommand(execId));
+    const elapsedMs = Date.now() - start;
+    expect(cancel.status).toBe(0);
+    // cancelCommand's own poll-for-EXIT loop is 10 * 300ms = up to 3s if
+    // EXIT never appears. A prompt write (the fix) should resolve in well
+    // under one poll cycle; generous margin against CI jitter.
+    expect(elapsedMs).toBeLessThan(1000);
+
+    const poll = sh(pollCommand(execId, 0));
+    const status = parseJobStatus(poll.stderr);
+    expect(status.status).toBe("done");
+    expect(status.exitCode).not.toBe(0);
   }, 10_000);
 });

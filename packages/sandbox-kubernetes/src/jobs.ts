@@ -67,11 +67,21 @@
  *
  * The exit-code capture has to move as a result: a POSIX-sh pipeline's own
  * exit status is the LAST command's (the capping filter's `cat`), not the
- * job's, so `pollJobInPod`'s `EXIT` file can no longer be written by the
- * outer `; echo $? > EXIT` that follows the pipeline. Instead, when capping
- * is active, the exit code is written from INSIDE the piped-through script,
- * as a direct file write that never touches the stdout pipe at all — see
- * `jobKickoffCommand`'s capped branch.
+ * job's. Rather than a plain shell pipeline, the capped branch connects the
+ * job to the capping filter through a named pipe (`mkfifo`): the filter
+ * reads from the fifo as an ordinary background job in the OUTER script's
+ * process group, while the job itself (under `setsid`, in its OWN process
+ * group) writes to the fifo. That keeps the capping filter OUTSIDE the
+ * process group `cancelJob` kills, and — critically — keeps `setsid`'s own
+ * parent process (which isn't part of the killed group either; see
+ * `jobKickoffCommand`'s docblock) free to run `; echo $? > EXIT` right after
+ * `setsid` returns, exactly like the uncapped branch. This is what makes
+ * `EXIT` appear promptly on `cancelJob` for capped jobs too — piping the
+ * job directly into the filter (the pre-fix shape) put that write inside
+ * the killed group, so cancelling a capped job used to spin `cancelJob`'s
+ * full poll-for-EXIT budget every time (the write never happened until the
+ * whole group death was somehow otherwise observed, which for SIGKILL never
+ * comes). See `jobKickoffCommand`'s capped branch for the fifo wiring.
  */
 import type { ExecJobHandle, ExecOpts, JobPoll } from "@valet/engine";
 import { buildShellCommand, execInPod, JOBS_DIR, shQuote, type ExecDeps } from "./exec.js";
@@ -84,6 +94,9 @@ function jobExitPath(execId: string): string {
 }
 function jobPidPath(execId: string): string {
   return `${JOBS_DIR}/${execId}.pid`;
+}
+function jobFifoPath(execId: string): string {
+  return `${JOBS_DIR}/${execId}.fifo`;
 }
 
 /**
@@ -133,15 +146,19 @@ function jobPidPath(execId: string): string {
  *
  * `maxOutputBytes`, when provided, switches to the capped branch (see the
  * module docblock's "maxOutputBytes" section): the job's stdout+stderr are
- * piped through `head -c LIMIT > OUT; cat > /dev/null` instead of
- * redirected directly to `OUT`, and — because a pipeline's own exit status
- * isn't the job's — the exit code is written by the inner script itself
- * (`; echo $? > EXIT`, a plain file write that never touches the pipe)
- * instead of by the outer wrapper. This also means the job can no longer be
- * `exec`'d into as a tail call (something has to run *after* it to write
- * `EXIT`), so the capped branch runs it as a plain `sh -c` instead —
- * harmless: `setsid`'s process group still covers it, so `cancelJob`'s
- * group-kill is unaffected.
+ * connected to `head -c LIMIT > OUT; cat > /dev/null` through a `mkfifo`
+ * named pipe rather than a plain shell pipeline, specifically so the
+ * capping filter lands OUTSIDE `setsid`'s process group. That preserves the
+ * uncapped branch's `exec`-tail-call shape for the job itself (`echo $$ >
+ * PID; exec sh -c innerCommand`) and lets both branches share the identical
+ * `setsid ...; echo $? > EXIT` outer sequencing — the exit code always comes
+ * from `setsid`'s own wait() status (the job's real exit code on normal
+ * completion, or its signal-death status if `cancelJob` kills the group),
+ * written by a process `cancelJob`'s group-kill never touches, so `EXIT`
+ * appears promptly on cancel in both branches. `wait "$filterpid"` after the
+ * `EXIT` write just ensures `OUT` is fully flushed before this whole
+ * kickoff script exits — it runs after `EXIT` is already visible, so it
+ * doesn't reintroduce cancel latency.
  */
 export function jobKickoffCommand(execId: string, innerCommand: string, maxOutputBytes?: number): string {
   const outFile = jobOutPath(execId);
@@ -152,18 +169,58 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
     `i=0; while [ ! -f ${shQuote(pidFile)} ] && [ ! -f ${shQuote(exitFile)} ] && [ "$i" -lt 500 ]; do ` +
     `sleep 0.01; i=$((i+1)); done`;
 
+  // Common to both branches: record the pid (== pgid, thanks to setsid,
+  // recorded before `exec` replaces this shell so it survives the exec)
+  // and then exec straight into the job so `setsid`'s own wait() reflects
+  // the job's real exit status (or its signal-death status if cancelJob
+  // kills the group) — see this function's docblock for why that outer
+  // `setsid ...; echo $? > EXIT` sequencing (not a write from *inside* the
+  // killed group) is what makes EXIT appear promptly on cancel in BOTH
+  // branches.
+  const pidAndExec = `echo $$ > ${shQuote(pidFile)}; exec sh -c ${shQuote(innerCommand)}`;
+  const innerSetsid = `setsid sh -c ${shQuote(pidAndExec)} < /dev/null`;
+
   let wrapped: string;
   if (maxOutputBytes === undefined) {
-    const pidAndExec = `echo $$ > ${shQuote(pidFile)}; exec sh -c ${shQuote(innerCommand)}`;
-    wrapped =
-      `setsid sh -c ${shQuote(pidAndExec)} > ${shQuote(outFile)} 2>&1 < /dev/null; ` +
-      `echo $? > ${shQuote(exitFile)}`;
+    wrapped = `${innerSetsid} > ${shQuote(outFile)} 2>&1; echo $? > ${shQuote(exitFile)}`;
   } else {
     const limit = Math.max(0, Math.floor(maxOutputBytes));
-    const pidAndRun =
-      `echo $$ > ${shQuote(pidFile)}; sh -c ${shQuote(innerCommand)}; echo $? > ${shQuote(exitFile)}`;
+    const fifo = jobFifoPath(execId);
     const cappingFilter = `head -c ${limit} > ${shQuote(outFile)}; cat > /dev/null`;
-    wrapped = `setsid sh -c ${shQuote(pidAndRun)} 2>&1 < /dev/null | ( ${cappingFilter} )`;
+    // The capping filter has to run as a SEPARATE process from the job
+    // (see module docblock's "maxOutputBytes" section for why a plain
+    // `head -c LIMIT` alone would SIGPIPE-kill the job early) — but piping
+    // the job's stdout directly into it (the pre-fix shape) put the exit-
+    // code capture *inside* the setsid'd group, which cancelJob's group
+    // kill blows away before it can run (DEFECT 2). A FIFO decouples the
+    // two: the capping filter reads from `fifo` as an ordinary background
+    // job in the OUTER script's process group (not part of the killed
+    // group), while the job itself writes to `fifo` from inside the
+    // killed group. `wait $filterpid` after the EXIT write (not before —
+    // ordering matters) just makes sure OUT is fully flushed before this
+    // whole kickoff script exits; it doesn't delay EXIT's visibility to a
+    // concurrent pollJob/cancelJob.
+    // `mkfifo` MUST be its own fully-synchronous statement, terminated by
+    // `;` — NOT chained with `&&` into the same list as the backgrounded
+    // reader below. `A && B & C` backgrounds the WHOLE `A && B` list (POSIX
+    // `&`/`;` are both list separators with `&&`/`||` binding tighter), so
+    // `mkfifo fifo && ( cappingFilter ) < fifo &` would background the
+    // `mkfifo` call itself alongside the reader, racing it against
+    // `innerSetsid`'s `> fifo` open below: if that redirect's `open(2)`
+    // wins the race, it creates `fifo` as an ordinary O_CREAT file (redirect
+    // opens don't care about existing file type), and the not-yet-run
+    // backgrounded `mkfifo` then fails ("File exists") against that plain
+    // file — silently breaking the whole fifo handshake (reader and writer
+    // each get their own independent view of a regular file instead of a
+    // shared pipe). Sequencing `mkfifo` synchronously before anything
+    // touches the path closes that race.
+    wrapped =
+      `rm -f ${shQuote(fifo)}; mkfifo ${shQuote(fifo)}; ` +
+      `( ${cappingFilter} ) < ${shQuote(fifo)} & filterpid=$!; ` +
+      `${innerSetsid} > ${shQuote(fifo)} 2>&1; ` +
+      `echo $? > ${shQuote(exitFile)}; ` +
+      `wait "$filterpid"; ` +
+      `rm -f ${shQuote(fifo)}`;
   }
 
   return (
@@ -208,14 +265,28 @@ export function pollCommand(execId: string, offset: number): string {
  * `cancelJob` reliably observes a terminal state instead of racing the
  * kickoff subshell's own post-kill `echo $? > EXIT` (see jobKickoffCommand's
  * docblock: that write happens in a *different* process than the one we
- * just killed, so it isn't instantaneous). */
+ * just killed, so it isn't instantaneous).
+ *
+ * The group-kill itself deliberately omits `--` before the negative pgid:
+ * `kill -KILL -- -"$pid"` reads like the portable/safe form (`--` ends
+ * option parsing so a pid that happens to look like a flag can't be
+ * misread), but dash's `kill` builtin — the actual `/bin/sh` on the
+ * Debian-slim sandbox image — rejects `--` outright ("Illegal number: -",
+ * exit 2), which fell through to the `kill -KILL "$pid"` fallback and
+ * killed only the setsid leader, orphaning the job's real child process
+ * (verified in-container: e.g. a `sleep 30` child kept running past
+ * cancelJob, until pod teardown). Dropping `--` (`kill -KILL -"$pid"`) is
+ * accepted by dash's builtin, BusyBox's `kill`, AND GNU/util-linux `kill`
+ * alike, and actually reaps the whole process group in all three — the
+ * `-"$pid"` argument is unambiguous (a negative number, not a flag) even
+ * without `--` in every shell tested. */
 export function cancelCommand(execId: string): string {
   const pidFile = jobPidPath(execId);
   const exitFile = jobExitPath(execId);
   return (
     `if [ -f ${shQuote(pidFile)} ]; then ` +
     `pid=$(cat ${shQuote(pidFile)}); ` +
-    `kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; ` +
+    `kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; ` +
     `fi; ` +
     `for i in 1 2 3 4 5 6 7 8 9 10; do ` +
     `[ -f ${shQuote(exitFile)} ] && break; ` +

@@ -63,39 +63,55 @@ describe("jobKickoffCommand", () => {
     expect(cmd).toContain("exit 9");
   });
 
-  it("without maxOutputBytes, redirects the job's exec output directly to OUT and captures $? after it (unchanged/uncapped path)", () => {
+  it("without maxOutputBytes, redirects the job's exec output directly to OUT and captures setsid's own $? after it returns (uncapped path)", () => {
     const cmd = jobKickoffCommand("job-1", "echo hi");
     expect(cmd).toContain("exec sh -c");
     expect(cmd).not.toContain("head -c");
-    expect(cmd).toMatch(/> '[^']+\.out' 2>&1 < \/dev\/null; echo \$\? > '[^']+\.exit'/);
+    expect(cmd).not.toContain("mkfifo");
+    expect(cmd).toMatch(/< \/dev\/null > '[^']+\.out' 2>&1; echo \$\? > '[^']+\.exit'/);
   });
 
-  it("with maxOutputBytes, pipes the job's output through a head/cat capping filter instead of a direct redirect", () => {
+  it("with maxOutputBytes, connects the job to a head/cat capping filter through a fifo instead of a direct redirect", () => {
     const cmd = jobKickoffCommand("job-1", "echo hi", 1024);
+    expect(cmd).toContain(`mkfifo ${shQuote(`${JOBS_DIR}/job-1.fifo`)}`);
     expect(cmd).toContain(`head -c 1024 > ${shQuote(`${JOBS_DIR}/job-1.out`)}`);
     // `cat > /dev/null` keeps draining (discarding) output past the cap so
     // the job's process never sees a broken pipe / SIGPIPE.
     expect(cmd).toContain("cat > /dev/null");
-    // No `exec` tail-call in the capped branch — the inner script has to
-    // run *after* the job to write EXIT, so it can't replace itself via exec.
-    expect(cmd).not.toContain("exec sh -c");
+    // The capped branch still exec-tail-calls into the job — the fifo
+    // decouples exit-code capture from the capping filter, so there's no
+    // longer any need to avoid `exec` here (see jobs.ts docblock, DEFECT 2
+    // fix).
+    expect(cmd).toContain("exec sh -c");
+    // The capping filter reads from the fifo as a background job whose pid
+    // is captured for a later `wait`, so OUT is flushed before the whole
+    // kickoff script exits.
+    expect(cmd).toContain('filterpid=$!');
+    expect(cmd).toContain('wait "$filterpid"');
   });
 
-  it("with maxOutputBytes, the job's own exit code is written from inside the piped script, not from the outer pipeline (whose own status would be the capping filter's, not the job's)", () => {
+  it("with maxOutputBytes, the exit code is still captured from setsid's own $? AFTER it returns, not from inside the killed group — this is what makes cancelJob's EXIT write prompt (DEFECT 2 fix)", () => {
     const cmd = jobKickoffCommand("job-1", "exit 5", 1024);
-    // `echo $? > .../job-1.exit` must appear BEFORE the pipe (` | (`), i.e.
-    // inside the piped-from side, not chained after the whole pipeline with
-    // `;` — the (re-quoted) exit-file path still shows up verbatim inside
-    // the doubly-shQuoted inner script, same rationale as the "embeds the
-    // inner command's text" test above.
-    const pipeIdx = cmd.indexOf(" | (");
+    // Ordering: mkfifo -> background capping filter (captures $! as
+    // filterpid) -> setsid runs the job, writing to the fifo -> ONLY AFTER
+    // setsid returns is $? written to EXIT -> then (and only then) do we
+    // wait for the capping filter and clean up the fifo. Critically, the
+    // `echo $? > EXIT` write happens OUTSIDE setsid's own process group, so
+    // cancelJob's SIGKILL to that group can never prevent it from running.
+    const mkfifoIdx = cmd.indexOf("mkfifo");
+    const filterpidIdx = cmd.indexOf("filterpid=$!");
+    const setsidIdx = cmd.indexOf("setsid sh -c");
     const echoExitIdx = cmd.indexOf("echo $?");
-    const exitPathIdx = cmd.indexOf("job-1.exit");
-    expect(pipeIdx).toBeGreaterThan(-1);
+    const waitIdx = cmd.indexOf('wait "$filterpid"');
+    expect(mkfifoIdx).toBeGreaterThan(-1);
+    expect(filterpidIdx).toBeGreaterThan(-1);
+    expect(setsidIdx).toBeGreaterThan(-1);
     expect(echoExitIdx).toBeGreaterThan(-1);
-    expect(exitPathIdx).toBeGreaterThan(-1);
-    expect(echoExitIdx).toBeLessThan(pipeIdx);
-    expect(exitPathIdx).toBeLessThan(pipeIdx);
+    expect(waitIdx).toBeGreaterThan(-1);
+    expect(mkfifoIdx).toBeLessThan(filterpidIdx);
+    expect(filterpidIdx).toBeLessThan(setsidIdx);
+    expect(setsidIdx).toBeLessThan(echoExitIdx);
+    expect(echoExitIdx).toBeLessThan(waitIdx);
   });
 
   it("floors and clamps a fractional/negative maxOutputBytes to a safe non-negative integer", () => {
@@ -128,9 +144,16 @@ describe("pollCommand", () => {
 });
 
 describe("cancelCommand", () => {
-  it("kills the negative pid (process group) read from the pid file", () => {
+  it("kills the negative pid (process group) read from the pid file, WITHOUT a `--` before it", () => {
     const cmd = cancelCommand("job-1");
-    expect(cmd).toContain(`kill -KILL -- -"$pid"`);
+    // No `--`: dash's `kill` builtin (the real /bin/sh on the Debian-slim
+    // sandbox image) rejects `kill -KILL -- -"$pid"` outright ("Illegal
+    // number: -", exit 2) and falls through to the single-process fallback,
+    // orphaning the job's child (see this function's docblock). Dropping
+    // `--` is accepted by dash, BusyBox, and GNU/util-linux `kill` alike and
+    // actually reaps the group in all three.
+    expect(cmd).toContain(`kill -KILL -"$pid"`);
+    expect(cmd).not.toContain(`kill -KILL -- -"$pid"`);
   });
 
   it("polls for the exit file to appear before returning", () => {
