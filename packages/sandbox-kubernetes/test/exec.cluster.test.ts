@@ -221,10 +221,15 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
     expect(poll.exitCode).toBe(9);
   }, 15_000);
 
-  it("cancelJob stops a running job mid-execution", async () => {
+  it("cancelJob stops a running job immediately after execJob returns — zero delay, no pidfile race", async () => {
     const execId = `job-${nextJobId++}`;
     await execJobInPod(deps, podName, execId, "sleep 30; echo should-not-appear");
-    await new Promise((resolve) => setTimeout(resolve, 300)); // let the pid file land
+    // No delay: jobKickoffCommand's own wait-for-pidfile loop (see jobs.ts)
+    // guarantees the .pid file exists by the time execJobInPod's single
+    // exec call resolves, so cancelJob is safe to call the instant
+    // execJob returns — this is the fix for the cancelJob-before-pidfile
+    // race, exercised against the real cluster instead of a busy-wait
+    // sleep crutch.
     await cancelJobInPod(deps, podName, execId);
 
     const poll = await pollJobInPod(deps, podName, execId, 0);
@@ -232,4 +237,34 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
     expect(poll.exitCode).not.toBe(0);
     expect(poll.output).not.toContain("should-not-appear");
   }, 15_000);
+
+  it("reassembles multibyte output losslessly when polled at tight offsets across a mid-codepoint write boundary", async () => {
+    const execId = `job-${nextJobId++}`;
+    // Rocket emoji (\xF0\x9F\x9A\x80, 4 bytes) written as two separate
+    // printfs with a pause between them, so a poll landing in that 300ms
+    // window sees the job's .out file mid-codepoint — the live-cluster
+    // version of the AB\u{1F680}CD boundary repro (jobs-framing.test.ts /
+    // jobs-local-protocol.test.ts cover the same case without a cluster).
+    await execJobInPod(
+      deps,
+      podName,
+      execId,
+      "printf hi; printf '\\xf0\\x9f'; sleep 0.3; printf '\\x9a\\x80'; printf END",
+    );
+
+    let offset = 0;
+    let output = "";
+    let status: "running" | "done" | "failed" = "running";
+    for (let i = 0; i < 100 && status === "running"; i++) {
+      const poll = await pollJobInPod(deps, podName, execId, offset);
+      output += poll.output;
+      offset = poll.nextOffset;
+      status = poll.status;
+      // Tight poll interval — well under the 300ms gap between the two
+      // printfs — to maximize the chance a poll actually lands mid-write.
+      if (status === "running") await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(status).toBe("done");
+    expect(output).toBe("hi\u{1F680}END");
+  }, 20_000);
 });

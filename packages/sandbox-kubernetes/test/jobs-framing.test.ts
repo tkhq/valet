@@ -3,7 +3,15 @@
  * cluster required.
  */
 import { describe, expect, it } from "vitest";
-import { cancelCommand, jobKickoffCommand, parseJobStatus, pollCommand } from "../src/jobs.js";
+import {
+  cancelCommand,
+  decodeUtf8HoldingTail,
+  incompleteUtf8TailLength,
+  jobKickoffCommand,
+  parseJobStatus,
+  pollCommand,
+  utf8SequenceLength,
+} from "../src/jobs.js";
 import { JOBS_DIR, shQuote } from "../src/exec.js";
 
 describe("jobKickoffCommand", () => {
@@ -24,6 +32,23 @@ describe("jobKickoffCommand", () => {
 
   it("uses setsid so cancelJob can kill the whole process group", () => {
     expect(jobKickoffCommand("job-1", "echo hi")).toContain("setsid");
+  });
+
+  it("waits for the pid file (or an early exit file) before echoing started — closes the cancelJob-before-pidfile race", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi");
+    const pidFile = shQuote(`${JOBS_DIR}/job-1.pid`);
+    const exitFile = shQuote(`${JOBS_DIR}/job-1.exit`);
+    expect(cmd).toMatch(new RegExp(`while \\[ ! -f ${pidFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    expect(cmd).toContain(`[ ! -f ${exitFile} ]`);
+    // The wait must come after the backgrounded job group and before the
+    // final "started" echo, not inside the backgrounded subshell itself
+    // (else it wouldn't block execJobInPod's own exec call at all).
+    const backgroundIdx = cmd.indexOf(") &");
+    const waitIdx = cmd.indexOf("while [ ! -f");
+    const startedIdx = cmd.lastIndexOf("echo started");
+    expect(backgroundIdx).toBeGreaterThan(-1);
+    expect(waitIdx).toBeGreaterThan(backgroundIdx);
+    expect(startedIdx).toBeGreaterThan(waitIdx);
   });
 
   it("embeds the inner command's text, doubly shell-quoted (once for `exec sh -c`, once for the outer `setsid sh -c`)", () => {
@@ -53,6 +78,12 @@ describe("pollCommand", () => {
     const cmd = pollCommand("job-1", 0);
     expect(cmd).toContain("echo unknown 1>&2");
     expect(cmd).toContain("echo running 1>&2");
+  });
+
+  it("base64-encodes the tail output (-w0, no line wrap) so raw bytes survive execInPod's own UTF-8 decode", () => {
+    const cmd = pollCommand("job-1", 0);
+    expect(cmd).toContain("tail -c +1");
+    expect(cmd).toMatch(/tail -c \+1 '[^']+' \| base64 -w0/);
   });
 });
 
@@ -86,30 +117,88 @@ describe("parseJobStatus", () => {
   });
 });
 
-describe("offset math (pollJobInPod's increment, not docker's full-buffer slice)", () => {
-  // These document the *shape* of the offset arithmetic pollJobInPod
-  // performs (nextOffset = offset + byteLength(newChunk)) as a standalone,
-  // dependency-free check — the actual wiring is exercised end-to-end by
-  // jobs-local-protocol.test.ts and, live, by exec.cluster.test.ts.
-  function nextOffset(offset: number, chunk: string): number {
-    return offset + Buffer.byteLength(chunk, "utf8");
-  }
-
-  it("advances by the UTF-8 byte length of the chunk, not its JS string length", () => {
-    const chunk = "\u{1F680}"; // 4 bytes in utf8, length 2 as a JS UTF-16 string
-    expect(Buffer.byteLength(chunk, "utf8")).toBe(4);
-    expect(nextOffset(0, chunk)).toBe(4);
+describe("utf8SequenceLength", () => {
+  it("returns 1 for ASCII lead bytes", () => {
+    expect(utf8SequenceLength(0x41)).toBe(1); // 'A'
   });
 
-  it("is idempotent for an empty chunk (no new data yet)", () => {
-    expect(nextOffset(10, "")).toBe(10);
+  it("returns 2/3/4 for multi-byte lead bytes", () => {
+    expect(utf8SequenceLength(0xc2)).toBe(2); // 2-byte lead
+    expect(utf8SequenceLength(0xe2)).toBe(3); // 3-byte lead
+    expect(utf8SequenceLength(0xf0)).toBe(4); // 4-byte lead (e.g. emoji)
   });
 
-  it("accumulates monotonically across polls", () => {
-    let offset = 0;
-    for (const chunk of ["hello", " ", "world"]) {
-      offset = nextOffset(offset, chunk);
-    }
-    expect(offset).toBe(Buffer.byteLength("hello world", "utf8"));
+  it("returns 0 for a continuation byte or invalid lead byte", () => {
+    expect(utf8SequenceLength(0x80)).toBe(0); // continuation byte
+    expect(utf8SequenceLength(0xff)).toBe(0); // invalid
+  });
+});
+
+describe("incompleteUtf8TailLength / decodeUtf8HoldingTail (pollJobInPod's byte-boundary fix)", () => {
+  // "AB\u{1F680}CD" split mid-emoji: the reviewer's exact repro. \u{1F680}
+  // (rocket) is F0 9F 9A 80 in UTF-8 — 4 bytes. Split the buffer after the
+  // first 2 bytes of the emoji, mid-codepoint.
+  const full = Buffer.from("AB\u{1F680}CD", "utf8");
+  const emojiStart = 2; // byte offset where the 4-byte emoji sequence starts
+
+  it("holds back the correct number of bytes when a fetch ends mid-codepoint", () => {
+    // First half: "AB" + first 2 bytes of the emoji (F0 9F) — incomplete.
+    const firstHalf = full.subarray(0, emojiStart + 2);
+    expect(incompleteUtf8TailLength(firstHalf)).toBe(2);
+
+    const { text, deliveredBytes } = decodeUtf8HoldingTail(firstHalf);
+    expect(text).toBe("AB");
+    expect(deliveredBytes).toBe(2);
+  });
+
+  it("delivers a complete codepoint with no holdback", () => {
+    expect(incompleteUtf8TailLength(full)).toBe(0);
+    const { text, deliveredBytes } = decodeUtf8HoldingTail(full);
+    expect(text).toBe("AB\u{1F680}CD");
+    expect(deliveredBytes).toBe(full.length);
+  });
+
+  it("reassembles losslessly across two polls that split mid-emoji", () => {
+    // Poll 1 fetches "AB" + the first 2 bytes of the emoji.
+    const firstFetch = full.subarray(0, emojiStart + 2);
+    const first = decodeUtf8HoldingTail(firstFetch);
+    expect(first.text).toBe("AB");
+    expect(first.deliveredBytes).toBe(2);
+
+    // Poll 2 (from nextOffset = 2) re-fetches the held-back bytes plus the
+    // rest of the file — exactly what pollJobInPod's tail -c +N does since
+    // nextOffset never advanced past the held-back tail.
+    const secondFetch = full.subarray(first.deliveredBytes);
+    const second = decodeUtf8HoldingTail(secondFetch);
+    expect(second.text).toBe("\u{1F680}CD");
+    expect(second.deliveredBytes).toBe(secondFetch.length);
+
+    expect(first.text + second.text).toBe("AB\u{1F680}CD");
+  });
+
+  it("is a no-op (holds back nothing) for an empty buffer", () => {
+    expect(incompleteUtf8TailLength(Buffer.alloc(0))).toBe(0);
+    expect(decodeUtf8HoldingTail(Buffer.alloc(0))).toEqual({ text: "", deliveredBytes: 0 });
+  });
+
+  it("does not hold back plain ASCII", () => {
+    const buf = Buffer.from("hello", "utf8");
+    expect(incompleteUtf8TailLength(buf)).toBe(0);
+    expect(decodeUtf8HoldingTail(buf)).toEqual({ text: "hello", deliveredBytes: 5 });
+  });
+
+  it("documents the binary-output limitation: genuinely invalid UTF-8 is delivered as-is (lossy), not held back forever", () => {
+    // A lone continuation byte (0x80) with no preceding lead byte within
+    // the 3-byte scan window isn't an "incomplete tail" this function can
+    // fix — it's just not valid UTF-8. Per JobPoll's `output: string`
+    // contract (matches sandbox-docker's own StringDecoder-based fidelity,
+    // which is equally lossy for non-UTF-8 bytes), this is delivered
+    // immediately and decodes to the U+FFFD replacement character rather
+    // than being held back indefinitely.
+    const buf = Buffer.from([0x80, 0x80, 0x80, 0x80]);
+    expect(incompleteUtf8TailLength(buf)).toBe(0);
+    const { text, deliveredBytes } = decodeUtf8HoldingTail(buf);
+    expect(deliveredBytes).toBe(4);
+    expect(text).toBe("����");
   });
 });

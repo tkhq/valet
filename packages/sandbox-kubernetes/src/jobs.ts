@@ -23,12 +23,30 @@
  * in-memory string (`state.output.slice(offset)`, `nextOffset =
  * state.output.length`) it already holds in its entirety. This module never
  * holds the full output — each poll fetches only the *new* bytes via
- * `tail -c +N` and advances the offset by what actually came back
- * (`offset + byteLength(chunk)`), because re-fetching (and re-transferring
- * over the exec websocket) the whole file every poll would make long-running
- * jobs with verbose output increasingly expensive per poll. Different
+ * `tail -c +N` and advances the offset by what actually came back. Different
  * algorithm, not just a different transport — hence the duplication instead
  * of extraction.
+ *
+ * Byte fidelity across poll boundaries: `pollCommand` pipes its `tail -c +N`
+ * output through `base64 -w0` (same device as files.ts's `readBinaryCommand`
+ * — see that module's docblock for the GNU/BusyBox `-w0` portability note)
+ * instead of shipping raw bytes over the exec stdout channel. This matters
+ * because `execInPod` decodes that channel as UTF-8 into a JS `string`
+ * (`Buffer.concat(stdoutChunks).toString("utf8")`) — if a byte-range fetch
+ * happened to split a multi-byte UTF-8 codepoint (e.g. a 4-byte emoji cut
+ * after 2 bytes), that per-call decode would mangle the trailing partial
+ * bytes into U+FFFD *and* `Buffer.byteLength` of the mangled string would no
+ * longer equal the raw bytes actually consumed from the file — silently
+ * dropping/misaligning a byte on every such boundary, permanently, since
+ * this module has no persistent per-execId decoder state to carry it
+ * forward (unlike docker's `child.stdout.setEncoding("utf8")`, whose
+ * `Readable` holds a stateful `StringDecoder` across the whole child
+ * process's lifetime — see `pollJobInPod`'s docblock for how this module
+ * gets the equivalent effect statelessly). Base64 sidesteps the problem
+ * entirely: the wire-transferred text is pure ASCII, so `execInPod`'s own
+ * UTF-8 decode can never corrupt it, and `pollJobInPod` decodes the
+ * `base64`-recovered raw bytes back to UTF-8 itself, in raw-byte offset
+ * space, with the actual holdback logic described below.
  */
 import type { ExecJobHandle, ExecOpts, JobPoll } from "@valet/engine";
 import { buildShellCommand, execInPod, JOBS_DIR, shQuote, type ExecDeps } from "./exec.js";
@@ -52,6 +70,9 @@ function jobPidPath(execId: string): string {
  *       > OUT 2>&1 < /dev/null
  *     echo $? > EXIT
  *   ) &
+ *   i=0; while [ ! -f PID ] && [ ! -f EXIT ] && [ "$i" -lt 500 ]; do
+ *     sleep 0.01; i=$((i+1))
+ *   done
  *   echo started
  *
  * `: > OUT` creates the (empty) output file synchronously, before this
@@ -69,6 +90,21 @@ function jobPidPath(execId: string): string {
  * replaces that shell with the real command, so the pid is stable across
  * the `exec`) — `cancelJob` kills `-pid` (the whole group) rather than a
  * single process, catching any children the job's own command spawns.
+ *
+ * The `while [ ! -f PID ] ...` loop closes the cancelJob-before-pidfile
+ * race: `echo $$ > PID` happens inside the backgrounded subshell, so
+ * without this wait, this kickoff command's own `echo started` (and thus
+ * `execJobInPod`'s resolved promise) could return to the caller *before*
+ * the pid file exists. A caller that calls `cancelJob` immediately after
+ * `execJob` resolves would then find no `.pid` file, silently no-op, and
+ * leak the running job. The loop makes `execJobInPod`'s single exec call
+ * block (bounded: 500 * 10ms = 5s) until the pid file is actually there —
+ * so by the time `execJob` returns, `cancelJob` is guaranteed to work
+ * immediately, with zero extra delay needed by the caller. It also bails
+ * out early if `EXIT` appears first (the subshell's own trailing
+ * `echo $? > EXIT` still runs even when e.g. `setsid` itself failed to
+ * exec, which would otherwise never write `PID` and hang this loop for the
+ * full 5s on every such failure).
  */
 export function jobKickoffCommand(execId: string, innerCommand: string): string {
   const outFile = jobOutPath(execId);
@@ -79,8 +115,15 @@ export function jobKickoffCommand(execId: string, innerCommand: string): string 
   const wrapped =
     `setsid sh -c ${shQuote(pidAndExec)} > ${shQuote(outFile)} 2>&1 < /dev/null; ` + `echo $? > ${shQuote(exitFile)}`;
 
+  const waitForPid =
+    `i=0; while [ ! -f ${shQuote(pidFile)} ] && [ ! -f ${shQuote(exitFile)} ] && [ "$i" -lt 500 ]; do ` +
+    `sleep 0.01; i=$((i+1)); done`;
+
   return (
-    `mkdir -p ${shQuote(JOBS_DIR)} && : > ${shQuote(outFile)} && ` + `( ${wrapped} ) & ` + `echo started`
+    `mkdir -p ${shQuote(JOBS_DIR)} && : > ${shQuote(outFile)} && ` +
+    `( ${wrapped} ) & ` +
+    `${waitForPid}; ` +
+    `echo started`
   );
 }
 
@@ -89,12 +132,13 @@ export function jobKickoffCommand(execId: string, innerCommand: string): string 
  * caller's 0-indexed byte offset needs `+1`) and, separately, whether the
  * job has finished. The two are deliberately split across *different exec
  * calls' stdio channels* — this poll script's own stdout carries the job's
- * output bytes verbatim (which could be arbitrary binary/text and must not
- * be intermixed with status text), while its own stderr carries a small,
- * unambiguous status marker (`"running"` or the exit code integer). This
- * works cleanly because the poll script's stdio is entirely separate from
- * the job's own captured `.out` file content — it's a fresh exec, not the
- * job process itself.
+ * output bytes (base64-encoded, see module docblock's "byte fidelity"
+ * section — the raw bytes could be arbitrary binary/text and must not be
+ * intermixed with status text or mangled by `execInPod`'s own UTF-8
+ * decode), while its own stderr carries a small, unambiguous status marker
+ * (`"running"` or the exit code integer). This works cleanly because the
+ * poll script's stdio is entirely separate from the job's own captured
+ * `.out` file content — it's a fresh exec, not the job process itself.
  */
 export function pollCommand(execId: string, offset: number): string {
   const outFile = jobOutPath(execId);
@@ -107,7 +151,7 @@ export function pollCommand(execId: string, offset: number): string {
     // Map-miss-equivalent "failed" shape instead of misreading it as
     // "running" or trying to parse an empty exit code.
     `if [ ! -f ${shQuote(outFile)} ]; then echo unknown 1>&2; exit 0; fi; ` +
-    `tail -c +${tailFrom} ${shQuote(outFile)}; ` +
+    `tail -c +${tailFrom} ${shQuote(outFile)} | base64 -w0; ` +
     `if [ -f ${shQuote(exitFile)} ]; then cat ${shQuote(exitFile)} 1>&2; else echo running 1>&2; fi`
   );
 }
@@ -162,14 +206,92 @@ export function parseJobStatus(statusText: string): { status: "running" | "done"
   return { status: "done", exitCode };
 }
 
+/**
+ * Length, in bytes, of a UTF-8 sequence starting with `leadByte` — 0 for a
+ * byte that can't legally start a sequence (a continuation byte or an
+ * invalid 0xF8-0xFF marker). Pure; exported for unit testing.
+ */
+export function utf8SequenceLength(leadByte: number): number {
+  if ((leadByte & 0x80) === 0x00) return 1; // 0xxxxxxx
+  if ((leadByte & 0xe0) === 0xc0) return 2; // 110xxxxx
+  if ((leadByte & 0xf0) === 0xe0) return 3; // 1110xxxx
+  if ((leadByte & 0xf8) === 0xf0) return 4; // 11110xxx
+  return 0; // continuation byte (10xxxxxx) or invalid lead byte
+}
+
+/**
+ * How many trailing bytes of `buf` form an INCOMPLETE UTF-8 multi-byte
+ * sequence — i.e. a lead byte whose declared sequence length extends past
+ * the end of the buffer. Scans back at most 3 bytes (the longest possible
+ * incomplete tail: a 4-byte sequence missing only its last byte). Returns 0
+ * when the tail is plain ASCII, a complete multi-byte sequence, or bytes
+ * that aren't valid UTF-8 at all — this function's only job is to avoid
+ * *manufacturing* a corrupted codepoint at a poll boundary, not to detect
+ * binary data in general (see `pollJobInPod`'s docblock for why that's out
+ * of scope). Pure; exported for unit testing.
+ */
+export function incompleteUtf8TailLength(buf: Buffer): number {
+  const len = buf.length;
+  const maxBack = Math.min(3, len);
+  for (let back = 1; back <= maxBack; back++) {
+    const byte = buf[len - back];
+    if ((byte & 0xc0) === 0x80) continue; // still inside a continuation run — keep scanning back
+    const seqLen = utf8SequenceLength(byte);
+    return seqLen > back ? back : 0;
+  }
+  return 0;
+}
+
+/**
+ * Splits `buf` (raw bytes fetched this poll) into the prefix that's safe to
+ * decode right now and the number of bytes actually delivered by that
+ * decode. Holding back an incomplete trailing codepoint — instead of
+ * decoding the whole buffer and letting `Buffer#toString("utf8")` silently
+ * replace it with U+FFFD — is what keeps `pollJobInPod`'s `nextOffset`
+ * exactly in sync with the bytes it actually handed to the caller: the next
+ * poll re-fetches starting at `nextOffset`, which includes the held-back
+ * tail, so a codepoint split across two polls (e.g. a 4-byte emoji fetched
+ * 2+2) reassembles losslessly instead of being corrupted twice (once per
+ * fragment) and silently under/over-counted in the offset. Pure; exported
+ * for unit testing.
+ */
+export function decodeUtf8HoldingTail(buf: Buffer): { text: string; deliveredBytes: number } {
+  const heldBack = incompleteUtf8TailLength(buf);
+  const deliveredBytes = buf.length - heldBack;
+  return { text: buf.subarray(0, deliveredBytes).toString("utf8"), deliveredBytes };
+}
+
+/**
+ * `JobPoll.output` is a `string` (the engine's contract, matching docker's
+ * `pollJob`) — there is no lossless representation of arbitrary binary job
+ * output in that contract, on either provider. Docker's `pollJob` gets
+ * *valid* multi-byte UTF-8 output right across chunk boundaries by holding
+ * a stateful `StringDecoder` on `child.stdout`/`child.stderr` for the whole
+ * process lifetime (`setEncoding("utf8")`), but genuinely non-UTF-8 bytes
+ * still decode lossy (replaced with U+FFFD) there too. This module has no
+ * persistent per-execId decoder to hold state across the stateless
+ * `pollCommand` exec calls, so it gets the equivalent *valid-UTF-8* fidelity
+ * a different way — `decodeUtf8HoldingTail` holds back an incomplete
+ * trailing codepoint at each poll boundary and includes it in the next
+ * poll's byte range instead of decoding it prematurely. This closes the gap
+ * for split-but-valid UTF-8; it does NOT make arbitrary binary output
+ * lossless — a job that emits genuinely non-UTF-8 bytes (not merely a
+ * boundary artifact) will still see them come back as U+FFFD replacement
+ * characters, same limitation as the docker provider, only reachable here
+ * if the job's raw output itself isn't valid UTF-8 (a poll-boundary split of
+ * *valid* UTF-8 is exactly what this function fixes and is no longer a
+ * source of corruption).
+ */
 export async function pollJobInPod(deps: ExecDeps, podName: string, execId: string, offset: number): Promise<JobPoll> {
   const result = await execInPod(deps, podName, pollCommand(execId, offset));
   const { status, exitCode } = parseJobStatus(result.stderr);
   if (status === "failed") {
     return { status, output: "", nextOffset: offset };
   }
-  const nextOffset = offset + Buffer.byteLength(result.stdout, "utf8");
-  return { status, exitCode, output: result.stdout, nextOffset };
+  const fetched = Buffer.from(result.stdout.trim(), "base64");
+  const { text, deliveredBytes } = decodeUtf8HoldingTail(fetched);
+  const nextOffset = offset + deliveredBytes;
+  return { status, exitCode, output: text, nextOffset };
 }
 
 export async function cancelJobInPod(deps: ExecDeps, podName: string, execId: string): Promise<void> {
