@@ -1034,6 +1034,17 @@ export interface SkillInvokeOptions {
   resultSchema?: TSchema;
 }
 
+/**
+ * A model spec resolved by a host `resolveModel` seam: the live pi-ai model to
+ * run the turn on, plus an optional per-turn API key. `apiKey` undefined means
+ * "no host key — use pi-ai's env-var fallback". Produced by the host, consumed
+ * by the engine at turn start and by `Session.setModel`/`Thread.setModel`.
+ */
+export interface ResolvedModel {
+  model: Model<any>;
+  apiKey?: string;
+}
+
 export interface CreateSessionOptions {
   id?: string;
   userId: string;
@@ -1048,6 +1059,21 @@ export interface CreateSessionOptions {
   skills?: SkillSource[];
   model: Model<any>;
   modelFailover?: Model<any>[];
+  /**
+   * Optional host-provided model resolver. Absent === the engine's current
+   * internal resolution (`resolveModelId`): every existing path is unchanged
+   * and the pi-agent-core Agent is constructed WITHOUT `getApiKey`, so pi-ai's
+   * env-var fallback stamps `StreamOptions.apiKey`. When present:
+   *  - `Session.setModel` / `Thread.setModel` validate ids through it (a `null`
+   *    return throws the same "unknown model id" surface as today);
+   *  - at each turn start the effective model spec (thread override → session
+   *    default) is resolved through it and the returned `{ model, apiKey }` is
+   *    held for that turn only — never cached across turns, so a rotated key
+   *    takes effect on the next turn;
+   *  - the Agent's `getApiKey` returns that per-turn key so pi-agent-core
+   *    stamps `StreamOptions.apiKey` (an `undefined` key preserves env fallback).
+   */
+  resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;

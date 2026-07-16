@@ -576,7 +576,11 @@ export class Session {
     reason: string = "set_via_api",
   ): Promise<{ fromModel: string; toModel: string }> {
     const before = this.options.model.id;
-    const next = resolveSessionModel(modelId);
+    // With a host resolver present, validate through it (null → same "unknown
+    // model id" surface as the internal resolver's undefined). Absent → today's
+    // internal `resolveModelId` path, unchanged.
+    const resolver = this.options.resolveModel;
+    const next = resolver ? (await resolver(modelId))?.model : resolveSessionModel(modelId);
     if (!next) throw new Error(`unknown model id: ${modelId}`);
     this.options.model = next;
     await this.providers.store.saveSession(await this.toData());

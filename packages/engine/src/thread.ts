@@ -155,6 +155,14 @@ export class Thread {
    * Persisted via toThreadData → store.saveThread.
    */
   private modelOverride?: string;
+  /**
+   * Per-turn API key from the host `resolveModel` seam. Resolved at turn start
+   * (fresh turns and resume/replay), read by the Agent's `getApiKey`, cleared
+   * at turn end. Never cached across turns — key rotation applies next turn.
+   * Always undefined when the session has no resolver (the Agent has no
+   * `getApiKey` in that case, so this is never read).
+   */
+  private turnApiKey?: string;
   private readonly threadCreatedAt: number;
 
   constructor(session: Session, data: ThreadData) {
@@ -712,6 +720,9 @@ export class Thread {
     await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
+    // Host resolver (if any) delivers this resumed turn's per-turn key before
+    // the continuation LLM call; no-op when absent.
+    await this.applyResolvedKeyForResume();
     try {
       await this.agent.continue();
       await this.agent.waitForIdle();
@@ -720,6 +731,8 @@ export class Thread {
         "replay_continue_failed",
         err instanceof Error ? err.message : String(err),
       );
+    } finally {
+      this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
     // reconcileGate). Flip the durable block back to running first so
@@ -938,8 +951,11 @@ export class Thread {
       this.modelOverride = undefined;
     } else {
       // Resolve before assigning so an unknown id is rejected and the
-      // thread keeps its previous setting.
-      const resolved = resolveModelId(modelId);
+      // thread keeps its previous setting. With a host resolver present,
+      // validate through it (null → same throw as the internal resolver's
+      // undefined); absent → today's internal `resolveModelId` path.
+      const resolver = this.session.options.resolveModel;
+      const resolved = resolver ? await resolver(modelId) : resolveModelId(modelId);
       if (!resolved) {
         throw new Error(`unknown model id: ${modelId}`);
       }
@@ -968,6 +984,48 @@ export class Thread {
       // Stored override no longer resolvable; fall back to session default.
     }
     return this.session.options.model;
+  }
+
+  /** Effective model spec string for this turn: thread override → session default id. */
+  private turnModelSpec(): string {
+    return this.modelOverride ?? this.session.options.model.id;
+  }
+
+  /**
+   * Resolve this turn's model, and — with a host `resolveModel` seam present —
+   * stamp its per-turn API key onto `this.turnApiKey`. Absent resolver: the
+   * existing synchronous `resolveTurnModel()` path, no key touched
+   * (byte-identical). Present resolver: resolve the effective spec through it
+   * and hold `{ model, apiKey }` for this turn only. If the resolver can't
+   * resolve the (setModel-validated) spec at turn time, fall back to internal
+   * resolution + env-key path, mirroring `resolveTurnModel`'s stale-override
+   * fallback.
+   */
+  private async resolveTurnModelForTurn(): Promise<PiModel> {
+    const resolver = this.session.options.resolveModel;
+    if (!resolver) return this.resolveTurnModel();
+    const resolved = await resolver(this.turnModelSpec());
+    if (resolved) {
+      this.turnApiKey = resolved.apiKey;
+      return resolved.model;
+    }
+    return this.resolveTurnModel();
+  }
+
+  /**
+   * Resume/replay key delivery: with a host resolver present, re-resolve this
+   * turn's effective spec and stamp the per-turn key + agent model before the
+   * agent continues an interrupted or gate-resolved turn. No-op when the
+   * resolver is absent (byte-identical to the pre-seam resume paths).
+   */
+  private async applyResolvedKeyForResume(): Promise<void> {
+    const resolver = this.session.options.resolveModel;
+    if (!resolver) return;
+    const resolved = await resolver(this.turnModelSpec());
+    if (resolved) {
+      this.turnApiKey = resolved.apiKey;
+      this.agent.state.model = resolved.model;
+    }
   }
 
   async readEntries(opts?: MessageQuery): Promise<SessionEntry[]> {
@@ -1455,12 +1513,17 @@ export class Thread {
       });
       this.agent.state.tools = this.buildTools();
 
+      // Host resolver (if any) delivers this resumed turn's per-turn key before
+      // the continuation LLM call; no-op when absent.
+      await this.applyResolvedKeyForResume();
       await this.agent.continue();
       await this.agent.waitForIdle();
     } catch (err) {
       turnFailed = true;
       turnError = err;
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
+    } finally {
+      this.turnApiKey = undefined;
     }
 
     try {
@@ -1553,7 +1616,7 @@ export class Thread {
     // for that one turn. Captured here so we restore the right baseline,
     // not whatever the role overlaid.
     const baselineModel = this.agent.state.model;
-    const turnModel = this.resolveTurnModel();
+    const turnModel = await this.resolveTurnModelForTurn();
     if (turnModel !== baselineModel) {
       this.agent.state.model = turnModel;
     }
@@ -1593,6 +1656,9 @@ export class Thread {
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
       this.agent.state.model = baselineModel;
+      // Per-turn key is turn-scoped only — clear it so the next turn re-resolves
+      // (rotation applies next turn; a resolver-less session never set it).
+      this.turnApiKey = undefined;
     }
   }
 
@@ -1886,6 +1952,10 @@ export class Thread {
   }
 
   private buildAgent(): Agent {
+    // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
+    // is constructed with the exact same options as before the seam existed, so
+    // pi-ai's env-var fallback stamps StreamOptions.apiKey (byte-identical pin).
+    const hasResolver = this.session.options.resolveModel !== undefined;
     const agent = new Agent({
       initialState: {
         model: this.session.options.model,
@@ -1898,6 +1968,9 @@ export class Thread {
           (m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
         ) as Message[];
       },
+      // Per-turn key delivery: pi-agent-core calls this with the turn's provider
+      // and stamps the result onto StreamOptions.apiKey (undefined → env fallback).
+      ...(hasResolver ? { getApiKey: (_provider: string) => this.turnApiKey } : {}),
     });
     agent.subscribe((event, _signal) => this.handleAgentEvent(event));
     return agent;
