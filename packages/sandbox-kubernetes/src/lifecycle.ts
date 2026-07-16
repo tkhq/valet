@@ -502,18 +502,187 @@ export function mapConditionsToStatus(id: string, conditions: SandboxCondition[]
   return { id, state: "provisioning" };
 }
 
-/** Absent CR → "released" (per the brief); otherwise delegates to
- * `mapConditionsToStatus`. */
+// ── Pod-failure classification (bug fix: a pod that FAILS to start must
+// surface as a terminal error, not a generic 60s "provisioning" timeout) ──
+
+/** `waiting.reason` values on a container status that mean the container
+ * will never come up on its own — the image reference (or its pull
+ * credentials/config) is simply bad. */
+const IMAGE_PULL_WAITING_REASONS = new Set([
+  "ImagePullBackOff",
+  "ErrImagePull",
+  "InvalidImageName",
+  "CreateContainerConfigError",
+]);
+
+/** Minimal per-container status this module reads — just enough to detect
+ * a stuck `waiting` state. Extracted separately from `PodSummary` (which is
+ * scoped to `resolvePodName`'s ownerReference-scan) since this one carries
+ * status/image detail that fallback never needs. */
+export interface PodContainerStatus {
+  name: string;
+  image?: string;
+  waitingReason?: string;
+  waitingMessage?: string;
+}
+
+/** Standard Kubernetes pod condition shape (`type`/`status`/`reason`/
+ * `message`) — same fields as `SandboxCondition`, kept as a separate type
+ * since it describes the POD's conditions (e.g. `PodScheduled`), not the
+ * Sandbox CR's. */
+export interface PodStatusCondition {
+  type: string;
+  status: "True" | "False" | "Unknown";
+  reason?: string;
+  message?: string;
+}
+
+/** The subset of a `V1Pod`'s `.status` (plus per-container `image`, sourced
+ * from `.spec.containers`) this module needs to classify a startup failure. */
+export interface PodStatusInfo {
+  phase?: string;
+  containerStatuses?: PodContainerStatus[];
+  conditions?: PodStatusCondition[];
+}
+
+/** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to GET a
+ * single pod's status for failure classification — distinct from
+ * `SandboxPodsApi` (list-based, ownerReference-scan fallback) and from
+ * `provider.ts`'s `PodLivenessApi` (just a `uid`, no status detail). */
+export interface SandboxPodStatusApi {
+  /** Returns `null` when the pod does not exist (404) — never throws for
+   * the "absent" case, since a Sandbox CR that hasn't reconciled a pod yet
+   * is a normal (not-error) state. */
+  getPodStatus(namespace: string, podName: string): Promise<PodStatusInfo | null>;
+}
+
+/** Wraps a real `k8s.CoreV1Api` instance. */
+export function podStatusApiAdapter(api: k8s.CoreV1Api): SandboxPodStatusApi {
+  return {
+    async getPodStatus(namespace, podName) {
+      let pod: k8s.V1Pod;
+      try {
+        pod = await api.readNamespacedPod({ name: podName, namespace });
+      } catch (err) {
+        if (isApiError(err) && err.code === 404) return null;
+        throw err;
+      }
+      const images = new Map((pod.spec?.containers ?? []).map((c) => [c.name, c.image]));
+      const containerStatuses: PodContainerStatus[] = (pod.status?.containerStatuses ?? []).map((cs) => ({
+        name: cs.name,
+        image: images.get(cs.name) ?? cs.image,
+        waitingReason: cs.state?.waiting?.reason,
+        waitingMessage: cs.state?.waiting?.message,
+      }));
+      const conditions: PodStatusCondition[] = (pod.status?.conditions ?? [])
+        .filter(
+          (c): c is k8s.V1PodCondition & { type: string; status: "True" | "False" | "Unknown" } =>
+            typeof c.type === "string" && (c.status === "True" || c.status === "False" || c.status === "Unknown"),
+        )
+        .map((c) => ({ type: c.type, status: c.status, reason: c.reason, message: c.message }));
+      return { phase: pod.status?.phase, containerStatuses, conditions };
+    },
+  };
+}
+
+/**
+ * Pure classification of a backing pod's status (plus, for the `PodFailed`
+ * case, the Sandbox CR's own `Ready` condition) into a terminal-startup-
+ * failure reason string, or `null` when the pod isn't in a terminal-failure
+ * state (still pulling, healthy, or genuinely absent/unresolved — all of
+ * which should stay "provisioning", not "error"). Extracted as a pure
+ * function (no I/O) so it's directly unit-testable with synthesized pod
+ * objects — mirrors `mapConditionsToStatus`'s existing pattern.
+ *
+ * Checked in order:
+ *   1. any container `waiting.reason` in `IMAGE_PULL_WAITING_REASONS` →
+ *      "image pull failed (<reason>): <image>"
+ *   2. any container `waiting.reason === "CrashLoopBackOff"` →
+ *      "container crash-looping (CrashLoopBackOff)"
+ *   3. `pod.phase === "Failed"`, or the CR's `Ready` condition has
+ *      `reason === "PodFailed"` → "pod failed: <detail>"
+ *   4. `pod.phase === "Pending"` with a `PodScheduled=False,
+ *      reason=Unschedulable` condition → "unschedulable: <message>"
+ *   5. otherwise `null` (defer to `mapConditionsToStatus`'s CR-Ready mapping)
+ *
+ * `pod === null` (CR has no backing pod yet, or the GET 404'd) always
+ * returns `null` — a merely-still-provisioning CR must never be classified
+ * as an error.
+ */
+export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?: SandboxCondition): string | null {
+  if (pod === null) return null;
+
+  for (const cs of pod.containerStatuses ?? []) {
+    if (cs.waitingReason && IMAGE_PULL_WAITING_REASONS.has(cs.waitingReason)) {
+      const target = cs.image ?? cs.waitingMessage ?? "unknown image";
+      return `image pull failed (${cs.waitingReason}): ${target}`;
+    }
+  }
+
+  for (const cs of pod.containerStatuses ?? []) {
+    if (cs.waitingReason === "CrashLoopBackOff") {
+      return "container crash-looping (CrashLoopBackOff)";
+    }
+  }
+
+  if (pod.phase === "Failed" || crReadyCondition?.reason === "PodFailed") {
+    const detail = crReadyCondition?.message ?? crReadyCondition?.reason ?? "pod entered phase Failed";
+    return `pod failed: ${detail}`;
+  }
+
+  if (pod.phase === "Pending") {
+    const scheduled = pod.conditions?.find((c) => c.type === "PodScheduled");
+    if (scheduled?.status === "False" && scheduled.reason === "Unschedulable") {
+      return `unschedulable: ${scheduled.message ?? "no message"}`;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Absent CR → "released" (per the brief); otherwise delegates to
+ * `mapConditionsToStatus`, UNLESS `podsApi`/`podStatusApi` are supplied and
+ * the backing pod is in a terminal-failure state (`classifyPodFailure`), in
+ * which case that takes precedence and reports `state: "error"` immediately
+ * — this is the fix for the "pod fails to start -> hangs for 60s on a
+ * generic timeout" bug: the CR's own `Ready` condition only ever carries
+ * `type: Ready` with the failure cause in `reason`/`message`, so without
+ * reading the pod directly every startup failure looked identical to normal
+ * in-progress provisioning.
+ *
+ * Best-effort and defensive: `podsApi`/`podStatusApi` are optional (existing
+ * callers/tests that only care about the CR-Ready mapping keep working
+ * unchanged), and any failure resolving the pod name or GETting the pod
+ * (404, transient API error) is swallowed — falls through to the baseline
+ * CR-Ready mapping rather than misreporting "error" for a pod that simply
+ * isn't resolvable yet.
+ */
 export async function sandboxStatus(
   api: SandboxCustomObjectsApi,
   cfg: K8sProviderConfig,
   name: string,
+  podsApi?: SandboxPodsApi,
+  podStatusApi?: SandboxPodStatusApi,
 ): Promise<SandboxStatus> {
   const cr = await getSandbox(api, cfg, name);
   if (cr === null) {
     return { id: name, state: "released" };
   }
-  return mapConditionsToStatus(name, cr.status?.conditions ?? []);
+  const conditions = cr.status?.conditions ?? [];
+  const baseline = mapConditionsToStatus(name, conditions);
+
+  if (podsApi && podStatusApi) {
+    const podName = await resolvePodName(api, podsApi, cfg, name).catch(() => null);
+    if (podName) {
+      const pod = await podStatusApi.getPodStatus(cfg.namespace, podName).catch(() => null);
+      const readyCondition = conditions.find((c) => c.type === "Ready");
+      const reason = classifyPodFailure(pod, readyCondition);
+      if (reason) return { id: name, state: "error", error: reason };
+    }
+  }
+
+  return baseline;
 }
 
 /**

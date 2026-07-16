@@ -34,6 +34,7 @@ export {
   SANDBOX_KIND,
   SANDBOX_PLURAL,
   applySandbox,
+  classifyPodFailure,
   customObjectsApiAdapter,
   deleteSandbox,
   getSandbox,
@@ -42,6 +43,7 @@ export {
   mapConditionsToStatus,
   parseSandboxCRRead,
   podsApiAdapter,
+  podStatusApiAdapter,
   resolvePodName,
   sandboxStatus,
   type CreateSandboxParams,
@@ -49,12 +51,17 @@ export {
   type GetSandboxParams,
   type ListPodsParams,
   type ListSandboxParams,
+  type PodContainerStatus,
+  type PodStatusCondition,
+  type PodStatusInfo,
   type ReplaceSandboxParams,
   type SandboxCustomObjectsApi,
   type SandboxPodsApi,
+  type SandboxPodStatusApi,
 } from "./lifecycle.js";
 
 export {
+  EXEC_DEFAULT_TIMEOUT_MS,
   JOBS_DIR,
   buildShellCommand,
   execInPod,

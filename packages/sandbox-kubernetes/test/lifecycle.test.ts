@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { SANDBOX_CR_API_VERSION, buildSandboxManifest } from "../src/index.js";
-import type { K8sProviderConfig, SandboxCR, SandboxCRRead } from "../src/index.js";
+import type { K8sProviderConfig, SandboxCondition, SandboxCR, SandboxCRRead } from "../src/index.js";
 import {
   SANDBOX_KIND,
   SANDBOX_PLURAL,
   applySandbox,
+  classifyPodFailure,
   deleteSandbox,
   getSandbox,
   listSandboxes,
@@ -19,9 +20,11 @@ import type {
   GetSandboxParams,
   ListPodsParams,
   ListSandboxParams,
+  PodStatusInfo,
   ReplaceSandboxParams,
   SandboxCustomObjectsApi,
   SandboxPodsApi,
+  SandboxPodStatusApi,
 } from "../src/lifecycle.js";
 
 const cfg: K8sProviderConfig = {
@@ -141,6 +144,17 @@ class FakePodsApi implements SandboxPodsApi {
   }
 }
 
+/** Fake `SandboxPodStatusApi` backed by a fixed map of namespace/name ->
+ * `PodStatusInfo | null`, mirroring `sandboxStatus`'s "GET a single pod's
+ * status" need. */
+class FakePodStatusApi implements SandboxPodStatusApi {
+  constructor(private pods: Map<string, PodStatusInfo | null>) {}
+
+  async getPodStatus(_namespace: string, podName: string): Promise<PodStatusInfo | null> {
+    return this.pods.get(podName) ?? null;
+  }
+}
+
 describe("mapConditionsToStatus (pure)", () => {
   it("maps no conditions to provisioning", () => {
     expect(mapConditionsToStatus("sess-1", [])).toEqual({ id: "sess-1", state: "provisioning" });
@@ -190,6 +204,98 @@ describe("mapConditionsToStatus (pure)", () => {
       { type: "Error", status: "False" },
     ]);
     expect(status).toEqual({ id: "sess-1", state: "ready" });
+  });
+});
+
+describe("classifyPodFailure (pure)", () => {
+  it("returns null when the pod is absent (still provisioning, not error)", () => {
+    expect(classifyPodFailure(null)).toBeNull();
+  });
+
+  it("returns null for a healthy running pod", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{ name: "sandbox", image: "valet-sandbox:dev" }],
+    };
+    expect(classifyPodFailure(pod)).toBeNull();
+  });
+
+  it("returns null for a pod still pulling its image (no backoff yet)", () => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      containerStatuses: [{ name: "sandbox", image: "valet-sandbox:dev", waitingReason: "ContainerCreating" }],
+    };
+    expect(classifyPodFailure(pod)).toBeNull();
+  });
+
+  it("classifies ImagePullBackOff as an image-pull error, naming the image", () => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      containerStatuses: [
+        { name: "sandbox", image: "valet-sandbox:dev", waitingReason: "ImagePullBackOff", waitingMessage: "back-off pulling image" },
+      ],
+    };
+    const reason = classifyPodFailure(pod);
+    expect(reason).toMatch(/image pull failed \(ImagePullBackOff\)/);
+    expect(reason).toContain("valet-sandbox:dev");
+  });
+
+  it("classifies ErrImagePull, InvalidImageName, and CreateContainerConfigError the same way", () => {
+    for (const waitingReason of ["ErrImagePull", "InvalidImageName", "CreateContainerConfigError"]) {
+      const pod: PodStatusInfo = {
+        phase: "Pending",
+        containerStatuses: [{ name: "sandbox", image: "bad:tag", waitingReason }],
+      };
+      expect(classifyPodFailure(pod)).toBe(`image pull failed (${waitingReason}): bad:tag`);
+    }
+  });
+
+  it("classifies CrashLoopBackOff as a crash-loop error", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff" }],
+    };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff)");
+  });
+
+  it("classifies phase Failed as a pod-failed error", () => {
+    const pod: PodStatusInfo = { phase: "Failed", containerStatuses: [] };
+    expect(classifyPodFailure(pod)).toBe("pod failed: pod entered phase Failed");
+  });
+
+  it("classifies the CR's Ready reason=PodFailed as a pod-failed error even when phase looks benign", () => {
+    const pod: PodStatusInfo = { phase: "Running", containerStatuses: [] };
+    const crReady: SandboxCondition = { type: "Ready", status: "False", reason: "PodFailed", message: "container exited 1" };
+    expect(classifyPodFailure(pod, crReady)).toBe("pod failed: container exited 1");
+  });
+
+  it("classifies an Unschedulable Pending pod", () => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      containerStatuses: [],
+      conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message: "0/3 nodes available" }],
+    };
+    expect(classifyPodFailure(pod)).toBe("unschedulable: 0/3 nodes available");
+  });
+
+  it("does not classify a Pending pod with a non-Unschedulable PodScheduled=False condition", () => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      containerStatuses: [],
+      conditions: [{ type: "PodScheduled", status: "False", reason: "SomethingElse" }],
+    };
+    expect(classifyPodFailure(pod)).toBeNull();
+  });
+
+  it("prioritizes image-pull classification over CrashLoopBackOff when both somehow appear", () => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      containerStatuses: [
+        { name: "a", waitingReason: "CrashLoopBackOff" },
+        { name: "b", image: "bad:tag", waitingReason: "ImagePullBackOff" },
+      ],
+    };
+    expect(classifyPodFailure(pod)).toMatch(/image pull failed/);
   });
 });
 
@@ -384,6 +490,72 @@ describe("sandboxStatus", () => {
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
     api.seed(toCRRead(manifest));
     await expect(sandboxStatus(api, cfg, "sess-1")).resolves.toEqual({ id: "sess-1", state: "provisioning" });
+  });
+
+  it("without podsApi/podStatusApi wired, a pod-failure never overrides the CR-Ready mapping (backward compatible)", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    api.seed(toCRRead(manifest));
+    await expect(sandboxStatus(api, cfg, "sess-1")).resolves.toEqual({ id: "sess-1", state: "provisioning" });
+  });
+
+  it("when a pod-name is resolvable and the backing pod is classified as a terminal failure, reports error even though the CR's own Ready condition just says False/PodPending", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    const cr = toCRRead(manifest);
+    cr.status = { conditions: [{ type: "Ready", status: "False", reason: "PodPending" }] };
+    api.seed(cr);
+    const podsApi = new FakePodsApi([
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+    ]);
+    const podStatusApi = new FakePodStatusApi(
+      new Map([
+        [
+          "sess-1",
+          {
+            phase: "Pending",
+            containerStatuses: [
+              { name: "sandbox", image: "valet-sandbox:dev", waitingReason: "ImagePullBackOff" },
+            ],
+          },
+        ],
+      ]),
+    );
+    await expect(sandboxStatus(api, cfg, "sess-1", podsApi, podStatusApi)).resolves.toEqual({
+      id: "sess-1",
+      state: "error",
+      error: "image pull failed (ImagePullBackOff): valet-sandbox:dev",
+    });
+  });
+
+  it("falls back to the CR-Ready mapping when the pod isn't resolvable yet (still-pending CR, no pod object)", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    api.seed(toCRRead(manifest));
+    const podsApi = new FakePodsApi([]);
+    const podStatusApi = new FakePodStatusApi(new Map());
+    await expect(sandboxStatus(api, cfg, "sess-1", podsApi, podStatusApi)).resolves.toEqual({
+      id: "sess-1",
+      state: "provisioning",
+    });
+  });
+
+  it("falls back to the CR-Ready mapping when the pod is healthy (no terminal failure detected)", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    const cr = toCRRead(manifest);
+    cr.status = { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] };
+    api.seed(cr);
+    const podsApi = new FakePodsApi([
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+    ]);
+    const podStatusApi = new FakePodStatusApi(
+      new Map([["sess-1", { phase: "Running", containerStatuses: [{ name: "sandbox" }] }]]),
+    );
+    await expect(sandboxStatus(api, cfg, "sess-1", podsApi, podStatusApi)).resolves.toEqual({
+      id: "sess-1",
+      state: "ready",
+    });
   });
 });
 

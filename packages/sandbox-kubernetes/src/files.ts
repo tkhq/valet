@@ -25,7 +25,7 @@
  * `readFile`/`readBinary`/`stat`/`readdir` detect a missing path.
  */
 import type { ExecOpts } from "@valet/engine";
-import { execInPod, shQuote, type ExecDeps } from "./exec.js";
+import { EXEC_DEFAULT_TIMEOUT_MS, execInPod, shQuote, type ExecDeps } from "./exec.js";
 
 /** Directory listing errors (`ls`/`test` non-zero), stat probe failures,
  * and any other non-zero exec result from a file op surface as this —
@@ -60,6 +60,13 @@ async function runOrThrow(
   opts?: ExecOpts,
 ) {
   const result = await execInPod(deps, podName, command, opts);
+  if (result.timedOut) {
+    // Distinct message from the generic exit-code case below: an ordinary
+    // command failure has real stderr, but a timeout means the pod never
+    // answered at all — "<no stderr>" would be misleading here.
+    const deadlineMs = opts?.timeout ?? EXEC_DEFAULT_TIMEOUT_MS;
+    throw new PodFileOpError(op, path, result.exitCode, `pod was not execable within ${deadlineMs}ms`);
+  }
   if (result.exitCode !== 0) {
     throw new PodFileOpError(op, path, result.exitCode, result.stderr);
   }

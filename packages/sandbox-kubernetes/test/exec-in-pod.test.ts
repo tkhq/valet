@@ -6,8 +6,15 @@
  * in-memory stand-in for the one method (`Exec.exec`) this module actually
  * calls.
  */
-import { describe, expect, it } from "vitest";
-import { execInPod, type ExecDeps, type ExecStatus, type PodExecApi, type PodExecSocket } from "../src/exec.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  EXEC_DEFAULT_TIMEOUT_MS,
+  execInPod,
+  type ExecDeps,
+  type ExecStatus,
+  type PodExecApi,
+  type PodExecSocket,
+} from "../src/exec.js";
 
 interface ExecCall {
   namespace: string;
@@ -101,6 +108,56 @@ describe("execInPod", () => {
     expect(result.stdout).toBe("partial");
     expect(api.closed).toBe(1);
   }, 2000);
+
+  it(
+    "applies EXEC_DEFAULT_TIMEOUT_MS when the caller passes no opts at all — a non-execable pod cannot hang forever (bug fix)",
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const api = new FakePodExecApi(() => {
+          // never call statusCallback — simulates a pod the exec transport
+          // can never reach a result on.
+        });
+        const resultPromise = execInPod(deps(api), "pod-1", "echo hi"); // no opts at all
+        // Not yet — must still be pending just under the default deadline.
+        await vi.advanceTimersByTimeAsync(EXEC_DEFAULT_TIMEOUT_MS - 1000);
+        expect(api.closed).toBe(0);
+
+        // Crossing the default deadline force-closes the socket and reports
+        // a timeout — same shape as an explicit opts.timeout.
+        await vi.advanceTimersByTimeAsync(1000 + 100 /* + FLUSH_GRACE_MS */);
+        const result = await resultPromise;
+        expect(result.timedOut).toBe(true);
+        expect(result.exitCode).toBe(124);
+        expect(api.closed).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+    10_000,
+  );
+
+  it("an explicit opts.timeout still wins over EXEC_DEFAULT_TIMEOUT_MS (does not change the sync-bash-path behavior)", async () => {
+    const api = new FakePodExecApi((stdout) => {
+      stdout?.write("partial");
+      // never call statusCallback
+    });
+    const result = await execInPod(deps(api), "pod-1", "sleep 999", { timeout: 50 });
+    expect(result.timedOut).toBe(true);
+    expect(api.closed).toBe(1);
+  }, 2000);
+
+  it("an explicit opts.timeout of 0 disables the timeout entirely (no default applied)", async () => {
+    const api = new FakePodExecApi((_o, _e, statusCallback) => {
+      // Resolve status on the next tick — with no timer at all, execInPod
+      // must simply wait for it rather than racing a default timer.
+      setTimeout(() => statusCallback?.({ status: "Success" }), 5);
+    });
+    const result = await execInPod(deps(api), "pod-1", "true", { timeout: 0 });
+    expect(result.timedOut).toBeUndefined();
+    expect(result.exitCode).toBe(0);
+    expect(api.closed).toBe(0);
+  });
 
   it("force-closes the socket on abort signal", async () => {
     const api = new FakePodExecApi(() => {

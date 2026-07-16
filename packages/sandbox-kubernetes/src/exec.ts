@@ -30,6 +30,19 @@ import type { ExecOpts, ExecResult } from "@valet/engine";
  * helpers are what construct paths inside it. */
 export const JOBS_DIR = "/tmp/valet-jobs";
 
+/**
+ * Default deadline applied to `execInPod` when the caller passes NO
+ * `opts.timeout` (bug fix: `files.ts`'s file ops — readFile, writeFile,
+ * readdir, stat, mkdir, rm — all call `execInPod` with no `opts` at all, so
+ * before this constant existed, a non-execable pod (e.g. the exec transport
+ * itself wedged, or a pod stuck in a state where `pods/exec` never resolves
+ * its status channel) hung those calls forever). An explicit `opts.timeout`
+ * (any value, including `0`) always wins over this default — this only
+ * fills in the "caller didn't think about it" case, matching the sync bash
+ * path's behavior exactly when it DOES pass a timeout.
+ */
+export const EXEC_DEFAULT_TIMEOUT_MS = 60_000;
+
 // ── Shell quoting / framing (pure — unit tested without a cluster) ─────
 
 /**
@@ -234,11 +247,16 @@ export async function execInPod(
     statusPromise.then((status) => ({ kind: "status" as const, status })),
   ];
 
+  // No explicit opts.timeout at all -> apply EXEC_DEFAULT_TIMEOUT_MS so a
+  // non-execable pod can never hang a caller forever. An explicit timeout
+  // (including 0, "no timeout") always overrides this default.
+  const effectiveTimeout = opts?.timeout !== undefined ? opts.timeout : EXEC_DEFAULT_TIMEOUT_MS;
+
   let timer: NodeJS.Timeout | undefined;
-  if (opts?.timeout !== undefined && opts.timeout > 0) {
+  if (effectiveTimeout > 0) {
     raced.push(
       new Promise((resolve) => {
-        timer = setTimeout(() => resolve({ kind: "timeout" }), opts.timeout);
+        timer = setTimeout(() => resolve({ kind: "timeout" }), effectiveTimeout);
       }),
     );
   }

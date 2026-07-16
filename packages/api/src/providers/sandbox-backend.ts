@@ -27,6 +27,7 @@ import {
   customObjectsApiAdapter,
   podExecApiAdapter,
   podLivenessApiAdapter,
+  podStatusApiAdapter,
   podsApiAdapter,
   type K8sProviderConfig,
 } from "@valet/sandbox-kubernetes";
@@ -126,12 +127,13 @@ export function buildSandboxProvider(
       const podsApi = podsApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
       const execApi = podExecApiAdapter(new k8s.Exec(kc));
       const livenessApi = podLivenessApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
+      const podStatusApi = podStatusApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image,
         apiVersion: SANDBOX_CR_API_VERSION,
       };
-      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi }, cfg);
+      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi }, cfg);
     }
   }
 }

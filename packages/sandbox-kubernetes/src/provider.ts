@@ -64,7 +64,7 @@
  * applies.
  */
 import type * as k8s from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, SandboxStartupError } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -97,6 +97,7 @@ import {
   sandboxStatus,
   type SandboxCustomObjectsApi,
   type SandboxPodsApi,
+  type SandboxPodStatusApi,
 } from "./lifecycle.js";
 import { buildSandboxManifest, SANDBOX_CONTAINER_NAME, sandboxCrName } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
@@ -416,6 +417,13 @@ export interface KubernetesSandboxProviderDeps {
   podsApi: SandboxPodsApi;
   execApi: PodExecApi;
   livenessApi: PodLivenessApi;
+  /** Optional: enables `status()`/`waitReady`'s pod-failure classification
+   * (see `lifecycle.ts`'s `sandboxStatus`/`classifyPodFailure`). Omitting it
+   * falls back to the CR-Ready-only mapping (pre-fix behavior) — kept
+   * optional so existing callers/tests that don't need the fast-fail
+   * behavior aren't forced to wire a new dep. Production wiring
+   * (`packages/api/src/providers/sandbox-backend.ts`) always supplies it. */
+  podStatusApi?: SandboxPodStatusApi;
 }
 
 export class KubernetesSandboxProvider implements SandboxProvider {
@@ -504,7 +512,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   }
 
   async status(id: string): Promise<SandboxStatus> {
-    return sandboxStatus(this.deps.objectsApi, this.cfg, id);
+    return sandboxStatus(this.deps.objectsApi, this.cfg, id, this.deps.podsApi, this.deps.podStatusApi);
   }
 
   private makeSandbox(id: string): KubernetesSandbox {
@@ -520,18 +528,33 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     );
   }
 
-  /** Polls `sandboxStatus` until `ready` (or `error`/timeout). The engine's
+  /**
+   * Polls `sandboxStatus` until `ready` (or `error`/timeout). The engine's
    * `SandboxAttachment` treats a resolved `provider.create()` as
    * immediately ready (it does not itself poll `status()` post-create — see
    * `packages/engine/src/sandbox/attachment.ts`'s `doProvision`), so this
-   * provider must not return until the CR has actually reconciled. */
+   * provider must not return until the CR has actually reconciled.
+   *
+   * `state: "error"` is a FAST FAIL: `sandboxStatus` (when `podStatusApi` is
+   * wired) classifies terminal pod failures — `ImagePullBackOff`,
+   * `CrashLoopBackOff`, `PodFailed`, `Unschedulable` — as `error` within a
+   * few poll intervals of the failure actually occurring, well under
+   * `READY_TIMEOUT_MS`. That's thrown as `SandboxStartupError` (a definite,
+   * non-retryable startup failure carrying the specific cause), NOT the
+   * generic timeout error below — `SandboxAttachment.doProvision` branches
+   * on that distinction to reject pending `ensureReady` waiters immediately
+   * with the real cause instead of leaving them to hit their own 60s
+   * timeout and see a misleading "retry shortly" message. The deadline
+   * branch (no `error` state ever observed, just genuinely slow) keeps
+   * throwing a plain `Error` — that IS a transient, retry-shaped condition.
+   */
   private async waitReady(name: string): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     for (;;) {
-      const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name);
+      const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
       if (status.state === "ready") return;
       if (status.state === "error") {
-        throw new Error(`Sandbox CR "${name}" reported error: ${status.error ?? "unknown"}`);
+        throw new SandboxStartupError(name, status.error ?? "unknown");
       }
       if (Date.now() >= deadline) {
         throw new Error(`Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${status.state})`);

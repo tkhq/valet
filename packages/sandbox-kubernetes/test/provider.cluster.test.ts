@@ -17,11 +17,18 @@ import { spawnSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CONTAINER_DEATH_PATTERN } from "@valet/engine";
-import { SANDBOX_CR_API_VERSION } from "../src/index.js";
+import { SANDBOX_CR_API_VERSION, sandboxCrName } from "../src/index.js";
 import type { K8sProviderConfig } from "../src/index.js";
-import { RANCHER_DESKTOP_CONTEXT, customObjectsApiAdapter, loadRancherDesktopKubeConfig, podsApiAdapter } from "../src/lifecycle.js";
+import {
+  RANCHER_DESKTOP_CONTEXT,
+  customObjectsApiAdapter,
+  loadRancherDesktopKubeConfig,
+  podStatusApiAdapter,
+  podsApiAdapter,
+} from "../src/lifecycle.js";
 import { podExecApiAdapter } from "../src/exec.js";
 import { KubernetesSandboxProvider, podLivenessApiAdapter } from "../src/provider.js";
+import { SandboxStartupError } from "@valet/engine";
 
 function kubectl(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("kubectl", ["--context", RANCHER_DESKTOP_CONTEXT, ...args], { encoding: "utf8" });
@@ -57,7 +64,8 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
     const podsApi = podsApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
     const execApi = podExecApiAdapter(new k8s.Exec(kc));
     const livenessApi = podLivenessApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
-    provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi }, cfg);
+    const podStatusApi = podStatusApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
+    provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi }, cfg);
   }, 30_000);
 
   afterAll(() => {
@@ -218,5 +226,50 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
       }
     },
     120_000,
+  );
+
+  it(
+    "a bogus image FAILS FAST: status() reports error with an image-pull reason, and create()/waitReady throws SandboxStartupError well under the 60s ready timeout (bug repro)",
+    async () => {
+      // Non-existent repository/tag on the default registry — the kubelet
+      // reports this as ErrImagePull first, then ImagePullBackOff once it
+      // starts backing off retries. Neither this image nor this registry
+      // path exists, so there is no risk of an accidental successful pull.
+      const identity = `bad-image-${randomUUID()}`;
+      const badImage = "valet-nonexistent-image-does-not-exist:doesnotexist";
+      const name = sandboxCrName(identity);
+
+      const start = Date.now();
+      let thrown: unknown;
+      try {
+        await provider.create({ workspace: identity, image: badImage });
+      } catch (err) {
+        thrown = err;
+      }
+      const elapsedMs = Date.now() - start;
+
+      try {
+        expect(thrown).toBeInstanceOf(SandboxStartupError);
+        const startupErr = thrown as SandboxStartupError;
+        expect(startupErr.message).toMatch(/sandbox failed to start/i);
+        expect(startupErr.reason).toMatch(/image pull failed/i);
+        expect(startupErr.reason).toMatch(/(ImagePullBackOff|ErrImagePull)/);
+
+        // The whole point of the fix: this must resolve in a handful of
+        // poll intervals (READY_POLL_INTERVAL_MS = 1s), NOT burn the full
+        // 60s READY_TIMEOUT_MS generic-timeout path.
+        expect(elapsedMs).toBeLessThan(30_000);
+
+        // status() independently corroborates the same terminal
+        // classification (the provider's own polling loop, exercised
+        // directly rather than via the create()/waitReady wrapper).
+        const status = await provider.status(name);
+        expect(status.state).toBe("error");
+        expect(status.error ?? "").toMatch(/image pull failed/i);
+      } finally {
+        await provider.destroy(name);
+      }
+    },
+    60_000,
   );
 });
