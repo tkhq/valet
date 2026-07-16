@@ -7,15 +7,21 @@ export interface FakeBotApi {
   calls: Array<{ method: string; body: Record<string, unknown> }>;
   /** Queue of update batches returned by successive getUpdates calls. */
   pushUpdates(updates: unknown[]): void;
-  /** File registry for getFile/download. */
-  addFile(fileId: string, filePath: string, bytes: Uint8Array): void;
+  /** File registry for getFile/download. `fileSize` is echoed back by getFile when set. */
+  addFile(fileId: string, filePath: string, bytes: Uint8Array, fileSize?: number): void;
+  /** Make the download (GET /file/...) for this fileId 404 even though getFile still resolves it. */
+  breakDownload(fileId: string): void;
+  /** Make the next call to `method` return `{ ok: false }` once, then resume normal behavior. */
+  failNext(method: string): void;
   close(): Promise<void>;
 }
 
 export async function startFakeBotApi(): Promise<FakeBotApi> {
   const calls: FakeBotApi["calls"] = [];
   const updateBatches: unknown[][] = [];
-  const files = new Map<string, { filePath: string; bytes: Uint8Array }>();
+  const files = new Map<string, { filePath: string; bytes: Uint8Array; fileSize?: number }>();
+  const brokenDownloads = new Set<string>();
+  const pendingFailures = new Set<string>();
   let nextMessageId = 1000;
 
   const app = new Hono();
@@ -30,6 +36,10 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
       ? ((await c.req.json()) as Record<string, unknown>)
       : Object.fromEntries((await c.req.formData()).entries());
     calls.push({ method, body });
+    if (pendingFailures.has(method)) {
+      pendingFailures.delete(method);
+      return c.json({ ok: false, error_code: 400, description: `simulated failure for ${method}` }, 400);
+    }
     if (method === "getMe") {
       return c.json({ ok: true, result: { id: 42, is_bot: true, username: "valet_test_bot" } });
     }
@@ -40,7 +50,10 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
     if (method === "getFile") {
       const f = files.get(String(body.file_id));
       if (!f) return c.json({ ok: false, error_code: 400, description: "file not found" }, 400);
-      return c.json({ ok: true, result: { file_id: body.file_id, file_path: f.filePath } });
+      return c.json({
+        ok: true,
+        result: { file_id: body.file_id, file_path: f.filePath, file_size: f.fileSize },
+      });
     }
     if (method === "sendMessage" || method === "sendPhoto" || method === "sendDocument") {
       return c.json({ ok: true, result: { message_id: nextMessageId++ } });
@@ -51,8 +64,9 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
   });
   app.get("/file/bot:token/*", (c) => {
     const filePath = c.req.path.replace(/^\/file\/bot[^/]+\//, "");
-    for (const f of files.values()) {
+    for (const [fileId, f] of files.entries()) {
       if (f.filePath === filePath) {
+        if (brokenDownloads.has(fileId)) return c.text("not found", 404);
         const buffer = new ArrayBuffer(f.bytes.byteLength);
         new Uint8Array(buffer).set(f.bytes);
         return new Response(buffer);
@@ -68,7 +82,9 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
     baseUrl: `http://127.0.0.1:${address.port}`,
     calls,
     pushUpdates: (u) => updateBatches.push(u),
-    addFile: (fileId, filePath, bytes) => files.set(fileId, { filePath, bytes }),
+    addFile: (fileId, filePath, bytes, fileSize) => files.set(fileId, { filePath, bytes, fileSize }),
+    breakDownload: (fileId) => brokenDownloads.add(fileId),
+    failNext: (method) => pendingFailures.add(method),
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

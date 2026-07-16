@@ -130,7 +130,7 @@ export class TelegramTransport implements ChannelTransport {
     if (u.callback_query) {
       const cb = u.callback_query;
       const msg = cb.message;
-      if (!msg || typeof cb.data !== "string") return null;
+      if (!msg || msg.chat.type !== "private" || typeof cb.data !== "string") return null;
       const [tag, actionId] = cb.data.split("|");
       if (tag !== "g" || !actionId) return null;
       return {
@@ -195,9 +195,20 @@ export class TelegramTransport implements ChannelTransport {
 
   async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void> {
     const chatId = chatIdFromConversationKey(ref.conversationKey);
-    await this.api.editMessageText({
-      chatId, messageId: Number(ref.messageId), html: markdownToTelegramHtml(resolution.label),
-    });
+    const messageId = Number(ref.messageId);
+    try {
+      // editMessageText replaces the message content; the inline keyboard is
+      // dropped along with it since we never pass a replacement reply_markup.
+      await this.api.editMessageText({ chatId, messageId, html: markdownToTelegramHtml(resolution.label) });
+    } catch (err) {
+      // Best-effort: make sure the buttons don't stay live even if the text edit failed.
+      try {
+        await this.api.editMessageReplyMarkup({ chatId, messageId });
+      } catch {
+        // Swallow — we're already about to rethrow the original failure.
+      }
+      throw err;
+    }
   }
 
   async fetchMedia(media: InboundChannelMedia): Promise<FetchedChannelMedia | null> {
@@ -209,7 +220,12 @@ export class TelegramTransport implements ChannelTransport {
       return null;
     }
     if (file.fileSize !== undefined && file.fileSize > MAX_FILE_BYTES) return null;
-    const data = await this.api.downloadFile(file.filePath);
+    let data: Uint8Array;
+    try {
+      data = await this.api.downloadFile(file.filePath);
+    } catch {
+      return null;
+    }
     const ext = file.filePath.split(".").pop()?.toLowerCase();
     const mimeType =
       media.mimeType ??

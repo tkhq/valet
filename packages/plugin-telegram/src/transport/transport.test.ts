@@ -88,6 +88,19 @@ describe("TelegramTransport", () => {
     expect(transport.parseUpdate({ update_id: 3, edited_message: {} })).toBeNull();
   });
 
+  it("returns null for a callback_query from a group chat", () => {
+    const ev = transport.parseUpdate({
+      update_id: 223,
+      callback_query: {
+        id: "cb2",
+        from: { id: 77, first_name: "Ada" },
+        message: { message_id: 41, chat: { id: -100, type: "group" } },
+        data: "g|approve",
+      },
+    });
+    expect(ev).toBeNull();
+  });
+
   it("verifyWebhook checks the secret token header", () => {
     const body = new TextEncoder().encode(JSON.stringify(msgUpdate()));
     const good = transport.verifyWebhook(
@@ -134,6 +147,19 @@ describe("TelegramTransport", () => {
     expect(fake.calls.some((c) => c.method === "editMessageText")).toBe(true);
   });
 
+  it("updateGatePrompt clears the keyboard when editMessageText fails, then rethrows", async () => {
+    const ref = await transport.sendGatePrompt("telegram:dm:99", {
+      gateId: "gate:x",
+      title: "Deploy?",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+    });
+    fake.failNext("editMessageText");
+    await expect(
+      transport.updateGatePrompt(ref, { actionId: "approve", label: "✅ Approved" }),
+    ).rejects.toThrow();
+    expect(fake.calls.some((c) => c.method === "editMessageReplyMarkup")).toBe(true);
+  });
+
   it("fetchMedia downloads within the 20MB cap and refuses beyond it", async () => {
     fake.addFile("f1", "photos/p.jpg", new Uint8Array([9, 9]));
     const ok = await transport.fetchMedia({ kind: "photo", fileId: "f1", fileSize: 2 });
@@ -142,6 +168,19 @@ describe("TelegramTransport", () => {
       kind: "document", fileId: "f1", fileSize: 21 * 1024 * 1024, fileName: "big.bin",
     });
     expect(refused).toBeNull();
+  });
+
+  it("fetchMedia returns null when download fails despite a small size hint", async () => {
+    fake.addFile("f2", "documents/d.bin", new Uint8Array([1, 2, 3]));
+    fake.breakDownload("f2");
+    const result = await transport.fetchMedia({ kind: "document", fileId: "f2", fileName: "d.bin" });
+    expect(result).toBeNull();
+  });
+
+  it("fetchMedia returns null when getFile reports an oversize file with no inbound size hint", async () => {
+    fake.addFile("f3", "documents/big.bin", new Uint8Array([1]), 21 * 1024 * 1024);
+    const result = await transport.fetchMedia({ kind: "document", fileId: "f3", fileName: "big.bin" });
+    expect(result).toBeNull();
   });
 
   it("poll yields updates and advances offset, stopping on abort", async () => {
