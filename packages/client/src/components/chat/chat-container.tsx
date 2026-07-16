@@ -265,8 +265,13 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
     return filtered;
   }, [messages, activeThreadId, isResolvingThread]);
 
-  // Prompts the user has already sent in this thread, for ArrowUp recall in the composer.
-  const messageHistory = useMemo(() => getUserMessageHistory(filteredMessages), [filteredMessages]);
+  // Prompts the user has already sent in this thread, for ArrowUp recall in the
+  // composer. Scoped to the current user so a shared session does not recall
+  // other participants' prompts.
+  const messageHistory = useMemo(
+    () => getUserMessageHistory(filteredMessages, authUser?.id),
+    [filteredMessages, authUser?.id],
+  );
 
   const filteredChildSessionEvents = useMemo(() => {
     if (isResolvingThread) return [];

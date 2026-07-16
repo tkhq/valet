@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canRecallForward,
   canRecallHistory,
   getUserMessageHistory,
   recallNextIndex,
@@ -87,6 +88,55 @@ describe('getUserMessageHistory', () => {
   it('returns nothing for a thread with no user prompts yet', () => {
     expect(getUserMessageHistory([])).toEqual([]);
     expect(getUserMessageHistory([{ role: 'assistant', content: 'hi' }])).toEqual([]);
+  });
+
+  it('keeps only the current user\'s prompts in a shared thread', () => {
+    const history = getUserMessageHistory(
+      [
+        { role: 'user', content: 'mine one', authorId: 'me' },
+        { role: 'user', content: 'theirs', authorId: 'them' },
+        { role: 'user', content: 'mine two', authorId: 'me' },
+      ],
+      'me',
+    );
+
+    expect(history).toEqual(['mine one', 'mine two']);
+  });
+
+  it('keeps unattributed prompts so single-player and legacy recall still work', () => {
+    const history = getUserMessageHistory(
+      [
+        { role: 'user', content: 'no author' },
+        { role: 'user', content: 'mine', authorId: 'me' },
+      ],
+      'me',
+    );
+
+    expect(history).toEqual(['no author', 'mine']);
+  });
+
+  it('does not filter by author when the current user is unknown', () => {
+    const history = getUserMessageHistory([
+      { role: 'user', content: 'a', authorId: 'x' },
+      { role: 'user', content: 'b', authorId: 'y' },
+    ]);
+
+    expect(history).toEqual(['a', 'b']);
+  });
+});
+
+describe('canRecallForward', () => {
+  it('steps forward from an empty composer', () => {
+    expect(canRecallForward('', 0)).toBe(true);
+  });
+
+  it('steps forward when the caret sits at the very end of a recalled prompt', () => {
+    expect(canRecallForward('recalled prompt', 'recalled prompt'.length)).toBe(true);
+  });
+
+  it('leaves the caret alone before the end so arrowing down through lines still works', () => {
+    expect(canRecallForward('some draft', 4)).toBe(false);
+    expect(canRecallForward('line one\nline two', 3)).toBe(false);
   });
 });
 

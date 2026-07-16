@@ -25,6 +25,7 @@ import {
   type FlatModel,
 } from '@/components/ui/model-selector-utils';
 import {
+  canRecallForward,
   canRecallHistory,
   recallNextIndex,
   recallPrevIndex,
@@ -765,20 +766,21 @@ export function ChatInput({
 
     // Sent-prompt recall. This sits below every overlay so their ArrowUp and
     // ArrowDown selection keeps priority; it only sees keys they did not take.
-    // Once recall is active the arrows keep walking the history, because the
-    // composer is showing a past prompt rather than anything the user typed.
+    // The same edge guards that gate entering recall keep applying once it is
+    // active, so arrowing within a multi-line recalled prompt moves the caret
+    // and history is only crossed from the composer's start (up) or end (down).
     const caretPos = textareaRef.current?.selectionStart ?? cursorPos;
 
-    if (e.key === 'ArrowUp' && (recallIndex !== null || canRecallHistory(value, caretPos))) {
+    if (e.key === 'ArrowUp' && canRecallHistory(value, caretPos)) {
       const nextIndex = recallPrevIndex(messageHistory, recallIndex);
-      if (nextIndex !== null) {
+      if (nextIndex !== null && nextIndex !== recallIndex) {
         e.preventDefault();
         applyRecall(nextIndex);
         return;
       }
     }
 
-    if (e.key === 'ArrowDown' && recallIndex !== null) {
+    if (e.key === 'ArrowDown' && recallIndex !== null && canRecallForward(value, caretPos)) {
       e.preventDefault();
       applyRecall(recallNextIndex(messageHistory, recallIndex));
       return;

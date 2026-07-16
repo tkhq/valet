@@ -10,6 +10,7 @@
 interface HistoryMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
+  authorId?: string;
 }
 
 /**
@@ -25,12 +26,21 @@ export function stripFileContextBlocks(content: string): string {
  * Builds the recall list from the messages of the current thread: the user's
  * own prompts, oldest first, without the file contents the composer inlined and
  * without immediate repeats of the same prompt.
+ *
+ * In a shared session other participants' prompts also land in the thread, so
+ * when the current user's id is known their messages are the only ones kept.
+ * Messages with no author (single-player or legacy history) stay recallable,
+ * as does everything when the current user is not yet known.
  */
-export function getUserMessageHistory(messages: readonly HistoryMessage[]): string[] {
+export function getUserMessageHistory(
+  messages: readonly HistoryMessage[],
+  currentUserId?: string,
+): string[] {
   const history: string[] = [];
 
   for (const message of messages) {
     if (message.role !== 'user') continue;
+    if (currentUserId && message.authorId && message.authorId !== currentUserId) continue;
 
     const content = stripFileContextBlocks(message.content ?? '').trim();
     if (!content) continue;
@@ -49,6 +59,15 @@ export function getUserMessageHistory(messages: readonly HistoryMessage[]): stri
  */
 export function canRecallHistory(value: string, cursorPos: number): boolean {
   return value.length === 0 || cursorPos === 0;
+}
+
+/**
+ * Mirror of {@link canRecallHistory} for ArrowDown: stepping forward only takes
+ * over at the very end of the composer, so arrowing down through a multi-line
+ * recalled prompt moves the caret rather than jumping to the next entry.
+ */
+export function canRecallForward(value: string, cursorPos: number): boolean {
+  return value.length === 0 || cursorPos === value.length;
 }
 
 /** Steps one prompt further back, stopping at the oldest. */
