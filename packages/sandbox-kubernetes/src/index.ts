@@ -53,3 +53,46 @@ export {
   type SandboxCustomObjectsApi,
   type SandboxPodsApi,
 } from "./lifecycle.js";
+
+export {
+  JOBS_DIR,
+  buildShellCommand,
+  execInPod,
+  exitCodeFromStatus,
+  podExecApiAdapter,
+  shQuote,
+  type ExecDeps,
+  type ExecStatus,
+  type PodExecApi,
+  type PodExecSocket,
+} from "./exec.js";
+
+export {
+  PodFileOpError,
+  mkdirCommand,
+  mkdirInPod,
+  parseReaddirOutput,
+  parseStatOutput,
+  readBinaryCommand,
+  readBinaryInPod,
+  readFileInPod,
+  readdirCommand,
+  readdirInPod,
+  rmCommand,
+  rmInPod,
+  statCommand,
+  statInPod,
+  writeBinaryCommand,
+  writeBinaryInPod,
+  writeFileInPod,
+} from "./files.js";
+
+export {
+  cancelCommand,
+  cancelJobInPod,
+  execJobInPod,
+  jobKickoffCommand,
+  parseJobStatus,
+  pollCommand,
+  pollJobInPod,
+} from "./jobs.js";
