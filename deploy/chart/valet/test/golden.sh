@@ -62,7 +62,7 @@ done
 # The sandboxes rule specifically needs `update`: the adopt-on-409 path calls
 # replaceNamespacedCustomObject (PUT = update). A generic whole-Role grep for
 # "update" is not enough — assert it on the sandboxes rule's own verb line.
-SANDBOX_VERBS=$(echo "$ROLE_BLOCK" | grep -A2 '"sandboxes"' | grep 'verbs:')
+SANDBOX_VERBS=$(echo "$ROLE_BLOCK" | grep -A8 '"sandboxes"' | grep -m1 'verbs:')
 echo "$SANDBOX_VERBS" | grep -q '"update"' \
   || fail "sandboxes rule missing 'update' verb — adopt/re-provision (replaceNamespacedCustomObject PUT) would 403"
 if echo "$ROLE_BLOCK" | grep -qE '"?persistentvolumeclaims"?'; then
