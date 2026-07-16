@@ -4779,16 +4779,27 @@ export class SessionAgentDO {
     });
 
     this.emitAuditEvent('session.terminated', 'Session terminated');
-    // `handleStop` is the funnel for every termination, including recovery
-    // exhaustion (reason 'recovery_exhausted'). Surface that as its own
-    // terminal outcome; all other stop reasons collapse to 'terminated'.
+    // `handleStop` is the funnel for every termination, so the stop reason
+    // decides the outcome. Recovery exhaustion is its own terminal outcome.
+    // `snapshot_failed` and `sandbox_exited` arrive here from performHibernate's
+    // catch blocks: both are failures, not normal end-of-life, so they emit
+    // `error` carrying the reason as the errorCode — collapsing them to
+    // 'terminated' would hide them from any consumer computing an error rate by
+    // grouping on reason, which is the signal this event exists to produce.
+    // Every other stop reason is a genuine termination.
     // A session that already reached the terminal `error` outcome keeps it: a
     // later stop/cascade must not write a superseding `terminated` outcome,
     // since consumers take the last outcome per session and that would mask
     // the failure. Recovery exhaustion runs with status 'recovering', so its
     // outcome is unaffected.
     if (currentStatus !== 'error') {
-      await this.emitSessionOutcome(reason === 'recovery_exhausted' ? 'recovery_exhausted' : 'terminated');
+      if (reason === 'recovery_exhausted') {
+        await this.emitSessionOutcome('recovery_exhausted');
+      } else if (reason === 'snapshot_failed' || reason === 'sandbox_exited') {
+        await this.emitSessionOutcome('error', reason);
+      } else {
+        await this.emitSessionOutcome('terminated');
+      }
     }
 
     // Publish session.completed to EventBus

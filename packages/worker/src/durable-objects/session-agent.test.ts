@@ -868,6 +868,31 @@ describe('SessionAgentDO', () => {
       });
     });
 
+    it.each([['snapshot_failed'], ['sandbox_exited']])(
+      'emits session.outcome { reason: error, errorCode: %s } for an anomalous sandbox exit',
+      async (stopReason) => {
+        const { agent } = await createTestAgent();
+        // performHibernate catches SandboxSnapshotFailedError / SandboxAlreadyExitedError
+        // and funnels both into handleStop. They are failures, so they must not be
+        // recorded as a clean 'terminated' — that would hide them from any consumer
+        // computing an error rate by grouping on reason.
+        (agent as any).sessionState.set('status', 'hibernating');
+        (agent as any).flushMetrics = vi.fn().mockResolvedValue(undefined);
+        (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+        await (agent as any).handleStop(stopReason);
+
+        expect((agent as any).emitEvent).toHaveBeenCalledWith('session.outcome', {
+          errorCode: stopReason,
+          properties: { reason: 'error' },
+        });
+        expect((agent as any).emitEvent).not.toHaveBeenCalledWith(
+          'session.outcome',
+          expect.objectContaining({ properties: { reason: 'terminated' } }),
+        );
+      },
+    );
+
     it('does not emit a terminated outcome when stopping an already-errored session', async () => {
       const { agent } = await createTestAgent();
       // A prior spawn/hibernate failure already emitted session.outcome{error}
