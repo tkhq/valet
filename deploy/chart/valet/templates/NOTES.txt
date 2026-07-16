@@ -1,0 +1,18 @@
+Valet has been deployed.
+
+{{- if .Values.ingress.enabled }}
+Visit https://{{ .Values.ingress.host }}/ (accept the self-signed certificate
+if you haven't configured a real one via ingress.tls.secretName).
+
+If {{ .Values.ingress.host }} doesn't resolve, add it to /etc/hosts pointing
+at your ingress controller's address, or switch ingress.host to a
+*.sslip.io name in values.
+{{- else }}
+Ingress is disabled; port-forward the api Service to reach it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "valet.fullname" . }}-api 8787:{{ .Values.service.port }}
+{{- end }}
+
+First user to sign up becomes admin.
+
+Reminder: this chart does NOT install the agent-sandbox CRDs/controller.
+See deploy/chart/valet/README.md for install ordering.

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: valet
+description: Valet — hosted background coding agent platform (api + bundled Postgres + sandbox RBAC)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valet.fullname" . }}-config
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+data:
+  BETTER_AUTH_URL: {{ .Values.api.betterAuthUrl | quote }}
+  VALET_SANDBOX_BACKEND: "kubernetes"
+  VALET_SANDBOX_NAMESPACE: {{ .Values.sandbox.namespace | quote }}
+  VALET_SANDBOX_IMAGE: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
+  VALET_WEB_DIST_DIR: "/app/web/dist"
+  {{- if .Values.api.auth.oidcIssuer }}
+  AUTH_OIDC_ISSUER: {{ .Values.api.auth.oidcIssuer | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.oidcClientId }}
+  AUTH_OIDC_CLIENT_ID: {{ .Values.api.auth.oidcClientId | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.oidcName }}
+  AUTH_OIDC_NAME: {{ .Values.api.auth.oidcName | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.oidcDomain }}
+  AUTH_OIDC_DOMAIN: {{ .Values.api.auth.oidcDomain | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.googleClientId }}
+  AUTH_GOOGLE_CLIENT_ID: {{ .Values.api.auth.googleClientId | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.githubClientId }}
+  AUTH_GITHUB_CLIENT_ID: {{ .Values.api.auth.githubClientId | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.trustedOrigins }}
+  AUTH_TRUSTED_ORIGINS: {{ .Values.api.auth.trustedOrigins | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.allowedEmailDomains }}
+  AUTH_ALLOWED_EMAIL_DOMAINS: {{ .Values.api.auth.allowedEmailDomains | quote }}
+  {{- end }}

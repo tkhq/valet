@@ -1,0 +1,18 @@
+{{- if and .Values.postgres.bundled (not .Values.externalDatabase.url) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valet.fullname" . }}-postgres
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  clusterIP: None
+  selector:
+    {{- include "valet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+{{- end }}

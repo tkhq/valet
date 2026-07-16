@@ -1,0 +1,106 @@
+# Default values for the valet chart.
+# See deploy/chart/valet/README.md for install ordering (agent-sandbox CRDs
+# +controller must be installed BEFORE this chart).
+
+api:
+  # The engine is a stateful singleton (in-memory submission claim loop,
+  # WS fan-out) — do NOT scale this beyond 1 replica. There is no leader
+  # election or shared engine state across pods.
+  replicas: 1
+
+  image:
+    repository: valet-api
+    tag: dev
+    pullPolicy: IfNotPresent
+
+  port: 8787
+
+  resources: {}
+
+  # Non-secret env, merged into the api ConfigMap.
+  # BETTER_AUTH_URL must be https:// — better-auth marks session cookies
+  # Secure, so plain http breaks login once TLS terminates at the ingress.
+  betterAuthUrl: "https://valet.localdev"
+
+  # Optional social/SSO env (non-secret half — client IDs, issuer, domain).
+  # Secret halves (client secrets) live under api.secrets below.
+  auth:
+    oidcIssuer: ""
+    oidcClientId: ""
+    oidcName: ""
+    oidcDomain: ""
+    googleClientId: ""
+    githubClientId: ""
+    trustedOrigins: ""
+    allowedEmailDomains: ""
+
+  # Secret values. Leave blank to have the chart generate-and-retain them
+  # (see templates/secret.yaml's lookup-based retain guard) — regenerating
+  # BETTER_AUTH_SECRET on every `helm upgrade` would invalidate every
+  # session AND rotate the sandbox JWT master (VALET_SANDBOX_JWT_MASTER
+  # falls back to BETTER_AUTH_SECRET when unset).
+  #
+  # DO NOT commit real values here — placeholders only.
+  secrets:
+    betterAuthSecret: ""
+    encryptionKey: ""
+    anthropicApiKey: ""
+    oidcClientSecret: ""
+    googleClientSecret: ""
+    githubClientSecret: ""
+
+serviceAccount:
+  # ServiceAccount the api pod runs as. Bound (via RoleBinding, in the
+  # sandbox namespace) to the Role granting Sandbox CR + pods/exec/log
+  # access — see templates/rbac.yaml.
+  name: valet-api
+  create: true
+
+sandbox:
+  # Namespace where session Sandbox CRs (and their backing pods/PVCs) live.
+  # Kept separate from the api's own namespace so the RBAC Role below can
+  # stay narrowly scoped instead of granting pod access next to the api
+  # pod itself.
+  namespace: valet-sandboxes
+  image:
+    repository: valet-sandbox
+    tag: dev
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: traefik
+  host: valet.localdev
+  # TLS terminates at Traefik. Leave secretName empty to use Traefik's
+  # built-in default (self-signed) certificate — fine for the local
+  # reference environment; set a real secretName (from cert-manager or
+  # a manually created TLS secret) for anything beyond that.
+  tls:
+    enabled: true
+    secretName: ""
+
+postgres:
+  # Bundled single-replica postgres:17 StatefulSet. Set to false (or set
+  # externalDatabase.url) to disable it and point the api at managed PG.
+  bundled: true
+  image:
+    repository: postgres
+    tag: "17"
+  storageClassName: "" # "" = cluster default storage class
+  storageSize: 5Gi
+  database: valet
+  user: valet
+  # Blank = chart-generated-with-retain (see templates/postgres-secret.yaml).
+  password: ""
+
+externalDatabase:
+  # When set, disables the bundled postgres StatefulSet/Service/Secret
+  # entirely and the api's DATABASE_URL is this value verbatim.
+  url: ""
+
+helmTest:
+  enabled: true
+  image: curlimages/curl:8.11.0

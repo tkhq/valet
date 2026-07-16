@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "valet.fullname" . }}-api
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  # Pinned to 1 — see values.yaml's api.replicas comment. The engine is a
+  # stateful singleton (in-memory submission claim loop); do not scale.
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "valet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "valet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- if and .Values.postgres.bundled (not .Values.externalDatabase.url) }}
+      initContainers:
+        # Boot runs migrations against DATABASE_URL; without this gate the
+        # api crash-loops until the bundled postgres StatefulSet is ready.
+        - name: wait-for-postgres
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "valet.fullname" . }}-postgres -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do
+                echo "waiting for postgres...";
+                sleep 2;
+              done
+          envFrom:
+            - secretRef:
+                name: {{ include "valet.fullname" . }}-postgres
+      {{- end }}
+      containers:
+        - name: api
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.api.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "valet.fullname" . }}-config
+            - secretRef:
+                name: {{ include "valet.fullname" . }}-app
+          env:
+            - name: PORT
+              value: {{ .Values.api.port | quote }}
+            # VALET_PG_DATA_DIR is unused once DATABASE_URL is set (main.ts
+            # only falls back to it when DATABASE_URL is absent), left
+            # documented here rather than set.
+            {{- if and .Values.postgres.bundled (not .Values.externalDatabase.url) }}
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valet.fullname" . }}-postgres
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valet.fullname" . }}-postgres
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valet.fullname" . }}-postgres
+                  key: POSTGRES_DB
+            # Composed from the postgres Secret's own keys via Kubernetes'
+            # native $(VAR) env interpolation — this is the single source
+            # of truth for the password, so it can never drift from what
+            # the bundled Postgres StatefulSet was actually given.
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ include "valet.fullname" . }}-postgres:5432/$(POSTGRES_DB)"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
