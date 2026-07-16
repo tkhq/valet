@@ -956,6 +956,81 @@ export interface PatchIdentityLinkResponse {
   ok: true;
 }
 
+// ── REST: org LLM providers (split-settings design, llm-providers spec) ──
+//
+// `/api/org/llm-providers` — admin-gated provider CRUD + encrypted key
+// management. `LlmProviderSummary` never carries key material — only
+// `hasKey`/`keyLast4`. Model ids elsewhere in the wire protocol are
+// namespaced `{providerKindOrRowId}/{modelId}` (see the design doc); this
+// file's `preferences` endpoints move that ordered list.
+
+export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openai_compatible";
+
+export interface LlmProviderModelWire {
+  id: string;
+  name: string;
+  contextWindow?: number;
+  pricing?: { input: number; output: number };
+}
+
+export interface LlmProviderSummary {
+  id: string;
+  kind: LlmProviderKindWire;
+  name: string;
+  baseUrl?: string;
+  enabled: boolean;
+  models: LlmProviderModelWire[];
+  hasKey: boolean;
+  keyLast4?: string;
+  envFallback: boolean;
+  createdAt: number;
+}
+
+export interface ListLlmProvidersResponse {
+  providers: LlmProviderSummary[];
+}
+
+export interface CreateLlmProviderRequest {
+  kind: LlmProviderKindWire;
+  name: string;
+  baseUrl?: string;
+  models?: LlmProviderModelWire[];
+}
+
+export type CreateLlmProviderResponse = LlmProviderSummary;
+
+/** Whitelisted fields only — `kind` is immutable after creation. */
+export interface PatchLlmProviderRequest {
+  name?: string;
+  baseUrl?: string;
+  enabled?: boolean;
+  models?: LlmProviderModelWire[];
+}
+
+export type PatchLlmProviderResponse = LlmProviderSummary;
+
+export interface PutLlmProviderKeyRequest {
+  apiKey: string;
+}
+
+/** Never echoes the submitted key — only its last 4 characters. */
+export interface PutLlmProviderKeyResponse {
+  hasKey: true;
+  keyLast4: string;
+}
+
+// `DELETE .../key` and `DELETE /:id` return 204 No Content — no response body.
+
+export interface GetLlmProviderPreferencesResponse {
+  preferences: string[];
+}
+
+export interface PutLlmProviderPreferencesRequest {
+  preferences: string[];
+}
+
+export type PutLlmProviderPreferencesResponse = GetLlmProviderPreferencesResponse;
+
 export interface DeleteIdentityLinkResponse {
   ok: true;
 }

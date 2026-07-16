@@ -32,6 +32,7 @@ import { meRouter } from "./routes/me.js";
 import { modelsRouter } from "./routes/models.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
+import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
@@ -159,6 +160,7 @@ export function createApp(
   app.route("/api/models", modelsRouter);
   app.route("/api/org", orgRouter);
   app.route("/api/org/invites", orgInvitesRouter);
+  app.route("/api/org/llm-providers", llmProvidersRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)
