@@ -303,6 +303,49 @@ describe("SandboxAttachment", () => {
     expect(provider.createCalls).toBe(createsBefore);
   });
 
+  it("7b. reportFailure prefers provider.release over provider.destroy when release is implemented", async () => {
+    class FakeProviderWithRelease extends FakeProvider {
+      releaseCalls: string[] = [];
+      async release(id: string): Promise<void> {
+        this.releaseCalls.push(id);
+      }
+    }
+    const provider = new FakeProviderWithRelease();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
+
+    const sb1 = makeFakeSandbox("sb-1");
+    provider.nextDeferred().resolve(sb1);
+    await wrapper.readFile("/x.txt");
+
+    sb1.exec.mockRejectedValueOnce(new Error("No such container abc"));
+    const d2 = provider.nextDeferred();
+    d2.resolve(makeFakeSandbox("sb-2"));
+    await expect(wrapper.exec("ls")).rejects.toBeInstanceOf(SandboxUnavailableError);
+    await wrapper.readFile("/y.txt"); // wait for epoch 2 to settle
+
+    expect(provider.releaseCalls).toEqual(["sb-1"]);
+    expect(provider.destroyCalls).toEqual([]);
+  });
+
+  it("7c. reportFailure falls back to provider.destroy when the provider has no release (pins docker/local behavior)", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
+
+    const sb1 = makeFakeSandbox("sb-1");
+    provider.nextDeferred().resolve(sb1);
+    await wrapper.readFile("/x.txt");
+
+    sb1.exec.mockRejectedValueOnce(new Error("No such container abc"));
+    const d2 = provider.nextDeferred();
+    d2.resolve(makeFakeSandbox("sb-2"));
+    await expect(wrapper.exec("ls")).rejects.toBeInstanceOf(SandboxUnavailableError);
+    await wrapper.readFile("/y.txt"); // wait for epoch 2 to settle
+
+    expect(provider.destroyCalls).toEqual(["sb-1"]);
+  });
+
   it("8. non-degrading errors: ENOENT rethrown as-is, state stays ready, no re-provision", async () => {
     const provider = new FakeProvider();
     const attachment = new SandboxAttachment(provider, {});

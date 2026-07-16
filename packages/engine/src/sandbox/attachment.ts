@@ -191,9 +191,10 @@ export class SandboxAttachment {
   /**
    * Degradation report (spec decision 2/3). When `epoch` names the current
    * epoch: marks it superseded (bumps the epoch immediately), best-effort
-   * destroys the old sandbox, and kicks a background re-provision. Stale
-   * reports (an old epoch that is no longer current) are ignored — no
-   * state change, no extra `create`.
+   * releases the old sandbox (`provider.release` when implemented, else
+   * `provider.destroy` — see `SandboxProvider.release`'s doc), and kicks a
+   * background re-provision. Stale reports (an old epoch that is no longer
+   * current) are ignored — no state change, no extra `create`.
    */
   reportFailure(epoch: number, _err: unknown): void {
     if (this.destroyed) return;
@@ -214,7 +215,13 @@ export class SandboxAttachment {
     this._state = "provisioning";
 
     if (oldSandbox && provider) {
-      void provider.destroy(oldSandbox.id).catch(() => {});
+      // Prefer the optional `release` seam when the provider implements it
+      // (spec decision 5): for a provider whose `destroy` cascades to
+      // persistent storage, an unconditional `destroy` here would wipe the
+      // workspace on every liveness-triggered re-provision. Providers that
+      // don't implement `release` (docker/local/virtual) fall back to
+      // `destroy` — byte-identical to prior behavior.
+      void (provider.release ? provider.release(oldSandbox.id) : provider.destroy(oldSandbox.id)).catch(() => {});
     }
 
     this.kickProvision();

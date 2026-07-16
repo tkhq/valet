@@ -1,11 +1,16 @@
 /**
  * Task 5 targeted tests (beyond the generic conformance suite in
  * conformance.cluster.test.ts): destroy() terminal cascade (CR + pod + PVC
- * all gone) and the liveness/SandboxUnavailableError-translation path for a
- * pod killed mid-exec — the two behaviors the brief calls out explicitly
- * beyond what runSandboxContract itself exercises. Same skip-gate and
- * context-safety posture as the other `.cluster.test.ts` files (decision 2,
- * BINDING).
+ * all gone), the liveness/SandboxUnavailableError-translation path for a
+ * pod killed mid-exec, and (adversarial-review fix, decision 5) the two
+ * REAL paths a session's teardown/re-provision can take:
+ *   - `destroy()` reached through the attachment's terminal path (session
+ *     deletion) — CR+pod+PVC gone.
+ *   - `release()` reached through `SandboxAttachment.reportFailure`'s
+ *     non-terminal re-provision path — CR (and its workspace PVC) survives,
+ *     and the follow-up `create()` (upsert, same opts) re-adopts it.
+ * Same skip-gate and context-safety posture as the other `.cluster.test.ts`
+ * files (decision 2, BINDING).
  */
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -126,5 +131,92 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
       }
     },
     60_000,
+  );
+
+  it(
+    "TERMINAL teardown via the real attachment path: create -> write workspace file -> provider.destroy() -> CR+pod+PVC all gone",
+    async () => {
+      // Drives the exact path `SandboxAttachment.destroy()` reaches on
+      // session deletion: raw `KubernetesSandbox` has no `destroy()` method
+      // (see provider.ts), so the attachment falls through to
+      // `provider.destroy(id)` — the terminal CR+PVC cascade delete. This
+      // pins that fallthrough by exercising `provider.destroy` directly
+      // (the attachment layer itself is unit-tested against a fake
+      // provider in packages/engine/test/sandbox-attachment.test.ts; this
+      // test proves the k8s side of that contract against the live
+      // controller).
+      const identity = `terminal-${randomUUID()}`;
+      const sandbox = await provider.create({ workspace: identity, image: "busybox:stable" });
+      const name = sandbox.id;
+
+      await sandbox.writeFile("/workspace/terminal-marker.txt", "should not survive destroy\n");
+      await expect(sandbox.readFile("/workspace/terminal-marker.txt")).resolves.toContain("should not survive");
+
+      const pvcBefore = kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout.trim();
+      expect(pvcBefore.length).toBeGreaterThan(0);
+
+      await provider.destroy(name);
+
+      const deadline = Date.now() + 60_000;
+      let crGone = false;
+      let podGone = false;
+      let pvcGone = false;
+      while (Date.now() < deadline && !(crGone && podGone && pvcGone)) {
+        crGone = kubectl(["-n", namespace, "get", "sandbox", name]).status !== 0;
+        podGone = kubectl(["-n", namespace, "get", "pod", name]).status !== 0;
+        pvcGone = kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout.trim() === "";
+        if (!(crGone && podGone && pvcGone)) await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      expect(crGone).toBe(true);
+      expect(podGone).toBe(true);
+      expect(pvcGone).toBe(true);
+    },
+    120_000,
+  );
+
+  it(
+    "NON-TERMINAL re-provision via provider.release(): create -> write workspace file -> release() (no-op) -> create() SAME opts re-adopts CR -> file still present",
+    async () => {
+      // Simulates exactly what `SandboxAttachment.reportFailure` now does
+      // (spec decision 5, adversarial-review fix): on a liveness-triggered
+      // re-provision it calls `provider.release(oldId)` — never
+      // `provider.destroy(oldId)` — before re-`create`ing with the SAME
+      // `SandboxCreateOpts`. This is the whole point of the `release` seam:
+      // proving the workspace PVC survives that path, unlike the old
+      // unconditional-`destroy` behavior which would have cascade-deleted
+      // it.
+      const identity = `release-${randomUUID()}`;
+      const opts = { workspace: identity, image: "busybox:stable" };
+      const sandbox = await provider.create(opts);
+      const name = sandbox.id;
+
+      try {
+        await sandbox.writeFile("/workspace/release-marker.txt", "should survive release\n");
+        await expect(sandbox.readFile("/workspace/release-marker.txt")).resolves.toContain(
+          "should survive release",
+        );
+
+        const pvcBefore = kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout.trim();
+        expect(pvcBefore.length).toBeGreaterThan(0);
+
+        // release(): no-op, must leave the CR (and its PVC) standing.
+        await provider.release(name);
+        expect(kubectl(["-n", namespace, "get", "sandbox", name]).status).toBe(0);
+        const pvcAfterRelease = kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout.trim();
+        expect(pvcAfterRelease).toBe(pvcBefore);
+
+        // create() again with the SAME opts (the attachment's re-provision
+        // shape): upsert-adopts the retained CR rather than erroring.
+        const reprovisioned = await provider.create(opts);
+        expect(reprovisioned.id).toBe(name);
+
+        await expect(reprovisioned.readFile("/workspace/release-marker.txt")).resolves.toContain(
+          "should survive release",
+        );
+      } finally {
+        await provider.destroy(name);
+      }
+    },
+    120_000,
   );
 });

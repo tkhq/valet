@@ -10,10 +10,26 @@
  * failure-recovery path calls `provider.create()` again with the same
  * opts). `restore(id)` GETs the CR and never creates. `destroy(id)` is
  * TERMINAL (deletes the CR, cascading to pod+PVC) and is the only method
- * that may delete a CR. The conformance suite's `recreate` callback
- * (below, in test/conformance.cluster.test.ts) is pod-recreate under the
- * SAME retained CR — never destroy+create — proving workspace survival the
- * way decision 5 mandates.
+ * that may delete a CR. `release(id)` is the NON-terminal seam: a no-op
+ * that leaves the CR standing, consumed by the engine's
+ * `SandboxAttachment.reportFailure` (liveness-triggered re-provision) in
+ * preference to `destroy` when a provider implements it (see
+ * `packages/engine/src/types.ts`'s `SandboxProvider.release`). Two
+ * DIFFERENT engine call sites reach two DIFFERENT `Sandbox`/`SandboxProvider`
+ * methods, and it is critical not to conflate them:
+ *   - `SandboxAttachment.reportFailure` (non-terminal, epoch degradation)
+ *     calls `provider.release(oldId)` directly when implemented, else
+ *     `provider.destroy(oldId)` — it does NOT go through `Sandbox.destroy`
+ *     at all.
+ *   - `SandboxAttachment.destroy` (terminal, session deletion) calls
+ *     `sandbox.destroy()` when the raw `Sandbox` defines one, else falls
+ *     back to `provider.destroy(id)`. `KubernetesSandbox` deliberately does
+ *     NOT define a `destroy()` method (see the class below) so this always
+ *     falls through to `provider.destroy(id)` — the terminal CR+PVC delete.
+ * The conformance suite's `recreate` callback (below, in
+ * test/conformance.cluster.test.ts) is pod-recreate under the SAME
+ * retained CR — never destroy+create — proving workspace survival the way
+ * decision 5 mandates.
  *
  * ── Session identity → CR name ───────────────────────────────────────────
  * `SandboxCreateOpts` has no dedicated `sessionId` field (checked: neither
@@ -357,16 +373,18 @@ export class KubernetesSandbox implements Sandbox {
     return {};
   }
 
-  async destroy(): Promise<void> {
-    // Intentionally a no-op: destroy semantics for a Sandbox CR are TERMINAL
-    // (decision 5) and live on the PROVIDER (`KubernetesSandboxProvider.destroy`),
-    // driven by the engine's `SandboxAttachment`/session-deletion path — not
-    // by the raw `Sandbox` handle. Recovery/re-provision paths
-    // (`reportFailure`) call `provider.destroy(sandbox.id)` only when a
-    // `Sandbox.destroy` method is ABSENT (see attachment.ts's `destroy()`);
-    // defining one here that actually deleted the CR would make ordinary
-    // epoch degradation destroy the workspace, which decision 5 forbids.
-  }
+  // `destroy` is intentionally NOT implemented on this class. Destroy
+  // semantics for a Sandbox CR are TERMINAL (decision 5) and must live on
+  // the PROVIDER only (`KubernetesSandboxProvider.destroy`, the CR+PVC
+  // cascade delete). `Sandbox.destroy` is optional precisely so a provider
+  // can omit it: `SandboxAttachment.destroy` (session deletion) falls back
+  // to `provider.destroy(id)` whenever the raw `Sandbox` has no `destroy`
+  // method (see attachment.ts) — that fallback is how the terminal delete
+  // actually fires. Defining a `destroy()` here (even a no-op) would
+  // short-circuit that fallback and leak the CR/pod/PVC on every session
+  // deletion forever. Non-terminal recovery (`reportFailure`) never touches
+  // `Sandbox.destroy` at all — it calls `provider.release`/`provider.destroy`
+  // directly (see `KubernetesSandboxProvider.release`, below).
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     const execId = this.nextExecId();
@@ -460,6 +478,29 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * session-deletion path may call this. */
   async destroy(id: string): Promise<void> {
     await deleteSandbox(this.deps.objectsApi, this.cfg, id);
+  }
+
+  /** NON-terminal (decision 5, NON-NEGOTIABLE): a no-op that leaves the CR
+   * (and its owner-referenced pod + workspace PVC) standing. This is the
+   * seam `SandboxAttachment.reportFailure` calls in preference to `destroy`
+   * (see `packages/engine/src/types.ts`'s `SandboxProvider.release` and
+   * `packages/engine/src/sandbox/attachment.ts`'s `reportFailure`) — the
+   * subsequent `create()` call (upsert-shaped, same CR name) re-adopts the
+   * retained CR and the controller heals a fresh pod onto the retained PVC,
+   * so the workspace survives a liveness-triggered re-provision instead of
+   * being cascade-deleted the way an unconditional `destroy` would. Verifies
+   * (does not create) the CR still exists and logs when it's unexpectedly
+   * already gone — that's a legitimate race (e.g. a concurrent `destroy`)
+   * this method must never treat as an error, since it makes no state
+   * change of its own. */
+  async release(id: string): Promise<void> {
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+    if (cr === null) {
+      // Already gone (e.g. raced a concurrent terminal `destroy`) — nothing
+      // to release, and this must not throw: `reportFailure`'s caller
+      // treats `release`/`destroy` as fire-and-forget best-effort.
+      console.warn(`KubernetesSandboxProvider.release: Sandbox CR "${id}" was already gone`);
+    }
   }
 
   async status(id: string): Promise<SandboxStatus> {

@@ -635,6 +635,19 @@ export interface SandboxProvider {
   restore(id: string): Promise<Sandbox>;
   destroy(id: string): Promise<void>;
   status(id: string): Promise<SandboxStatus>;
+  /**
+   * Optional non-terminal teardown seam for `SandboxAttachment.reportFailure`'s
+   * degradation/re-provision path (spec `docs/specs/2026-07-15-kubernetes-deployment-design.md`
+   * decision 5). When implemented, `reportFailure` prefers `release` over
+   * `destroy` for the old sandbox before re-`create`ing — for providers whose
+   * `destroy` cascades to persistent storage (e.g. sandbox-kubernetes's CR
+   * deletion, which cascade-deletes the workspace PVC), `release` can leave
+   * the backing resource standing so the subsequent `create` (upsert-shaped)
+   * re-adopts it and the workspace survives. Providers that don't implement
+   * it (docker/local/virtual) keep their exact current behavior — `reportFailure`
+   * falls back to `destroy`.
+   */
+  release?(id: string): Promise<void>;
 }
 
 // ── Blob store ─────────────────────────────────────────────────────
