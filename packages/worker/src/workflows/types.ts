@@ -31,6 +31,12 @@ export interface WorkflowRunParams {
   definition: WorkflowDefinition;
   /** "production" or "test" — drives trace retention and audit tagging. */
   mode?: 'production' | 'test';
+  /**
+   * W3C trace context of the request that dispatched this run, stamped at
+   * WORKFLOW_INTERPRETER.create() time. The interpreter parents its
+   * `workflow.run` span to it so runs join the originating trace.
+   */
+  traceparent?: string;
 }
 
 /**

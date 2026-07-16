@@ -7,7 +7,7 @@ import {
   type ReadableSpan, type SpanExporter,
 } from '@opentelemetry/sdk-trace-base';
 import { resourceFromAttributes } from '@opentelemetry/resources';
-import { buildTraceConfig, isTracingEnabled, RedactingSpanExporter } from './tracing.js';
+import { buildTraceConfig, isTracingEnabled, RedactingSpanExporter, type TracingEnv } from './tracing.js';
 import type { Env } from '../env.js';
 
 /**
@@ -82,19 +82,34 @@ class DropCountingSpanExporter implements SpanExporter {
   forceFlush(): Promise<void> { return this.inner.forceFlush?.() ?? Promise.resolve(); }
 }
 
-export async function createDoTracer(env: Env, ctx: DurableObjectState, serviceName: string): Promise<DoTracer> {
-  if (!isTracingEnabled(env)) return NOOP;
-  const config = buildTraceConfig(env, serviceName);
-  if (!('exporter' in config) || !config.exporter || !('url' in config.exporter)) return NOOP;
-  // Lazy import keeps `@microlabs/otel-cf-workers` (which pulls `cloudflare:workers`) off the
-  // module-load path, so the DOs that import this file stay loadable in Node unit tests.
-  const { OTLPExporter } = await import('@microlabs/otel-cf-workers');
+/**
+ * Shared provider construction for every manually-traced surface (DOs, the
+ * Workflow interpreter). Builds the full redact → drop-count → batch chain;
+ * `exporterOverride` swaps only the terminal OTLP exporter (a test seam that
+ * keeps redaction and batching in the exercised path). Returns null when
+ * tracing is disabled or the config is incomplete.
+ */
+export async function createTraceProvider(
+  env: TracingEnv,
+  serviceName: string,
+  exporterOverride?: SpanExporter,
+): Promise<{ provider: BasicTracerProvider; dropCounter: DropCountingSpanExporter } | null> {
+  if (!isTracingEnabled(env) && !exporterOverride) return null;
+  let terminal = exporterOverride;
+  if (!terminal) {
+    const config = buildTraceConfig(env, serviceName);
+    if (!('exporter' in config) || !config.exporter || !('url' in config.exporter)) return null;
+    // Lazy import keeps `@microlabs/otel-cf-workers` (which pulls `cloudflare:workers`) off the
+    // module-load path, so the DOs that import this file stay loadable in Node unit tests.
+    const { OTLPExporter } = await import('@microlabs/otel-cf-workers');
+    terminal = new OTLPExporter(config.exporter);
+  }
   // Exporter chain: redact URL secrets, then count drops, then OTLP. Redaction must run before
   // bytes leave; the counter wraps it so it sees the real OTLP export result.
-  const dropCounter = new DropCountingSpanExporter(new RedactingSpanExporter(new OTLPExporter(config.exporter)));
-  // Batch within the DO rather than one POST per span. maxQueueSize/maxExportBatchSize use the
-  // library defaults (2048 / 512); only the scheduled delay (a long backstop — the DO drives
-  // flushing on lifecycle events, and hibernation freezes this timer anyway) and the export
+  const dropCounter = new DropCountingSpanExporter(new RedactingSpanExporter(terminal));
+  // Batch rather than one POST per span. maxQueueSize/maxExportBatchSize use the
+  // library defaults (2048 / 512); only the scheduled delay (a long backstop — callers drive
+  // flushing explicitly, and DO hibernation freezes this timer anyway) and the export
   // timeout are overridden.
   const batch = new BatchSpanProcessor(dropCounter, {
     scheduledDelayMillis: 30_000,
@@ -104,6 +119,13 @@ export async function createDoTracer(env: Env, ctx: DurableObjectState, serviceN
     resource: resourceFromAttributes({ 'service.name': serviceName }),
     spanProcessors: [batch],
   });
+  return { provider, dropCounter };
+}
+
+export async function createDoTracer(env: Env, ctx: DurableObjectState, serviceName: string): Promise<DoTracer> {
+  const created = await createTraceProvider(env, serviceName);
+  if (!created) return NOOP;
+  const { provider, dropCounter } = created;
   const tracer = provider.getTracer(serviceName);
 
   return {
