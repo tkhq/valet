@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { resolveAudience, routeAttention } from "./attention.js";
+import { resolveAudience, routeAttention, type AttentionChannelDeliverer, type AttentionEvent } from "./attention.js";
 import { notifications, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
 let api: TestApi | undefined;
@@ -162,5 +162,62 @@ describe("routeAttention (DB-backed)", () => {
 
     const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user"));
     expect(rows).toHaveLength(1);
+  });
+
+  it("calls each channel deliverer once per recipient", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+
+    await db.insert(teams).values({ id: "team-2", orgId: "local-org", name: "Deliverers", createdAt: Date.now() });
+    await db
+      .insert(teamMembers)
+      .values([
+        { teamId: "team-2", userId: "local-user", role: "admin" },
+        { teamId: "team-2", userId: "test-member", role: "member" },
+      ]);
+
+    const calls: Array<{ userId: string; event: AttentionEvent }> = [];
+    const stub: AttentionChannelDeliverer = {
+      deliver: async (userId, event) => {
+        calls.push({ userId, event });
+      },
+    };
+
+    await routeAttention(
+      { db, channels: [stub] },
+      { kind: "notification", owner: { type: "team", id: "team-2" }, title: "fanout" },
+    );
+
+    expect(calls.map((c) => c.userId).sort()).toEqual(["local-user", "test-member"]);
+    expect(calls.every((c) => c.event.title === "fanout")).toBe(true);
+  });
+
+  it("a rejecting deliverer does not prevent notification inserts or other deliverers", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+
+    const rejecting: AttentionChannelDeliverer = {
+      deliver: async () => {
+        throw new Error("boom");
+      },
+    };
+    const calls: string[] = [];
+    const ok: AttentionChannelDeliverer = {
+      deliver: async (userId) => {
+        calls.push(userId);
+      },
+    };
+
+    await routeAttention(
+      { db, channels: [rejecting, ok] },
+      { kind: "notification", owner: { type: "user", id: "local-user" }, title: "resilient" },
+    );
+
+    // Give the fire-and-forget deliverers a turn to settle.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const rows = await db.select().from(notifications).where(eq(notifications.userId, "local-user"));
+    expect(rows).toHaveLength(1);
+    expect(calls).toEqual(["local-user"]);
   });
 });

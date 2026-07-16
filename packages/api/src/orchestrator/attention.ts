@@ -56,8 +56,14 @@ export interface AttentionEvent {
   dedupeKey?: string;
 }
 
+/** Best-effort per-recipient channel delivery (e.g. Telegram DM). Must never throw. */
+export interface AttentionChannelDeliverer {
+  deliver(userId: string, event: AttentionEvent): Promise<void>;
+}
+
 export interface AttentionDeps {
   db: AppDb;
+  channels?: AttentionChannelDeliverer[];
 }
 
 /** Membership resolved once by the caller of `resolveAudience` — see module doc. */
@@ -135,22 +141,28 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
 
   const now = Date.now();
   for (const userId of audience) {
-    if (!(await isWebEnabled(deps.db, userId, event.kind))) continue;
+    if (await isWebEnabled(deps.db, userId, event.kind)) {
+      await deps.db
+        .insert(notifications)
+        .values({
+          id: notificationId(event, userId),
+          userId,
+          kind: event.kind,
+          urgency: event.urgency ?? "normal",
+          title: event.title,
+          body: event.body ?? null,
+          href: event.href ?? null,
+          sessionId: event.sessionId ?? null,
+          createdAt: now,
+          readAt: null,
+        })
+        .onConflictDoNothing();
+    }
 
-    await deps.db
-      .insert(notifications)
-      .values({
-        id: notificationId(event, userId),
-        userId,
-        kind: event.kind,
-        urgency: event.urgency ?? "normal",
-        title: event.title,
-        body: event.body ?? null,
-        href: event.href ?? null,
-        sessionId: event.sessionId ?? null,
-        createdAt: now,
-        readAt: null,
-      })
-      .onConflictDoNothing();
+    for (const ch of deps.channels ?? []) {
+      void ch.deliver(userId, event).catch((err) => {
+        console.error("attention router: channel deliverer failed:", err);
+      });
+    }
   }
 }

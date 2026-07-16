@@ -26,8 +26,9 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { linkIdentity } from "./identity-links.js";
-import { ChannelHost } from "./host.js";
+import type { AttentionEvent } from "../orchestrator/attention.js";
+import { linkIdentity, setNotifyAttention } from "./identity-links.js";
+import { ChannelHost, type ChannelHostDeps } from "./host.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -385,5 +386,119 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("✅");
     expect(fakeTransport.answered.some((a) => a.callbackId === "cb1")).toBe(true);
+  });
+});
+
+describe("ChannelHost.attentionDeliverer", () => {
+  let testDb: TestPgDb;
+  let host: ChannelHost;
+  let fakeTransport: FakeTransport;
+
+  async function buildHost(overrides: Partial<ChannelHostDeps> = {}): Promise<ChannelHost> {
+    testDb = await freshTestPgDb();
+    const { pgdb, appDb } = testDb;
+
+    const engineStore = new PgSessionStore(pgdb);
+    const sandboxProvider = new VirtualSandboxProvider();
+    const eventStream = new PgEventStream(pgdb);
+    const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+
+    fakeTransport = new FakeTransport();
+    const fakePlugin: ValetPlugin = {
+      name: "fake",
+      version: "0",
+      transports: [{ channelType: "fake", create: () => fakeTransport }],
+    };
+
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", {
+      type: "bot_token",
+      accessToken: "fake-bot-token",
+    });
+
+    const engineHost = new EngineHost({
+      engineStore,
+      sandboxProvider,
+      eventStream,
+      engineCredentials,
+      db: appDb,
+      apiBaseUrl: "http://127.0.0.1:1",
+      plugins: [fakePlugin],
+    });
+
+    const built = new ChannelHost({
+      db: appDb,
+      engineHost,
+      engineStore,
+      eventStream,
+      engineCredentials,
+      plugins: [fakePlugin],
+      resolveOrgId: async () => ORG_ID,
+      ...overrides,
+    });
+    await built.start();
+    return built;
+  }
+
+  afterEach(async () => {
+    host?.stopOutbound();
+  });
+
+  function event(overrides: Partial<AttentionEvent> = {}): AttentionEvent {
+    return {
+      kind: "notification",
+      owner: { type: "user", id: USER_ID },
+      title: "Stuck submission",
+      ...overrides,
+    };
+  }
+
+  it("sends one DM to a linked user with notifyAttention enabled", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+
+    await host.attentionDeliverer().deliver(USER_ID, event({ body: "details here" }));
+
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.conversationKey).toBe("fake:dm:77");
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Stuck submission");
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("details here");
+  });
+
+  it("does not send when the linked user disabled notifyAttention", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await setNotifyAttention(testDb.appDb, "fake", USER_ID, false);
+
+    await host.attentionDeliverer().deliver(USER_ID, event());
+
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("does not send when the user has no linked identity", async () => {
+    host = await buildHost();
+
+    await host.attentionDeliverer().deliver(USER_ID, event());
+
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("includes an 'Open in Valet' link when href is present and publicUrl is set", async () => {
+    host = await buildHost({ publicUrl: "https://valet.example.com" });
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+
+    await host.attentionDeliverer().deliver(USER_ID, event({ href: "/sessions/abc" }));
+
+    expect(fakeTransport.sent[0]?.message.markdown).toContain(
+      "[Open in Valet](https://valet.example.com/sessions/abc)",
+    );
+  });
+
+  it("omits the link line when href is present but publicUrl is unset", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+
+    await host.attentionDeliverer().deliver(USER_ID, event({ href: "/sessions/abc" }));
+
+    expect(fakeTransport.sent[0]?.message.markdown).not.toContain("Open in Valet");
   });
 });

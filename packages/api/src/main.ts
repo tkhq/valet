@@ -141,6 +141,7 @@ wireAttentionRouter({
   db: providers.db,
   engineStore: providers.engineStore,
   eventStream: providers.eventStream,
+  channels: [providers.channelHost.attentionDeliverer()],
 });
 
 // Eager boot restore: pick up any submissions left unsettled by a prior

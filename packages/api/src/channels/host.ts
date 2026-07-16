@@ -35,7 +35,8 @@ import type { EngineHost } from "../engine/host.js";
 import { agentSessions } from "../schema/index.js";
 import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { consumeLinkCode, identityForExternal, linkIdentity } from "./identity-links.js";
+import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 
 export interface ChannelHostDeps {
   db: AppDb;
@@ -638,5 +639,40 @@ export class ChannelHost {
       source: { channelType, channelId: event.conversationKey, messageId: gateCallback.ref.messageId },
     });
     await transport?.answerCallback?.(gateCallback.callbackId);
+  }
+
+  /**
+   * Attention-router deliverer (Task 10): for every running transport,
+   * resolves the recipient's linked identity and DMs them a summary of the
+   * event. Best-effort per channelType — a lookup/send failure on one
+   * transport is logged and does not prevent delivery on the others.
+   */
+  attentionDeliverer(): AttentionChannelDeliverer {
+    return {
+      deliver: async (userId: string, event: AttentionEvent): Promise<void> => {
+        for (const channelType of this.transports.keys()) {
+          try {
+            const link = await identityForUser(this.deps.db, channelType, userId);
+            if (!link || link.notifyAttention === false) continue;
+            const transport = this.transports.get(channelType);
+            if (!transport) continue;
+            await transport.send(`${channelType}:dm:${link.externalId}`, {
+              markdown: this.attentionMarkdown(event),
+            });
+          } catch (err) {
+            console.error(`[channels] ${channelType}: attention delivery failed`, err);
+          }
+        }
+      },
+    };
+  }
+
+  private attentionMarkdown(event: AttentionEvent): string {
+    let markdown = `**${event.title}**`;
+    if (event.body) markdown += `\n\n${event.body}`;
+    if (event.href && this.deps.publicUrl) {
+      markdown += `\n\n[Open in Valet](${this.deps.publicUrl}${event.href})`;
+    }
+    return markdown;
   }
 }

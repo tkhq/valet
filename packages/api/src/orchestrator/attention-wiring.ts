@@ -19,12 +19,13 @@ import { eq } from "drizzle-orm";
 import type { DeliveredBusEvent, EventStream, SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
-import { routeAttention, type AttentionDeps } from "./attention.js";
+import { routeAttention, type AttentionChannelDeliverer, type AttentionDeps } from "./attention.js";
 
 export interface AttentionWiringDeps extends AttentionDeps {
   db: AppDb;
   engineStore: SessionStore;
   eventStream: EventStream;
+  channels?: AttentionChannelDeliverer[];
 }
 
 async function sessionLabel(db: AppDb, sessionId: string): Promise<string> {
