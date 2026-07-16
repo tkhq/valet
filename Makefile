@@ -165,6 +165,14 @@ k8s-build: ## Build the api (+ bundled web) and sandbox images for the local k3s
 	@echo "  If you've switched Rancher Desktop to containerd mode instead, these images"
 	@echo "  won't be visible to k3s pods; use 'nerdctl --namespace k8s.io build' in place"
 	@echo "  of 'docker build' above (documented as a variant, not the default)."
+	@echo "$(YELLOW)Full-profile smoke check (manual, after 'make k8s-up' with a full-profile"
+	@echo "  session):$(NC) exec into the sandbox pod and run 'ps aux' — expect code-server,"
+	@echo "  ttyd, and 'node /gateway/dist/bin.js' all present. A headless-profile pod should"
+	@echo "  show none of the three. Full end-to-end coverage lands in Task 8's dogfood."
+	@echo "$(YELLOW)Docker-backend gateway testing:$(NC) 'make dev-local' defaults to a plain"
+	@echo "  sandbox image with no gateway/ttyd/code-server. To exercise the gateway against"
+	@echo "  the docker backend, point VALET_SANDBOX_IMAGE at $(K8S_SANDBOX_IMAGE) (or an"
+	@echo "  equivalent build of docker/Dockerfile.sandbox-k8s) for a full-profile session."
 
 k8s-sandbox-install: ## Install vendored agent-sandbox controller + CRD + webhook into Rancher Desktop
 	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \

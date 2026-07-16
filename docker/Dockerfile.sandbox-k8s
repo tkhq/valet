@@ -4,19 +4,46 @@
 # image at `docker/Dockerfile.sandbox` (that one backs the Modal/docker-
 # compose "opencode" stack and is intentionally left untouched).
 #
-# `packages/sandbox-kubernetes/src/manifest.ts` sets the pod's `command` to
-# a non-terminating tail (mirroring sandbox-docker's default `node:20-
-# bookworm` container), so this image's ENTRYPOINT/CMD never actually runs —
-# what matters is the TOOLING baked in: a shell, coreutils (incl. base64,
-# used for binary-safe file ops over `pods/exec` — see the design doc's
-# "File ops ride exec" section), git, ripgrep, ca-certificates, and Node
-# (the engine's exec-based tool calls assume these are on PATH).
+# `packages/sandbox-kubernetes/src/manifest.ts` sets the pod's `command`
+# depending on profile:
+#   - `headless` (default): a non-terminating tail (mirroring sandbox-
+#     docker's default `node:20-bookworm` container) — agent-only, no
+#     interactive services. `docker/start-full.sh` mirrors this branch when
+#     `VALET_SANDBOX_PROFILE` is unset/`headless`, so the sandbox-docker
+#     provider gets the same behavior from the same image/entrypoint.
+#   - `full`: `["/bin/bash", "/start-full.sh"]` — starts ttyd, code-server,
+#     and the auth gateway (sandbox auth gateway spec). See
+#     `docker/start-full.sh`.
+#
+# What matters either way: a shell, coreutils (incl. base64, used for
+# binary-safe file ops over `pods/exec` — see the design doc's "File ops
+# ride exec" section), git, ripgrep, ca-certificates, and Node (the engine's
+# exec-based tool calls assume these are on PATH) — plus, for `full`
+# profile, ttyd + code-server + the bundled `@valet/sandbox-gateway`.
 #
 # Build with plain `docker build` (decision 2 — moby mode, not nerdctl):
 #
 #   docker build -f docker/Dockerfile.sandbox-k8s -t valet-sandbox:dev .
+#
+# Gateway bundling choice: `pnpm deploy --filter @valet/sandbox-gateway
+# --prod` (same pattern as `docker/Dockerfile.api`'s api stage) rather than
+# esbuild — the gateway's deps (hono, @hono/node-server, @hono/node-ws, ws)
+# are plain CJS/ESM npm packages with no native addons, so a pruned,
+# workspace-resolved `node_modules` is simpler than maintaining a bundler
+# config, and it matches how the rest of this repo already ships
+# `@valet/api`. The gateway package must be `tsc`-built (produces `dist/`)
+# BEFORE `pnpm deploy` runs — deploy only copies what's already on disk.
+#
+# Local docker-backend testing: `make dev-local` defaults to the plain
+# `node:20-bookworm` sandbox-docker image, which has none of this. To
+# exercise the gateway/ttyd/code-server path against the docker backend,
+# point `VALET_SANDBOX_IMAGE` at an image built from this Dockerfile with a
+# `full`-profile session (see Task 5 for the api wiring that passes the
+# image through). This Dockerfile's own CMD is a bare shell fallback — both
+# providers always set `command`/entrypoint explicitly per profile.
 
-FROM node:22-bookworm-slim
+# ─── Base agent tooling (shared by both profiles) ──────────────────────
+FROM node:22-bookworm-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -32,8 +59,55 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /workspace
 WORKDIR /workspace
 
-# No CMD/ENTRYPOINT override needed — the k8s provider's PodSpec always sets
-# `command` explicitly (the non-terminating tail). A bare shell is a
+# ─── Gateway build stage ────────────────────────────────────────────────
+# Builds @valet/sandbox-gateway's dist/ and produces a self-contained,
+# production-only package dir (workspace deps resolved to real files, no
+# devDependencies) at /out/gateway.
+FROM node:22-bookworm-slim AS gateway-build
+
+RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
+
+WORKDIR /repo
+
+# Full monorepo source (root .dockerignore excludes node_modules, .git,
+# legacy build artifacts) — same approach as docker/Dockerfile.api; not
+# layer-cache-optimized for partial dependency changes, acceptable for a
+# pre-1.0 local/CI image.
+COPY . .
+
+RUN pnpm install --frozen-lockfile
+
+RUN pnpm --filter @valet/sandbox-gateway run build
+RUN pnpm --filter @valet/sandbox-gateway deploy --prod /out/gateway
+
+# ─── Final image ────────────────────────────────────────────────────────
+FROM base
+
+# code-server (VS Code in browser) — lifted from docker/Dockerfile.sandbox.
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
+# ttyd (web terminal) — lifted from docker/Dockerfile.sandbox.
+RUN curl -fsSL -o /usr/local/bin/ttyd \
+    "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
+    && chmod +x /usr/local/bin/ttyd
+
+# Bundled auth gateway (Task 2): `node /gateway/dist/bin.js` is what
+# docker/start-full.sh execs. Requires VALET_SESSION_ID +
+# VALET_SANDBOX_JWT_SECRET in the pod/container env — exits 1 if missing.
+COPY --from=gateway-build /out/gateway /gateway
+
+COPY docker/start-full.sh /start-full.sh
+RUN chmod +x /start-full.sh
+
+# Ports (full profile only — headless exposes none of these):
+#   7681  ttyd (bound to 127.0.0.1, reached only via the gateway proxy)
+#   8765  code-server (bound to 127.0.0.1, reached only via the gateway proxy)
+#   9000  Auth gateway proxy
+EXPOSE 7681 8765 9000
+
+# No CMD/ENTRYPOINT override for headless — the k8s provider's PodSpec sets
+# `command` explicitly per profile (tail for headless, start-full.sh for
+# full), and the sandbox-docker provider does the same. A bare shell is a
 # reasonable fallback for `docker run`-based smoke tests of this image on
 # its own.
 CMD ["/bin/bash"]
