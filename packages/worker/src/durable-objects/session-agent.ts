@@ -5866,7 +5866,10 @@ export class SessionAgentDO {
    * 4. Advance the breaker counter — unless this is a backoff retry, which
    *    resumes an already-counted failure
    * 5. Circuit breaker: on trip, quarantine exactly the poison suspect so it
-   *    can't re-poison the sandbox, then backoff (orchestrators) or terminate
+   *    can't re-poison the sandbox — but only when the sandbox reached ready
+   *    during the incident (a crash-after-ready); a pure spawn-failure loop trips
+   *    without dead-lettering so an infra outage never destroys a queued prompt —
+   *    then backoff (orchestrators) or terminate
    * 6. Otherwise: transition to 'initializing' and respawn the sandbox
    *
    * `lossAt` is when the sandbox was actually lost — the disconnect time on the
@@ -5973,12 +5976,24 @@ export class SessionAgentDO {
     const CIRCUIT_BREAKER_MAX_ATTEMPTS = 3;
 
     if (!isBackoffRetry && attemptCount > CIRCUIT_BREAKER_MAX_ATTEMPTS) {
+      // Only quarantine on positive evidence that the suspect actually ran on a
+      // healthy sandbox: the runner reached ready before this loss
+      // (readyAtBeforeLoss > 0), i.e. a crash-after-ready, which is what a poison
+      // prompt looks like. This reuses the same signal as the recovery.flapping
+      // indicator above. When the trip is a pure spawn-failure / never-reached-ready
+      // loop (an infrastructure outage — e.g. Modal can't hand back a sandbox), the
+      // breaker MUST still trip and stop the recovery loop, but MUST NOT dead-letter:
+      // the suspect was reverted to 'queued' and never actually ran, so destroying it
+      // (deadLetter is unconditional, and dequeueNext only selects 'queued') would
+      // silently lose a user prompt. Leave it queued so it retries when infra recovers.
+      const sawHealthySandboxThisIncident = readyAtBeforeLoss > 0;
+
       // Quarantine exactly the poison suspect so it can't re-crash the respawned
       // sandbox forever. Only that one prompt is dropped into 'dead_letter' —
       // healthy sibling-channel prompts stay queued and retry after backoff. For
       // orchestrators the row survives as a diagnostic; for regular sessions the
       // audit event is the record.
-      if (poisonPromptId) {
+      if (poisonPromptId && sawHealthySandboxThisIncident) {
         this.promptQueue.deadLetter([poisonPromptId]);
         console.log(`[SessionAgentDO] Circuit breaker: quarantined in-flight prompt ${poisonPromptId} for session ${sessionId}`);
         this.emitAuditEvent(

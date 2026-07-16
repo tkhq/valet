@@ -209,7 +209,10 @@ function createMockSql(): SqlStorage & { queue: Map<string, QueueRow>; state: Ma
           return cursor(out);
         }
 
-        if (q.includes('ORDER BY priority DESC, created_at ASC')) {
+        if (q.includes('ORDER BY received_at ASC')) {
+          // getOldestProcessingId orders by ms-precision received_at, created_at tiebreak.
+          rows.sort((a, b) => (a.received_at ?? 0) - (b.received_at ?? 0) || a.created_at - b.created_at);
+        } else if (q.includes('ORDER BY priority DESC, created_at ASC')) {
           rows.sort((a, b) => b.priority - a.priority || a.created_at - b.created_at);
         } else if (q.includes('ORDER BY created_at ASC')) {
           rows.sort((a, b) => a.created_at - b.created_at);

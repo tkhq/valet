@@ -171,25 +171,34 @@ export class PromptQueue {
    * text, which the rebuild removes, so this runs at most once per DO.
    */
   private migrateStatusCheckForDeadLetter(): void {
-    const oldStatusCheck = "CHECK(status IN ('queued', 'processing', 'completed'))";
-    const schema = this.sql
-      .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue'")
-      .toArray()[0]?.sql as string | undefined;
-    if (!schema?.includes(oldStatusCheck)) return;
+    // Runs inside runMigrations, which the DO constructor drives under
+    // blockConcurrencyWhile. Every ALTER above it is individually wrapped so a
+    // rejected statement degrades gracefully; this probe-and-rebuild must be too.
+    // If workerd rejects the sqlite_master read, PRAGMA, or rebuild, a bare throw
+    // here would escape the constructor and fail EVERY SessionAgentDO on its first
+    // request after deploy. better-sqlite3 accepts all of these, so tests can't
+    // catch a workerd-only rejection — the guard is the safeguard.
+    try {
+      const oldStatusCheck = "CHECK(status IN ('queued', 'processing', 'completed'))";
+      const schema = this.sql
+        .exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue'")
+        .toArray()[0]?.sql as string | undefined;
+      if (!schema?.includes(oldStatusCheck)) return;
 
-    const rebuilt = schema
-      .replace(oldStatusCheck, "CHECK(status IN ('queued', 'processing', 'completed', 'dead_letter'))")
-      .replace('CREATE TABLE prompt_queue', 'CREATE TABLE prompt_queue_migrate');
-    const columns = this.sql
-      .exec('PRAGMA table_info(prompt_queue)')
-      .toArray()
-      .map((col) => col.name as string)
-      .join(', ');
+      const rebuilt = schema
+        .replace(oldStatusCheck, "CHECK(status IN ('queued', 'processing', 'completed', 'dead_letter'))")
+        .replace('CREATE TABLE prompt_queue', 'CREATE TABLE prompt_queue_migrate');
+      const columns = this.sql
+        .exec('PRAGMA table_info(prompt_queue)')
+        .toArray()
+        .map((col) => col.name as string)
+        .join(', ');
 
-    this.sql.exec(rebuilt);
-    this.sql.exec(`INSERT INTO prompt_queue_migrate (${columns}) SELECT ${columns} FROM prompt_queue`);
-    this.sql.exec('DROP TABLE prompt_queue');
-    this.sql.exec('ALTER TABLE prompt_queue_migrate RENAME TO prompt_queue');
+      this.sql.exec(rebuilt);
+      this.sql.exec(`INSERT INTO prompt_queue_migrate (${columns}) SELECT ${columns} FROM prompt_queue`);
+      this.sql.exec('DROP TABLE prompt_queue');
+      this.sql.exec('ALTER TABLE prompt_queue_migrate RENAME TO prompt_queue');
+    } catch { /* probe/rebuild rejected — leave the existing CHECK in place rather than throw out of the DO constructor */ }
   }
 
   // ─── Core Queue Operations ───────────────────────────────────────────────
@@ -380,8 +389,14 @@ export class PromptQueue {
    *  quarantines exactly that prompt and leaves healthy sibling-channel work
    *  queued to retry after backoff. */
   getOldestProcessingId(): string | null {
+    // Order by the ms-precision received_at, not created_at. created_at defaults
+    // to unixepoch() (whole-second precision), so two prompts dispatched in the
+    // same second across different channels tie and SQLite picks one
+    // nondeterministically — which can quarantine the innocent prompt. received_at
+    // is stamped in ms at enqueue; created_at is a secondary tiebreaker for legacy
+    // rows enqueued before the received_at column existed (received_at NULL).
     const rows = this.sql
-      .exec("SELECT id FROM prompt_queue WHERE status = 'processing' ORDER BY created_at ASC LIMIT 1")
+      .exec("SELECT id FROM prompt_queue WHERE status = 'processing' ORDER BY received_at ASC, created_at ASC LIMIT 1")
       .toArray();
     return rows.length > 0 ? (rows[0].id as string) : null;
   }

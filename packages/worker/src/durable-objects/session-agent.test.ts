@@ -390,7 +390,10 @@ function createMockSql(): SqlStorage & {
           return cursor(out);
         }
 
-        if (q.includes('ORDER BY created_at DESC')) {
+        if (q.includes('ORDER BY received_at ASC')) {
+          // getOldestProcessingId orders by ms-precision received_at, created_at tiebreak.
+          rows.sort((a, b) => (a.received_at ?? 0) - (b.received_at ?? 0) || a.created_at - b.created_at);
+        } else if (q.includes('ORDER BY created_at DESC')) {
           rows.sort((a, b) => b.created_at - a.created_at);
         } else if (q.includes('ORDER BY priority DESC, created_at ASC')) {
           rows.sort((a, b) => b.priority - a.priority || a.created_at - b.created_at);
@@ -935,6 +938,9 @@ describe('SessionAgentDO', () => {
       expect((agent as any).promptQueue.getOldestProcessingId()).toBeNull();
 
       for (let i = 0; i < 4; i++) {
+        // The respawned sandbox reaches ready and then dies again each cycle —
+        // a genuine crash-after-ready loop, which is what quarantine gates on.
+        (agent as any).runnerLink.readyAt = clock;
         await (agent as any).performRecovery('sandbox_lost');
       }
 
@@ -955,9 +961,11 @@ describe('SessionAgentDO', () => {
       await crashRunner(agent);
       expect((agent as any).sessionState.lastRecoveryPromptId).toBe('poison-a');
 
-      // Grace revert queues both; drive recoveries to the trip.
+      // Grace revert queues both; drive recoveries to the trip. The respawned
+      // sandbox reaches ready and dies again each cycle (crash-after-ready).
       (agent as any).promptQueue.revertProcessingToQueued();
       for (let i = 0; i < 4; i++) {
+        (agent as any).runnerLink.readyAt = clock;
         await (agent as any).performRecovery('sandbox_lost');
       }
 
@@ -1022,6 +1030,38 @@ describe('SessionAgentDO', () => {
       await (agent as any).performRecovery('sandbox_lost');
 
       expect((agent as any).sessionState.lastRecoveryPromptId).toBe('');
+    });
+
+    it('a spawn-failure loop trips the breaker but does NOT dead-letter the untried prompt', async () => {
+      const { agent, sql } = await armRecovery();
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      // A prompt was in flight when the sandbox first dropped, so it is captured
+      // as the poison suspect and reverted to queued by the grace path.
+      (agent as any).promptQueue.enqueue({ id: 'p1', content: 'ok', status: 'processing', channelKey: 'web:default' });
+      await crashRunner(agent);
+      expect((agent as any).sessionState.lastRecoveryPromptId).toBe('p1');
+      (agent as any).promptQueue.revertProcessingToQueued();
+
+      // The sandbox never comes back up — every recovery is a pure spawn failure
+      // that never reaches ready (readyAt stays 0), i.e. an infrastructure outage
+      // rather than a prompt that crashes a healthy sandbox.
+      for (let i = 0; i < 4; i++) {
+        expect((agent as any).runnerLink.readyAt).toBe(0);
+        await (agent as any).performRecovery('spawn_failed: modal unavailable');
+      }
+
+      // The breaker still trips and stops the recovery loop...
+      expect((agent as any).sessionState.status).toBe('backoff');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBeGreaterThan(3);
+      // ...but the prompt that never ran is NOT destroyed — it stays queued so it
+      // is retried once infra recovers, and no dead_letter audit event is emitted.
+      expect(sql.queue.get('p1')?.status).toBe('queued');
+      expect((agent as any).emitAuditEvent).not.toHaveBeenCalledWith(
+        'recovery.dead_letter',
+        expect.any(String),
+      );
     });
 
     it('a clean idle-hibernation within the stable window clears a lingering breaker count', async () => {
