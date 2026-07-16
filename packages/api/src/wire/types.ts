@@ -778,6 +778,9 @@ export interface PutCredentialRequest {
   /** Only meaningful (and only accepted) alongside `type: "oauth2"`. */
   refreshToken?: string;
   metadata?: Record<string, unknown>;
+  /** Owner scope for the saved credential. `"org"` requires the caller to be
+   * an org admin. Defaults to `"user"`. */
+  scope?: "user" | "org";
 }
 
 export interface PutCredentialResponse {
@@ -909,5 +912,41 @@ export interface ListInvitesResponse {
 }
 
 export interface RevokeInviteResponse {
+  ok: true;
+}
+
+// ── REST: identity links (channel-link Phase 7) ───────────────────────────
+//
+// `/api/me/identity-links` — per-user Telegram (etc.) account linking.
+// Just `telegram` this pass (see `packages/api/src/routes/identity-links.ts`).
+
+export interface IdentityLinkStatus {
+  provider: string;
+  linked: boolean;
+  externalId?: string;
+  notifyAttention?: boolean;
+  createdAt?: number;
+  /** Transport availability — false when no bot token is configured. */
+  channelReady: boolean;
+}
+
+export interface ListIdentityLinksResponse {
+  links: IdentityLinkStatus[];
+}
+
+export interface StartIdentityLinkResponse {
+  deepLink: string;
+  expiresInSeconds: number;
+}
+
+export interface PatchIdentityLinkRequest {
+  notifyAttention: boolean;
+}
+
+export interface PatchIdentityLinkResponse {
+  ok: true;
+}
+
+export interface DeleteIdentityLinkResponse {
   ok: true;
 }

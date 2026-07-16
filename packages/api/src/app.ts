@@ -27,6 +27,7 @@ import { notificationsRouter } from "./routes/notifications.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { credentialsRouter } from "./routes/credentials.js";
+import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
 import { modelsRouter } from "./routes/models.js";
 import { orgRouter } from "./routes/org.js";
@@ -148,6 +149,9 @@ export function createApp(
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
   app.route("/api/credentials", credentialsRouter);
+  // Mounted BEFORE /api/me so the longer, more specific prefix wins under
+  // Hono's route matching (see routes/identity-links.ts).
+  app.route("/api/me/identity-links", identityLinksRouter);
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/org", orgRouter);

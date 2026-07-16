@@ -1,9 +1,15 @@
 /**
  * `/api/credentials` — manual token entry for the connect UI
  * (plugin-system-v2 plan Task 15; OAuth flows are deliberately out of scope
- * this phase). Owner is always the authenticated caller's `user:{id}`
+ * this phase). Owner defaults to the authenticated caller's `user:{id}`
  * scope — same `CredentialOwner` shape `plugins/action-invoker.ts` and the
- * engine's `Session.credentialProvider` read at call time.
+ * engine's `Session.credentialProvider` read at call time. `PUT`'s optional
+ * `scope: "org"` body field (and `GET`/`DELETE`'s `?scope=org` query param)
+ * maps the owner to `{type:"org", id:user.orgId}` instead — org admins only
+ * (403 `"org admin required"` otherwise, matching `routes/org.ts`'s copy).
+ * This is how an org admin pastes a shared credential (e.g. a Telegram bot
+ * token `ChannelHost` resolves at `{type:"org",id}`) rather than a personal
+ * one.
  *
  * `GET` never returns secret material — only `type`/`scopes`/`connectedAt`
  * (mirrors `CredentialStore.list`'s own shape, which is already
@@ -36,8 +42,10 @@ export const credentialsRouter = new Hono<AppEnv>();
 
 const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "bot_token", "service_account"];
 
-function ownerFor(user: { id: string }): CredentialOwner {
-  return { type: "user", id: user.id };
+const ORG_ADMIN_REQUIRED = { error: "org admin required" } as const;
+
+function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
+  return scope === "org" ? { type: "org", id: user.orgId } : { type: "user", id: user.id };
 }
 
 function isCredentialKind(type: StoredCredential["type"]): type is PutCredentialRequest["type"] {
@@ -46,7 +54,12 @@ function isCredentialKind(type: StoredCredential["type"]): type is PutCredential
 
 credentialsRouter.get("/", async (c) => {
   const { engineCredentials } = c.var.providers;
-  const owner = ownerFor(c.var.user);
+  const user = c.var.user;
+  const scope = c.req.query("scope") === "org" ? "org" : "user";
+  if (scope === "org" && user.role !== "admin") {
+    return c.json(ORG_ADMIN_REQUIRED, 403);
+  }
+  const owner = ownerFor(user, scope);
 
   const listed = await engineCredentials.list(owner);
   const credentials: CredentialSummary[] = [];
@@ -73,7 +86,7 @@ credentialsRouter.get("/", async (c) => {
 
 credentialsRouter.put("/:service", async (c) => {
   const { engineCredentials } = c.var.providers;
-  const owner = ownerFor(c.var.user);
+  const user = c.var.user;
   const service = c.req.param("service");
 
   let body: PutCredentialRequest;
@@ -82,6 +95,12 @@ credentialsRouter.put("/:service", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+
+  const scope = body.scope === "org" ? "org" : "user";
+  if (scope === "org" && user.role !== "admin") {
+    return c.json(ORG_ADMIN_REQUIRED, 403);
+  }
+  const owner = ownerFor(user, scope);
 
   if (!CREDENTIAL_TYPES.includes(body.type)) {
     return c.json({ error: `type must be one of ${CREDENTIAL_TYPES.join("|")}` }, 400);
@@ -115,7 +134,12 @@ credentialsRouter.put("/:service", async (c) => {
 
 credentialsRouter.delete("/:service", async (c) => {
   const { engineCredentials } = c.var.providers;
-  const owner = ownerFor(c.var.user);
+  const user = c.var.user;
+  const scope = c.req.query("scope") === "org" ? "org" : "user";
+  if (scope === "org" && user.role !== "admin") {
+    return c.json(ORG_ADMIN_REQUIRED, 403);
+  }
+  const owner = ownerFor(user, scope);
   const service = c.req.param("service");
 
   await engineCredentials.delete(owner, service);

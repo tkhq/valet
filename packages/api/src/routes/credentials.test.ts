@@ -155,6 +155,88 @@ describe("DELETE /api/credentials/:service", () => {
   });
 });
 
+describe("PUT/DELETE/GET /api/credentials — org scope", () => {
+  it("PUT with scope:\"org\" as an admin saves under the org owner", async () => {
+    api = await bootTestApi();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/telegram`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "123:abc", scope: "org" }),
+    });
+    expect(put.status).toBe(200);
+
+    const stored = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "telegram");
+    expect(stored).toMatchObject({ type: "bot_token", accessToken: "123:abc" });
+  });
+
+  it("PUT with scope:\"org\" as a non-admin member 403s", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/credentials/telegram`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "123:abc", scope: "org" }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "org admin required" });
+  });
+
+  it("GET ?scope=org as admin includes the org credential; as member 403s", async () => {
+    api = await bootTestApi();
+
+    await fetch(`${api.baseUrl}/api/credentials/telegram`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "123:abc", scope: "org" }),
+    });
+
+    const asAdmin = await fetch(`${api.baseUrl}/api/credentials?scope=org`);
+    expect(asAdmin.status).toBe(200);
+    const { credentials } = (await asAdmin.json()) as ListCredentialsResponse;
+    expect(credentials.map((c) => c.service)).toContain("telegram");
+
+    const asMember = await fetch(`${api.baseUrl}/api/credentials?scope=org`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(asMember.status).toBe(403);
+    expect(await asMember.json()).toEqual({ error: "org admin required" });
+  });
+
+  it("DELETE ?scope=org as admin removes the org credential", async () => {
+    api = await bootTestApi();
+
+    await fetch(`${api.baseUrl}/api/credentials/telegram`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "bot_token", accessToken: "123:abc", scope: "org" }),
+    });
+
+    const del = await fetch(`${api.baseUrl}/api/credentials/telegram?scope=org`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(await del.json()).toEqual({ ok: true });
+
+    const stored = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "telegram");
+    expect(stored).toBeNull();
+  });
+
+  it("PUT without scope still lands user-owned (regression pin)", async () => {
+    api = await bootTestApi();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "ghp_supersecret" }),
+    });
+    expect(put.status).toBe(200);
+
+    const userOwned = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    expect(userOwned).toMatchObject({ type: "api_key", apiKey: "ghp_supersecret" });
+    const orgOwned = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "github");
+    expect(orgOwned).toBeNull();
+  });
+});
+
 describe("GET /api/credentials", () => {
   it("only lists the caller's own credentials", async () => {
     api = await bootTestApi();
