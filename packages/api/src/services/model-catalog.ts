@@ -34,7 +34,7 @@ import { getEnvApiKey, getModels } from "@mariozechner/pi-ai";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { getOrgModelPreferences } from "./org.js";
-import { listLlmProviders } from "./llm-providers.js";
+import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import type { ModelInfo } from "../wire/types.js";
 
 export type CatalogEntry = ModelInfo & { resolvable: boolean };
@@ -52,8 +52,6 @@ const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
   google: "Google",
 };
 
-const ANTHROPIC_PREFIX = "anthropic/";
-
 async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<boolean> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
@@ -62,13 +60,14 @@ async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: str
 
 function knownKindEntries(
   kind: (typeof KNOWN_KINDS)[number],
+  namespace: string,
   active: boolean,
   resolvable: boolean,
   providerId: string,
   providerName: string,
 ): CatalogEntry[] {
   return getModels(kind).map((m) => ({
-    id: `${kind}/${m.id}`,
+    id: `${namespace}/${m.id}`,
     name: m.name,
     contextWindow: m.contextWindow,
     reasoning: m.reasoning,
@@ -83,17 +82,16 @@ function knownKindEntries(
 
 /** A preference entry matches a catalog entry either by its full namespaced
  * id, or (for Anthropic entries only) by the bare model id — bare
- * preference ids are back-compat and mean Anthropic. Returns the matching
- * index in `modelPreferences`, or -1 when unmatched. */
+ * preference ids are back-compat and mean Anthropic (`parseModelId`,
+ * shared with `services/llm-providers.ts`'s delete-guard/preferences
+ * logic, is the single source of truth for that rule). Returns the
+ * matching index in `modelPreferences`, or -1 when unmatched. */
 function preferenceIndex(entry: CatalogEntry, modelPreferences: string[]): number {
   const namespacedIdx = modelPreferences.indexOf(entry.id);
   if (namespacedIdx !== -1) return namespacedIdx;
-  if (entry.providerKind === "anthropic" && entry.id.startsWith(ANTHROPIC_PREFIX)) {
-    const bare = entry.id.slice(ANTHROPIC_PREFIX.length);
-    const bareIdx = modelPreferences.indexOf(bare);
-    if (bareIdx !== -1) return bareIdx;
-  }
-  return -1;
+  const { namespace, modelId } = parseModelId(entry.id);
+  if (namespace !== "anthropic") return -1;
+  return modelPreferences.findIndex((p) => parseModelId(p).namespace === "anthropic" && parseModelId(p).modelId === modelId);
 }
 
 function orderEntries(entries: CatalogEntry[], modelPreferences: string[]): CatalogEntry[] {
@@ -127,24 +125,26 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       const orgKey = await hasOrgKey(credentials, orgId, row.id);
       const resolvable = orgKey || Boolean(getEnvApiKey(kind));
       const active = row.enabled && resolvable;
-      entries.push(...knownKindEntries(kind, active, resolvable, row.id, row.name));
+      entries.push(...knownKindEntries(kind, providerNamespace(row), active, resolvable, row.id, row.name));
     } else {
       // No row for this kind — zero-config back-compat: synthesize a
       // registry entry only when the deployment env can resolve a key for
       // it (otherwise there's nothing selectable, and we'd rather stay
-      // silent than list unusable models).
+      // silent than list unusable models). No row exists to derive a
+      // namespace from, so it's the kind itself (same value
+      // `providerNamespace` would give a known-kind row).
       const envKey = getEnvApiKey(kind);
       if (!envKey) continue;
-      entries.push(...knownKindEntries(kind, true, true, kind, KNOWN_KIND_LABEL[kind]));
+      entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind]));
     }
   }
 
-  for (const row of rows.filter((r) => r.kind === "openai_compatible")) {
+  for (const row of rows.filter((r) => !isKnownProviderKind(r.kind))) {
     const resolvable = await hasOrgKey(credentials, orgId, row.id);
     const active = row.enabled && resolvable;
     for (const m of row.models) {
       entries.push({
-        id: `${row.id}/${m.id}`,
+        id: `${providerNamespace(row)}/${m.id}`,
         name: m.name,
         contextWindow: m.contextWindow,
         providerId: row.id,
@@ -170,9 +170,8 @@ export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
   for (const entry of entries) {
     if (!entry.active) continue;
     ids.add(entry.id);
-    if (entry.providerKind === "anthropic" && entry.id.startsWith(ANTHROPIC_PREFIX)) {
-      ids.add(entry.id.slice(ANTHROPIC_PREFIX.length));
-    }
+    const { namespace, modelId } = parseModelId(entry.id);
+    if (namespace === "anthropic") ids.add(modelId);
   }
   return ids;
 }

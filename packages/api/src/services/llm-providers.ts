@@ -159,6 +159,21 @@ export function providerNamespace(row: LlmProviderRow): string {
 }
 
 /**
+ * Splits a model-preference/catalog id into its provider namespace and bare
+ * model id. Ids with no `/` are back-compat and mean Anthropic (design doc
+ * decision 2), so a bare id parses as the `anthropic` namespace. This is the
+ * single source of truth for that back-compat rule — `isDefaultProviderNamespace`
+ * below and `services/model-catalog.ts`'s preference-ordering/valid-id logic
+ * both parse ids through here so the delete-guard/preferences path and the
+ * catalog can never drift on what "bare id" means.
+ */
+export function parseModelId(id: string): { namespace: string; modelId: string } {
+  const slashIdx = id.indexOf("/");
+  if (slashIdx === -1) return { namespace: "anthropic", modelId: id };
+  return { namespace: id.slice(0, slashIdx), modelId: id.slice(slashIdx + 1) };
+}
+
+/**
  * True when `modelPreferences[0]` (the org default model) is namespaced to
  * `row`. Bare ids (no `/`) are back-compat and mean Anthropic (design doc
  * decision 2), so an unnamespaced default counts as `anthropic`'s namespace.
@@ -166,7 +181,5 @@ export function providerNamespace(row: LlmProviderRow): string {
 export function isDefaultProviderNamespace(row: LlmProviderRow, modelPreferences: string[]): boolean {
   const first = modelPreferences[0];
   if (!first) return false;
-  const slashIdx = first.indexOf("/");
-  const namespace = slashIdx === -1 ? "anthropic" : first.slice(0, slashIdx);
-  return namespace === providerNamespace(row);
+  return parseModelId(first).namespace === providerNamespace(row);
 }
