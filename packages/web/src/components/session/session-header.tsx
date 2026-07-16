@@ -87,7 +87,7 @@ function ConnectionBadge({ conn }: { conn: ConnectionStatus }) {
  * Renders nothing until the first `sandbox.status` frame arrives (absent =
  * unknown, not "detached") to avoid layout shift / a misleading state.
  */
-function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: number } }) {
+export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: number } }) {
   if (!sandbox) return null;
   const map: Record<string, { dot: string; label: string }> = {
     provisioning: { dot: "bg-amber-500", label: "workspace provisioning…" },

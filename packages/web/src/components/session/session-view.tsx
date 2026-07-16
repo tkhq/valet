@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
@@ -16,6 +16,7 @@ import {
 import { Composer } from "~/components/session/composer";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
+import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
 import { Button, Spinner } from "~/components/primitives";
 
@@ -48,6 +49,8 @@ export function SessionView({
   activeThreadId,
   onClose,
   onOpenChild,
+  activeTab,
+  onTabChange,
 }: {
   sessionId: string;
   variant: SessionViewVariant;
@@ -64,8 +67,20 @@ export function SessionView({
    * falls back to a plain link to the child's full-page session view.
    */
   onOpenChild?: (childSessionId: string) => void;
+  /**
+   * Controlled active tab (Chat/Terminal/VS Code), typically derived from
+   * the host route's `?tab=` search param (standalone). When omitted
+   * (full/panel), this view falls back to internal state defaulting to
+   * "chat" — those hosts don't have a `?tab=` search param of their own.
+   */
+  activeTab?: SandboxTabId;
+  /** Required alongside a controlled `activeTab`; ignored otherwise. */
+  onTabChange?: (tab: SandboxTabId) => void;
 }) {
   const session = useSession(sessionId);
+  const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
+  const tab = activeTab ?? localTab;
+  const setTab = onTabChange ?? setLocalTab;
   const threads = useThreads(sessionId);
   // Open the WS — pipes events into the store keyed by sessionId.
   useSessionWebSocket(sessionId);
@@ -125,18 +140,29 @@ export function SessionView({
           sandbox={stream.sandbox}
         />
       )}
-      <MessageList
-        messages={stream.messages}
-        threadId={effectiveThreadId}
-        onOpenChild={onOpenChild}
+      <SandboxTabs
+        sessionId={sessionId}
+        profile={session.data.profile}
+        activeTab={tab}
+        onTabChange={setTab}
+        sandbox={stream.sandbox}
       />
-      {stream.error && (
-        <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
-          <span className="font-medium">{stream.error.code}:</span> {stream.error.message}
-        </div>
-      )}
-      {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
-      <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
+      {tab === "chat" ? (
+        <>
+          <MessageList
+            messages={stream.messages}
+            threadId={effectiveThreadId}
+            onOpenChild={onOpenChild}
+          />
+          {stream.error && (
+            <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
+              <span className="font-medium">{stream.error.code}:</span> {stream.error.message}
+            </div>
+          )}
+          {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
+          <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
+        </>
+      ) : null}
     </div>
   );
 }

@@ -65,6 +65,7 @@ import type {
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
   RevokeInviteResponse,
+  SandboxJwtResponse,
   SendPromptRequest,
   SendPromptResponse,
   SetNotificationPreferenceRequest,
@@ -164,6 +165,8 @@ export const api = {
     request<{ ok: true }>("DELETE", `/sessions/${encodeURIComponent(id)}`),
   patchSession: (id: string, body: PatchSessionRequest) =>
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
+  mintSandboxJwt: (id: string) =>
+    request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
 
   // orchestrator (session ids contain colons — always encoded above too, but
   // this entry point never touches a raw id itself, only ensures one exists)

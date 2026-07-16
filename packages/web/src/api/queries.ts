@@ -27,6 +27,7 @@ import type {
   PatchSessionResponse,
   PatchThreadResponse,
   ResolveDecisionRequest,
+  SandboxJwtResponse,
   SetNotificationPreferenceRequest,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
@@ -227,6 +228,18 @@ export function useSendPrompt(sessionId: string) {
     mutationFn: ({ text, threadId }) =>
       api.sendPrompt(sessionId, { text, threadId }),
     // Invalidations not needed — live updates flow through the WS store.
+  });
+}
+
+/**
+ * Mints a short-lived sandbox gateway JWT for the "full"-profile session's
+ * ttyd/code-server iframe (sandbox auth gateway plan, Task 7). No
+ * invalidation — each call mints a fresh token; the sandbox-tabs component
+ * re-invokes this on tab switch and on a 401-driven silent re-mint.
+ */
+export function useSandboxJwt(sessionId: string) {
+  return useMutation<SandboxJwtResponse, Error, void>({
+    mutationFn: () => api.mintSandboxJwt(sessionId),
   });
 }
 

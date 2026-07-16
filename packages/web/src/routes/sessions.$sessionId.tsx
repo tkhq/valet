@@ -3,15 +3,24 @@ import { ArrowLeft } from "lucide-react";
 import type { OrchestratorChildSummary } from "@valet/api/wire";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { SessionView } from "~/components/session/session-view";
+import type { SandboxTabId } from "~/components/session/sandbox-tabs";
+
+const TAB_VALUES: readonly string[] = ["chat", "terminal", "vscode"] satisfies SandboxTabId[];
 
 interface SessionSearch {
   /** Active thread id. Defaults to the first thread (engine's web:default). */
   thread?: string;
+  /** Active view tab. Defaults to "chat" (Task 7 — Terminal/VS Code tabs). */
+  tab?: SandboxTabId;
 }
 
 export const Route = createFileRoute("/sessions/$sessionId")({
   validateSearch: (raw): SessionSearch => ({
     thread: typeof raw.thread === "string" ? raw.thread : undefined,
+    tab:
+      typeof raw.tab === "string" && TAB_VALUES.includes(raw.tab)
+        ? (raw.tab as SandboxTabId)
+        : undefined,
   }),
   component: SessionPage,
 });
@@ -26,7 +35,8 @@ export function findChild(
 
 function SessionPage() {
   const { sessionId } = Route.useParams();
-  const { thread } = Route.useSearch();
+  const { thread, tab } = Route.useSearch();
+  const navigate = Route.useNavigate();
   const childrenQ = useOrchestratorChildren();
   const info = useOrchestratorInfo();
 
@@ -48,7 +58,13 @@ function SessionPage() {
           the root layout hides the sidebar for this route (see
           `__root.tsx`). Children opened full-page render the same way, with
           the breadcrumb above as their only visual distinction. */}
-      <SessionView sessionId={sessionId} variant="standalone" activeThreadId={thread} />
+      <SessionView
+        sessionId={sessionId}
+        variant="standalone"
+        activeThreadId={thread}
+        activeTab={tab ?? "chat"}
+        onTabChange={(next) => navigate({ search: (prev) => ({ ...prev, tab: next }) })}
+      />
     </div>
   );
 }

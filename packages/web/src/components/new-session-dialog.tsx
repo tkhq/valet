@@ -27,7 +27,11 @@ export function NewSessionDialog({
     const ws = workspace.trim();
     if (!ws) return;
     try {
-      const created = await create.mutateAsync({ workspace: ws });
+      // Web-created sessions are interactive (Terminal/VS Code tabs, Task 7)
+      // — "full" runs ttyd + code-server behind the sandbox auth gateway
+      // alongside the agent, vs. the "headless" default for agent-only
+      // (e.g. orchestrator-spawned) sessions.
+      const created = await create.mutateAsync({ workspace: ws, profile: "full" });
       onOpenChange(false);
       navigate({ to: "/sessions/$sessionId", params: { sessionId: created.id } });
     } catch {
