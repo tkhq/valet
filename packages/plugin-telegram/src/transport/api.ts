@@ -87,9 +87,15 @@ export class TelegramApi {
     return { messageId: result.message_id };
   }
 
-  async editMessageText(opts: { chatId: number | string; messageId: number; html: string }): Promise<void> {
+  async editMessageText(opts: {
+    chatId: number | string;
+    messageId: number;
+    html: string;
+    replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+  }): Promise<void> {
     await this.call("editMessageText", {
       chat_id: opts.chatId, message_id: opts.messageId, text: opts.html, parse_mode: "HTML",
+      reply_markup: opts.replyMarkup,
     });
   }
 

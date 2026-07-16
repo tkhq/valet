@@ -197,9 +197,13 @@ export class TelegramTransport implements ChannelTransport {
     const chatId = chatIdFromConversationKey(ref.conversationKey);
     const messageId = Number(ref.messageId);
     try {
-      // editMessageText replaces the message content; the inline keyboard is
-      // dropped along with it since we never pass a replacement reply_markup.
-      await this.api.editMessageText({ chatId, messageId, html: markdownToTelegramHtml(resolution.label) });
+      // Telegram's omission semantics for reply_markup on editMessageText are
+      // ambiguous (community reports disagree), so clear the keyboard
+      // explicitly rather than relying on it being dropped implicitly.
+      await this.api.editMessageText({
+        chatId, messageId, html: markdownToTelegramHtml(resolution.label),
+        replyMarkup: { inline_keyboard: [] },
+      });
     } catch (err) {
       // Best-effort: make sure the buttons don't stay live even if the text edit failed.
       try {

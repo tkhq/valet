@@ -144,7 +144,9 @@ describe("TelegramTransport", () => {
       expect(new TextEncoder().encode(btn.callback_data).length).toBeLessThanOrEqual(64);
     }
     await transport.updateGatePrompt(ref, { actionId: "approve", label: "✅ Approved by conner" });
-    expect(fake.calls.some((c) => c.method === "editMessageText")).toBe(true);
+    const edit = fake.calls.find((c) => c.method === "editMessageText");
+    expect(edit).toBeDefined();
+    expect(edit?.body.reply_markup).toEqual({ inline_keyboard: [] });
   });
 
   it("updateGatePrompt clears the keyboard when editMessageText fails, then rethrows", async () => {
