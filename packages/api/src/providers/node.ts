@@ -4,7 +4,6 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
-import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
@@ -20,6 +19,7 @@ import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { FsBlobStore } from "./blob-fs.js";
+import { buildSandboxProvider } from "./sandbox-backend.js";
 import type { Providers } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -171,7 +171,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   const engineStore = new PgSessionStore(pgdb);
   const blobs = new FsBlobStore(opts.blobsRoot);
-  const sandboxProvider = new DockerSandboxProvider();
+  // Backend selection (kubernetes-deployment plan Task 6, spec decision 7):
+  // VALET_SANDBOX_BACKEND=docker|kubernetes|local, default docker — the
+  // pre-Task-6 unconditional `new DockerSandboxProvider()` behavior.
+  const sandboxProvider = buildSandboxProvider(process.env);
   const eventStream = new PgEventStream(pgdb);
   const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
 
