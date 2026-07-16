@@ -1999,18 +1999,29 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
   // The 'revoked' state is a transient success indicator — auto-clear
   // it after a few seconds so the row returns to its idle state and
   // admins can re-revoke the same user during an incident without
-  // having to click on another row first. React's effect cleanup
-  // guarantees that if `rowAction` changes before the timer fires,
-  // `clearTimeout` runs on the previous timer before the next effect
-  // re-arms — so the timer that eventually fires always closes over
-  // the still-current `rowAction`. No ref indirection needed.
+  // having to click on another row first.
+  //
+  // We route the reset through a ref rather than depending on
+  // `resetRowAction` directly. `resetRowAction`'s useCallback deps
+  // include the TanStack Query mutation objects, whose identity can
+  // change on internal state churn (isPending / isError transitions on
+  // background refetches). If we depended on `resetRowAction`, every
+  // such churn re-runs this effect, fires `clearTimeout` on the pending
+  // 4s timer, and re-arms a fresh one — potentially keeping 'revoked'
+  // visible far longer than intended. The ref pattern (mirrored via a
+  // separate effect that only writes into the ref) keeps this timer's
+  // cadence tied to `rowAction` alone.
+  const resetRowActionRef = React.useRef(resetRowAction);
+  React.useEffect(() => {
+    resetRowActionRef.current = resetRowAction;
+  }, [resetRowAction]);
   React.useEffect(() => {
     if (rowAction?.kind !== 'revoked') return;
     const t = setTimeout(() => {
-      resetRowAction(null);
+      resetRowActionRef.current(null);
     }, 4000);
     return () => clearTimeout(t);
-  }, [rowAction, resetRowAction]);
+  }, [rowAction]);
 
   const adminCount = users?.filter((u) => u.role === 'admin').length ?? 0;
 

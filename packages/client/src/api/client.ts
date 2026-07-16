@@ -67,23 +67,22 @@ export async function readErrorBody(
 export function authClearSignalFrom(
   parsed: Record<string, unknown> | null,
 ): { code: string | null | undefined; hasJsonBody: boolean } {
-  const rawCode = parsed?.code;
-  // Only strings and explicit `null` map to "code we understand". A
-  // non-string, non-null value (number, boolean, object) means the body
-  // carried a `code` field of an unexpected type — that's evidence of a
-  // Valet route or intermediary bug, NOT a bare 401. Return a sentinel
-  // so `shouldClearAuthOn401` sees "code present, unknown" (does not
-  // clear) rather than "code missing" (would clear). Anything else
-  // (undefined key, no `code` at all) maps to undefined.
-  const code =
-    typeof rawCode === 'string'
-      ? rawCode
-      : rawCode === null
-        ? null
-        : rawCode === undefined
-          ? undefined
-          : '__non_string_code__';
-  return { code, hasJsonBody: parsed !== null };
+  if (parsed === null) return { code: undefined, hasJsonBody: false };
+  const rawCode = parsed.code;
+  // A `code` field of an unexpected type (number, boolean, object,
+  // array) means the body isn't a valid Valet error shape. We can't
+  // attribute this response to Valet, so degrade to `hasJsonBody: false`
+  // — shouldClearAuthOn401 refuses to clear on non-Valet-shaped 401s.
+  // The alternative (returning `code: '<sentinel>'`) leaks a magic
+  // string through a typed contract; using the existing `hasJsonBody`
+  // dimension keeps the return shape honest.
+  if (rawCode !== undefined && rawCode !== null && typeof rawCode !== 'string') {
+    return { code: undefined, hasJsonBody: false };
+  }
+  return {
+    code: typeof rawCode === 'string' ? rawCode : (rawCode === null ? null : undefined),
+    hasJsonBody: true,
+  };
 }
 
 export class ApiError extends Error {
