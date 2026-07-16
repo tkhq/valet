@@ -21,7 +21,19 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - uses: oven-sh/setup-bun@v2
+      # Install bun via the official curl script rather than the
+      # oven-sh/setup-bun action. The action fetches release metadata
+      # from api.github.com, which means every CI run inherits GitHub
+      # API's availability — and when the API 503s (as it did on the
+      # 2026-07-16 outage), every job fails in setup at ~10s with a
+      # zero code change. The curl script downloads bun directly from
+      # bun.sh and only touches api.github.com at all if you pin
+      # BUN_INSTALL_VERSION to `latest` — we pin an explicit version so
+      # nothing outside bun.sh is required for CI to start.
+      - name: Install bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash -s "bun-v1.1.42"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
       - run: pnpm install --frozen-lockfile
 
