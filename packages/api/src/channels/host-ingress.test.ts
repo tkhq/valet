@@ -186,6 +186,55 @@ describe("long-poll mode", () => {
     await host.stop();
   });
 
+  it("a second start() call is a no-op — does not re-create transports or spawn a duplicate poll loop", async () => {
+    await saveCredential();
+    const transport = new PollingFakeTransport([inbound({ dispatchId: "fake:1" })]);
+    let createCalls = 0;
+    const { pgdb, appDb } = testDb;
+    const engineStore = new PgSessionStore(pgdb);
+    const sandboxProvider = new VirtualSandboxProvider();
+    const eventStream = new PgEventStream(pgdb);
+    const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    const fakePlugin: ValetPlugin = {
+      name: "fake",
+      version: "0",
+      transports: [
+        {
+          channelType: "fake",
+          create: () => {
+            createCalls++;
+            return transport;
+          },
+        },
+      ],
+    };
+    engineHost = new EngineHost({
+      engineStore,
+      sandboxProvider,
+      eventStream,
+      engineCredentials,
+      db: appDb,
+      apiBaseUrl: "http://127.0.0.1:1",
+      plugins: [fakePlugin],
+    });
+    const host = new ChannelHost({
+      db: appDb,
+      engineHost,
+      engineStore,
+      eventStream,
+      engineCredentials,
+      plugins: [fakePlugin],
+      resolveOrgId: async () => ORG_ID,
+    });
+
+    await host.start();
+    await host.start(); // second call must be a no-op
+
+    expect(createCalls).toBe(1);
+
+    await host.stop();
+  });
+
   it("poller resumes after restart without duplicate admission", async () => {
     await saveCredential();
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });

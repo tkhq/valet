@@ -136,6 +136,9 @@ export class ChannelHost {
    * unauthenticated webhook endpoint with bad secrets still gets 403 every
    * time, but only writes one drop-log row per channelType per cooldown. */
   private verifyFailedLoggedAt = new Map<string, number>();
+  /** Guards against a second `start()` re-creating transports/poll loops
+   * on top of already-running ones; reset in `stop()`. */
+  private started = false;
 
   constructor(private readonly deps: ChannelHostDeps) {}
 
@@ -165,6 +168,8 @@ export class ChannelHost {
   }
 
   async start(): Promise<void> {
+    if (this.started) return;
+    this.started = true;
     this.orgId = await this.deps.resolveOrgId();
     const orgId = this.orgId;
     for (const plugin of this.deps.plugins) {
@@ -258,6 +263,7 @@ export class ChannelHost {
     this.pollControllers.clear();
     this.pollLoops = [];
     this.stopOutbound();
+    this.started = false;
   }
 
   /**
@@ -628,6 +634,17 @@ export class ChannelHost {
       return;
     }
 
+    // Resolution deliberately looks up the user's orchestrator session
+    // rather than reusing `mapped.sessionId` — the ownership check above
+    // only proved `mapped.sessionId` belongs to `userId`, not that it IS
+    // the orchestrator session. This relies on the invariant that
+    // channel-keyed threads (see `channelThreadFor`) exist only on
+    // orchestrator sessions: `handleMessage` always threads through
+    // `ensureOrchestratorSession`, so any gate whose ref maps back to a
+    // channel thread must have been raised on that same orchestrator
+    // session. If that invariant is ever violated, `resolveDecision` below
+    // throws on a gateId that doesn't exist on this session — caught by
+    // `handleUpdate`'s try/catch (fails safe, not silently wrong).
     const session = await this.deps.engineHost.orchestratorSessionFor({ type: "user", id: userId }, {
       actorUserId: userId,
       orgId,
