@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
-import { useNavigate, useRouter } from '@tanstack/react-router';
+import { Link, useNavigate, useRouter } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { useChat } from '@/hooks/use-chat';
 import type { IntegrationAuthError } from '@/hooks/use-chat';
@@ -20,6 +20,7 @@ import { useAuthStore } from '@/stores/auth';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { useAutoRestartOrchestrator } from '@/hooks/use-auto-restart-orchestrator';
 import { filterChildSessionEventsForThread, getEffectiveActiveThreadId } from './thread-selection';
+import { getUserMessageHistory } from './message-history';
 import { getPendingResponseRequiredThreadIds, selectVisibleInteractivePrompts } from '@/lib/approval-prompts';
 import { getBuildChrome } from '@/lib/build-info';
 import { cn } from '@/lib/cn';
@@ -98,6 +99,8 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
     sessionStatus,
     interactivePrompts,
     connectionStatus,
+    connectionRetriesExhausted,
+    reconnectWebSocket,
     isConnected,
     runnerConnected,
     isAgentThinking,
@@ -161,6 +164,7 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
     initialContinuationContext ?? (initialThreadId ? (consumePendingContinuation(initialThreadId) ?? undefined) : undefined)
   );
   const isOrchestrator = session?.isOrchestrator === true;
+  const parentSessionId = session?.parentSessionId ?? null;
   // Auto-restart orchestrator if it enters error/terminated state while viewing chat
   useAutoRestartOrchestrator(isOrchestrator);
   const createThread = useCreateThread(sessionId);
@@ -260,6 +264,9 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
     }
     return filtered;
   }, [messages, activeThreadId, isResolvingThread]);
+
+  // Prompts the user has already sent in this thread, for ArrowUp recall in the composer.
+  const messageHistory = useMemo(() => getUserMessageHistory(filteredMessages), [filteredMessages]);
 
   const filteredChildSessionEvents = useMemo(() => {
     if (isResolvingThread) return [];
@@ -452,6 +459,21 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
               errorMessage={session?.errorMessage}
             />
             <SessionStatusIndicator sessionStatus={displaySessionStatus} connectionStatus={connectionStatus} />
+            {connectionRetriesExhausted && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={reconnectWebSocket}
+                className="h-5 shrink-0 gap-1 rounded-full bg-red-500/10 px-2 font-mono text-[10px] font-medium uppercase tracking-wider text-red-600 hover:bg-red-500/20 dark:text-red-400"
+                title="The connection to this session was lost and automatic retries gave up. Click to try again."
+              >
+                <ReconnectIcon className="h-2.5 w-2.5" />
+                Reconnect
+              </Button>
+            )}
+            {parentSessionId && (
+              <ChildSessionPill parentSessionId={parentSessionId} />
+            )}
             {isOrchestrator && (displaySessionStatus === 'restoring' || displaySessionStatus === 'waiting_runner') && (
               <StuckWakingRestart sessionId={sessionId} />
             )}
@@ -670,6 +692,7 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
             onOpenActions={() => setMobileActionsOpen(true)}
             onFocusChange={setComposerFocused}
             onCommand={handleCommand}
+            messageHistory={messageHistory}
             externalValue={editingWithdrawnContent}
             onExternalValueConsumed={() => setEditingWithdrawnContent(null)}
             inputRef={chatInputRef}
@@ -1053,6 +1076,51 @@ function BackIcon({ className }: { className?: string }) {
       <path d="m12 19-7-7 7-7" />
       <path d="M19 12H5" />
     </svg>
+  );
+}
+
+function ReconnectIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M8 16H3v5" />
+    </svg>
+  );
+}
+
+function SubAgentIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M5 3v10a2 2 0 0 0 2 2h9" />
+      <path d="m13 11 3 4-3 4" />
+    </svg>
+  );
+}
+
+/**
+ * Child sessions look identical to orchestrator sessions once you are inside
+ * one, which matters because refreshing the orchestrator cascade-terminates
+ * running children. This keeps the distinction on the chat surface itself
+ * rather than only in the metadata sidebar, and links back to the parent.
+ */
+function ChildSessionPill({ parentSessionId }: { parentSessionId: string }) {
+  const { data: parentSession } = useSession(parentSessionId);
+  const parentLabel = parentSession?.title || parentSession?.workspace || parentSessionId.slice(0, 8);
+
+  return (
+    <Link
+      to="/sessions/$sessionId"
+      params={{ sessionId: parentSessionId }}
+      title={`This is a sub-agent session. Its parent is "${parentLabel}". Open the parent session.`}
+      className="group/parent flex h-5 min-w-0 shrink items-center gap-1 rounded-full bg-violet-500/10 px-2 font-mono text-[10px] font-medium uppercase tracking-wider text-violet-600 transition-colors hover:bg-violet-500/20 dark:text-violet-400"
+    >
+      <SubAgentIcon className="h-2.5 w-2.5 shrink-0" />
+      <span className="shrink-0">Sub-agent</span>
+      <span className="text-violet-500/50 dark:text-violet-400/50">/</span>
+      <span className="truncate normal-case text-violet-500 dark:text-violet-400/80">{parentLabel}</span>
+    </Link>
   );
 }
 
