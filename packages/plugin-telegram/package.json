@@ -23,6 +23,8 @@
     "@valet/engine": "workspace:*"
   },
   "devDependencies": {
+    "@hono/node-server": "^1.13.0",
+    "hono": "^4.3.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }
