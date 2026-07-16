@@ -122,3 +122,38 @@ describe("validateValetPlugin", () => {
     if (!res.ok) expect(res.issues.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("validateValetPlugin transports", () => {
+  it("accepts a plugin without transports (unchanged behavior)", () => {
+    const res = validateValetPlugin(minimalPlugin());
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts a valid transports array", () => {
+    const res = validateValetPlugin({
+      ...minimalPlugin(),
+      transports: [{ channelType: "telegram", create: () => ({}) }],
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects non-array transports", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), transports: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "transports")).toBe(true);
+    }
+  });
+
+  it("rejects a factory missing channelType or create", () => {
+    const res = validateValetPlugin({
+      ...minimalPlugin(),
+      transports: [{ channelType: "" }, { channelType: "x", create: "not-fn" }],
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "transports[0].channelType")).toBe(true);
+      expect(res.issues.some((i) => i.path === "transports[1].create")).toBe(true);
+    }
+  });
+});

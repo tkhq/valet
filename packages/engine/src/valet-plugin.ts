@@ -9,11 +9,11 @@
  * `() => ValetPlugin | Promise<ValetPlugin>` factory. The marker's presence
  * is the whole contract — a package without it is not a plugin.
  *
- * No `transports` field yet: the v2 ChannelTransport contract lands with
- * the first channel plugin (Telegram, Phase 7) and the field is added then.
+ * See the "Channel transports" section below for the v2 ChannelTransport
+ * contract (Telegram, Phase 7).
  */
 import type { ActionPlugin } from "./plugin-catalog.js";
-import type { RiskLevel, SignalContent, SkillSource, RoleSpec } from "./types.js";
+import type { RiskLevel, SignalContent, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 
 export interface CredentialDeclaration {
   /** Service the credential is stored under. Defaults to the plugin name. */
@@ -55,6 +55,118 @@ export interface TriggerDef {
   };
 }
 
+// ─── Channel transports (v2 contract, Phase 7) ─────────────────────────────
+//
+// Verify-before-parse, same philosophy as TriggerDef: the host hands raw
+// bytes to `verifyWebhook` (or consumes `poll()`), then feeds each
+// RawChannelUpdate through `parseUpdate`. Conversation keys are a
+// transport-owned codec (e.g. "telegram:dm:{chatId}") — the host treats
+// them as opaque and passes them back verbatim for outbound sends.
+
+/** One raw provider update (e.g. a Telegram Update object). Opaque to the host. */
+export type RawChannelUpdate = unknown;
+
+export interface TransportContext {
+  /** Resolved org credential for the transport's service (e.g. the bot token). */
+  credential: StoredCredential;
+  /** Transport-specific config. Factories never read env vars. */
+  config: Record<string, string>;
+}
+
+export interface ChannelSender {
+  externalId: string;
+  displayName?: string;
+}
+
+export interface InboundChannelMedia {
+  kind: "photo" | "document" | "voice" | "audio";
+  fileId: string;
+  mimeType?: string;
+  fileName?: string;
+  fileSize?: number;
+}
+
+/** Where a sent message landed; also the correlation handle for gate edits. */
+export interface SendRef {
+  conversationKey: string;
+  messageId: string;
+}
+export type GatePromptRef = SendRef;
+
+export interface InboundChannelEvent {
+  /** Dedup key, e.g. "telegram:{update_id}". */
+  dispatchId: string;
+  conversationKey: string;
+  sender: ChannelSender;
+  kind: "message" | "command" | "gate_callback";
+  text?: string;
+  /** Set when kind === "command" (e.g. /start <code>). */
+  command?: { name: string; args?: string };
+  media?: InboundChannelMedia[];
+  /** Set when kind === "gate_callback". `ref` identifies the gate-prompt message. */
+  gateCallback?: { actionId: string; callbackId: string; ref: GatePromptRef };
+  raw: RawChannelUpdate;
+}
+
+export interface OutboundChannelMessage {
+  markdown: string;
+}
+
+export type OutboundChannelAttachment =
+  | { type: "image"; data: Uint8Array; mimeType: string; name?: string; caption?: string }
+  | { type: "file"; data: Uint8Array; mimeType: string; name: string; caption?: string };
+
+export interface ChannelGatePrompt {
+  gateId: string;
+  title: string;
+  body?: string;
+  actions: Array<{ id: string; label: string; style?: "primary" | "danger" }>;
+}
+
+export interface ChannelGateResolution {
+  actionId?: string;
+  /** Human-readable outcome line, e.g. "✅ Approved by conner". */
+  label: string;
+}
+
+export interface FetchedChannelMedia {
+  data: Uint8Array;
+  mimeType: string;
+  name?: string;
+}
+
+export interface ChannelTransport {
+  readonly channelType: string;
+  /**
+   * Verify an incoming webhook and extract its raw updates. `null` = reject.
+   * secrets carries host-held values (for Telegram: { webhookSecret }).
+   */
+  verifyWebhook(
+    req: { headers: Record<string, string>; rawBody: Uint8Array },
+    secrets: Record<string, string>,
+  ): RawChannelUpdate[] | null;
+  /** Long-poll ingress; yields until `signal` aborts. Optional per transport. */
+  poll?(signal: AbortSignal): AsyncIterable<RawChannelUpdate>;
+  /** Normalize one raw update. `null` = not something we handle. */
+  parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
+  send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
+  sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef>;
+  sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef>;
+  updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void>;
+  /** Download inbound media. `null` = unavailable (oversize, expired, …). */
+  fetchMedia?(media: InboundChannelMedia): Promise<FetchedChannelMedia | null>;
+  sendTyping?(conversationKey: string): Promise<void>;
+  /** Ack an interactive callback (Telegram answerCallbackQuery). */
+  answerCallback?(callbackId: string, text?: string): Promise<void>;
+  /** Register the webhook endpoint with the provider (webhook mode only). */
+  registerWebhook?(url: string, secretToken: string): Promise<void>;
+}
+
+export interface ChannelTransportFactory {
+  channelType: string;
+  create(ctx: TransportContext): ChannelTransport;
+}
+
 export interface ValetPlugin {
   /** Plugin id, e.g. "github". Unique across loaded plugins. */
   name: string;
@@ -65,6 +177,7 @@ export interface ValetPlugin {
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
+  transports?: ChannelTransportFactory[];
 }
 
 export interface PluginValidationIssue {
@@ -183,6 +296,16 @@ export function validateValetPlugin(
     }
     if (cred.service !== undefined && typeof cred.service !== "string") {
       issues.push({ path: `${path}.service`, message: "must be a string when present" });
+    }
+  });
+
+  checkArray(v.transports, "transports", issues, (item, path) => {
+    const t = item as Partial<ChannelTransportFactory>;
+    if (typeof t.channelType !== "string" || t.channelType === "") {
+      issues.push({ path: `${path}.channelType`, message: "must be a non-empty string" });
+    }
+    if (typeof t.create !== "function") {
+      issues.push({ path: `${path}.create`, message: "must be a function" });
     }
   });
 
