@@ -57,7 +57,7 @@ for API groups it doesn't own.
   `volumeClaimTemplates` PVCs are not owned by the Helm release). For a true
   reset, delete them explicitly:
   ```sh
-  kubectl -n valet delete pvc -l app.kubernetes.io/instance=valet
+  kubectl --context rancher-desktop -n valet delete pvc -l app.kubernetes.io/instance=valet
   ```
 - No secrets are committed to `values.yaml` — only empty placeholders.
   Supply real values via `--set` / a local `values-local.yaml` (gitignored)
