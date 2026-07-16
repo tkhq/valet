@@ -12,7 +12,7 @@ import * as k8s from "@kubernetes/client-node";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import { KubernetesSandboxProvider } from "@valet/sandbox-kubernetes";
-import { buildSandboxProvider, parseSandboxBackend, resolveKubeConfig } from "./sandbox-backend.js";
+import { buildSandboxProvider, parseSandboxBackend, resolveDefaultImage, resolveKubeConfig } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
   const kc = new k8s.KubeConfig();
@@ -97,6 +97,18 @@ describe("buildSandboxProvider", () => {
   it("throws a clear error for an unrecognized backend", () => {
     expect(() => buildSandboxProvider({ VALET_SANDBOX_BACKEND: "ec2" })).toThrow(
       /Invalid VALET_SANDBOX_BACKEND "ec2"/,
+    );
+  });
+});
+
+describe("resolveDefaultImage", () => {
+  it("returns undefined when VALET_SANDBOX_IMAGE is unset (docker default stays node:20-bookworm)", () => {
+    expect(resolveDefaultImage({})).toBeUndefined();
+  });
+
+  it("pins VALET_SANDBOX_IMAGE through to the resolved default image, for the docker backend too", () => {
+    expect(resolveDefaultImage({ VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:full" })).toBe(
+      "ghcr.io/example/sandbox:full",
     );
   });
 });

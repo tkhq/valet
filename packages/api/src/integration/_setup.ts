@@ -51,6 +51,11 @@ export interface BootTestApiOpts {
   /** Override the default `VirtualSandboxProvider` — e.g. a create-counting
    * wrapper that proves a code path never provisions a sandbox. */
   sandboxProvider?: SandboxProvider;
+  /** Forwarded to `EngineHostOpts.defaultImage` — tests that pin
+   * `VALET_SANDBOX_IMAGE`-style behavior assert against a fake
+   * `sandboxProvider` that records the `SandboxCreateOpts.image` it
+   * receives. Unset by default, matching `EngineHost`'s own default. */
+  defaultImage?: string;
   /**
    * Override the default real `LocalRunHost` — route-level tests that only
    * need to observe `start`/`wake`/`terminate` calls (never actually drive a
@@ -187,6 +192,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     blobs,
     anthropicApiKey: ANTHROPIC_API_KEY,
+    defaultImage: opts.defaultImage,
     db,
     apiBaseUrl,
     plugins,

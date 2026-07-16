@@ -175,14 +175,23 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     // gateway plan). `DockerSandbox.gatewayEndpoint()` resolves the actual
     // assigned port via `docker inspect`.
     runArgs.push("-p", `127.0.0.1::${GATEWAY_PORT}`);
-  }
-  if (opts.profile === "full") {
     // Full-profile containers run the same startup script the kubernetes
     // provider uses (packages/sandbox-kubernetes/src/manifest.ts) — it
     // starts the gateway/ttyd/code-server daemons and keeps the container
-    // alive in the foreground of its own wait loop. Only full-profile
-    // images are guaranteed to carry docker/start-full.sh.
-    runArgs.push(opts.image, "/bin/bash", "/start-full.sh");
+    // alive in the foreground of its own wait loop. Not every image passed
+    // to a full-profile session is guaranteed to carry
+    // docker/start-full.sh (e.g. the default `node:20-bookworm` fallback,
+    // or any image supplied before a full-capable one is wired up) — probe
+    // for it at container-start time and degrade to the same `tail -f
+    // /dev/null` placeholder headless containers use instead of dying
+    // instantly. The agent (docker exec) still works either way; the
+    // gateway-fronted tabs 502 until a full-capable image is supplied.
+    runArgs.push(
+      opts.image,
+      "sh",
+      "-c",
+      "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+    );
   } else {
     // Keep the container alive — most images exit immediately if PID 1 is
     // an interactive shell and there's no TTY. `tail -f /dev/null` is a

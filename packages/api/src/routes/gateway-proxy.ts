@@ -161,6 +161,31 @@ function createProxyHeaders(rawHeaders: Headers): Headers {
   return headers;
 }
 
+/**
+ * Rewrites a `Set-Cookie` value's `Path` attribute to `path`, appending one
+ * if absent. The sandbox gateway daemon mints `gateway_session` with
+ * `Path=/` (`@valet/sandbox-gateway`'s `sessionCookieHeader` — correct for
+ * ITS own origin, the sandbox, where it's the only cookie in play). Forwarded
+ * unmodified through this api-side proxy, `Path=/` would scope the cookie to
+ * the WHOLE api origin in the browser, so it'd get attached to — and
+ * forwarded into — every OTHER session's proxied gateway requests too.
+ * Confining it to this session's own proxy prefix keeps each session's
+ * sandbox cookie from leaking into another session's request.
+ */
+function rewriteSetCookiePath(cookie: string, path: string): string {
+  const attrs = cookie.split(";");
+  let sawPath = false;
+  const rewritten = attrs.map((attr, i) => {
+    if (i === 0) return attr;
+    if (/^\s*path\s*=/i.test(attr)) {
+      sawPath = true;
+      return ` Path=${path}`;
+    }
+    return attr;
+  });
+  return sawPath ? rewritten.join(";") : `${cookie}; Path=${path}`;
+}
+
 const CONTENTLESS_STATUS_CODES = new Set([101, 204, 205, 304]);
 
 /** Hono's `.body()` types the status param as the closed `StatusCode`
@@ -226,6 +251,11 @@ async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
     const headers = new Headers(res.headers);
     headers.delete("content-encoding");
     headers.delete("transfer-encoding");
+    const setCookies = res.headers.getSetCookie();
+    if (setCookies.length > 0) {
+      headers.delete("set-cookie");
+      for (const cookie of setCookies) headers.append("set-cookie", rewriteSetCookiePath(cookie, prefix));
+    }
     return res.body
       ? c.body(res.body, { status: asContentfulStatusCode(res.status), statusText: res.statusText, headers })
       : c.body(null, { status: asStatusCode(res.status), statusText: res.statusText, headers });
@@ -268,6 +298,35 @@ function mirrorClose(target: { close(code?: number, reason?: string): void }, co
     target.close(code, reason);
   } else {
     target.close();
+  }
+}
+
+/**
+ * Mirrors the client's close code/reason onto `backend`, falling back to a
+ * hard `terminate()` if `backend` isn't open, or if the mirror attempt
+ * itself throws. `evt.reason` is client-controlled and the `ws` library
+ * throws synchronously when asked to send a close frame whose reason
+ * encodes to more than 123 UTF-8 bytes (a JS string can be short in
+ * `.length` — UTF-16 code units — while still exceeding that once
+ * multi-byte characters are encoded) — letting that escape this handler
+ * would leave the backend socket connected instead of closed. Extracted
+ * (rather than inlined in `onClose`) so it's unit-testable without a live
+ * WS round trip — see `gateway-proxy.test.ts`.
+ */
+export function closeBackendOnClientClose(
+  backend: { readyState: number; close(code?: number, reason?: string): void; terminate(): void },
+  code: number,
+  reason: string,
+): void {
+  if (backend.readyState !== BackendWebSocket.OPEN) {
+    backend.terminate();
+    return;
+  }
+  try {
+    mirrorClose(backend, code, reason);
+  } catch (err) {
+    console.error("gateway-proxy ws: mirrorClose to backend failed, terminating:", err);
+    backend.terminate();
   }
 }
 
@@ -366,7 +425,16 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
         },
 
         onMessage(evt) {
-          const payload = toBackendPayload(evt.data);
+          let payload: string | ArrayBuffer;
+          try {
+            payload = toBackendPayload(evt.data);
+          } catch (err) {
+            // Unexpected payload shape (e.g. a Blob) — drop the frame
+            // instead of throwing inside the handler, which would tear
+            // down the connection over one bad frame.
+            console.error("gateway-proxy ws: dropping unsupported client frame:", err);
+            return;
+          }
           if (backend && backend.readyState === BackendWebSocket.OPEN) {
             backend.send(payload);
           } else {
@@ -376,11 +444,7 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
 
         onClose(evt) {
           clientOpen = false;
-          if (backend && backend.readyState === BackendWebSocket.OPEN) {
-            mirrorClose(backend, evt.code, evt.reason);
-          } else if (backend) {
-            backend.terminate();
-          }
+          if (backend) closeBackendOnClientClose(backend, evt.code, evt.reason);
         },
 
         onError(evt) {

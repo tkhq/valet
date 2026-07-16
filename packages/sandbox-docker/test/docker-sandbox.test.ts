@@ -352,8 +352,10 @@ describeDocker("DockerSandbox", () => {
   });
 
   it("gatewayEndpoint() returns a mapped loopback port for a full-profile container", async () => {
-    // profile:"full" now runs /bin/bash /start-full.sh (see buildDockerRunArgs)
-    // — alpine:3.20 has neither, so this needs the bash+script fixture image.
+    // profile:"full" now runs /bin/bash /start-full.sh when present, else
+    // degrades to the tail placeholder (see buildDockerRunArgs) — alpine:3.20
+    // has neither, so this needs the bash+script fixture image to exercise
+    // the gateway-serving path.
     const image = await buildFullProfileTestImage();
     const sb = await makeSandbox({ profile: "full", image });
     try {

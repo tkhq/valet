@@ -90,6 +90,26 @@ export function resolveKubeConfig(env: NodeJS.ProcessEnv): k8s.KubeConfig {
   return kc;
 }
 
+/**
+ * Resolves `EngineHostOpts.defaultImage` from `VALET_SANDBOX_IMAGE` — the
+ * seam that lets it reach `SandboxCreateOpts.image` (`EngineHost` threads
+ * `opts.defaultImage` into every `sandbox: {..., image, ...}` it builds,
+ * and `DockerSandboxProvider.create` falls back to its own
+ * `node:20-bookworm` default whenever `opts.image` is unset — so without
+ * this, `VALET_SANDBOX_IMAGE` was read for the kubernetes backend only and
+ * silently ignored for docker).
+ *
+ * Wiring it unconditionally (not just for the docker backend) is harmless
+ * for kubernetes: `buildSandboxProvider`'s kubernetes branch already reads
+ * the same env var into `K8sProviderConfig.defaultImage`, and
+ * `KubernetesSandboxProvider.create` prefers an explicit `opts.image` over
+ * `cfg.defaultImage` when both are set — they're always equal here, so the
+ * resolved image never changes.
+ */
+export function resolveDefaultImage(env: NodeJS.ProcessEnv): string | undefined {
+  return env.VALET_SANDBOX_IMAGE;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a

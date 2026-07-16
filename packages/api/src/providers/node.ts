@@ -21,7 +21,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { FsBlobStore } from "./blob-fs.js";
-import { buildSandboxProvider } from "./sandbox-backend.js";
+import { buildSandboxProvider, resolveDefaultImage } from "./sandbox-backend.js";
 import type { Providers } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -212,6 +212,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     blobs,
     anthropicApiKey: opts.anthropicApiKey,
+    defaultImage: resolveDefaultImage(process.env),
     db,
     apiBaseUrl: opts.apiBaseUrl,
     sandboxJwtMaster: opts.sandboxJwtMaster,

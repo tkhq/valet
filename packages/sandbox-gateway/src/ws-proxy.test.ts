@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { startGateway, type GatewayHandle } from "./gateway.js";
+import { closeBackendOnClientClose } from "./ws-proxy.js";
 import { startFakeBackend, type FakeBackend } from "../test/fake-backend.js";
 
 const SECRET = "gateway-secret";
@@ -35,6 +36,26 @@ function waitForClose(ws: WebSocket): Promise<{ code: number; reason: string }> 
     ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
   });
 }
+
+describe("closeBackendOnClientClose (Fix 3: throw-safe WS close mirroring)", () => {
+  it("falls back to terminate() when mirroring an oversize close reason throws", () => {
+    let terminated = false;
+    const fakeBackend = {
+      readyState: WebSocket.OPEN,
+      close(_code?: number, reason?: string) {
+        if (reason && Buffer.byteLength(reason, "utf8") > 123) {
+          throw new RangeError("Reason must be less than 123 bytes");
+        }
+      },
+      terminate() {
+        terminated = true;
+      },
+    };
+
+    expect(() => closeBackendOnClientClose(fakeBackend, 1000, "x".repeat(200))).not.toThrow();
+    expect(terminated).toBe(true);
+  });
+});
 
 describe("ws-proxy", () => {
   let backend: FakeBackend;

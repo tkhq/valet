@@ -84,7 +84,11 @@ RUN pnpm --filter @valet/sandbox-gateway deploy --prod /out/gateway
 FROM base
 
 # code-server (VS Code in browser) — lifted from docker/Dockerfile.sandbox.
-RUN curl -fsSL https://code-server.dev/install.sh | sh
+# Pinned (bump this ARG to upgrade) rather than an unpinned `curl | sh`,
+# which would silently pull in whatever the installer resolves as "latest"
+# on every rebuild.
+ARG CODE_SERVER_VERSION=4.128.0
+RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --version "${CODE_SERVER_VERSION}"
 
 # ttyd (web terminal) — lifted from docker/Dockerfile.sandbox.
 RUN curl -fsSL -o /usr/local/bin/ttyd \

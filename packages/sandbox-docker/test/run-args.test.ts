@@ -40,7 +40,7 @@ describe("buildDockerRunArgs (pure)", () => {
     expect(args[idx + 1]).toBe("127.0.0.1::9000");
   });
 
-  it("full profile still includes the rest of the standard args, and runs /start-full.sh instead of tail — byte-identical pin", () => {
+  it("full profile still includes the rest of the standard args, and degrades to tail when /start-full.sh is missing — byte-identical pin", () => {
     const args = buildDockerRunArgs({ ...baseOpts, profile: "full" });
     expect(args).toEqual([
       "run",
@@ -54,8 +54,9 @@ describe("buildDockerRunArgs (pure)", () => {
       "-p",
       "127.0.0.1::9000",
       "alpine:3.20",
-      "/bin/bash",
-      "/start-full.sh",
+      "sh",
+      "-c",
+      "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
     ]);
   });
 

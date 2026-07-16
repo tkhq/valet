@@ -88,6 +88,36 @@ function mirrorClose(target: { close(code?: number, reason?: string): void }, co
   }
 }
 
+/**
+ * Mirrors the client's close code/reason onto `backend`, falling back to a
+ * hard `terminate()` if `backend` isn't open, or if the mirror attempt
+ * itself throws. `reason` is client-controlled and the `ws` library throws
+ * synchronously when asked to send a close frame whose reason encodes to
+ * more than 123 UTF-8 bytes (a JS string can be short in `.length` — UTF-16
+ * code units — while still exceeding that once multi-byte characters are
+ * encoded) — letting that escape this handler would leave the backend
+ * socket connected instead of closed. Mirrors the api-side proxy's
+ * `closeBackendOnClientClose` (`packages/api/src/routes/gateway-proxy.ts`),
+ * duplicated rather than shared per this module's existing convention (see
+ * that file's module doc comment).
+ */
+export function closeBackendOnClientClose(
+  backend: { readyState: number; close(code?: number, reason?: string): void; terminate(): void },
+  code: number,
+  reason: string,
+): void {
+  if (backend.readyState !== BackendWebSocket.OPEN) {
+    backend.terminate();
+    return;
+  }
+  try {
+    mirrorClose(backend, code, reason);
+  } catch (err) {
+    console.error("[sandbox-gateway] mirrorClose to backend failed, terminating:", err);
+    backend.terminate();
+  }
+}
+
 function upstreamWsUrl(url: URL, prefix: string, port: number): string {
   const path = url.pathname.slice(prefix.length) || "/";
   const params = new URLSearchParams(url.search);
@@ -159,7 +189,15 @@ export function registerWsProxyRoutes(opts: RegisterWsProxyOpts): void {
 
           onMessage(evt, _ws) {
             if (!auth) return;
-            const payload = toBackendPayload(evt.data);
+            let payload: string | ArrayBuffer;
+            try {
+              payload = toBackendPayload(evt.data);
+            } catch (err) {
+              // Unexpected payload shape (e.g. a Blob) — drop the frame
+              // instead of throwing inside the handler.
+              console.error(`[sandbox-gateway] dropping unsupported client frame (${target.prefix}):`, err);
+              return;
+            }
             if (backend && backend.readyState === BackendWebSocket.OPEN) {
               backend.send(payload);
             } else {
@@ -169,11 +207,7 @@ export function registerWsProxyRoutes(opts: RegisterWsProxyOpts): void {
 
           onClose(evt) {
             clientOpen = false;
-            if (backend && backend.readyState === BackendWebSocket.OPEN) {
-              mirrorClose(backend, evt.code, evt.reason);
-            } else if (backend) {
-              backend.terminate();
-            }
+            if (backend) closeBackendOnClientClose(backend, evt.code, evt.reason);
           },
 
           onError(evt) {

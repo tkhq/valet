@@ -28,6 +28,8 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { deriveSandboxJwtSecret } from "../auth/sandbox-tokens.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { agentSessions } from "../schema/index.js";
+import { closeBackendOnClientClose } from "./gateway-proxy.js";
+import { WebSocket as BackendWebSocket } from "ws";
 
 /** A `Sandbox` whose `gatewayEndpoint()` is test-controlled (constant
  * per-instance) — everything else (fs/exec) is inherited from
@@ -129,6 +131,62 @@ async function warmSandbox(api: TestApi, opts: { id: string; userId: string }): 
   await session.attachment.ensureReady({ timeoutMs: 5_000 });
 }
 
+describe("closeBackendOnClientClose (Fix 3: throw-safe WS close mirroring)", () => {
+  it("falls back to terminate() when mirroring an oversize close reason throws", () => {
+    let terminated = false;
+    const fakeBackend = {
+      readyState: BackendWebSocket.OPEN,
+      close(_code?: number, reason?: string) {
+        // Mirrors `ws`'s real behavior: throws when the reason encodes to
+        // more than 123 bytes rather than sending a malformed close frame.
+        if (reason && Buffer.byteLength(reason, "utf8") > 123) {
+          throw new RangeError("Reason must be less than 123 bytes");
+        }
+      },
+      terminate() {
+        terminated = true;
+      },
+    };
+
+    expect(() => closeBackendOnClientClose(fakeBackend, 1000, "x".repeat(200))).not.toThrow();
+    expect(terminated).toBe(true);
+  });
+
+  it("mirrors a normal close without falling back to terminate()", () => {
+    let terminated = false;
+    let mirrored: { code?: number; reason?: string } | undefined;
+    const fakeBackend = {
+      readyState: BackendWebSocket.OPEN,
+      close(code?: number, reason?: string) {
+        mirrored = { code, reason };
+      },
+      terminate() {
+        terminated = true;
+      },
+    };
+
+    closeBackendOnClientClose(fakeBackend, 1000, "bye");
+    expect(mirrored).toEqual({ code: 1000, reason: "bye" });
+    expect(terminated).toBe(false);
+  });
+
+  it("terminates directly when the backend isn't open", () => {
+    let terminated = false;
+    const fakeBackend = {
+      readyState: BackendWebSocket.CLOSING,
+      close() {
+        throw new Error("should not be called");
+      },
+      terminate() {
+        terminated = true;
+      },
+    };
+
+    closeBackendOnClientClose(fakeBackend, 1000, "bye");
+    expect(terminated).toBe(true);
+  });
+});
+
 describe("session gateway reverse-proxy", () => {
   let api: TestApi | undefined;
   let fakeBackend: FakeBackend | undefined;
@@ -179,6 +237,97 @@ describe("session gateway reverse-proxy", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toBe("vscode-ok");
+  });
+
+  it("rewrites the gateway's Set-Cookie Path to this session's proxy prefix, confining it away from other sessions", async () => {
+    const sessionId1 = "gw-cookie-1";
+    const sessionId2 = "gw-cookie-2";
+
+    const fakeBackend1 = await startFakeBackend();
+    const jwtSecret1 = deriveSandboxJwtSecret(internalToken(), sessionId1);
+    const gateway1 = startGateway({
+      port: 0,
+      sessionId: sessionId1,
+      jwtSecret: jwtSecret1,
+      targets: { ttyd: fakeBackend1.ttydPort, vscode: fakeBackend1.vscodePort },
+    });
+    const gatewayPort1 = (gateway1.server.address() as AddressInfo).port;
+
+    const fakeBackend2 = await startFakeBackend();
+    const jwtSecret2 = deriveSandboxJwtSecret(internalToken(), sessionId2);
+    const gateway2 = startGateway({
+      port: 0,
+      sessionId: sessionId2,
+      jwtSecret: jwtSecret2,
+      targets: { ttyd: fakeBackend2.ttydPort, vscode: fakeBackend2.vscodePort },
+    });
+    const gatewayPort2 = (gateway2.server.address() as AddressInfo).port;
+
+    // Both sessions share one api process, each with its own gateway-backed
+    // sandbox — a purpose-built provider whose `create()` return alternates
+    // isn't available here, so seed both sessions against a single provider
+    // instance keyed by whichever endpoint each session's own `sessionFor`
+    // resolves. `GatewayTestSandboxProvider` is fixed to one endpoint per
+    // instance, so this test drives two full `bootTestApi` instances instead
+    // — mirroring how the other cases each own one.
+    try {
+      api = await bootTestApi({
+        sandboxProvider: new GatewayTestSandboxProvider({ host: "127.0.0.1", port: gatewayPort1 }),
+      });
+      await seedSession(api, { id: sessionId1, userId: "local-user" });
+      await warmSandbox(api, { id: sessionId1, userId: "local-user" });
+
+      const mintRes1 = await fetch(`${api.baseUrl}/api/sessions/${sessionId1}/sandbox-jwt`, {
+        method: "POST",
+        headers: { "x-valet-test-user-id": "local-user" },
+      });
+      const { token: token1 } = (await mintRes1.json()) as { token: string };
+
+      const res1 = await fetch(
+        `${api.baseUrl}/api/sessions/${sessionId1}/gateway/vscode/?token=${encodeURIComponent(token1)}`,
+        { headers: { "x-valet-test-user-id": "local-user" } },
+      );
+      expect(res1.status).toBe(200);
+      const setCookie1 = res1.headers.get("set-cookie");
+      expect(setCookie1).toBeTruthy();
+      expect(setCookie1).toContain(`Path=/api/sessions/${sessionId1}/gateway`);
+      expect(setCookie1).not.toMatch(/Path=\/;/);
+
+      // Extract the raw gateway_session cookie pair a real browser would
+      // have stored (scoped, in a real browser, to session 1's own proxy
+      // path — never attached to a request for session 2). Simulate the
+      // failure mode this fix prevents: hand-forward that cookie into a
+      // request for session 2's proxy anyway (as if path scoping were
+      // absent) and confirm the sandbox-side auth boundary still rejects it
+      // — the cookie filter + path rewrite together confine session 1's
+      // cookie away from session 2.
+      const cookiePair = setCookie1?.split(";")[0];
+      expect(cookiePair).toMatch(/^gateway_session=/);
+
+      await api.cleanup();
+      api = undefined;
+
+      api = await bootTestApi({
+        sandboxProvider: new GatewayTestSandboxProvider({ host: "127.0.0.1", port: gatewayPort2 }),
+      });
+      await seedSession(api, { id: sessionId2, userId: "local-user" });
+      await warmSandbox(api, { id: sessionId2, userId: "local-user" });
+
+      const res2 = await fetch(`${api.baseUrl}/api/sessions/${sessionId2}/gateway/vscode/`, {
+        headers: { "x-valet-test-user-id": "local-user", Cookie: cookiePair ?? "" },
+      });
+      // Session 1's cookie doesn't authenticate session 2's gateway (each
+      // gateway's session store + JWT secret is per-sessionId) — no token
+      // and a foreign cookie both fail, surfacing as the sandbox gateway's
+      // own 401, not a 200 that would mean the cookie leaked across
+      // sessions and worked.
+      expect(res2.status).toBe(401);
+    } finally {
+      await gateway1.close();
+      await fakeBackend1.close();
+      await gateway2.close();
+      await fakeBackend2.close();
+    }
   });
 
   it("404s for a session owned by a different user", async () => {
