@@ -36,7 +36,7 @@
 
 **Design (locked now so Stage 1 doesn't preclude it):**
 
-- One `SandboxTemplate` per sandbox image/profile (helm-managed), one `SandboxWarmPool` with `replicas` from values (default 2, 0 = disabled).
+- One `SandboxTemplate` per sandbox image/profile (helm-managed), one `SandboxWarmPool` with `replicas` from values (default 2, 0 = disabled). Templates/pools are **per-image**, so this composes with the sandbox-images-v2 spec (`docs/specs/2026-07-15-sandbox-images-v2-design.md`): each repo prebuild config maps to at most one template/pool, pool sizing is image-keyed, and pooling stays an optimization applied only where a pool exists for the resolved image.
 - `create(opts)` becomes claim-first: create a `SandboxClaim` referencing the pool; on fulfillment, adopt the claimed Sandbox (label it with the session identity, apply session env — **env application to a pre-started pod is the hard part**: pooled pods boot without `VALET_SANDBOX_TOKEN`/JWT secret, so per-session env must arrive post-claim, e.g. written to a file via exec before first use, or the claim triggers a one-time controller-side restart with merged env — the plan picks after testing what upstream fulfillment actually does). Fallback to today's cold `Sandbox` create on claim timeout (pool empty/broken) — warm is an optimization, never a correctness dependency.
 - `capabilities()` flips `warmPool: true` and drops `coldStartEstimateMs` to the measured claim latency.
 - Stage 1's seams are already compatible: suspend/resume operate on the adopted CR identically; `release`/adopt semantics unchanged.
