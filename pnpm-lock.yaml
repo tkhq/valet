@@ -715,6 +715,31 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/sandbox-gateway:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.0
+        version: 1.19.14(hono@4.11.4)
+      '@hono/node-ws':
+        specifier: ^1.0.0
+        version: 1.3.1(@hono/node-server@1.19.14(hono@4.11.4))(hono@4.11.4)
+      hono:
+        specifier: ^4.3.0
+        version: 4.11.4
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.1
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/sandbox-kubernetes:
     dependencies:
       '@kubernetes/client-node':
@@ -8024,7 +8049,7 @@ snapshots:
       google-auth-library: 10.6.2
       p-retry: 4.6.2
       protobufjs: 7.5.6
-      ws: 8.18.0
+      ws: 8.21.1
     optionalDependencies:
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
     transitivePeerDependencies:
@@ -8348,7 +8373,7 @@ snapshots:
 
   '@mistralai/mistralai@2.2.1':
     dependencies:
-      ws: 8.18.0
+      ws: 8.21.1
       zod: 3.25.76
       zod-to-json-schema: 3.25.2(zod@3.25.76)
     transitivePeerDependencies:
@@ -9878,14 +9903,6 @@ snapshots:
     optionalDependencies:
       vite: 6.4.1(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0)
 
-  '@vitest/mocker@4.0.18(vite@6.4.1(@types/node@20.19.39)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))':
-    dependencies:
-      '@vitest/spy': 4.0.18
-      estree-walker: 3.0.3
-      magic-string: 0.30.21
-    optionalDependencies:
-      vite: 6.4.1(@types/node@20.19.39)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0)
-
   '@vitest/mocker@4.0.18(vite@6.4.1(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 4.0.18
@@ -11311,7 +11328,7 @@ snapshots:
       whatwg-encoding: 3.1.1
       whatwg-mimetype: 4.0.0
       whatwg-url: 14.2.0
-      ws: 8.18.0
+      ws: 8.21.1
       xml-name-validator: 5.0.0
     transitivePeerDependencies:
       - bufferutil
@@ -13255,7 +13272,7 @@ snapshots:
   vitest@4.0.18(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       '@vitest/expect': 4.0.18
-      '@vitest/mocker': 4.0.18(vite@6.4.1(@types/node@20.19.39)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
+      '@vitest/mocker': 4.0.18(vite@6.4.1(@types/node@25.0.9)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
       '@vitest/pretty-format': 4.0.18
       '@vitest/runner': 4.0.18
       '@vitest/snapshot': 4.0.18

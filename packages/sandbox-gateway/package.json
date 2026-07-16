@@ -1,0 +1,25 @@
+{
+  "name": "@valet/sandbox-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/bin.js",
+  "types": "./dist/bin.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "start": "node ./dist/bin.js"
+  },
+  "dependencies": {
+    "hono": "^4.3.0",
+    "@hono/node-server": "^1.13.0",
+    "@hono/node-ws": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
+  }
+}

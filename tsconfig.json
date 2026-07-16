@@ -43,6 +43,7 @@
     { "path": "./packages/plugin-workflows" },
     { "path": "./packages/plugin-sandbox-tunnels" },
     { "path": "./packages/plugin-personas" },
+    { "path": "./packages/sandbox-gateway" },
     { "path": "./packages/api" }
   ]
 }
