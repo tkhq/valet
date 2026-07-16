@@ -33,6 +33,7 @@ import { modelsRouter } from "./routes/models.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { registerWsRoutes } from "./routes/ws.js";
+import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
 import { mountWebStatic } from "./static-web.js";
 
@@ -164,6 +165,12 @@ export function createApp(
   // after serve().
   const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
   registerWsRoutes(app, upgradeWebSocket);
+  // Gateway reverse-proxy: WS upgrade `GET` registered before the HTTP
+  // `ALL` on the same `/api/sessions/:id/gateway/*` path — `upgradeWebSocket`
+  // only engages on `Upgrade: websocket`, so ordering here is what lets the
+  // HTTP handler still answer everything else on that path.
+  registerGatewayWsProxy(app, upgradeWebSocket);
+  registerGatewayHttpProxy(app);
 
   // Web app static serving + SPA fallback — registered LAST (decision 3):
   // every real route above must get first crack at a request. No-op unless

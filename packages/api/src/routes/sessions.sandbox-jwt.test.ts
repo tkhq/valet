@@ -10,6 +10,7 @@ import { deriveSandboxJwtSecret, verifySandboxJwt } from "../auth/sandbox-tokens
 import { internalToken } from "../lib/internal-auth.js";
 import { agentSessions } from "../schema/index.js";
 import type { SandboxJwtResponse } from "../wire/types.js";
+import { verifyGatewayJwt } from "@valet/sandbox-gateway";
 
 describe("POST /api/sessions/:id/sandbox-jwt", () => {
   let api: TestApi | undefined;
@@ -46,6 +47,18 @@ describe("POST /api/sessions/:id/sandbox-jwt", () => {
     const secret = deriveSandboxJwtSecret(internalToken(), "sbjwt-session-1");
     const verified = verifySandboxJwt(secret, body.token);
     expect(verified).toEqual({ sub: "local-user", sid: "sbjwt-session-1" });
+
+    // Two-package contract (Task 6, sandbox auth gateway plan): the exact
+    // same api-minted token must also verify via `@valet/sandbox-gateway`'s
+    // own verifier — that's what the in-sandbox gateway daemon runs, signed
+    // with the same `deriveSandboxJwtSecret`-derived secret it gets handed
+    // as `VALET_SANDBOX_JWT_SECRET`.
+    const gatewayVerified = verifyGatewayJwt(secret, body.token, "sbjwt-session-1");
+    expect(gatewayVerified).toEqual({ sub: "local-user", sid: "sbjwt-session-1" });
+
+    // Rejected for the wrong sid — proves the gateway verifier enforces
+    // session binding, not just signature/expiry.
+    expect(verifyGatewayJwt(secret, body.token, "some-other-session")).toBeNull();
   });
 
   it("404s for a session owned by a different user", async () => {

@@ -51,6 +51,7 @@
     "@valet/plugin-typefully": "workspace:*",
     "@valet/plugin-workflows": "workspace:*",
     "@valet/sandbox-docker": "workspace:*",
+    "@valet/sandbox-gateway": "workspace:*",
     "@valet/sandbox-kubernetes": "workspace:*",
     "@valet/sandbox-local": "workspace:*",
     "@valet/shared": "workspace:*",
@@ -62,6 +63,7 @@
     "pg": "^8.22.0",
     "tsx": "^4.0.0",
     "typebox": "^1.1.24",
+    "ws": "^8.18.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

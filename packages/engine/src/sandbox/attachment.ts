@@ -97,6 +97,19 @@ export class SandboxAttachment {
   }
 
   /**
+   * Peek the current raw `Sandbox` handle WITHOUT provisioning — `null`
+   * unless the attachment is currently `ready`. Unlike `ensureReady`, this
+   * never kicks a cold provision; it exists for read-only "is the sandbox
+   * currently reachable" callers (sandbox auth gateway plan Task 6's
+   * `gatewayEndpoint()` reverse proxy) that must NOT wake a hibernated or
+   * detached sandbox just to check its status — that's the caller's
+   * `wake`-then-retry job, signaled by this returning `null`.
+   */
+  current(): Sandbox | null {
+    return this._state === "ready" ? this._sandbox : null;
+  }
+
+  /**
    * The backend's declared cold-start estimate (`SandboxCapabilities.coldStartEstimateMs`),
    * exposed so callers building a cold-turn hint (spec decision 7) don't need
    * their own handle on the provider. `forSandbox` attachments have no

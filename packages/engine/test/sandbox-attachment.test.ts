@@ -135,6 +135,29 @@ describe("SandboxAttachment", () => {
     expect(provider.createCalls).toBe(0);
   });
 
+  it("1b. current() peeks without provisioning: null while detached, the live sandbox once ready, null again after destroy", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 1000 });
+
+    // Detached: current() must not kick a provision.
+    expect(attachment.current()).toBeNull();
+    expect(provider.createCalls).toBe(0);
+
+    const d = provider.nextDeferred();
+    const opPromise = wrapper.readFile("/x.txt");
+    // Still provisioning: current() stays null, no false-positive readiness.
+    expect(attachment.current()).toBeNull();
+
+    d.resolve(makeFakeSandbox("sb-current"));
+    await opPromise;
+    expect(attachment.state).toBe("ready");
+    expect(attachment.current()?.id).toBe("sb-current");
+
+    await attachment.destroy();
+    expect(attachment.current()).toBeNull();
+  });
+
   it("2. warm() kicks exactly one create even when called 5x concurrently", async () => {
     const provider = new FakeProvider();
     const attachment = new SandboxAttachment(provider, {});

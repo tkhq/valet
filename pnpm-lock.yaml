@@ -107,6 +107,9 @@ importers:
       '@valet/sandbox-docker':
         specifier: workspace:*
         version: link:../sandbox-docker
+      '@valet/sandbox-gateway':
+        specifier: workspace:*
+        version: link:../sandbox-gateway
       '@valet/sandbox-kubernetes':
         specifier: workspace:*
         version: link:../sandbox-kubernetes
@@ -140,6 +143,9 @@ importers:
       typebox:
         specifier: ^1.1.24
         version: 1.1.37
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.1
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -8065,7 +8071,7 @@ snapshots:
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.11.4)
       hono: 4.11.4
-      ws: 8.18.0
+      ws: 8.21.1
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
