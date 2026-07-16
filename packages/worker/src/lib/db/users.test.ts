@@ -63,9 +63,10 @@ describe('deleteUser', () => {
   });
 
   it('credentials do NOT cascade when the owning users row is deleted', () => {
-    // Migration 0066 deliberately dropped the cascade on `credentials` so an
-    // admin can review a deleted user's encrypted secrets before purging.
-    // This test pins that intent: deleting the users row directly must
+    // `credentials.owner_id` is polymorphic (users.id OR orgs.id,
+    // discriminated by owner_type), so the table has never carried a FK
+    // to users and cascade-on-delete was never possible. This test pins
+    // that structural invariant: deleting the users row directly must
     // leave the credentials row intact.
     const { db, sqlite } = createTestDb();
 

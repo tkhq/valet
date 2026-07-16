@@ -203,12 +203,14 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
         // Non-JSON 401 bodies (CF WAF interstitial, proxy text/plain)
         // are attributed to an intermediary and left alone. Route-level
         // 401s (workflow ownership check with an explicit UNAUTHORIZED
-        // code) surface as ordinary errors. We throw after clearing
-        // auth so send() rejects consistently with every other error
-        // path — callers that `await send(...)` before firing follow-up
-        // work must not see a silent resolution on auth failure. The
-        // outer catch handles the shared cleanup (drop the empty
-        // assistant bubble, set status/error).
+        // code) surface as ordinary errors. We throw so control lands
+        // in the outer catch, which handles UI cleanup uniformly with
+        // every other error path (drop the empty assistant bubble, set
+        // status='error', set error). The throw does NOT propagate to
+        // callers of send() — send()'s own catch swallows it — so
+        // `await send(...)` still resolves; callers that need to
+        // short-circuit on auth failure should inspect the hook's
+        // `error` / `status` state, not the promise.
         if (
           resp.status === 401 &&
           shouldClearAuthOn401(authClearSignalFrom(parsedRaw))

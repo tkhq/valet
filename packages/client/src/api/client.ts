@@ -68,8 +68,21 @@ export function authClearSignalFrom(
   parsed: Record<string, unknown> | null,
 ): { code: string | null | undefined; hasJsonBody: boolean } {
   const rawCode = parsed?.code;
+  // Only strings and explicit `null` map to "code we understand". A
+  // non-string, non-null value (number, boolean, object) means the body
+  // carried a `code` field of an unexpected type — that's evidence of a
+  // Valet route or intermediary bug, NOT a bare 401. Return a sentinel
+  // so `shouldClearAuthOn401` sees "code present, unknown" (does not
+  // clear) rather than "code missing" (would clear). Anything else
+  // (undefined key, no `code` at all) maps to undefined.
   const code =
-    typeof rawCode === 'string' ? rawCode : rawCode === null ? null : undefined;
+    typeof rawCode === 'string'
+      ? rawCode
+      : rawCode === null
+        ? null
+        : rawCode === undefined
+          ? undefined
+          : '__non_string_code__';
   return { code, hasJsonBody: parsed !== null };
 }
 

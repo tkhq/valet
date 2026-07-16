@@ -220,13 +220,14 @@ export async function deleteUser(db: AppDb, userId: string): Promise<void> {
   // drops the ON DELETE CASCADE on these tables. No-ops after the cascade.
   await deleteUserAuthSessions(db, userId);
   await deleteUserApiTokens(db, userId);
-  // Credentials cleanup runs LAST. Migration 0066 removed the cascade on
-  // `credentials` so that an admin can review an ex-user's stored secrets
-  // before purging them; the tradeoff is that if this step fails we leave
-  // orphan credentials rows (encrypted blobs with no valid owner — largely
-  // inert since there's no user id to authenticate against). Recovery is
-  // straightforward: re-insert a row into `users` with the same id and
-  // re-run `DELETE /users/:id` to clean them up.
+  // Credentials cleanup runs LAST. `credentials.owner_id` is polymorphic —
+  // it holds either a users.id or an orgs.id, discriminated by owner_type —
+  // so the table has NEVER carried a FK to users, and cascade-on-delete
+  // was never possible. Cleanup must live in code. If this step fails we
+  // leave orphan credentials rows (encrypted blobs with no valid owner —
+  // largely inert since there's no user id to authenticate against).
+  // Recovery is straightforward: re-insert a row into `users` with the
+  // same id and re-run `DELETE /users/:id` to clean them up.
   await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
 }
 
