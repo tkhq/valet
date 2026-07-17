@@ -72,7 +72,10 @@ describe.skipIf(!registryPresent())("KubernetesImageBuilder (live rancher-deskto
       buildId = dispatched.buildId;
 
       let status = await builder.status(buildId);
-      const deadline = Date.now() + 180_000;
+      // Generous budget: a cold run pulls the buildkit image AND the base
+      // image before the first build step, which can dominate wall-clock on
+      // a busy node. Live-infra tests get slack, not tight deadlines.
+      const deadline = Date.now() + 420_000;
       while ((status.state === "queued" || status.state === "building") && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000));
         status = await builder.status(buildId);
@@ -84,6 +87,6 @@ describe.skipIf(!registryPresent())("KubernetesImageBuilder (live rancher-deskto
       // without throwing (the Job itself is left standing until cancel()).
       await expect(builder.status(buildId)).resolves.toBeDefined();
     },
-    240_000,
+    480_000,
   );
 });

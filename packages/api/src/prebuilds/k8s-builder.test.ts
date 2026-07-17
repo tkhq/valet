@@ -466,6 +466,36 @@ describe("KubernetesImageBuilder", () => {
     expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(false);
   });
 
+  it("status() reports failed (not stuck) when the Job was deleted out-of-band (e.g. kubectl delete job) while building, and releases the queue slot", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi);
+    const first = await builder.build(baseSpec());
+    const second = await builder.build(baseSpec({ prebuildId: "pb-2" }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // First build is actively running.
+    jobsApi.setStatus("valet-prebuild-pb-1", { active: 1 });
+    const building = await builder.status(first.buildId);
+    expect(building.state).toBe("building");
+    // Second build is still parked in the local FIFO behind the concurrency cap.
+    expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(false);
+
+    // Someone runs `kubectl delete job` on the in-flight Job directly (not via
+    // our own cancel()/cleanup path) — the Job vanishes out from under us.
+    jobsApi.jobs.get("valet-prebuild-pb-1")!.deleted = true;
+
+    const status = await builder.status(first.buildId);
+    expect(status.state).toBe("failed");
+    expect(status.error).toBe("build job deleted");
+    // Terminal cleanup ran too, same as any other failed/pushed transition.
+    expect(jobsApi.deletedConfigMaps).toContain("valet-prebuild-pb-1-dockerfile");
+
+    // The queue slot the deleted build occupied must be released so the
+    // second, still-queued build gets dispatched.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(true);
+  });
+
   it("cancel() deletes the Job, Secret, and ConfigMap", async () => {
     const jobsApi = new FakeJobsApi();
     const builder = newBuilder(jobsApi);

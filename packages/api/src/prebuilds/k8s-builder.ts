@@ -360,9 +360,26 @@ export class KubernetesImageBuilder implements ImageBuilder {
 
     const jobStatus = await this.jobsApi.getNamespacedJob({ namespace: this.namespace, name: jobName(rec.resourceId) });
     if (jobStatus === null) {
-      // Job already deleted (cancel, or a previous terminal poll's
-      // cleanup raced a caller's status() — cleanup only removes the
-      // Secret/ConfigMap, never the Job itself, so this indicates cancel).
+      if (rec.state === "pushed" || rec.state === "failed") {
+        // Already terminal (typically `cancel()`, which sets rec.state to
+        // "failed" itself before deleting the Job) — nothing new to map.
+        return { state: rec.state, error: rec.error };
+      }
+      // We believed this build was queued-and-dispatched or actively
+      // building, but the Job is gone — e.g. someone ran `kubectl delete
+      // job` directly on the in-flight Job rather than going through our
+      // `cancel()`. Map that to a terminal failure (and run the same
+      // cleanup + queue-release path a normal terminal poll takes) instead
+      // of leaving the row stuck at its last-observed state forever, which
+      // would also wedge the concurrency slot it occupies.
+      rec.state = "failed";
+      rec.error = rec.error ?? "build job deleted";
+      if (!rec.cleanedUp) {
+        rec.cleanedUp = true;
+        await this.cleanupSecretsAndConfig(rec);
+        this.running.delete(buildId);
+        void this.pump();
+      }
       return { state: rec.state, error: rec.error };
     }
 
