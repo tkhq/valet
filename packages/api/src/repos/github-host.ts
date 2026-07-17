@@ -188,21 +188,21 @@ async function listInstallationRepos(ctx: RepoHostContext): Promise<RepoListItem
     .from(githubInstallations)
     .where(and(eq(githubInstallations.orgId, ctx.orgId), eq(githubInstallations.suspended, false)));
 
-  const items: RepoListItem[] = [];
-  for (const row of rows) {
-    let token: string | null;
-    try {
-      token = await mintInstallationToken(appDeps, ctx.orgId, row.accountLogin);
-    } catch (err) {
-      console.error(`github-host: minting installation token for ${row.accountLogin} failed:`, err);
-      continue;
-    }
-    if (!token) continue;
-    const repos = await fetchRepoPage(ctx, "/installation/repositories?per_page=100", token);
-    if (!repos) continue;
-    for (const r of repos) items.push(mapGitHubRepo(r));
-  }
-  return items;
+  const perInstallation = await Promise.all(
+    rows.map(async (row): Promise<RepoListItem[]> => {
+      let token: string | null;
+      try {
+        token = await mintInstallationToken(appDeps, ctx.orgId, row.accountLogin);
+      } catch (err) {
+        console.error(`github-host: minting installation token for ${row.accountLogin} failed:`, err);
+        return [];
+      }
+      if (!token) return [];
+      const repos = await fetchRepoPage(ctx, "/installation/repositories?per_page=100", token);
+      return repos ? repos.map(mapGitHubRepo) : [];
+    }),
+  );
+  return perInstallation.flat();
 }
 
 async function listUserOrPatRepos(ctx: RepoHostContext): Promise<RepoListItem[]> {

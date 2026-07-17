@@ -211,6 +211,52 @@ describe("GET /api/repos", () => {
     expect(body.connected).toBe(true);
   });
 
+  it("soft-degrades a single failing installation among several: still 200, partial results from the healthy one", async () => {
+    api = await bootTestApi();
+    useFixture({
+      listInstallations: () => ({ body: [] }),
+      convertManifest: () => ({
+        body: {
+          id: 42,
+          slug: "valet-acme",
+          name: "Valet Acme",
+          client_id: "Iv1.client",
+          client_secret: "oauth-client-secret",
+          webhook_secret: "the-webhook-secret",
+          pem: TEST_PEM,
+          html_url: "https://github.com/apps/valet-acme",
+        },
+      }),
+      // Installation 999 (acme) mints fine; installation 998 (bob) fails to
+      // mint — exercises the per-installation try/catch that lets the
+      // parallelized `Promise.all` in `listInstallationRepos` still return
+      // the healthy installation's repos.
+      createInstallationToken: (installationId) =>
+        installationId === "998"
+          ? { status: 500, body: { message: "boom" } }
+          : {
+              body: {
+                token: "installation-secret-token",
+                expires_at: new Date(Date.now() + 3600_000).toISOString(),
+              },
+            },
+      listInstallationRepositories: () => ({
+        body: { total_count: 1, repositories: [rawRepo({ id: 1, full_name: "acme/one" })] },
+      }),
+      listUserRepos: () => ({ body: [] }),
+    });
+    await configureOrgApp(api.baseUrl);
+    await seedInstallationRow();
+    await seedInstallationRow({ id: "ghi_seed_2", installationId: 998, accountLogin: "bob" });
+    await saveUserCredential("user-secret-token", "local-user-login");
+
+    const res = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetReposResponse;
+    expect(body.repos.map((r) => r.fullName)).toEqual(["acme/one"]);
+    expect(body.installed).toBe(true);
+  });
+
   it("falls back to the org-owned PAT for personal-tier listing when the user has no connection", async () => {
     api = await bootTestApi();
     useFixture({
