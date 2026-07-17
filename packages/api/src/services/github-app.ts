@@ -230,28 +230,63 @@ async function loadLinkedUserLoginMap(db: AppQueryable): Promise<Map<string, str
   return map;
 }
 
+const MAX_INSTALLATION_PAGES = 10;
+
+/** Parses the `next` URL out of a GitHub `Link` response header (RFC 8288
+ * `<url>; rel="next", <url>; rel="last"` format). `null` when there's no
+ * `rel="next"` entry (i.e. the last page). */
+function parseNextLink(linkHeader: string | null): string | null {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(",")) {
+    const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+/** Fetches every page of `GET /app/installations` (App JWT auth), following
+ * the `Link: rel="next"` header rather than assuming `per_page=100` fits
+ * everything — an org with >100 installations would otherwise silently look
+ * like page-2+ installations were removed. Capped at
+ * `MAX_INSTALLATION_PAGES` pages as a sanity bound against a misbehaving or
+ * malicious upstream looping forever. */
+async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<ParsedInstallation[]> {
+  const installations: ParsedInstallation[] = [];
+  let url: string | null = `${githubApiUrl(deps)}/app/installations?per_page=100`;
+  let pages = 0;
+
+  while (url && pages < MAX_INSTALLATION_PAGES) {
+    pages++;
+    const res: Response = await githubFetch(deps)(url, {
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "Valet-App",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`GitHub API GET /app/installations returned ${res.status}`);
+    }
+    installations.push(...parseInstallationsResponse(await res.json()));
+    url = parseNextLink(res.headers.get("link"));
+  }
+
+  return installations;
+}
+
 /** Discovers the org's GitHub App installations via `GET /app/installations`
- * (App JWT auth), upserts `github_installations` by `(orgId,
- * installationId)`, deletes rows absent from the response, and sets
- * `linkedUserId` for installations whose account login matches a connected
- * user's GitHub login. Returns the org's installation rows (post-sync).
- * `[]` when no app is configured for the org. */
+ * (App JWT auth, paginated — see `fetchAllInstallations`), upserts
+ * `github_installations` by `(orgId, installationId)`, deletes rows absent
+ * from the response, and sets `linkedUserId` for installations whose account
+ * login matches a connected user's GitHub login. Returns the org's
+ * installation rows (post-sync). `[]` when no app is configured for the
+ * org. */
 export async function discoverInstallations(deps: GithubAppDeps, orgId: string): Promise<GithubInstallationRow[]> {
   const config = await loadAppConfig(deps, orgId);
   if (!config) return [];
 
   const jwt = mintAppJwt(config);
-  const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app/installations?per_page=100`, {
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      Accept: "application/vnd.github+json",
-      "User-Agent": "Valet-App",
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`GitHub API GET /app/installations returned ${res.status}`);
-  }
-  const installations = parseInstallationsResponse(await res.json());
+  const installations = await fetchAllInstallations(deps, jwt);
 
   const [existingRows, linkedByLogin] = await Promise.all([
     deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId)),
@@ -352,7 +387,17 @@ export async function mintInstallationToken(
 
   if (row.cachedToken !== null && row.cachedTokenExpiresAt !== null) {
     if (row.cachedTokenExpiresAt - CACHED_TOKEN_MARGIN_MS > nowMs) {
-      return decryptSecret(row.cachedToken, deps.key);
+      try {
+        return decryptSecret(row.cachedToken, deps.key);
+      } catch {
+        // A rekeyed VALET_ENCRYPTION_KEY or a corrupted row makes the cached
+        // token undecryptable — never let that throw and take down every
+        // installation-token resolution. Log (no secret material) and fall
+        // through to a fresh mint below, which overwrites the bad cache.
+        console.error(
+          `mintInstallationToken: failed to decrypt cached token for installation ${row.installationId} (org ${orgId}); re-minting`,
+        );
+      }
     }
   }
 

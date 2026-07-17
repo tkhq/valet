@@ -12,7 +12,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, githubInstallations } from "../schema/index.js";
 import {
   discoverInstallations,
@@ -189,6 +189,58 @@ describe("github-app service", () => {
       expect(payload.iss).toBe(baseConfig.appId);
     });
 
+    it("follows Link: rel=\"next\" pagination before computing upserts/deletions", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      // Seed a pre-existing row for an installation (333) that is genuinely
+      // absent from BOTH pages of the new response — it must be deleted.
+      await db.insert(githubInstallations).values({
+        id: "ghi_stale",
+        orgId,
+        installationId: 333,
+        accountLogin: "stale",
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      // The Link "next" URL is only known once startGithubFixture returns a
+      // port; the handler closure reads `fixture.url` lazily at request time
+      // (after assignment below), so a single start suffices.
+      fixture = startGithubFixture({
+        listInstallations: (query) => {
+          if (query.page === "2") {
+            return {
+              body: [
+                { id: 222, account: { login: "page2user", type: "User" }, repository_selection: "all", suspended_at: null },
+              ],
+            };
+          }
+          return {
+            body: [
+              { id: 111, account: { login: "page1user", type: "Organization" }, repository_selection: "all", suspended_at: null },
+            ],
+            headers: {
+              link: `<${fixture?.url}/app/installations?per_page=100&page=2>; rel="next"`,
+            },
+          };
+        },
+      });
+
+      const rows = await discoverInstallations(deps(), orgId);
+      const installationIds = rows.map((r) => r.installationId).sort();
+      expect(installationIds).toEqual([111, 222]);
+
+      const allRows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+      const remainingIds = allRows.map((r) => r.installationId).sort();
+      expect(remainingIds).toEqual([111, 222]); // 333 (genuinely absent) is deleted, 111/222 survive
+
+      expect(fixture.calls).toHaveLength(2);
+      expect(fixture.calls[0].query.page).toBeUndefined();
+      expect(fixture.calls[1].query.page).toBe("2");
+    });
+
     it("removes rows whose installation is absent from a later response", async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
       let installationsBody: unknown[] = [
@@ -295,6 +347,32 @@ describe("github-app service", () => {
       const token = await mintInstallationToken(d, orgId, "acme");
       expect(token).toBe("cached-token");
       expect(fixture.calls).toHaveLength(0);
+    });
+
+    it("re-mints and overwrites the cache when the cached token fails to decrypt (e.g. rekeyed VALET_ENCRYPTION_KEY)", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      const wrongKey = deriveSecretKey("a-completely-different-key");
+      const { encryptSecret } = await import("../lib/secret-crypto.js");
+      await seedInstallation({
+        // Encrypted under a DIFFERENT key than deps().key below — simulates a
+        // rekeyed VALET_ENCRYPTION_KEY or a corrupted row.
+        cachedToken: encryptSecret("undecryptable-token", wrongKey),
+        cachedTokenExpiresAt: Date.now() + 10 * 60 * 1000, // well past the 5 min margin
+      });
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({
+          body: { token: "freshly-minted-token", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        }),
+      });
+
+      const d = deps();
+      const token = await mintInstallationToken(d, orgId, "acme");
+      expect(token).toBe("freshly-minted-token"); // fell through to a fresh mint, not a throw
+      expect(fixture.calls).toHaveLength(1); // fixture hit
+      expect(fixture.calls[0].path).toBe("/app/installations/999/access_tokens");
+
+      const [row] = await db.select().from(githubInstallations).where(eq(githubInstallations.id, "ghi_1"));
+      expect(decryptSecret(row.cachedToken as string, d.key)).toBe("freshly-minted-token"); // cache replaced, decryptable under the current key
     });
 
     it("re-mints once the cached token is within the 5-minute margin", async () => {

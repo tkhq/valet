@@ -20,6 +20,9 @@ export interface GithubFixtureCall {
   method: string;
   path: string;
   params: Record<string, string>;
+  /** Parsed query string (e.g. `{ per_page: "100", page: "2" }`) — `c.req.path`
+   * drops the query string, so this is the only way tests can assert on it. */
+  query: Record<string, string>;
   authHeader?: string;
   body?: unknown;
 }
@@ -27,11 +30,14 @@ export interface GithubFixtureCall {
 export interface GithubFixtureResponse {
   status?: ContentfulStatusCode;
   body: unknown;
+  /** Extra response headers, e.g. `Link` for pagination. */
+  headers?: Record<string, string>;
 }
 
 export interface GithubFixtureHandlers {
-  /** `GET /app/installations` */
-  listInstallations?: () => GithubFixtureResponse;
+  /** `GET /app/installations`. Receives the request's parsed query string so
+   * multi-page fixtures can branch on `page`/`per_page`. */
+  listInstallations?: (query: Record<string, string>) => GithubFixtureResponse;
   /** `POST /app/installations/:id/access_tokens` */
   createInstallationToken?: (installationId: string) => GithubFixtureResponse;
   /** `GET /user` */
@@ -89,19 +95,35 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
 
   const app = new Hono();
 
-  function record(c: { req: { method: string; path: string; header: (n: string) => string | undefined } }, params: Record<string, string>, body?: unknown) {
+  function record(
+    c: {
+      req: {
+        method: string;
+        path: string;
+        header: (n: string) => string | undefined;
+        query: () => Record<string, string>;
+      };
+    },
+    params: Record<string, string>,
+    body?: unknown,
+  ) {
     calls.push({
       method: c.req.method,
       path: c.req.path,
       params,
+      query: c.req.query(),
       authHeader: c.req.header("authorization") ?? undefined,
       body,
     });
   }
 
   app.get("/app/installations", (c) => {
+    const query = c.req.query();
     record(c, {});
-    const { status, body } = handlers.listInstallations();
+    const { status, body, headers } = handlers.listInstallations(query);
+    if (headers) {
+      for (const [name, value] of Object.entries(headers)) c.header(name, value);
+    }
     return c.json(body as object, status ?? 200);
   });
 
