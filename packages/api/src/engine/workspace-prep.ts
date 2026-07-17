@@ -89,13 +89,46 @@ function repoNameOf(fullName: string): string {
   return idx === -1 ? fullName : fullName.slice(idx + 1);
 }
 
-/** Workspace-relative target clone dir for binding at `index` (position
- * order): the single binding clones into the workspace root itself
- * (`.`, i.e. the sandbox's default cwd); with multiple bindings each gets
- * its own `<repoName>` subdirectory relative to that root. */
-function targetDirFor(repos: RepoBinding[], index: number): string {
-  if (repos.length === 1) return ".";
-  return repoNameOf(repos[index].fullName);
+/** `owner/repo` → `owner` (the segment before the first "/"; empty string
+ * when there is no "/"). */
+function ownerOf(fullName: string): string {
+  const idx = fullName.indexOf("/");
+  return idx === -1 ? "" : fullName.slice(0, idx);
+}
+
+/** Disambiguated dir name for a colliding binding: `<owner>__<repo>` (falls
+ * back to the bare repo name when there's no owner segment to prefix). Uses
+ * `__` rather than `/` so it stays a single flat subdir under the workspace
+ * root. */
+function disambiguatedDirOf(fullName: string): string {
+  const owner = ownerOf(fullName);
+  const repo = repoNameOf(fullName);
+  return owner ? `${owner}__${repo}` : repo;
+}
+
+/**
+ * Workspace-relative target clone dir for every binding, in position order.
+ * A single binding clones into the workspace root itself (`.`, the sandbox's
+ * default cwd). With multiple bindings each gets its own subdir named for its
+ * repo (`<repoName>`) — EXCEPT when two or more bindings share a repo name
+ * (`acme/widgets` + `beta/widgets` both → `widgets`), which would silently
+ * make the second clone target the first's dir (fetch the wrong remote). Every
+ * binding in a colliding group is disambiguated to `<owner>__<repo>`
+ * deterministically; non-colliding bindings keep the plain `<repo>` name.
+ *
+ * Exported for direct unit coverage of the collision layout.
+ */
+export function computeTargetDirs(repos: RepoBinding[]): string[] {
+  if (repos.length === 1) return ["."];
+  const nameCounts = new Map<string, number>();
+  for (const r of repos) {
+    const name = repoNameOf(r.fullName);
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  }
+  return repos.map((r) => {
+    const name = repoNameOf(r.fullName);
+    return (nameCounts.get(name) ?? 0) > 1 ? disambiguatedDirOf(r.fullName) : name;
+  });
 }
 
 /** Runs `sandbox.exec`, converting a rejection into a synthetic failed
@@ -265,10 +298,9 @@ export function buildWorkspacePrep(opts: WorkspacePrepOpts): (sandbox: Sandbox, 
     await installCredentialHelper(sandbox, opts.apiUrl);
     await configureGitIdentity(sandbox, opts.userName, opts.userEmail);
 
+    const dirs = computeTargetDirs(opts.repos);
     for (let index = 0; index < opts.repos.length; index++) {
-      const binding = opts.repos[index];
-      const dir = targetDirFor(opts.repos, index);
-      await prepBinding(sandbox, dir, binding);
+      await prepBinding(sandbox, dirs[index], opts.repos[index]);
     }
   };
 }

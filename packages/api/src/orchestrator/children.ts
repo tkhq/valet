@@ -31,6 +31,7 @@ import {
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 
@@ -342,11 +343,19 @@ export class ChildWatcher {
     const childData = await this.deps.engineStore.getSession(watch.childSessionId);
     if (!childData) throw new Error(`child session not found: ${watch.childSessionId}`);
 
-    const childSession = await this.deps.engineHost.sessionFor(watch.childSessionId, {
-      userId: childData.userId,
-      orgId: childData.orgId,
-      workspace: childData.workspace,
-    });
+    // Centralized meta assembly (repo bindings + git identity). A child that
+    // was spawned with repo bindings gets them prepped here too; one without
+    // returns empty bindings, and `profile` stays unset (headless) exactly as
+    // this watcher path did before — see `loadSessionMeta`.
+    const childSession = await this.deps.engineHost.sessionFor(
+      watch.childSessionId,
+      await loadSessionMeta(this.deps.db, {
+        id: watch.childSessionId,
+        userId: childData.userId,
+        orgId: childData.orgId,
+        workspace: childData.workspace,
+      }),
+    );
     // The spawner always prompts the child's default thread — see
     // `buildChildSpawner`'s `childSession.prompt(...)` call.
     const result = await childSession.thread().awaitResult(watch.queueItemId);

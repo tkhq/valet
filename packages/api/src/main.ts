@@ -12,7 +12,8 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createApp, type AuthWiring } from "./app.js";
 import { buildNodeProviders } from "./providers/node.js";
-import { agentSessions, sessionRepos, users } from "./schema/index.js";
+import { agentSessions } from "./schema/index.js";
+import { loadSessionMeta } from "./engine/session-meta.js";
 import type { Providers } from "./providers/types.js";
 import { loadAuthConfig } from "./auth/config.js";
 import { buildAuthHooks } from "./auth/provisioning.js";
@@ -63,35 +64,11 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
       if (!row) return undefined;
 
       // Repo bindings + git identity (GitHub/repo integration plan, Task 9)
-      // — threaded the same way `profile` is, so a restarted process that
-      // rehydrates a session with unsettled submissions still runs prep on
-      // the first cold sandbox boot.
-      const [repoRows, userRows] = await Promise.all([
-        providers.db
-          .select()
-          .from(sessionRepos)
-          .where(eq(sessionRepos.sessionId, sessionId))
-          .orderBy(sessionRepos.position),
-        providers.db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, row.userId)).limit(1),
-      ]);
-
-      return {
-        userId: row.userId,
-        orgId: row.orgId,
-        workspace: row.workspace,
-        profile: row.profile,
-        repos: repoRows.length
-          ? repoRows.map((r) => ({
-              host: r.host,
-              fullName: r.fullName,
-              cloneUrl: r.cloneUrl,
-              ref: r.ref ?? undefined,
-              auth: r.auth,
-            }))
-          : undefined,
-        userName: userRows[0]?.name,
-        userEmail: userRows[0]?.email,
-      };
+      // — assembled centrally via `loadSessionMeta` so a restarted process
+      // that rehydrates a session with unsettled submissions still runs prep
+      // on the first cold sandbox boot. `profile` is always present here
+      // (the app row column is non-null), satisfying `RestoreSessionMeta`.
+      return { ...(await loadSessionMeta(providers.db, row)), profile: row.profile };
     },
     sessionFor: (sessionId, meta) => providers.engineHost.sessionFor(sessionId, meta),
   };

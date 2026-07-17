@@ -32,6 +32,7 @@ import {
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDropLog } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 
 export interface AdmitSignalDeps {
   db: AppDb;
@@ -201,11 +202,19 @@ async function resolveThread(
 export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs): Promise<PromptReceipt> {
   const { toData } = await authorizeEdge(deps, args);
 
-  const session = await deps.engineHost.sessionFor(args.to, {
-    userId: toData.userId,
-    orgId: toData.orgId,
-    workspace: toData.workspace,
-  });
+  // Centralized meta assembly (repo bindings + git identity). `args.to` is
+  // an orchestrator or regular session id; orchestrator ids carry no repo
+  // rows so this returns empty bindings, and `profile` stays unset (headless)
+  // exactly as this path did before — see `loadSessionMeta`.
+  const session = await deps.engineHost.sessionFor(
+    args.to,
+    await loadSessionMeta(deps.db, {
+      id: args.to,
+      userId: toData.userId,
+      orgId: toData.orgId,
+      workspace: toData.workspace,
+    }),
+  );
   const thread = await resolveThread(deps, args, session, toData);
 
   try {

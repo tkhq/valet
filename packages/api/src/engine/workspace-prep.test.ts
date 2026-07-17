@@ -166,6 +166,38 @@ describe("buildWorkspacePrep", () => {
       ]);
     });
 
+    it("disambiguates colliding repo names to <owner>__<repo> so the second binding never targets the first's dir", async () => {
+      const sandbox = new RecordingSandbox();
+      const repos = [
+        binding({ fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" }),
+        binding({ fullName: "beta/widgets", cloneUrl: "https://github.com/beta/widgets.git" }),
+      ];
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos });
+      await prep(sandbox, 1);
+      const cloneCommands = sandbox.execCalls.map((c) => c.command).filter((c) => c.startsWith("git clone"));
+      expect(cloneCommands).toEqual([
+        "git clone 'https://github.com/acme/widgets.git' 'acme__widgets'",
+        "git clone 'https://github.com/beta/widgets.git' 'beta__widgets'",
+      ]);
+    });
+
+    it("only disambiguates the colliding group — non-colliding bindings keep the plain <repo> dir", async () => {
+      const sandbox = new RecordingSandbox();
+      const repos = [
+        binding({ fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" }),
+        binding({ fullName: "beta/widgets", cloneUrl: "https://github.com/beta/widgets.git" }),
+        binding({ fullName: "acme/gadgets", cloneUrl: "https://github.com/acme/gadgets.git" }),
+      ];
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos });
+      await prep(sandbox, 1);
+      const cloneCommands = sandbox.execCalls.map((c) => c.command).filter((c) => c.startsWith("git clone"));
+      expect(cloneCommands).toEqual([
+        "git clone 'https://github.com/acme/widgets.git' 'acme__widgets'",
+        "git clone 'https://github.com/beta/widgets.git' 'beta__widgets'",
+        "git clone 'https://github.com/acme/gadgets.git' 'gadgets'",
+      ]);
+    });
+
     it("clones with --branch when ref is set", async () => {
       const sandbox = new RecordingSandbox();
       const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding({ ref: "release/1.0" })] });

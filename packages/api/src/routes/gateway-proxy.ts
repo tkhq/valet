@@ -52,6 +52,7 @@ import { and, eq } from "drizzle-orm";
 import { WebSocket as BackendWebSocket, type RawData } from "ws";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 
 type SessionRow = typeof agentSessions.$inferSelect;
 
@@ -227,12 +228,10 @@ async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
 
   let session;
   try {
-    session = await c.var.providers.engineHost.sessionFor(sessionId, {
-      userId: row.userId,
-      orgId: row.orgId,
-      workspace: row.workspace,
-      profile: row.profile === "full" ? "full" : "headless",
-    });
+    session = await c.var.providers.engineHost.sessionFor(
+      sessionId,
+      await loadSessionMeta(c.var.providers.db, row),
+    );
   } catch (err) {
     console.error(`gateway-proxy: sessionFor(${sessionId}) failed:`, err);
     return c.json({ error: "sandbox not ready", wake: true }, 409);
@@ -379,12 +378,10 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
 
             let session;
             try {
-              session = await providers.engineHost.sessionFor(sessionId, {
-                userId: row.userId,
-                orgId: row.orgId,
-                workspace: row.workspace,
-                profile: row.profile === "full" ? "full" : "headless",
-              });
+              session = await providers.engineHost.sessionFor(
+                sessionId,
+                await loadSessionMeta(providers.db, row),
+              );
             } catch (err) {
               console.error(`gateway-proxy ws: sessionFor(${sessionId}) failed:`, err);
               ws.close(4009, "sandbox not ready");

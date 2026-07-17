@@ -4,6 +4,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseOrchestratorSessionId } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -258,12 +259,7 @@ sessionsRouter.get("/:id", async (c) => {
   const { engineHost } = c.var.providers;
   let model: string | undefined;
   if (engineHost.isLive(id)) {
-    const engineSession = await engineHost.sessionFor(id, {
-      userId: row.userId,
-      orgId: row.orgId,
-      workspace: row.workspace,
-      profile: row.profile,
-    });
+    const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
     model = engineSession.options.model.id;
   }
 
@@ -304,12 +300,7 @@ sessionsRouter.patch("/:id", async (c) => {
     return c.json({ error: "model is required" }, 400);
   }
 
-  const engineSession = await engineHost.sessionFor(id, {
-    userId: row.userId,
-    orgId: row.orgId,
-    workspace: row.workspace,
-    profile: row.profile,
-  });
+  const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
   try {
     await engineSession.setModel(body.model);
   } catch (err) {
@@ -395,12 +386,7 @@ sessionsRouter.post("/:id/pause", async (c) => {
     return c.json({ error: "a turn is running" }, 409);
   }
 
-  const session = await engineHost.sessionFor(id, {
-    userId: row.userId,
-    orgId: row.orgId,
-    workspace: row.workspace,
-    profile: row.profile,
-  });
+  const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
   await session.attachment.suspend();
 
   // `suspend()` silently no-ops unless the attachment was `ready` — only

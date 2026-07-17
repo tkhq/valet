@@ -21,6 +21,7 @@ import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { busEventToWire, type WireEventDraft } from "../engine/bridge.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 import type { ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
 
@@ -85,12 +86,16 @@ export function registerWsRoutes(
             // We DO NOT read the persisted entries here — the client loads
             // history per-thread via REST so reconnects don't wipe the
             // currently-visible thread when it isn't the default.
-            const engineSession = await providers.engineHost.sessionFor(sessionId, {
-              userId: row.userId,
-              orgId: row.orgId,
-              workspace: row.workspace,
-              profile: row.profile,
-            });
+            //
+            // The WS is the FIRST touch in the web flow (the browser opens
+            // this stream before POSTing the first prompt), so the meta MUST
+            // carry repo bindings — otherwise the session caches a prep-less
+            // attachment and repo-bound sessions never clone. `loadSessionMeta`
+            // assembles the complete meta (repos + git identity included).
+            const engineSession = await providers.engineHost.sessionFor(
+              sessionId,
+              await loadSessionMeta(providers.db, row),
+            );
             await engineSession.ensureDefaultThread();
 
             send(ws, {
