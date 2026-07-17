@@ -496,6 +496,53 @@ describe("KubernetesImageBuilder", () => {
     expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(true);
   });
 
+  it("status() called between build() and Job creation returns queued/building untouched — no ConfigMap delete, no false failure", async () => {
+    const jobsApi = new FakeJobsApi();
+    // Gate createNamespacedJob on a test-controlled promise so we can poll
+    // status() while dispatch() is still in flight (has created the
+    // ConfigMap but not yet the Job).
+    let releaseJobCreate!: () => void;
+    const jobCreateGate = new Promise<void>((resolve) => {
+      releaseJobCreate = resolve;
+    });
+    const realCreateJob = jobsApi.createNamespacedJob.bind(jobsApi);
+    jobsApi.createNamespacedJob = async (params) => {
+      await jobCreateGate;
+      return realCreateJob(params);
+    };
+
+    const builder = newBuilder(jobsApi);
+    const { buildId } = await builder.build(baseSpec());
+    // Let dispatch() run far enough to create the ConfigMap and block on the
+    // gated createNamespacedJob call.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(true);
+    expect(jobsApi.jobs.has("valet-prebuild-pb-1")).toBe(false);
+
+    // The Job doesn't exist yet — getNamespacedJob would return null. Racing
+    // status() here must NOT mark the build failed or delete the ConfigMap
+    // dispatch just created.
+    const raced = await builder.status(buildId);
+    expect(raced.state === "queued" || raced.state === "building").toBe(true);
+    expect(raced.error).toBeUndefined();
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(true);
+    expect(jobsApi.deletedConfigMaps).not.toContain("valet-prebuild-pb-1-dockerfile");
+
+    // Release dispatch — the build should proceed normally to building/pushed.
+    releaseJobCreate();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(jobsApi.jobs.has("valet-prebuild-pb-1")).toBe(true);
+
+    jobsApi.setStatus("valet-prebuild-pb-1", { active: 1 });
+    const building = await builder.status(buildId);
+    expect(building.state).toBe("building");
+
+    jobsApi.setStatus("valet-prebuild-pb-1", { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] });
+    const pushed = await builder.status(buildId);
+    expect(pushed.state).toBe("pushed");
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(false);
+  });
+
   it("cancel() deletes the Job, Secret, and ConfigMap", async () => {
     const jobsApi = new FakeJobsApi();
     const builder = newBuilder(jobsApi);

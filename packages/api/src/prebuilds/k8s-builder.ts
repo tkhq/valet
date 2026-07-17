@@ -276,6 +276,15 @@ interface BuildRecord {
   error?: string;
   cleanedUp: boolean;
   hasGitToken: boolean;
+  /** Set true the instant `dispatch()`'s `createNamespacedJob` call
+   * succeeds. `status()` uses this — NOT `rec.state` — to tell "the Job
+   * hasn't been created yet (dispatch still creating the ConfigMap/Secret,
+   * or not yet scheduled)" apart from "the Job WAS created and is now gone
+   * out-of-band". Only the latter is a real failure; the former is a race
+   * between a `status()` poll landing right after `build()`/`pump()` return
+   * and the fire-and-forget `dispatch()` that hasn't reached
+   * `createNamespacedJob` yet — see the `status()` null-Job branch. */
+  jobCreated: boolean;
 }
 
 export interface KubernetesImageBuilderOpts {
@@ -343,6 +352,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
       state: "queued",
       cleanedUp: false,
       hasGitToken: Boolean(spec.gitToken),
+      jobCreated: false,
     });
     this.queue.push(buildId);
     void this.pump();
@@ -363,6 +373,16 @@ export class KubernetesImageBuilder implements ImageBuilder {
       if (rec.state === "pushed" || rec.state === "failed") {
         // Already terminal (typically `cancel()`, which sets rec.state to
         // "failed" itself before deleting the Job) — nothing new to map.
+        return { state: rec.state, error: rec.error };
+      }
+      if (!rec.jobCreated) {
+        // `dispatch()` hasn't reached `createNamespacedJob` yet (it's still
+        // creating the ConfigMap/Secret, or hasn't run at all) — this
+        // `status()` call raced `build()`/`pump()`. There is no Job to have
+        // gone missing; report the current (queued/building) state
+        // untouched. Do NOT run cleanup here — the ConfigMap dispatch just
+        // created (or is about to) must not be deleted out from under it,
+        // or the Job dispatch creates next fails to mount it.
         return { state: rec.state, error: rec.error };
       }
       // We believed this build was queued-and-dispatched or actively
@@ -533,6 +553,11 @@ export class KubernetesImageBuilder implements ImageBuilder {
         resources: this.resources,
       });
       await this.jobsApi.createNamespacedJob({ namespace: this.namespace, body: manifest });
+      // From this point on, a `status()` poll that sees a missing Job means
+      // the Job WAS created and is now gone out-of-band — not that dispatch
+      // is still in flight. Set this before the cancelled-check below so a
+      // `cancel()` racing right here still sees a Job it needs to delete.
+      rec.jobCreated = true;
       if (this.cancelled.has(buildId)) {
         await this.jobsApi.deleteNamespacedJob({ namespace: this.namespace, name: jobName(rec.resourceId) });
         await this.cleanupSecretsAndConfig(rec);
