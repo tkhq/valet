@@ -10,6 +10,7 @@ export {
   SandboxSupersededError,
   SandboxUnavailableError,
   SandboxStartupError,
+  SandboxPreparationError,
 } from "./errors.js";
 export {
   parseMarkdownArtifact,

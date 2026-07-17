@@ -1102,6 +1102,21 @@ export interface CreateSessionOptions {
    *    stamps `StreamOptions.apiKey` (an `undefined` key preserves env fallback).
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
+  /**
+   * Optional host-provided post-provision prep hook. Absent === no prep —
+   * existing paths unchanged (the provision path executes exactly today's
+   * statements). When present, it runs once per (sandbox, epoch) after a
+   * freshly cold-booted sandbox reports ready and BEFORE any `ensureReady`
+   * waiter is resolved: the host receives the live `Sandbox` handle plus the
+   * attachment epoch and may do first-boot setup (e.g. clone a repo into the
+   * workspace). No waiter ever observes an unprepped sandbox. A rejection is
+   * terminal for that provision — waiters reject with
+   * `sandbox preparation failed: {message}`, the attachment lands in `error`,
+   * and the next `ensureReady` re-provisions and re-runs prep. Only the cold
+   * `doProvision` path runs prep; a hibernation wake (`doResume`, same epoch)
+   * does not.
+   */
+  prepareSandbox?: (sandbox: Sandbox, epoch: number) => Promise<void>;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;

@@ -160,6 +160,25 @@ export class SandboxStartupError extends Error {
 }
 
 /**
+ * Thrown by `SandboxAttachment.doProvision` when the host's optional
+ * `prepareSandbox` hook rejects. Prep runs after a freshly-created sandbox
+ * reports ready but BEFORE any `ensureReady` waiter is resolved, so a prep
+ * failure is terminal for that provision: like `SandboxStartupError`, pending
+ * waiters are rejected with this error immediately (no waiter ever receives an
+ * unprepped sandbox) and the attachment lands in `error`. The next
+ * `ensureReady` re-provisions and re-runs prep. `cause` carries the hook's
+ * original rejection.
+ */
+export class SandboxPreparationError extends Error {
+  readonly code = "sandbox_preparation_failed";
+
+  constructor(public readonly cause?: unknown) {
+    super(`sandbox preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "SandboxPreparationError";
+  }
+}
+
+/**
  * Thrown by `PolicySandbox` when a raw op rejects with a transport-level
  * failure (container death, connection loss) — as opposed to a normal
  * command-level or filesystem error, which rethrows untouched. The

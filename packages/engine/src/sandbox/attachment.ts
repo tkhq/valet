@@ -1,5 +1,17 @@
 import type { Sandbox, SandboxCreateOpts, SandboxProvider } from "../types.js";
-import { SandboxStartupError, SandboxUnavailableError, WorkspaceProvisioningError } from "../errors.js";
+import {
+  SandboxPreparationError,
+  SandboxStartupError,
+  SandboxUnavailableError,
+  WorkspaceProvisioningError,
+} from "../errors.js";
+
+/**
+ * Optional host post-provision prep hook. Awaited once per (sandbox, epoch) in
+ * `doProvision` after readiness and before any waiter resolves; see
+ * `CreateSessionOptions.prepareSandbox`.
+ */
+export type PrepareSandbox = (sandbox: Sandbox, epoch: number) => Promise<void>;
 
 /**
  * Attachment lifecycle states (spec decision 2). `detached` = never
@@ -45,6 +57,7 @@ interface Waiter {
 export class SandboxAttachment {
   private provider: SandboxProvider | null;
   private readonly createOpts: SandboxCreateOpts;
+  private readonly prepare: PrepareSandbox | undefined;
   private readonly estimateMs: number | undefined;
   private noProvider: boolean;
 
@@ -57,9 +70,10 @@ export class SandboxAttachment {
   private readonly waiters = new Set<Waiter>();
   private readonly listeners = new Set<StatusListener>();
 
-  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts) {
+  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, prepare?: PrepareSandbox) {
     this.provider = provider;
     this.createOpts = createOpts;
+    this.prepare = prepare;
     this.estimateMs = provider.capabilities().coldStartEstimateMs;
     this.noProvider = false;
   }
@@ -412,6 +426,34 @@ export class SandboxAttachment {
         await provider.destroy(sandbox.id).catch(() => {});
         return;
       }
+      // Post-provision prep (host `prepareSandbox` seam). Runs once per
+      // (sandbox, epoch) AFTER the sandbox reports ready and BEFORE we mark
+      // `ready`/flush waiters — no waiter may ever observe an unprepped
+      // sandbox (`_sandbox` is still null and `_state` still `provisioning`
+      // throughout, so `current()`/the ensureReady fast-path both miss).
+      // Absent hook: this block is skipped and the path below is byte-identical
+      // to the pre-seam behavior. Only the cold `doProvision` runs prep — a
+      // hibernation wake (`doResume`, same epoch) deliberately does not.
+      if (this.prepare) {
+        try {
+          await this.prepare(sandbox, this._epoch);
+        } catch (prepErr) {
+          // Terminal for this provision. Best-effort destroy the unprepped
+          // sandbox unconditionally so the handle never leaks — even if a
+          // concurrent destroy() raced (it saw `_sandbox` still null and so
+          // could not tear this one down). Then classify as a startup-shaped
+          // failure via the outer catch.
+          await provider.destroy(sandbox.id).catch(() => {});
+          if (this.destroyed) return;
+          throw new SandboxPreparationError(prepErr);
+        }
+      }
+      // A destroy() that raced an in-flight prep wins — discard the (now
+      // prepped) sandbox rather than adopting it.
+      if (this.destroyed) {
+        await provider.destroy(sandbox.id).catch(() => {});
+        return;
+      }
       this._sandbox = sandbox;
       this._state = "ready";
       this.emitStatus();
@@ -422,12 +464,12 @@ export class SandboxAttachment {
       this.emitStatus();
       // Waiters are not force-failed here — a slow/failed provision still
       // lets each caller's own ensureReady timeout govern its wait, per the
-      // spec's "timeout is not degradation" rule (test case 4). The ONE
-      // exception is a `SandboxStartupError`: that's a definite, terminal
-      // startup failure (bad image, crash-loop, unschedulable pod) — not a
-      // "still working" condition — so waiters get the real cause now
-      // instead of a generic timeout later.
-      if (err instanceof SandboxStartupError) {
+      // spec's "timeout is not degradation" rule (test case 4). The
+      // exceptions are terminal failures that will not resolve on their own:
+      // a `SandboxStartupError` (bad image, crash-loop, unschedulable pod) or
+      // a `SandboxPreparationError` (the host prep hook rejected) — waiters
+      // get the real cause now instead of a generic timeout later.
+      if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError) {
         const waiters = [...this.waiters];
         this.waiters.clear();
         for (const w of waiters) w.reject(err);

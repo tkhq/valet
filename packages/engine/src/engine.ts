@@ -1,6 +1,6 @@
 import { VirtualSandboxProvider } from "./providers/sandbox/virtual.js";
 import { Session } from "./session.js";
-import { SandboxAttachment } from "./sandbox/attachment.js";
+import { SandboxAttachment, type PrepareSandbox } from "./sandbox/attachment.js";
 import { PolicySandbox } from "./sandbox/policy.js";
 import type {
   CreateSessionOptions,
@@ -27,7 +27,11 @@ export class Engine {
     const id = opts.id ?? uid("sess");
     if (this.sessions.has(id)) return this.sessions.get(id)!;
 
-    const { attachment, sandbox } = await this.materializeSandbox(opts.sandbox, opts.sandboxReadyTimeoutMs);
+    const { attachment, sandbox } = await this.materializeSandbox(
+      opts.sandbox,
+      opts.sandboxReadyTimeoutMs,
+      opts.prepareSandbox,
+    );
     const session = new Session(id, opts, this.opts.providers, sandbox, attachment);
     this.sessions.set(id, session);
 
@@ -43,6 +47,7 @@ export class Engine {
     const { attachment, sandbox } = await this.materializeSandbox(
       args.options.sandbox,
       args.options.sandboxReadyTimeoutMs,
+      args.options.prepareSandbox,
     );
     const session = await Session.rehydrate(
       data,
@@ -77,13 +82,17 @@ export class Engine {
   private async materializeSandbox(
     arg: Sandbox | SandboxCreateOpts | undefined,
     readyTimeoutMs: number | undefined,
+    prepareSandbox?: PrepareSandbox,
   ): Promise<{ attachment: SandboxAttachment; sandbox: Sandbox }> {
     let attachment: SandboxAttachment;
     if (arg && typeof (arg as Sandbox).readFile === "function") {
+      // A concrete pre-provisioned handle is ready at epoch 1 and never runs
+      // `doProvision`, so there is no cold-boot point at which prep could run —
+      // the host is responsible for prepping a sandbox it hands in ready.
       attachment = SandboxAttachment.forSandbox(arg as Sandbox);
     } else {
       const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
-      attachment = new SandboxAttachment(provider, (arg ?? {}) as SandboxCreateOpts);
+      attachment = new SandboxAttachment(provider, (arg ?? {}) as SandboxCreateOpts, prepareSandbox);
     }
     const sandbox = new PolicySandbox(attachment, { readyTimeoutMs });
     return { attachment, sandbox };
