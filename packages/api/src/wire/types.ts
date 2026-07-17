@@ -1087,3 +1087,62 @@ export type TestLlmProviderResponse = { ok: true; latencyMs: number } | { ok: fa
 export interface DeleteIdentityLinkResponse {
   ok: true;
 }
+
+// ── REST: GitHub App setup (GitHub/repo integration plan, Task 5) ────────
+//
+// `/api/org/github-app` — admin-gated App-manifest setup flow, installation
+// listing, and config removal. `GetGithubAppResponse`/`GithubAppInfo` never
+// carry secret material (private key / OAuth client secret / webhook
+// secret) — only the plain fields `github-app.ts`'s `GithubAppConfig`
+// exposes alongside them. The public webhook (`/webhooks/github-app`) has
+// no wire response type of its own; it always answers `204`/`403`/`404`.
+
+export interface GithubAppInstallationSummary {
+  id: string;
+  installationId: number;
+  accountLogin: string;
+  accountType: string;
+  repositorySelection: string | null;
+  suspended: boolean;
+  linkedUserId: string | null;
+}
+
+export interface GithubAppInfo {
+  appId: string;
+  appSlug: string;
+  htmlUrl: string;
+  installUrl: string;
+}
+
+export interface GetGithubAppResponse {
+  configured: boolean;
+  app?: GithubAppInfo;
+  installations: GithubAppInstallationSummary[];
+  webhook: { mode: "public" | "manual" };
+}
+
+export interface PostGithubAppManifestRequest {
+  /** `"org:{login}"` to create the app under a GitHub organization, or
+   * `"personal"`/omitted for the caller's personal GitHub account. */
+  target?: string;
+}
+
+/** GitHub's app-manifest schema (https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) — only the fields this flow sets. */
+export interface GithubAppManifestWire {
+  name: string;
+  url: string;
+  redirect_url: string;
+  hook_attributes: { url: string; active?: boolean };
+  public: boolean;
+  default_events: string[];
+  permissions: Record<string, string>;
+}
+
+export interface PostGithubAppManifestResponse {
+  /** Where the browser should POST the manifest (GitHub's app-creation form). */
+  url: string;
+  manifest: GithubAppManifestWire;
+  /** HMAC-signed `{orgId, nonce, exp}` — echoed back by GitHub as the
+   * `state` query param on the `redirect_url` callback. */
+  state: string;
+}

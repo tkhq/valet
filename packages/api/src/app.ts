@@ -33,6 +33,7 @@ import { modelsRouter } from "./routes/models.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
+import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
@@ -93,6 +94,13 @@ export function createApp(
   // logged-in Valet user. Mounting BEFORE `buildAuthMiddleware` is what
   // makes this route public — do not move it below that line.
   app.route("/api/channels", channelsRouter);
+
+  // PUBLIC GitHub App webhook ingress — same reasoning as `channelsRouter`
+  // above: the caller is GitHub, not a logged-in Valet user; verification
+  // is HMAC-signature-level (`X-Hub-Signature-256`) inside the router
+  // itself, not the auth gate below. Mounted BEFORE `buildAuthMiddleware`
+  // for the same reason `channelsRouter` is.
+  app.route("/webhooks/github-app", githubAppWebhookRouter);
 
   // Public health check (no auth).
   app.get("/api/health", (c) =>
@@ -161,6 +169,7 @@ export function createApp(
   app.route("/api/org", orgRouter);
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
+  app.route("/api/org/github-app", githubAppRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)
