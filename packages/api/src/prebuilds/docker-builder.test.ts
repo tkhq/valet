@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import { PassThrough } from "node:stream";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -214,6 +214,103 @@ describe("DockerImageBuilder lifecycle", () => {
     expect(capturedSecretPath).toBeDefined();
     // The temp dir (and its secret file) must be gone after the build.
     await expect(readFile(capturedSecretPath as string)).rejects.toThrow();
+  });
+
+  it("pins the git-token secret file to mode 0600 during the build", async () => {
+    let statedMode: number | undefined;
+    const { spawnFn } = fakeSpawnFn((child, call) => {
+      const secretArg = call.args.find((a) => a.startsWith("--secret"));
+      const idx = call.args.indexOf(secretArg ?? "");
+      const srcArg = call.args[idx + 1] ?? "";
+      const secretPath = srcArg.replace("id=git-token,src=", "");
+      // Inspect the file's mode while the build is still "in flight" (the
+      // fake spawn callback runs before the test emits `close`).
+      void stat(secretPath).then((st) => {
+        statedMode = st.mode & 0o777;
+        child.emit("close", 0, null);
+      });
+    });
+    const builder = new DockerImageBuilder({ spawnFn });
+
+    const { buildId } = await builder.build(baseSpec({ gitToken: "ghp_secret" }));
+    await waitForTerminal(builder, buildId);
+
+    expect(statedMode).toBe(0o600);
+  });
+
+  it("marshals a pre-spawn failure (e.g. mkdtemp ENOSPC) to failed without an unhandled rejection, and keeps the queue pumping", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      let call = 0;
+      const mkdtempFn = async (prefix: string): Promise<string> => {
+        call += 1;
+        if (call === 1) {
+          throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+        }
+        return mkdtemp(prefix);
+      };
+      const { spawnFn, calls } = fakeSpawnFn((child) => {
+        child.emit("close", 0, null);
+      });
+      const builder = new DockerImageBuilder({ spawnFn, mkdtempFn });
+
+      const failing = await builder.build(baseSpec({ configId: "cfg-fail" }));
+      const failingStatus = await waitForTerminal(builder, failing.buildId);
+      expect(failingStatus.state).toBe("failed");
+      expect(failingStatus.error).toContain("ENOSPC");
+
+      // The queue must not be wedged: a subsequently queued build still runs.
+      const ok = await builder.build(baseSpec({ configId: "cfg-ok" }));
+      const okStatus = await waitForTerminal(builder, ok.buildId);
+      expect(okStatus.state).toBe("pushed");
+      expect(calls.length).toBe(1); // only the second (successful) build ever spawned docker
+
+      // Give any stray unhandled-rejection microtask a turn to surface.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("cancel on a queued (not-yet-spawned) build marks it failed(cancelled), never spawns it, and lets the running build finish", async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const { spawnFn, calls } = fakeSpawnFn((child) => {
+      void firstGate.then(() => child.emit("close", 0, null));
+    });
+    const builder = new DockerImageBuilder({ spawnFn });
+
+    const first = await builder.build(baseSpec({ configId: "cfg-1" }));
+    const second = await builder.build(baseSpec({ configId: "cfg-2" }));
+
+    // Wait until the first build actually spawns, confirming the second is
+    // still sitting in the queue (never having spawned).
+    const spawnDeadline = Date.now() + 5000;
+    while (calls.length < 1) {
+      if (Date.now() > spawnDeadline) throw new Error("first build never spawned");
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const secondStatusBefore = await builder.status(second.buildId);
+    expect(secondStatusBefore.state).toBe("queued");
+
+    await builder.cancel(second.buildId);
+    const secondStatus = await waitForTerminal(builder, second.buildId);
+    expect(secondStatus.state).toBe("failed");
+    expect(secondStatus.error).toBe("cancelled");
+
+    releaseFirst?.();
+    const firstStatus = await waitForTerminal(builder, first.buildId);
+    expect(firstStatus.state).toBe("pushed");
+
+    // The cancelled queued build never reached spawn — only the first build did.
+    expect(calls.length).toBe(1);
   });
 });
 

@@ -79,12 +79,17 @@ export interface DockerImageBuilderOpts {
    * Tests supply a fake to exercise queueing/lifecycle without touching a
    * real docker daemon. */
   spawnFn?: SpawnFn;
+  /** Injected `mkdtemp`; defaults to `node:fs/promises`'s `mkdtemp`. Tests
+   * substitute a rejecting fake to exercise pre-spawn failure paths (e.g.
+   * ENOSPC/EMFILE) without needing to actually exhaust host resources. */
+  mkdtempFn?: (prefix: string) => Promise<string>;
 }
 
 export class DockerImageBuilder implements ImageBuilder {
   readonly backend = "docker";
 
   private readonly spawnFn: SpawnFn;
+  private readonly mkdtempFn: (prefix: string) => Promise<string>;
   private readonly builds = new Map<string, BuildRecord>();
   private readonly pendingSpecs = new Map<string, PrebuildSpec>();
   private readonly queue: string[] = [];
@@ -93,6 +98,7 @@ export class DockerImageBuilder implements ImageBuilder {
 
   constructor(opts: DockerImageBuilderOpts = {}) {
     this.spawnFn = opts.spawnFn ?? spawn;
+    this.mkdtempFn = opts.mkdtempFn ?? mkdtemp;
   }
 
   async build(spec: PrebuildSpec): Promise<{ buildId: string }> {
@@ -148,6 +154,18 @@ export class DockerImageBuilder implements ImageBuilder {
     this.running = buildId;
     try {
       await this.runBuild(buildId, spec);
+    } catch (err) {
+      // Defense in depth: `runBuild` wraps its entire body in try/catch and
+      // should always resolve normally with `rec.state = "failed"`. If some
+      // unexpected exception still escapes it, don't let it become an
+      // unhandled rejection (crashes the whole api process — Node default)
+      // or wedge the queue — mark the record failed here too so callers
+      // waiting on `status()` aren't stuck at "building" forever.
+      const rec = this.builds.get(buildId);
+      if (rec) {
+        rec.state = "failed";
+        rec.error = err instanceof Error ? err.message : String(err);
+      }
     } finally {
       this.running = null;
       void this.pump();
@@ -159,18 +177,30 @@ export class DockerImageBuilder implements ImageBuilder {
     if (!rec) return;
     rec.state = "building";
 
-    const dockerfile = generateDockerfile({
-      baseImage: spec.baseImage,
-      cloneUrl: spec.cloneUrl,
-      commitSha: spec.commitSha,
-      recipe: spec.recipe,
-      setup: spec.setup,
-    });
-
-    const tmpDir = await mkdtemp(join(tmpdir(), "valet-prebuild-"));
-    const secretPath = join(tmpDir, "git-token");
-    const contextDir = join(tmpDir, "context");
+    // Everything below — including Dockerfile generation and `mkdtemp` — is
+    // inside this try/catch on purpose. A pre-spawn throw (e.g. mkdtemp
+    // ENOSPC/EMFILE) must still marshal to `rec.state = "failed"` instead of
+    // rejecting the fire-and-forget `void this.pump()` chain and crashing
+    // the process via an unhandled rejection.
+    //
+    // The terminal `rec.state` write is deliberately deferred until *after*
+    // the `finally` cleanup below (rather than set inline before it), so a
+    // caller polling `status()` never observes "pushed"/"failed" while the
+    // secret tmpdir still exists on disk — avoids a cleanup-vs-poll race.
+    let tmpDir: string | undefined;
+    let outcome: { ok: true } | { ok: false; error: string };
     try {
+      const dockerfile = generateDockerfile({
+        baseImage: spec.baseImage,
+        cloneUrl: spec.cloneUrl,
+        commitSha: spec.commitSha,
+        recipe: spec.recipe,
+        setup: spec.setup,
+      });
+
+      tmpDir = await this.mkdtempFn(join(tmpdir(), "valet-prebuild-"));
+      const secretPath = join(tmpDir, "git-token");
+      const contextDir = join(tmpDir, "context");
       await mkdir(contextDir, { recursive: true });
       // 0600: never readable by other users on the host. Written even when
       // there's no token (empty file) so the CLI shape — and the
@@ -180,12 +210,22 @@ export class DockerImageBuilder implements ImageBuilder {
 
       const args = buildDockerBuildArgs(spec, secretPath, contextDir);
       await this.runDockerBuild(rec, args, dockerfile);
-      rec.state = "pushed";
+      outcome = { ok: true };
     } catch (err) {
-      rec.state = "failed";
-      rec.error = err instanceof Error ? err.message : String(err);
+      outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
     } finally {
-      await rm(tmpDir, { recursive: true, force: true });
+      // Best-effort cleanup. If the process was SIGKILLed mid-build (cancel
+      // path), the docker child may still hold the tmpdir/secret file open
+      // briefly; a failed `rm` here is accepted as an OS temp-dir leak that
+      // the host's normal temp GC will reclaim, not something we retry.
+      if (tmpDir) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    if (outcome.ok) {
+      rec.state = "pushed";
+    } else {
+      rec.state = "failed";
+      rec.error = outcome.error;
     }
   }
 
