@@ -11,6 +11,8 @@ import {
   getGithubInstallationByLogin,
   listGithubInstallationsByAccountType,
 } from '../lib/db/github-installations.js';
+import { findSessionsByRepoBranch } from '../lib/db/webhooks.js';
+import { updateSessionGitState } from '../lib/db/sessions.js';
 import { loadGitHubApp, getOrMintInstallationToken } from '../services/github-app.js';
 
 export const reposRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -437,7 +439,30 @@ reposRouter.post('/pull-request', zValidator('json', createPRSchema), async (c) 
     html_url: string;
     title: string;
     state: string;
+    created_at?: string;
+    draft?: boolean;
   };
+
+  // Link the new PR to the session(s) working on its head branch so
+  // agent-authored PR outcomes are trackable even when repo webhooks are
+  // not configured. Skip rows already tied to a different PR.
+  try {
+    const appDb = getDb(c.env.DB);
+    const matches = await findSessionsByRepoBranch(appDb, `${owner}/${repo}`, body.branch);
+    for (const m of matches.results ?? []) {
+      if (m.pr_number == null) {
+        await updateSessionGitState(appDb, m.session_id, {
+          prNumber: pr.number,
+          prTitle: pr.title,
+          prUrl: pr.html_url,
+          prState: pr.draft ? 'draft' : 'open',
+          ...(pr.created_at ? { prCreatedAt: pr.created_at } : {}),
+        });
+      }
+    }
+  } catch (err) {
+    console.error('Failed to link created PR to session git state:', err);
+  }
 
   return c.json({
     pr: {

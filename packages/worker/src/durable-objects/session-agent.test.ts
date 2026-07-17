@@ -1001,6 +1001,65 @@ describe('SessionAgentDO', () => {
     }
   });
 
+  it('emits turn_error analytics when a turn finalizes with reason=error', async () => {
+    // The V2 sync-prompt path reports turn failures exclusively via
+    // message.finalize(reason: 'error') — if this emit regresses, the
+    // Performance tab error rate goes blind (turn_error stopped flowing
+    // entirely when the runner moved off the legacy 'error' message).
+    const { agent } = await createTestAgent();
+
+    await (agent as any).runnerHandlers['message.create']({
+      type: 'message.create',
+      turnId: 'turn-err',
+      channelType: 'web',
+      channelId: 'default',
+    });
+    await (agent as any).runnerHandlers['message.finalize']({
+      type: 'message.finalize',
+      turnId: 'turn-err',
+      reason: 'error',
+      error: 'Model exploded mid-turn',
+    });
+
+    const emitEvent = (agent as any).emitEvent as ReturnType<typeof vi.fn>;
+    expect(emitEvent).toHaveBeenCalledWith('turn_error', expect.objectContaining({
+      turnId: 'turn-err',
+      errorCode: 'agent_error',
+      channel: 'web',
+      properties: { message: 'Model exploded mid-turn' },
+    }));
+    const emitAuditEvent = (agent as any).emitAuditEvent as ReturnType<typeof vi.fn>;
+    expect(emitAuditEvent).toHaveBeenCalledWith('agent.error', 'Model exploded mid-turn');
+  });
+
+  it('does not emit turn_error when a turn finalizes normally or canceled', async () => {
+    const { agent } = await createTestAgent();
+
+    await (agent as any).runnerHandlers['message.create']({
+      type: 'message.create',
+      turnId: 'turn-ok',
+    });
+    await (agent as any).runnerHandlers['message.finalize']({
+      type: 'message.finalize',
+      turnId: 'turn-ok',
+      reason: 'end_turn',
+      finalText: 'done',
+    });
+    await (agent as any).runnerHandlers['message.create']({
+      type: 'message.create',
+      turnId: 'turn-cancel',
+    });
+    await (agent as any).runnerHandlers['message.finalize']({
+      type: 'message.finalize',
+      turnId: 'turn-cancel',
+      reason: 'canceled',
+    });
+
+    const emitEvent = (agent as any).emitEvent as ReturnType<typeof vi.fn>;
+    const turnErrorCalls = emitEvent.mock.calls.filter(([eventType]) => eventType === 'turn_error');
+    expect(turnErrorCalls).toHaveLength(0);
+  });
+
   it('does not mirror text channel replies into the web UI', async () => {
     const { agent, broadcasts } = await createTestAgent();
     const runnerSend = vi.fn();

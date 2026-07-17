@@ -68,7 +68,7 @@ Debian 12 (Bookworm) slim, GLIBC 2.36, Python 3.12 (added by Modal).
 | 6 | code-server | `.run_commands()` | Latest (installer, unpinned) |
 | 7 | VNC stack + Chromium | `.apt_install()` | Latest from apt |
 | 8 | TTYD | `.run_commands()` | `1.7.7` (pinned) |
-| 9 | whisper.cpp | `.apt_install("cmake")` + `.run_commands()` | HEAD (`--depth 1`, unpinned) |
+| 9 | whisper.cpp | `.apt_install("cmake")` + `.run_commands()` | `v1.9.1` (pinned `--branch`, built with `-DBUILD_SHARED_LIBS=ON`) |
 | 10 | Cache-bust echo | `.run_commands()` | `RUNNER_VERSION` string |
 | 11 | Runner package | `.add_local_dir()` + `.run_commands()` | From local source |
 | 12 | Workflow CLI wrapper | `.run_commands()` | N/A |
@@ -102,7 +102,7 @@ chromium, imagemagick, xdotool, ffmpeg
 | Playwright + Chromium | Matches agent-browser | `npx playwright install` | |
 | code-server | Latest | install.sh | Unpinned |
 | TTYD | 1.7.7 | GitHub release | Pinned |
-| whisper.cpp | HEAD | `git clone --depth 1` | Unpinned |
+| whisper.cpp | v1.9.1 | `git clone --depth 1 --branch v1.9.1` | Pinned; built with `-DBUILD_SHARED_LIBS=ON` (shared libs copied to `/usr/local/lib`) |
 | Chromium (system) | Latest | Debian apt | Unpinned |
 | Xvfb, fluxbox, x11vnc, websockify, noVNC | Latest | Debian apt | Unpinned |
 | imagemagick, xdotool, ffmpeg | Latest | Debian apt | Unpinned |
@@ -403,7 +403,7 @@ New image deploys only affect **new** sandboxes. Existing running or hibernated 
 - **Automated version bumping:** entirely manual.
 - **Image build pipeline:** no CI/CD for image builds.
 - **Warm sandbox pools:** no pre-warmed sandboxes.
-- **Version pinning** for: Bun, code-server, apt packages, whisper.cpp.
+- **Version pinning** for: Bun, code-server, apt packages.
 
 ### Known Drift
 - `Dockerfile.sandbox` has diverged significantly from the Modal image (missing whisper, imagemagick, xdotool, ffmpeg, OpenCode config; uses old package name).

@@ -204,7 +204,7 @@ Three deploy workflows live in `.github/workflows/`:
 | `deploy-dev.yml` | Push to `main` | dev environment |
 | `deploy-prod.yml` | Push of a `v*` tag | prod environment |
 
-`deploy-dev.yml` and `deploy-prod.yml` call `make deploy` (the full `scripts/deploy.sh cmd_all` path: worker → migrations → modal → client). `deploy-preview.yml` calls `make deploy-client` with `PAGES_DEPLOY_BRANCH=pr-<number>` so the preview branch is published to the dev Pages project without deploying a per-PR Worker, D1, R2 bucket, or Modal backend. All three workflows write `API_PUBLIC_URL` into `.env.deploy.<env>` from a GitHub Actions **secret** of the same name in each environment; the deploy script requires it (no auto-discovery fallback) and the client build uses it as `VITE_API_URL`.
+`deploy-dev.yml` and `deploy-prod.yml` call `make deploy` (the full `scripts/deploy.sh cmd_all` path: migrations → worker → modal → client). `deploy-preview.yml` calls `make deploy-client` with `PAGES_DEPLOY_BRANCH=pr-<number>` so the preview branch is published to the dev Pages project without deploying a per-PR Worker, D1, R2 bucket, or Modal backend. All three workflows write `API_PUBLIC_URL` into `.env.deploy.<env>` from a GitHub Actions **secret** of the same name in each environment; the deploy script requires it (no auto-discovery fallback) and the client build uses it as `VITE_API_URL`.
 
 The Worker accepts preview OAuth redirects only for the configured frontend origin or for hosts under `FRONTEND_PREVIEW_ORIGIN_SUFFIX`, which defaults to `${PAGES_PROJECT_NAME}.pages.dev` during deploy config generation. Keep that suffix project-specific; do not set it to a broad value like `pages.dev`.
 
@@ -484,9 +484,24 @@ This codebase has accumulated `any`, `unknown`, and type assertions (`as`) as sh
 - Commit at logical checkpoints — each phase / sub-task / passing test surface — rather than batching everything into one mega-commit at the end.
 - Keep commit messages succinct. The subject line is one short sentence (≤72 chars); the body, when needed, is a few terse bullet points covering what changed and why. Skip exhaustive enumerations of files, line counts, or test totals — `git log` and the diff already show that. If you find yourself writing a multi-paragraph essay, trim.
 
+### PR Descriptions
+
+A PR body documents one change for a reviewer and for whoever reads `git log` in a year. It is not a status update, a story, or a place to give credit.
+
+Every PR uses the template at [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) (What / Why / Test plan / Checklist). GitHub only pre-fills it in the web UI — `gh pr create --body` and API calls bypass it — so when filing a PR from the CLI, structure the body on the template explicitly: fill in every section and delete checklist lines that don't apply.
+
+- **Describe the change, not the process.** What changed, why, and what a reviewer needs to know (breaking changes, migrations, how it was verified). Leave out how the work unfolded — requests, conversations, dead ends, session play-by-play.
+- **Never name people.** No "per X's request", "as discussed with Y", "thanks to Z", reviewer call-outs, or quotes from Slack/meetings. Provenance belongs in the linked issue; requesting a review is the attribution. This applies to commit messages and PR comments too.
+- **Keep unrelated context out.** Other workstreams, roadmap plans, deprioritized items, team decisions, or anything the diff doesn't touch — if a sentence isn't about this change, cut it.
+- **Keep it current.** When the branch changes — scope cut, approach reversed, commits added — update the description to match the code as it stands. A body that describes an earlier draft of the PR is wrong, not just stale.
+- **No review-process narration.** Don't recount local review passes, fixed findings, agent/verification machinery, or test-count tallies. A finding that was fixed before the PR was opened (or updated) is not information about this change — describe the final behavior instead. One line on how the change was verified is enough.
+- **Stay short.** A few sentences or bullets is the norm. If the body outweighs the diff's complexity, trim it.
+
 ## Common Patterns
 
 ### Adding a new D1 table
+
+Migrations must be **additive and backward-compatible** (no `DROP`/`RENAME` of in-use tables or columns): migrations apply *before* the Worker deploys, so the previous Worker build serves traffic against the new schema during the deploy window — and a rollback redeploys an old Worker against it. Destructive cleanup ships in a later migration once no deployed Worker references the old shape.
 
 1. Create migration: `packages/worker/migrations/NNNN_name.sql`
 2. Add Drizzle schema: `packages/worker/src/lib/schema/<name>.ts` and re-export from `schema/index.ts`

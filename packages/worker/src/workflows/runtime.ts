@@ -49,6 +49,7 @@ import { executeOrchestrator } from './nodes/orchestrator.js';
 import { executeSession } from './nodes/session.js';
 import { executeSet } from './nodes/set.js';
 import { executeStop, StopFailure, type StopOutput } from './nodes/stop.js';
+import { executeProject } from './nodes/project.js';
 import { executeTool } from './nodes/tool.js';
 import { executeWait } from './nodes/wait.js';
 import { readExecutionCancelState, setExecutionStatus } from './execution-status.js';
@@ -560,18 +561,23 @@ async function executeNodeStep(
       // effects. No outer step.do (CF rejects nested step.do).
       data = await dispatchNode(node, { node, state, params, env, step, correlations, recordWaiting });
     } else {
-      // llm is the only side-effectful non-step-driven executor today.
-      // Wrap with NO_RETRY so a transient model error doesn't fire a
-      // 5x retry storm (the default CF policy) — duplicates billed
-      // model calls and re-renders user-visible content.
-      const stepConfig = node.type === 'llm' ? { retries: { ...NO_RETRY } } : undefined;
+      // Non-step-driven executors always run under NO_RETRY.
+      //   - llm: side-effectful. A transient model error shouldn't fire
+      //     a 5x retry storm — that duplicates billed model calls and
+      //     re-renders user-visible content.
+      //   - set/if/stop/project: pure and deterministic. Retrying a
+      //     deterministic throw (bad template, non-array source, etc.)
+      //     is guaranteed to throw the same error again. Under CF's
+      //     default policy that means ~5 min of exponential backoff
+      //     before the `failed` trace is written — from the outside it
+      //     looks like a hang (observed on project nodes whose source
+      //     template didn't resolve to an array). NO_RETRY surfaces the
+      //     real error immediately.
       const callback = async () => {
         const out = await dispatchNode(node, { node, state, params, env, step, correlations, recordWaiting });
         return JSON.stringify(out ?? null);
       };
-      const json = stepConfig
-        ? await step.do(stepName, stepConfig, callback)
-        : await step.do(stepName, callback);
+      const json = await step.do(stepName, { retries: { ...NO_RETRY } }, callback);
       data = JSON.parse(json) as unknown;
     }
     const completedAt = await stepDoIso(step, `node:${node.id}:completed-at`);
@@ -672,6 +678,8 @@ export async function dispatchNode(node: WorkflowNode, args: NodeExecutorArgs): 
       return executeOrchestrator({ ...args, node });
     case 'session':
       return executeSession({ ...args, node });
+    case 'project':
+      return executeProject({ ...args, node });
     case 'approval':
       return executeApproval({ ...args, node });
     default: {

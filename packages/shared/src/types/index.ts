@@ -1375,6 +1375,89 @@ export interface AnalyticsEventsResponse {
   period: number;
 }
 
+/**
+ * One window of outcome/value metrics for the admin "Value" tab. The route
+ * returns the trailing window plus the equal-length window before it so the
+ * client can render deltas. All rates are 0–1 fractions; null means the
+ * denominator was empty for the window.
+ */
+export interface ValueMetricsWindow {
+  // Cost per resolved task
+  totalCost: number | null;
+  resolvedWorkflowRuns: number;
+  resolvedSessions: number;
+  resolvedTasks: number;
+  costPerResolvedTask: number | null;
+  // Accepted output (proxy: explicit approval decisions)
+  approvalsAccepted: number;
+  approvalsDenied: number;
+  approvalsExpired: number;
+  acceptedOutputRate: number | null;
+  // Session errors (recomputed live from current session status; the
+  // agent-mailbox escalation signal was retired with the mailbox)
+  erroredSessions: number;
+  endedSessions: number;
+  failedWorkflowRuns: number;
+  terminalWorkflowRuns: number;
+  sessionErrorRate: number | null;
+  // Cycle time (proxy: absolute time-to-resolution, no pre-Valet baseline)
+  medianSessionMinutes: number | null;
+  medianWorkflowMinutes: number | null;
+  // Review burden (proxy: agent-authored PR outcomes)
+  prsOpened: number;
+  prsMerged: number;
+  prsClosedUnmerged: number;
+  prsStillOpen: number;
+  prMergeRate: number | null;
+  medianHoursToMerge: number | null;
+  // Model-routing efficiency. Unknown-tier tokens are excluded from the
+  // share so unclassified model names cannot inflate it.
+  unknownTokens: number;
+  nonFrontierTokenShare: number | null;
+  sessionsWithModelUsage: number;
+  frontierFreeSessionShare: number | null;
+  // What ended sessions were started from (session_git_state.source_type;
+  // 'none' = no git context)
+  sessionSources: Array<{
+    sourceType: string;
+    sessions: number;
+  }>;
+}
+
+export interface AnalyticsValueResponse {
+  current: ValueMetricsWindow;
+  previous: ValueMetricsWindow;
+  period: number;
+}
+
+/**
+ * Application-state health for the admin dashboard: the last outcome of every
+ * scheduled sweep (from cron_heartbeats) plus a 24h webhook-delivery rollup.
+ * `stale` is derived server-side — a job is stale when it hasn't succeeded in
+ * more than 3x its expected interval; jobs with no known interval are never
+ * flagged stale.
+ */
+export interface AnalyticsHealthResponse {
+  jobs: Array<{
+    jobName: string;
+    lastSuccessAt: string | null;
+    lastErrorAt: string | null;
+    lastError: string | null;
+    lastDurationMs: number | null;
+    lastItems: number | null;
+    stale: boolean;
+  }>;
+  webhooks: Array<{
+    provider: string;
+    received: number;
+    invalidSignature: number;
+    processed: number;
+    failed: number;
+    total: number;
+    lastCreatedAt: string | null;
+  }>;
+}
+
 // Plugin types
 export interface OrgPlugin {
   id: string;

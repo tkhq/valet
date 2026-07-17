@@ -3126,6 +3126,23 @@ export class SessionAgentDO {
         }
         const final = this.messageStore.finalizeTurn(turnId, msg.finalText, msg.reason, msg.error);
         if (!final) return;
+        // Errored turns must land in analytics. The V2 sync-prompt path reports
+        // errors exclusively through this finalize message (reason: 'error') —
+        // the legacy 'error' runner message only fires for rare hard exceptions —
+        // so this is the emit site that keeps the Performance tab's error rate
+        // (turn_error vs turn_complete) honest. The runner still sends 'complete'
+        // after an errored finalize, so turn_complete fires for every turn and
+        // turn_error marks the errored subset, matching the legacy semantics.
+        if (msg.reason === 'error') {
+          const finalizeErrorText = msg.error || 'Unknown error';
+          this.emitEvent('turn_error', {
+            turnId,
+            errorCode: 'agent_error',
+            channel: final.metadata.channelType || undefined,
+            properties: { message: finalizeErrorText.slice(0, 200) },
+          });
+          this.emitAuditEvent('agent.error', finalizeErrorText.slice(0, 120));
+        }
         // Broadcast final message state
         this.broadcastToClients({
           type: 'message.updated',
@@ -3189,7 +3206,7 @@ export class SessionAgentDO {
             if (this.sessionState.status === 'waiting_runner') {
               this.sessionState.status = 'running';
               const sid = this.sessionState.sessionId;
-              updateSessionStatus(this.appDb, sid, 'running', this.sessionState.sandboxId).catch((e) =>
+              updateSessionStatus(this.appDb, sid, 'running', this.sessionState.sandboxId, null).catch((e) =>
                 console.error('[SessionAgentDO] Failed to sync running status to D1:', e),
               );
               this.broadcastToClients({ type: 'status', data: { status: 'running', sandboxRunning: true } });
@@ -4510,7 +4527,7 @@ export class SessionAgentDO {
       this.sessionState.status = 'running';
       this.sessionState.sandboxStartedAt = Date.now();
       this.lifecycle.markRunningStarted();
-      updateSessionStatus(this.appDb, body.sessionId, 'running', body.sandboxId).catch((err) =>
+      updateSessionStatus(this.appDb, body.sessionId, 'running', body.sandboxId, null).catch((err) =>
         console.error('[SessionAgentDO] Failed to sync status to D1:', err),
       );
       this.broadcastToClients({
@@ -5907,7 +5924,7 @@ export class SessionAgentDO {
       data: { status: 'initializing' },
     });
     if (sessionId) {
-      updateSessionStatus(this.appDb, sessionId, 'initializing').catch((e) =>
+      updateSessionStatus(this.appDb, sessionId, 'initializing', undefined, null).catch((e) =>
         console.error('[SessionAgentDO] Failed to sync initializing status to D1:', e),
       );
     }

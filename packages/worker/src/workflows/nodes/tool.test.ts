@@ -153,6 +153,20 @@ describe('executeTool', () => {
     await expect(executeTool(args(node))).rejects.toThrow(/not found in slack package/);
   });
 
+  it('surfaces a credential/network error when listActions failed transiently', async () => {
+    // McpActionSource swallows listTools errors and returns []; when the
+    // action is truly cached but the live list call failed (expired OAuth,
+    // MCP server down), the preflight should name credentials as the
+    // likely cause instead of the misleading "action not found." The
+    // failure is reported through the per-call onListError sink.
+    listActionsMock.mockImplementation(async (ctx?: { onListError?: (err: string) => void }) => {
+      ctx?.onListError?.('401 Unauthorized from https://mcp.example.test');
+      return [];
+    });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
+    await expect(executeTool(args(node))).rejects.toThrow(/listing actions for "slack" failed.*401 Unauthorized.*re-connect the integration/i);
+  });
+
   it('fails when the action-policy resolves to denied', async () => {
     invokeWorkflowActionMock.mockResolvedValue({ outcome: 'denied', invocationId: 'inv-1', mode: 'deny', policyId: null });
     const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
@@ -211,6 +225,23 @@ describe('executeTool', () => {
       {},
       expect.objectContaining({ credentials: { access_token: 'tok-1', _credential_type: 'oauth2' } }),
     );
+  });
+
+  it('uses user credentials to discover credential-gated actions during preflight', async () => {
+    getProviderMock.mockReturnValue({ authType: 'oauth2', mcpServerUrl: 'https://mcp.example.test' });
+    resolveCredentialsMock.mockResolvedValue({
+      ok: true,
+      credential: { accessToken: 'tok-1', credentialType: 'oauth2' },
+    });
+    executeMock.mockResolvedValue({ success: true, data: null });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'custom_mcp', action: 'custom_mcp.search', params: {} };
+    listActionsMock.mockResolvedValue([{ id: 'custom_mcp.search', riskLevel: 'low' }]);
+
+    await executeTool(args(node));
+
+    expect(listActionsMock).toHaveBeenCalledWith(expect.objectContaining({
+      credentials: { access_token: 'tok-1' },
+    }));
   });
 
   it('injects owner_slack_user_id from identity links for slack service', async () => {

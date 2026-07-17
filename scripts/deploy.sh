@@ -8,15 +8,18 @@ NC='\033[0m'
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-# Require ENVIRONMENT to select which config file to source
-: "${ENVIRONMENT:?Set ENVIRONMENT (dev|prod). Usage: ENVIRONMENT=prod $0 [command]}"
+# Require ENVIRONMENT to select which config file to source: it picks
+# .env.deploy.<env> (dev, prod, test, a personal env, ...). Keep it DNS-safe
+# (lowercase letters, digits, hyphens) — it feeds Modal endpoint labels and
+# subdomains unsanitized.
+: "${ENVIRONMENT:?Set ENVIRONMENT to the suffix of a .env.deploy.<env> config (e.g. dev, prod, test). Usage: ENVIRONMENT=dev $0 [command]}"
 
 DEPLOY_CONFIG=".env.deploy.${ENVIRONMENT}"
 if [ ! -f "$DEPLOY_CONFIG" ]; then
     # Migration hint for old .env.deploy users
     if [ -f .env.deploy ]; then
         echo -e "${RED}Found .env.deploy but ENVIRONMENT=${ENVIRONMENT} requires ${DEPLOY_CONFIG}${NC}"
-        echo "Rename .env.deploy to .env.deploy.dev (or .env.deploy.prod) to migrate."
+        echo "Rename .env.deploy to .env.deploy.<env> (e.g. .env.deploy.dev) to migrate."
     else
         echo -e "${RED}Config file not found: ${DEPLOY_CONFIG}${NC}"
         echo "Copy .env.deploy.example to ${DEPLOY_CONFIG} and set PROJECT_NAME."
@@ -35,11 +38,41 @@ PAGES_DEPLOY_BRANCH="${PAGES_DEPLOY_BRANCH:-main}"
 FRONTEND_PREVIEW_ORIGIN_SUFFIX="${FRONTEND_PREVIEW_ORIGIN_SUFFIX:-${PAGES_PROJECT_NAME}.pages.dev}"
 D1_DATABASE_NAME="${D1_DATABASE_NAME:-${PROJECT_NAME}-db}"
 R2_BUCKET_NAME="${R2_BUCKET_NAME:-${PROJECT_NAME}-storage}"
+# Cloudflare Workflows are scoped by name at the account level, so this must be
+# per-env or one env's deploy claims the workflow for all of them.
+WORKFLOW_NAME="${WORKFLOW_NAME:-${PROJECT_NAME}-workflow-interpreter}"
 MODAL_APP_NAME="${MODAL_APP_NAME:-${PROJECT_NAME}-backend}"
 MODAL_LABEL_PREFIX="${MODAL_LABEL_PREFIX:-${ENVIRONMENT}-}"
 ALLOWED_EMAILS="${ALLOWED_EMAILS:-}"
 MODAL_DEPLOY_CMD="${MODAL_DEPLOY_CMD:-uv run --project backend modal deploy}"
 API_PUBLIC_URL="${API_PUBLIC_URL:-}"
+# Modal workspace slug for endpoint URLs. Set this when deploying to a team
+# workspace: `modal profile current` returns the profile name, which is not
+# necessarily the workspace slug, so auto-discovery builds the wrong URL.
+MODAL_WORKSPACE="${MODAL_WORKSPACE:-}"
+# Client build mode: production | development. Empty preserves the historical
+# default (production only when ENVIRONMENT=prod). Resolve and validate it here,
+# before any deploy work, so a bad value fails fast instead of aborting cmd_all
+# mid-way — after remote D1 migrations and the Worker/Modal deploy have applied.
+CLIENT_BUILD_MODE="${CLIENT_BUILD_MODE:-}"
+if [ -z "$CLIENT_BUILD_MODE" ]; then
+    if [ "${ENVIRONMENT}" = "prod" ]; then CLIENT_BUILD_MODE="production"; else CLIENT_BUILD_MODE="development"; fi
+fi
+if [ "$CLIENT_BUILD_MODE" != "production" ] && [ "$CLIENT_BUILD_MODE" != "development" ]; then
+    echo -e "${RED}Invalid CLIENT_BUILD_MODE='${CLIENT_BUILD_MODE}' (expected: production | development)${NC}"
+    exit 1
+fi
+
+# MODAL_WORKSPACE sets the endpoint-URL slug; MODAL_PROFILE (sourced under set -a
+# above, so the modal CLI sees it) picks which workspace the backend deploys to.
+# Setting only one risks pointing the Worker at a workspace the backend was never
+# deployed to — a profile name is not necessarily its workspace slug — so warn
+# when they are not set together. Both unset is the legitimate default: the
+# single-workspace auto-discovery path in discover_modal_url, so it is not warned.
+if { [ -n "${MODAL_WORKSPACE:-}" ] && [ -z "${MODAL_PROFILE:-}" ]; } \
+    || { [ -z "${MODAL_WORKSPACE:-}" ] && [ -n "${MODAL_PROFILE:-}" ]; }; then
+    echo -e "${YELLOW}Warning: set MODAL_WORKSPACE and MODAL_PROFILE together for team workspaces; only one is set, so the Worker's endpoint URL may not match the deploy target.${NC}"
+fi
 
 # ─── Shared Helpers ──────────────────────────────────────────────────────────
 
@@ -79,6 +112,11 @@ _resolve_d1_id() {
 discover_modal_url() {
     local required="${1:-true}"
     if [ -z "${MODAL_BACKEND_URL:-}" ]; then
+        if [ -n "${MODAL_WORKSPACE}" ]; then
+            MODAL_BACKEND_URL="https://${MODAL_WORKSPACE}--${MODAL_LABEL_PREFIX}{label}.modal.run"
+            echo -e "${GREEN}✓ Modal (workspace: ${MODAL_WORKSPACE})${NC}"
+            return
+        fi
         if ! command -v modal >/dev/null 2>&1; then
             if [ "$required" = "true" ]; then
                 echo -e "${RED}modal CLI not found. Install: uv tool install modal${NC}"; exit 1
@@ -115,15 +153,22 @@ resolve_worker_url() {
     fi
 }
 
+# Escape a value for safe use as a sed replacement string with a | delimiter:
+# backslash, the & backreference, and the | delimiter must all be escaped.
+sed_escape() {
+    printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
 generate_wrangler_config() {
-    sed -e "s|\${CF_WORKER_NAME}|${CF_WORKER_NAME}|g" \
-        -e "s|\${D1_DATABASE_NAME}|${D1_DATABASE_NAME}|g" \
-        -e "s|\${D1_DATABASE_ID}|${D1_DATABASE_ID}|g" \
-        -e "s|\${R2_BUCKET_NAME}|${R2_BUCKET_NAME}|g" \
-        -e "s|\${ALLOWED_EMAILS}|${ALLOWED_EMAILS}|g" \
-        -e "s|\${API_PUBLIC_URL}|${API_PUBLIC_URL}|g" \
-        -e "s|\${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|g" \
-        -e "s|\${MODAL_BACKEND_URL}|${MODAL_BACKEND_URL}|g" \
+    sed -e "s|\${CF_WORKER_NAME}|$(sed_escape "${CF_WORKER_NAME}")|g" \
+        -e "s|\${D1_DATABASE_NAME}|$(sed_escape "${D1_DATABASE_NAME}")|g" \
+        -e "s|\${D1_DATABASE_ID}|$(sed_escape "${D1_DATABASE_ID}")|g" \
+        -e "s|\${R2_BUCKET_NAME}|$(sed_escape "${R2_BUCKET_NAME}")|g" \
+        -e "s|\${WORKFLOW_NAME}|$(sed_escape "${WORKFLOW_NAME}")|g" \
+        -e "s|\${ALLOWED_EMAILS}|$(sed_escape "${ALLOWED_EMAILS}")|g" \
+        -e "s|\${API_PUBLIC_URL}|$(sed_escape "${API_PUBLIC_URL}")|g" \
+        -e "s|\${FRONTEND_PREVIEW_ORIGIN_SUFFIX}|$(sed_escape "${FRONTEND_PREVIEW_ORIGIN_SUFFIX}")|g" \
+        -e "s|\${MODAL_BACKEND_URL}|$(sed_escape "${MODAL_BACKEND_URL}")|g" \
         packages/worker/wrangler.toml > packages/worker/wrangler.deploy.toml
 }
 
@@ -149,14 +194,17 @@ build_client() {
 
     build_commit_hash=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "unknown")
 
-    if [ "${ENVIRONMENT}" = "prod" ]; then
+    # Resolved and validated at config time.
+    local client_mode="${CLIENT_BUILD_MODE}"
+
+    if [ "$client_mode" = "production" ]; then
         build_version_tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
         if [ -z "${build_version_tag}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             build_version_tag="${GITHUB_REF_NAME:-}"
         fi
     else
         build_args=(-- --mode development)
-        echo -e "${YELLOW}Building client in development mode (ENVIRONMENT=${ENVIRONMENT})${NC}"
+        echo -e "${YELLOW}Building client in development mode (CLIENT_BUILD_MODE=${client_mode})${NC}"
     fi
 
     echo -e "${GREEN}✓ Build metadata: env=${ENVIRONMENT}, commit=${build_commit_hash}${NC}"
@@ -170,7 +218,7 @@ build_client() {
         VITE_DEPLOY_ENVIRONMENT="${ENVIRONMENT}" \
         VITE_BUILD_COMMIT_HASH="${build_commit_hash}" \
         VITE_BUILD_VERSION_TAG="${build_version_tag}" \
-        pnpm run build "${build_args[@]}"
+        pnpm run build ${build_args[@]+"${build_args[@]}"}
     )
 }
 
@@ -201,6 +249,8 @@ deploy_client_pages() {
 
 # ─── Subcommands ─────────────────────────────────────────────────────────────
 
+# Deploys the Worker only — does NOT apply migrations. If the new code depends
+# on schema changes, run `deploy.sh migrate` first (cmd_all does this order).
 cmd_worker() {
     echo -e "${GREEN}Deploying Worker...${NC}"
     preflight wrangler jq bun
@@ -283,11 +333,25 @@ cmd_all() {
     pnpm --filter '@valet/*' --filter '!@valet/worker' --filter '!@valet/client' run build
     echo -e "${GREEN}✓ Packages built${NC}"
 
-    # --- Step 4: Deploy Worker ---
+    # --- Step 4: Run D1 migrations ---
+    # Migrations MUST apply before the Worker deploy: the new Worker reads new
+    # columns on hot paths (drizzle enumerates every schema column in SELECT),
+    # so deploy-first serves "no such column" 500s until migrations land.
+    # Migrate-first is safe because migrations are required to be additive/
+    # backward-compatible with the RUNNING Worker version — the old Worker
+    # tolerates new columns, the new Worker requires them. The same invariant
+    # covers rollback.yml, which redeploys an older Worker against the newer
+    # schema.
     echo ""
-    echo "Step 4/7: Deploying Worker..."
-    (cd packages/worker && bun scripts/generate-plugin-registry.ts)
+    echo "Step 4/7: Running migrations..."
     generate_wrangler_config
+    (cd packages/worker && wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote -c wrangler.deploy.toml)
+    echo -e "${GREEN}✓ Migrations applied${NC}"
+
+    # --- Step 5: Deploy Worker ---
+    echo ""
+    echo "Step 5/7: Deploying Worker..."
+    (cd packages/worker && bun scripts/generate-plugin-registry.ts)
 
     DEPLOY_OUT=$(cd packages/worker && wrangler deploy -c wrangler.deploy.toml 2>&1) || {
         echo -e "${RED}Worker deploy failed:${NC}"
@@ -296,12 +360,6 @@ cmd_all() {
     }
     echo "$DEPLOY_OUT"
     echo -e "${GREEN}✓ Worker: ${WORKER_URL}${NC}"
-
-    # --- Step 5: Run D1 migrations ---
-    echo ""
-    echo "Step 5/7: Running migrations..."
-    (cd packages/worker && wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote -c wrangler.deploy.toml)
-    echo -e "${GREEN}✓ Migrations applied${NC}"
 
     # --- Step 6: Deploy Modal backend ---
     echo ""

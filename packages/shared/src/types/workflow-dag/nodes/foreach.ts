@@ -5,16 +5,19 @@ import type { SetNode } from './set.js';
 import type { StopNode } from './stop.js';
 import type { OrchestratorNode } from './orchestrator.js';
 import type { SessionNode } from './session.js';
+import type { ProjectNode } from './project.js';
 
 // Body of a foreach is restricted — no nested foreach, no if (control flow at
 // the DAG level), no approval. The runtime executes one body per item.
+// `project` is body-eligible: it's pure and its output is a typed 2D array.
 export type ForeachBodyNode =
   | LlmNode
   | ToolNode
   | SetNode
   | StopNode
   | OrchestratorNode
-  | SessionNode;
+  | SessionNode
+  | ProjectNode;
 
 export interface ForeachNode {
   id: string;

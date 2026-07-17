@@ -257,8 +257,11 @@ export async function listTools(
       credCtx = { credentials: { access_token: credResult.credential.accessToken } };
     }
 
-    let actions = await actionSource.listActions(credCtx);
-    let listError = getActionSourceListError(actionSource);
+    let listError: string | null = null;
+    const listCtxWithSink = credCtx
+      ? { ...credCtx, onListError: (err: string) => { listError = err; } }
+      : { onListError: (err: string) => { listError = err; } };
+    let actions = await actionSource.listActions(listCtxWithSink);
 
     // MCP sources may return [] when tokens are silently expired — force-refresh and retry
     if (actions.length === 0 && isMcpSource && credCtx && requiresUserCredential(provider)) {
@@ -269,8 +272,11 @@ export async function listTools(
       if (refreshed.ok && refreshed.credential.refreshed) {
         credentialCache?.set('user', userId, service, refreshed);
         credCtx = { credentials: { access_token: refreshed.credential.accessToken } };
-        actions = await actionSource.listActions(credCtx);
-        listError = getActionSourceListError(actionSource);
+        listError = null;
+        actions = await actionSource.listActions({
+          ...credCtx,
+          onListError: (err) => { listError = err; },
+        });
       }
     }
 
@@ -673,12 +679,6 @@ export function matchesServiceFilter(
 
   return normalizedService.includes(normalizedFilter)
     || (provider.displayName ?? '').toLowerCase().includes(normalizedFilter);
-}
-
-function getActionSourceListError(actionSource: unknown): string | null {
-  const source = actionSource as { getLastListError?: () => string | null | undefined };
-  if (typeof source.getLastListError !== 'function') return null;
-  return source.getLastListError() ?? null;
 }
 
 function buildToolDiscoveryWarning(

@@ -117,6 +117,7 @@
             "group": "Integrations",
             "pages": [
               "product/integrations/overview",
+              "product/integrations/channel-integrations",
               "product/integrations/cloudflare",
               "product/integrations/deepwiki",
               "product/integrations/figma",
@@ -164,6 +165,7 @@
               "engineering/workflow-execution",
               "engineering/orchestrator-runtime",
               "engineering/plugin-system",
+              "engineering/integration-system",
               "engineering/policy-engine",
               "engineering/auth-access-internals"
             ]

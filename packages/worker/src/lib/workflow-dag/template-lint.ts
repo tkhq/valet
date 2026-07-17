@@ -343,6 +343,22 @@ function* iterateTemplatedFields(node: WorkflowNode | ForeachNode['body']): Iter
       // if.left uses expression syntax (not template syntax) so it's
       // linted by the existing tryParseExpression path; skip here.
       return;
+    case 'project':
+      // `source` is the sole template field. `columns[].path` is a
+      // dotted-path against each source row, not a template against the
+      // workflow state, so it's not linted here — malformed paths get
+      // caught by the `project_column_path_malformed` validator check.
+      yield* emit('source', node.source);
+      return;
+    default: {
+      // Exhaustiveness guard. Adding a new node type to the discriminated
+      // union without handling it here now becomes a compile error rather
+      // than a silent template-lint miss. `project` was added to the type
+      // union without a case here initially — this catch prevents that.
+      const _exhaustive: never = node;
+      void _exhaustive;
+      return;
+    }
   }
 }
 

@@ -2,26 +2,11 @@ import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
 import type { UsageStatsResponse } from '@valet/shared';
 import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getUsageByUserModel, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxHeroStats, getSandboxByDay, getSandboxByUser } from '../lib/db/analytics.js';
-import { getModelPricing } from '../services/model-catalog.js';
+import { getModelPricing, computeCost } from '../services/model-catalog.js';
 import { computeSandboxCost, DEFAULT_CPU_CORES, DEFAULT_MEMORY_GIB } from '../services/sandbox-pricing.js';
 import { getDb } from '../lib/drizzle.js';
 
 export const usageRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
-
-/**
- * Compute cost for a given token count using the pricing map.
- * Returns null if no pricing data is available for the model.
- */
-function computeCost(
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  pricingMap: Map<string, { inputCostPerMillion: number; outputCostPerMillion: number }>,
-): number | null {
-  const pricing = pricingMap.get(model);
-  if (!pricing) return null;
-  return (inputTokens * pricing.inputCostPerMillion + outputTokens * pricing.outputCostPerMillion) / 1_000_000;
-}
 
 // GET /api/usage/stats?period=24
 usageRouter.get('/stats', async (c) => {
