@@ -54,6 +54,7 @@
     "@valet/sandbox-gateway": "workspace:*",
     "@valet/sandbox-kubernetes": "workspace:*",
     "@valet/sandbox-local": "workspace:*",
+    "@valet/sdk": "workspace:*",
     "@valet/shared": "workspace:*",
     "@valet/store-postgres": "workspace:*",
     "@valet/workflow": "workspace:*",

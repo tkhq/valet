@@ -355,6 +355,34 @@ async function resolveOrgPatCredential(deps: GitHubTokenDeps, orgId: string): Pr
   return { ok: true, token: cred.accessToken, login: loginOf(metadata) };
 }
 
+export interface ApiListToken {
+  token: string;
+  login?: string;
+}
+
+/** Narrow read-only wrapper over `resolveUserCredential`'s health check, for
+ * callers (Task 7's repo listing) that only want "does this user have a
+ * healthy API-capable credential" without the STRICT-throw behavior
+ * `resolveGitHubToken({ auth: "user" })` has. `null` on any unhealthy/absent
+ * reason — reuses the exact same health rules, does not duplicate them. */
+export async function resolveUserApiToken(
+  deps: GitHubTokenDeps,
+  orgId: string,
+  userId: string | undefined,
+): Promise<ApiListToken | null> {
+  const result = await resolveUserCredential(deps, orgId, userId);
+  return result.ok ? { token: result.token, login: result.login } : null;
+}
+
+/** Narrow read-only wrapper over `resolveOrgPatCredential`, for the same
+ * reason as `resolveUserApiToken` above — the org-PAT tier of listing needs
+ * the health check without the `auto`/`app`/`user` selection machinery
+ * `resolveGitHubToken` wraps it in. */
+export async function resolveOrgPatApiToken(deps: GitHubTokenDeps, orgId: string): Promise<ApiListToken | null> {
+  const result = await resolveOrgPatCredential(deps, orgId);
+  return result.ok ? { token: result.token, login: result.login } : null;
+}
+
 // ── Installation helpers ───────────────────────────────────────────────
 
 /** Wraps `mintInstallationToken` so every consumer of this module sees one

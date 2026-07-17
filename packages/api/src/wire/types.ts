@@ -11,6 +11,7 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
+import type { RepoListItem } from "@valet/sdk/repos";
 
 // ── Common ────────────────────────────────────────────────────────────────
 
@@ -1170,4 +1171,21 @@ export interface PostGithubConnectResponse {
   /** `{github}/login/oauth/authorize?...` — where the browser should
    * navigate to start the App-OAuth authorize flow. */
   url: string;
+}
+
+// ── REST: repo listing (GitHub/repo integration plan, Task 7)
+// ────────────────────────────────────────────────────────────────────────
+// `GET /api/repos` — union of every `RepoHost` the caller has access to;
+// only `github` exists today (`repos/host.ts`'s `repoHostForUrl`).
+
+export interface GetReposResponse {
+  /** `RepoListItem` (from `@valet/sdk/repos`) plus the host-specific
+   * `installed` flag — set when the repo was found via a GitHub App
+   * installation (as opposed to only the personal/org-PAT listing tier). */
+  repos: (RepoListItem & { installed?: boolean })[];
+  /** The signed-in user has a usable personal GitHub credential (healthy
+   * `resolveUserApiToken`) — distinct from `installed` below. */
+  connected: boolean;
+  /** The org has at least one non-suspended GitHub App installation. */
+  installed: boolean;
 }

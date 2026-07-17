@@ -35,6 +35,7 @@ import { orgInvitesRouter } from "./routes/org-invites.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
+import { reposRouter } from "./routes/repos.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
@@ -174,6 +175,7 @@ export function createApp(
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
   app.route("/api/org/github-app", githubAppRouter);
+  app.route("/api/repos", reposRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)
