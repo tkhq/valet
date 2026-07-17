@@ -85,6 +85,10 @@ We are NOT in production. There is no real data to preserve. When you change an 
 
 - **`VALET_SANDBOX_IDLE_MINUTES`** controls the host's idle-sweep hibernation window (default `30`, `0` disables). It only does anything on the `kubernetes` sandbox backend — `capabilities().hibernation` is `false` for docker/local/virtual, so the sweep is a no-op there regardless of this env var.
 
+### pnpm workspace peer-dep splits: a new dep edge can silently fork a "singleton" package
+
+Adding a workspace dependency edge between two packages that both depend on a peer-dep'd package (e.g. `pi-ai`, whose provider registry is meant to be one shared instance) can make pnpm's resolver install **two separate copies** of that package — one per differing peer range — instead of hoisting to a single instance. Symptom: code that assumes a singleton (a provider registry, a module-level cache) silently stops sharing state across the two copies, and anything gated on "did this really hit the network" (a faux-provider "no-network" test, an in-memory stub) goes live/breaks with no type error and no obvious stack trace pointing at the cause. Fixed here by pinning a shared version via root `pnpm.overrides` (e.g. the `zod` pin that keeps `pi-ai` a single instance across `packages/api` and `packages/engine`). If a test that should never hit the network suddenly does, or a "singleton" starts behaving like two, suspect a peer-dep split before anything else — check `pnpm why <pkg>` for duplicate resolved versions.
+
 ---
 
 ## What This Project Is
