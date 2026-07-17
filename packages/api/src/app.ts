@@ -36,6 +36,7 @@ import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
 import { reposRouter } from "./routes/repos.js";
+import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
@@ -176,6 +177,7 @@ export function createApp(
   app.route("/api/org/llm-providers", llmProvidersRouter);
   app.route("/api/org/github-app", githubAppRouter);
   app.route("/api/repos", reposRouter);
+  app.route("/api/sandbox", sandboxGitCredentialRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)

@@ -17,10 +17,14 @@ export interface AuthUser {
   orgId: string;
 }
 
-/** The only route prefix that consumes `c.var.sandbox` today. Must match
- * the mount point in `app.ts` (`app.route("/api/memory", memoryRouter)`) —
- * see rung 2 of the ladder below. */
-const SANDBOX_ALLOWED_PATH_PREFIX = "/api/memory";
+/** Route prefixes that consume `c.var.sandbox` today. Must match the mount
+ * points in `app.ts` — see rung 2 of the ladder below:
+ *   - `/api/memory` — owner-tuple OKF memory surface (decision 15).
+ *   - `/api/sandbox` — in-sandbox git credential surface (GitHub/repo
+ *     integration plan, Task 8).
+ * A valid sandbox token against any other path 403s rather than reaching a
+ * handler that unconditionally reads `c.var.user`. */
+const SANDBOX_ALLOWED_PATH_PREFIXES = ["/api/memory", "/api/sandbox"];
 
 /** Narrows better-auth's loosely-typed (`type: "string"`) `role`
  * additional field down to our real enum. The db column is declared
@@ -61,10 +65,11 @@ export interface BuildAuthMiddlewareOpts {
  *   2. `x-valet-sandbox` present → `verifySandboxToken`; invalid 401s even
  *      in stub mode — an explicit credential beats every fallback below it.
  *      Valid tokens only set `c.var.sandbox` and `next()` when the path
- *      starts with `SANDBOX_ALLOWED_PATH_PREFIX` (memory routes, the only
- *      consumer of `c.var.sandbox`); every other path 403s instead of
- *      falling through, so a valid sandbox token against e.g. `/api/me`
- *      never reaches a handler that unconditionally reads `c.var.user`.
+ *      starts with one of `SANDBOX_ALLOWED_PATH_PREFIXES` (memory routes and
+ *      the Task 8 git-credential route — the only consumers of
+ *      `c.var.sandbox`); every other path 403s instead of falling through,
+ *      so a valid sandbox token against e.g. `/api/me` never reaches a
+ *      handler that unconditionally reads `c.var.user`.
  *   3. `auth` configured and a valid session (cookie or session header)
  *      resolves → `c.var.user`.
  *   4. `auth` configured and `x-api-key` present → `verifyApiKey`; invalid
@@ -100,17 +105,18 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
     }
 
     // 2. Sandbox token — explicit credential, invalid always 401s. Valid
-    // sandbox principals are only accepted on the memory routes today —
-    // every other route reads `c.var.user`, not `c.var.sandbox`, so letting
-    // a sandbox token through elsewhere would crash the route handler with
-    // an unguarded TypeError instead of failing cleanly here.
+    // sandbox principals are only accepted on the allow-listed prefixes
+    // (memory + git-credential routes) — every other route reads
+    // `c.var.user`, not `c.var.sandbox`, so letting a sandbox token through
+    // elsewhere would crash the route handler with an unguarded TypeError
+    // instead of failing cleanly here.
     const sandboxHeader = c.req.header("x-valet-sandbox");
     if (sandboxHeader !== undefined) {
       const principal = await verifySandboxToken(db, sandboxHeader);
       if (!principal) {
         return c.json({ error: "invalid sandbox token" }, 401);
       }
-      if (!c.req.path.startsWith(SANDBOX_ALLOWED_PATH_PREFIX)) {
+      if (!SANDBOX_ALLOWED_PATH_PREFIXES.some((prefix) => c.req.path.startsWith(prefix))) {
         return c.json({ error: "sandbox token not accepted here" }, 403);
       }
       c.set("sandbox", principal);

@@ -1189,3 +1189,35 @@ export interface GetReposResponse {
   /** The org has at least one non-suspended GitHub App installation. */
   installed: boolean;
 }
+
+// ── REST: in-sandbox git credential surface (GitHub/repo integration plan,
+// Task 8) ────────────────────────────────────────────────────────────────
+// `POST /api/sandbox/git-credential` — sandbox-token authed. The in-sandbox
+// git credential helper / `valet-gh` wrapper POST `{host, owner}`; the route
+// resolves the session's bound owner to a usable git credential.
+
+export interface PostSandboxGitCredentialRequest {
+  /** Git host from the credential request (e.g. `github.com`). Informational
+   * — the resolvable host is derived from the matched binding's clone URL. */
+  host: string;
+  /** Repository owner (org/user login) the credential is wanted for. Must be
+   * one of the session's bound owners (case-insensitive) or the request 403s. */
+  owner: string;
+}
+
+/** A usable git credential — `password` is the token, `username` its paired
+ * Basic-Auth username (`x-access-token` for GitHub). Emitted only over the
+ * response body, never logged. */
+export interface SandboxGitCredential {
+  username: string;
+  password: string;
+}
+
+/** No credential applies but the request is valid — the helper proceeds
+ * tokenless (a public clone works; a private one surfaces the host's own
+ * auth error downstream). */
+export interface SandboxGitAnonymous {
+  anonymous: true;
+}
+
+export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGitAnonymous;
