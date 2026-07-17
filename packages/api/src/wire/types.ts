@@ -1040,6 +1040,23 @@ export interface PutLlmProviderPreferencesRequest {
 
 export type PutLlmProviderPreferencesResponse = GetLlmProviderPreferencesResponse;
 
+// `POST .../probe` — custom-provider discovery: GETs `{baseUrl}/models`
+// upstream and echoes back the ids. 502 `{ error }` carries the verbatim
+// upstream status + body text on failure (admin tool; raw errors are
+// correct per the design doc's failure-semantics section).
+export interface ProbeLlmProviderResponse {
+  models: { id: string }[];
+}
+
+// `POST .../test` — 1-token completion round-trip through the resolution
+// bridge. Always 200: `ok: true` on success, `ok: false` with a message on
+// failure (a result to display, not a transport error).
+export interface TestLlmProviderRequest {
+  modelId: string;
+}
+
+export type TestLlmProviderResponse = { ok: true; latencyMs: number } | { ok: false; error: string };
+
 export interface DeleteIdentityLinkResponse {
   ok: true;
 }

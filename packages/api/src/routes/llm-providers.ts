@@ -19,7 +19,7 @@
  * `/:id` routes so `"preferences"` isn't captured as a provider id.
  */
 import { Hono, type Context } from "hono";
-import { getEnvApiKey } from "@mariozechner/pi-ai";
+import { completeSimple, getEnvApiKey } from "@mariozechner/pi-ai";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin, getOrgModelPreferences, setOrgModelPreferences } from "../services/org.js";
@@ -32,12 +32,14 @@ import {
   isKnownProviderKind,
   isLlmProviderKind,
   listLlmProviders,
+  providerNamespace,
   updateLlmProvider,
   LlmProviderSingletonError,
   DEFAULT_PROVIDER_IN_USE_ERROR,
   type LlmProviderKind,
   type UpdateLlmProviderOptions,
 } from "../services/llm-providers.js";
+import { resolveModelSpec } from "../services/model-resolution.js";
 import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type {
   CreateLlmProviderRequest,
@@ -47,10 +49,13 @@ import type {
   LlmProviderSummary,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
+  ProbeLlmProviderResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
+  TestLlmProviderRequest,
+  TestLlmProviderResponse,
 } from "../wire/types.js";
 
 export const llmProvidersRouter = new Hono<AppEnv>();
@@ -351,6 +356,136 @@ llmProvidersRouter.delete("/:id", async (c) => {
   await deleteLlmProvider(db, user.orgId, id);
 
   return c.body(null, 204);
+});
+
+// ── POST /:id/probe — custom-provider model discovery ───────────────────
+
+/** Replaces every occurrence of `secret` in `text` — a defense-in-depth
+ * backstop for a pathological upstream that echoes the `Authorization`
+ * header (or a redirect target embedding it) back in an error body. This
+ * route already never sends the key anywhere but the upstream `/models`
+ * call, so this only guards against the upstream itself leaking it back. */
+function redact(text: string, secret: string | undefined): string {
+  if (!secret) return text;
+  return text.split(secret).join("[REDACTED]");
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+llmProvidersRouter.post("/:id/probe", async (c) => {
+  const forbidden = await requireOrgAdmin(c);
+  if (forbidden) return forbidden;
+
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const existing = await getLlmProvider(db, user.orgId, id);
+  if (!existing) return c.json(PROVIDER_NOT_FOUND, 404);
+  if (existing.kind !== "openai_compatible") {
+    return c.json({ error: "probe is only available for custom (openai_compatible) providers" }, 400);
+  }
+  if (!existing.baseUrl) {
+    return c.json({ error: "provider has no baseUrl configured" }, 400);
+  }
+
+  const owner: CredentialOwner = { type: "org", id: user.orgId };
+  const stored = await engineCredentials.get(owner, `llm:${existing.id}`);
+  const apiKey = stored?.apiKey;
+  if (!apiKey) {
+    return c.json({ error: "provider has no API key" }, 400);
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${existing.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: redact(message, apiKey) }, 502);
+  }
+
+  if (!upstream.ok) {
+    const bodyText = await upstream.text();
+    return c.json({ error: redact(`${upstream.status} ${upstream.statusText}: ${bodyText}`, apiKey) }, 502);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = await upstream.json();
+  } catch {
+    return c.json({ error: "malformed /models response from provider (invalid JSON)" }, 502);
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.data)) {
+    return c.json({ error: "malformed /models response from provider (expected { data: [...] })" }, 502);
+  }
+  const models = parsed.data
+    .filter((m): m is { id: string } => isRecord(m) && typeof m.id === "string")
+    .map((m) => ({ id: m.id }));
+
+  const resp: ProbeLlmProviderResponse = { models };
+  return c.json(resp);
+});
+
+// ── POST /:id/test — provider test button (1-token completion) ──────────
+
+llmProvidersRouter.post("/:id/test", async (c) => {
+  const forbidden = await requireOrgAdmin(c);
+  if (forbidden) return forbidden;
+
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  let body: TestLlmProviderRequest;
+  try {
+    body = (await c.req.json()) as TestLlmProviderRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.modelId !== "string" || body.modelId.length === 0) {
+    return c.json({ error: "modelId is required" }, 400);
+  }
+
+  const existing = await getLlmProvider(db, user.orgId, id);
+  if (!existing) return c.json(PROVIDER_NOT_FOUND, 404);
+
+  const spec = `${providerNamespace(existing)}/${body.modelId}`;
+
+  let apiKey: string | undefined;
+  try {
+    const resolved = await resolveModelSpec(db, engineCredentials, user.orgId, spec);
+    if (!resolved) {
+      const resp: TestLlmProviderResponse = { ok: false, error: `model ${body.modelId} not found` };
+      return c.json(resp);
+    }
+    apiKey = resolved.apiKey;
+
+    const start = Date.now();
+    const result = await completeSimple(
+      resolved.model,
+      {
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }],
+      },
+      { apiKey, maxTokens: 1 },
+    );
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      const resp: TestLlmProviderResponse = {
+        ok: false,
+        error: redact(result.errorMessage ?? `completion failed (stopReason: ${result.stopReason})`, apiKey),
+      };
+      return c.json(resp);
+    }
+    const resp: TestLlmProviderResponse = { ok: true, latencyMs: Date.now() - start };
+    return c.json(resp);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const resp: TestLlmProviderResponse = { ok: false, error: redact(message, apiKey) };
+    return c.json(resp);
+  }
 });
 
 export type LlmProvidersRouter = typeof llmProvidersRouter;

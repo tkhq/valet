@@ -8,14 +8,58 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
+import { serve, type ServerType } from "@hono/node-server";
+import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProviders } from "../schema/index.js";
 import type {
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
+  ProbeLlmProviderResponse,
   PutLlmProviderKeyResponse,
+  TestLlmProviderResponse,
 } from "../wire/types.js";
+
+/** Tiny `/v1/models`-shaped fixture server (pattern: `packages/sandbox-gateway/test/fake-backend.ts`) —
+ * a real HTTP server on port 0 the probe route hits instead of a live upstream. */
+interface FakeModelsServer {
+  baseUrl: string;
+  lastAuthHeader(): string | undefined;
+  close(): Promise<void>;
+}
+
+function listenAddress(server: ServerType): number {
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("no port assigned");
+  return address.port;
+}
+
+function startFakeModelsServer(
+  handler: (
+    auth: string | undefined,
+  ) =>
+    | { status: ContentfulStatusCode; body: Record<string, unknown> }
+    | { status: ContentfulStatusCode; text: string },
+): FakeModelsServer {
+  let lastAuth: string | undefined;
+  const app = new Hono();
+  app.get("/v1/models", (c) => {
+    lastAuth = c.req.header("authorization") ?? undefined;
+    const result = handler(lastAuth);
+    if ("text" in result) return c.text(result.text, result.status);
+    return c.json(result.body, result.status);
+  });
+  const server: ServerType = serve({ fetch: app.fetch, port: 0 });
+  const port = listenAddress(server);
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    lastAuthHeader: () => lastAuth,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -577,5 +621,289 @@ describe("GET/PUT /api/org/llm-providers/preferences", () => {
     // provider row) instead of returning the (empty) preferences shape.
     const res = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, { headers: HEADERS });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/org/llm-providers/:id/probe", () => {
+  let fake: FakeModelsServer | undefined;
+
+  afterEach(async () => {
+    await fake?.close();
+    fake = undefined;
+  });
+
+  async function createCustomProvider(baseUrl: string, providerBaseUrl: string): Promise<CreateLlmProviderResponse> {
+    const res = await fetch(`${baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openai_compatible", name: "Custom", baseUrl: providerBaseUrl }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateLlmProviderResponse;
+  }
+
+  it("403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/probe`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("404s a cross-org id", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(llmProviders).values({
+      id: "prov_probe_cross_org",
+      orgId: "other-org",
+      kind: "openai_compatible",
+      name: "Other org's Custom",
+      baseUrl: "https://example.com/v1",
+      enabled: true,
+      models: [],
+      createdAt: Date.now(),
+    });
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/prov_probe_cross_org/probe`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("400s for a known-kind provider", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/probe`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("400s when the custom provider has no API key", async () => {
+    api = await bootTestApi();
+    const created = await createCustomProvider(api.baseUrl, "https://example.com/v1");
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/probe`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns { models } from data[].id on a successful probe, sending the stored key as Bearer auth", async () => {
+    api = await bootTestApi();
+    fake = startFakeModelsServer(() => ({
+      status: 200,
+      body: { object: "list", data: [{ id: "model-a" }, { id: "model-b" }] },
+    }));
+    const created = await createCustomProvider(api.baseUrl, fake.baseUrl);
+    const secretKey = "sk-custom-probe-secret-1234";
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: secretKey }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/probe`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ProbeLlmProviderResponse;
+    expect(body).toEqual({ models: [{ id: "model-a" }, { id: "model-b" }] });
+    expect(fake.lastAuthHeader()).toBe(`Bearer ${secretKey}`);
+  });
+
+  it("502s with the verbatim upstream status + body on upstream failure, never echoing the stored key", async () => {
+    api = await bootTestApi();
+    fake = startFakeModelsServer(() => ({ status: 401, text: "unauthorized upstream" }));
+    const created = await createCustomProvider(api.baseUrl, fake.baseUrl);
+    const secretKey = "sk-custom-probe-secret-5678";
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: secretKey }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/probe`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(502);
+    const bodyText = await res.text();
+    expect(bodyText).toContain("401");
+    expect(bodyText).toContain("unauthorized upstream");
+    expect(bodyText).not.toContain(secretKey);
+  });
+
+  it("502s and redacts the key even if a pathological upstream echoes it back", async () => {
+    api = await bootTestApi();
+    const secretKey = "sk-custom-probe-secret-echo";
+    fake = startFakeModelsServer((auth) => ({ status: 403, text: `forbidden: saw header ${auth ?? "none"}` }));
+    const created = await createCustomProvider(api.baseUrl, fake.baseUrl);
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: secretKey }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/probe`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(502);
+    const bodyText = await res.text();
+    expect(bodyText).not.toContain(secretKey);
+    expect(bodyText).toContain("[REDACTED]");
+  });
+});
+
+describe("POST /api/org/llm-providers/:id/test", () => {
+  let faux: FauxProviderRegistration | undefined;
+
+  afterEach(() => {
+    faux?.unregister();
+    faux = undefined;
+  });
+
+  async function createCustomProviderWithModel(baseUrl: string): Promise<CreateLlmProviderResponse> {
+    const res = await fetch(`${baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://example.com/v1",
+        models: [{ id: "faux-model", name: "Faux Model" }],
+      }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateLlmProviderResponse;
+  }
+
+  it("403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/test`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ modelId: "claude-haiku-4-5" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("404s a cross-org id", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(llmProviders).values({
+      id: "prov_test_cross_org",
+      orgId: "other-org",
+      kind: "openai",
+      name: "Other org's OpenAI",
+      baseUrl: null,
+      enabled: true,
+      models: [],
+      createdAt: Date.now(),
+    });
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/prov_test_cross_org/test`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ modelId: "gpt-5" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("400s when modelId is missing", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/test`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("200s { ok: true, latencyMs } on a successful 1-token completion through the resolution bridge", async () => {
+    api = await bootTestApi();
+    const created = await createCustomProviderWithModel(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "sk-custom-test-secret-1234" }),
+    });
+
+    faux = registerFauxProvider({ api: "openai-completions", provider: created.id });
+    faux.setResponses([fauxAssistantMessage("ok")]);
+
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/test`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ modelId: "faux-model" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TestLlmProviderResponse;
+    expect(body.ok).toBe(true);
+    if (body.ok) {
+      expect(typeof body.latencyMs).toBe("number");
+    }
+  });
+
+  it("200s { ok: false, error } when the completion errors, and never echoes the stored key", async () => {
+    api = await bootTestApi();
+    const created = await createCustomProviderWithModel(api.baseUrl);
+    const secretKey = "sk-custom-test-secret-5678";
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: secretKey }),
+    });
+
+    faux = registerFauxProvider({ api: "openai-completions", provider: created.id });
+    faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: `boom ${secretKey}` })]);
+
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/test`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ modelId: "faux-model" }),
+    });
+    expect(res.status).toBe(200);
+    const bodyText = await res.text();
+    expect(bodyText).not.toContain(secretKey);
+    const body = JSON.parse(bodyText) as TestLlmProviderResponse;
+    expect(body.ok).toBe(false);
+  });
+
+  it("200s { ok: false } for a provider with no key, rather than a transport error", async () => {
+    api = await bootTestApi();
+    const created = await createCustomProviderWithModel(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/test`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ modelId: "faux-model" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TestLlmProviderResponse;
+    expect(body.ok).toBe(false);
+  });
+
+  it("200s { ok: false } for an unknown modelId on the provider", async () => {
+    api = await bootTestApi();
+    const created = await createCustomProviderWithModel(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "sk-custom-test-secret-9999" }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/test`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ modelId: "no-such-model" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TestLlmProviderResponse;
+    expect(body.ok).toBe(false);
   });
 });
