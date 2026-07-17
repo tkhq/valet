@@ -91,6 +91,7 @@ import { resolveDefaultImage } from "../providers/sandbox-backend.js";
 import { resolveRecipe, CANDIDATE_LOCKFILES, type ResolvedRecipe } from "./recipe.js";
 import type { SpawnFn } from "./docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "./builder.js";
+import { pushRefFor } from "./k8s-builder.js";
 
 /** Thrown by `startBuild`/`rebuild` when no `ImageBuilder` is wired
  * (`Providers.imageBuilder === null`) — routes map this to a 409 with an
@@ -244,6 +245,7 @@ export function defaultRetention(
   spawnFn: SpawnFn = spawn as unknown as SpawnFn,
   fetchImpl: typeof fetch = fetch,
   registryInsecure = false,
+  registryPushHost?: string,
 ): RetentionFn {
   return async (backend, imageRefs) => {
     if (imageRefs.length === 0) return;
@@ -255,7 +257,10 @@ export function defaultRetention(
     }
     if (backend === "kubernetes") {
       for (const imageRef of imageRefs) {
-        await registryManifestDelete(imageRef, fetchImpl, registryInsecure);
+        // Stored refs are PULL-hosted; the api pod reaches the registry over
+        // the in-cluster Service DNS (PUSH host), so swap the host before the
+        // manifest HEAD/DELETE. No-op when no split is configured.
+        await registryManifestDelete(pushRefFor(imageRef, registryPushHost), fetchImpl, registryInsecure);
       }
     }
   };
@@ -427,6 +432,11 @@ export interface PrebuildServiceDeps {
    * `VALET_PREBUILD_REGISTRY_INSECURE` on `env`. Ignored when a custom
    * `retention` is injected. */
   registryInsecure?: boolean;
+  /** In-cluster registry Service DNS host the api pod reaches for retention
+   * deletes (the PUSH host), swapped into each stored PULL ref. Defaults from
+   * `VALET_PREBUILD_REGISTRY_PUSH` on `env`; unset = no split (delete against
+   * the ref's own host). Ignored when a custom `retention` is injected. */
+  registryPushHost?: string;
   /** Env the stock-sandbox-image fallback is resolved from
    * (`resolveDefaultImage(env)` — `VALET_SANDBOX_IMAGE`). Defaults to
    * `process.env`; tests inject a fixture object so the fallback doesn't
@@ -464,7 +474,8 @@ export class PrebuildService {
     this.schedulerIntervalMs = deps.schedulerIntervalMs ?? DEFAULT_SCHEDULER_INTERVAL_MS;
     this.env = deps.env ?? process.env;
     const registryInsecure = deps.registryInsecure ?? this.env.VALET_PREBUILD_REGISTRY_INSECURE === "true";
-    this.retention = deps.retention ?? defaultRetention(undefined, undefined, registryInsecure);
+    const registryPushHost = deps.registryPushHost ?? (this.env.VALET_PREBUILD_REGISTRY_PUSH || undefined);
+    this.retention = deps.retention ?? defaultRetention(undefined, undefined, registryInsecure, registryPushHost);
   }
 
   /** The wired builder's backend id, or `null` when prebuilds are

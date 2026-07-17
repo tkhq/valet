@@ -51,13 +51,6 @@ function defaultBackendFor(sandboxBackend: ReturnType<typeof parseSandboxBackend
   }
 }
 
-/** Default bundled in-cluster registry Service DNS name — mirrors
- * `../prebuilds/service.ts`'s `DEFAULT_PREBUILD_REGISTRY_HOST` (kept as a
- * separate literal rather than an import to avoid a providers → prebuilds
- * → providers cycle; both must be bumped together if the chart's Service
- * name ever changes). */
-const DEFAULT_PREBUILD_REGISTRY_HOST = "valet-registry:5000";
-
 export interface ResolveImageBuilderDeps {
   /** Injected `child_process.spawn` for the docker builder — tests
    * substitute a fake to avoid touching a real daemon. Ignored for other
@@ -85,7 +78,11 @@ export function resolveImageBuilder(
       const namespace = env.VALET_SANDBOX_NAMESPACE ?? "valet-sandboxes";
       const kc = deps.kubeConfig ?? resolveKubeConfig(env);
       const jobsApi = batchJobsApiAdapter(kc.makeApiClient(k8s.BatchV1Api), kc.makeApiClient(k8s.CoreV1Api));
-      const registryHost = env.VALET_PREBUILD_REGISTRY ?? DEFAULT_PREBUILD_REGISTRY_HOST;
+      // PUSH host BuildKit reaches the registry at (in-cluster Service DNS),
+      // distinct from the PULL host (`VALET_PREBUILD_REGISTRY`) that lands on
+      // image refs + sandbox pod images. Unset = no split (push == pull host):
+      // external registry, or a raw dev cluster without the chart's wiring.
+      const registryPushHost = env.VALET_PREBUILD_REGISTRY_PUSH || undefined;
       // Explicit flag (chart-injected), not inferred from the host string —
       // see the k8s-builder task brief: insecure only when the endpoint is
       // the bundled in-cluster registry, and a raw dev cluster without the
@@ -118,6 +115,7 @@ export function resolveImageBuilder(
         jobsApi,
         namespace,
         registryInsecure,
+        ...(registryPushHost ? { registryPushHost } : {}),
         ...(activeDeadlineSeconds !== undefined && !Number.isNaN(activeDeadlineSeconds) ? { activeDeadlineSeconds } : {}),
         ...(resources ? { resources } : {}),
       });

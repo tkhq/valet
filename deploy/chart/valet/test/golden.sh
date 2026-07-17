@@ -181,27 +181,44 @@ grep -q '^kind: CronJob$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no re
 grep -q 'REGISTRY_STORAGE_DELETE_ENABLED' "$TMP_DIR/bundled.yaml" || fail "bundled render: registry missing REGISTRY_STORAGE_DELETE_ENABLED=true (required for retention's manifest DELETE)"
 pass "bundled render: registry StatefulSet/Service/GC-CronJob present"
 
+# The registry Service must be NodePort (kubelet pulls prebuilt images via
+# localhost:<nodePort> — a ClusterIP-only Service name is unresolvable by the
+# node). Assert on the registry Service block specifically.
+REGISTRY_SVC_BLOCK=$(awk '/^kind: Service$/{svc=1} svc&&/name: valet-registry$/{hit=1} hit&&/^---$/{exit} hit{print}' "$TMP_DIR/bundled.yaml")
+echo "$REGISTRY_SVC_BLOCK" | grep -q 'type: NodePort' \
+  || fail "bundled render: registry Service is not type: NodePort (kubelet can't pull a ClusterIP-only Service name)"
+echo "$REGISTRY_SVC_BLOCK" | grep -q 'nodePort: 30500' \
+  || fail "bundled render: registry Service missing nodePort: 30500 from registry.nodePort"
+pass "bundled render: registry Service is NodePort with nodePort 30500"
+
 if grep -q 'name: valet-registry' "$TMP_DIR/external-registry.yaml"; then
   fail "external-registry render: bundled registry resources still rendered when externalRegistry.url is set"
 fi
 EXTERNAL_REGISTRY_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/external-registry.yaml")
 echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "registry.example.com"' \
   || fail "external-registry render: VALET_PREBUILD_REGISTRY does not carry externalRegistry.url verbatim"
+# External registry has no push/pull split — the PUSH host equals the pull URL.
+echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY_PUSH: "registry.example.com"' \
+  || fail "external-registry render: VALET_PREBUILD_REGISTRY_PUSH should equal externalRegistry.url (no split)"
 echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY_INSECURE: "false"' \
   || fail "external-registry render: VALET_PREBUILD_REGISTRY_INSECURE should be false for an external registry"
 echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_SANDBOX_IMAGE_PULL_SECRET: "regcred"' \
   || fail "external-registry render: VALET_SANDBOX_IMAGE_PULL_SECRET does not carry externalRegistry.pullSecret"
-pass "external-registry render: no bundled registry resources, VALET_PREBUILD_REGISTRY(_INSECURE)/pull-secret wired from externalRegistry.*"
+pass "external-registry render: no bundled registry resources, VALET_PREBUILD_REGISTRY(_PUSH/_INSECURE)/pull-secret wired from externalRegistry.*"
 
 # --- registry: VALET_PREBUILD_REGISTRY wiring (bundled) --------------------
 BUNDLED_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/bundled.yaml")
-echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "valet-registry:5000"' \
-  || fail "bundled render: VALET_PREBUILD_REGISTRY is not the bundled registry's in-cluster Service DNS name"
+# PULL host = localhost:<nodePort> (what kubelet resolves per-node).
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "localhost:30500"' \
+  || fail "bundled render: VALET_PREBUILD_REGISTRY (pull host) is not localhost:<nodePort> — kubelet can't pull a cluster-DNS Service name"
+# PUSH host = in-cluster Service DNS (what BuildKit Jobs + api-pod retention reach).
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY_PUSH: "valet-registry.valet-sandboxes.svc.cluster.local:5000"' \
+  || fail "bundled render: VALET_PREBUILD_REGISTRY_PUSH is not the registry's in-cluster Service DNS name"
 echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY_INSECURE: "true"' \
   || fail "bundled render: VALET_PREBUILD_REGISTRY_INSECURE should be true for the bundled (HTTP-only) registry"
 echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_IMAGE_BUILDER: "kubernetes"' \
   || fail "bundled render: VALET_IMAGE_BUILDER is not pinned to kubernetes"
-pass "VALET_PREBUILD_REGISTRY(_INSECURE)/VALET_IMAGE_BUILDER wired for the bundled registry"
+pass "VALET_PREBUILD_REGISTRY (pull=localhost NodePort) + _PUSH (cluster DNS) + _INSECURE/VALET_IMAGE_BUILDER wired for the bundled registry"
 
 # --- build resources/deadline values wiring ---------------------------------
 echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_BUILD_DEADLINE_SECONDS: "1800"' \

@@ -66,6 +66,32 @@ export function prebuildResourceId(prebuildId: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/**
+ * Swap the registry HOST prefix of a fully-qualified pull ref for the PUSH
+ * host, leaving the image path + tag untouched. Pure, no I/O.
+ *
+ * Prebuild image refs are stored PULL-hosted (the host kubelet resolves when
+ * pulling the image onto a sandbox pod — for the bundled registry that's a
+ * node-reachable `localhost:<nodePort>`). BuildKit Jobs and the api pod's
+ * retention deletes, however, reach the SAME registry over the in-cluster
+ * Service DNS (the PUSH host). This helper rewrites `<pullHost>/<path>:<tag>`
+ * to `<pushHost>/<path>:<tag>`.
+ *
+ * No-ops (returns the ref unchanged) when `pushHost` is undefined/empty (no
+ * split configured — push and pull are the same host, e.g. an external
+ * registry or a raw dev cluster), when the pull host already equals the push
+ * host, or when the ref has no `/` host segment (a docker-backend-shaped ref
+ * like `valet-prebuild/foo:sha`, never expected here — defensive).
+ */
+export function pushRefFor(pullRef: string, pushHost: string | undefined): string {
+  if (!pushHost) return pullRef;
+  const slash = pullRef.indexOf("/");
+  if (slash < 0) return pullRef;
+  const pullHost = pullRef.slice(0, slash);
+  if (pullHost === pushHost) return pullRef;
+  return `${pushHost}${pullRef.slice(slash)}`;
+}
+
 function jobName(id: string): string {
   return `valet-prebuild-${id}`;
 }
@@ -96,6 +122,11 @@ export interface BuildKitJobSpec {
   /** Only true for the bundled in-cluster registry — pushing to an
    * external registry over TLS must never set this. */
   registryInsecure: boolean;
+  /** The PUSH host (in-cluster Service DNS) BuildKit reaches the registry at.
+   * `imageRef` is PULL-hosted (what kubelet later pulls the image by); the
+   * `--output name=` swaps this host in via `pushRefFor`. `undefined` = no
+   * split (push == pull host), so the ref is pushed as-is. */
+  registryPushHost?: string;
   resources?: BuildKitResources;
 }
 
@@ -121,7 +152,11 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
   if (spec.hasGitToken) {
     args.push("--secret", `id=git-token,src=${GIT_TOKEN_MOUNT_PATH}`);
   }
-  const outputOpts = ["type=image", `name=${spec.imageRef}`, "push=true"];
+  // Push target = the PULL ref with its host swapped for the in-cluster PUSH
+  // host (BuildKit reaches the registry over Service DNS, not the node-facing
+  // pull host). No-op when no push host is configured.
+  const pushRef = pushRefFor(spec.imageRef, spec.registryPushHost);
+  const outputOpts = ["type=image", `name=${pushRef}`, "push=true"];
   if (spec.registryInsecure) outputOpts.push("registry.insecure=true");
   args.push("--output", outputOpts.join(","));
 
@@ -248,6 +283,10 @@ export interface KubernetesImageBuilderOpts {
   namespace: string;
   /** Only true for the bundled in-cluster registry. */
   registryInsecure: boolean;
+  /** In-cluster Service DNS host BuildKit pushes to (swapped into the pull
+   * ref's `--output name=`). `VALET_PREBUILD_REGISTRY_PUSH`; undefined = push
+   * to the pull host as-is (external registry / no split). */
+  registryPushHost?: string;
   buildkitImage?: string;
   activeDeadlineSeconds?: number;
   resources?: BuildKitResources;
@@ -265,6 +304,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
   private readonly jobsApi: SandboxBatchJobsApi;
   private readonly namespace: string;
   private readonly registryInsecure: boolean;
+  private readonly registryPushHost?: string;
   private readonly buildkitImage: string;
   private readonly activeDeadlineSeconds: number;
   private readonly resources?: BuildKitResources;
@@ -285,6 +325,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
     this.jobsApi = opts.jobsApi;
     this.namespace = opts.namespace;
     this.registryInsecure = opts.registryInsecure;
+    this.registryPushHost = opts.registryPushHost;
     this.buildkitImage = opts.buildkitImage ?? BUILDKIT_IMAGE;
     this.activeDeadlineSeconds = opts.activeDeadlineSeconds ?? DEFAULT_ACTIVE_DEADLINE_SECONDS;
     this.resources = opts.resources;
@@ -471,6 +512,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
         buildkitImage: this.buildkitImage,
         activeDeadlineSeconds: this.activeDeadlineSeconds,
         registryInsecure: this.registryInsecure,
+        registryPushHost: this.registryPushHost,
         resources: this.resources,
       });
       await this.jobsApi.createNamespacedJob({ namespace: this.namespace, body: manifest });

@@ -23,10 +23,22 @@ data:
   # default-pairing change can't silently disable prebuilds on this chart.
   VALET_IMAGE_BUILDER: "kubernetes"
   {{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
-  VALET_PREBUILD_REGISTRY: {{ printf "%s-registry:5000" (include "valet.fullname" .) | quote }}
+  # Split PUSH host from PULL host (standard kind/minikube pattern). PULL host
+  # (VALET_PREBUILD_REGISTRY) lands on prebuild-row image refs + sandbox pod
+  # images, which KUBELET pulls via the NODE's resolver — a ClusterIP-only
+  # Service name is unresolvable there, so we use the registry's NodePort on
+  # `localhost` (every node binds the NodePort → works per-node on multi-node
+  # clusters). localhost registries are treated as insecure by default in BOTH
+  # moby AND containerd, so no per-node registry TLS/insecure config is needed.
+  VALET_PREBUILD_REGISTRY: {{ printf "localhost:%v" (.Values.registry.nodePort | default 30500) | quote }}
+  # PUSH host: reachable from BuildKit Job pods (pod-network cluster DNS) and
+  # from the api pod (retention manifest deletes) — the in-cluster Service DNS.
+  VALET_PREBUILD_REGISTRY_PUSH: {{ printf "%s-registry.%s.svc.cluster.local:5000" (include "valet.fullname" .) .Values.sandbox.namespace | quote }}
   VALET_PREBUILD_REGISTRY_INSECURE: "true"
   {{- else if .Values.externalRegistry.url }}
   VALET_PREBUILD_REGISTRY: {{ .Values.externalRegistry.url | quote }}
+  # External registry: no push/pull split — both hosts are the same endpoint.
+  VALET_PREBUILD_REGISTRY_PUSH: {{ .Values.externalRegistry.url | quote }}
   VALET_PREBUILD_REGISTRY_INSECURE: "false"
   {{- if .Values.externalRegistry.pullSecret }}
   VALET_SANDBOX_IMAGE_PULL_SECRET: {{ .Values.externalRegistry.pullSecret | quote }}

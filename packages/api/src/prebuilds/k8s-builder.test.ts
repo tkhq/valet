@@ -13,7 +13,7 @@ import type {
   SandboxBatchJobsApi,
 } from "@valet/sandbox-kubernetes";
 import type { PrebuildSpec } from "./builder.js";
-import { BUILDKIT_IMAGE, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY } from "./k8s-builder.js";
+import { BUILDKIT_IMAGE, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor } from "./k8s-builder.js";
 
 function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
   return {
@@ -27,6 +27,34 @@ function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
     ...overrides,
   };
 }
+
+// ── pushRefFor (pure host swap) ─────────────────────────────────────────
+
+describe("pushRefFor", () => {
+  it("swaps the pull-host prefix for the push host, path + tag untouched", () => {
+    expect(pushRefFor("localhost:30500/octocat-hello-world:abc123", "valet-registry.valet-sandboxes.svc.cluster.local:5000")).toBe(
+      "valet-registry.valet-sandboxes.svc.cluster.local:5000/octocat-hello-world:abc123",
+    );
+  });
+
+  it("is a no-op when the push host is undefined (no split configured)", () => {
+    expect(pushRefFor("localhost:30500/octocat-hello-world:abc123", undefined)).toBe(
+      "localhost:30500/octocat-hello-world:abc123",
+    );
+  });
+
+  it("is a no-op when the pull host already equals the push host", () => {
+    expect(pushRefFor("registry.example.com/acme-widgets:abc123", "registry.example.com")).toBe(
+      "registry.example.com/acme-widgets:abc123",
+    );
+  });
+
+  it("is a no-op for a hostless (docker-shaped) ref with no '/' segment", () => {
+    // `valet-prebuild/foo:sha` DOES have a slash — a truly hostless ref is one
+    // with no slash at all; defensive, never reached for k8s refs.
+    expect(pushRefFor("no-slash-ref:tag", "push-host:5000")).toBe("no-slash-ref:tag");
+  });
+});
 
 // ── buildKitJobManifest (pure) ──────────────────────────────────────────
 
@@ -127,6 +155,39 @@ describe("buildKitJobManifest", () => {
     expect(insecureArgs).toContain("registry.insecure=true");
     expect(secureArgs).not.toContain("registry.insecure=true");
     expect(insecureArgs).toContain("name=reg/foo:bar");
+  });
+
+  it("output name uses the PUSH host (swapped in) while imageRef stays pull-hosted", () => {
+    const job = buildKitJobManifest({
+      id: "12",
+      namespace: "valet-sandboxes",
+      // pull-hosted ref (what lands on the row + sandbox pod image)
+      imageRef: "localhost:30500/octocat-hello-world:abc123",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: true,
+      registryPushHost: "valet-registry.valet-sandboxes.svc.cluster.local:5000",
+    });
+    const args = job.spec?.template.spec?.containers[0].args?.join(" ") ?? "";
+    // buildctl pushes to the PUSH host...
+    expect(args).toContain("name=valet-registry.valet-sandboxes.svc.cluster.local:5000/octocat-hello-world:abc123");
+    // ...never to the pull host.
+    expect(args).not.toContain("name=localhost:30500/");
+  });
+
+  it("output name equals imageRef when no push host is configured (no split)", () => {
+    const job = buildKitJobManifest({
+      id: "13",
+      namespace: "ns",
+      imageRef: "registry.example.com/acme-widgets:abc123",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: false,
+    });
+    const args = job.spec?.template.spec?.containers[0].args?.join(" ") ?? "";
+    expect(args).toContain("name=registry.example.com/acme-widgets:abc123");
   });
 
   it("uses the pinned buildkit image and rootless securityContext", () => {
@@ -300,12 +361,13 @@ class FakeJobsApi implements SandboxBatchJobsApi {
   }
 }
 
-function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure: boolean }> = {}) {
+function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure: boolean; registryPushHost: string }> = {}) {
   let counter = 0;
   return new KubernetesImageBuilder({
     jobsApi,
     namespace: "valet-sandboxes",
     registryInsecure: overrides.registryInsecure ?? true,
+    ...(overrides.registryPushHost ? { registryPushHost: overrides.registryPushHost } : {}),
     newId: () => String(++counter),
   });
 }
@@ -338,6 +400,19 @@ describe("KubernetesImageBuilder", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(jobsApi.jobs.has("valet-prebuild-pb-abc-123")).toBe(true);
     expect(jobsApi.configMaps.has("valet-prebuild-pb-abc-123-dockerfile")).toBe(true);
+  });
+
+  it("dispatched Job pushes to the PUSH host while the spec's pull-hosted imageRef is unchanged", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryPushHost: "valet-registry.valet-sandboxes.svc.cluster.local:5000",
+    });
+    await builder.build(baseSpec({ imageRef: "localhost:30500/octocat-hello-world:abc123" }));
+    await new Promise((r) => setTimeout(r, 0));
+    const job = jobsApi.jobs.get("valet-prebuild-pb-1");
+    const args = job?.params.body.spec?.template.spec?.containers[0].args?.join(" ") ?? "";
+    expect(args).toContain("name=valet-registry.valet-sandboxes.svc.cluster.local:5000/octocat-hello-world:abc123");
+    expect(args).not.toContain("name=localhost:30500/");
   });
 
   it("build() omits the Secret entirely when the spec has no gitToken", async () => {

@@ -742,6 +742,30 @@ describe("defaultRetention (kubernetes)", () => {
     ]);
   });
 
+  it("swaps the stored PULL host for the PUSH host before the manifest HEAD/DELETE (insecure/bundled)", async () => {
+    const calls: { method: string | undefined; url: string }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calls.push({ method: init?.method, url });
+      if (init?.method === "HEAD") {
+        return new Response(null, { status: 200, headers: { "Docker-Content-Digest": "sha256:deadbeef" } });
+      }
+      return new Response(null, { status: 202 });
+    };
+    // Stored ref is pull-hosted (localhost:<nodePort>); retention runs from the
+    // api pod, which reaches the registry over the in-cluster Service DNS.
+    const retention = defaultRetention(undefined, fetchImpl, true, "valet-registry.valet-sandboxes.svc.cluster.local:5000");
+    await retention("kubernetes", ["localhost:30500/octocat-hello-world:abc123"]);
+
+    expect(calls).toEqual([
+      { method: "HEAD", url: "http://valet-registry.valet-sandboxes.svc.cluster.local:5000/v2/octocat-hello-world/manifests/abc123" },
+      {
+        method: "DELETE",
+        url: "http://valet-registry.valet-sandboxes.svc.cluster.local:5000/v2/octocat-hello-world/manifests/sha256:deadbeef",
+      },
+    ]);
+  });
+
   it("external registry (insecure=false): HEADs over https, logs a warning, and SKIPS the unauthenticated DELETE", async () => {
     const calls: { method: string | undefined; url: string }[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {

@@ -113,12 +113,19 @@ registry:
     tag: "2"
   storageClassName: "" # "" = cluster default storage class
   storageSize: 10Gi
+  # NodePort the bundled registry Service is exposed on. This is the PULL
+  # endpoint: sandbox pod image refs use `localhost:<nodePort>`, which kubelet
+  # resolves per-node (a ClusterIP-only Service name is NOT resolvable by the
+  # node's kubelet). BuildKit + retention push/delete over the in-cluster
+  # Service DNS instead (see templates/configmap.yaml's split-host wiring).
+  nodePort: 30500
   # Nightly registry-garbage-collect CronJob schedule (cron syntax).
   gcSchedule: "0 3 * * *"
 
 externalRegistry:
   # When set, disables the bundled registry StatefulSet/Service entirely;
-  # VALET_PREBUILD_REGISTRY carries this value verbatim and
+  # VALET_PREBUILD_REGISTRY (pull) and VALET_PREBUILD_REGISTRY_PUSH (push) both
+  # carry this value verbatim (no push/pull split for an external registry) and
   # VALET_PREBUILD_REGISTRY_INSECURE is NOT set (defaults to pushing/pulling
   # over TLS, standard for a real external registry).
   #

@@ -8,12 +8,19 @@ metadata:
     {{- include "valet.labels" . | nindent 4 }}
     app.kubernetes.io/component: registry
 spec:
-  clusterIP: None
+  # NodePort (not headless/ClusterIP-only): kubelet on each node pulls prebuilt
+  # sandbox images via `localhost:<nodePort>`, which a ClusterIP-only Service
+  # name can never satisfy (kubelet resolves image hosts through the node's own
+  # resolver, not cluster DNS). BuildKit Jobs + api-pod retention still reach
+  # this same Service over the in-cluster DNS name + port 5000. NodePort binds
+  # every node, so `localhost:<nodePort>` works per-node on multi-node clusters.
+  type: NodePort
   selector:
     {{- include "valet.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: registry
   ports:
     - port: 5000
       targetPort: registry
+      nodePort: {{ .Values.registry.nodePort | default 30500 }}
       name: registry
 {{- end }}
