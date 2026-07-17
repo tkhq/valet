@@ -111,6 +111,14 @@ export interface BootTestApiOpts {
   /** Forwarded to `EngineHostOpts.idleSweepTestHooks` — test-only race
    * injection for the idle sweep's re-check. */
   idleSweepTestHooks?: EngineHostOpts["idleSweepTestHooks"];
+  /** Forwarded to `EngineHostOpts.githubTokenDeps` — wires the session
+   * `credentialResolver` seam (GH-T10 fix) so a real `sessionFor(...)` build
+   * resolves `github` credentials through the token service instead of a raw
+   * store read. Unset by default, matching every other route test (no
+   * resolver at all) — only tests exercising the action-invoke-level
+   * session-credential seam (GitHub/repo integration plan, Task 12's e2e)
+   * need this wired through a full API boot. */
+  githubTokenDeps?: EngineHostOpts["githubTokenDeps"];
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -221,6 +229,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     onWake: opts.onWake ?? defaultHibernationHooks.onWake,
     onSessionReady: opts.onSessionReady ?? defaultHibernationHooks.onSessionReady,
     idleSweepTestHooks: opts.idleSweepTestHooks,
+    githubTokenDeps: opts.githubTokenDeps,
     db,
     apiBaseUrl,
     plugins,
