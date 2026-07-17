@@ -436,16 +436,29 @@ export async function applySandbox(
     // now. Surface as a normal error; callers retry via their own policy.
     throw new Error(`applySandbox: 409 on create but "${manifest.metadata.name}" is not gettable afterward`);
   }
-  // Adoption must not clobber an existing Suspended CR back to the CRD's
-  // default (Running): if the incoming manifest doesn't specify
-  // operatingMode, carry forward whatever the existing CR has. Attachment-
-  // layer recovery re-calls applySandbox with the same (mode-less) manifest,
-  // and a wholesale spec replace would otherwise silently wake a suspended
-  // sandbox (see provider.ts create()'s adopt-on-409 path).
-  const existingOperatingMode = existing.spec.operatingMode;
+  // Adopt must satisfy create()'s postcondition: a READY sandbox. `create()`
+  // unconditionally ends in `waitReady` (see provider.ts), so adopting a CR
+  // AS Suspended can never satisfy the caller — the controller keeps the pod
+  // scaled to zero and `waitReady` polls forever for a pod it will never
+  // schedule. Every `create()` call is an explicit request for live compute
+  // (fresh provision, liveness-triggered re-provision, or — the dogfood-found
+  // case — a post-api-restart wake: a hibernated session is rebuilt with a
+  // FRESH detached SandboxAttachment that has no memory of the suspension, so
+  // its wake path goes through create()/applySandbox, NOT resume()). If an
+  // adopted CR is Suspended, the replace body therefore EXPLICITLY resumes it
+  // (operatingMode: Running), unless the incoming manifest itself asks for
+  // Suspended — which it never does today (buildSandboxManifest emits no
+  // operatingMode key). When the existing CR is Running/absent we keep today's
+  // body byte-for-byte, adding no operatingMode key so the CRD's pin is
+  // preserved. The earlier carry-forward (1a487a34) protected against a
+  // recovery re-create silently un-suspending a sandbox, but that race is
+  // mitigated one layer up — the engine's idle sweep re-checks state right
+  // before suspending, and a reportFailure-triggered re-create means the
+  // engine actively needs the sandbox live — so the provider's create-adopt
+  // must resume, not preserve Suspended.
   const spec =
-    manifest.spec.operatingMode === undefined && existingOperatingMode !== undefined
-      ? { ...manifest.spec, operatingMode: existingOperatingMode }
+    existing.spec.operatingMode === "Suspended"
+      ? { ...manifest.spec, operatingMode: manifest.spec.operatingMode ?? "Running" }
       : manifest.spec;
 
   const replaced = await api.replaceNamespacedCustomObject({

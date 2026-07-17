@@ -457,7 +457,7 @@ describe("applySandbox", () => {
     expect(api.replaceCalls).toBe(1);
   });
 
-  it("adopting a Suspended CR preserves operatingMode: Suspended in the replace body", async () => {
+  it("adopting a Suspended CR explicitly resumes it (operatingMode: Running) — create() must end in a READY sandbox, so a post-restart hibernated wake through create()/applySandbox cannot leave the CR Suspended (waitReady would hang forever)", async () => {
     const api = new FakeCustomObjectsApi();
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
     expect(manifest.spec.operatingMode).toBeUndefined();
@@ -467,7 +467,7 @@ describe("applySandbox", () => {
 
     const result = await applySandbox(api, cfg, manifest);
 
-    expect(result.spec.operatingMode).toBe("Suspended");
+    expect(result.spec.operatingMode).toBe("Running");
   });
 
   it("adopting a Running/unset CR does not introduce an operatingMode key (byte-identical spec otherwise)", async () => {
