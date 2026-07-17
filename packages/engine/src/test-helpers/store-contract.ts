@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import type {
   DecisionGate,
   MessageEntry,
+  QueueItem,
   SessionData,
   SessionEntry,
   SessionStore,
@@ -46,6 +47,20 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         queueMode: "followup",
         createdAt: 1,
         updatedAt: 1,
+      };
+    }
+
+    function queueItem(id: string, createdAt: number, updatedAt: number): QueueItem {
+      return {
+        id,
+        threadId: "th-1",
+        content: "hello",
+        status: "queued",
+        attemptCount: 0,
+        maxAttempts: 10,
+        timeoutAt: createdAt + 3_600_000,
+        createdAt,
+        updatedAt,
       };
     }
 
@@ -488,6 +503,28 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       const e = entries.find((x) => x.type === "decision_gate");
       expect(e && e.type === "decision_gate" && e.gate.status).toBe("resolved");
       expect(e && e.type === "decision_gate" && e.resolution?.actionId).toBe("approve");
+    });
+
+    it("latestActivityAt: null when empty, tracks the max queue-item updatedAt through admit + settle", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+
+      // No queue items yet → null.
+      expect(await store.latestActivityAt("sess-1")).toBeNull();
+
+      await store.admitSubmission("sess-1", "th-1", queueItem("q-1", 100, 100));
+      expect(await store.latestActivityAt("sess-1")).toBe(100);
+
+      // A newer item's updatedAt wins.
+      await store.admitSubmission("sess-1", "th-1", queueItem("q-2", 150, 250));
+      expect(await store.latestActivityAt("sess-1")).toBe(250);
+
+      // Settling an item stamps updatedAt = now, so latestActivityAt advances.
+      const before = Date.now();
+      await store.forceSettle("sess-1", "q-1", "failed");
+      const after = await store.latestActivityAt("sess-1");
+      expect(after).not.toBeNull();
+      expect(after as number).toBeGreaterThanOrEqual(before);
     });
 
     it("deleteSession removes the session", async () => {

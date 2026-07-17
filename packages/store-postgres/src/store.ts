@@ -35,6 +35,7 @@ import {
   rowToEntry,
   rowToGate,
   toNum,
+  toNumOrNull,
   type EntryInsertRow,
   type QueueItemRow,
   type SessionRow,
@@ -901,6 +902,17 @@ export class PgSessionStore implements SessionStore {
     ]);
     const raw = result.rows[0];
     return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+  }
+
+  async latestActivityAt(sessionId: string): Promise<number | null> {
+    // MAX(updated_at) is NULL when the session has no queue items — toNumOrNull
+    // maps that to null. updated_at is a bigint ms column, so it must funnel
+    // through toNum* (never a raw cast) per the store's numeric-column rule.
+    const result = await this.db.query(
+      "SELECT MAX(updated_at) as latest FROM engine_queue_items WHERE session_id = $1",
+      [sessionId],
+    );
+    return toNumOrNull(result.rows[0]?.latest, "latest");
   }
 
   async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {

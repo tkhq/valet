@@ -9,6 +9,7 @@ runSandboxContract("virtual", {
     return { sandbox, cleanup: async () => provider.destroy(sandbox.id) };
   },
   capabilities: provider.capabilities(),
+  provider,
   supportsAbort: false,
   shell: "virtual",
   gatewayEndpoint: "null",

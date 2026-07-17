@@ -327,6 +327,7 @@ describeDocker("DockerSandbox", () => {
       persistentWorkspace: true,
       tunnels: false,
       warmPool: false,
+      hibernation: false,
       coldStartEstimateMs: 8000,
     });
   });

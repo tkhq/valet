@@ -81,6 +81,7 @@ class FakeProvider implements SandboxProvider {
       persistentWorkspace: false,
       tunnels: false,
       warmPool: false,
+      hibernation: false,
       coldStartEstimateMs: 5000,
       ...caps,
     };

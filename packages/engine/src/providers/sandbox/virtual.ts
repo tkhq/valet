@@ -237,7 +237,14 @@ export class VirtualSandboxProvider implements SandboxProvider {
   private nextId = 1;
 
   capabilities(): SandboxCapabilities {
-    return { snapshot: "none", persistentWorkspace: false, tunnels: false, warmPool: false, coldStartEstimateMs: 0 };
+    return {
+      snapshot: "none",
+      persistentWorkspace: false,
+      tunnels: false,
+      warmPool: false,
+      hibernation: false,
+      coldStartEstimateMs: 0,
+    };
   }
 
   async create(_opts: SandboxCreateOpts): Promise<Sandbox> {

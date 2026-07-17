@@ -6,9 +6,11 @@ import { SandboxStartupError, SandboxUnavailableError, WorkspaceProvisioningErro
  * provisioned; `provisioning` = a `provider.create` is in flight;
  * `ready` = a live raw `Sandbox` is attached; `error` = provisioning
  * failed or (for `forSandbox` attachments) a reported failure with no
- * provider to recover with; `released` = `destroy()` was called — terminal.
+ * provider to recover with; `suspended` = hibernated via `suspend()` (workspace
+ * retained, sandbox scaled to zero) — the raw handle is kept so `resume` wakes
+ * it under the same id and epoch; `released` = `destroy()` was called — terminal.
  */
-export type AttachmentState = "detached" | "provisioning" | "ready" | "error" | "released";
+export type AttachmentState = "detached" | "provisioning" | "ready" | "suspended" | "error" | "released";
 
 export interface AttachmentStatus {
   state: AttachmentState;
@@ -65,6 +67,7 @@ export class SandboxAttachment {
         persistentWorkspace: false,
         tunnels: false,
         warmPool: false,
+        hibernation: false,
       }),
       create: () => {
         throw new Error("SandboxAttachment.forSandbox: no provider available");
@@ -104,6 +107,10 @@ export class SandboxAttachment {
    * `gatewayEndpoint()` reverse proxy) that must NOT wake a hibernated or
    * detached sandbox just to check its status — that's the caller's
    * `wake`-then-retry job, signaled by this returning `null`.
+   *
+   * A `suspended` (hibernated) attachment returns `null` here even though it
+   * still holds a raw handle: the sandbox is scaled to zero and not reachable
+   * until `ensureReady`/`warm` drives the resume path.
    */
   current(): Sandbox | null {
     return this._state === "ready" ? this._sandbox : null;
@@ -138,6 +145,35 @@ export class SandboxAttachment {
     if (this.destroyed || this.noProvider) return;
     if (this._state === "ready") return;
     this.kickProvision();
+  }
+
+  /**
+   * Hibernate a ready sandbox (spec: idle scale-to-zero). Only meaningful from
+   * `ready`: calls `provider.suspend(id)`, then transitions to `suspended`
+   * KEEPING the raw handle so the id stays stable across suspend/resume. The
+   * epoch is NOT bumped — a clean suspend/resume is not a re-provision, so ops
+   * dispatched before hibernation are not superseded. From any other state this
+   * resolves as a no-op WITHOUT touching the provider. If the provider does not
+   * implement `suspend` (capability off), this throws — callers MUST gate on
+   * `SandboxCapabilities.hibernation` first. On a `provider.suspend` rejection
+   * the attachment stays `ready` and the error is rethrown.
+   */
+  async suspend(): Promise<void> {
+    if (this._state !== "ready") return;
+    const provider = this.provider;
+    const sandbox = this._sandbox;
+    // `forSandbox` / no live handle: nothing to hibernate, and no provider to
+    // drive it with.
+    if (!provider || !sandbox) return;
+    if (!provider.suspend) {
+      throw new Error("provider does not support hibernation");
+    }
+    // On rejection: state is untouched (still `ready`) and the error propagates.
+    await provider.suspend(sandbox.id);
+    // A concurrent destroy() during the await wins — do not resurrect it.
+    if (this.destroyed) return;
+    this._state = "suspended";
+    this.emitStatus();
   }
 
   /**
@@ -280,8 +316,49 @@ export class SandboxAttachment {
     if (this.destroyed || this.noProvider) return;
     if (this._state === "ready") return;
     if (this.inFlight) return;
+    // A `suspended` attachment already holds a live handle and epoch — wake it
+    // via `resume` rather than a fresh `create` (no epoch mint, id stable). All
+    // other non-ready states go through the cold-provision path.
+    if (this._state === "suspended") {
+      this.inFlight = this.doResume();
+      return;
+    }
     if (this._epoch === 0) this._epoch = 1;
     this.inFlight = this.doProvision();
+  }
+
+  private async doResume(): Promise<void> {
+    const sandbox = this._sandbox;
+    const provider = this.provider;
+    // Silent-ish transition: emit a single `provisioning` status for the wake,
+    // mirroring doProvision. The epoch is deliberately left unchanged.
+    this._state = "provisioning";
+    this.emitStatus();
+    try {
+      if (!provider) throw new Error("no provider");
+      if (!provider.resume) throw new Error("provider does not support hibernation");
+      if (!sandbox) throw new Error("suspended attachment has no sandbox handle");
+      await provider.resume(sandbox.id);
+      if (this.destroyed) return;
+      // The raw handle is reused as-is — resume wakes the same sandbox.
+      this._state = "ready";
+      this.emitStatus();
+      this.flushWaiters();
+    } catch (err) {
+      if (this.destroyed) return;
+      this._state = "error";
+      this.emitStatus();
+      // Same fast-fail rule as doProvision: a terminal SandboxStartupError
+      // rejects waiters now; any other failure lets each waiter's own
+      // ensureReady timeout govern (a slow wake is not degradation).
+      if (err instanceof SandboxStartupError) {
+        const waiters = [...this.waiters];
+        this.waiters.clear();
+        for (const w of waiters) w.reject(err);
+      }
+    } finally {
+      this.inFlight = null;
+    }
   }
 
   private async doProvision(): Promise<void> {

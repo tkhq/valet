@@ -67,6 +67,7 @@ describe.skipIf(!dockerOk)("docker sandbox contract", () => {
       };
     },
     capabilities: provider.capabilities(),
+    provider,
     supportsAbort: true,
     shell: "full",
     gatewayEndpoint: "mapped-port",

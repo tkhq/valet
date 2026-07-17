@@ -55,7 +55,14 @@ class GatewayTestSandboxProvider implements SandboxProvider {
   constructor(private readonly endpoint: GatewayEndpoint | null) {}
 
   capabilities(): SandboxCapabilities {
-    return { snapshot: "none", persistentWorkspace: false, tunnels: false, warmPool: false, coldStartEstimateMs: 0 };
+    return {
+      snapshot: "none",
+      persistentWorkspace: false,
+      tunnels: false,
+      warmPool: false,
+      hibernation: false,
+      coldStartEstimateMs: 0,
+    };
   }
 
   async create(_opts: SandboxCreateOpts): Promise<Sandbox> {

@@ -19,6 +19,7 @@ describe("VirtualSandboxProvider: spec-aligned contract", () => {
       persistentWorkspace: false,
       tunnels: false,
       warmPool: false,
+      hibernation: false,
       coldStartEstimateMs: 0,
     });
   });

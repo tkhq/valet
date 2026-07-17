@@ -632,6 +632,14 @@ export interface SandboxCapabilities {
   persistentWorkspace: boolean;
   tunnels: boolean;
   warmPool: boolean;
+  /**
+   * Whether the backend can scale an idle sandbox to zero and later wake it
+   * with its workspace intact (hibernation). When true, the provider MUST
+   * implement `suspend`/`resume` and the attachment layer's `suspended` state
+   * becomes reachable. When false (docker/local/virtual today), `suspend`/
+   * `resume` are absent and `SandboxAttachment.suspend()` is a refused no-op.
+   */
+  hibernation: boolean;
   coldStartEstimateMs?: number;
 }
 
@@ -662,6 +670,16 @@ export interface SandboxProvider {
    * falls back to `destroy`.
    */
   release?(id: string): Promise<void>;
+  /**
+   * Optional hibernation seam (paired with `SandboxCapabilities.hibernation`).
+   * `suspend` scales the sandbox to zero while retaining its workspace; `resume`
+   * wakes it under the same id. When both are implemented (and capability true),
+   * `SandboxAttachment.suspend()` drives them and the `suspended` attachment
+   * state becomes reachable. Absent === capability off — existing paths
+   * unchanged, and `SandboxAttachment.suspend()` refuses with an explicit error.
+   */
+  suspend?(id: string): Promise<void>;
+  resume?(id: string): Promise<void>;
 }
 
 // ── Blob store ─────────────────────────────────────────────────────
@@ -754,7 +772,7 @@ export type EngineEvent =
        */
       type: "sandbox_status";
       sandboxId?: string;
-      state: "provisioning" | "ready" | "idle" | "snapshotting" | "released" | "error";
+      state: "provisioning" | "ready" | "idle" | "snapshotting" | "suspended" | "released" | "error";
       epoch: number;
       estimateMs?: number;
     };
@@ -929,6 +947,16 @@ export interface SessionStore {
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
+  /**
+   * Max last-touched timestamp across the session's queue items, or null when
+   * the session has no items. Reads the `updatedAt` column: it is stamped on
+   * every queue-item mutation (admission, claim, lease renewal, settlement), so
+   * it is the honest "when did anything last happen in this session" signal.
+   * `createdAt` would only reflect admission, and there is no dedicated
+   * settled-at column, so `updatedAt` is the correct choice. Used by the
+   * hibernation idle-sweep to decide when a session's sandbox may be suspended.
+   */
+  latestActivityAt(sessionId: string): Promise<number | null>;
   /**
    * All unsettled submissions across sessions (operator surface). Unlike
    * `QueueItem` elsewhere (always accessed via an already-known sessionId),

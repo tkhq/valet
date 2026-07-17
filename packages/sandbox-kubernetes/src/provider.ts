@@ -467,6 +467,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       persistentWorkspace: true,
       tunnels: false,
       warmPool: false,
+      // Task 2 flips this to true alongside the real suspend/resume impl.
+      hibernation: false,
       coldStartEstimateMs: 8000,
     };
   }

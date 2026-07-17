@@ -626,6 +626,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       persistentWorkspace: true,
       tunnels: false,
       warmPool: false,
+      hibernation: false,
       coldStartEstimateMs: 8000,
     };
   }

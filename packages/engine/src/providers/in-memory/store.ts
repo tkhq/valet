@@ -451,6 +451,16 @@ export class InMemorySessionStore implements SessionStore {
     return item ? { ...item } : null;
   }
 
+  async latestActivityAt(sessionId: string): Promise<number | null> {
+    const r = this.rows.get(sessionId);
+    if (!r || r.queueItems.size === 0) return null;
+    let max: number | null = null;
+    for (const item of r.queueItems.values()) {
+      if (max === null || item.updatedAt > max) max = item.updatedAt;
+    }
+    return max;
+  }
+
   /**
    * Sync fence check for wiring into InMemoryEventStream's fenceCheck opt
    * (decision 12). Item ids are unique across sessions (uid-based), so this

@@ -179,6 +179,7 @@ describe("LocalSandboxProvider", () => {
       persistentWorkspace: true,
       tunnels: false,
       warmPool: false,
+      hibernation: false,
       coldStartEstimateMs: 0,
     });
   });

@@ -1,10 +1,17 @@
 import { describe, it, expect } from "vitest";
-import type { Sandbox, SandboxCapabilities } from "../types.js";
+import type { Sandbox, SandboxCapabilities, SandboxProvider } from "../types.js";
 
 export interface SandboxContractContext {
   /** Provision a fresh raw sandbox for one test. Not the PolicySandbox wrapper — this suite exercises providers directly. */
   factory: () => Promise<{ sandbox: Sandbox; cleanup?: () => Promise<void> }>;
   capabilities: SandboxCapabilities;
+  /**
+   * The provider under test. Only required when capabilities.hibernation is
+   * true (drives the suspend/resume round-trip case). When hibernation is
+   * false and this is supplied, the suite asserts the provider does NOT expose
+   * suspend/resume.
+   */
+  provider?: SandboxProvider;
   /** Whether the provider makes any effort to honor an abort signal mid-exec. Default true. Virtual sets false. */
   supportsAbort?: boolean;
   /** Selects the command fixtures used by exec-related cases. "full" assumes a real POSIX shell (local/docker); "virtual" is limited to echo/cat/ls/pwd/true/false. Default "full". */
@@ -227,6 +234,37 @@ export function runSandboxContract(name: string, ctx: SandboxContractContext) {
           }
         } finally {
           await cleanup?.();
+        }
+      });
+    }
+
+    if (ctx.capabilities.hibernation) {
+      it("suspend + resume round-trips and the sandbox still execs", async () => {
+        if (!ctx.provider) {
+          throw new Error(`${name}: capabilities.hibernation requires ctx.provider`);
+        }
+        const provider = ctx.provider;
+        if (!provider.suspend || !provider.resume) {
+          throw new Error(`${name}: capabilities.hibernation requires provider.suspend/resume`);
+        }
+        const { sandbox, cleanup } = await ctx.factory();
+        try {
+          await provider.suspend(sandbox.id);
+          await provider.resume(sandbox.id);
+          const r = await sandbox.exec("echo alive");
+          expect(r.stdout).toContain("alive");
+          expect(r.exitCode).toBe(0);
+        } finally {
+          await cleanup?.();
+        }
+      });
+    } else {
+      it("does not expose suspend/resume when hibernation is off", () => {
+        // Only assertable when the provider is supplied; the capability being
+        // false is the binding contract either way.
+        if (ctx.provider) {
+          expect(ctx.provider.suspend).toBeUndefined();
+          expect(ctx.provider.resume).toBeUndefined();
         }
       });
     }
