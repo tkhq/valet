@@ -1233,6 +1233,95 @@ describe('SessionAgentDO', () => {
     expect(resultCall![0].error).toContain('no originating channel');
   });
 
+  it('a channel_followup reminder wake carries the follow-up channel so channel_reply back is allowed', async () => {
+    const { agent } = await createTestAgent();
+    const runnerSend = vi.fn();
+    (agent as any).runnerLink.send = runnerSend;
+    (agent as any).channelRouter = {
+      sendReply: vi.fn().mockResolvedValue({ success: true }),
+    };
+
+    // Present the runner as connected + ready + idle so the wake dispatches as a
+    // 'processing' prompt — the state the agent is in when it calls channel_reply.
+    Object.defineProperty((agent as any).runnerLink, 'isConnected', { get: () => true, configurable: true });
+    Object.defineProperty((agent as any).runnerLink, 'isReady', { get: () => true, configurable: true });
+    (agent as any).promptQueue.runnerBusy = false;
+    (agent as any).sendPrompt = vi.fn().mockReturnValue(true);
+
+    // A channel_followup reminder fires for a Slack channel the session earlier
+    // acknowledged but hasn't delivered on yet. The alarm injects it via
+    // handleSystemMessage carrying the follow-up's originating channel, exactly
+    // as the reminder call site does.
+    await (agent as any).handleSystemMessage(
+      '⏰ Reminder: deliver the deferred answer via channel_reply',
+      undefined,
+      true,
+      undefined,
+      { channelType: 'slack', channelId: 'C_DEFERRED' },
+    );
+
+    // The wake prompt is now processing and carries the Slack origin (previously
+    // it had none, so the reply below was rejected as origin-less).
+    expect((agent as any).promptQueue.getProcessingChannelContext()).toMatchObject({
+      channelType: 'slack',
+      channelId: 'C_DEFERRED',
+    });
+
+    // The deferred answer delivers: channel_reply to that channel is ALLOWED.
+    await (agent as any).handleChannelReply(
+      'reply-deferred',
+      'slack',
+      'C_DEFERRED',
+      'Here is the deferred answer you asked for.',
+    );
+
+    expect((agent as any).channelRouter.sendReply).toHaveBeenCalledWith(
+      expect.objectContaining({ channelType: 'slack', channelId: 'C_DEFERRED' }),
+    );
+    const result = runnerSend.mock.calls.find(
+      ([m]) => m?.type === 'channel-reply-result' && m?.requestId === 'reply-deferred',
+    );
+    expect(result![0].success).toBe(true);
+  });
+
+  it('a wake with no channel context still fails closed for channel_reply', async () => {
+    const { agent } = await createTestAgent();
+    const runnerSend = vi.fn();
+    (agent as any).runnerLink.send = runnerSend;
+    (agent as any).channelRouter = {
+      sendReply: vi.fn().mockResolvedValue({ success: true }),
+    };
+
+    Object.defineProperty((agent as any).runnerLink, 'isConnected', { get: () => true, configurable: true });
+    Object.defineProperty((agent as any).runnerLink, 'isReady', { get: () => true, configurable: true });
+    (agent as any).promptQueue.runnerBusy = false;
+    (agent as any).sendPrompt = vi.fn().mockReturnValue(true);
+
+    // Same wake, but with no channel context (the pre-fix behavior): the enqueued
+    // prompt has no external origin, so channel_reply must stay rejected.
+    await (agent as any).handleSystemMessage(
+      'system event with no channel origin',
+      undefined,
+      true,
+    );
+
+    expect((agent as any).promptQueue.getProcessingChannelContext()).toBeNull();
+
+    await (agent as any).handleChannelReply(
+      'reply-originless',
+      'slack',
+      'C_DEFERRED',
+      'This should not be deliverable.',
+    );
+
+    expect((agent as any).channelRouter.sendReply).not.toHaveBeenCalled();
+    const result = runnerSend.mock.calls.find(
+      ([m]) => m?.type === 'channel-reply-result' && m?.requestId === 'reply-originless',
+    );
+    expect(result![0].success).toBeUndefined();
+    expect(result![0].error).toContain('no originating channel');
+  });
+
   it('does not leak thread ID from a Telegram turn into a subsequent web-UI turn', async () => {
     const runnerSocket = { send: vi.fn() };
     const { agent, broadcasts } = await createTestAgent({ sockets: [runnerSocket] });

@@ -1542,8 +1542,10 @@ export class SessionAgentDO {
         `(Reminder #${count}, use channel_reply with follow_up=true to clear)`,
       ].join('\n');
 
-      // Inject as a wake-able system message
-      await this.handleSystemMessage(reminderContent, undefined, true);
+      // Inject as a wake-able system message, carrying the follow-up's
+      // originating channel so the wake prompt has a real origin and the agent
+      // can channel_reply back to it (the whole point of the reminder).
+      await this.handleSystemMessage(reminderContent, undefined, true, undefined, { channelType, channelId });
 
       // Bump reminder count and schedule next reminder
       this.ctx.storage.sql.exec(
@@ -4994,7 +4996,7 @@ export class SessionAgentDO {
     }
   }
 
-  private async handleSystemMessage(content: string, parts?: Record<string, unknown>, wake?: boolean, threadId?: string) {
+  private async handleSystemMessage(content: string, parts?: Record<string, unknown>, wake?: boolean, threadId?: string, channelContext?: { channelType?: string; channelId?: string }) {
     if (parts?.childSessionId) {
       console.log(`[SessionAgentDO] handleSystemMessage: childEvent childSession=${parts.childSessionId} childStatus=${parts.childStatus} threadId=${threadId || 'NONE'} wake=${wake}`);
     }
@@ -5061,6 +5063,12 @@ export class SessionAgentDO {
       if (threadId) {
         sysChannelType = 'thread';
         sysChannelId = threadId;
+      } else if (channelContext?.channelType && channelContext?.channelId) {
+        // No thread, but the caller supplied the originating external channel
+        // (e.g. a channel_followup reminder). Stamp it onto the enqueued wake
+        // prompt so the origin guard recognizes a channel_reply back to it.
+        sysChannelType = channelContext.channelType;
+        sysChannelId = channelContext.channelId;
       }
 
       // Extract child metadata for queue-level filtering
