@@ -3,11 +3,13 @@
  * an optional `profile` ("headless" | "full"), persists it, and returns it.
  * Omitting `profile` defaults to "headless".
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { agentSessions, sessionRepos } from "../schema/index.js";
 import type { CreateSessionResponse, GetSessionResponse } from "../wire/types.js";
 
 describe("POST /api/sessions: profile", () => {
@@ -214,6 +216,46 @@ describe("POST /api/sessions: repo bindings", () => {
       body: JSON.stringify({ workspace, repos }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("rolls back the session row when the repo-bindings insert fails (atomicity)", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-create-repo-atomic-"));
+    const { db } = api.providers;
+
+    // `insert` is defined once on the shared `PgDatabase` prototype that
+    // both the top-level `db` handle and any `tx` passed to
+    // `db.transaction(...)` inherit from — patching it there lets us force
+    // the *second* statement in the route's transaction (the
+    // `sessionRepos` insert) to fail without touching the first
+    // (`agentSessions`), regardless of which handle instance calls it.
+    const proto = Object.getPrototypeOf(Object.getPrototypeOf(db)) as {
+      insert: (...args: unknown[]) => unknown;
+    };
+    const original = proto.insert;
+    const spy = vi.spyOn(proto, "insert").mockImplementation(function (this: unknown, table: unknown) {
+      if (table === sessionRepos) {
+        throw new Error("simulated repo-bindings insert failure");
+      }
+      return original.apply(this, [table]);
+    });
+
+    try {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          workspace,
+          repo: { fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" },
+        }),
+      });
+      expect(res.status).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const rows = await db.select().from(agentSessions).where(eq(agentSessions.workspace, workspace));
+    expect(rows).toHaveLength(0);
   });
 
   it("400s on an invalid `auth` value", async () => {

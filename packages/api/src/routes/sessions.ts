@@ -183,35 +183,40 @@ sessionsRouter.post("/", async (c) => {
 
   const now = Date.now();
   const id = newId("s");
-  await db
-    .insert(agentSessions)
-    .values({
-      id,
-      userId: user.id,
-      orgId: user.orgId,
-      workspace: body.workspace,
-      title: body.title ?? null,
-      status: "active",
-      ownerType: "user",
-      ownerId: user.id,
-      profile,
-      createdAt: now,
-      updatedAt: now,
-    });
+  // Session row + repo bindings must land atomically — a failure between
+  // the two statements would otherwise leave an orphaned agentSessions row
+  // with no bindings (review finding on commit d0de1af3).
+  await db.transaction(async (tx) => {
+    await tx
+      .insert(agentSessions)
+      .values({
+        id,
+        userId: user.id,
+        orgId: user.orgId,
+        workspace: body.workspace,
+        title: body.title ?? null,
+        status: "active",
+        ownerType: "user",
+        ownerId: user.id,
+        profile,
+        createdAt: now,
+        updatedAt: now,
+      });
 
-  if (repos.length > 0) {
-    await db.insert(sessionRepos).values(
-      repos.map((repo, position) => ({
-        sessionId: id,
-        host: repo.host ?? "github",
-        fullName: repo.fullName,
-        cloneUrl: repo.cloneUrl,
-        ref: repo.ref ?? null,
-        auth: repo.auth ?? "auto",
-        position,
-      })),
-    );
-  }
+    if (repos.length > 0) {
+      await tx.insert(sessionRepos).values(
+        repos.map((repo, position) => ({
+          sessionId: id,
+          host: repo.host ?? "github",
+          fullName: repo.fullName,
+          cloneUrl: repo.cloneUrl,
+          ref: repo.ref ?? null,
+          auth: repo.auth ?? "auto",
+          position,
+        })),
+      );
+    }
+  });
 
   const detail: CreateSessionResponse = {
     id,
