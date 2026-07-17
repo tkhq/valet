@@ -398,6 +398,10 @@ llmProvidersRouter.post("/:id/probe", async (c) => {
     return c.json({ error: "provider has no API key" }, 400);
   }
 
+  // `baseUrl` is admin-supplied and treated as trusted (same trust model as
+  // the turn-time resolution path in services/model-resolution.ts). Bearer
+  // stripping on cross-origin redirects is the fetch/undici runtime's
+  // spec-mandated behavior; we do not re-implement it here.
   let upstream: Response;
   try {
     upstream = await fetch(`${existing.baseUrl}/models`, {
