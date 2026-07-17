@@ -4451,8 +4451,11 @@ export class SessionAgentDO {
         this._activeWorkflowExecutionId = undefined;
         // Session-wide idle event. Include completed-turn scope so clients
         // can also route "this thread just completed" per-thread.
-        const completedLookup = messageId ? this.getChannelForMessage(messageId) : null;
-        const completedThreadId = completedLookup?.found ? completedLookup.target.threadId : undefined;
+        // Reuse `followupChannel` — resolved BEFORE markCompletedById above —
+        // instead of re-looking up by messageId (the row is gone by now, which
+        // would return threadId=undefined and leave the client's per-thread
+        // status stuck on 'streaming', showing "Writing" forever).
+        const completedThreadId = followupChannel?.threadId ?? undefined;
         this.broadcastToClients({
           type: 'status',
           data: {
