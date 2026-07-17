@@ -801,6 +801,19 @@ export interface CredentialSummary {
   type: CredentialKind;
   scopes?: string[];
   connectedAt: string;
+  /** Epoch ms — present only for a credential with a known expiry
+   * (`StoredCredential.expiresAt`). Health-relevant, not secret. */
+  expiresAt?: number;
+  /** `metadata.login`, when the stored credential carries one (GitHub App
+   * OAuth / PAT credentials). Never secret material. */
+  login?: string;
+  /** `metadata.identityOnly === true` — a social-login credential with
+   * sign-in-only scopes, not repo-capable (see `services/github-tokens.ts`'s
+   * "healthy" definition). */
+  identityOnly?: boolean;
+  /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
+   * failed and left the credential needing a reconnect. Epoch ms. */
+  refreshFailedAt?: number;
 }
 
 export interface ListCredentialsResponse {
@@ -1145,4 +1158,16 @@ export interface PostGithubAppManifestResponse {
   /** HMAC-signed `{orgId, nonce, exp}` — echoed back by GitHub as the
    * `state` query param on the `redirect_url` callback. */
   state: string;
+}
+
+// ── REST: user GitHub connect (App-OAuth, GitHub/repo integration plan
+// Task 6) ────────────────────────────────────────────────────────────────
+// `/api/me/github` — a signed-in user's own App-OAuth connection, distinct
+// from the org-level App setup above. `GET /callback` has no wire response
+// type of its own (always a 302 redirect, or a 400/409/502 error body).
+
+export interface PostGithubConnectResponse {
+  /** `{github}/login/oauth/authorize?...` — where the browser should
+   * navigate to start the App-OAuth authorize flow. */
+  url: string;
 }

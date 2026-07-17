@@ -44,6 +44,7 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { isRecord, signState, verifyState as verifySignedState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import {
   discoverInstallations,
@@ -64,10 +65,6 @@ import type {
 
 export const githubAppRouter = new Hono<AppEnv>();
 export const githubAppWebhookRouter = new Hono<AppEnv>();
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 /** Builds the `GithubAppDeps` service-layer dependency bag from request
  * providers. `apiUrl` is left unset — `resolveGithubApiUrl(process.env)`
@@ -117,8 +114,9 @@ function slugifyOrgName(name: string): string {
 }
 
 // ── Manifest-flow state signing ───────────────────────────────────────────
-
-const STATE_TTL_MS = 15 * 60 * 1000;
+// Sign/verify primitives live in `lib/oauth-state.ts` (shared with Task 6's
+// user-connect callback) — this section only owns the manifest-flow's own
+// payload shape and expiry check.
 
 interface ManifestState {
   orgId: string;
@@ -126,34 +124,16 @@ interface ManifestState {
   exp: number;
 }
 
-function signState(payload: ManifestState, key: Buffer): string {
-  const payloadB64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const sig = createHmac("sha256", key).update(payloadB64).digest("base64url");
-  return `${payloadB64}.${sig}`;
-}
-
 /** Verifies signature + expiry. Returns `null` for any tampering, malformed
  * shape, or expired `exp` — never throws. */
-function verifyState(state: string, key: Buffer, nowMs: number): { orgId: string } | null {
-  const parts = state.split(".");
-  if (parts.length !== 2) return null;
-  const [payloadB64, sig] = parts;
-  const expectedSig = createHmac("sha256", key).update(payloadB64).digest("base64url");
-  const a = Buffer.from(sig, "utf8");
-  const b = Buffer.from(expectedSig, "utf8");
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!isRecord(payload)) return null;
-  const { orgId, exp } = payload;
-  if (typeof orgId !== "string" || typeof exp !== "number") return null;
-  if (exp < nowMs) return null;
-  return { orgId };
+function verifyManifestState(state: string, key: Buffer, nowMs: number): { orgId: string } | null {
+  return verifySignedState<{ orgId: string }>(state, key, (payload) => {
+    if (!isRecord(payload)) return null;
+    const { orgId, exp } = payload;
+    if (typeof orgId !== "string" || typeof exp !== "number") return null;
+    if (exp < nowMs) return null;
+    return { orgId };
+  });
 }
 
 /** Validates GitHub's `POST /app-manifests/{code}/conversions` response
@@ -249,7 +229,8 @@ githubAppRouter.post("/manifest", async (c) => {
   };
 
   const key = deriveSecretKey(encryptionKey);
-  const state = signState({ orgId, nonce: randomBytes(16).toString("hex"), exp: Date.now() + STATE_TTL_MS }, key);
+  const statePayload: ManifestState = { orgId, nonce: randomBytes(16).toString("hex"), exp: Date.now() + STATE_TTL_MS };
+  const state = signState(statePayload, key);
 
   const responseBody: PostGithubAppManifestResponse = { url, manifest, state };
   return c.json(responseBody);
@@ -266,7 +247,7 @@ githubAppRouter.get("/setup", async (c) => {
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
   const key = deriveSecretKey(encryptionKey);
-  const verified = verifyState(state, key, Date.now());
+  const verified = verifyManifestState(state, key, Date.now());
   if (!verified) return c.json({ error: "invalid or expired state" }, 400);
 
   const apiUrl = resolveGithubApiUrl(process.env);

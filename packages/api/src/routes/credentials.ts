@@ -12,11 +12,17 @@
  * one.
  *
  * `GET` never returns secret material — only `type`/`scopes`/`connectedAt`
- * (mirrors `CredentialStore.list`'s own shape, which is already
- * secret-free). `list()` doesn't carry `type`, so this reads each entry
- * back through `get()` to report it — an N+1 over a small per-user list,
- * traded for not widening the `CredentialStore` port's `list` return shape
- * for one read-only field.
+ * plus a health-relevant whitelist (`expiresAt`, `metadata.login`,
+ * `metadata.identityOnly`, `metadata.refreshFailedAt` — see
+ * `services/github-tokens.ts`'s "healthy" definition, which these fields
+ * mirror; the connect UI's health badges read them). `metadata` itself is
+ * NEVER spread wholesale into the summary — only these four named fields,
+ * so a future credential type whose `metadata` happens to carry
+ * secret-shaped data can't leak through this route by accident. `list()`
+ * doesn't carry `type`, so this reads each entry back through `get()` to
+ * report it — an N+1 over a small per-user list, traded for not widening
+ * the `CredentialStore` port's `list` return shape for one read-only
+ * field.
  *
  * `PUT` validates exactly one of `accessToken`/`apiKey` is present —
  * `refreshToken` is additionally accepted, but only for `type: "oauth2"`.
@@ -72,11 +78,16 @@ credentialsRouter.get("/", async (c) => {
     // below). Skip rather than widen `CredentialKind` for a kind this route
     // can neither create nor manage.
     if (!isCredentialKind(stored.type)) continue;
+    const metadata = stored.metadata;
     credentials.push({
       service: item.service,
       type: stored.type,
       scopes: item.scopes,
       connectedAt: item.connectedAt,
+      expiresAt: stored.expiresAt,
+      login: typeof metadata?.login === "string" ? metadata.login : undefined,
+      identityOnly: metadata?.identityOnly === true ? true : undefined,
+      refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
     });
   }
 

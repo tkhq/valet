@@ -230,6 +230,31 @@ async function loadLinkedUserLoginMap(db: AppQueryable): Promise<Map<string, str
   return map;
 }
 
+/**
+ * Cheap DB-only re-match of `github_installations.linkedUserId` for one org
+ * — re-derives `loadLinkedUserLoginMap` and updates any row whose
+ * `linkedUserId` disagrees with the fresh match. No GitHub API round trip
+ * (unlike `discoverInstallations`, which re-fetches installations too);
+ * this is what Task 6's user-connect callback calls after saving a new
+ * user `github` credential, so a fresh `login` gets matched against
+ * already-known installations without paying for a live App JWT + API
+ * call on every connect. */
+export async function relinkInstallations(deps: Pick<GithubAppDeps, "db">, orgId: string): Promise<void> {
+  const [existingRows, linkedByLogin] = await Promise.all([
+    deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId)),
+    loadLinkedUserLoginMap(deps.db),
+  ]);
+  const nowMs = Date.now();
+  for (const row of existingRows) {
+    const linkedUserId = linkedByLogin.get(row.accountLogin.toLowerCase()) ?? null;
+    if (linkedUserId === row.linkedUserId) continue;
+    await deps.db
+      .update(githubInstallations)
+      .set({ linkedUserId, updatedAt: nowMs })
+      .where(eq(githubInstallations.id, row.id));
+  }
+}
+
 const MAX_INSTALLATION_PAGES = 10;
 
 /** Parses the `next` URL out of a GitHub `Link` response header (RFC 8288

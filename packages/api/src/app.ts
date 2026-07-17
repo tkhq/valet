@@ -34,6 +34,7 @@ import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
+import { githubConnectRouter } from "./routes/github-connect.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
@@ -164,6 +165,9 @@ export function createApp(
   // no actual collision to lose. Revisit this ordering if /api/me ever grows
   // a catch-all route that could shadow /api/me/identity-links.
   app.route("/api/me/identity-links", identityLinksRouter);
+  // Mounted BEFORE /api/me for the same defensive-ordering reason as
+  // identityLinksRouter above.
+  app.route("/api/me/github", githubConnectRouter);
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/org", orgRouter);
