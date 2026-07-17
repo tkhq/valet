@@ -82,7 +82,12 @@ const listChannels: ActionDefinition = {
       .describe(
         'Comma-separated Slack channel types: public_channel,private_channel,im,mpim. Default: public_channel,private_channel,mpim,im.',
       ),
-    prefix: z.string().optional().describe('Filter channels whose name starts with this prefix (case-insensitive).'),
+    prefix: z
+      .string()
+      .optional()
+      .describe(
+        'Filter channels whose name starts with this prefix (case-insensitive). Filter is applied after fetching, so results may be incomplete on large workspaces — check `truncated` and pass `next_cursor` back to keep scanning.',
+      ),
     exclude_archived: z.boolean().optional().describe('Default true.'),
     limit: z.number().int().min(1).max(200).optional().describe('Max channels per Slack page (default 200).'),
     cursor: z.string().optional().describe('Pagination cursor from a prior call to fetch the next page.'),
@@ -403,9 +408,13 @@ async function executeAction(
             (ch) => typeof ch.name === 'string' && (ch.name as string).toLowerCase().startsWith(pfx),
           );
         }
+        // `truncated` = we hit the per-call page cap and Slack still has more.
+        // Callers must pass `next_cursor` back to see the rest; a prefix filter
+        // returning empty with `truncated: true` is NOT authoritative.
+        const truncated = !!cursor && pages >= MAX_PAGES;
         return {
           success: true,
-          data: { total: channels.length, channels, next_cursor: cursor },
+          data: { total: channels.length, channels, next_cursor: cursor, truncated },
         };
       }
 

@@ -334,9 +334,11 @@ slackUserCallbackRouter.get('/callback', async (c) => {
   // (`onConflictDoUpdate` on userId+service+scope) so concurrent callbacks
   // can't race into duplicate rows or a pending→active gap.
   //
-  // If ensureIntegration fails (transient D1 error), roll the credential
-  // back so the user isn't stuck in a "connected but no tools" state — the
-  // status endpoint reports `connected: true` purely from hasCredential.
+  // If ensureIntegration fails (transient D1 error), roll back both the
+  // credential and any pre-existing integration row so the tool surface
+  // doesn't diverge from the credential state — listTools filters by
+  // `status = active` alone, so a stale active row with no credential
+  // would keep slack_user.* tools exposed and every call would fail.
   const appDb = c.get('db');
   try {
     await db.ensureIntegration(appDb, userId, SLACK_USER_PROVIDER, 'user', {
@@ -348,6 +350,14 @@ slackUserCallbackRouter.get('/callback', async (c) => {
       await revokeCredential(c.env, 'user', userId, SLACK_USER_PROVIDER);
     } catch (revokeErr) {
       console.error(`[slack-user] rollback revokeCredential failed for user=${userId}:`, revokeErr);
+    }
+    try {
+      const existing = (await db.getUserIntegrations(appDb, userId)).find(
+        (i) => i.service === SLACK_USER_PROVIDER,
+      );
+      if (existing) await db.deleteIntegration(appDb, existing.id);
+    } catch (delErr) {
+      console.error(`[slack-user] rollback deleteIntegration failed for user=${userId}:`, delErr);
     }
     return errorRedirect('integration_write_failed');
   }
