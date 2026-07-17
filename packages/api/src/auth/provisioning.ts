@@ -205,7 +205,23 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
         await credentialStore.save(owner, service, credential);
       }
     } else if (account.providerId === "github") {
-      await credentialStore.save(owner, GITHUB_CREDENTIAL_SERVICE, credential);
+      // Social GitHub login yields a token with better-auth's default
+      // `read:user user:email` scopes — useful for identity, NOT for repos.
+      // The token service (`services/github-tokens.ts`) treats
+      // `metadata.identityOnly` as connect-state "identity-only" and excludes
+      // it from repo-capable resolution; "Connect GitHub" (the App user-OAuth
+      // flow) later overwrites this row with a repo-scoped credential.
+      //
+      // `expiresAt` is captured here so the refresh subsystem can keep the
+      // token live. NOTE (create-only-hook limitation, spec decision 4):
+      // better-auth fires `account.create.after` only on the FIRST link, so a
+      // re-login that rotates the token does NOT re-run this hook — the
+      // refresh subsystem, not this hook, is what keeps a linked token fresh.
+      await credentialStore.save(owner, GITHUB_CREDENTIAL_SERVICE, {
+        ...credential,
+        expiresAt: account.accessTokenExpiresAt?.getTime(),
+        metadata: { identityOnly: true },
+      });
     }
   };
 

@@ -330,7 +330,27 @@ describe("buildAuthHooks", () => {
       expect(workspaceCred).toEqual({ type: "oauth2", accessToken: "gtok", refreshToken: "grefresh" });
     });
 
-    it("writes github tokens to the credential store under the github service", async () => {
+    it("writes github tokens as identity-only, capturing expiresAt from the account row", async () => {
+      const cfg = baseConfig();
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
+      const expiresAt = new Date("2026-08-01T00:00:00Z");
+
+      await databaseHooks!.account!.create!.after!(
+        makeAccount({ providerId: "github", userId: "u-new", accessToken: "htok", accessTokenExpiresAt: expiresAt }),
+        dbHookCtx({ path: "/callback/github" }),
+      );
+
+      const cred = await credentialStore.get({ type: "user", id: "u-new" }, "github");
+      expect(cred).toEqual({
+        type: "oauth2",
+        accessToken: "htok",
+        refreshToken: undefined,
+        expiresAt: expiresAt.getTime(),
+        metadata: { identityOnly: true },
+      });
+    });
+
+    it("writes github tokens with expiresAt undefined when the account row has no expiry", async () => {
       const cfg = baseConfig();
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
 
@@ -340,7 +360,13 @@ describe("buildAuthHooks", () => {
       );
 
       const cred = await credentialStore.get({ type: "user", id: "u-new" }, "github");
-      expect(cred).toEqual({ type: "oauth2", accessToken: "htok", refreshToken: undefined });
+      expect(cred).toEqual({
+        type: "oauth2",
+        accessToken: "htok",
+        refreshToken: undefined,
+        expiresAt: undefined,
+        metadata: { identityOnly: true },
+      });
     });
 
     it("ignores password accounts (providerId: credential) — nothing written", async () => {
