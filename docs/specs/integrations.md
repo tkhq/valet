@@ -264,58 +264,54 @@ The plugins are separately toggleable in admin plugin settings — disabling
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/me/slack-user` | Status (oauthAvailable, connected, teamId, slackUserId) |
-| `POST` | `/api/me/slack-user/oauth/start` | Mint a 60s begin token and return a worker `/auth/slack-user/start` URL for the browser to top-level navigate to |
-| `GET` | `/auth/slack-user/start` | Verify begin token, set first-party nonce cookie, 302 to Slack authorize URL (public, no auth middleware) |
+| `POST` | `/api/me/slack-user/oauth/start` | Mint the Slack authorize URL with a signed state bound to the user |
+| `GET` | `/auth/slack-user/callback` | Slack redirects here after consent; exchanges the code and issues an encrypted claim blob (public, no auth middleware) |
+| `POST` | `/api/me/slack-user/oauth/claim` | Redeem the claim blob — the authenticated bind step |
 | `DELETE` | `/api/me/slack-user/oauth` | Disconnect (revoke credential + delete integration) |
-| `GET` | `/auth/slack-user/callback` | Slack redirects here after consent (public, no auth middleware) |
 
-`/auth/slack-user/start` and `/auth/slack-user/callback` are both mounted
-outside `/api/*` so they bypass the shared bearer-auth middleware — the
-start hop is a top-level navigation with no `Authorization` header, and
-Slack's redirect to the callback likewise carries none. Sibling pattern
-of `/auth/github`.
+The callback lives at `/auth/slack-user/callback` — outside `/api/*` so it
+bypasses the shared bearer-auth middleware (Slack redirects the browser
+with no `Authorization` header). Sibling pattern of `/auth/github`.
+**Mount order matters**: it must be registered before the generic `/auth`
+router, whose `GET /:provider/callback` would otherwise shadow it (Hono
+dispatches in registration order).
 
-### Two-hop start (first-party cookie)
+### Claim-based finalization (CSRF defense)
 
-The nonce cookie MUST be set on a top-level navigation on the worker
-origin, not on the `POST /api/me/slack-user/oauth/start` response. That
-POST is a cross-origin fetch (frontend Pages origin → worker origin) and
-browsers silently drop `Set-Cookie` on cross-site fetch responses —
-without a first-party context, the callback would never see the cookie
-and every flow would fail with `user_mismatch`.
+The callback would be trivially CSRF'able if it bound the credential from
+the signed `state` alone: an attacker could mint a state for their own
+`userId` and deliver the resulting consent link to a victim — the
+victim's `xoxp` token would then land under the attacker's account.
 
-So `/oauth/start` returns `{ authorizeUrl: "<worker>/auth/slack-user/start?token=..." }`
-where `token` is a 60-second signed begin token (`sub=slack-user-begin`,
-distinct from the real OAuth state so it can never be replayed as one).
-The frontend's `window.location.href = authorizeUrl` triggers a top-level
-navigation to `/start`, which verifies the begin token, sets the cookie
-first-party, signs the real state, and 302s to Slack.
+Defense: the callback persists **nothing**. It exchanges the code,
+validates scopes, then encrypts the exchange result (userId, xoxp token,
+metadata, 5-minute expiry) into an AES-GCM claim blob under the worker
+`ENCRYPTION_KEY` and redirects to
+`/integrations?slack_user=claim&claim=<blob>`. The frontend redeems the
+blob via the authenticated `POST /api/me/slack-user/oauth/claim`, which
+requires `claim.userId === authenticated user` before storing anything.
+That single check is the whole defense: no matter whose browser ran the
+consent flow or who obtains the blob (delivered link, URL leak, replay),
+the credential can only ever be bound by the user the flow was started
+for, over their own authenticated channel. A browser-bound cookie is
+unnecessary — which also sidesteps the cross-origin `Set-Cookie` drop
+that broke the earlier cookie-based design (frontend and worker run on
+different origins; browsers discard cookies set on cross-site fetch
+responses).
 
-### CSRF binding
-
-The callback would be trivially CSRF'able if it trusted the signed
-`state` alone: an attacker could mint a state for their own `userId` and
-deliver the resulting Slack authorize URL to a victim — the victim's
-`xoxp` token would then land under the attacker's account.
-
-Defense: on `/auth/slack-user/start` the server mints a random nonce,
-sets it as an `HttpOnly; Secure; SameSite=Lax; Path=/auth/slack-user`
-cookie, and embeds `sha256(nonce)` in the signed state as `nonceHash`.
-On the callback both must be present and match (constant-time compare).
-Cookie is single-use — cleared on every success + error exit.
-
-Client-side error label `user_mismatch` is emitted when the cookie is
-missing or doesn't match the hash.
+Error codes surface as `?slack_user=error&reason=…` from the callback and
+as `{ error, code }` JSON from the claim endpoint; the frontend maps both
+through one label table (`user_mismatch`, `invalid_claim`,
+`claim_expired`, `already_linked`, `missing_scopes`, …).
 
 ### Token exchange + storage
 
 - `slackUserProvider.getOAuthUrl` mints the authorize URL (scope=empty,
-  user_scope=SLACK_USER_SCOPES joined). The `/start` route sets the
-  cookie and 302s to that URL.
+  user_scope=SLACK_USER_SCOPES joined) from `/oauth/start`.
 - `slackUserProvider.exchangeOAuthCode` calls `oauth.v2.access` and
   returns `{ access_token, scope, slack_user_id, team_id, team_name }`.
-- Route validates every requested scope was granted (surfacing
-  `missing_scopes` on partial approval), checks for cross-user collisions
+- The callback validates every requested scope was granted (surfacing
+  `missing_scopes` on partial approval); the claim endpoint checks for cross-user collisions
   via `json_extract(metadata, '$.slack_user_id')` (returns
   `already_linked` if a different user is already linked to that Slack
   identity), then `storeCredential` + `ensureIntegration` (atomic

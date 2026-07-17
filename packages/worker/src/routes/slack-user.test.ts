@@ -5,7 +5,7 @@ import type { Env, Variables } from '../env.js';
 import { errorHandler } from '../middleware/error-handler.js';
 import { createTestDb } from '../test-utils/db.js';
 import { credentials as credentialsTable, users } from '../lib/schema/index.js';
-import { encryptStringPBKDF2 } from '../lib/crypto.js';
+import { encryptStringPBKDF2, decryptStringPBKDF2 } from '../lib/crypto.js';
 import { signOAuthState, verifyOAuthState } from '../lib/oauth-state.js';
 import { slackUserOAuthRouter, slackUserCallbackRouter } from './slack-user.js';
 import { SLACK_USER_SCOPES } from '@valet/plugin-slack-user/actions';
@@ -28,33 +28,36 @@ const USER_ID = 'user-1';
 const OTHER_USER_ID = 'user-2';
 const ENCRYPTION_KEY = 'test-encryption-key-slack-user';
 
-// Mirror the OAUTH_NONCE_COOKIE constant + hashing in slack-user.ts. Kept
-// inline so the test doesn't need to import an internal helper.
-const OAUTH_NONCE_COOKIE = 'slack_user_oauth_n';
-function b64url(bytes: Uint8Array): string {
-  let s = '';
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+/** Signed OAuth state as minted by POST /oauth/start. */
+async function stateFor(userId: string): Promise<string> {
+  return signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId });
 }
-async function sha256B64Url(input: string): Promise<string> {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
-  return b64url(new Uint8Array(buf));
+
+interface TestClaim {
+  v: number;
+  userId: string;
+  accessToken: string;
+  grantedScopes: string[];
+  slackUserId: string;
+  teamId: string;
+  teamName: string;
+  exp: number;
 }
-function randomNonce(): string {
-  const b = new Uint8Array(32);
-  crypto.getRandomValues(b);
-  return b64url(b);
-}
-/**
- * Build a valid (state, cookie) pair that mimics /oauth/start's browser
- * binding — the callback tests must supply both, otherwise the CSRF guard
- * rejects them with reason=user_mismatch.
- */
-async function boundState(userId: string): Promise<{ state: string; cookieHeader: string }> {
-  const nonce = randomNonce();
-  const nonceHash = await sha256B64Url(nonce);
-  const state = await signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId, nonceHash });
-  return { state, cookieHeader: `${OAUTH_NONCE_COOKIE}=${nonce}` };
+
+/** Encrypted claim blob as issued by the OAuth callback. */
+async function makeClaim(overrides: Partial<TestClaim> = {}): Promise<string> {
+  const claim: TestClaim = {
+    v: 1,
+    userId: USER_ID,
+    accessToken: 'xoxp-real',
+    grantedScopes: [...SLACK_USER_SCOPES],
+    slackUserId: 'U123',
+    teamId: 'T1',
+    teamName: 'Test Workspace',
+    exp: Math.floor(Date.now() / 1000) + 300,
+    ...overrides,
+  };
+  return encryptStringPBKDF2(JSON.stringify(claim), ENCRYPTION_KEY);
 }
 
 function buildApp(db: AppDb, userId: string = USER_ID) {
@@ -122,7 +125,7 @@ describe('POST /oauth/start', () => {
     expect(body.error).toMatch(/SLACK_CLIENT_ID unset/);
   });
 
-  it('returns a worker /auth/slack-user/start URL carrying a signed begin token (no cookie — cross-origin fetch responses drop Set-Cookie)', async () => {
+  it('returns a slack.com authorize URL with the full user_scope bundle and a state bound to the user', async () => {
     const app = buildApp(db);
     const res = await app.request(
       'https://api.example.com/oauth/start',
@@ -132,72 +135,6 @@ describe('POST /oauth/start', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { authorizeUrl: string };
     const url = new URL(body.authorizeUrl);
-    expect(url.origin + url.pathname).toBe('https://api.example.com/auth/slack-user/start');
-
-    const token = url.searchParams.get('token');
-    expect(token).toBeTruthy();
-    const verified = await verifyOAuthState(ENCRYPTION_KEY, 'slack-user-begin', token!);
-    expect(verified).not.toBeNull();
-    expect(verified!.userId).toBe(USER_ID);
-    // A begin token must never validate as an OAuth state.
-    expect(await verifyOAuthState(ENCRYPTION_KEY, 'slack-user', token!)).toBeNull();
-
-    // The nonce cookie is NOT set here — this response is consumed by a
-    // cross-origin fetch, where browsers drop Set-Cookie. The cookie is set
-    // by the top-level navigation to /auth/slack-user/start instead.
-    expect(res.headers.get('set-cookie')).toBeNull();
-  });
-});
-
-describe('GET /auth/slack-user/start', () => {
-  let db: AppDb;
-
-  beforeEach(() => {
-    const { db: newDb } = createTestDb();
-    db = newDb as AppDb;
-    holder.db = db;
-  });
-
-  async function beginToken(userId: string = USER_ID): Promise<string> {
-    return signOAuthState(ENCRYPTION_KEY, 'slack-user-begin', { userId }, 60);
-  }
-
-  it('redirects to the frontend with reason=missing_params when token is absent', async () => {
-    const app = buildCallbackApp(db);
-    const res = await app.request(
-      'https://api.example.com/auth/slack-user/start',
-      { method: 'GET', redirect: 'manual' },
-      makeEnv(),
-    );
-    expect(res.status).toBe(302);
-    const loc = new URL(res.headers.get('location')!);
-    expect(loc.searchParams.get('slack_user')).toBe('error');
-    expect(loc.searchParams.get('reason')).toBe('missing_params');
-  });
-
-  it('rejects a forged or wrong-provider token with reason=invalid_state', async () => {
-    const app = buildCallbackApp(db);
-    // A real OAuth state (sub=slack-user) must not work as a begin token.
-    const wrongProvider = await signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId: USER_ID }, 60);
-    const res = await app.request(
-      `https://api.example.com/auth/slack-user/start?token=${encodeURIComponent(wrongProvider)}`,
-      { method: 'GET', redirect: 'manual' },
-      makeEnv(),
-    );
-    expect(res.status).toBe(302);
-    const loc = new URL(res.headers.get('location')!);
-    expect(loc.searchParams.get('reason')).toBe('invalid_state');
-  });
-
-  it('sets the first-party nonce cookie and 302s to Slack with a state whose nonceHash matches the cookie', async () => {
-    const app = buildCallbackApp(db);
-    const res = await app.request(
-      `https://api.example.com/auth/slack-user/start?token=${encodeURIComponent(await beginToken())}`,
-      { method: 'GET', redirect: 'manual' },
-      makeEnv(),
-    );
-    expect(res.status).toBe(302);
-    const url = new URL(res.headers.get('location')!);
     expect(url.origin + url.pathname).toBe('https://slack.com/oauth/v2/authorize');
     expect(url.searchParams.get('client_id')).toBe('CLIENT_ID');
     expect(url.searchParams.get('scope')).toBe('');
@@ -214,25 +151,10 @@ describe('GET /auth/slack-user/start', () => {
     const verified = await verifyOAuthState(ENCRYPTION_KEY, 'slack-user', state!);
     expect(verified).not.toBeNull();
     expect(verified!.userId).toBe(USER_ID);
-    // The signed state must carry a hash of the browser-bound nonce so the
-    // callback can prove this flow originated in the same browser.
-    expect(typeof verified!.nonceHash).toBe('string');
-    expect((verified!.nonceHash as string).length).toBeGreaterThan(0);
 
-    // /auth/slack-user/start must set the handshake cookie: HttpOnly,
-    // SameSite=Lax, scoped to /auth/slack-user (shared with the callback).
-    // The cookie's SHA-256 hash must equal the nonceHash embedded in state.
-    const setCookieHeader = res.headers.get('set-cookie');
-    expect(setCookieHeader).toBeTruthy();
-    expect(setCookieHeader).toContain('slack_user_oauth_n=');
-    expect(setCookieHeader!.toLowerCase()).toContain('httponly');
-    expect(setCookieHeader!.toLowerCase()).toContain('samesite=lax');
-    expect(setCookieHeader).toContain('Path=/auth/slack-user');
-
-    const match = setCookieHeader!.match(/slack_user_oauth_n=([^;]+)/);
-    expect(match).toBeTruthy();
-    const cookieValue = match![1];
-    expect(await sha256B64Url(cookieValue)).toBe(verified!.nonceHash);
+    // No cookie in this design: the account binding happens at the
+    // authenticated /oauth/claim step, not via a browser-bound nonce.
+    expect(res.headers.get('set-cookie')).toBeNull();
   });
 });
 
@@ -263,14 +185,11 @@ describe('GET /oauth/callback', () => {
     const { db: newDb } = createTestDb();
     db = newDb as AppDb;
     holder.db = db;
-    // integrations.userId is a FK to users — seed both test users.
-    db.insert(users).values({ id: USER_ID, email: `${USER_ID}@example.com` }).run();
-    db.insert(users).values({ id: OTHER_USER_ID, email: `${OTHER_USER_ID}@example.com` }).run();
     env = makeEnv();
   });
 
-  it('redirects to /integrations?slack_user=linked on success and stores the xoxp token + metadata', async () => {
-    const { state, cookieHeader } = await boundState(USER_ID);
+  it('redirects to /integrations?slack_user=claim with an encrypted claim blob and persists NOTHING', async () => {
+    const state = await stateFor(USER_ID);
     // Use the live bundle so the granted-scope mock never drifts from the source.
     const fullScopes = SLACK_USER_SCOPES;
     const restore = mockOauthV2Access({
@@ -283,46 +202,37 @@ describe('GET /oauth/callback', () => {
       const app = buildCallbackApp(db);
       const res = await app.request(
         `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual', headers: { cookie: cookieHeader } },
+        { method: 'GET', redirect: 'manual' },
         env,
       );
       expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toBe(
-        'https://app.example.com/integrations?slack_user=linked',
-      );
+      const loc = new URL(res.headers.get('location')!);
+      expect(loc.origin + loc.pathname).toBe('https://app.example.com/integrations');
+      expect(loc.searchParams.get('slack_user')).toBe('claim');
 
-      const row = await db
+      const blob = loc.searchParams.get('claim');
+      expect(blob).toBeTruthy();
+      const claim = JSON.parse(await decryptStringPBKDF2(blob!, ENCRYPTION_KEY)) as TestClaim;
+      expect(claim.v).toBe(1);
+      expect(claim.userId).toBe(USER_ID);
+      expect(claim.accessToken).toBe('xoxp-real');
+      expect(claim.slackUserId).toBe('U123');
+      expect(claim.teamId).toBe('T1');
+      expect(claim.teamName).toBe('Test Workspace');
+      expect(claim.grantedScopes).toEqual([...fullScopes]);
+      expect(claim.exp).toBeGreaterThan(Math.floor(Date.now() / 1000));
+
+      // The callback is not a trust boundary — nothing may be persisted
+      // until the authenticated claim call.
+      const rows = await db
         .select()
         .from(credentialsTable)
-        .where(eq(credentialsTable.provider, 'slack-user'))
-        .get();
-      expect(row).toBeTruthy();
-      expect((row as { ownerId: string }).ownerId).toBe(USER_ID);
-      expect((row as { credentialType: string }).credentialType).toBe('oauth2');
-      const metadata = JSON.parse((row as { metadata: string }).metadata) as {
-        slack_user_id: string;
-        team_id: string;
-        team_name: string;
-      };
-      expect(metadata.slack_user_id).toBe('U123');
-      expect(metadata.team_id).toBe('T1');
-      expect(metadata.team_name).toBe('Test Workspace');
-
-      // The integration row must exist so the slack_user.* tools surface in
-      // the orchestrator's list_tools. Storing only the credential is not enough.
-      const integrationRows = await getUserIntegrations(db, USER_ID);
-      const slackUser = integrationRows.find((i) => i.service === 'slack-user');
-      expect(slackUser).toBeTruthy();
-      expect(slackUser!.status).toBe('active');
+        .where(eq(credentialsTable.provider, 'slack-user'));
+      expect(rows).toHaveLength(0);
     } finally {
       restore();
     }
   });
-
-  // Note: the previous "resolves user from state when unauthenticated" test
-  // is subsumed by every other callback test here — `buildCallbackApp` never
-  // sets `user` in context, so if identity weren't coming from the signed
-  // state the redirects wouldn't be =linked.
 
   it('redirects with error=invalid_state when state is malformed', async () => {
     const app = buildCallbackApp(db);
@@ -337,13 +247,13 @@ describe('GET /oauth/callback', () => {
   });
 
   it('redirects with error when oauth.v2.access fails', async () => {
-    const { state, cookieHeader } = await boundState(USER_ID);
+    const state = await stateFor(USER_ID);
     const restore = mockOauthV2Access({ ok: false, error: 'invalid_code' });
     try {
       const app = buildCallbackApp(db);
       const res = await app.request(
         `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual', headers: { cookie: cookieHeader } },
+        { method: 'GET', redirect: 'manual' },
         env,
       );
       expect(res.status).toBe(302);
@@ -354,7 +264,128 @@ describe('GET /oauth/callback', () => {
     }
   });
 
-  it('redirects with reason=already_linked when the same Slack user is already linked to a different Valet user', async () => {
+  it('redirects with reason=missing_scopes when the granted scope set is incomplete', async () => {
+    const state = await stateFor(USER_ID);
+    // Note: explicitly missing chat:write and users.profile:write
+    const restore = mockOauthV2Access({
+      ok: true,
+      authed_user: {
+        id: 'U123',
+        access_token: 'xoxp-real',
+        scope: 'search:read,channels:read,users:read',
+      },
+      team: { id: 'T1', name: 'Test' },
+    });
+
+    try {
+      const app = buildCallbackApp(db);
+      const res = await app.request(
+        `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
+        { method: 'GET', redirect: 'manual' },
+        env,
+      );
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toContain('slack_user=error');
+      expect(res.headers.get('location')).toContain('reason=missing_scopes');
+      // No claim blob is issued on missing scopes.
+      expect(res.headers.get('location')).not.toContain('claim=');
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('POST /oauth/claim', () => {
+  let db: AppDb;
+
+  beforeEach(() => {
+    const { db: newDb } = createTestDb();
+    db = newDb as AppDb;
+    holder.db = db;
+    // integrations.userId is a FK to users — seed both test users.
+    db.insert(users).values({ id: USER_ID, email: `${USER_ID}@example.com` }).run();
+    db.insert(users).values({ id: OTHER_USER_ID, email: `${OTHER_USER_ID}@example.com` }).run();
+  });
+
+  async function postClaim(app: ReturnType<typeof buildApp>, claim: string) {
+    return app.request(
+      'https://api.example.com/oauth/claim',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ claim }),
+      },
+      makeEnv(),
+    );
+  }
+
+  it('stores the xoxp token + metadata and registers the integration row', async () => {
+    const app = buildApp(db);
+    const res = await postClaim(app, await makeClaim());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { linked: boolean; teamName: string | null };
+    expect(body.linked).toBe(true);
+    expect(body.teamName).toBe('Test Workspace');
+
+    const row = await db
+      .select()
+      .from(credentialsTable)
+      .where(eq(credentialsTable.provider, 'slack-user'))
+      .get();
+    expect(row).toBeTruthy();
+    expect((row as { ownerId: string }).ownerId).toBe(USER_ID);
+    expect((row as { credentialType: string }).credentialType).toBe('oauth2');
+    const metadata = JSON.parse((row as { metadata: string }).metadata) as {
+      slack_user_id: string;
+      team_id: string;
+      team_name: string;
+    };
+    expect(metadata.slack_user_id).toBe('U123');
+    expect(metadata.team_id).toBe('T1');
+    expect(metadata.team_name).toBe('Test Workspace');
+
+    // The integration row must exist so the slack_user.* tools surface in
+    // the orchestrator's list_tools. Storing only the credential is not enough.
+    const integrationRows = await getUserIntegrations(db, USER_ID);
+    const slackUser = integrationRows.find((i) => i.service === 'slack-user');
+    expect(slackUser).toBeTruthy();
+    expect(slackUser!.status).toBe('active');
+  });
+
+  it('CSRF: rejects a claim issued for a different user with 403 user_mismatch and stores nothing', async () => {
+    // The blob names OTHER_USER_ID (the flow initiator); the authenticated
+    // session is USER_ID. This is the delivered-link attack: no matter whose
+    // browser completed Slack consent, the bind must fail here.
+    const app = buildApp(db); // authenticated as USER_ID
+    const res = await postClaim(app, await makeClaim({ userId: OTHER_USER_ID }));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('user_mismatch');
+
+    const rows = await db
+      .select()
+      .from(credentialsTable)
+      .where(eq(credentialsTable.provider, 'slack-user'));
+    expect(rows).toHaveLength(0);
+  });
+
+  it('rejects an expired claim with 400 claim_expired', async () => {
+    const app = buildApp(db);
+    const res = await postClaim(app, await makeClaim({ exp: Math.floor(Date.now() / 1000) - 1 }));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('claim_expired');
+  });
+
+  it('rejects a garbage blob with 400 invalid_claim', async () => {
+    const app = buildApp(db);
+    const res = await postClaim(app, 'not-a-real-blob');
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('invalid_claim');
+  });
+
+  it('rejects with 409 already_linked when the same Slack user is linked to a different Valet user', async () => {
     // Seed: user-2 already has slack-user credential pointing at slack U123.
     const existingEncrypted = await encryptStringPBKDF2(
       JSON.stringify({ access_token: 'xoxp-old' }),
@@ -370,37 +401,19 @@ describe('GET /oauth/callback', () => {
       metadata: JSON.stringify({ slack_user_id: 'U123', team_id: 'T1' }),
     });
 
-    const { state, cookieHeader } = await boundState(USER_ID);
-    // Use the live bundle so the granted-scope mock never drifts from the source.
-    const fullScopes = SLACK_USER_SCOPES;
-    const restore = mockOauthV2Access({
-      ok: true,
-      authed_user: { id: 'U123', access_token: 'xoxp-new', scope: fullScopes.join(',') },
-      team: { id: 'T1', name: 'Test' },
-    });
+    const app = buildApp(db); // user-1 tries to link the same Slack user
+    const res = await postClaim(app, await makeClaim());
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('already_linked');
 
-    try {
-      // Note: user-1 is trying to link the same Slack user as user-2.
-      const app = buildCallbackApp(db);
-      const res = await app.request(
-        `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual', headers: { cookie: cookieHeader } },
-        env,
-      );
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toContain('slack_user=error');
-      expect(res.headers.get('location')).toContain('reason=already_linked');
-
-      // The original user's credential must remain untouched
-      const row = await db
-        .select()
-        .from(credentialsTable)
-        .where(eq(credentialsTable.ownerId, OTHER_USER_ID))
-        .get();
-      expect(row).toBeTruthy();
-    } finally {
-      restore();
-    }
+    // The original user's credential must remain untouched
+    const row = await db
+      .select()
+      .from(credentialsTable)
+      .where(eq(credentialsTable.ownerId, OTHER_USER_ID))
+      .get();
+    expect(row).toBeTruthy();
   });
 
   it('upserts (treats as reconnect) when the same user re-links the same Slack identity', async () => {
@@ -419,171 +432,16 @@ describe('GET /oauth/callback', () => {
       metadata: JSON.stringify({ slack_user_id: 'U123', team_id: 'T1' }),
     });
 
-    const { state, cookieHeader } = await boundState(USER_ID);
-    // Use the live bundle so the granted-scope mock never drifts from the source.
-    const fullScopes = SLACK_USER_SCOPES;
-    const restore = mockOauthV2Access({
-      ok: true,
-      authed_user: { id: 'U123', access_token: 'xoxp-new', scope: fullScopes.join(',') },
-      team: { id: 'T1', name: 'Test' },
-    });
+    const app = buildApp(db);
+    const res = await postClaim(app, await makeClaim({ accessToken: 'xoxp-new' }));
+    expect(res.status).toBe(200);
 
-    try {
-      const app = buildCallbackApp(db);
-      const res = await app.request(
-        `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual', headers: { cookie: cookieHeader } },
-        env,
-      );
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toBe(
-        'https://app.example.com/integrations?slack_user=linked',
-      );
-
-      // Still exactly one row for slack-user
-      const rows = await db
-        .select()
-        .from(credentialsTable)
-        .where(eq(credentialsTable.provider, 'slack-user'));
-      expect(rows).toHaveLength(1);
-    } finally {
-      restore();
-    }
-  });
-
-  it('redirects with reason=missing_scopes when the granted scope set is incomplete', async () => {
-    const { state, cookieHeader } = await boundState(USER_ID);
-    // Note: explicitly missing chat:write and users.profile:write
-    const restore = mockOauthV2Access({
-      ok: true,
-      authed_user: {
-        id: 'U123',
-        access_token: 'xoxp-real',
-        scope: 'search:read,channels:read,users:read',
-      },
-      team: { id: 'T1', name: 'Test' },
-    });
-
-    try {
-      const app = buildCallbackApp(db);
-      const res = await app.request(
-        `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual', headers: { cookie: cookieHeader } },
-        env,
-      );
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toContain('slack_user=error');
-      expect(res.headers.get('location')).toContain('reason=missing_scopes');
-
-      // No credential should be stored on missing scopes
-      const rows = await db
-        .select()
-        .from(credentialsTable)
-        .where(eq(credentialsTable.provider, 'slack-user'));
-      expect(rows).toHaveLength(0);
-    } finally {
-      restore();
-    }
-  });
-
-  // ─── Account-linking CSRF guard ──────────────────────────────────────────
-  //
-  // These cover the exact attack the earlier revision was vulnerable to: the
-  // callback used to trust the signed state alone as identity, so an
-  // attacker could mint a state for their own userId (via /oauth/start),
-  // send the resulting Slack consent link to a victim, and have the
-  // victim's xoxp token stored under the attacker's account. Now the state
-  // carries a hash of a browser-bound cookie nonce; without the matching
-  // cookie the callback must refuse to store anything.
-
-  it('CSRF: rejects the callback when the browser has no handshake cookie', async () => {
-    // Attacker minted this state via /oauth/start (so it contains a valid
-    // nonceHash), but the victim's browser has no matching cookie.
-    const { state } = await boundState(USER_ID);
-    // Slack must never even be contacted if the guard is doing its job.
-    const restore = mockOauthV2Access({
-      ok: true,
-      authed_user: { id: 'U123', access_token: 'xoxp-victim', scope: SLACK_USER_SCOPES.join(',') },
-      team: { id: 'T1', name: 'Test' },
-    });
-    try {
-      const app = buildCallbackApp(db);
-      const res = await app.request(
-        `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual' },
-        env,
-      );
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toContain('slack_user=error');
-      expect(res.headers.get('location')).toContain('reason=user_mismatch');
-
-      // Nothing should have been stored under the attacker's id (or anyone's).
-      const rows = await db
-        .select()
-        .from(credentialsTable)
-        .where(eq(credentialsTable.provider, 'slack-user'));
-      expect(rows).toHaveLength(0);
-    } finally {
-      restore();
-    }
-  });
-
-  it('CSRF: rejects the callback when the cookie is present but does not match the state hash', async () => {
-    // Attacker's state (their nonce hash), victim's browser cookie (a
-    // different random nonce). The hash comparison must fail.
-    const { state } = await boundState(USER_ID);
-    const wrongCookie = `${OAUTH_NONCE_COOKIE}=${randomNonce()}`;
-    const restore = mockOauthV2Access({
-      ok: true,
-      authed_user: { id: 'U123', access_token: 'xoxp-victim', scope: SLACK_USER_SCOPES.join(',') },
-      team: { id: 'T1', name: 'Test' },
-    });
-    try {
-      const app = buildCallbackApp(db);
-      const res = await app.request(
-        `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual', headers: { cookie: wrongCookie } },
-        env,
-      );
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toContain('reason=user_mismatch');
-
-      const rows = await db
-        .select()
-        .from(credentialsTable)
-        .where(eq(credentialsTable.provider, 'slack-user'));
-      expect(rows).toHaveLength(0);
-    } finally {
-      restore();
-    }
-  });
-
-  it('CSRF: clears the handshake cookie after a successful callback (single-use)', async () => {
-    const { state, cookieHeader } = await boundState(USER_ID);
-    const restore = mockOauthV2Access({
-      ok: true,
-      authed_user: { id: 'U123', access_token: 'xoxp-real', scope: SLACK_USER_SCOPES.join(',') },
-      team: { id: 'T1', name: 'Test' },
-    });
-    try {
-      const app = buildCallbackApp(db);
-      const res = await app.request(
-        `https://api.example.com/auth/slack-user/callback?code=abc&state=${encodeURIComponent(state)}`,
-        { method: 'GET', redirect: 'manual', headers: { cookie: cookieHeader } },
-        env,
-      );
-      expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toBe(
-        'https://app.example.com/integrations?slack_user=linked',
-      );
-      // Cookie is cleared: Max-Age=0 (or an expired Expires) on Path=/auth/slack-user.
-      const setCookieHeader = res.headers.get('set-cookie') ?? '';
-      expect(setCookieHeader).toContain('slack_user_oauth_n=');
-      expect(setCookieHeader).toContain('Path=/auth/slack-user');
-      expect(setCookieHeader).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/i);
-    } finally {
-      restore();
-    }
+    // Still exactly one row for slack-user
+    const rows = await db
+      .select()
+      .from(credentialsTable)
+      .where(eq(credentialsTable.provider, 'slack-user'));
+    expect(rows).toHaveLength(1);
   });
 });
 

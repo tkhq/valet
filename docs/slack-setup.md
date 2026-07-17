@@ -190,8 +190,8 @@ Valet requests the full bundle on every connect and **refuses to store a partial
 ### Step B: Register the OAuth redirect URL
 
 1. Still under **OAuth & Permissions**, find **Redirect URLs**.
-2. Add exactly: `${API_PUBLIC_URL}/api/me/slack-user/oauth/callback`
-   (e.g. `https://valet.conner-7e8.workers.dev/api/me/slack-user/oauth/callback`). Use your deployed worker origin.
+2. Add exactly: `${API_PUBLIC_URL}/auth/slack-user/callback`
+   (e.g. `https://valet.conner-7e8.workers.dev/auth/slack-user/callback`). Use your deployed worker origin.
 3. Click **Save URLs**.
 
 Unlike the bot integration, the personal callback is served by the worker, not the client — the redirect URL must point at the worker origin.
@@ -252,7 +252,7 @@ These 33 scopes are requested as **User Token Scopes** for the personal integrat
 
 **Personal connect shows "Invalid client_id"**: `SLACK_CLIENT_ID` is unset or wrong on the worker. Set it (Step C) with the value from Basic Information → App Credentials.
 
-**Personal connect shows "redirect_uri did not match"**: The redirect URL in Step B isn't registered on the app, or doesn't exactly match the worker origin. Add `${API_PUBLIC_URL}/api/me/slack-user/oauth/callback` and Save URLs.
+**Personal connect shows "redirect_uri did not match"**: The redirect URL in Step B isn't registered on the app, or doesn't exactly match the worker origin. Add `${API_PUBLIC_URL}/auth/slack-user/callback` and Save URLs.
 
 **Personal connect redirects with `reason=missing_scopes`**: Slack didn't grant every requested scope (usually a workspace admin restriction). Add the named scopes under User Token Scopes (Step A) and reconnect.
 
