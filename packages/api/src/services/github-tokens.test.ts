@@ -91,6 +91,10 @@ describe("resolveGitHubToken", () => {
     await credentials.save({ type: "user", id: userId }, "github", cred);
   }
 
+  async function saveOrgGithub(cred: Parameters<PgCredentialStore["save"]>[2]): Promise<void> {
+    await credentials.save({ type: "org", id: orgId }, "github", cred);
+  }
+
   function oauthFixtureCalls(): number {
     return (fixture?.calls ?? []).filter((c) => c.path === "/login/oauth/access_token").length;
   }
@@ -362,6 +366,69 @@ describe("resolveGitHubToken", () => {
     });
   });
 
+  // ── org-owned PAT ───────────────────────────────────────────────────
+  describe("org-owned PAT", () => {
+    it("auto + git falls through to the org PAT when no installation and no user credential", async () => {
+      await saveOrgGithub({ type: "api_key", accessToken: "org-pat-tok", metadata: { login: "acme-bot" } });
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "git",
+        repo: { owner: "nobody", name: "repo" },
+      });
+      expect(result).toEqual({ token: "org-pat-tok", source: "pat", login: "acme-bot" });
+    });
+
+    it("auto + api falls through to the org PAT after user/installation/sole-installation are all absent", async () => {
+      await saveOrgGithub({ type: "api_key", accessToken: "org-pat-tok", metadata: { login: "acme-bot" } });
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), { orgId, userId, purpose: "api" });
+      expect(result).toEqual({ token: "org-pat-tok", source: "pat", login: "acme-bot" });
+    });
+
+    it("auto + api prefers the org's sole installation over the org PAT", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await saveOrgGithub({ type: "api_key", accessToken: "org-pat-tok", metadata: { login: "acme-bot" } });
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      const result = await resolveGitHubToken(deps(), { orgId, userId, purpose: "api" });
+      expect(result).toEqual({ token: "inst-999", source: "installation" });
+    });
+
+    it("treats a stale org PAT (has expiresAt, no refresh path) as unhealthy — falls through to tokenless", async () => {
+      await saveOrgGithub({
+        type: "oauth2",
+        accessToken: "org-pat-tok",
+        expiresAt: NOW + 60 * 1000, // inside the 5 min margin — stale, no refresh path
+        metadata: { login: "acme-bot" },
+      });
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), {
+        orgId,
+        userId,
+        purpose: "git",
+        repo: { owner: "nobody", name: "repo" },
+      });
+      expect(result).toEqual({ token: null, source: "none" });
+    });
+
+    it('explicit auth: "user" still THROWS when only an org PAT is present — org PAT never satisfies "user"', async () => {
+      await saveOrgGithub({ type: "api_key", accessToken: "org-pat-tok", metadata: { login: "acme-bot" } });
+      fixture = startGithubFixture();
+
+      await expect(resolveGitHubToken(deps(), { orgId, userId, purpose: "api", auth: "user" })).rejects.toThrow(
+        GitHubAuthError,
+      );
+    });
+  });
+
   // ── refresh subsystem ────────────────────────────────────────────────
   describe("refresh subsystem", () => {
     async function seedStaleOAuth(): Promise<void> {
@@ -452,6 +519,50 @@ describe("resolveGitHubToken", () => {
       await expect(resolveGitHubToken(deps(), { orgId, userId, purpose: "api", auth: "user" })).rejects.toThrow(
         GitHubAuthError,
       );
+    });
+
+    it("a throwing loadAppConfig (malformed github_app row) falls through to the next tier in auto and marks refreshFailedAt — never propagates", async () => {
+      // A malformed github_app credential row: metadata.appId is missing, so
+      // `loadAppConfig` throws instead of returning null. `performRefresh`
+      // must catch this, not let it reject the single-flight promise.
+      await credentials.save({ type: "org", id: orgId }, "github_app", {
+        type: "service_account",
+        apiKey: "pem",
+        accessToken: "oauth-client-secret",
+        refreshToken: "webhook-secret",
+        metadata: { appSlug: "valet-app", oauthClientId: "Iv1.abc123", htmlUrl: "https://github.com/apps/valet-app" },
+      });
+      await saveUserGithub({
+        type: "oauth2",
+        accessToken: "old-access",
+        refreshToken: "old-refresh",
+        expiresAt: NOW + 4 * 60 * 1000, // stale
+        metadata: { login: "octocat" },
+      });
+      fixture = startGithubFixture();
+
+      const result = await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "nobody", name: "r" } });
+      expect(result).toEqual({ token: null, source: "none" }); // fell through to tokenless, no unhandled rejection
+
+      const persisted = await credentials.get({ type: "user", id: userId }, "github");
+      expect(persisted?.accessToken).toBe("old-access"); // credential kept, unrotated
+      const metadata = persisted?.metadata as Record<string, unknown>;
+      expect(metadata.refreshFailedAt).toBe(NOW);
+    });
+  });
+
+  // ── installation-mint HTTP failures ─────────────────────────────────
+  describe("installation-mint HTTP failures", () => {
+    it("wraps a non-2xx access_tokens response in GitHubAuthError", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({ status: 500, body: { message: "internal error" } }),
+      });
+
+      await expect(
+        resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "acme", name: "repo" }, auth: "app" }),
+      ).rejects.toBeInstanceOf(GitHubAuthError);
     });
   });
 });

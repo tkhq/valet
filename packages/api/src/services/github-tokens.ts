@@ -10,15 +10,18 @@
  *
  *   - Explicit `auth: "app"`  → installation token for `repo.owner`, or THROW
  *     (`GitHubAuthError`). Never falls back to a user credential.
- *   - Explicit `auth: "user"` → the user's healthy App-OAuth/PAT credential,
- *     or THROW naming the gap. Never falls back to an installation token.
+ *   - Explicit `auth: "user"` → the USER's healthy App-OAuth/PAT credential,
+ *     or THROW naming the gap. Never falls back to an installation token,
+ *     and never matches an org-owned PAT (see below) — "user" means the
+ *     signed-in user's own credential, not the org's shared one.
  *     (Both directions pinned: an explicit selection is honored STRICTLY.)
  *   - `auto` + `git`: installation(`repo.owner`) → healthy user credential →
- *     `{ token: null, source: "none" }` (tokenless — public clones proceed
- *     bare; a private-repo failure surfaces git's own error).
+ *     healthy org PAT → `{ token: null, source: "none" }` (tokenless —
+ *     public clones proceed bare; a private-repo failure surfaces git's own
+ *     error).
  *   - `auto` + `api`: healthy user credential → installation(`repo.owner`)
  *     when a repo is given → the org's SOLE non-suspended installation when
- *     exactly one exists → THROW with a connect hint.
+ *     exactly one exists → healthy org PAT → THROW with a connect hint.
  *
  * ── "Healthy" user credential ───────────────────────────────────────────
  * A user-owned `github` credential is healthy when it is NOT
@@ -27,6 +30,18 @@
  * and no `refreshToken`) is always fresh. An App-OAuth credential is fresh
  * when `expiresAt - 5min > now`; otherwise it is refreshed in-place (see
  * below) and the rotated credential is used.
+ *
+ * ── Org-owned PAT ────────────────────────────────────────────────────────
+ * A pasted user/org GitHub PAT participates as a non-expiring OAuth token
+ * for the whole org: an org-owned `github` credential (`{type:"org",
+ * id:orgId}`, same service name as the per-user row) is the last `auto`
+ * tier before tokenless/throw. Health rules mirror the user credential's
+ * (not `identityOnly`, not `refreshFailedAt`-marked, fresh) MINUS the
+ * refresh path — org credentials have no `refreshToken` flow, so a missing
+ * `expiresAt` means non-expiring (fresh), and an `expiresAt` that's stale
+ * is simply unhealthy (no attempt to refresh it). Its result source is
+ * `"pat"`, with `login` from `metadata.login` when present. Explicit
+ * `auth: "user"` never reaches this tier (see above).
  *
  * ── Refresh subsystem ───────────────────────────────────────────────────
  * A stale App-OAuth credential (`expiresAt - 5min <= now`) with a
@@ -37,8 +52,8 @@
  * failure marks `metadata.refreshFailedAt` (keeping the credential) and the
  * credential is then treated as absent for `auto` / a STRICT throw for
  * explicit `auth: "user"`. Single-flight is an in-module map keyed by
- * user+service, cleared in `finally` — two concurrent resolves of the same
- * stale credential hit the refresh endpoint exactly once.
+ * org+user+service, cleared in `finally` — two concurrent resolves of the
+ * same stale credential hit the refresh endpoint exactly once.
  *
  * No token material ever appears in an error message or log — errors name
  * the missing/unhealthy credential (the GAP), never the secret.
@@ -114,16 +129,24 @@ function userOwner(userId: string): CredentialOwner {
   return { type: "user", id: userId };
 }
 
+function orgOwner(orgId: string): CredentialOwner {
+  return { type: "org", id: orgId };
+}
+
 function loginOf(metadata: unknown): string | undefined {
   return isRecord(metadata) && typeof metadata.login === "string" ? metadata.login : undefined;
 }
 
 // ── Single-flight refresh ──────────────────────────────────────────────
 
-/** In-module single-flight registry, keyed by `${userId}:${service}`. A
- * second concurrent resolve of the same stale credential joins the in-flight
- * refresh rather than issuing a duplicate token exchange. Cleared in
- * `finally`, so the next resolve after completion refreshes anew if needed. */
+/** In-module single-flight registry, keyed by `${orgId}:${userId}:${service}`
+ * — the org id is part of the key because the refresh hits that org's App
+ * config (`loadAppConfig(deps, orgId)`); without it, concurrent refreshes
+ * for the same user across two different orgs would collapse onto whichever
+ * org's config happened to win the race. A second concurrent resolve of the
+ * same stale credential joins the in-flight refresh rather than issuing a
+ * duplicate token exchange. Cleared in `finally`, so the next resolve after
+ * completion refreshes anew if needed. */
 const refreshInFlight = new Map<string, Promise<StoredCredential | null>>();
 
 function refreshSingleFlight(
@@ -132,7 +155,7 @@ function refreshSingleFlight(
   userId: string,
   cred: StoredCredential,
 ): Promise<StoredCredential | null> {
-  const key = `${userId}:${GITHUB_CREDENTIAL_SERVICE}`;
+  const key = `${orgId}:${userId}:${GITHUB_CREDENTIAL_SERVICE}`;
   const existing = refreshInFlight.get(key);
   if (existing) return existing;
   const promise = performRefresh(deps, orgId, userId, cred).finally(() => refreshInFlight.delete(key));
@@ -161,17 +184,31 @@ function parseRefreshResponse(payload: unknown): ParsedRefresh | null {
 
 /** Marks the credential unhealthy (`metadata.refreshFailedAt`) while keeping
  * it otherwise intact, then returns `null`. The credential store stays dumb:
- * liveness lives entirely here. */
+ * liveness lives entirely here. Persisting the marker is itself best-effort
+ * — if `credentials.save` throws (store outage, etc.) this still resolves to
+ * `null` rather than rejecting, so a failed refresh NEVER propagates as an
+ * unhandled rejection out of the single-flight promise. */
 async function markRefreshFailed(
   deps: GitHubTokenDeps,
   owner: CredentialOwner,
   cred: StoredCredential,
 ): Promise<null> {
-  const metadata = { ...(isRecord(cred.metadata) ? cred.metadata : {}), refreshFailedAt: nowOf(deps) };
-  await deps.credentials.save(owner, GITHUB_CREDENTIAL_SERVICE, { ...cred, metadata });
+  try {
+    const metadata = { ...(isRecord(cred.metadata) ? cred.metadata : {}), refreshFailedAt: nowOf(deps) };
+    await deps.credentials.save(owner, GITHUB_CREDENTIAL_SERVICE, { ...cred, metadata });
+  } catch {
+    // Best-effort marker — see doc comment above.
+  }
   return null;
 }
 
+/** Every failure mode here — `loadAppConfig` throwing on a malformed
+ * `github_app` row, the fetch rejecting, a non-2xx/unparseable response, or
+ * `credentials.save` rejecting on the rotated credential — funnels to
+ * `markRefreshFailed` and resolves `null` (never rejects). This is load-
+ * bearing for `auto` mode: a throwing refresh must fall through to the next
+ * resolution tier, not blow up the caller. `resolveUserCredential` maps a
+ * `null` here to a STRICT throw only for explicit `auth: "user"`. */
 async function performRefresh(
   deps: GitHubTokenDeps,
   orgId: string,
@@ -179,48 +216,56 @@ async function performRefresh(
   cred: StoredCredential,
 ): Promise<StoredCredential | null> {
   const owner = userOwner(userId);
-  const config = await loadAppConfig(deps, orgId);
-  if (!config || !cred.refreshToken) return markRefreshFailed(deps, owner, cred);
-
-  let res: Response;
   try {
-    res = await githubFetchOf(deps)(`${githubBaseUrl(deps)}/login/oauth/access_token`, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Valet-App",
-      },
-      body: JSON.stringify({
-        client_id: config.oauthClientId,
-        client_secret: config.oauthClientSecret,
-        grant_type: "refresh_token",
-        refresh_token: cred.refreshToken,
-      }),
-    });
+    const config = await loadAppConfig(deps, orgId);
+    if (!config || !cred.refreshToken) return markRefreshFailed(deps, owner, cred);
+
+    let res: Response;
+    try {
+      res = await githubFetchOf(deps)(`${githubBaseUrl(deps)}/login/oauth/access_token`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "Valet-App",
+        },
+        body: JSON.stringify({
+          client_id: config.oauthClientId,
+          client_secret: config.oauthClientSecret,
+          grant_type: "refresh_token",
+          refresh_token: cred.refreshToken,
+        }),
+      });
+    } catch {
+      return markRefreshFailed(deps, owner, cred);
+    }
+    if (!res.ok) return markRefreshFailed(deps, owner, cred);
+
+    let payload: unknown;
+    try {
+      payload = await res.json();
+    } catch {
+      return markRefreshFailed(deps, owner, cred);
+    }
+    const parsed = parseRefreshResponse(payload);
+    if (!parsed) return markRefreshFailed(deps, owner, cred);
+
+    const now = nowOf(deps);
+    const rotated: StoredCredential = {
+      ...cred,
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken ?? cred.refreshToken,
+      expiresAt: parsed.expiresInMs !== undefined ? now + parsed.expiresInMs : undefined,
+    };
+    // `refreshFailedAt` is intentionally never cleared here: a credential
+    // already marked unhealthy is rejected by `resolveUserCredential` before
+    // it ever reaches a refresh attempt, so recovery is a reconnect (which
+    // overwrites the row), not a successful refresh.
+    await deps.credentials.save(owner, GITHUB_CREDENTIAL_SERVICE, rotated);
+    return rotated;
   } catch {
     return markRefreshFailed(deps, owner, cred);
   }
-  if (!res.ok) return markRefreshFailed(deps, owner, cred);
-
-  let payload: unknown;
-  try {
-    payload = await res.json();
-  } catch {
-    return markRefreshFailed(deps, owner, cred);
-  }
-  const parsed = parseRefreshResponse(payload);
-  if (!parsed) return markRefreshFailed(deps, owner, cred);
-
-  const now = nowOf(deps);
-  const rotated: StoredCredential = {
-    ...cred,
-    accessToken: parsed.accessToken,
-    refreshToken: parsed.refreshToken ?? cred.refreshToken,
-    expiresAt: parsed.expiresInMs !== undefined ? now + parsed.expiresInMs : undefined,
-  };
-  await deps.credentials.save(owner, GITHUB_CREDENTIAL_SERVICE, rotated);
-  return rotated;
 }
 
 // ── User-credential health ─────────────────────────────────────────────
@@ -281,7 +326,51 @@ async function resolveUserCredential(
   return { ok: true, token: rotated.accessToken, source: "user", login: loginOf(rotated.metadata) ?? login };
 }
 
+// ── Org-owned PAT ────────────────────────────────────────────────────────
+
+type OrgPatResult = { ok: true; token: string; login?: string } | { ok: false };
+
+/** Resolves the org-owned `github` credential (a pasted PAT, see the module
+ * doc comment) to a healthy token. Same health checks as
+ * `resolveUserCredential` minus the refresh path — org credentials never
+ * carry a `refreshToken`, so a stale `expiresAt` is simply unhealthy rather
+ * than triggering a refresh attempt. Non-throwing: `auto` treats
+ * `{ ok: false }` as a fallthrough to the next tier. */
+async function resolveOrgPatCredential(deps: GitHubTokenDeps, orgId: string): Promise<OrgPatResult> {
+  const cred = await deps.credentials.get(orgOwner(orgId), GITHUB_CREDENTIAL_SERVICE);
+  if (!cred || !cred.accessToken) return { ok: false };
+
+  const metadata = cred.metadata;
+  if (isRecord(metadata) && metadata.identityOnly === true) return { ok: false };
+  if (isRecord(metadata) && metadata.refreshFailedAt !== undefined && metadata.refreshFailedAt !== null) {
+    return { ok: false };
+  }
+
+  // No expiresAt → non-expiring (fresh). An expiresAt that's stale is
+  // unhealthy outright — there is no refresh path for an org credential.
+  if (cred.expiresAt !== undefined && cred.expiresAt - STALE_MARGIN_MS <= nowOf(deps)) {
+    return { ok: false };
+  }
+
+  return { ok: true, token: cred.accessToken, login: loginOf(metadata) };
+}
+
 // ── Installation helpers ───────────────────────────────────────────────
+
+/** Wraps `mintInstallationToken` so every consumer of this module sees one
+ * error type (`GitHubAuthError`) rather than the plain `Error`s
+ * `mintInstallationToken`/`loadAppConfig` throw on a bad HTTP response or a
+ * malformed `github_app` row. The wrapped message names the failure class
+ * and carries the underlying message (which itself never includes secret or
+ * response-body material — only a status code at most). */
+async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string): Promise<string | null> {
+  try {
+    return await mintInstallationToken(deps, orgId, accountLogin);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new GitHubAuthError(`installation token minting failed for ${accountLogin}: ${detail}`);
+  }
+}
 
 /** The org's SOLE non-suspended installation token, when exactly one
  * installation exists. `null` when there are zero or more than one — the
@@ -293,7 +382,7 @@ async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string
     .from(githubInstallations)
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
   if (rows.length !== 1) return null;
-  return mintInstallationToken(deps, orgId, rows[0].accountLogin);
+  return mintInstallation(deps, orgId, rows[0].accountLogin);
 }
 
 // ── The resolution function ────────────────────────────────────────────
@@ -309,12 +398,14 @@ export async function resolveGitHubToken(
     if (!req.repo) {
       throw new GitHubAuthError("the GitHub App requires a repository owner but none was provided");
     }
-    const token = await mintInstallationToken(deps, req.orgId, req.repo.owner);
+    const token = await mintInstallation(deps, req.orgId, req.repo.owner);
     if (!token) throw new GitHubAuthError(`the GitHub App is not installed on ${req.repo.owner}`);
     return { token, source: "installation" };
   }
 
   if (auth === "user") {
+    // Never falls back to the org PAT tier — "user" means THIS user's own
+    // credential (see the module doc comment).
     const result = await resolveUserCredential(deps, req.orgId, req.userId);
     if (!result.ok) throw new GitHubAuthError(result.reason);
     return { token: result.token, source: result.source, login: result.login };
@@ -322,27 +413,32 @@ export async function resolveGitHubToken(
 
   // ── auto ──
   if (req.purpose === "git") {
-    // installation(owner) → user → tokenless.
+    // installation(owner) → user → org PAT → tokenless.
     if (req.repo) {
-      const installation = await mintInstallationToken(deps, req.orgId, req.repo.owner);
+      const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
       if (installation) return { token: installation, source: "installation" };
     }
     const user = await resolveUserCredential(deps, req.orgId, req.userId);
     if (user.ok) return { token: user.token, source: user.source, login: user.login };
+    const orgPat = await resolveOrgPatCredential(deps, req.orgId);
+    if (orgPat.ok) return { token: orgPat.token, source: "pat", login: orgPat.login };
     return { token: null, source: "none" };
   }
 
-  // auto + api: user → installation(owner) → sole installation → throw.
+  // auto + api: user → installation(owner) → sole installation → org PAT → throw.
   const user = await resolveUserCredential(deps, req.orgId, req.userId);
   if (user.ok) return { token: user.token, source: user.source, login: user.login };
 
   if (req.repo) {
-    const installation = await mintInstallationToken(deps, req.orgId, req.repo.owner);
+    const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
     if (installation) return { token: installation, source: "installation" };
   }
 
   const sole = await resolveSoleInstallationToken(deps, req.orgId);
   if (sole) return { token: sole, source: "installation" };
+
+  const orgPat = await resolveOrgPatCredential(deps, req.orgId);
+  if (orgPat.ok) return { token: orgPat.token, source: "pat", login: orgPat.login };
 
   throw new GitHubAuthError(
     "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
