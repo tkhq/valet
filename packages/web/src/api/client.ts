@@ -22,9 +22,11 @@ import type {
   CreateWorkflowResponse,
   DeleteCredentialResponse,
   EnsureOrchestratorResponse,
+  GetGithubAppResponse,
   GetMemoryTreeResponse,
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
+  GetReposResponse,
   GetSessionResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
@@ -66,6 +68,9 @@ import type {
   PauseSessionResponse,
   PatchThreadRequest,
   PatchThreadResponse,
+  PostGithubAppManifestRequest,
+  PostGithubAppManifestResponse,
+  PostGithubConnectResponse,
   ProbeLlmProviderResponse,
   PutCredentialRequest,
   PutCredentialResponse,
@@ -411,6 +416,21 @@ export const api = {
       "DELETE",
       `/credentials/${encodeURIComponent(service)}`,
     ),
+
+  // repos (GitHub/repo integration plan, Task 7): union of every RepoHost
+  // the caller has access to — only `github` today.
+  getRepos: () => request<GetReposResponse>("GET", "/repos"),
+
+  // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated
+  getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),
+  postGithubAppManifest: (body: PostGithubAppManifestRequest = {}) =>
+    request<PostGithubAppManifestResponse>("POST", "/org/github-app/manifest", body),
+  refreshGithubApp: () => request<GetGithubAppResponse>("POST", "/org/github-app/refresh"),
+  deleteGithubApp: () => request<undefined>("DELETE", "/org/github-app"),
+
+  // per-user GitHub App-OAuth connection (GitHub/repo integration plan, Task 6)
+  connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
+  disconnectGithub: () => request<undefined>("DELETE", "/me/github"),
 
   // identity links (channel-link Phase 7): per-user Telegram account linking
   listIdentityLinks: () => request<ListIdentityLinksResponse>("GET", "/me/identity-links"),

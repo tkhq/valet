@@ -18,6 +18,7 @@ import type {
   CreateLlmProviderResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
@@ -34,6 +35,8 @@ import type {
   PatchOrgMemberResponse,
   PatchOrgRequest,
   PatchOrgResponse,
+  PostGithubAppManifestRequest,
+  PostGithubAppManifestResponse,
   ProbeLlmProviderResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
@@ -56,6 +59,7 @@ export const qkSettings = {
   llmProviderPreferences: () => ["settings", "llmProviderPreferences"] as const,
   teams: () => ["settings", "teams"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
+  githubApp: () => ["settings", "githubApp"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -319,6 +323,44 @@ export function useRemoveTeamMember() {
     onSuccess: (_data, { teamId }) => {
       qc.invalidateQueries({ queryKey: qkSettings.teamMembers(teamId) });
       qc.invalidateQueries({ queryKey: qkSettings.teams() });
+    },
+  });
+}
+
+// ── GitHub App (GitHub/repo integration plan, Task 5/11) — org-admin-only ──
+
+export function useGithubApp(opts?: UseQueryOptions<GetGithubAppResponse>) {
+  return useQuery<GetGithubAppResponse>({
+    queryKey: qkSettings.githubApp(),
+    queryFn: () => api.getGithubApp(),
+    ...opts,
+  });
+}
+
+export function useCreateGithubAppManifest() {
+  return useMutation<PostGithubAppManifestResponse, Error, PostGithubAppManifestRequest | void>({
+    mutationFn: (body) => api.postGithubAppManifest(body ?? {}),
+    // No invalidation — nothing changes until the admin completes the
+    // browser-POST manifest flow and GitHub redirects back to `GET /setup`.
+  });
+}
+
+export function useRefreshGithubApp() {
+  const qc = useQueryClient();
+  return useMutation<GetGithubAppResponse, Error, void>({
+    mutationFn: () => api.refreshGithubApp(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
+    },
+  });
+}
+
+export function useDeleteGithubApp() {
+  const qc = useQueryClient();
+  return useMutation<undefined, Error, void>({
+    mutationFn: () => api.deleteGithubApp(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
     },
   });
 }

@@ -1,6 +1,8 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import type { CreateSessionRequest, GetReposResponse, RepoBinding } from "@valet/api/wire";
 import {
+  Badge,
   Button,
   Dialog,
   DialogContent,
@@ -9,8 +11,26 @@ import {
   Label,
 } from "~/components/primitives";
 import { useCreateSession } from "~/api/queries";
+import { useRepos } from "~/api/repos";
 
 const DEFAULT_WORKSPACE = "/tmp/valet/workspace";
+const MAX_REPOS = 5;
+
+type RepoOption = GetReposResponse["repos"][number];
+
+interface RepoRow {
+  fullName: string;
+  cloneUrl: string;
+  ref: string;
+  auth: "auto" | "app" | "user";
+  installed?: boolean;
+}
+
+/** `owner/repo` -> `repo`; falls back to the whole string if it has no slash. */
+function repoBaseName(fullName: string): string {
+  const parts = fullName.split("/");
+  return parts[parts.length - 1] || fullName;
+}
 
 export function NewSessionDialog({
   open,
@@ -21,17 +41,69 @@ export function NewSessionDialog({
 }) {
   const navigate = useNavigate();
   const create = useCreateSession();
+  const reposQ = useRepos();
   const [workspace, setWorkspace] = useState(DEFAULT_WORKSPACE);
+  const [workspaceTouched, setWorkspaceTouched] = useState(false);
+  const [rows, setRows] = useState<RepoRow[]>([]);
+
+  const repos = reposQ.data?.repos ?? [];
+  const connected = reposQ.data?.connected ?? false;
+  const installed = reposQ.data?.installed ?? false;
+  // Neither a personal connection nor an org App install — there is
+  // nothing this picker could list, so it never renders an empty/broken
+  // combobox; it points the user at settings instead.
+  const showConnectHint = !connected && !installed;
+  const availableRepos = repos.filter((r) => !rows.some((row) => row.fullName === r.fullName));
+
+  function addRepo(repo: RepoOption) {
+    if (rows.length >= MAX_REPOS) return;
+    const cloneUrl = repo.cloneUrl ?? repo.url;
+    setRows((prev) => [
+      ...prev,
+      {
+        fullName: repo.fullName,
+        cloneUrl,
+        ref: repo.defaultBranch,
+        auth: "auto",
+        installed: repo.installed,
+      },
+    ]);
+    // Only the first repo drives the default — and only while the user
+    // hasn't typed their own path (editable per the brief: autofill is a
+    // convenience, not a lock).
+    if (!workspaceTouched) {
+      setWorkspace(`/workspace/${repoBaseName(repo.fullName)}`);
+    }
+  }
+
+  function removeRepo(fullName: string) {
+    setRows((prev) => prev.filter((r) => r.fullName !== fullName));
+  }
+
+  function updateRow(fullName: string, patch: Partial<RepoRow>) {
+    setRows((prev) => prev.map((r) => (r.fullName === fullName ? { ...r, ...patch } : r)));
+  }
 
   async function submit() {
     const ws = workspace.trim();
     if (!ws) return;
     try {
+      const body: CreateSessionRequest = { workspace: ws, profile: "full" };
+      if (rows.length > 0) {
+        const repoBindings: RepoBinding[] = rows.map((r) => ({
+          host: "github",
+          fullName: r.fullName,
+          cloneUrl: r.cloneUrl,
+          ref: r.ref,
+          auth: r.auth,
+        }));
+        body.repos = repoBindings;
+      }
       // Web-created sessions are interactive (Terminal/VS Code tabs, Task 7)
       // — "full" runs ttyd + code-server behind the sandbox auth gateway
       // alongside the agent, vs. the "headless" default for agent-only
       // (e.g. orchestrator-spawned) sessions.
-      const created = await create.mutateAsync({ workspace: ws, profile: "full" });
+      const created = await create.mutateAsync(body);
       onOpenChange(false);
       navigate({ to: "/sessions/$sessionId", params: { sessionId: created.id } });
     } catch {
@@ -50,13 +122,46 @@ export function NewSessionDialog({
           <Input
             id="workspace"
             value={workspace}
-            onChange={(e) => setWorkspace(e.target.value)}
+            onChange={(e) => {
+              setWorkspace(e.target.value);
+              setWorkspaceTouched(true);
+            }}
             placeholder={DEFAULT_WORKSPACE}
             autoFocus
           />
           <p className="text-xs text-muted">
             Absolute path on this host. Will be created if missing.
           </p>
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Repositories (optional)</Label>
+          {rows.map((row) => (
+            <RepoRowView
+              key={row.fullName}
+              row={row}
+              connected={connected}
+              onRemove={() => removeRepo(row.fullName)}
+              onChange={(patch) => updateRow(row.fullName, patch)}
+            />
+          ))}
+
+          {showConnectHint ? (
+            <p className="text-xs text-muted">
+              Connect GitHub or install the App to add repos.{" "}
+              <a href="/settings/connected-accounts" className="text-moss underline">
+                Go to settings
+              </a>
+            </p>
+          ) : rows.length < MAX_REPOS ? (
+            <RepoCombobox
+              repos={availableRepos}
+              label={rows.length === 0 ? "Search repositories" : "Add another repo"}
+              onSelect={addRepo}
+            />
+          ) : (
+            <p className="text-xs text-muted">Up to 5 repos.</p>
+          )}
         </div>
 
         {create.error && (
@@ -69,11 +174,148 @@ export function NewSessionDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={create.isPending}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={create.isPending || !workspace.trim()}>
+          <Button onClick={() => void submit()} disabled={create.isPending || !workspace.trim()}>
             {create.isPending ? "Creating…" : "Create"}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+const AUTH_OPTIONS: { value: RepoRow["auth"]; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "app", label: "App (bot)" },
+  { value: "user", label: "Me" },
+];
+
+function RepoRowView({
+  row,
+  connected,
+  onRemove,
+  onChange,
+}: {
+  row: RepoRow;
+  connected: boolean;
+  onRemove: () => void;
+  onChange: (patch: Partial<RepoRow>) => void;
+}) {
+  // Only meaningful when there's an actual choice to make: an
+  // App-installed repo AND a personal connection both capable of
+  // authenticating the clone. Otherwise the server's "auto" pick is the
+  // only usable path anyway.
+  const showAuthSelect = !!row.installed && connected;
+
+  return (
+    <div className="space-y-1.5 rounded border border-line p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-sm font-medium text-ink">{row.fullName}</span>
+        <button
+          type="button"
+          aria-label={`Remove ${row.fullName}`}
+          onClick={onRemove}
+          className="shrink-0 text-xs text-muted hover:text-danger-500"
+        >
+          Remove
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <div className="grid gap-1">
+          <Label htmlFor={`ref-${row.fullName}`}>Branch</Label>
+          <Input
+            id={`ref-${row.fullName}`}
+            aria-label={`Branch for ${row.fullName}`}
+            value={row.ref}
+            onChange={(e) => onChange({ ref: e.target.value })}
+            className="h-8 w-40 text-xs"
+          />
+        </div>
+        {showAuthSelect && (
+          <div className="grid gap-1">
+            <Label htmlFor={`auth-${row.fullName}`}>Authenticate as</Label>
+            <select
+              id={`auth-${row.fullName}`}
+              aria-label={`Authenticate as for ${row.fullName}`}
+              value={row.auth}
+              onChange={(e) => onChange({ auth: e.target.value as RepoRow["auth"] })}
+              className="h-8 rounded border border-[--border] bg-[--bg] px-2 text-xs text-[--fg]"
+            >
+              {AUTH_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RepoCombobox({
+  repos,
+  label,
+  onSelect,
+}: {
+  repos: RepoOption[];
+  label: string;
+  onSelect: (repo: RepoOption) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const matches = repos.filter((r) => r.fullName.toLowerCase().includes(query.trim().toLowerCase()));
+
+  return (
+    <div className="relative">
+      <Input
+        value={query}
+        placeholder="owner/repo"
+        onFocus={() => setOpen(true)}
+        onClick={() => setOpen(true)}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setOpen(false);
+        }}
+        onBlur={() => {
+          // Delay so a click on a list item registers before we close.
+          setTimeout(() => setOpen(false), 120);
+        }}
+        aria-label={label}
+        role="combobox"
+        aria-expanded={open}
+      />
+      {open && (
+        <div
+          role="listbox"
+          aria-label="Repository results"
+          className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded border border-line bg-paper py-1 shadow-lg"
+        >
+          {matches.length === 0 && (
+            <div className="px-3 py-1.5 text-sm text-muted">No matching repos.</div>
+          )}
+          {matches.map((r) => (
+            <button
+              key={r.fullName}
+              type="button"
+              role="option"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onSelect(r);
+                setQuery("");
+                setOpen(false);
+              }}
+              className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+            >
+              <span className="truncate text-ink">{r.fullName}</span>
+              {r.installed && <Badge variant="accent">Installed</Badge>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

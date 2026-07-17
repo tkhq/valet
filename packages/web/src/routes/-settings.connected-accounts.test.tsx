@@ -8,16 +8,23 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import type { IdentityLinkStatus } from "@valet/api/wire";
+import type { CredentialSummary, GetGithubAppResponse, IdentityLinkStatus } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 
 const startMutateAsync = vi.fn();
 const setNotifyMutate = vi.fn();
 const unlinkMutate = vi.fn();
+const connectGithubMutateAsync = vi.fn();
+const disconnectGithubMutate = vi.fn();
+const disconnectCredentialMutate = vi.fn();
 
 let linksData: { links: IdentityLinkStatus[] } | undefined;
 let isLoading = false;
 let isError = false;
+let credentialsData: { credentials: CredentialSummary[] } | undefined = { credentials: [] };
+let credentialsLoading = false;
+let credentialsError = false;
+let githubAppData: GetGithubAppResponse | undefined;
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
@@ -30,6 +37,24 @@ vi.mock("~/api/queries", () => ({
   useUnlinkIdentity: () => ({ mutate: unlinkMutate, isPending: false }),
 }));
 
+vi.mock("~/api/repos", () => ({
+  useConnectGithub: () => ({ mutateAsync: connectGithubMutateAsync, isPending: false }),
+  useDisconnectGithub: () => ({ mutate: disconnectGithubMutate, isPending: false }),
+}));
+
+vi.mock("~/api/integrations", () => ({
+  useCredentials: () => ({
+    data: credentialsData,
+    isLoading: credentialsLoading,
+    error: credentialsError ? new Error("boom") : null,
+  }),
+  useDisconnectCredential: () => ({ mutate: disconnectCredentialMutate, isPending: false }),
+}));
+
+vi.mock("~/api/settings", () => ({
+  useGithubApp: () => ({ data: githubAppData, isLoading: false, error: null }),
+}));
+
 import { ConnectedAccountsPage } from "./settings.connected-accounts";
 
 describe("ConnectedAccountsPage", () => {
@@ -38,6 +63,17 @@ describe("ConnectedAccountsPage", () => {
     linksData = undefined;
     isLoading = false;
     isError = false;
+    credentialsData = { credentials: [] };
+    credentialsLoading = false;
+    credentialsError = false;
+    githubAppData = undefined;
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    // jsdom logs "Not implemented: navigation" when a real redirect happens;
+    // route it through a plain assignable stub instead.
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, href: "" },
+      writable: true,
+    });
   });
 
   it("shows a loading spinner row", () => {
@@ -124,5 +160,168 @@ describe("ConnectedAccountsPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
     expect(unlinkMutate).toHaveBeenCalled();
+  });
+
+  describe("GitHub row", () => {
+    it("unconnected: shows Connect GitHub with no health badges", () => {
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeTruthy();
+      expect(screen.queryByText("Identity only")).toBeNull();
+    });
+
+    it("connecting redirects the browser to the returned url", async () => {
+      connectGithubMutateAsync.mockResolvedValue({ url: "https://github.com/login/oauth/authorize?x=1" });
+      render(<ConnectedAccountsPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      await waitFor(() =>
+        expect(window.location.href).toBe("https://github.com/login/oauth/authorize?x=1"),
+      );
+      expect(confirm).not.toHaveBeenCalled();
+    });
+
+    it("identity-only: shows the sign-in-only hint and Connect GitHub (no replace warning)", async () => {
+      credentialsData = {
+        credentials: [
+          {
+            service: "github",
+            type: "oauth2",
+            connectedAt: "2026-01-01T00:00:00Z",
+            login: "octocat",
+            identityOnly: true,
+          },
+        ],
+      };
+      connectGithubMutateAsync.mockResolvedValue({ url: "https://github.com/x" });
+      render(<ConnectedAccountsPage />);
+
+      expect(screen.getByText(/sign-in only/i)).toBeTruthy();
+      const btn = screen.getByRole("button", { name: "Connect GitHub" });
+      fireEvent.click(btn);
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      expect(confirm).not.toHaveBeenCalled();
+    });
+
+    it("repo-capable: shows login + Connected badge + Disconnect", () => {
+      credentialsData = {
+        credentials: [
+          {
+            service: "github",
+            type: "oauth2",
+            connectedAt: "2026-01-01T00:00:00Z",
+            login: "octocat",
+          },
+        ],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByText("octocat")).toBeTruthy();
+      expect(screen.getByText("Connected")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Reconnect GitHub" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Disconnect GitHub" })).toBeTruthy();
+    });
+
+    it("repo-capable: expired/refresh-failing badges reflect health fields", () => {
+      credentialsData = {
+        credentials: [
+          {
+            service: "github",
+            type: "oauth2",
+            connectedAt: "2026-01-01T00:00:00Z",
+            login: "octocat",
+            expiresAt: Date.parse("2020-01-01T00:00:00Z"),
+            refreshFailedAt: Date.parse("2026-01-01T00:00:00Z"),
+          },
+        ],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByText("Expired")).toBeTruthy();
+      expect(screen.getByText("Refresh failed")).toBeTruthy();
+    });
+
+    it("REPLACE-WARNING: Reconnect over a repo-capable credential confirms first", async () => {
+      credentialsData = {
+        credentials: [
+          { service: "github", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", login: "octocat" },
+        ],
+      };
+      connectGithubMutateAsync.mockResolvedValue({ url: "https://github.com/x" });
+      render(<ConnectedAccountsPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
+      expect(confirm).toHaveBeenCalledWith(
+        expect.stringContaining("replace your existing GitHub token"),
+      );
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+    });
+
+    it("Disconnect GitHub confirms then fires the disconnect mutation", () => {
+      credentialsData = {
+        credentials: [
+          { service: "github", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", login: "octocat" },
+        ],
+      };
+      render(<ConnectedAccountsPage />);
+      fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+      expect(confirm).toHaveBeenCalled();
+      expect(disconnectGithubMutate).toHaveBeenCalled();
+    });
+
+    it("shows an Install on your personal account link when the org App is configured", () => {
+      githubAppData = {
+        configured: true,
+        app: {
+          appId: "1",
+          appSlug: "valet-acme",
+          htmlUrl: "https://github.com/apps/valet-acme",
+          installUrl: "https://github.com/apps/valet-acme/installations/new",
+        },
+        installations: [],
+        webhook: { mode: "public" },
+      };
+      render(<ConnectedAccountsPage />);
+      expect(
+        screen.getByRole("link", { name: "Install on your personal account" }),
+      ).toHaveProperty("href", "https://github.com/apps/valet-acme/installations/new");
+    });
+
+    it("omits the install link when the org App isn't configured", () => {
+      githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+      render(<ConnectedAccountsPage />);
+      expect(screen.queryByRole("link", { name: "Install on your personal account" })).toBeNull();
+    });
+  });
+
+  describe("Credentials list", () => {
+    it("shows a quiet empty state with no credentials", () => {
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByText("No other services connected.")).toBeTruthy();
+    });
+
+    it("lists non-GitHub credentials with type and a revoke button, excluding GitHub (shown above)", () => {
+      credentialsData = {
+        credentials: [
+          { service: "github", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", login: "octocat" },
+          { service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" },
+        ],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByText("linear")).toBeTruthy();
+      expect(screen.queryByText("No other services connected.")).toBeNull();
+      // Only one Disconnect/Revoke control for github (from the row above);
+      // linear gets its own Revoke button in the generic list.
+      expect(screen.getByRole("button", { name: "Revoke linear" })).toBeTruthy();
+    });
+
+    it("revoke confirms then calls the delete-credential mutation", () => {
+      credentialsData = {
+        credentials: [{ service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" }],
+      };
+      render(<ConnectedAccountsPage />);
+      fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
+      expect(confirm).toHaveBeenCalled();
+      expect(disconnectCredentialMutate).toHaveBeenCalledWith("linear");
+    });
   });
 });
