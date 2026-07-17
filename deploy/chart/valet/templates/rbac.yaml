@@ -24,7 +24,10 @@ rules:
     # provider re-asserts the CR via replaceNamespacedCustomObject (HTTP PUT),
     # which is the `update` verb — this is the workspace-preserving
     # re-provision path (decision 5), so omitting it 403s exactly there.
-    verbs: ["create", "get", "list", "watch", "update", "delete"]
+    # `patch` is required by hibernation: suspend/resume flip
+    # spec.operatingMode via a JSON merge patch (setOperatingMode) — omitting
+    # it 403s the idle sweep and the pause route.
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "delete"]

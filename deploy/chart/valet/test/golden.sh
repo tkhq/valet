@@ -65,6 +65,10 @@ done
 SANDBOX_VERBS=$(echo "$ROLE_BLOCK" | grep -A8 '"sandboxes"' | grep -m1 'verbs:')
 echo "$SANDBOX_VERBS" | grep -q '"update"' \
   || fail "sandboxes rule missing 'update' verb — adopt/re-provision (replaceNamespacedCustomObject PUT) would 403"
+# `patch` guards hibernation: suspend/resume flip spec.operatingMode via a
+# JSON merge patch — omitting it 403s the idle sweep and the pause route.
+echo "$SANDBOX_VERBS" | grep -q '"patch"' \
+  || fail "sandboxes rule missing 'patch' verb — hibernation suspend/resume (merge-patch operatingMode) would 403"
 if echo "$ROLE_BLOCK" | grep -qE '"?persistentvolumeclaims"?'; then
   fail "Role grants persistentvolumeclaims — agent-sandbox controller owns PVC lifecycle, api must not"
 fi
