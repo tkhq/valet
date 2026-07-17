@@ -457,6 +457,30 @@ describe("applySandbox", () => {
     expect(api.replaceCalls).toBe(1);
   });
 
+  it("adopting a Suspended CR preserves operatingMode: Suspended in the replace body", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    expect(manifest.spec.operatingMode).toBeUndefined();
+    const seeded = toCRRead(manifest, { resourceVersion: "7" });
+    seeded.spec = { ...seeded.spec, operatingMode: "Suspended" };
+    api.seed(seeded);
+
+    const result = await applySandbox(api, cfg, manifest);
+
+    expect(result.spec.operatingMode).toBe("Suspended");
+  });
+
+  it("adopting a Running/unset CR does not introduce an operatingMode key (byte-identical spec otherwise)", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    api.seed(toCRRead(manifest, { resourceVersion: "7" }));
+
+    const result = await applySandbox(api, cfg, manifest);
+
+    expect(result.spec).toEqual(manifest.spec);
+    expect(Object.prototype.hasOwnProperty.call(result.spec, "operatingMode")).toBe(false);
+  });
+
   it("is idempotent — applying the same manifest twice in a row does not error and keeps the same name/uid", async () => {
     const api = new FakeCustomObjectsApi();
     const manifest = buildSandboxManifest(cfg, "sess-1", {});

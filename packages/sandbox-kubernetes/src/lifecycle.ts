@@ -436,6 +436,18 @@ export async function applySandbox(
     // now. Surface as a normal error; callers retry via their own policy.
     throw new Error(`applySandbox: 409 on create but "${manifest.metadata.name}" is not gettable afterward`);
   }
+  // Adoption must not clobber an existing Suspended CR back to the CRD's
+  // default (Running): if the incoming manifest doesn't specify
+  // operatingMode, carry forward whatever the existing CR has. Attachment-
+  // layer recovery re-calls applySandbox with the same (mode-less) manifest,
+  // and a wholesale spec replace would otherwise silently wake a suspended
+  // sandbox (see provider.ts create()'s adopt-on-409 path).
+  const existingOperatingMode = existing.spec.operatingMode;
+  const spec =
+    manifest.spec.operatingMode === undefined && existingOperatingMode !== undefined
+      ? { ...manifest.spec, operatingMode: existingOperatingMode }
+      : manifest.spec;
+
   const replaced = await api.replaceNamespacedCustomObject({
     group,
     version,
@@ -446,7 +458,7 @@ export async function applySandbox(
       apiVersion: manifest.apiVersion,
       kind: manifest.kind,
       metadata: { ...manifest.metadata, resourceVersion: existing.metadata.resourceVersion },
-      spec: manifest.spec,
+      spec,
     },
   });
   return parseSandboxCRRead(replaced);
