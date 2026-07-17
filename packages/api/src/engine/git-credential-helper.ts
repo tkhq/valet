@@ -38,8 +38,11 @@ const ROUTE_PATH = "/api/sandbox/git-credential";
  * helper exits silently and every clone runs anonymous. Only the `get` verb
  * does work; `store` and `erase` are no-ops (exit 0). On `get` we:
  *   1. parse `host` and `path` from stdin,
- *   2. derive `owner` as the first path segment (`owner/repo.git` → `owner`),
- *   3. POST `{host, owner}` to the credential route with the sandbox token,
+ *   2. derive `owner` as the first path segment (`owner/repo.git` → `owner`)
+ *      and `repo` as the second (`.git` stripped; empty when git sent no repo
+ *      segment) — `repo` lets the route pick the right binding when a session
+ *      has two repos under one owner with different auth,
+ *   3. POST `{host, owner, repo}` to the credential route with the sandbox token,
  *   4. emit `username=`/`password=` lines when the API returns a credential,
  *      or nothing (letting git proceed unauthenticated) on `{anonymous:true}`,
  *      an HTTP error (403 unbound / 409 credential-unavailable), a network
@@ -67,6 +70,10 @@ while IFS='=' read -r key value; do
 done
 
 owner=\${path%%/*}
+repo=
+case "\$path" in
+  */*) repo=\${path#*/}; repo=\${repo%%/*}; repo=\${repo%.git} ;;
+esac
 [ -n "\$owner" ] || exit 0
 [ -n "\${VALET_SANDBOX_TOKEN:-}" ] || exit 0
 
@@ -74,7 +81,7 @@ resp=\$(curl --max-time 10 -fsS \\
   -X POST "${url}" \\
   -H "x-valet-sandbox: \$VALET_SANDBOX_TOKEN" \\
   -H "Content-Type: application/json" \\
-  -d "{\\"host\\":\\"\$host\\",\\"owner\\":\\"\$owner\\"}") || exit 0
+  -d "{\\"host\\":\\"\$host\\",\\"owner\\":\\"\$owner\\",\\"repo\\":\\"\$repo\\"}") || exit 0
 
 username=\$(printf '%s' "\$resp" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 password=\$(printf '%s' "\$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
@@ -111,15 +118,17 @@ export function ghWrapperScript(apiUrl: string): string {
 set -u
 
 token=
-owner=\$(git config --get remote.origin.url 2>/dev/null \\
-  | sed -n 's#.*[/:]\\([^/]*\\)/[^/]*\$#\\1#p')
+remote=\$(git config --get remote.origin.url 2>/dev/null)
+owner=\$(printf '%s' "\$remote" | sed -n 's#.*[/:]\\([^/]*\\)/[^/]*\$#\\1#p')
+repo=\$(printf '%s' "\$remote" | sed -n 's#.*/\\([^/]*\\)\$#\\1#p')
+repo=\${repo%.git}
 
 if [ -n "\$owner" ] && [ -n "\${VALET_SANDBOX_TOKEN:-}" ]; then
   resp=\$(curl --max-time 10 -fsS \\
     -X POST "${url}" \\
     -H "x-valet-sandbox: \$VALET_SANDBOX_TOKEN" \\
     -H "Content-Type: application/json" \\
-    -d "{\\"host\\":\\"github.com\\",\\"owner\\":\\"\$owner\\"}" 2>/dev/null) || resp=
+    -d "{\\"host\\":\\"github.com\\",\\"owner\\":\\"\$owner\\",\\"repo\\":\\"\$repo\\"}" 2>/dev/null) || resp=
   token=\$(printf '%s' "\$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 fi
 

@@ -45,6 +45,7 @@
  */
 import type { ExecResult, Sandbox } from "@valet/engine";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { ownerOf } from "../services/session-github-token.js";
 import type { RepoBinding } from "../wire/types.js";
 
 /** Workspace-relative staging dir the two scripts are written to (via
@@ -87,13 +88,6 @@ function posixJoin(a: string, b: string): string {
 function repoNameOf(fullName: string): string {
   const idx = fullName.indexOf("/");
   return idx === -1 ? fullName : fullName.slice(idx + 1);
-}
-
-/** `owner/repo` → `owner` (the segment before the first "/"; empty string
- * when there is no "/"). */
-function ownerOf(fullName: string): string {
-  const idx = fullName.indexOf("/");
-  return idx === -1 ? "" : fullName.slice(0, idx);
 }
 
 /** Disambiguated dir name for a colliding binding: `<owner>__<repo>` (falls

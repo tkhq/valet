@@ -28,15 +28,22 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-/** Mints a new sandbox token for a session, revoking any prior live tokens
- * for that session. Returns the plaintext token — the only place it's ever
- * available; only its hash is stored. */
+/** Mints a new sandbox token for a session. Returns the plaintext token —
+ * the only place it's ever available; only its hash is stored.
+ *
+ * Does NOT revoke prior live tokens. A session BUILD (create/restore) can run
+ * on any cache miss — an api restart or an orchestrator PATCH — while the
+ * previous build's sandbox is still running and holding its token in the git
+ * credential helper. Revoking on mint would 401 that live sandbox until its
+ * pod is recreated, so each build mints an ADDITIONAL token instead; the
+ * natural 24h TTL bounds how long a stale one lingers. Explicit revocation is
+ * reserved for `EngineHost.destroy()` (a stopped session's sandbox MUST lose
+ * its token) via `revokeSandboxTokens`, which cancels ALL of a session's live
+ * tokens at once. */
 export async function mintSandboxToken(
   db: AppDb,
   opts: { sessionId: string; userId: string; orgId: string; ttlMs?: number },
 ): Promise<{ token: string; expiresAt: number }> {
-  await revokeSandboxTokens(db, opts.sessionId);
-
   const token = `st_${randomBytes(24).toString("hex")}`;
   const now = Date.now();
   const ttlMs = opts.ttlMs ?? TOKEN_TTL_MS;

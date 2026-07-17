@@ -32,6 +32,10 @@ while IFS='=' read -r key value; do
 done
 
 owner=\${path%%/*}
+repo=
+case "$path" in
+  */*) repo=\${path#*/}; repo=\${repo%%/*}; repo=\${repo%.git} ;;
+esac
 [ -n "$owner" ] || exit 0
 [ -n "\${VALET_SANDBOX_TOKEN:-}" ] || exit 0
 
@@ -39,7 +43,7 @@ resp=$(curl --max-time 10 -fsS \\
   -X POST "http://valet-api.example.com/api/sandbox/git-credential" \\
   -H "x-valet-sandbox: $VALET_SANDBOX_TOKEN" \\
   -H "Content-Type: application/json" \\
-  -d "{\\"host\\":\\"$host\\",\\"owner\\":\\"$owner\\"}") || exit 0
+  -d "{\\"host\\":\\"$host\\",\\"owner\\":\\"$owner\\",\\"repo\\":\\"$repo\\"}") || exit 0
 
 username=$(printf '%s' "$resp" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 password=$(printf '%s' "$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
@@ -85,15 +89,17 @@ describe("ghWrapperScript", () => {
 set -u
 
 token=
-owner=$(git config --get remote.origin.url 2>/dev/null \\
-  | sed -n 's#.*[/:]\\([^/]*\\)/[^/]*$#\\1#p')
+remote=$(git config --get remote.origin.url 2>/dev/null)
+owner=$(printf '%s' "$remote" | sed -n 's#.*[/:]\\([^/]*\\)/[^/]*$#\\1#p')
+repo=$(printf '%s' "$remote" | sed -n 's#.*/\\([^/]*\\)$#\\1#p')
+repo=\${repo%.git}
 
 if [ -n "$owner" ] && [ -n "\${VALET_SANDBOX_TOKEN:-}" ]; then
   resp=$(curl --max-time 10 -fsS \\
     -X POST "http://valet-api.example.com/api/sandbox/git-credential" \\
     -H "x-valet-sandbox: $VALET_SANDBOX_TOKEN" \\
     -H "Content-Type: application/json" \\
-    -d "{\\"host\\":\\"github.com\\",\\"owner\\":\\"$owner\\"}" 2>/dev/null) || resp=
+    -d "{\\"host\\":\\"github.com\\",\\"owner\\":\\"$owner\\",\\"repo\\":\\"$repo\\"}" 2>/dev/null) || resp=
   token=$(printf '%s' "$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 fi
 

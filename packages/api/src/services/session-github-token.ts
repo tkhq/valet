@@ -17,13 +17,19 @@ import {
   type ResolvedGitHubToken,
 } from "./github-tokens.js";
 
-/** `owner/repo` → `owner` (empty string when malformed). */
-function ownerOf(fullName: string): string {
-  return fullName.split("/", 1)[0] ?? "";
+/**
+ * `owner/repo` → `owner` (empty string when there is no `/`). The single
+ * canonical splitter — the route (`routes/sandbox-git-credential.ts`) and
+ * workspace prep (`engine/workspace-prep.ts`) import these rather than keeping
+ * their own copies (third-caller rule).
+ */
+export function ownerOf(fullName: string): string {
+  const idx = fullName.indexOf("/");
+  return idx === -1 ? "" : fullName.slice(0, idx);
 }
 
 /** `owner/repo` → `repo` (empty string when there is no `/`). */
-function repoOf(fullName: string): string {
+export function repoOf(fullName: string): string {
   const idx = fullName.indexOf("/");
   return idx === -1 ? "" : fullName.slice(idx + 1);
 }

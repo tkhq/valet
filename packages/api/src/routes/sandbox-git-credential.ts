@@ -24,7 +24,12 @@
  * for repos its session was never granted.
  *
  * ── Resolution ───────────────────────────────────────────────────────────
- * The first matching binding selects the repo name and the per-binding
+ * The binding is matched by full `owner/repo` (case-insensitive) when the
+ * request carries a `repo`, falling back to the first owner match otherwise
+ * (repo absent or unmatched). Matching on the full name matters when a session
+ * binds two repos under the same owner with DIFFERENT `auth` modes — each repo
+ * must resolve with ITS OWN binding's credential, not whichever happens to be
+ * first. The matched binding selects the repo name and the per-binding
  * `auth` mode. The `RepoHost` for that binding's clone URL resolves the
  * token via `resolveGitToken(purpose: "git")`:
  *   - `{token, username}`      → `{username, password: token}`
@@ -45,6 +50,7 @@ import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { sessionRepos } from "../schema/index.js";
+import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
 import type {
   PostSandboxGitCredentialRequest,
@@ -52,17 +58,6 @@ import type {
 } from "../wire/types.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
-
-/** `owner/repo` → `owner` (empty string when malformed). */
-function ownerOf(fullName: string): string {
-  return fullName.split("/", 1)[0] ?? "";
-}
-
-/** `owner/repo` → `repo` (empty string when there is no `/`). */
-function repoOf(fullName: string): string {
-  const idx = fullName.indexOf("/");
-  return idx === -1 ? "" : fullName.slice(idx + 1);
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -84,16 +79,28 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   }
   const host = (body as Record<string, unknown> | null)?.host;
   const owner = (body as Record<string, unknown> | null)?.owner;
+  const rawRepo = (body as Record<string, unknown> | null)?.repo;
   if (!isNonEmptyString(host) || !isNonEmptyString(owner)) {
     return c.json({ error: "host and owner are required" }, 400);
   }
+  // `repo` is optional — the helper only carries it when git sent a path with
+  // a repo segment. When present, it disambiguates two bindings under the same
+  // owner (each may carry a DIFFERENT auth); when absent or unmatched we fall
+  // back to the first owner match (the pre-repo behavior).
+  const wantRepo = isNonEmptyString(rawRepo) ? rawRepo.toLowerCase() : undefined;
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
 
   const bindings = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId));
 
   const wantOwner = owner.toLowerCase();
-  const binding = bindings.find((b) => ownerOf(b.fullName).toLowerCase() === wantOwner);
+  const binding =
+    (wantRepo !== undefined
+      ? bindings.find(
+          (b) =>
+            ownerOf(b.fullName).toLowerCase() === wantOwner && repoOf(b.fullName).toLowerCase() === wantRepo,
+        )
+      : undefined) ?? bindings.find((b) => ownerOf(b.fullName).toLowerCase() === wantOwner);
   if (!binding) {
     return c.json({ error: "owner not bound to this session" }, 403);
   }

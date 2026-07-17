@@ -41,12 +41,24 @@ describe("sandbox tokens", () => {
     expect(await verifySandboxToken(db, token)).toBeNull();
   });
 
-  it("re-minting for a session revokes that session's prior live tokens", async () => {
+  it("re-minting for a session mints an ADDITIONAL token, leaving the prior one live (rebuild-safe)", async () => {
+    // A session BUILD on a cache miss (api restart, orchestrator PATCH) must
+    // not kill the token a still-running earlier sandbox is holding.
     const { token: first } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
     const { token: second } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
 
-    expect(await verifySandboxToken(db, first)).toBeNull();
+    expect(await verifySandboxToken(db, first)).toEqual({ sessionId: "sess1", userId: "user1", orgId: "org1" });
     expect(await verifySandboxToken(db, second)).toEqual({ sessionId: "sess1", userId: "user1", orgId: "org1" });
+  });
+
+  it("revokeSandboxTokens revokes ALL of a session's live tokens at once (what destroy relies on)", async () => {
+    const { token: first } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+    const { token: second } = await mintSandboxToken(db, { sessionId: "sess1", userId: "user1", orgId: "org1" });
+
+    await revokeSandboxTokens(db, "sess1");
+
+    expect(await verifySandboxToken(db, first)).toBeNull();
+    expect(await verifySandboxToken(db, second)).toBeNull();
   });
 
   it("re-minting for a different session does not revoke the other session's token", async () => {

@@ -192,7 +192,7 @@ describe("GitHub/repo integration — full API loop e2e (fixture)", () => {
     ]);
 
     // ── 5. Sandbox credential-helper route mints for the bound owner ────
-    let sandboxToken = (
+    const sandboxToken = (
       await mintSandboxToken(api.providers.db, { sessionId: session.id, userId: "local-user", orgId: "local-org" })
     ).token;
     const helperRes = await fetch(`${api.baseUrl}/api/sandbox/git-credential`, {
@@ -233,12 +233,18 @@ describe("GitHub/repo integration — full API loop e2e (fixture)", () => {
     const anonOrgCred = await engineSession.credentialProvider().get("github");
     expect(anonOrgCred?.accessToken).toBe("inst-111");
 
-    // `sessionFor`'s build just re-minted (and revoked) the sandbox token
-    // above (`mintSandboxEnv`, called once per session BUILD) — re-mint a
-    // fresh one for the remaining credential-helper-route calls below.
-    sandboxToken = (
-      await mintSandboxToken(api.providers.db, { sessionId: session.id, userId: "local-user", orgId: "local-org" })
-    ).token;
+    // `sessionFor`'s build minted an ADDITIONAL sandbox token above
+    // (`mintSandboxEnv`, once per session BUILD) WITHOUT revoking prior ones
+    // (final-review fix wave) — so the PRE-rebuild token a running sandbox is
+    // still holding keeps working across the rebuild. Prove it: the same
+    // `sandboxToken` from before the build still authenticates the credential
+    // helper route rather than 403ing.
+    const survivesRebuildRes = await fetch(`${api.baseUrl}/api/sandbox/git-credential`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": sandboxToken },
+      body: JSON.stringify({ host: "github.com", owner: "acme" }),
+    });
+    expect(survivesRebuildRes.status).toBe(200);
 
     // ── 7. Connect flow (fixture exchange) upgrades attribution ─────────
     userReposBody = [rawRepo({ id: 7, full_name: "octouser/solo", private: false, updated_at: "2026-02-01T00:00:00Z" })];

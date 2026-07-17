@@ -502,9 +502,11 @@ export class EngineHost {
   }
 
   /**
-   * Mints a fresh long-lived sandbox bearer token (revoking any prior live
-   * one for this session — `mintSandboxToken`'s own contract) and derives
-   * this session's JWT secret, returning the five env vars every sandbox
+   * Mints a fresh long-lived sandbox bearer token (an ADDITIONAL token — it
+   * does NOT revoke prior live ones, so a rebuild while an earlier build's
+   * sandbox is still running never 401s that sandbox; see `mintSandboxToken`)
+   * and derives this session's JWT secret, returning the five env vars every
+   * sandbox
    * gets at provision time: `VALET_SANDBOX_TOKEN`, `VALET_API_URL`,
    * `VALET_SANDBOX_JWT_SECRET` (Task 8, auth-v2 plan), plus `VALET_SESSION_ID`
    * and `VALET_SANDBOX_PROFILE` (sandbox auth gateway plan, Task 5).
@@ -581,6 +583,17 @@ export class EngineHost {
    * branch of `resolveSessionGitHubToken` is exercised only from a real
    * session build (this resolver) today, not from the shipped workflow
    * engine, until workflow runs gain session context.
+   *
+   * PROBE COST (for T12): `plugin-catalog.ts`'s `list_tools` discovery calls
+   * `credentials.get("github")` once per listing to emit a "not connected"
+   * warning — and for `github` that `.get` is THIS resolver, so a cold-cache
+   * tool listing can trigger a token mint/refresh over the network. It's the
+   * `purpose: "api"` path, bounded by the token service's 5-minute mint cache
+   * and single-flight refresh (a warm cache re-listing pays nothing), so the
+   * cost is accepted/documented rather than engineered around here. A cheaper
+   * probe would use `CredentialProvider.list` (a raw store read, no mint) to
+   * answer the "is github connected" question discovery actually asks; that's
+   * a follow-up seam, not new surface built in this wave.
    */
   private buildCredentialResolver(
     sessionId: string,

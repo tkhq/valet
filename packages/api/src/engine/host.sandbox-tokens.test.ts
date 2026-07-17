@@ -135,7 +135,12 @@ describe("EngineHost sandbox token wiring", () => {
     expect(after[0].revokedAt).not.toBeNull();
   });
 
-  it("restore re-mints: a fresh token replaces the prior one, which is revoked", async () => {
+  it("restore mints an ADDITIONAL token, leaving the pre-rebuild one live (rebuild-safe)", async () => {
+    // Final-review fix wave: a rebuild on a cache miss must NOT revoke the
+    // token a still-running sandbox is holding, or its git credential helper
+    // 401s until pod recreation. So a rebuild mints a new token and the prior
+    // one stays live (bounded only by its natural 24h TTL); explicit
+    // revocation is reserved for `destroy()`.
     const recorder = new RecordingSandboxProvider(new VirtualSandboxProvider());
     api = await bootTestApi({ sandboxProvider: recorder });
     const { engineHost, db } = api.providers;
@@ -169,9 +174,8 @@ describe("EngineHost sandbox token wiring", () => {
       .from(sandboxTokens)
       .where(eq(sandboxTokens.sessionId, "sbtok-session-3"));
     expect(rows.length).toBe(2);
-    const revoked = rows.filter((r) => r.revokedAt !== null);
+    // Both tokens are live — the rebuild revoked nothing.
     const live = rows.filter((r) => r.revokedAt === null);
-    expect(revoked.length).toBe(1);
-    expect(live.length).toBe(1);
+    expect(live.length).toBe(2);
   });
 });

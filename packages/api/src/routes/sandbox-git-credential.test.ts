@@ -109,6 +109,54 @@ describe("POST /api/sandbox/git-credential", () => {
     expect(body).toEqual({ anonymous: true });
   });
 
+  it("two same-owner bindings with different auth each resolve with THEIR binding (matched by repo)", async () => {
+    api = await bootTestApi();
+    // Same owner, DIFFERENT auth. Position-0 is `auto` (would win an owner-only
+    // match); position-1 is explicit `user`. No user credential is connected,
+    // so the two bindings must diverge: `auto` → anonymous, `user` → 409.
+    await api.providers.db.insert(sessionRepos).values([
+      {
+        sessionId: SESSION_ID,
+        host: "github",
+        fullName: "acme/alpha",
+        cloneUrl: "https://github.com/acme/alpha.git",
+        ref: null,
+        auth: "auto",
+        position: 0,
+      },
+      {
+        sessionId: SESSION_ID,
+        host: "github",
+        fullName: "acme/beta",
+        cloneUrl: "https://github.com/acme/beta.git",
+        ref: null,
+        auth: "user",
+        position: 1,
+      },
+    ]);
+    const token = await mintToken();
+
+    // repo=beta must select the position-1 `user` binding → 409, NOT the
+    // position-0 `auto` binding an owner-only match would have picked.
+    const betaRes = await post(token, { host: "github.com", owner: "acme", repo: "beta" });
+    expect(betaRes.status).toBe(409);
+
+    // repo=alpha selects the `auto` binding → anonymous passthrough.
+    const alphaRes = await post(token, { host: "github.com", owner: "acme", repo: "alpha" });
+    expect(alphaRes.status).toBe(200);
+    expect((await alphaRes.json()) as PostSandboxGitCredentialResponse).toEqual({ anonymous: true });
+
+    // repo absent → falls back to the first owner match (position-0 `auto`).
+    const noRepoRes = await post(token, { host: "github.com", owner: "acme" });
+    expect(noRepoRes.status).toBe(200);
+    expect((await noRepoRes.json()) as PostSandboxGitCredentialResponse).toEqual({ anonymous: true });
+
+    // repo present but unmatched → same owner-only fallback (position-0 `auto`).
+    const unmatchedRes = await post(token, { host: "github.com", owner: "acme", repo: "ghost" });
+    expect(unmatchedRes.status).toBe(200);
+    expect((await unmatchedRes.json()) as PostSandboxGitCredentialResponse).toEqual({ anonymous: true });
+  });
+
   it("403s for an owner not bound to the session", async () => {
     api = await bootTestApi();
     await bindRepo();
