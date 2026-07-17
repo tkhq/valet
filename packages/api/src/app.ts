@@ -36,6 +36,8 @@ import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
 import { reposRouter } from "./routes/repos.js";
+import { imageCatalogRouter } from "./routes/image-catalog.js";
+import { prebuildsRouter } from "./routes/prebuilds.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
@@ -176,6 +178,8 @@ export function createApp(
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
   app.route("/api/org/github-app", githubAppRouter);
+  app.route("/api/org/image-catalog", imageCatalogRouter);
+  app.route("/api/org/prebuilds", prebuildsRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
 

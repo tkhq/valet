@@ -50,6 +50,16 @@ export interface GithubFixtureHandlers {
   listInstallationRepositories?: () => GithubFixtureResponse;
   /** `POST /app-manifests/:code/conversions` */
   convertManifest?: (code: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo` (prebuild orchestration, Task 3 — head-sha
+   * resolution reads `default_branch` from here). */
+  getRepo?: (owner: string, repo: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/commits/:ref` */
+  getCommit?: (owner: string, repo: string, ref: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/contents/:path` — `path` may contain slashes
+   * (e.g. `.valet/prebuild.yaml`), so it's reconstructed from the raw
+   * request path rather than a single Hono `:path` param. `ref` is the
+   * parsed `?ref=` query value. */
+  getContents?: (owner: string, repo: string, path: string, ref: string | undefined) => GithubFixtureResponse;
 }
 
 export interface GithubFixture {
@@ -85,6 +95,9 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
       html_url: "https://github.com/apps/fixture-app",
     },
   }),
+  getRepo: () => ({ body: { default_branch: "main" } }),
+  getCommit: () => ({ body: { sha: "fixture-head-sha" } }),
+  getContents: () => ({ status: 404, body: { message: "Not Found" } }),
 };
 
 /** Starts a fake GitHub API server on port 0. Callers MUST `await close()`
@@ -174,6 +187,34 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     const code = c.req.param("code");
     record(c, { code });
     const { status, body } = handlers.convertManifest(code);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    record(c, { owner, repo });
+    const { status, body } = handlers.getRepo(owner, repo);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:ref", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const ref = c.req.param("ref");
+    record(c, { owner, repo, ref });
+    const { status, body } = handlers.getCommit(owner, repo, ref);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/contents/*", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const prefix = `/repos/${owner}/${repo}/contents/`;
+    const path = c.req.path.slice(prefix.length);
+    const ref = c.req.query("ref");
+    record(c, { owner, repo, path });
+    const { status, body } = handlers.getContents(owner, repo, path, ref);
     return c.json(body as object, status ?? 200);
   });
 

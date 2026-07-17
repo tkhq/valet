@@ -9,6 +9,7 @@ import type {
 } from "@valet/engine";
 import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
+import type { PrebuildService } from "../prebuilds/service.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
@@ -35,6 +36,12 @@ export interface Providers {
    * `VALET_IMAGE_BUILDER` (e.g. `local`, or `kubernetes` pre-T5) — callers
    * must treat that as "prebuilds unavailable", not an error. */
   imageBuilder: ImageBuilder | null;
+  /** Prebuild orchestration (Task 3) — service, routes, and scheduler.
+   * `start()`/`stop()` are called from `main.ts` alongside `workflowRunHost`.
+   * Every method treats `imageBuilder: null` as "prebuilds unavailable"
+   * internally; routes don't need to branch on `imageBuilder` themselves
+   * except for `GET /api/org/prebuilds/meta`. */
+  prebuildService: PrebuildService;
 
   // Per-process Engine cache. Lives only on the server, not in engine.
   engineHost: EngineHost;

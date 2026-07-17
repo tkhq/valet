@@ -36,6 +36,8 @@ import { orgMembers, orgs, users } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { createApp, type AuthWiring } from "../app.js";
+import { PrebuildService } from "../prebuilds/service.js";
+import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { Providers } from "../providers/types.js";
 import { loadAuthConfig } from "../auth/config.js";
 import { buildAuthHooks } from "../auth/provisioning.js";
@@ -119,6 +121,14 @@ export interface BootTestApiOpts {
    * session-credential seam (GitHub/repo integration plan, Task 12's e2e)
    * need this wired through a full API boot. */
   githubTokenDeps?: EngineHostOpts["githubTokenDeps"];
+  /** Wires `Providers.prebuildService`'s `builder` — unset/`null` (the
+   * default) means "prebuilds unavailable", same as a `local` sandbox
+   * backend boot. Prebuild route tests supply a fake `ImageBuilder`. */
+  imageBuilder?: ImageBuilder | null;
+  /** Overrides the `apiUrl`/`githubUrl` the constructed `PrebuildService`
+   * resolves GitHub credentials/contents through — point this at
+   * `startGithubFixture()`'s `url`. Ignored when `imageBuilder` is unset. */
+  githubApiUrl?: string;
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -279,15 +289,27 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowRunHost.startHost();
   }
 
+  // Prebuilds are out of scope for the integration harness (no real
+  // docker/kubernetes builder wired here); routes must treat this as
+  // "unavailable", same as a `local` sandbox-backend boot.
+  const prebuildService = new PrebuildService({
+    db,
+    builder: opts.imageBuilder ?? null,
+    githubTokenDeps: {
+      db,
+      credentials: engineCredentials,
+      key: deriveSecretKey("test-key"),
+      apiUrl: opts.githubApiUrl,
+      githubUrl: opts.githubApiUrl,
+    },
+  });
+
   const providers: Providers = {
     db,
     blobs,
     encryptionKey: "test-key",
     engineStore,
     sandboxProvider,
-    // Prebuilds are out of scope for the integration harness (no real
-    // docker/kubernetes builder wired here); routes must treat this as
-    // "unavailable", same as a `local` sandbox-backend boot.
     imageBuilder: null,
     eventStream,
     engineCredentials,
@@ -298,6 +320,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowRunHost,
     plugins,
     actionPluginByService,
+    prebuildService,
   };
 
   let authWiring: AuthWiring = {};

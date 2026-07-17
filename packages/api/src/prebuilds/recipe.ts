@@ -45,6 +45,12 @@ const DETECTION_MATRIX: DetectionRule[] = [
   { id: "go-mod-download", lockfile: "go.sum", command: "go mod download" },
 ];
 
+/** Root-level lockfile paths the detection matrix checks for, in matrix
+ * order. Exported so callers that need to know WHICH paths to fetch before
+ * calling `detectRecipe` (e.g. the prebuild service's GitHub Contents-API
+ * probe, Task 3) don't hardcode a second copy of this list. */
+export const CANDIDATE_LOCKFILES: readonly string[] = DETECTION_MATRIX.map((r) => r.lockfile);
+
 /**
  * Detects the install recipe for a repo from its root-level file listing.
  * `read` is accepted for interface symmetry with `loadPrebuildOverride` and

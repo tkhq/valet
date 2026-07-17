@@ -24,6 +24,7 @@ import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder } from "./image-builder.js";
+import { PrebuildService } from "../prebuilds/service.js";
 import type { Providers } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -303,6 +304,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     crashAt: opts.workflowCrashAt,
   });
 
+  // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
+  // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
+  // in this file builds (`{ db, credentials: engineCredentials, key }`).
+  // `start()`/`stop()` are called from `main.ts`.
+  const prebuildService = new PrebuildService({
+    db,
+    builder: imageBuilder,
+    githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+  });
+
   return {
     db,
     blobs,
@@ -319,5 +330,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowRunHost,
     plugins,
     actionPluginByService,
+    prebuildService,
   };
 }
