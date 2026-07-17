@@ -2,15 +2,19 @@ import { useMemo, useState } from "react";
 import { Check } from "lucide-react";
 import { Input, Badge } from "~/components/primitives";
 import { useModels } from "~/api/settings";
-import { MODEL_CATALOG, findModel, type ModelOption } from "~/lib/models";
+import { curatedForCatalogId, type ModelOption } from "~/lib/models";
+import type { ModelInfo } from "@valet/api/wire";
 
 /**
  * Text `Input` + filtered popover list — the model typeahead (split-settings
- * design, "You · Assistant" default-model control). Filters case-insensitive
- * on both id and label; curated `MODEL_CATALOG` matches surface first (with
- * their friendly label + tier badge), remaining `GET /api/models` registry
- * ids follow below by raw id. A "System default" row clears the override
- * when one is set.
+ * design, "You · Assistant" default-model control). Options come from the
+ * org catalog (`GET /api/models`, Task 4/8) — already preference-ordered.
+ * Entries whose id matches a curated `MODEL_CATALOG` tier (bare or
+ * `anthropic/`-namespaced) render with the friendly label + tier badge;
+ * everything else renders with its catalog `name` + provider hint.
+ * Selecting an option always submits the catalog's own `id` verbatim — the
+ * curated list only supplies display labels, never overrides the id being
+ * written.
  *
  * Built with a plain filtered list under the input rather than a
  * Popover/Command primitive — this package's `components/primitives/` has
@@ -33,24 +37,19 @@ export function ModelCombobox({
   const [open, setOpen] = useState(false);
   const modelsQ = useModels();
 
-  const registryIds = useMemo(
-    () => new Set((modelsQ.data?.models ?? []).map((m) => m.id)),
-    [modelsQ.data],
-  );
+  const models = modelsQ.data?.models ?? [];
+  const registryIds = useMemo(() => new Set(models.map((m) => m.id)), [models]);
 
-  const curatedMatches = useMemo(() => filterCurated(MODEL_CATALOG, query), [query]);
-  const curatedIds = useMemo(() => new Set(MODEL_CATALOG.map((m) => m.id)), []);
-  const otherMatches = useMemo(
-    () =>
-      (modelsQ.data?.models ?? [])
-        .filter((m) => !curatedIds.has(m.id))
-        .filter((m) => matchesQuery(m.id, m.name, query))
-        .map((m) => m.id),
-    [modelsQ.data, curatedIds, query],
-  );
+  const matches = useMemo(() => models.filter((m) => matchesQuery(m.id, m.name, query)), [models, query]);
+  const curatedMatches = matches
+    .map((m) => ({ m, curated: curatedForCatalogId(m.id) }))
+    .filter((p): p is { m: ModelInfo; curated: ModelOption } => !!p.curated);
+  const otherMatches = matches.filter((m) => !curatedForCatalogId(m.id));
 
-  const selectedCatalog = findModel(value);
-  const displayValue = value ? (selectedCatalog?.label ?? value) : "";
+  const selectedEntry = models.find((m) => m.id === value);
+  const selectedCurated = curatedForCatalogId(value);
+  const displayValue = value ? (selectedCurated?.label ?? selectedEntry?.name ?? value) : "";
+  const isKnownValue = !value || registryIds.has(value) || !!selectedCurated;
 
   function select(id: string) {
     onSelect(id);
@@ -105,7 +104,7 @@ export function ModelCombobox({
               System default
             </button>
           )}
-          {curatedMatches.map((m) => (
+          {curatedMatches.map(({ m, curated }) => (
             <button
               key={m.id}
               type="button"
@@ -117,23 +116,26 @@ export function ModelCombobox({
             >
               <span className="flex items-center gap-2">
                 {value === m.id && <Check className="h-3.5 w-3.5 text-moss" />}
-                <span className="text-ink">{m.label}</span>
+                <span className="text-ink">{curated.label}</span>
               </span>
-              <Badge variant={tierBadgeVariant(m.tier)}>{m.tier}</Badge>
+              <Badge variant={tierBadgeVariant(curated.tier)}>{curated.tier}</Badge>
             </button>
           ))}
-          {otherMatches.map((id) => (
+          {otherMatches.map((m) => (
             <button
-              key={id}
+              key={m.id}
               type="button"
               role="option"
-              aria-selected={value === id}
+              aria-selected={value === m.id}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => select(id)}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+              onClick={() => select(m.id)}
+              className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
             >
-              {value === id && <Check className="h-3.5 w-3.5 text-moss" />}
-              <span className="text-muted">{id}</span>
+              <span className="flex items-center gap-2">
+                {value === m.id && <Check className="h-3.5 w-3.5 text-moss" />}
+                <span className="text-ink">{m.name}</span>
+              </span>
+              <span className="text-xs text-muted">{m.providerName}</span>
             </button>
           ))}
           {!hasResults && (
@@ -141,18 +143,13 @@ export function ModelCombobox({
           )}
         </div>
       )}
-      {value && !registryIds.has(value) && !curatedIds.has(value) && !modelsQ.isLoading && (
+      {value && !isKnownValue && !modelsQ.isLoading && (
         <p className="mt-1 text-xs text-danger-500">
           &quot;{value}&quot; isn&apos;t in the current model registry.
         </p>
       )}
     </div>
   );
-}
-
-function filterCurated(catalog: readonly ModelOption[], query: string): ModelOption[] {
-  if (!query.trim()) return [...catalog];
-  return catalog.filter((m) => matchesQuery(m.id, m.label, query));
 }
 
 function matchesQuery(id: string, label: string, query: string): boolean {

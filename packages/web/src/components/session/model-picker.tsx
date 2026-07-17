@@ -9,7 +9,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/primitives";
-import { MODEL_CATALOG, modelLabel, type ModelOption } from "~/lib/models";
+import { useModels } from "~/api/settings";
+import { curatedForCatalogId } from "~/lib/models";
+import type { ModelInfo } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
 
 /**
@@ -22,10 +24,18 @@ import { cn } from "~/lib/cn";
  *     override" indicator is a tiny dot when `isOverride` is true. Used in
  *     the thread sidebar.
  *
+ * Options come from the org catalog (`GET /api/models`, Task 4/8), listed
+ * in response order (already preference-ordered). Entries matching a
+ * curated `MODEL_CATALOG` tier (bare or `anthropic/`-namespaced id) render
+ * with their curated label + description; other entries render with the
+ * catalog `name` + a provider hint. Selecting an item always submits the
+ * catalog's own id verbatim.
+ *
  * Pass `currentId` (string | undefined) — undefined renders as "Inherit
- * from session" when `inheritLabel` is given. Selecting an item fires
- * `onSelect(id)`. The optional `onClear` callback, when given, adds an
- * "Inherit from session" item at the bottom that calls `onClear()`.
+ * from session" when `inheritLabel` is given. `currentId` may be a value
+ * that's no longer in the catalog (a session parked on a model whose
+ * provider key was removed, or a legacy bare id) — it's still labeled
+ * (curated match, else raw id) rather than blanked out.
  */
 export interface ModelPickerProps {
   currentId?: string;
@@ -42,6 +52,12 @@ export interface ModelPickerProps {
   inheritLabel?: string;
 }
 
+function labelFor(id: string, models: ModelInfo[]): string {
+  const curated = curatedForCatalogId(id);
+  if (curated) return curated.label;
+  return models.find((m) => m.id === id)?.name ?? id;
+}
+
 export function ModelPicker({
   currentId,
   variant = "compact",
@@ -52,8 +68,10 @@ export function ModelPicker({
   inheritLabel = "Inherit",
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
+  const modelsQ = useModels();
+  const models = modelsQ.data?.models ?? [];
 
-  const triggerLabel = currentId ? modelLabel(currentId) : inheritLabel;
+  const triggerLabel = currentId ? labelFor(currentId, models) : inheritLabel;
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -91,32 +109,44 @@ export function ModelPicker({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[280px]">
         <DropdownMenuLabel>Model</DropdownMenuLabel>
-        <ModelGroup
-          tier="fast"
-          currentId={currentId}
-          onPick={(id) => {
-            onSelect(id);
-            setOpen(false);
-          }}
-        />
-        <DropdownMenuSeparator />
-        <ModelGroup
-          tier="balanced"
-          currentId={currentId}
-          onPick={(id) => {
-            onSelect(id);
-            setOpen(false);
-          }}
-        />
-        <DropdownMenuSeparator />
-        <ModelGroup
-          tier="powerful"
-          currentId={currentId}
-          onPick={(id) => {
-            onSelect(id);
-            setOpen(false);
-          }}
-        />
+        {modelsQ.isLoading && (
+          <div className="px-2 py-1.5 text-xs text-muted">Loading models…</div>
+        )}
+        {!modelsQ.isLoading && models.length === 0 && (
+          <div className="px-2 py-1.5 text-xs text-muted">No models available.</div>
+        )}
+        {models.map((m) => {
+          const active = m.id === currentId;
+          const curated = curatedForCatalogId(m.id);
+          return (
+            <DropdownMenuItem
+              key={m.id}
+              onSelect={() => {
+                onSelect(m.id);
+                setOpen(false);
+              }}
+              className={cn(
+                "flex flex-col items-stretch gap-0.5 py-1.5",
+                active && "bg-neutral-100 dark:bg-neutral-800",
+              )}
+            >
+              <div className="flex items-center gap-2">
+                {active ? (
+                  <Check className="h-3.5 w-3.5 text-accent-600 shrink-0" />
+                ) : (
+                  <span className="h-3.5 w-3.5 shrink-0" />
+                )}
+                <span className="text-sm font-medium">{curated?.label ?? m.name}</span>
+                <span className="ml-auto font-mono text-[10px] text-muted/70">
+                  {m.id}
+                </span>
+              </div>
+              <div className="pl-[22px] text-xs text-muted leading-snug">
+                {curated?.description ?? m.providerName}
+              </div>
+            </DropdownMenuItem>
+          );
+        })}
         {onClear && (
           <>
             <DropdownMenuSeparator />
@@ -133,59 +163,5 @@ export function ModelPicker({
         )}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-const TIER_LABEL: Record<ModelOption["tier"], string> = {
-  fast: "Fast",
-  balanced: "Balanced",
-  powerful: "Powerful",
-};
-
-function ModelGroup({
-  tier,
-  currentId,
-  onPick,
-}: {
-  tier: ModelOption["tier"];
-  currentId?: string;
-  onPick: (id: string) => void;
-}) {
-  const items = MODEL_CATALOG.filter((m) => m.tier === tier);
-  if (items.length === 0) return null;
-  return (
-    <div className="py-0.5">
-      <div className="px-2 pb-0.5 text-[10px] uppercase tracking-wider text-muted/70">
-        {TIER_LABEL[tier]}
-      </div>
-      {items.map((m) => {
-        const active = m.id === currentId;
-        return (
-          <DropdownMenuItem
-            key={m.id}
-            onSelect={() => onPick(m.id)}
-            className={cn(
-              "flex flex-col items-stretch gap-0.5 py-1.5",
-              active && "bg-neutral-100 dark:bg-neutral-800",
-            )}
-          >
-            <div className="flex items-center gap-2">
-              {active ? (
-                <Check className="h-3.5 w-3.5 text-accent-600 shrink-0" />
-              ) : (
-                <span className="h-3.5 w-3.5 shrink-0" />
-              )}
-              <span className="text-sm font-medium">{m.label}</span>
-              <span className="ml-auto font-mono text-[10px] text-muted/70">
-                {m.id}
-              </span>
-            </div>
-            <div className="pl-[22px] text-xs text-muted leading-snug">
-              {m.description}
-            </div>
-          </DropdownMenuItem>
-        );
-      })}
-    </div>
   );
 }

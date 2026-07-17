@@ -54,3 +54,15 @@ export function modelLabel(id: string | undefined | null): string {
   const m = findModel(id);
   return m?.label ?? id ?? "Unknown";
 }
+
+/**
+ * Matches an `/api/models` catalog id against the curated list — catalog ids
+ * for Anthropic entries may be bare (`claude-haiku-4-5`, back-compat) or
+ * namespaced (`anthropic/claude-haiku-4-5`); both forms should surface the
+ * curated tier label. Non-Anthropic ids never match.
+ */
+export function curatedForCatalogId(id: string | undefined | null): ModelOption | undefined {
+  if (!id) return undefined;
+  const bare = id.startsWith("anthropic/") ? id.slice("anthropic/".length) : id;
+  return findModel(bare);
+}

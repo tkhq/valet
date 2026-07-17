@@ -88,9 +88,10 @@ export function useModels(opts?: UseQueryOptions<ListModelsResponse>) {
   return useQuery<ListModelsResponse>({
     queryKey: qkSettings.models(),
     queryFn: () => api.listModels(),
-    // Static registry (pi-ai `getModels`, no provider call) — effectively
-    // never changes within a session.
-    staleTime: Infinity,
+    // Org-admin-editable catalog (LLM providers, model preferences) — Task 7's
+    // mutations already invalidate this key on write, but a short staleTime
+    // covers changes made from elsewhere (another tab, another org admin).
+    staleTime: 60_000,
     ...opts,
   });
 }
