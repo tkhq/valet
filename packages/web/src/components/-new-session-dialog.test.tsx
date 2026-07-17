@@ -9,7 +9,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { GetReposResponse } from "@valet/api/wire";
+import type { GetPrebuildForRepoResponse, GetReposResponse } from "@valet/api/wire";
 
 const navigate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
@@ -22,8 +22,14 @@ vi.mock("~/api/queries", () => ({
 }));
 
 let reposData: GetReposResponse = { repos: [], connected: false, installed: false };
+const prebuildByRepo = new Map<string, GetPrebuildForRepoResponse>();
 vi.mock("~/api/repos", () => ({
   useRepos: () => ({ data: reposData, isLoading: false, error: null }),
+  useRepoPrebuild: (fullName: string | undefined) => ({
+    data: fullName ? prebuildByRepo.get(fullName) : undefined,
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 import { NewSessionDialog } from "./new-session-dialog";
@@ -44,6 +50,7 @@ describe("NewSessionDialog", () => {
     vi.clearAllMocks();
     mutateAsync.mockResolvedValue({ id: "sess-new" });
     reposData = { repos: [], connected: false, installed: false };
+    prebuildByRepo.clear();
   });
 
   it("submits with profile: full", async () => {
@@ -205,5 +212,35 @@ describe("NewSessionDialog", () => {
         auth: "auto",
       },
     ]);
+  });
+
+  it("shows the prebuilt badge for a selected repo with a ready prebuild", async () => {
+    reposData = {
+      repos: [repo("acme/api", { installed: true })],
+      connected: true,
+      installed: true,
+    };
+    const finishedAt = Date.now() - 5 * 60_000;
+    prebuildByRepo.set("acme/api", { prebuild: { commitSha: "abcdef1234567", finishedAt } });
+    render(<NewSessionDialog open onOpenChange={() => {}} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: /search repositories/i }));
+    await user.click(screen.getByRole("option", { name: /acme\/api/i }));
+
+    expect(screen.getByText("prebuilt · api@abcdef1 · built 5m ago")).toBeTruthy();
+  });
+
+  it("no prebuilt badge when the repo has no ready prebuild", async () => {
+    reposData = {
+      repos: [repo("acme/api", { installed: true })],
+      connected: true,
+      installed: true,
+    };
+    render(<NewSessionDialog open onOpenChange={() => {}} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: /search repositories/i }));
+    await user.click(screen.getByRole("option", { name: /acme\/api/i }));
+
+    expect(screen.queryByText(/prebuilt ·/)).toBeNull();
   });
 });

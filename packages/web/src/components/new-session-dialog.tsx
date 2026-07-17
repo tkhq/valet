@@ -11,7 +11,8 @@ import {
   Label,
 } from "~/components/primitives";
 import { useCreateSession } from "~/api/queries";
-import { useRepos } from "~/api/repos";
+import { useRepoPrebuild, useRepos } from "~/api/repos";
+import { relativeTime } from "~/lib/relative-time";
 
 const DEFAULT_WORKSPACE = "/tmp/valet/workspace";
 const MAX_REPOS = 5;
@@ -205,11 +206,21 @@ function RepoRowView({
   // authenticating the clone. Otherwise the server's "auto" pick is the
   // only usable path anyway.
   const showAuthSelect = !!row.installed && connected;
+  const prebuildQ = useRepoPrebuild(row.fullName);
+  const prebuild = prebuildQ.data?.prebuild;
 
   return (
     <div className="space-y-1.5 rounded border border-line p-2.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-sm font-medium text-ink">{row.fullName}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-sm font-medium text-ink">{row.fullName}</span>
+          {prebuild && (
+            <span className="shrink-0 text-xs text-muted">
+              prebuilt · {repoBaseName(row.fullName)}@{prebuild.commitSha.slice(0, 7)} · built{" "}
+              {relativeTime(prebuild.finishedAt)}
+            </span>
+          )}
+        </div>
         <button
           type="button"
           aria-label={`Remove ${row.fullName}`}

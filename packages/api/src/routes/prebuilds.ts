@@ -201,3 +201,40 @@ prebuildsRouter.get("/configs/:id/builds", async (c) => {
   const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, id)).orderBy(desc(prebuilds.createdAt));
   return c.json({ builds: rows });
 });
+
+// ── Member-accessible read (Task 6) ─────────────────────────────────────
+//
+// Mounted separately at `/api/prebuilds` (not `/api/org/prebuilds`) — no
+// `requireOrgAdmin` gate, any authed org member can hit it. Powers the
+// new-session dialog's "prebuilt" badge. Response is deliberately narrow:
+// only `commitSha`/`finishedAt`, never `imageRef`/`error`/`logTail`, which
+// would leak build internals to non-admin members.
+
+export const prebuildsPublicRouter = new Hono<AppEnv>();
+
+prebuildsPublicRouter.get("/for-repo", async (c) => {
+  const fullName = c.req.query("fullName");
+  if (!fullName || fullName.trim() === "") {
+    return c.json({ error: "fullName is required" }, 400);
+  }
+
+  const { db } = c.var.providers;
+  const configRows = await db
+    .select({ id: prebuildConfigs.id })
+    .from(prebuildConfigs)
+    .where(and(eq(prebuildConfigs.orgId, c.var.user.orgId), eq(prebuildConfigs.repoFullName, fullName)))
+    .limit(1);
+  const config = configRows[0];
+  if (!config) return c.json({ prebuild: null });
+
+  const buildRows = await db
+    .select({ commitSha: prebuilds.commitSha, finishedAt: prebuilds.finishedAt })
+    .from(prebuilds)
+    .where(and(eq(prebuilds.configId, config.id), eq(prebuilds.status, "pushed")))
+    .orderBy(desc(prebuilds.finishedAt))
+    .limit(1);
+  const build = buildRows[0];
+  if (!build || build.finishedAt === null) return c.json({ prebuild: null });
+
+  return c.json({ prebuild: { commitSha: build.commitSha, finishedAt: build.finishedAt } });
+});

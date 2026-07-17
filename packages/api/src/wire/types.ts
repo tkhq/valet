@@ -1226,3 +1226,118 @@ export interface SandboxGitAnonymous {
 }
 
 export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGitAnonymous;
+
+// ── REST: sandbox image prebuilds (sandbox images v2 plan, Task 6) ───────
+//
+// `/api/org/image-catalog` + `/api/org/prebuilds/*` — org-admin CRUD, see
+// `routes/image-catalog.ts` / `routes/prebuilds.ts`. Row shapes are
+// returned verbatim (no secret material lives on either table) so these
+// wire types mirror the Drizzle row types 1:1. `/api/prebuilds/for-repo` is
+// the one member-accessible (non-admin-gated) read in this group — its
+// response is deliberately narrow (see `GetPrebuildForRepoResponse`).
+
+export interface ImageCatalogEntryWire {
+  id: string;
+  orgId: string;
+  name: string;
+  ref: string;
+  pullSecretName: string | null;
+  kind: "base";
+  createdAt: number;
+}
+
+export interface ListImageCatalogResponse {
+  images: ImageCatalogEntryWire[];
+}
+
+export interface CreateImageCatalogRequest {
+  name: string;
+  ref: string;
+  pullSecretName?: string;
+}
+
+export interface CreateImageCatalogResponse {
+  image: ImageCatalogEntryWire;
+}
+
+export type PrebuildScheduleWire = "nightly" | "off";
+
+export interface PrebuildConfigWire {
+  id: string;
+  orgId: string;
+  repoHost: string;
+  repoFullName: string;
+  cloneUrl: string;
+  baseImageId: string | null;
+  schedule: PrebuildScheduleWire;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListPrebuildConfigsResponse {
+  configs: PrebuildConfigWire[];
+}
+
+export interface CreatePrebuildConfigRequest {
+  repoFullName: string;
+  cloneUrl: string;
+  repoHost?: string;
+  baseImageId?: string | null;
+  schedule?: PrebuildScheduleWire;
+  enabled?: boolean;
+}
+
+export interface CreatePrebuildConfigResponse {
+  config: PrebuildConfigWire;
+}
+
+export interface PatchPrebuildConfigRequest {
+  cloneUrl?: string;
+  baseImageId?: string | null;
+  schedule?: PrebuildScheduleWire;
+  enabled?: boolean;
+}
+
+export interface PatchPrebuildConfigResponse {
+  config: PrebuildConfigWire;
+}
+
+export type PrebuildStatusWire = "queued" | "building" | "pushed" | "failed";
+
+export interface PrebuildWire {
+  id: string;
+  configId: string;
+  commitSha: string;
+  imageRef: string;
+  status: PrebuildStatusWire;
+  builderBackend: string;
+  error: string | null;
+  logTail: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  createdAt: number;
+}
+
+export interface RebuildPrebuildResponse {
+  prebuild: PrebuildWire;
+}
+
+export interface ListPrebuildBuildsResponse {
+  builds: PrebuildWire[];
+}
+
+export interface GetPrebuildsMetaResponse {
+  /** `null` when no `ImageBuilder` is wired for this deployment — the
+   * settings page shows the "unavailable on this deployment" banner but
+   * keeps the image catalog usable regardless. */
+  builder: string | null;
+}
+
+/** `GET /api/prebuilds/for-repo?fullName=owner/repo` — any authed org
+ * member. The newest `pushed` build for the caller's org + repo, or
+ * `null`. Deliberately narrow (no `imageRef`/`error`/`logTail`) — this is
+ * the one prebuild read a non-admin member can hit. */
+export interface GetPrebuildForRepoResponse {
+  prebuild: { commitSha: string; finishedAt: number } | null;
+}

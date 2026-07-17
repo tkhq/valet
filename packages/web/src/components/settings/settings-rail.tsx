@@ -32,6 +32,7 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/teams", label: "Teams" },
   { to: "/settings/organization/models", label: "Models" },
   { to: "/settings/organization/github", label: "GitHub" },
+  { to: "/settings/organization/sandbox-images", label: "Sandbox images" },
 ] as const;
 
 export function SettingsRail() {

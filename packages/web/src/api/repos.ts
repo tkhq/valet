@@ -10,13 +10,14 @@ import {
   useQueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
-import type { GetReposResponse, PostGithubConnectResponse } from "@valet/api/wire";
+import type { GetPrebuildForRepoResponse, GetReposResponse, PostGithubConnectResponse } from "@valet/api/wire";
 import { api } from "./client";
 import { qkIntegrations } from "./integrations";
 import { qkSettings } from "./settings";
 
 export const qkRepos = {
   list: () => ["repos"] as const,
+  prebuildForRepo: (fullName: string) => ["repos", "prebuild", fullName] as const,
 };
 
 /** `GET /api/repos` — the new-session repo picker's source. A short
@@ -45,6 +46,18 @@ export function useConnectGithub() {
       qc.invalidateQueries({ queryKey: qkIntegrations.credentials() });
       qc.invalidateQueries({ queryKey: qkRepos.list() });
     },
+  });
+}
+
+/** `GET /api/prebuilds/for-repo` — member-accessible (sandbox images v2
+ * plan, Task 6). Powers the new-session dialog's "prebuilt" badge; `enabled`
+ * gates it so it only fires once a repo is actually selected. */
+export function useRepoPrebuild(fullName: string | undefined) {
+  return useQuery<GetPrebuildForRepoResponse>({
+    queryKey: qkRepos.prebuildForRepo(fullName ?? ""),
+    queryFn: () => api.getPrebuildForRepo(fullName as string),
+    enabled: fullName !== undefined && fullName.trim() !== "",
+    staleTime: 60_000,
   });
 }
 

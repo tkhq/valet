@@ -6,9 +6,11 @@
  * pointed at the shared GitHub fixture via `githubApiUrl`.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
+import { prebuilds } from "../schema/index.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -239,5 +241,87 @@ describe("GET /api/org/prebuilds/configs/:id/builds", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { builds: unknown[] };
     expect(body.builds).toEqual([]);
+  });
+});
+
+describe("GET /api/prebuilds/for-repo", () => {
+  it("400s when fullName is missing", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/prebuilds/for-repo`, { headers: HEADERS });
+    expect(res.status).toBe(400);
+  });
+
+  it("is reachable by a non-admin org member (no requireOrgAdmin gate)", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/prebuilds/for-repo?fullName=acme/widgets`, {
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("returns prebuild: null when no config exists for the repo", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/prebuilds/for-repo?fullName=acme/widgets`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ prebuild: null });
+  });
+
+  it("returns prebuild: null when the config has no pushed build", async () => {
+    api = await bootTestApi();
+    await createConfig(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/prebuilds/for-repo?fullName=acme/widgets`, { headers: HEADERS });
+    expect(await res.json()).toEqual({ prebuild: null });
+  });
+
+  it("returns the newest pushed build's commitSha + finishedAt, and no other fields", async () => {
+    api = await bootTestApi();
+    const config = await createConfig(api.baseUrl);
+    const { db } = api.providers;
+    await db.insert(prebuilds).values([
+      {
+        id: `pb_${randomUUID()}`,
+        configId: config.id,
+        commitSha: "olderc1",
+        imageRef: "registry.local/acme-widgets:olderc1",
+        status: "pushed",
+        builderBackend: "docker",
+        recipe: [],
+        startedAt: 1_000,
+        finishedAt: 2_000,
+        createdAt: 1_000,
+      },
+      {
+        id: `pb_${randomUUID()}`,
+        configId: config.id,
+        commitSha: "newestc2",
+        imageRef: "registry.local/acme-widgets:newestc2",
+        status: "pushed",
+        builderBackend: "docker",
+        recipe: [],
+        startedAt: 3_000,
+        finishedAt: 4_000,
+        createdAt: 3_000,
+      },
+      {
+        id: `pb_${randomUUID()}`,
+        configId: config.id,
+        commitSha: "failedc3",
+        imageRef: "registry.local/acme-widgets:failedc3",
+        status: "failed",
+        builderBackend: "docker",
+        recipe: [],
+        error: "boom",
+        startedAt: 5_000,
+        finishedAt: 6_000,
+        createdAt: 5_000,
+      },
+    ]);
+
+    const res = await fetch(`${api.baseUrl}/api/prebuilds/for-repo?fullName=acme/widgets`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ prebuild: { commitSha: "newestc2", finishedAt: 4_000 } });
+    expect(JSON.stringify(body)).not.toContain("imageRef");
+    expect(JSON.stringify(body)).not.toContain("registry.local");
   });
 });

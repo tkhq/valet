@@ -10,6 +10,10 @@ import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
   CancelWorkflowRunResponse,
+  CreateImageCatalogRequest,
+  CreateImageCatalogResponse,
+  CreatePrebuildConfigRequest,
+  CreatePrebuildConfigResponse,
   CreateSessionRequest,
   CreateSessionResponse,
   CreateTeamRequest,
@@ -26,6 +30,8 @@ import type {
   GetMemoryTreeResponse,
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
+  GetPrebuildForRepoResponse,
+  GetPrebuildsMetaResponse,
   GetReposResponse,
   GetSessionResponse,
   GetWorkflowResponse,
@@ -33,7 +39,10 @@ import type {
   ListCredentialsResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
+  ListImageCatalogResponse,
   ListInvitesResponse,
+  ListPrebuildBuildsResponse,
+  ListPrebuildConfigsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
@@ -63,6 +72,8 @@ import type {
   PatchIdentityLinkRequest,
   PatchOrgRequest,
   PatchOrgResponse,
+  PatchPrebuildConfigRequest,
+  PatchPrebuildConfigResponse,
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
@@ -78,6 +89,7 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
+  RebuildPrebuildResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -420,6 +432,36 @@ export const api = {
   // repos (GitHub/repo integration plan, Task 7): union of every RepoHost
   // the caller has access to — only `github` today.
   getRepos: () => request<GetReposResponse>("GET", "/repos"),
+
+  // sandbox image prebuilds (sandbox images v2 plan, Task 6): org-admin
+  // catalog + per-repo config CRUD, plus the one member-accessible read
+  // (`getPrebuildForRepo`, mounted at `/prebuilds` not `/org/prebuilds`).
+  listImageCatalog: () => request<ListImageCatalogResponse>("GET", "/org/image-catalog"),
+  createImageCatalogEntry: (body: CreateImageCatalogRequest) =>
+    request<CreateImageCatalogResponse>("POST", "/org/image-catalog", body),
+  deleteImageCatalogEntry: (id: string) =>
+    request<{ ok: true }>("DELETE", `/org/image-catalog/${encodeURIComponent(id)}`),
+  getPrebuildsMeta: () => request<GetPrebuildsMetaResponse>("GET", "/org/prebuilds/meta"),
+  listPrebuildConfigs: () => request<ListPrebuildConfigsResponse>("GET", "/org/prebuilds/configs"),
+  createPrebuildConfig: (body: CreatePrebuildConfigRequest) =>
+    request<CreatePrebuildConfigResponse>("POST", "/org/prebuilds/configs", body),
+  patchPrebuildConfig: (id: string, body: PatchPrebuildConfigRequest) =>
+    request<PatchPrebuildConfigResponse>(
+      "PATCH",
+      `/org/prebuilds/configs/${encodeURIComponent(id)}`,
+      body,
+    ),
+  deletePrebuildConfig: (id: string) =>
+    request<{ ok: true }>("DELETE", `/org/prebuilds/configs/${encodeURIComponent(id)}`),
+  rebuildPrebuildConfig: (id: string) =>
+    request<RebuildPrebuildResponse>("POST", `/org/prebuilds/configs/${encodeURIComponent(id)}/rebuild`),
+  listPrebuildBuilds: (id: string) =>
+    request<ListPrebuildBuildsResponse>("GET", `/org/prebuilds/configs/${encodeURIComponent(id)}/builds`),
+  getPrebuildForRepo: (fullName: string) =>
+    request<GetPrebuildForRepoResponse>(
+      "GET",
+      `/prebuilds/for-repo?fullName=${encodeURIComponent(fullName)}`,
+    ),
 
   // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated
   getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),
