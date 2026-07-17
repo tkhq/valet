@@ -174,7 +174,7 @@ describe("generateDockerfile", () => {
     expect(dockerfile).toBe(`FROM ghcr.io/valet/sandbox-base:v12
 
 RUN --mount=type=secret,id=git-token sh -c '\\
-  printf "#!/bin/sh\\ncat /run/secrets/git-token\\n" > /tmp/valet-git-askpass.sh && \\
+  printf "#!/bin/sh\\ncase \\"\\$1\\" in\\n  *[Uu]sername*) echo x-access-token ;;\\n  *) cat /run/secrets/git-token ;;\\nesac\\n" > /tmp/valet-git-askpass.sh && \\
   chmod +x /tmp/valet-git-askpass.sh && \\
   GIT_ASKPASS=/tmp/valet-git-askpass.sh git clone "https://github.com/acme/widgets.git" /prebuilt/repo && \\
   rm -f /tmp/valet-git-askpass.sh'
@@ -184,7 +184,7 @@ RUN git checkout a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
 
 RUN pnpm install --frozen-lockfile
 
-LABEL valet.prebuild.identity="ghcr.io/valet/sandbox-base:v12|https://github.com/acme/widgets.git@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2|1515836e1c86d8c6e320aa6439f67007ce04de4d386ecf5bba5a47a51bc8d098"
+LABEL valet.prebuild.identity="ghcr.io/valet/sandbox-base:v12|https://github.com/acme/widgets.git@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2|cd49d99c170e343b4954d954a63545c413fdcbc79ba845712717dabf1bba777e"
 `);
   });
 
@@ -211,6 +211,22 @@ LABEL valet.prebuild.identity="ghcr.io/valet/sandbox-base:v12|https://github.com
     expect(hashOf(a)).not.toBe(hashOf(b));
   });
 
+  it("changing a recipe step's command (same id/lockfile) changes the identity hash", () => {
+    const a = generateDockerfile(baseOpts);
+    const b = generateDockerfile({
+      ...baseOpts,
+      recipe: [
+        {
+          id: "pnpm-install",
+          lockfile: "pnpm-lock.yaml",
+          command: "pnpm install --frozen-lockfile --prod",
+        },
+      ],
+    });
+    const hashOf = (s: string) => /valet\.prebuild\.identity="[^"]*\|([0-9a-f]+)"/.exec(s)?.[1];
+    expect(hashOf(a)).not.toBe(hashOf(b));
+  });
+
   it("never embeds the secret token — only the mount path and askpass script path", () => {
     const dockerfile = generateDockerfile(baseOpts);
     expect(dockerfile).toContain("/run/secrets/git-token");
@@ -221,6 +237,21 @@ LABEL valet.prebuild.identity="ghcr.io/valet/sandbox-base:v12|https://github.com
     // The literal word "token" only ever appears as part of the secret id
     // or mount path — never assigned a value of its own.
     expect(dockerfile).not.toMatch(/token[=:]\s*[^/\s"]/i);
+  });
+
+  it("askpass script answers the Username prompt with x-access-token and the Password prompt with the mounted secret", () => {
+    const dockerfile = generateDockerfile(baseOpts);
+    // Case-insensitive branch on the askpass prompt argument ($1): a
+    // "Username" prompt gets the literal GitHub App installation-token
+    // username, anything else (the password prompt) reads the secret. The
+    // script text is embedded in a printf format string nested two shells
+    // deep (outer `sh -c '...'`, inner generated script), so `"` and `$`
+    // are backslash-escaped in the Dockerfile source to survive the inner
+    // shell's parsing and land literally in the generated script file.
+    expect(dockerfile).toMatch(/case\s+\\"\\\$1\\"\s+in/);
+    expect(dockerfile).toMatch(/\*\[Uu\]sername\*\)/);
+    expect(dockerfile).toContain("x-access-token");
+    expect(dockerfile).toContain("cat /run/secrets/git-token");
   });
 
   it("has no recipe steps rendered when recipe is empty (setup-only)", () => {

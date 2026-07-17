@@ -141,11 +141,16 @@ export async function resolveRecipe(
 }
 
 /** Canonical, stable JSON used to hash a recipe+setup pair for the cache
- * identity label — field order is fixed so the hash is deterministic
- * regardless of input object key order. */
+ * identity label — field order is fixed (per step: id, lockfile, command)
+ * so the hash is deterministic regardless of input object key order, and
+ * covers full step *content* (not just `id`) so editing a detection-matrix
+ * command (e.g. adding a flag) changes the identity even though the step's
+ * `id`/`lockfile` are unchanged. `baseImage` and `cloneUrl@commitSha` are
+ * NOT included here — they're already folded into the label string
+ * (`${baseImage}|${cloneUrl}@${commitSha}|${hash}`) by the caller. */
 function canonicalRecipeJson(recipe: RecipeStep[], setup: string[]): string {
   return JSON.stringify({
-    stepIds: recipe.map((s) => s.id),
+    steps: recipe.map((s) => ({ id: s.id, lockfile: s.lockfile, command: s.command })),
     setup,
   });
 }
@@ -186,7 +191,9 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   lines.push(`FROM ${baseImage}`);
   lines.push("");
   lines.push("RUN --mount=type=secret,id=git-token sh -c '\\");
-  lines.push(`  printf "#!/bin/sh\\ncat /run/secrets/git-token\\n" > ${ASKPASS_PATH} && \\`);
+  lines.push(
+    `  printf "#!/bin/sh\\ncase \\"\\$1\\" in\\n  *[Uu]sername*) echo x-access-token ;;\\n  *) cat /run/secrets/git-token ;;\\nesac\\n" > ${ASKPASS_PATH} && \\`,
+  );
   lines.push(`  chmod +x ${ASKPASS_PATH} && \\`);
   lines.push(
     `  GIT_ASKPASS=${ASKPASS_PATH} git clone "${cloneUrl}" ${PREBUILT_REPO_PATH} && \\`,
