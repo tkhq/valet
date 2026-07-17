@@ -1,7 +1,7 @@
 # LLM Provider Keys + Custom Providers Design — BYO keys and org model catalog
 
 **Date:** 2026-07-16
-**Status:** Draft
+**Status:** Implemented
 **Scope:** Org-level LLM provider configuration: BYO API keys for known providers (Anthropic/OpenAI/Google), custom OpenAI-compatible providers (base URL + key + models), an org-scoped model catalog with ordered default preferences, and the resolution bridge that threads provider/key/baseUrl into pi-ai per turn. Resolution: org key > deployment env fallback.
 
 ## Context
@@ -44,6 +44,20 @@ With only deployment env `ANTHROPIC_API_KEY`: everything behaves as today (env-f
 - **Engine seam:** `Agent` construction receives the resolved key/baseUrl (fake pi-ai transport asserting what arrives); restore-no-clobber pinned with a namespaced persisted model.
 - **CRUD/integration:** provider lifecycle incl. delete-refused-while-default, credential revocation on delete, probe against a fixture `/v1/models`, test-button round-trip against a faux provider (pi-ai's `faux` provider is available for exactly this).
 - **Live e2e** gated on `OPENAI_API_KEY`: one real OpenAI turn through an org key.
+
+## Deviations (as implemented, plan `docs/plans/2026-07-16-llm-providers.md`, 9 tasks)
+
+- **The engine seam is NEW, not a widening.** This doc's decision 4 described `resolveModel` as an existing seam that "widens" — there was no host-provided model resolver before this arc. `thread.ts` resolved models purely internally via `resolveModelId` (already namespace/bare-id aware). Task 1 introduced an *optional* `resolveModel?: (spec) => Promise<ResolvedModel | null>` on the session-options object; the internal `resolveModelId` path is reused unchanged as the absent-resolver fallback (pinned byte-identical). Key delivery to pi-agent-core is via `AgentOptions.getApiKey(provider)` (a per-turn closure over `this.turnApiKey`), not a per-call `apiKey` parameter — pi-agent-core has no such parameter on the Agent construction path.
+- **Canonical-id echo form.** The resolver echoes the caller's namespace form: a bare spec (`claude-haiku-4-5`) stays bare, a namespaced spec (`anthropic/claude-haiku-4-5`, `openai/gpt-4.1`, `{rowId}/{modelId}`) stays namespaced. OpenAI/Google/custom models are only ever reachable namespaced (no bare form exists for them). Because the engine persists the returned `model.id` and feeds it back into the resolver on every subsequent turn, this makes resolution idempotent on its own output by construction — `resolve(resolve(spec).model.id)` yields the same provider and key, pinned by a dedicated round-trip test per kind.
+- **Compaction's summarizer honors the turn key.** `Thread.summarize()` (`packages/engine/src/thread.ts`) gained `apiKey: this.turnApiKey` at its `completeSimple` call site — a sanctioned engine edit beyond Task 1's original scope, needed because compaction runs *inside* a claimed turn and would otherwise silently fall back to the deployment env key even for a BYO-only custom provider.
+- **`/api/models` excludes inactive entries rather than flagging them.** `buildOrgCatalog` returns the full set (active + inactive, for admin/debug visibility); the public `/api/models` route filters to `active` only before responding — a disabled provider or a keyless known-kind never appears in a picker, it isn't shown-but-disabled. Every catalog entry's `id` (including Anthropic) is namespaced (`anthropic/claude-haiku-4-5`); the bare form is validation/persistence-only back-compat (`catalogValidIds` accepts both, session/user `defaultModel` fields may still hold the bare form).
+- **Preferences write route:** `PUT /api/org/llm-providers/preferences` (under the provider CRUD router), not a field on `PATCH /api/org`. It validates every submitted id against the *active* catalog set on every write (`catalogValidIds`) — an id that names a disabled provider or an inactive custom model is rejected with 400, even if it was valid when originally set.
+- **New-session precedence has a 5th tier.** `EngineHost.resolveModelForBuild`'s chain is `overrideId ?? userDefaultModel ?? orgPreferences[0] ?? this.opts.defaultModelId ?? "claude-haiku-4-5"` — the design doc's decision 5 omitted the `EngineHostOptions.defaultModelId` tier (used by `VALET_MODEL`/dogfood overrides). It defaults to the same literal, so behavior for hosts that don't set it is unchanged.
+- **Known latents, left deliberately unfixed this pass:**
+  - **Role-model override keeps the base-spec key.** `applyRoleForTurn` switches `agent.state.model` via the engine's internal `resolveRoleModel`, not the host resolver; `turnApiKey` stays whatever the base spec resolved to. A role that overrides to a different provider than the turn's base model runs under the wrong key.
+  - **`orgPreferences[0]` is read unconditionally, with no active-filter.** If the org's top preference now names a disabled/deleted/keyless provider, a session *build or restore* (not just a live turn) throws — there is no automatic fall-through to `orgPreferences[1]`. The admin must rewrite the preferences array (which, per the point above, `PUT .../preferences` will now reject if it still contains the stale entry) before a new session can succeed. Exercised directly by Task 9's e2e.
+  - **Probe/test `baseUrl` is admin-trusted**, not validated against an allowlist (SSRF-shaped surface, mitigated only by the route being org-admin-gated) — flagged in a code comment at the call site, not hardened this pass.
+- **Web: model-preference reordering uses up/down buttons**, not drag-and-drop — no dnd dependency exists in the repo, and the brief didn't require adding one.
 
 ## Non-goals
 
