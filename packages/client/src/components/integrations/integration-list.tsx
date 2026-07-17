@@ -38,9 +38,18 @@ interface IntegrationListProps {
   addIntegrationLabel?: string;
 }
 
+// Integrations that are hidden behind the "Advanced" toggle until the user
+// opts in. Reserved for surfaces with meaningful privacy scope (personal
+// Slack reads DMs, private channels, and posts as the user), so we want
+// people to consciously choose to see them rather than surprise them into
+// a Connect click. Items already `active` never get hidden — that would
+// pretend a connected integration doesn't exist.
+const ADVANCED_SERVICES = new Set<string>(['slack-user']);
+
 export function IntegrationList({ onAddIntegration, addIntegrationLabel = 'Connect Integration' }: IntegrationListProps = {}) {
   const [search, setSearch] = React.useState('');
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('all');
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const { data, isLoading: integrationsLoading, error } = useIntegrations();
   const { data: credentials, isLoading: credentialsLoading } = useUserCredentials();
   const { data: telegramConfig, isLoading: telegramLoading } = useTelegramConfig();
@@ -158,6 +167,23 @@ export function IntegrationList({ onAddIntegration, addIntegrationLabel = 'Conne
       return true;
     });
   }, [allItems, search, statusFilter]);
+
+  // Split into main + advanced groups. An advanced item goes into the main
+  // grid once it's active (it's already the user's integration, no reason
+  // to hide it) OR whenever the user is searching / filtering by status
+  // (hiding search results would look like a bug).
+  const isFiltering = !!search || statusFilter !== 'all';
+  const { mainItems, advancedItems } = React.useMemo(() => {
+    const main: typeof filteredItems = [];
+    const advanced: typeof filteredItems = [];
+    for (const item of filteredItems) {
+      const isAdvanced =
+        ADVANCED_SERVICES.has(item.service) && item.status !== 'active' && !isFiltering;
+      (isAdvanced ? advanced : main).push(item);
+    }
+    return { mainItems: main, advancedItems: advanced };
+  }, [filteredItems, isFiltering]);
+
   const displayState = getIntegrationListDisplayState({
     totalItems: allItems.length,
     visibleItems: filteredItems.length,
@@ -218,34 +244,92 @@ export function IntegrationList({ onAddIntegration, addIntegrationLabel = 'Conne
           </p>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {filteredItems.map((item) => {
-            if (item.type === '1password') {
-              return <OnePasswordCard key={item.key} />;
-            }
-            if (item.type === 'telegram') {
-              return <TelegramCard key={item.key} config={telegramConfig!} />;
-            }
-            if (item.type === 'slack') {
-              return <SlackCard key={item.key} />;
-            }
-            if (item.type === 'slack-user') {
-              return <SlackUserOAuthCard key={item.key} />;
-            }
-            if (item.type === 'github') {
-              return <GitHubCard key={item.key} />;
-            }
-            if (item.type === 'auto') {
-              return <AutoEnabledCard key={item.key} service={item.service} icon={item.icon} description={item.description} displayName={item.displayName} />;
-            }
-            return <IntegrationCard key={item.key} integration={item.integration!} />;
-          })}
-          {onAddIntegration && (
-            <AddIntegrationCard label={addIntegrationLabel} onClick={onAddIntegration} />
+        <>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {mainItems.map(renderItem)}
+            {onAddIntegration && (
+              <AddIntegrationCard label={addIntegrationLabel} onClick={onAddIntegration} />
+            )}
+          </div>
+
+          {advancedItems.length > 0 && (
+            <div className="mt-6 border-t border-neutral-200 pt-4 dark:border-neutral-700">
+              <button
+                type="button"
+                onClick={() => setAdvancedOpen((v) => !v)}
+                aria-expanded={advancedOpen}
+                aria-controls="advanced-integrations"
+                className="flex items-center gap-2 text-sm font-medium text-neutral-600 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100"
+              >
+                <ChevronRightIcon
+                  className={`h-4 w-4 transition-transform ${advancedOpen ? 'rotate-90' : ''}`}
+                />
+                Advanced integrations
+                <span className="text-xs font-normal text-neutral-500 dark:text-neutral-500">
+                  ({advancedItems.length}) — sensitive-scope integrations, hidden by default
+                </span>
+              </button>
+              {advancedOpen && (
+                <div
+                  id="advanced-integrations"
+                  className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3"
+                >
+                  {advancedItems.map(renderItem)}
+                </div>
+              )}
+            </div>
           )}
-        </div>
+        </>
       )}
     </div>
+  );
+
+  function renderItem(item: typeof filteredItems[number]) {
+    if (item.type === '1password') {
+      return <OnePasswordCard key={item.key} />;
+    }
+    if (item.type === 'telegram') {
+      return <TelegramCard key={item.key} config={telegramConfig!} />;
+    }
+    if (item.type === 'slack') {
+      return <SlackCard key={item.key} />;
+    }
+    if (item.type === 'slack-user') {
+      return <SlackUserOAuthCard key={item.key} />;
+    }
+    if (item.type === 'github') {
+      return <GitHubCard key={item.key} />;
+    }
+    if (item.type === 'auto') {
+      return (
+        <AutoEnabledCard
+          key={item.key}
+          service={item.service}
+          icon={item.icon}
+          description={item.description}
+          displayName={item.displayName}
+        />
+      );
+    }
+    return <IntegrationCard key={item.key} integration={item.integration!} />;
+  }
+}
+
+function ChevronRightIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path
+        fillRule="evenodd"
+        d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z"
+        clipRule="evenodd"
+      />
+    </svg>
   );
 }
 
@@ -682,6 +766,18 @@ function SlackUserOAuthCard() {
     );
   }
 
+  return <SlackUserDisconnectedCard onConnect={() => startOAuth.mutate()} isPending={startOAuth.isPending} />;
+}
+
+function SlackUserDisconnectedCard({
+  onConnect,
+  isPending,
+}: {
+  onConnect: () => void;
+  isPending: boolean;
+}) {
+  const [ack, setAck] = React.useState(false);
+
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -695,18 +791,43 @@ function SlackUserOAuthCard() {
           </div>
         </div>
       </CardHeader>
-      <CardContent>
-        <div className="flex items-center justify-between">
-          <p className="text-xs text-neutral-500 dark:text-neutral-400">
-            Connect your personal Slack to let Valet search, read and act on your behalf
-          </p>
+      <CardContent className="space-y-3">
+        <p className="text-xs text-neutral-600 dark:text-neutral-300">
+          Grants Valet access to act as you on Slack. Before connecting, know that this integration will let Valet:
+        </p>
+        <ul className="list-disc space-y-1 pl-5 text-xs text-neutral-600 dark:text-neutral-300">
+          <li>
+            <span className="font-medium text-neutral-900 dark:text-neutral-100">Read your DMs, private channels, and group DMs.</span>{' '}
+            Full search + history on the Slack surface visible to you.
+          </li>
+          <li>
+            <span className="font-medium text-neutral-900 dark:text-neutral-100">Send messages, DMs, and reactions as you.</span>{' '}
+            Anything Valet posts appears from your account, not a bot.
+          </li>
+          <li>
+            <span className="font-medium text-neutral-900 dark:text-neutral-100">Store your Slack access token on Valet.</span>{' '}
+            Encrypted at rest; retrievable by orchestrator sessions you run. Disconnect anytime to revoke.
+          </li>
+        </ul>
+        <label className="flex cursor-pointer items-start gap-2 text-xs text-neutral-700 dark:text-neutral-300">
+          <input
+            type="checkbox"
+            checked={ack}
+            onChange={(e) => setAck(e.target.checked)}
+            className="mt-0.5 h-3.5 w-3.5 rounded border-neutral-300 text-neutral-900 focus:ring-neutral-500 dark:border-neutral-600 dark:bg-neutral-800"
+          />
+          <span>
+            I understand Valet will read my Slack DMs and store my token on Valet servers.
+          </span>
+        </label>
+        <div className="flex justify-end">
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => startOAuth.mutate()}
-            disabled={startOAuth.isPending}
+            onClick={onConnect}
+            disabled={!ack || isPending}
           >
-            {startOAuth.isPending ? 'Redirecting...' : 'Connect'}
+            {isPending ? 'Redirecting...' : 'Connect'}
           </Button>
         </div>
       </CardContent>
