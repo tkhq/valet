@@ -320,9 +320,11 @@ async function stagePrebuiltRepo(sandbox: Sandbox, dir: string): Promise<void> {
  * naming the lockfile (or the diff command erroring — treated conservatively
  * as "changed" so stale deps never ship silently) triggers the step. Offline
  * with head still at `bakedSha` → empty diff → every step skipped (the cheap
- * path). Unlike fetch/checkout, a reinstall failure is NOT tolerated: the spec
- * requires the install to complete before the session is handed over, so a
- * non-zero exit THROWS (prep fails → startup-failure semantics).
+ * path). A reinstall failure is logged and tolerated, not thrown: the COLD
+ * path (no prebuild) never runs installs at all, so a prebuild is strictly an
+ * optimization — it must never make a session LESS available than cold boot.
+ * The agent hands over with baked/partial deps and can fix them itself,
+ * exactly as it would on a cold session.
  */
 async function conditionalReinstall(
   sandbox: Sandbox,
@@ -339,7 +341,13 @@ async function conditionalReinstall(
     if (!changed) continue;
     const install = await safeExec(sandbox, step.command, { cwd: dir });
     if (install.exitCode !== 0) {
-      throw new Error(
+      // Degrade, don't throw: prebuilds are an optimization, never a
+      // correctness dependency. The COLD path never runs installs at all, so
+      // throwing here would make enabling a prebuild strictly worse than not
+      // having one — bricking the session on every restore (the reinstall
+      // re-runs against the same drifted lockfile each time). Hand over with
+      // baked/partial deps; the agent can fix dependencies itself.
+      console.error(
         execFailureMessage(`workspace prep: prebuild reinstall '${step.command}' (${step.lockfile}) failed`, install),
       );
     }

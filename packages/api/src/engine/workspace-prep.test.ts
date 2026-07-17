@@ -409,16 +409,19 @@ describe("buildWorkspacePrep", () => {
       expect(sandbox.execCalls.some((c) => c.command === "pnpm install --frozen-lockfile")).toBe(false);
     });
 
-    it("a failed reinstall THROWS (startup-failure semantics — the spec requires the install to complete)", async () => {
+    it("a failed reinstall degrades to a logged warning — prep completes so the prebuild stays an optimization, never a correctness dependency", async () => {
       const sandbox = new RecordingSandbox();
       sandbox.setResult(DIFF_CMD, { stdout: "pnpm-lock.yaml\n", stderr: "", exitCode: 0 });
       sandbox.setResult("pnpm install --frozen-lockfile", { stdout: "", stderr: "ERR_PNPM", exitCode: 1 });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const prep = buildWorkspacePrep({
         apiUrl: API_URL,
         repos: [binding()],
         prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
       });
-      await expect(prep(sandbox, 1)).rejects.toThrow(/prebuild reinstall/);
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/prebuild reinstall/));
+      errSpy.mockRestore();
     });
 
     it("cp staging failure THROWS", async () => {
