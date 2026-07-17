@@ -1151,6 +1151,41 @@ describe('SessionAgentDO', () => {
     expect((created?.data as Record<string, unknown> | undefined)?.threadId).toBeUndefined();
   });
 
+  it('broadcasts idle status with the completed thread id after handlePromptComplete', async () => {
+    // Regression test for the "Writing" indicator sticking on a thread after
+    // the prompt has already completed. The bug was a read-after-delete in
+    // handlePromptComplete: markCompletedById dropped the prompt_queue row,
+    // then a follow-up getChannelForMessage lookup returned nothing and the
+    // idle-status broadcast fired with threadId=undefined. Clients treat an
+    // unscoped completion as session-wide only and leave the per-thread
+    // status latched on 'streaming', so <ThinkingIndicator> keeps showing
+    // "Writing" forever. The fix resolves the threadId BEFORE the delete
+    // (via the already-hoisted `followupChannel`) so the status broadcast
+    // carries the correct threadId.
+    const { agent, broadcasts } = await createTestAgent();
+
+    (agent as any).promptQueue.runnerBusy = true;
+    (agent as any).promptQueue.enqueue({
+      id: 'web-turn-thread-1',
+      content: 'threaded web prompt',
+      status: 'processing',
+      channelType: 'thread',
+      channelId: 'thread-web-1',
+      channelKey: 'thread:thread-web-1',
+      threadId: 'thread-web-1',
+    });
+
+    await (agent as any).handlePromptComplete('web-turn-thread-1');
+
+    const idleStatus = broadcasts.find((message) => {
+      const data = message.data as Record<string, unknown> | undefined;
+      return message.type === 'status' && data?.runnerBusy === false;
+    });
+    expect(idleStatus).toBeTruthy();
+    expect((idleStatus?.data as Record<string, unknown> | undefined)?.threadId).toBe('thread-web-1');
+    expect((idleStatus?.data as Record<string, unknown> | undefined)?.messageId).toBe('web-turn-thread-1');
+  });
+
   it('preserves original array parts when building forwarded message parts', () => {
     expect(buildForwardedParts(
       [{ type: 'text', text: 'full forwarded text' }],
