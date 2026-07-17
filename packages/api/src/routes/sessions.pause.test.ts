@@ -215,4 +215,70 @@ describe("POST /api/sessions/:id/pause", () => {
     const body = (await res.json()) as { error: string };
     expect(body).toEqual({ error: "provider does not support hibernation" });
   });
+
+  it("404s for an archived session and leaves the row untouched", async () => {
+    const provider = new HibernatingTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = "pause-archived";
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    await api.providers.db
+      .update(agentSessions)
+      .set({ status: "archived" })
+      .where(eq(agentSessions.id, sessionId));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, { method: "POST" });
+    expect(res.status).toBe(404);
+    expect(provider.suspendCalls).toEqual([]);
+
+    const rows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    expect(rows[0]?.status).toBe("archived");
+  });
+
+  it("404s for a deleted session", async () => {
+    const provider = new HibernatingTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = "pause-deleted";
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    await api.providers.db
+      .update(agentSessions)
+      .set({ status: "deleted" })
+      .where(eq(agentSessions.id, sessionId));
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, { method: "POST" });
+    expect(res.status).toBe(404);
+    expect(provider.suspendCalls).toEqual([]);
+
+    const rows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    expect(rows[0]?.status).toBe("deleted");
+  });
+
+  it("409s 'sandbox is not ready to pause' when the attachment never reached ready, and writes nothing", async () => {
+    const provider = new HibernatingTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = "pause-not-ready";
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    // Deliberately do NOT warm the session — the attachment stays "detached"
+    // and suspend() no-ops.
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body).toEqual({ error: "sandbox is not ready to pause" });
+    expect(provider.suspendCalls).toEqual([]);
+
+    const rows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    expect(rows[0]?.status).toBe("active");
+  });
 });

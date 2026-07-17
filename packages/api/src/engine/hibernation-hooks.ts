@@ -21,6 +21,21 @@ import type { EngineHostOpts } from "./host.js";
 
 export type HibernationHooks = Pick<EngineHostOpts, "onHibernate" | "onWake" | "onSessionReady">;
 
+/**
+ * The single guarded "flip to hibernated" write: conditioned on the row's
+ * CURRENT status being `active` so it never clobbers `archived`/`deleted`
+ * (or a row that's already hibernated). Shared by `buildHibernationHooks`'s
+ * `onHibernate` (fires from engine-internal hibernation) and the
+ * `POST /:id/pause` route (fires from an explicit user pause) so there is
+ * exactly one place that writes this transition.
+ */
+export async function writeHibernated(db: AppDb, sessionId: string): Promise<void> {
+  await db
+    .update(agentSessions)
+    .set({ status: "hibernated", updatedAt: Date.now() })
+    .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "active")));
+}
+
 export function buildHibernationHooks(db: AppDb): HibernationHooks {
   const clearHibernated = async (sessionId: string): Promise<void> => {
     await db
@@ -31,10 +46,7 @@ export function buildHibernationHooks(db: AppDb): HibernationHooks {
 
   return {
     onHibernate: async (sessionId: string) => {
-      await db
-        .update(agentSessions)
-        .set({ status: "hibernated", updatedAt: Date.now() })
-        .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "active")));
+      await writeHibernated(db, sessionId);
     },
     onWake: clearHibernated,
     onSessionReady: clearHibernated,

@@ -3,6 +3,7 @@ import { and, count, desc, eq, inArray } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseOrchestratorSessionId } from "@valet/engine";
+import { writeHibernated } from "../engine/hibernation-hooks.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, messages as messagesTable } from "../schema/index.js";
@@ -278,10 +279,14 @@ sessionsRouter.post("/:id/pause", async (c) => {
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
+  // Status guard #1: the ownership lookup itself requires `active` — an
+  // archived/deleted session 404s exactly like a missing one, rather than
+  // passing the id+userId check and getting resurrected by the status write
+  // below (`listStandaloneSessions` treats `hibernated` as visible).
   const rows = await db
     .select()
     .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
   if (!row) return c.json({ error: "session not found" }, 404);
@@ -303,10 +308,18 @@ sessionsRouter.post("/:id/pause", async (c) => {
   });
   await session.attachment.suspend();
 
-  await db
-    .update(agentSessions)
-    .set({ status: "hibernated", updatedAt: Date.now() })
-    .where(eq(agentSessions.id, id));
+  // `suspend()` silently no-ops unless the attachment was `ready` — only
+  // stamp the row `hibernated` when it actually transitioned, so a pause hit
+  // mid-provision doesn't lie about having suspended anything.
+  if (session.attachment.state !== "suspended") {
+    return c.json({ error: "sandbox is not ready to pause" }, 409);
+  }
+
+  // Status guard #2: conditioned `WHERE status='active'` (shared with the
+  // engine's own hibernation hook — see `writeHibernated`) so a concurrent
+  // archive/delete between the lookup above and this write still can't be
+  // resurrected.
+  await writeHibernated(db, id);
 
   const body: PauseSessionResponse = { status: "hibernated" };
   return c.json(body, 200);
