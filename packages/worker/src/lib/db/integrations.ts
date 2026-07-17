@@ -150,7 +150,11 @@ export async function ensureIntegration(
     errorMessage: null,
     updatedAt: sql`datetime('now')`,
   };
-  if (opts?.entities) updateSet.config = config;
+  // Surgically update only the `entities` key so other config keys (e.g.
+  // `filters`) written by other flows survive a reconnect.
+  if (opts?.entities) {
+    updateSet.config = sql`json_set(coalesce(${integrations.config}, '{}'), '$.entities', json(${JSON.stringify(opts.entities)}))`;
+  }
   await db.insert(integrations).values({
     id: crypto.randomUUID(),
     userId,

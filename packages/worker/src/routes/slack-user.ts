@@ -3,6 +3,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Env, Variables } from '../env.js';
 import { signOAuthState, verifyOAuthState } from '../lib/oauth-state.js';
+import { base64UrlEncode } from '../lib/hmac-jwt.js';
 import { revokeCredential, storeCredential, hasCredential } from '../services/credentials.js';
 import * as db from '../lib/db.js';
 import { getCredentialRow } from '../lib/db/credentials.js';
@@ -35,21 +36,15 @@ const OAUTH_NONCE_COOKIE = 'slack_user_oauth_n';
 const OAUTH_NONCE_COOKIE_PATH = '/auth/slack-user';
 const OAUTH_NONCE_TTL_SECONDS = 600;
 
-function b64url(bytes: Uint8Array): string {
-  let s = '';
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
 function randomNonce(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return b64url(bytes);
+  return base64UrlEncode(bytes);
 }
 
 async function sha256B64Url(input: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
-  return b64url(new Uint8Array(buf));
+  return base64UrlEncode(new Uint8Array(buf));
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
@@ -338,10 +333,24 @@ slackUserCallbackRouter.get('/callback', async (c) => {
   // actions never appear in list_tools. Uses the atomic upsert
   // (`onConflictDoUpdate` on userId+service+scope) so concurrent callbacks
   // can't race into duplicate rows or a pending→active gap.
+  //
+  // If ensureIntegration fails (transient D1 error), roll the credential
+  // back so the user isn't stuck in a "connected but no tools" state — the
+  // status endpoint reports `connected: true` purely from hasCredential.
   const appDb = c.get('db');
-  await db.ensureIntegration(appDb, userId, SLACK_USER_PROVIDER, 'user', {
-    entities: grantedScopes,
-  });
+  try {
+    await db.ensureIntegration(appDb, userId, SLACK_USER_PROVIDER, 'user', {
+      entities: grantedScopes,
+    });
+  } catch (err) {
+    console.error(`[slack-user] ensureIntegration failed for user=${userId}:`, err);
+    try {
+      await revokeCredential(c.env, 'user', userId, SLACK_USER_PROVIDER);
+    } catch (revokeErr) {
+      console.error(`[slack-user] rollback revokeCredential failed for user=${userId}:`, revokeErr);
+    }
+    return errorRedirect('integration_write_failed');
+  }
 
   deleteCookie(c, OAUTH_NONCE_COOKIE, { path: OAUTH_NONCE_COOKIE_PATH });
   return c.redirect(frontendIntegrationsPath(c.env, new URLSearchParams({ slack_user: 'linked' }).toString()));

@@ -204,9 +204,9 @@ export async function listTools(
     const provider = integrationRegistry.getProvider(service, customContext);
     if (filterService && !matchesServiceFilter(service, filterService, provider)) continue;
     if (disabledServiceSet.has(service)) continue;
-    // Uses isServiceDisabledByPlugin so `slack` disabling cascades to
-    // `slack-user`, and so the hyphenated/underscored spellings of the same
-    // service both match. Plain `.has()` misses both cases.
+    // Uses isServiceDisabledByPlugin so hyphenated/underscored spellings of
+    // the same service both match. Sibling services are distinct: disabling
+    // `slack` does NOT disable `slack-user` (they are separate plugin toggles).
     if (isServiceDisabledByPlugin(service, disabledPluginServices)) continue;
 
     const actionSource = integrationRegistry.getActions(service, customContext);

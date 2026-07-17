@@ -85,6 +85,7 @@ const listChannels: ActionDefinition = {
     prefix: z.string().optional().describe('Filter channels whose name starts with this prefix (case-insensitive).'),
     exclude_archived: z.boolean().optional().describe('Default true.'),
     limit: z.number().int().min(1).max(200).optional().describe('Max channels per Slack page (default 200).'),
+    cursor: z.string().optional().describe('Pagination cursor from a prior call to fetch the next page.'),
   }),
 };
 
@@ -362,8 +363,13 @@ async function executeAction(
       case 'slack_user.list_channels': {
         const p = listChannels.params.parse(params);
         const types = p.types || 'public_channel,private_channel,mpim,im';
+        // Cap server-side pagination to keep tool latency + Worker subrequest
+        // budget bounded on large workspaces (thousands of DMs). Callers pass
+        // the returned `next_cursor` back to fetch the next batch.
+        const MAX_PAGES = 5;
         const all: Record<string, unknown>[] = [];
-        let cursor: string | undefined;
+        let cursor: string | undefined = p.cursor;
+        let pages = 0;
         do {
           const q: Record<string, unknown> = {
             types,
@@ -387,7 +393,8 @@ async function executeAction(
           }
           all.push(...((data.channels || []) as Record<string, unknown>[]));
           cursor = data.response_metadata?.next_cursor || undefined;
-        } while (cursor);
+          pages += 1;
+        } while (cursor && pages < MAX_PAGES);
 
         let channels = all.map(slimChannel);
         if (p.prefix) {
@@ -396,7 +403,10 @@ async function executeAction(
             (ch) => typeof ch.name === 'string' && (ch.name as string).toLowerCase().startsWith(pfx),
           );
         }
-        return { success: true, data: { total: channels.length, channels } };
+        return {
+          success: true,
+          data: { total: channels.length, channels, next_cursor: cursor },
+        };
       }
 
       case 'slack_user.read_history': {
