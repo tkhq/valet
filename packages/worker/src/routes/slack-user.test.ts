@@ -122,7 +122,7 @@ describe('POST /oauth/start', () => {
     expect(body.error).toMatch(/SLACK_CLIENT_ID unset/);
   });
 
-  it('returns an authorizeUrl pointing at slack.com/oauth/v2/authorize with the full user_scope bundle', async () => {
+  it('returns a worker /auth/slack-user/start URL carrying a signed begin token (no cookie — cross-origin fetch responses drop Set-Cookie)', async () => {
     const app = buildApp(db);
     const res = await app.request(
       'https://api.example.com/oauth/start',
@@ -132,6 +132,72 @@ describe('POST /oauth/start', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { authorizeUrl: string };
     const url = new URL(body.authorizeUrl);
+    expect(url.origin + url.pathname).toBe('https://api.example.com/auth/slack-user/start');
+
+    const token = url.searchParams.get('token');
+    expect(token).toBeTruthy();
+    const verified = await verifyOAuthState(ENCRYPTION_KEY, 'slack-user-begin', token!);
+    expect(verified).not.toBeNull();
+    expect(verified!.userId).toBe(USER_ID);
+    // A begin token must never validate as an OAuth state.
+    expect(await verifyOAuthState(ENCRYPTION_KEY, 'slack-user', token!)).toBeNull();
+
+    // The nonce cookie is NOT set here — this response is consumed by a
+    // cross-origin fetch, where browsers drop Set-Cookie. The cookie is set
+    // by the top-level navigation to /auth/slack-user/start instead.
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+});
+
+describe('GET /auth/slack-user/start', () => {
+  let db: AppDb;
+
+  beforeEach(() => {
+    const { db: newDb } = createTestDb();
+    db = newDb as AppDb;
+    holder.db = db;
+  });
+
+  async function beginToken(userId: string = USER_ID): Promise<string> {
+    return signOAuthState(ENCRYPTION_KEY, 'slack-user-begin', { userId }, 60);
+  }
+
+  it('redirects to the frontend with reason=missing_params when token is absent', async () => {
+    const app = buildCallbackApp(db);
+    const res = await app.request(
+      'https://api.example.com/auth/slack-user/start',
+      { method: 'GET', redirect: 'manual' },
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    const loc = new URL(res.headers.get('location')!);
+    expect(loc.searchParams.get('slack_user')).toBe('error');
+    expect(loc.searchParams.get('reason')).toBe('missing_params');
+  });
+
+  it('rejects a forged or wrong-provider token with reason=invalid_state', async () => {
+    const app = buildCallbackApp(db);
+    // A real OAuth state (sub=slack-user) must not work as a begin token.
+    const wrongProvider = await signOAuthState(ENCRYPTION_KEY, 'slack-user', { userId: USER_ID }, 60);
+    const res = await app.request(
+      `https://api.example.com/auth/slack-user/start?token=${encodeURIComponent(wrongProvider)}`,
+      { method: 'GET', redirect: 'manual' },
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    const loc = new URL(res.headers.get('location')!);
+    expect(loc.searchParams.get('reason')).toBe('invalid_state');
+  });
+
+  it('sets the first-party nonce cookie and 302s to Slack with a state whose nonceHash matches the cookie', async () => {
+    const app = buildCallbackApp(db);
+    const res = await app.request(
+      `https://api.example.com/auth/slack-user/start?token=${encodeURIComponent(await beginToken())}`,
+      { method: 'GET', redirect: 'manual' },
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
     expect(url.origin + url.pathname).toBe('https://slack.com/oauth/v2/authorize');
     expect(url.searchParams.get('client_id')).toBe('CLIENT_ID');
     expect(url.searchParams.get('scope')).toBe('');
@@ -153,10 +219,9 @@ describe('POST /oauth/start', () => {
     expect(typeof verified!.nonceHash).toBe('string');
     expect((verified!.nonceHash as string).length).toBeGreaterThan(0);
 
-    // /oauth/start must set the handshake cookie: HttpOnly, SameSite=Lax,
-    // and scoped to /auth/slack-user (the path the callback lives on, which
-    // is outside /api/*). The cookie's SHA-256 hash must equal the
-    // nonceHash embedded in the state.
+    // /auth/slack-user/start must set the handshake cookie: HttpOnly,
+    // SameSite=Lax, scoped to /auth/slack-user (shared with the callback).
+    // The cookie's SHA-256 hash must equal the nonceHash embedded in state.
     const setCookieHeader = res.headers.get('set-cookie');
     expect(setCookieHeader).toBeTruthy();
     expect(setCookieHeader).toContain('slack_user_oauth_n=');

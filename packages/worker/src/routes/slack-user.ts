@@ -14,9 +14,9 @@ import type { SlackUserOAuthStatus } from '@valet/shared';
 const SLACK_USER_PROVIDER = 'slack-user';
 
 /**
- * Browser-bound nonce for the OAuth handshake. On /oauth/start we mint a
- * random nonce, embed its SHA-256 hash in the signed state, and set the raw
- * nonce as an HttpOnly cookie scoped to /api/me/slack-user/oauth/. On the
+ * Browser-bound nonce for the OAuth handshake. On /auth/slack-user/start we
+ * mint a random nonce, embed its SHA-256 hash in the signed state, and set
+ * the raw nonce as an HttpOnly first-party cookie. On the
  * callback we require the cookie and that its hash matches the hash carried
  * in state — this binds the flow to the browser that started it and blocks
  * the account-linking CSRF where an attacker mints a state for their own
@@ -27,14 +27,20 @@ const SLACK_USER_PROVIDER = 'slack-user';
  * sent to any other route.
  */
 const OAUTH_NONCE_COOKIE = 'slack_user_oauth_n';
-// Cookie is set by POST /api/me/slack-user/oauth/start and consumed by
-// GET /auth/slack-user/callback (which is mounted OUTSIDE /api/* so it can
-// run unauthenticated — Slack redirects the browser here with no bearer).
-// Those two paths share no natural prefix, so the cookie is scoped to
-// `/auth/slack-user` (the read side); the browser stores it regardless of
-// which request Set-Cookie came from.
+// Cookie is set by GET /auth/slack-user/start and consumed by
+// GET /auth/slack-user/callback. Both are top-level navigations on the
+// worker origin, so the cookie is always first-party — a Set-Cookie on a
+// cross-origin fetch response (the previous design, set from
+// POST /api/me/slack-user/oauth/start) is silently dropped by browsers
+// when the frontend runs on a different origin than the worker.
 const OAUTH_NONCE_COOKIE_PATH = '/auth/slack-user';
 const OAUTH_NONCE_TTL_SECONDS = 600;
+
+// Short-lived token bridging the authenticated /oauth/start call to the
+// unauthenticated top-level /auth/slack-user/start navigation. Distinct
+// `sub` so a begin token can never be replayed as an OAuth state.
+const SLACK_USER_BEGIN_PROVIDER = 'slack-user-begin';
+const BEGIN_TOKEN_TTL_SECONDS = 60;
 
 function randomNonce(): string {
   const bytes = new Uint8Array(32);
@@ -67,12 +73,15 @@ function frontendIntegrationsPath(env: Env, qs: string): string {
  * redirects the browser here with no Authorization header. Identity is
  * carried by the signed state + browser-bound nonce cookie (see below).
  */
-function workerCallbackUrl(env: Env, req: Request): string {
+function workerBaseUrl(env: Env, req: Request): string {
   const url = new URL(req.url);
-  const base = env.API_PUBLIC_URL
+  return env.API_PUBLIC_URL
     ? env.API_PUBLIC_URL.replace(/\/+$/, '')
     : `${url.protocol}//${url.host}`;
-  return `${base}/auth/slack-user/callback`;
+}
+
+function workerCallbackUrl(env: Env, req: Request): string {
+  return `${workerBaseUrl(env, req)}/auth/slack-user/callback`;
 }
 
 /**
@@ -153,10 +162,15 @@ slackUserOAuthRouter.get('/', async (c) => {
 });
 
 /**
- * POST /api/me/slack-user/oauth/start — returns the Slack OAuth URL for the
- * user to visit. The state is a 10-minute signed JWT tying the request to
- * this user + the `slack-user` provider id (cross-provider state confusion
- * guard lives in verifyOAuthState).
+ * POST /api/me/slack-user/oauth/start — returns a worker URL for the browser
+ * to navigate to (NOT the Slack authorize URL directly).
+ *
+ * The nonce cookie that binds the OAuth flow to this browser must be set in
+ * a first-party context: this endpoint is called via cross-origin fetch from
+ * the frontend, and browsers drop Set-Cookie on cross-site fetch responses.
+ * So we hand back /auth/slack-user/start?token=… — a top-level navigation on
+ * the worker origin — and THAT route sets the cookie and 302s to Slack.
+ * The begin token is a 60s signed JWT carrying the authenticated userId.
  */
 slackUserOAuthRouter.post('/oauth/start', async (c) => {
   const user = c.get('user');
@@ -164,35 +178,13 @@ slackUserOAuthRouter.post('/oauth/start', async (c) => {
     return c.json({ error: 'Slack OAuth is not configured (SLACK_CLIENT_ID unset).' }, 400);
   }
 
-  // Mint a browser-bound nonce: raw value goes in an HttpOnly cookie, its
-  // SHA-256 hash goes into the signed state. On callback both must match —
-  // that is what ties this OAuth flow to the initiator's browser and blocks
-  // the account-linking CSRF (see OAUTH_NONCE_COOKIE docs above).
-  const nonce = randomNonce();
-  const nonceHash = await sha256B64Url(nonce);
-  const state = await signOAuthState(
+  const beginToken = await signOAuthState(
     c.env.ENCRYPTION_KEY,
-    SLACK_USER_PROVIDER,
-    { userId: user.id, nonceHash },
-    OAUTH_NONCE_TTL_SECONDS,
+    SLACK_USER_BEGIN_PROVIDER,
+    { userId: user.id },
+    BEGIN_TOKEN_TTL_SECONDS,
   );
-  setCookie(c, OAUTH_NONCE_COOKIE, nonce, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Lax',
-    path: OAUTH_NONCE_COOKIE_PATH,
-    maxAge: OAUTH_NONCE_TTL_SECONDS,
-  });
-  const redirectUri = workerCallbackUrl(c.env, c.req.raw);
-  // Delegate URL construction to the provider so `plugin-slack-user` owns
-  // the shape of the authorize URL (scope split, user_scope bundling) —
-  // this route stays a thin transport wrapper. getOAuthUrl is declared
-  // non-optional on IntegrationProvider (see @valet/sdk).
-  const authorizeUrl = slackUserProvider.getOAuthUrl!(
-    { clientId: c.env.SLACK_CLIENT_ID, clientSecret: c.env.SLACK_CLIENT_SECRET },
-    redirectUri,
-    state,
-  );
+  const authorizeUrl = `${workerBaseUrl(c.env, c.req.raw)}/auth/slack-user/start?token=${encodeURIComponent(beginToken)}`;
   return c.json({ authorizeUrl });
 });
 
@@ -206,9 +198,67 @@ slackUserOAuthRouter.post('/oauth/start', async (c) => {
 // prior webhook-401 incident).
 //
 // Identity is carried by the HMAC-signed `state` param + the browser-bound
-// nonce cookie set at /oauth/start.
+// nonce cookie set at /auth/slack-user/start.
 
 export const slackUserCallbackRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+/**
+ * GET /auth/slack-user/start?token= — top-level navigation target returned by
+ * POST /api/me/slack-user/oauth/start. Verifies the short-lived begin token,
+ * mints the browser-bound nonce, sets it as a first-party HttpOnly cookie
+ * (possible here because this is a top-level navigation on the worker origin,
+ * unlike the cross-origin fetch to /oauth/start), signs the real OAuth state,
+ * and 302s to Slack's consent screen.
+ */
+slackUserCallbackRouter.get('/start', async (c) => {
+  const token = c.req.query('token');
+
+  const errorRedirect = (reason: string) => {
+    const qs = new URLSearchParams({ slack_user: 'error', reason });
+    return c.redirect(frontendIntegrationsPath(c.env, qs.toString()));
+  };
+
+  if (!token) return errorRedirect('missing_params');
+  if (!c.env.SLACK_CLIENT_ID || !c.env.SLACK_CLIENT_SECRET) {
+    return errorRedirect('not_configured');
+  }
+
+  const payload = await verifyOAuthState(c.env.ENCRYPTION_KEY, SLACK_USER_BEGIN_PROVIDER, token);
+  const userId = typeof payload?.userId === 'string' ? payload.userId : '';
+  if (!userId) return errorRedirect('invalid_state');
+
+  // Mint a browser-bound nonce: raw value goes in an HttpOnly cookie, its
+  // SHA-256 hash goes into the signed state. On callback both must match —
+  // that is what ties this OAuth flow to the initiator's browser and blocks
+  // the account-linking CSRF (see OAUTH_NONCE_COOKIE docs above).
+  const nonce = randomNonce();
+  const nonceHash = await sha256B64Url(nonce);
+  const state = await signOAuthState(
+    c.env.ENCRYPTION_KEY,
+    SLACK_USER_PROVIDER,
+    { userId, nonceHash },
+    OAUTH_NONCE_TTL_SECONDS,
+  );
+  setCookie(c, OAUTH_NONCE_COOKIE, nonce, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    path: OAUTH_NONCE_COOKIE_PATH,
+    maxAge: OAUTH_NONCE_TTL_SECONDS,
+  });
+
+  const redirectUri = workerCallbackUrl(c.env, c.req.raw);
+  // Delegate URL construction to the provider so `plugin-slack-user` owns
+  // the shape of the authorize URL (scope split, user_scope bundling) —
+  // this route stays a thin transport wrapper. getOAuthUrl is declared
+  // non-optional on IntegrationProvider (see @valet/sdk).
+  const authorizeUrl = slackUserProvider.getOAuthUrl!(
+    { clientId: c.env.SLACK_CLIENT_ID, clientSecret: c.env.SLACK_CLIENT_SECRET },
+    redirectUri,
+    state,
+  );
+  return c.redirect(authorizeUrl);
+});
 
 /**
  * GET /auth/slack-user/callback?code=&state= — Slack redirects here after

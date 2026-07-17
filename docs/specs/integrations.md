@@ -264,26 +264,45 @@ The plugins are separately toggleable in admin plugin settings — disabling
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/me/slack-user` | Status (oauthAvailable, connected, teamId, slackUserId) |
-| `POST` | `/api/me/slack-user/oauth/start` | Mint authorize URL + set nonce cookie |
+| `POST` | `/api/me/slack-user/oauth/start` | Mint a 60s begin token and return a worker `/auth/slack-user/start` URL for the browser to top-level navigate to |
+| `GET` | `/auth/slack-user/start` | Verify begin token, set first-party nonce cookie, 302 to Slack authorize URL (public, no auth middleware) |
 | `DELETE` | `/api/me/slack-user/oauth` | Disconnect (revoke credential + delete integration) |
 | `GET` | `/auth/slack-user/callback` | Slack redirects here after consent (public, no auth middleware) |
 
-The callback lives at `/auth/slack-user/callback` — outside `/api/*` so it
-bypasses the shared bearer-auth middleware (Slack redirects the browser
-with no `Authorization` header). Sibling pattern of `/auth/github`.
+`/auth/slack-user/start` and `/auth/slack-user/callback` are both mounted
+outside `/api/*` so they bypass the shared bearer-auth middleware — the
+start hop is a top-level navigation with no `Authorization` header, and
+Slack's redirect to the callback likewise carries none. Sibling pattern
+of `/auth/github`.
+
+### Two-hop start (first-party cookie)
+
+The nonce cookie MUST be set on a top-level navigation on the worker
+origin, not on the `POST /api/me/slack-user/oauth/start` response. That
+POST is a cross-origin fetch (frontend Pages origin → worker origin) and
+browsers silently drop `Set-Cookie` on cross-site fetch responses —
+without a first-party context, the callback would never see the cookie
+and every flow would fail with `user_mismatch`.
+
+So `/oauth/start` returns `{ authorizeUrl: "<worker>/auth/slack-user/start?token=..." }`
+where `token` is a 60-second signed begin token (`sub=slack-user-begin`,
+distinct from the real OAuth state so it can never be replayed as one).
+The frontend's `window.location.href = authorizeUrl` triggers a top-level
+navigation to `/start`, which verifies the begin token, sets the cookie
+first-party, signs the real state, and 302s to Slack.
 
 ### CSRF binding
 
 The callback would be trivially CSRF'able if it trusted the signed
-`state` alone: an attacker could mint a state for their own `userId` via
-`/oauth/start` and deliver the resulting Slack authorize URL to a victim
-— the victim's `xoxp` token would then land under the attacker's account.
+`state` alone: an attacker could mint a state for their own `userId` and
+deliver the resulting Slack authorize URL to a victim — the victim's
+`xoxp` token would then land under the attacker's account.
 
-Defense: on `/oauth/start` the server mints a random nonce, sets it as an
-`HttpOnly; Secure; SameSite=Lax; Path=/auth/slack-user` cookie, and
-embeds `sha256(nonce)` in the signed state as `nonceHash`. On the
-callback both must be present and match (constant-time compare). Cookie
-is single-use — cleared on every success + error exit.
+Defense: on `/auth/slack-user/start` the server mints a random nonce,
+sets it as an `HttpOnly; Secure; SameSite=Lax; Path=/auth/slack-user`
+cookie, and embeds `sha256(nonce)` in the signed state as `nonceHash`.
+On the callback both must be present and match (constant-time compare).
+Cookie is single-use — cleared on every success + error exit.
 
 Client-side error label `user_mismatch` is emitted when the cookie is
 missing or doesn't match the hash.
@@ -291,8 +310,8 @@ missing or doesn't match the hash.
 ### Token exchange + storage
 
 - `slackUserProvider.getOAuthUrl` mints the authorize URL (scope=empty,
-  user_scope=SLACK_USER_SCOPES joined). The route only sets the cookie
-  and returns the URL.
+  user_scope=SLACK_USER_SCOPES joined). The `/start` route sets the
+  cookie and 302s to that URL.
 - `slackUserProvider.exchangeOAuthCode` calls `oauth.v2.access` and
   returns `{ access_token, scope, slack_user_id, team_id, team_name }`.
 - Route validates every requested scope was granted (surfacing
