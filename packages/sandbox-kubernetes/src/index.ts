@@ -116,3 +116,19 @@ export {
   type KubernetesSandboxProviderDeps,
   type PodLivenessApi,
 } from "./provider.js";
+
+export {
+  batchJobsApiAdapter,
+  type CreateConfigMapParams,
+  type CreateJobParams,
+  type CreateSecretParams,
+  type DeleteConfigMapParams,
+  type DeleteJobParams,
+  type DeleteSecretParams,
+  type GetJobParams,
+  type JobConditionInfo,
+  type JobStatusInfo,
+  type ListJobPodsParams,
+  type ReadPodLogParams,
+  type SandboxBatchJobsApi,
+} from "./buildkit-job.js";

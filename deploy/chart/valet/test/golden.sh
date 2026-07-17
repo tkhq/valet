@@ -43,6 +43,13 @@ helm template valet "$CHART_DIR" --kube-version 1.30.0 \
   > "$TMP_DIR/external.yaml"
 pass "renders with externalDatabase.url set"
 
+echo "== helm template (external registry) =="
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set externalRegistry.url="registry.example.com" \
+  --set externalRegistry.pullSecret="regcred" \
+  > "$TMP_DIR/external-registry.yaml"
+pass "renders with externalRegistry.url set"
+
 # --- RBAC: namespaced only, nothing cluster-scoped ---------------------
 grep -q '^kind: Role$' "$TMP_DIR/bundled.yaml" || fail "no namespaced Role rendered"
 grep -q '^kind: RoleBinding$' "$TMP_DIR/bundled.yaml" || fail "no RoleBinding rendered"
@@ -74,6 +81,36 @@ if echo "$ROLE_BLOCK" | grep -qE '"?persistentvolumeclaims"?'; then
 fi
 pass "Role has the expected sandbox/pods/exec/log verbs incl. sandboxes:update, no PVC verbs"
 
+# --- RBAC: batch/jobs (Task 5 BuildKit builder), scoped -------------------
+echo "$ROLE_BLOCK" | grep -q '"batch"' || fail "Role missing apiGroup: batch"
+echo "$ROLE_BLOCK" | grep -q '"jobs"' || fail "Role missing resource: jobs"
+JOBS_VERBS=$(echo "$ROLE_BLOCK" | grep -A6 '"jobs"' | grep -m1 'verbs:')
+for verb in create get list watch delete; do
+  echo "$JOBS_VERBS" | grep -q "\"$verb\"" || fail "jobs rule missing verb: $verb"
+done
+pass "Role has the expected batch/jobs verbs"
+
+# --- RBAC: configmaps/secrets (Task 5 Dockerfile/git-token resources) -----
+echo "$ROLE_BLOCK" | grep -q '"configmaps"' || fail "Role missing resource: configmaps"
+CONFIGMAPS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"configmaps"' | grep -m1 'verbs:')
+for verb in create get delete; do
+  echo "$CONFIGMAPS_VERBS" | grep -q "\"$verb\"" || fail "configmaps rule missing verb: $verb"
+done
+echo "$ROLE_BLOCK" | grep -q '"secrets"' || fail "Role missing resource: secrets"
+SECRETS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"secrets"' | grep -m1 'verbs:')
+for verb in create delete; do
+  echo "$SECRETS_VERBS" | grep -q "\"$verb\"" || fail "secrets rule missing verb: $verb"
+done
+# Secrets grant is deliberately narrower than configmaps: no `get` — the api
+# never reads a Secret's contents back (see rbac.yaml's comment).
+if echo "$SECRETS_VERBS" | grep -q '"get"'; then
+  fail "secrets rule grants 'get' — the api never reads Secret contents back, keep this grant minimal"
+fi
+if echo "$SECRETS_VERBS" | grep -qE '"list"|"watch"'; then
+  fail "secrets rule grants list/watch — unnecessary, keep this grant minimal"
+fi
+pass "Role has the expected configmaps/secrets verbs, secrets grant kept minimal (no get/list/watch)"
+
 # --- DATABASE_URL wiring: bundled vs external ---------------------------
 grep -q 'name: DATABASE_URL' "$TMP_DIR/bundled.yaml" || fail "bundled render: api Deployment missing DATABASE_URL env"
 grep -q 'postgres://\$(POSTGRES_USER):\$(POSTGRES_PASSWORD)@valet-postgres:5432/\$(POSTGRES_DB)' "$TMP_DIR/bundled.yaml" \
@@ -83,7 +120,7 @@ pass "bundled render: DATABASE_URL wired from bundled postgres Secret"
 
 grep -q 'DATABASE_URL: "postgres://ext:pw@external-host:5432/valet"' "$TMP_DIR/external.yaml" \
   || fail "external render: DATABASE_URL does not carry externalDatabase.url verbatim"
-if grep -q 'kind: StatefulSet' "$TMP_DIR/external.yaml"; then
+if grep -q 'name: valet-postgres' "$TMP_DIR/external.yaml"; then
   fail "external render: bundled postgres StatefulSet still rendered when externalDatabase.url is set"
 fi
 pass "external render: DATABASE_URL from externalDatabase.url, bundled postgres resources absent"
@@ -126,6 +163,52 @@ pass "lookup-retain helper present and used by both Secret templates"
 echo "$API_DEPLOY_BLOCK" | grep -q 'initContainers:' || fail "api Deployment missing initContainers (bundled)"
 echo "$API_DEPLOY_BLOCK" | grep -q 'wait-for-postgres' || fail "api Deployment missing wait-for-postgres initContainer"
 pass "api Deployment has wait-for-postgres initContainer"
+
+# --- registry: bundled vs external ----------------------------------------
+grep -q '^kind: StatefulSet$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no StatefulSet at all"
+BUNDLED_STATEFULSETS=$(grep -c '^kind: StatefulSet$' "$TMP_DIR/bundled.yaml")
+[ "$BUNDLED_STATEFULSETS" -eq 2 ] || fail "bundled render: expected 2 StatefulSets (postgres + registry), found $BUNDLED_STATEFULSETS"
+grep -q 'name: valet-registry' "$TMP_DIR/bundled.yaml" || fail "bundled render: no registry StatefulSet/Service named valet-registry"
+grep -q '^kind: CronJob$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no registry-gc CronJob"
+grep -q 'REGISTRY_STORAGE_DELETE_ENABLED' "$TMP_DIR/bundled.yaml" || fail "bundled render: registry missing REGISTRY_STORAGE_DELETE_ENABLED=true (required for retention's manifest DELETE)"
+pass "bundled render: registry StatefulSet/Service/GC-CronJob present"
+
+if grep -q 'name: valet-registry' "$TMP_DIR/external-registry.yaml"; then
+  fail "external-registry render: bundled registry resources still rendered when externalRegistry.url is set"
+fi
+EXTERNAL_REGISTRY_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/external-registry.yaml")
+echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "registry.example.com"' \
+  || fail "external-registry render: VALET_PREBUILD_REGISTRY does not carry externalRegistry.url verbatim"
+echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY_INSECURE: "false"' \
+  || fail "external-registry render: VALET_PREBUILD_REGISTRY_INSECURE should be false for an external registry"
+echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_SANDBOX_IMAGE_PULL_SECRET: "regcred"' \
+  || fail "external-registry render: VALET_SANDBOX_IMAGE_PULL_SECRET does not carry externalRegistry.pullSecret"
+pass "external-registry render: no bundled registry resources, VALET_PREBUILD_REGISTRY(_INSECURE)/pull-secret wired from externalRegistry.*"
+
+# --- registry: VALET_PREBUILD_REGISTRY wiring (bundled) --------------------
+BUNDLED_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/bundled.yaml")
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "valet-registry:5000"' \
+  || fail "bundled render: VALET_PREBUILD_REGISTRY is not the bundled registry's in-cluster Service DNS name"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY_INSECURE: "true"' \
+  || fail "bundled render: VALET_PREBUILD_REGISTRY_INSECURE should be true for the bundled (HTTP-only) registry"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_IMAGE_BUILDER: "kubernetes"' \
+  || fail "bundled render: VALET_IMAGE_BUILDER is not pinned to kubernetes"
+pass "VALET_PREBUILD_REGISTRY(_INSECURE)/VALET_IMAGE_BUILDER wired for the bundled registry"
+
+# --- build resources/deadline values wiring ---------------------------------
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_BUILD_DEADLINE_SECONDS: "1800"' \
+  || fail "ConfigMap missing VALET_PREBUILD_BUILD_DEADLINE_SECONDS from build.activeDeadlineSeconds"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_BUILD_CPU_REQUEST: "1"' \
+  || fail "ConfigMap missing VALET_PREBUILD_BUILD_CPU_REQUEST from build.resources.requests.cpu"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_BUILD_MEMORY_LIMIT: "4Gi"' \
+  || fail "ConfigMap missing VALET_PREBUILD_BUILD_MEMORY_LIMIT from build.resources.limits.memory"
+pass "build.resources/activeDeadlineSeconds values wired into the ConfigMap"
+
+# --- no secret/token material rendered anywhere -----------------------------
+if grep -qiE 'ghp_|gho_|github_pat_' "$TMP_DIR/bundled.yaml" "$TMP_DIR/external-registry.yaml"; then
+  fail "a git-token-shaped string leaked into a rendered manifest"
+fi
+pass "no token-shaped secret material rendered anywhere (chart never bakes in a git token — minted per-build at runtime)"
 
 echo
 echo "All golden assertions passed."

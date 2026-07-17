@@ -133,12 +133,17 @@ export function buildSandboxManifest(
     container.command = FULL_PROFILE_COMMAND;
   }
 
+  const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
+    containers: [container],
+    restartPolicy: "Always",
+  };
+  if (cfg.imagePullSecrets && cfg.imagePullSecrets.length > 0) {
+    podSpec.imagePullSecrets = cfg.imagePullSecrets;
+  }
+
   const spec: SandboxCR["spec"] = {
     podTemplate: {
-      spec: {
-        containers: [container],
-        restartPolicy: "Always",
-      },
+      spec: podSpec,
     },
     volumeClaimTemplates: [
       {

@@ -164,10 +164,16 @@ export function buildSandboxProvider(
       const execApi = podExecApiAdapter(new k8s.Exec(kc));
       const livenessApi = podLivenessApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
       const podStatusApi = podStatusApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
+      const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image,
         apiVersion: SANDBOX_CR_API_VERSION,
+        // Sandbox images v2 plan, Task 5: threaded when an external prebuild
+        // registry requires authenticated pulls (`externalRegistry.pullSecret`
+        // in the chart). Omitted (undefined, not []) for the bundled registry
+        // — nothing to authenticate against an in-cluster insecure registry.
+        ...(pullSecret ? { imagePullSecrets: [{ name: pullSecret }] } : {}),
       };
       return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi }, cfg);
     }

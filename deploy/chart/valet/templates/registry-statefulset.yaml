@@ -1,0 +1,64 @@
+{{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "valet.fullname" . }}-registry
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  serviceName: {{ include "valet.fullname" . }}-registry
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "valet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: registry
+  template:
+    metadata:
+      labels:
+        {{- include "valet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: registry
+    spec:
+      containers:
+        - name: registry
+          image: "{{ .Values.registry.image.repository }}:{{ .Values.registry.image.tag }}"
+          ports:
+            - containerPort: 5000
+              name: registry
+          env:
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: /var/lib/registry
+            # Required for the prebuild retention seam's manifest-digest
+            # DELETE (packages/api/src/prebuilds/service.ts's
+            # `registryManifestDelete`) to actually remove blobs instead of
+            # 405ing — the registry image defaults this to false.
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            initialDelaySeconds: 15
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.registry.storageClassName }}
+        storageClassName: {{ .Values.registry.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.registry.storageSize | quote }}
+{{- end }}

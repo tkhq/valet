@@ -16,6 +16,27 @@ data:
   VALET_SANDBOX_NAMESPACE: {{ .Values.sandbox.namespace | quote }}
   VALET_SANDBOX_IMAGE: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
   VALET_WEB_DIST_DIR: "/app/web/dist"
+  # Sandbox images v2 plan, Task 5: kubernetes prebuild image builder +
+  # registry wiring. VALET_IMAGE_BUILDER pins the kubernetes builder
+  # explicitly rather than relying on the VALET_SANDBOX_BACKEND-paired
+  # default (providers/image-builder.ts's `defaultBackendFor`) so a future
+  # default-pairing change can't silently disable prebuilds on this chart.
+  VALET_IMAGE_BUILDER: "kubernetes"
+  {{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
+  VALET_PREBUILD_REGISTRY: {{ printf "%s-registry:5000" (include "valet.fullname" .) | quote }}
+  VALET_PREBUILD_REGISTRY_INSECURE: "true"
+  {{- else if .Values.externalRegistry.url }}
+  VALET_PREBUILD_REGISTRY: {{ .Values.externalRegistry.url | quote }}
+  VALET_PREBUILD_REGISTRY_INSECURE: "false"
+  {{- if .Values.externalRegistry.pullSecret }}
+  VALET_SANDBOX_IMAGE_PULL_SECRET: {{ .Values.externalRegistry.pullSecret | quote }}
+  {{- end }}
+  {{- end }}
+  VALET_PREBUILD_BUILD_DEADLINE_SECONDS: {{ .Values.build.activeDeadlineSeconds | quote }}
+  VALET_PREBUILD_BUILD_CPU_REQUEST: {{ .Values.build.resources.requests.cpu | quote }}
+  VALET_PREBUILD_BUILD_CPU_LIMIT: {{ .Values.build.resources.limits.cpu | quote }}
+  VALET_PREBUILD_BUILD_MEMORY_REQUEST: {{ .Values.build.resources.requests.memory | quote }}
+  VALET_PREBUILD_BUILD_MEMORY_LIMIT: {{ .Values.build.resources.limits.memory | quote }}
   {{- if .Values.api.auth.oidcIssuer }}
   AUTH_OIDC_ISSUER: {{ .Values.api.auth.oidcIssuer | quote }}
   {{- end }}

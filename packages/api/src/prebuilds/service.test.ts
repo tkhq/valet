@@ -14,7 +14,14 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, prebuildConfigs, prebuilds, imageCatalog } from "../schema/index.js";
 import type { GitHubTokenDeps } from "../services/github-tokens.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "./builder.js";
-import { PrebuildService, PrebuildUnavailableError, imageRefFor, slugify } from "./service.js";
+import {
+  DEFAULT_PREBUILD_REGISTRY_HOST,
+  PrebuildService,
+  PrebuildUnavailableError,
+  defaultRetention,
+  imageRefFor,
+  slugify,
+} from "./service.js";
 
 const orgId = "org1";
 const NOW = 1_700_000_000_000;
@@ -542,5 +549,67 @@ describe("imageRefFor / slugify", () => {
   it("slugifies owner/repo into the valet-prebuild convention for docker", () => {
     expect(slugify("Acme_Corp")).toBe("acme-corp");
     expect(imageRefFor("docker", "Acme Corp", "My Repo!", "abc123")).toBe("valet-prebuild/acme-corp-my-repo:abc123");
+  });
+
+  it("kubernetes: prefixes the registry host onto <owner>-<repo>:<sha>, no valet-prebuild/ segment", () => {
+    expect(imageRefFor("kubernetes", "acme", "widgets", "abc123", "my-registry:5000")).toBe(
+      "my-registry:5000/acme-widgets:abc123",
+    );
+  });
+
+  it("kubernetes: defaults to the bundled in-cluster registry host when none is supplied", () => {
+    expect(imageRefFor("kubernetes", "acme", "widgets", "abc123")).toBe(
+      `${DEFAULT_PREBUILD_REGISTRY_HOST}/acme-widgets:abc123`,
+    );
+  });
+});
+
+describe("defaultRetention (kubernetes)", () => {
+  it("HEADs the tag for its digest then DELETEs the manifest by digest, best-effort", async () => {
+    const calls: { method: string | undefined; url: string }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calls.push({ method: init?.method, url });
+      if (init?.method === "HEAD") {
+        return new Response(null, { status: 200, headers: { "Docker-Content-Digest": "sha256:deadbeef" } });
+      }
+      return new Response(null, { status: 202 });
+    };
+    const retention = defaultRetention(undefined, fetchImpl);
+    await retention("kubernetes", ["my-registry:5000/acme-widgets:abc123"]);
+
+    expect(calls).toEqual([
+      { method: "HEAD", url: "http://my-registry:5000/v2/acme-widgets/manifests/abc123" },
+      { method: "DELETE", url: "http://my-registry:5000/v2/acme-widgets/manifests/sha256:deadbeef" },
+    ]);
+  });
+
+  it("swallows a fetch failure (network error, missing digest header) without throwing", async () => {
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error("network unreachable");
+    };
+    const retention = defaultRetention(undefined, fetchImpl);
+    await expect(retention("kubernetes", ["my-registry:5000/acme-widgets:abc123"])).resolves.toBeUndefined();
+  });
+
+  it("skips the DELETE when the HEAD response carries no Docker-Content-Digest header", async () => {
+    const calls: { method: string | undefined }[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      calls.push({ method: init?.method });
+      return new Response(null, { status: 200 });
+    };
+    const retention = defaultRetention(undefined, fetchImpl);
+    await retention("kubernetes", ["my-registry:5000/acme-widgets:abc123"]);
+    expect(calls).toEqual([{ method: "HEAD" }]);
+  });
+
+  it("is a no-op for an empty imageRefs list — never calls fetch", async () => {
+    let called = false;
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+      return new Response(null);
+    };
+    await defaultRetention(undefined, fetchImpl)("kubernetes", []);
+    expect(called).toBe(false);
   });
 });

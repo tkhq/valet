@@ -51,10 +51,14 @@
  * `retention(backend, imageRefs)` deletes the actual images beyond the
  * newest 2 pushed builds per config; the `prebuilds` ROWS are never deleted
  * (they're history — the config's build log). The default implementation
- * shells `docker rmi -f` per stale image ref for the `"docker"` backend and
- * no-ops for anything else (`"kubernetes"` awaits Task 5's registry-API
- * delete). Tests inject `retention` directly to assert "keeps exactly 2"
- * without touching a real daemon.
+ * shells `docker rmi -f` per stale image ref for the `"docker"` backend and,
+ * for `"kubernetes"` (Task 5), deletes via the registry's HTTP API: a HEAD
+ * on the tag's manifest (to resolve the content digest — registries only
+ * accept manifest deletes by digest, not by tag) followed by a DELETE on
+ * that digest. Both directions are best-effort (errors swallowed) — a
+ * missing/already-gone image is not a failure. Tests inject `retention`
+ * directly to assert "keeps exactly 2" without touching a real daemon or
+ * registry.
  *
  * ── No token ever lands on a row or a response ────────────────────────────
  * `PrebuildSpec.gitToken` is minted fresh per `startBuild` call
@@ -104,13 +108,25 @@ export function slugify(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/** Default bundled in-cluster registry Service DNS name (chart's
+ * `registry-service.yaml`, `valet-registry:5000`) — used when the
+ * kubernetes backend's caller doesn't supply `registryHost` explicitly
+ * (e.g. a test constructing `PrebuildService` without wiring
+ * `VALET_PREBUILD_REGISTRY`). */
+export const DEFAULT_PREBUILD_REGISTRY_HOST = "valet-registry:5000";
+
 /** `valet-prebuild/<owner>-<repo>:<sha>` for the docker backend (spec
- * decision, task brief). `backend` is threaded through as a seam: Task 5's
- * kubernetes builder prefixes a registry host onto the same slug/tag
- * without this function's callers needing to change. */
-export function imageRefFor(backend: string, owner: string, repo: string, sha: string): string {
+ * decision, task brief); `<registryHost>/<owner>-<repo>:<sha>` for the
+ * kubernetes backend (Task 5) — `registryHost` comes from
+ * `VALET_PREBUILD_REGISTRY` (threaded by `startBuild`'s caller below),
+ * defaulting to the bundled registry's in-cluster Service DNS name. */
+export function imageRefFor(backend: string, owner: string, repo: string, sha: string, registryHost?: string): string {
   const slug = `${slugify(owner)}-${slugify(repo)}`;
   switch (backend) {
+    case "kubernetes": {
+      const host = registryHost ?? DEFAULT_PREBUILD_REGISTRY_HOST;
+      return `${host}/${slug}:${sha}`;
+    }
     case "docker":
     default:
       return `valet-prebuild/${slug}:${sha}`;
@@ -120,8 +136,8 @@ export function imageRefFor(backend: string, owner: string, repo: string, sha: s
 /** Deletes stale prebuild IMAGES (never the `prebuilds` ROWS — those are
  * history) for backend `backend`. Docker: `docker rmi -f` per ref,
  * best-effort (errors swallowed — a missing/already-gone image is not a
- * failure). Kubernetes: no-op stub until Task 5 adds a registry-API
- * delete. */
+ * failure). Kubernetes: registry HTTP API digest delete, same best-effort
+ * contract. */
 export type RetentionFn = (backend: string, imageRefs: string[]) => Promise<void>;
 
 function dockerRmi(spawnFn: SpawnFn, imageRef: string): Promise<void> {
@@ -138,12 +154,60 @@ function dockerRmi(spawnFn: SpawnFn, imageRef: string): Promise<void> {
   });
 }
 
-export function defaultRetention(spawnFn: SpawnFn = spawn as unknown as SpawnFn): RetentionFn {
+/** Splits a `<host>/<name>:<tag>` ref into its parts. Returns `null` when
+ * the ref doesn't contain a `/` (i.e. it's a docker-backend-shaped ref like
+ * `valet-prebuild/foo:sha` with no registry host — never expected to reach
+ * this function since callers only invoke it for `backend === "kubernetes"`
+ * refs, but defensive rather than throwing on an unexpected shape). */
+function parseRegistryImageRef(imageRef: string): { host: string; name: string; tag: string } | null {
+  const lastColon = imageRef.lastIndexOf(":");
+  if (lastColon < 0) return null;
+  const hostAndName = imageRef.slice(0, lastColon);
+  const tag = imageRef.slice(lastColon + 1);
+  const slash = hostAndName.indexOf("/");
+  if (slash < 0) return null;
+  return { host: hostAndName.slice(0, slash), name: hostAndName.slice(slash + 1), tag };
+}
+
+/** Deletes one image from a Docker Registry HTTP API v2 endpoint: HEAD the
+ * tag's manifest (`Accept: application/vnd.docker.distribution.manifest.v2+json`)
+ * to resolve its content digest, then DELETE the manifest by that digest
+ * (registries reject delete-by-tag). Best-effort — every failure (network,
+ * missing `Docker-Content-Digest` header, non-2xx) is swallowed, matching
+ * `dockerRmi`'s contract. Requires the registry configured with
+ * `REGISTRY_STORAGE_DELETE_ENABLED=true` (set on the bundled chart's
+ * registry StatefulSet) — a registry without delete enabled 4xxs the
+ * DELETE, which this function silently treats the same as "already gone". */
+async function registryManifestDelete(imageRef: string, fetchImpl: typeof fetch): Promise<void> {
+  const parsed = parseRegistryImageRef(imageRef);
+  if (!parsed) return;
+  const { host, name, tag } = parsed;
+  try {
+    const headRes = await fetchImpl(`http://${host}/v2/${name}/manifests/${tag}`, {
+      method: "HEAD",
+      headers: { Accept: "application/vnd.docker.distribution.manifest.v2+json" },
+    });
+    const digest = headRes.headers.get("docker-content-digest");
+    if (!digest) return;
+    await fetchImpl(`http://${host}/v2/${name}/manifests/${digest}`, { method: "DELETE" });
+  } catch {
+    // best-effort — see docblock
+  }
+}
+
+export function defaultRetention(spawnFn: SpawnFn = spawn as unknown as SpawnFn, fetchImpl: typeof fetch = fetch): RetentionFn {
   return async (backend, imageRefs) => {
     if (imageRefs.length === 0) return;
-    if (backend !== "docker") return; // kubernetes: Task 5 stub
-    for (const imageRef of imageRefs) {
-      await dockerRmi(spawnFn, imageRef);
+    if (backend === "docker") {
+      for (const imageRef of imageRefs) {
+        await dockerRmi(spawnFn, imageRef);
+      }
+      return;
+    }
+    if (backend === "kubernetes") {
+      for (const imageRef of imageRefs) {
+        await registryManifestDelete(imageRef, fetchImpl);
+      }
     }
   };
 }
@@ -366,7 +430,7 @@ export class PrebuildService {
       repo: { owner, name: repo },
     });
 
-    const imageRef = imageRefFor(builder.backend, owner, repo, head.sha);
+    const imageRef = imageRefFor(builder.backend, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
     const now = this.now();
     const row: PrebuildRow = {
       id: newPrebuildId(this.newId),

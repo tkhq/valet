@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
+import * as k8s from "@kubernetes/client-node";
 import { DockerImageBuilder } from "../prebuilds/docker-builder.js";
+import { KubernetesImageBuilder } from "../prebuilds/k8s-builder.js";
 import { parseImageBuilderBackend, resolveImageBuilder } from "./image-builder.js";
+
+/** Fake-but-structurally-valid `KubeConfig` (mirrors
+ * `sandbox-backend.test.ts`'s `fakeKubeConfig`) — `resolveImageBuilder`
+ * only *constructs* the kubernetes builder here, it never invokes any of
+ * its methods, so no network call ever happens. */
+function fakeKubeConfig(): k8s.KubeConfig {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromOptions({
+    clusters: [{ name: "test-cluster", server: "https://example.invalid", skipTLSVerify: true }],
+    users: [{ name: "test-user" }],
+    contexts: [{ name: "test-context", cluster: "test-cluster", user: "test-user" }],
+    currentContext: "test-context",
+  });
+  return kc;
+}
 
 describe("parseImageBuilderBackend", () => {
   it("returns undefined for unset/empty", () => {
@@ -25,8 +42,14 @@ describe("resolveImageBuilder", () => {
     expect(resolveImageBuilder({ VALET_SANDBOX_BACKEND: "docker" })).toBeInstanceOf(DockerImageBuilder);
   });
 
-  it("defaults to null (kubernetes stub) when VALET_SANDBOX_BACKEND is kubernetes", () => {
-    expect(resolveImageBuilder({ VALET_SANDBOX_BACKEND: "kubernetes" })).toBeNull();
+  it("defaults to a KubernetesImageBuilder when VALET_SANDBOX_BACKEND is kubernetes", () => {
+    const result = resolveImageBuilder({ VALET_SANDBOX_BACKEND: "kubernetes" }, { kubeConfig: fakeKubeConfig() });
+    expect(result).toBeInstanceOf(KubernetesImageBuilder);
+    expect(result?.backend).toBe("kubernetes");
+  });
+
+  it("throws the same VALET_KUBE_CONTEXT guidance as the sandbox backend when no kubeConfig is injected and running out-of-cluster", () => {
+    expect(() => resolveImageBuilder({ VALET_SANDBOX_BACKEND: "kubernetes" })).toThrow(/VALET_KUBE_CONTEXT is required/);
   });
 
   it("defaults to null when VALET_SANDBOX_BACKEND is local", () => {

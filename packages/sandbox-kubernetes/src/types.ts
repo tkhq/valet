@@ -46,6 +46,14 @@ export interface K8sProviderConfig {
   /** Default workspace PVC size when not otherwise specified. Defaults to "2Gi" if omitted. */
   defaultStorage?: string;
   apiVersion: typeof SANDBOX_CR_API_VERSION;
+  /** `corev1.PodSpec.imagePullSecrets` names, threaded onto every Sandbox
+   * pod's spec unconditionally when set (sandbox images v2 plan, Task 5:
+   * pulling a prebuilt image from an EXTERNAL registry that requires
+   * authenticated pulls). Confirmed present on the vendored agent-sandbox
+   * CRD's `spec.podTemplate.spec` (both v1alpha1/v1beta1 schema blocks
+   * embed the full `corev1.PodSpec`, which includes `imagePullSecrets`) —
+   * this is plain pass-through, not a new CRD capability. */
+  imagePullSecrets?: { name: string }[];
 }
 
 /** `corev1.EnvVar` subset — name/value pairs only (we never emit valueFrom). */
@@ -95,6 +103,8 @@ export interface SandboxContainer {
 export interface SandboxPodSpec {
   containers: SandboxContainer[];
   restartPolicy?: "Always" | "OnFailure" | "Never";
+  /** See `K8sProviderConfig.imagePullSecrets`'s docblock. */
+  imagePullSecrets?: { name: string }[];
 }
 
 export interface SandboxPodTemplate {

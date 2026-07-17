@@ -101,6 +101,49 @@ externalDatabase:
   # entirely and the api's DATABASE_URL is this value verbatim.
   url: ""
 
+registry:
+  # Bundled single-replica `registry:2` StatefulSet (sandbox images v2 plan,
+  # Task 5) — backs the kubernetes ImageBuilder's push target and the
+  # kubernetes sandbox provider's pull target for prebuilt images. Set to
+  # false (or set externalRegistry.url) to disable it and push/pull against
+  # an external registry instead.
+  bundled: true
+  image:
+    repository: registry
+    tag: "2"
+  storageClassName: "" # "" = cluster default storage class
+  storageSize: 10Gi
+  # Nightly registry-garbage-collect CronJob schedule (cron syntax).
+  gcSchedule: "0 3 * * *"
+
+externalRegistry:
+  # When set, disables the bundled registry StatefulSet/Service entirely;
+  # VALET_PREBUILD_REGISTRY carries this value verbatim and
+  # VALET_PREBUILD_REGISTRY_INSECURE is NOT set (defaults to pushing/pulling
+  # over TLS, standard for a real external registry).
+  url: ""
+  # Name of an existing `kubernetes.io/dockerconfigjson` Secret (created out
+  # of band — this chart does not create it) in `sandbox.namespace`, used as
+  # `imagePullSecrets` on sandbox pods that pull a prebuilt image from this
+  # registry. Ignored when `url` is unset.
+  pullSecret: ""
+
+build:
+  # BuildKit Job resource requests/limits (moby/buildkit:rootless container).
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  # Job.spec.activeDeadlineSeconds — a build stuck past this long is killed
+  # and reported failed rather than running forever.
+  activeDeadlineSeconds: 1800
+  # Soft in-process cap (KubernetesImageBuilder) on simultaneously
+  # outstanding BuildKit Jobs; extra builds queue FIFO.
+  concurrency: 1
+
 helmTest:
   enabled: true
   image: curlimages/curl:8.11.0

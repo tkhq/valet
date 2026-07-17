@@ -1,0 +1,19 @@
+{{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valet.fullname" . }}-registry
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  clusterIP: None
+  selector:
+    {{- include "valet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+  ports:
+    - port: 5000
+      targetPort: registry
+      name: registry
+{{- end }}

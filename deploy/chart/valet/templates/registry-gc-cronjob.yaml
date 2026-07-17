@@ -1,0 +1,59 @@
+{{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
+# Registry garbage-collect CronJob. The upstream `registry garbage-collect`
+# command reclaims blobs orphaned by the retention seam's manifest deletes
+# (packages/api/src/prebuilds/service.ts's `registryManifestDelete` only
+# deletes the MANIFEST; the underlying layer blobs are only reclaimed by a
+# separate `garbage-collect` pass against the storage directory).
+#
+# ── Read-only-registry caveat ────────────────────────────────────────────
+# The standard `registry garbage-collect` invocation walks the storage
+# directory directly and is NOT safe to run concurrently with writes to
+# that same directory (the upstream docs recommend running it against a
+# registry started with `-r`/read-only mode, or otherwise ensuring no
+# concurrent pushes). This CronJob does NOT put the running registry
+# StatefulSet into read-only mode first — it mounts the SAME PVC in a
+# separate one-off pod and runs GC directly against it while the live
+# registry Pod keeps serving read/write traffic. This is a known-imperfect
+# simplification (disclosed, not hidden): a push landing mid-GC-run could
+# theoretically race a blob deletion. Acceptable for the pre-1.0 bundled
+# registry (low write volume: prebuild pushes are infrequent, scheduled
+# nightly rebuilds + occasional manual triggers) — revisit before this
+# registry sees meaningful concurrent write traffic, e.g. by draining to a
+# maintenance window or a --readonly flip via a ConfigMap-mounted
+# config.yml the live StatefulSet also reads.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "valet.fullname" . }}-registry-gc
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-gc
+spec:
+  schedule: {{ .Values.registry.gcSchedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "valet.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: registry-gc
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: registry-gc
+              image: "{{ .Values.registry.image.repository }}:{{ .Values.registry.image.tag }}"
+              command: ["registry", "garbage-collect", "/etc/docker/registry/config.yml"]
+              env:
+                - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+                  value: /var/lib/registry
+              volumeMounts:
+                - name: data
+                  mountPath: /var/lib/registry
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: data-{{ include "valet.fullname" . }}-registry-0
+{{- end }}
