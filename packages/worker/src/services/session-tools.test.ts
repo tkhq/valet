@@ -396,6 +396,86 @@ describe('resolveActionPolicy', () => {
     expect(result.warnings[0].message).toContain('JWT Token is required');
   });
 
+  it('does not warn when a custom MCP connector has no credentials (never connected)', async () => {
+    const { db } = createTestDb();
+    const appDb: AppDb = db;
+    db.insert(users).values({ id: USER_ID, email: 'mcp-policy@example.com' }).run();
+    db.insert(customMcpConnectors).values({
+      id: 'connector-1',
+      orgId: 'default',
+      serviceSlug: 'salesforce-read-only',
+      displayName: 'Salesforce Read Only',
+      serverUrl: 'https://mcp.example.com',
+      authType: 'oauth',
+      oauthClientId: 'sf-client-id',
+      oauthScopes: 'mcp_api refresh_token',
+      oauthAuthorizationEndpoint: 'https://login.salesforce.example.com/services/oauth2/authorize',
+      oauthTokenEndpoint: 'https://login.salesforce.example.com/services/oauth2/token',
+      status: 'active',
+    }).run();
+    // No integration row and no credential: the connector is probed on every list
+    // but the user never authorized it, so discovery must stay quiet.
+    vi.spyOn(integrationRegistry, 'resolveCredentials').mockResolvedValue({
+      ok: false,
+      error: { service: 'salesforce-read-only', reason: 'not_found', message: 'No credentials for salesforce-read-only' },
+    });
+    stubMcpFetch();
+
+    const result = await listTools(appDb, mockD1(), envWithEncryption(), USER_ID, {
+      credentialCache: emptyCredentialCache(),
+      orgId: 'default',
+      service: 'salesforce',
+    });
+
+    expect(result.tools).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('warns when a connected custom MCP connector credential is expired', async () => {
+    const { db } = createTestDb();
+    const appDb: AppDb = db;
+    db.insert(users).values({ id: USER_ID, email: 'mcp-policy@example.com' }).run();
+    db.insert(customMcpConnectors).values({
+      id: 'connector-1',
+      orgId: 'default',
+      serviceSlug: 'salesforce-read-only',
+      displayName: 'Salesforce Read Only',
+      serverUrl: 'https://mcp.example.com',
+      authType: 'oauth',
+      oauthClientId: 'sf-client-id',
+      oauthScopes: 'mcp_api refresh_token',
+      oauthAuthorizationEndpoint: 'https://login.salesforce.example.com/services/oauth2/authorize',
+      oauthTokenEndpoint: 'https://login.salesforce.example.com/services/oauth2/token',
+      status: 'active',
+    }).run();
+    db.insert(integrations).values({
+      id: 'integration-1',
+      userId: USER_ID,
+      service: 'salesforce-read-only',
+      config: { entities: ['mcp_api', 'refresh_token'] },
+      status: 'active',
+    }).run();
+    vi.spyOn(integrationRegistry, 'resolveCredentials').mockResolvedValue({
+      ok: false,
+      error: { service: 'salesforce-read-only', reason: 'expired', message: 'Credential for salesforce-read-only has expired and cannot be refreshed' },
+    });
+    stubMcpFetch();
+
+    const result = await listTools(appDb, mockD1(), envWithEncryption(), USER_ID, {
+      credentialCache: emptyCredentialCache(),
+      orgId: 'default',
+      service: 'salesforce',
+    });
+
+    expect(result.tools).toEqual([]);
+    expect(result.warnings).toMatchObject([{
+      service: 'salesforce-read-only',
+      displayName: 'Salesforce Read Only',
+      reason: 'expired',
+      integrationId: 'integration-1',
+    }]);
+  });
+
   it('allows active custom API-key connector policy resolution without an integration row', async () => {
     const { db } = createTestDb();
     const appDb: AppDb = db;

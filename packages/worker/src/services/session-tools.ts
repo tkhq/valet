@@ -243,14 +243,24 @@ export async function listTools(
       }
 
       if (!credResult.ok) {
-        const displayName = provider?.displayName || service;
-        warnings.push({
-          service,
-          displayName,
-          reason: credResult.error.reason,
-          message: credResult.error.message,
-          integrationId: firstSource.id,
-        });
+        // `not_found` means no credential exists for this user — i.e. they never
+        // connected the service. Org-registered custom MCP connectors are probed on
+        // every list, so an unconnected one lands here on every prompt. That is not
+        // an authorization failure, so skip it silently: discovery just omits the
+        // tools rather than raising a "reauthorize" prompt for a service the user
+        // never authorized (and the model would otherwise see it as an error). Only
+        // credentials that exist but are broken (expired / refresh_failed / revoked /
+        // decryption_failed) are worth surfacing.
+        if (credResult.error.reason !== 'not_found') {
+          const displayName = provider?.displayName || service;
+          warnings.push({
+            service,
+            displayName,
+            reason: credResult.error.reason,
+            message: credResult.error.message,
+            integrationId: firstSource.id,
+          });
+        }
         continue;
       }
 
