@@ -128,6 +128,24 @@ export interface EngineHostOpts {
    */
   onWake?: (sessionId: string) => Promise<void> | void;
   /**
+   * Cross-restart hibernation-clear seam (sandbox hibernation plan, Task 4
+   * review carry-forward): `onWake` above is gated on an IN-MEMORY
+   * `wasSuspended` flag, so it never fires for a session that hibernated,
+   * then had this process restart, then got rebuilt on its next touch — a
+   * rebuilt attachment starts `detached` and goes straight to
+   * `provisioning`/`ready` without ever passing through `suspended` in this
+   * process's lifetime. `onSessionReady` closes that gap: invoked on EVERY
+   * `ready` transition of EVERY session build (`buildSession`,
+   * `buildOrchestratorSession`, `buildChildSession`, `buildWorkflowSession`),
+   * regardless of `wasSuspended`. Task 4 wires this to the same
+   * "clear `hibernated` -> `active`" write `onWake` performs — the write is
+   * conditioned on the row currently being `"hibernated"` (a no-op
+   * otherwise), so firing on every ordinary cold-start is harmless. Errors
+   * are caught and logged, never thrown into the attachment's status-
+   * listener path.
+   */
+  onSessionReady?: (sessionId: string) => Promise<void> | void;
+  /**
    * Test-only injection point for the idle sweep's race rule: a submission
    * admitted between the idleness check and the actual `suspend()` call
    * must win (the sweep must NOT suspend a session a caller just woke).
@@ -293,11 +311,21 @@ export class EngineHost {
         wasSuspended = true;
         return;
       }
-      if (status.state === "ready" && wasSuspended) {
-        wasSuspended = false;
-        if (this.opts.onWake) {
-          Promise.resolve(this.opts.onWake(sessionId)).catch((err) =>
-            console.error(`EngineHost: onWake failed for session ${sessionId}:`, err),
+      if (status.state === "ready") {
+        if (wasSuspended) {
+          wasSuspended = false;
+          if (this.opts.onWake) {
+            Promise.resolve(this.opts.onWake(sessionId)).catch((err) =>
+              console.error(`EngineHost: onWake failed for session ${sessionId}:`, err),
+            );
+          }
+        }
+        // Unconditional (regardless of wasSuspended) — see
+        // `EngineHostOpts.onSessionReady`'s doc comment for why this exists
+        // separately from `onWake` above.
+        if (this.opts.onSessionReady) {
+          Promise.resolve(this.opts.onSessionReady(sessionId)).catch((err) =>
+            console.error(`EngineHost: onSessionReady failed for session ${sessionId}:`, err),
           );
         }
       }

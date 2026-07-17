@@ -12,7 +12,7 @@
  * round-trip through the api hop to the fake ttyd echo.
  */
 import { createServer, type AddressInfo } from "node:net";
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   VirtualSandbox,
   type GatewayEndpoint,
@@ -89,6 +89,60 @@ class GatewayTestSandboxProvider implements SandboxProvider {
   }
 }
 
+/** Hibernation-capable variant of `GatewayTestSandboxProvider` (sandbox
+ * hibernation plan, Task 4's gateway-touch wake test): same fixed
+ * `gatewayEndpoint()` behavior, plus tracked `suspend`/`resume` so a test
+ * can drive a session into `suspended` and assert the gateway proxy's 409
+ * path kicks a resume via `attachment.warm()`. */
+class HibernatingGatewayTestSandboxProvider implements SandboxProvider {
+  readonly backend = "gateway-hib-test";
+  readonly resumeCalls: string[] = [];
+  private sandboxes = new Map<string, GatewayTestSandbox>();
+  private nextId = 1;
+
+  constructor(private readonly endpoint: GatewayEndpoint | null) {}
+
+  capabilities(): SandboxCapabilities {
+    return {
+      snapshot: "none",
+      persistentWorkspace: false,
+      tunnels: false,
+      warmPool: false,
+      hibernation: true,
+      coldStartEstimateMs: 0,
+    };
+  }
+
+  async create(_opts: SandboxCreateOpts): Promise<Sandbox> {
+    const id = `gwhib-${this.nextId++}`;
+    const sb = new GatewayTestSandbox(id, this.endpoint);
+    this.sandboxes.set(id, sb);
+    return sb;
+  }
+
+  async restore(id: string): Promise<Sandbox> {
+    const sb = this.sandboxes.get(id);
+    if (!sb) throw new Error(`gateway-hib-test sandbox not found: ${id}`);
+    return sb;
+  }
+
+  async destroy(id: string): Promise<void> {
+    const sb = this.sandboxes.get(id);
+    if (sb) await sb.destroy?.();
+    this.sandboxes.delete(id);
+  }
+
+  async status(id: string): Promise<SandboxStatus> {
+    return this.sandboxes.has(id) ? { id, state: "ready", startedAt: Date.now() } : { id, state: "released" };
+  }
+
+  async suspend(_id: string): Promise<void> {}
+
+  async resume(id: string): Promise<void> {
+    this.resumeCalls.push(id);
+  }
+}
+
 async function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();
@@ -128,7 +182,7 @@ async function seedSession(
  * `detached` and every case would 409 regardless of what the route itself
  * does — this helper isolates that from the route behavior under test.
  */
-async function warmSandbox(api: TestApi, opts: { id: string; userId: string }): Promise<void> {
+async function warmSandbox(api: TestApi, opts: { id: string; userId: string }) {
   const session = await api.providers.engineHost.sessionFor(opts.id, {
     userId: opts.userId,
     orgId: "local-org",
@@ -136,6 +190,7 @@ async function warmSandbox(api: TestApi, opts: { id: string; userId: string }): 
     profile: "full",
   });
   await session.attachment.ensureReady({ timeoutMs: 5_000 });
+  return session;
 }
 
 describe("closeBackendOnClientClose (Fix 3: throw-safe WS close mirroring)", () => {
@@ -378,6 +433,34 @@ describe("session gateway reverse-proxy", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; wake: boolean };
     expect(body).toEqual({ error: "sandbox not ready", wake: true });
+  });
+
+  it("kicks a resume (attachment.warm()) when the sandbox is suspended (sandbox hibernation plan, Task 4)", async () => {
+    const sessionId = "gw-suspended";
+    const provider = new HibernatingGatewayTestSandboxProvider({ host: "127.0.0.1", port: 1 });
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    const session = await warmSandbox(api, { id: sessionId, userId: "local-user" });
+    const sandboxId = session.attachment.current()?.id;
+    expect(sandboxId).toBeDefined();
+
+    await session.attachment.suspend();
+    expect(session.attachment.state).toBe("suspended");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/gateway/vscode/`, {
+      headers: { "x-valet-test-user-id": "local-user" },
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; wake: boolean };
+    expect(body).toEqual({ error: "sandbox not ready", wake: true });
+
+    // warm() is fire-and-forget — the resume lands asynchronously.
+    await vi.waitFor(() => {
+      expect(provider.resumeCalls).toEqual([sandboxId]);
+    });
+    await vi.waitFor(() => {
+      expect(session.attachment.state).toBe("ready");
+    });
   });
 
   it("502s when the gateway endpoint is unreachable", async () => {

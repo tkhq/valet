@@ -9,6 +9,7 @@ import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { EngineHost } from "../engine/host.js";
+import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -214,6 +215,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
     idleMinutes: resolveIdleMinutes(process.env),
+    ...buildHibernationHooks(db),
     db,
     apiBaseUrl: opts.apiBaseUrl,
     sandboxJwtMaster: opts.sandboxJwtMaster,

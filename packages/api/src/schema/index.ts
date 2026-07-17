@@ -308,7 +308,7 @@ export const agentSessions = pgTable(
     workspace: text("workspace").notNull(),
     title: text("title"),
     status: text("status", {
-      enum: ["active", "archived", "deleted"],
+      enum: ["active", "hibernated", "archived", "deleted"],
     })
       .notNull()
       .default("active"),

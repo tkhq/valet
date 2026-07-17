@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, count, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq, inArray } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseOrchestratorSessionId } from "@valet/engine";
@@ -11,6 +11,7 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   ListSessionsResponse,
+  PauseSessionResponse,
   SandboxJwtResponse,
   SessionDetail,
   SessionStatus,
@@ -51,7 +52,9 @@ export async function listStandaloneSessions(db: AppDb, userId: string) {
     db
       .select()
       .from(agentSessions)
-      .where(and(eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
+      .where(
+        and(eq(agentSessions.userId, userId), inArray(agentSessions.status, ["active", "hibernated"])),
+      )
       .orderBy(desc(agentSessions.updatedAt)),
     db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
   ]);
@@ -256,6 +259,57 @@ sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
   const { token, expiresAt } = engineHost.mintSandboxJwtFor(id, userId);
   const body: SandboxJwtResponse = { token, expiresAt };
   return c.json(body);
+});
+
+// ── Pause (manual hibernation) ───────────────────────────────────────────
+
+// Sandbox hibernation plan, Task 4: suspends the session's sandbox on
+// demand (as opposed to the idle sweep's automatic suspend) and stamps the
+// row `"hibernated"`. Owner-gated like every other `/api/sessions/:id`
+// route — unknown or not-owned ids 404. Refuses (409) when a turn is
+// currently running/gated (nothing to safely suspend mid-turn) or when the
+// sandbox provider doesn't support hibernation at all. There is no explicit
+// resume route (spec decision 4) — the next submission, a gateway touch, or
+// a future wake all resume it and clear the status back to `"active"`
+// (`EngineHost`'s `onWake`/`onSessionReady` hooks, wired in
+// `providers/node.ts` and `integration/_setup.ts`).
+sessionsRouter.post("/:id/pause", async (c) => {
+  const { db, engineHost, engineStore, sandboxProvider } = c.var.providers;
+  const id = c.req.param("id");
+  const userId = c.var.user.id;
+
+  const rows = await db
+    .select()
+    .from(agentSessions)
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return c.json({ error: "session not found" }, 404);
+
+  if (!sandboxProvider.capabilities().hibernation) {
+    return c.json({ error: "provider does not support hibernation" }, 409);
+  }
+
+  const unsettled = await engineStore.listUnsettledSubmissions(id);
+  if (unsettled.some((item) => item.status === "running" || item.status === "blocked_on_decision_gate")) {
+    return c.json({ error: "a turn is running" }, 409);
+  }
+
+  const session = await engineHost.sessionFor(id, {
+    userId: row.userId,
+    orgId: row.orgId,
+    workspace: row.workspace,
+    profile: row.profile,
+  });
+  await session.attachment.suspend();
+
+  await db
+    .update(agentSessions)
+    .set({ status: "hibernated", updatedAt: Date.now() })
+    .where(eq(agentSessions.id, id));
+
+  const body: PauseSessionResponse = { status: "hibernated" };
+  return c.json(body, 200);
 });
 
 // ── Delete ────────────────────────────────────────────────────────────────

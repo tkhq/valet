@@ -41,7 +41,7 @@ export interface AuthConfigResponse {
 
 // ── REST: sessions ────────────────────────────────────────────────────────
 
-export type SessionStatus = "active" | "archived" | "deleted";
+export type SessionStatus = "active" | "hibernated" | "archived" | "deleted";
 
 /** Interactive-service profile (sandbox auth gateway plan, Task 5).
  * "headless" (default) is agent-only; "full" additionally runs ttyd +
@@ -86,6 +86,14 @@ export type GetSessionResponse = SessionDetail;
 export interface SandboxJwtResponse {
   token: string;
   expiresAt: number;
+}
+
+/** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation
+ * plan, Task 4). Suspends the session's sandbox and marks the row
+ * `"hibernated"`; the next touch (submission, gateway-touch, or a future
+ * wake) resumes it and clears the status back to `"active"`. */
+export interface PauseSessionResponse {
+  status: "hibernated";
 }
 
 // ── REST: orchestrator ────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { busEventToWire, type WireEventDraft } from "../engine/bridge.js";
-import type { ClientFrame, WireEvent } from "../wire/types.js";
+import type { ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
 
 const PING_INTERVAL_MS = 30_000;
@@ -98,7 +98,7 @@ export function registerWsRoutes(
               session: {
                 id: row.id,
                 workspace: row.workspace,
-                status: row.status as "active" | "archived" | "deleted",
+                status: row.status as SessionStatus,
                 title: row.title ?? undefined,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,

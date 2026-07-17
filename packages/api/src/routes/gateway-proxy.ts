@@ -234,7 +234,14 @@ async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
 
   const sandbox = session.attachment.current();
   const endpoint = sandbox?.gatewayEndpoint ? await sandbox.gatewayEndpoint() : null;
-  if (!endpoint) return c.json({ error: "sandbox not ready", wake: true }, 409);
+  if (!endpoint) {
+    // Fire-and-forget: kicks the resume path for a suspended attachment (or
+    // a cold provision for a detached one) so the client's retry after this
+    // 409 has a real chance of landing on a ready sandbox (sandbox
+    // hibernation plan, Task 4).
+    session.attachment.warm();
+    return c.json({ error: "sandbox not ready", wake: true }, 409);
+  }
 
   const target = `http://${endpoint.host}:${endpoint.port}${rewrittenPath}${url.search}`;
   const hasBody = c.req.method !== "GET" && c.req.method !== "HEAD";
@@ -376,6 +383,8 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
             const sandbox = session.attachment.current();
             const endpoint = sandbox?.gatewayEndpoint ? await sandbox.gatewayEndpoint() : null;
             if (!endpoint) {
+              // Fire-and-forget wake, same as the HTTP proxy's 409 path.
+              session.attachment.warm();
               ws.close(4009, "sandbox not ready");
               return;
             }

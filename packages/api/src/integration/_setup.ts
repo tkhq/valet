@@ -24,6 +24,7 @@ import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
+import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { resolveOrgId } from "../lib/org.js";
@@ -98,10 +99,15 @@ export interface BootTestApiOpts {
    * default. Idle-sweep tests set this (with a `sandboxProvider` whose
    * `capabilities().hibernation` is `true`) to exercise the sweep. */
   idleMinutes?: number;
-  /** Forwarded to `EngineHostOpts.onHibernate`. */
+  /** Overrides the default db-backed `EngineHostOpts.onHibernate` hook
+   * (`buildHibernationHooks`) — unset by default, matching real boot. */
   onHibernate?: EngineHostOpts["onHibernate"];
-  /** Forwarded to `EngineHostOpts.onWake`. */
+  /** Overrides the default db-backed `EngineHostOpts.onWake` hook
+   * (`buildHibernationHooks`) — unset by default, matching real boot. */
   onWake?: EngineHostOpts["onWake"];
+  /** Overrides the default db-backed `EngineHostOpts.onSessionReady` hook
+   * (`buildHibernationHooks`) — unset by default, matching real boot. */
+  onSessionReady?: EngineHostOpts["onSessionReady"];
   /** Forwarded to `EngineHostOpts.idleSweepTestHooks` — test-only race
    * injection for the idle sweep's re-check. */
   idleSweepTestHooks?: EngineHostOpts["idleSweepTestHooks"];
@@ -197,6 +203,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // directly still can (they're plain exported functions/classes); this
   // wiring only matters for exercising `task` through a real orchestrator.
   let spawnerRef: ChildSpawner | undefined;
+  // Default hibernation hooks are the SAME db-backed implementation real
+  // boot uses (`providers/node.ts`) — matches production behavior for tests
+  // that don't need to observe the hooks directly. `opts.on*` overrides
+  // take precedence for tests that do (e.g. asserting call order/count).
+  const defaultHibernationHooks = buildHibernationHooks(db);
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -206,8 +217,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
     idleMinutes: opts.idleMinutes,
-    onHibernate: opts.onHibernate,
-    onWake: opts.onWake,
+    onHibernate: opts.onHibernate ?? defaultHibernationHooks.onHibernate,
+    onWake: opts.onWake ?? defaultHibernationHooks.onWake,
+    onSessionReady: opts.onSessionReady ?? defaultHibernationHooks.onSessionReady,
     idleSweepTestHooks: opts.idleSweepTestHooks,
     db,
     apiBaseUrl,
