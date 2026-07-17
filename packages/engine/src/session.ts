@@ -140,6 +140,17 @@ export class Session {
       // includes it — narrow it away so the assignment to EngineEvent's
       // (slightly different) state union type-checks.
       if (status.state === "detached") return;
+      // Wake-tag the eventKey so a suspend/resume cycle's re-emitted
+      // `provisioning`/`ready` (SAME epoch — a clean wake is not a re-provision)
+      // don't collide with the cold-boot status events and get dropped by
+      // append's key-dedup (leaving the stale `suspended` as the last durable
+      // status on a live sandbox). wake 0 stays byte-identical to the original
+      // key for never-suspended sandboxes.
+      const wake = status.wake ?? 0;
+      const eventKey =
+        wake > 0
+          ? `sandbox:${status.epoch}:w${wake}:${status.state}`
+          : `sandbox:${status.epoch}:${status.state}`;
       void this.emit(
         {
           type: "sandbox_status",
@@ -148,7 +159,7 @@ export class Session {
           epoch: status.epoch,
           estimateMs: status.estimateMs,
         },
-        { eventKey: `sandbox:${status.epoch}:${status.state}` },
+        { eventKey },
       );
     });
   }

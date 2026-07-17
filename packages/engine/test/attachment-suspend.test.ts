@@ -271,4 +271,53 @@ describe("SandboxAttachment hibernation", () => {
     expect(att.state).toBe("ready");
     expect(att.current()?.id).toBe("sb-1");
   });
+
+  it("reportFailure racing an in-flight resume re-provisions instead of deadlocking", async () => {
+    const provider = new HibernatingProvider();
+    const att = await reachSuspended(provider, "sb-1");
+
+    // Block resume until the test fires reportFailure mid-flight.
+    const resumeGate = defer<void>();
+    provider.resumeImpl = async () => {
+      await resumeGate.promise;
+    };
+
+    // A waiter kicked off while suspended → drives doResume, then parks.
+    const readyP = att.ensureReady({ timeoutMs: 5000 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(att.state).toBe("provisioning"); // resume in flight
+    expect(provider.resumeCalls).toEqual(["sb-1"]);
+
+    // Queue the epoch-2 create result the degradation re-provision will consume.
+    const d2 = provider.nextDeferred();
+
+    // Degradation lands on the still-current epoch 1 while resume is blocked.
+    att.reportFailure(1, new Error("liveness lost"));
+    expect(att.currentEpoch()).toBe(2);
+
+    // Let the (now superseded) resume resolve. It must NOT mark ready+null.
+    resumeGate.resolve();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // A fresh create ran for the new epoch — not a stuck ready+null.
+    expect(provider.createCalls).toBe(2); // 1 initial + 1 degradation re-provision
+    expect(att.state === "ready" && att.current() === null).toBe(false);
+    expect(att.state).toBe("provisioning"); // awaiting the epoch-2 create
+
+    // Settle the re-provision; the parked waiter resolves exactly once with the
+    // new sandbox at the new epoch.
+    let resolveCount = 0;
+    void readyP.then(() => {
+      resolveCount++;
+    });
+    d2.resolve(makeFakeSandbox("sb-2"));
+    const resolved = await readyP;
+
+    expect(resolved.sandbox.id).toBe("sb-2");
+    expect(resolved.epoch).toBe(2);
+    expect(att.state).toBe("ready");
+    expect(att.current()?.id).toBe("sb-2");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(resolveCount).toBe(1);
+  });
 });

@@ -17,6 +17,16 @@ export interface AttachmentStatus {
   sandboxId?: string;
   epoch: number;
   estimateMs?: number;
+  /**
+   * Suspend/resume cycle counter (engine-internal). 0 for a never-suspended
+   * attachment; incremented on each `suspend()`. The epoch is deliberately NOT
+   * bumped by a clean suspend/resume, so a wake re-emits the SAME
+   * epoch's `provisioning`/`ready` — which would collide with the cold-boot
+   * status events on their durable `sandbox:{epoch}:{state}` eventKey. Callers
+   * building that key (see `Session`) use `wake` to disambiguate wake
+   * transitions from the cold boot. Not forwarded to the wire shape.
+   */
+  wake?: number;
 }
 
 type StatusListener = (status: AttachmentStatus) => void;
@@ -40,6 +50,7 @@ export class SandboxAttachment {
 
   private _state: AttachmentState = "detached";
   private _epoch = 0;
+  private _wakeCount = 0;
   private _sandbox: Sandbox | null = null;
   private destroyed = false;
   private inFlight: Promise<void> | null = null;
@@ -172,6 +183,12 @@ export class SandboxAttachment {
     await provider.suspend(sandbox.id);
     // A concurrent destroy() during the await wins — do not resurrect it.
     if (this.destroyed) return;
+    // Bump the suspend/resume cycle counter BEFORE emitting so this `suspended`
+    // event and the wake's re-emitted `provisioning`/`ready` all carry a
+    // wake-tag that disambiguates them from the cold-boot status events on the
+    // same (deliberately-stable) epoch — otherwise they collide on the durable
+    // eventKey and never reach the log or live subscribers.
+    this._wakeCount += 1;
     this._state = "suspended";
     this.emitStatus();
   }
@@ -328,18 +345,36 @@ export class SandboxAttachment {
   }
 
   private async doResume(): Promise<void> {
+    // Capture the epoch this wake belongs to. A concurrent reportFailure() can
+    // bump the epoch (and null the handle) WHILE provider.resume is in flight —
+    // it deliberately matches the still-current epoch, degrades, and re-kicks a
+    // provision that no-ops because this doResume holds `inFlight`. If we then
+    // blindly marked ready, `_sandbox` would be null (reportFailure dropped it)
+    // → a permanent `ready`+null deadlock: flushWaiters bails on the null guard
+    // and every future ensureReady misses the fast-path while kickProvision
+    // returns early on `ready`. So on completion we detect the supersession and
+    // hand off to a fresh provision for the new epoch instead.
+    const startEpoch = this._epoch;
     const sandbox = this._sandbox;
     const provider = this.provider;
     // Silent-ish transition: emit a single `provisioning` status for the wake,
     // mirroring doProvision. The epoch is deliberately left unchanged.
     this._state = "provisioning";
     this.emitStatus();
+    let superseded = false;
     try {
       if (!provider) throw new Error("no provider");
       if (!provider.resume) throw new Error("provider does not support hibernation");
       if (!sandbox) throw new Error("suspended attachment has no sandbox handle");
       await provider.resume(sandbox.id);
       if (this.destroyed) return;
+      // Superseded by a concurrent reportFailure (epoch bumped and/or the handle
+      // dropped): discard this wake WITHOUT marking ready — the waiters stay
+      // parked and are settled exactly once by the re-provision kicked below.
+      if (this._epoch !== startEpoch || this._sandbox === null) {
+        superseded = true;
+        return;
+      }
       // The raw handle is reused as-is — resume wakes the same sandbox.
       this._state = "ready";
       this.emitStatus();
@@ -358,6 +393,11 @@ export class SandboxAttachment {
       }
     } finally {
       this.inFlight = null;
+      // reportFailure already set `provisioning` and released the old handle;
+      // its kickProvision no-op'd on our `inFlight`. Now that it's clear, drive
+      // the re-provision for the new epoch — this is the degradation's intended
+      // re-provision, and its flushWaiters resolves the parked waiters.
+      if (superseded) this.kickProvision();
     }
   }
 
@@ -413,6 +453,7 @@ export class SandboxAttachment {
       sandboxId: this._sandbox?.id,
       epoch: this._epoch,
       estimateMs: this.estimateMs,
+      wake: this._wakeCount,
     };
     for (const cb of this.listeners) {
       try {
