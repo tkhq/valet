@@ -240,6 +240,53 @@ describe("pluginCatalogTools: list_tools", () => {
 
     faux.unregister();
   });
+
+  it("survives a throwing credential probe: full catalog + warning for that service, others probed normally", async () => {
+    const { plugin: githubPlugin } = makeMockPlugin();
+    const gmailAction: PluginAction = {
+      id: "gmail.send",
+      name: "Send Email",
+      description: "Send an email.",
+      riskLevel: "low",
+      parameters: Type.Object({ to: Type.String() }),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    const gmailPlugin: ActionPlugin = { service: "gmail", actions: [gmailAction] };
+
+    const [listTool] = pluginCatalogTools({ plugins: [githubPlugin, gmailPlugin] });
+    const ctx = makeCtx({
+      credentials: {
+        get: async (service?: string): Promise<Credential | null> => {
+          if (service === "github") throw new Error("GitHub App not installed");
+          if (service === "gmail") return { accessToken: "gmail-token" };
+          return null;
+        },
+        request: async (): Promise<Credential> => {
+          throw new Error("not implemented in test stub");
+        },
+      },
+    });
+
+    const result = await listTool.execute({}, ctx);
+    const payload = JSON.parse(result.text) as {
+      tools: Array<{ tool_id: string }>;
+      warnings?: Array<{ service: string; reason: string }>;
+    };
+
+    // Full catalog still returned — the throwing github probe didn't abort list_tools.
+    expect(payload.tools.map((t) => t.tool_id).sort()).toEqual([
+      "github.create_issue",
+      "github.delete_repo",
+      "github.get_issue",
+      "gmail.send",
+    ]);
+
+    // github got a warning (probe threw); gmail did not (credential resolved).
+    const githubWarning = payload.warnings?.find((w) => w.service === "github");
+    expect(githubWarning).toBeDefined();
+    const gmailWarning = payload.warnings?.find((w) => w.service === "gmail");
+    expect(gmailWarning).toBeUndefined();
+  });
 });
 
 describe("pluginCatalogTools: call_tool", () => {

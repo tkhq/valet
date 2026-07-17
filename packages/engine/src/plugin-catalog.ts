@@ -318,7 +318,16 @@ function makeListTool(catalog: Catalog): ToolDef {
           catalog.entries.find((e) => e.service === service)?.plugin.credentialService ??
           catalog.dynamicPlugins.find((p) => p.service === service)?.credentialService ??
           service;
-        const cred = await ctx.credentials.get(credService);
+        let cred: Awaited<ReturnType<typeof ctx.credentials.get>>;
+        try {
+          cred = await ctx.credentials.get(credService);
+        } catch {
+          // A resolver may throw instead of returning null (e.g. a
+          // GitHubAuthError when the org has no installation). Treat that
+          // the same as "no credential connected" so one throwing probe
+          // can't abort discovery for every other service.
+          cred = null;
+        }
         if (!cred) warnings.push({ service, reason: "no credential connected" });
       }
 
