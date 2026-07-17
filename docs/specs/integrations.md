@@ -239,6 +239,87 @@ Token retrieval: decrypts from `oauth_tokens` table using `ENCRYPTION_KEY`.
 
 **Signature verification caveat:** Signature is computed over `JSON.stringify(payload)` (re-serialized), not the original raw body.
 
+## Slack (personal) — per-user OAuth
+
+A per-user Slack integration, distinct from the org bot install. Uses a
+Slack user token (`xoxp`) so the agent can act **as the user**: read their
+DMs and private-channel history, post as them, update their profile /
+status. Package: `packages/plugin-slack-user`.
+
+### Shared Slack app, distinct plugin
+
+Both the org bot (`plugin-slack`) and personal-OAuth (`plugin-slack-user`)
+use the same Slack app credentials (`SLACK_CLIENT_ID` /
+`SLACK_CLIENT_SECRET`). The app manifest declares both bot scopes and user
+scopes. Tradeoff: an admin reinstalling the app sees all declared scopes
+in the approval prompt, including the user scopes personal Slack needs.
+This is preferred over managing two separate Slack apps + two sets of env
+vars per deploy.
+
+The plugins are separately toggleable in admin plugin settings — disabling
+`slack` does NOT disable `slack-user`, and vice versa.
+
+### Routes
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/me/slack-user` | Status (oauthAvailable, connected, teamId, slackUserId) |
+| `POST` | `/api/me/slack-user/oauth/start` | Mint authorize URL + set nonce cookie |
+| `DELETE` | `/api/me/slack-user/oauth` | Disconnect (revoke credential + delete integration) |
+| `GET` | `/auth/slack-user/callback` | Slack redirects here after consent (public, no auth middleware) |
+
+The callback lives at `/auth/slack-user/callback` — outside `/api/*` so it
+bypasses the shared bearer-auth middleware (Slack redirects the browser
+with no `Authorization` header). Sibling pattern of `/auth/github`.
+
+### CSRF binding
+
+The callback would be trivially CSRF'able if it trusted the signed
+`state` alone: an attacker could mint a state for their own `userId` via
+`/oauth/start` and deliver the resulting Slack authorize URL to a victim
+— the victim's `xoxp` token would then land under the attacker's account.
+
+Defense: on `/oauth/start` the server mints a random nonce, sets it as an
+`HttpOnly; Secure; SameSite=Lax; Path=/auth/slack-user` cookie, and
+embeds `sha256(nonce)` in the signed state as `nonceHash`. On the
+callback both must be present and match (constant-time compare). Cookie
+is single-use — cleared on every success + error exit.
+
+Client-side error label `user_mismatch` is emitted when the cookie is
+missing or doesn't match the hash.
+
+### Token exchange + storage
+
+- `slackUserProvider.getOAuthUrl` mints the authorize URL (scope=empty,
+  user_scope=SLACK_USER_SCOPES joined). The route only sets the cookie
+  and returns the URL.
+- `slackUserProvider.exchangeOAuthCode` calls `oauth.v2.access` and
+  returns `{ access_token, scope, slack_user_id, team_id, team_name }`.
+- Route validates every requested scope was granted (surfacing
+  `missing_scopes` on partial approval), checks for cross-user collisions
+  via `json_extract(metadata, '$.slack_user_id')` (returns
+  `already_linked` if a different user is already linked to that Slack
+  identity), then `storeCredential` + `ensureIntegration` (atomic
+  upsert on `(userId, service, scope)` — safe against concurrent
+  callbacks).
+
+### Revocation lifecycle
+
+Slack marks the token invalid on `token_revoked`, `invalid_auth`,
+`account_inactive`, `not_authed`. The plugin returns
+`ActionResult.revokeCredential = true` on any of these; the executor
+(`services/session-tools.executeAction`) then clears the credential row
+and marks the integration status `error` with a "reconnect" message so
+`GET /api/me/slack-user` reports `connected: false` on the next poll.
+
+### Risk levels
+
+Message-reading tools (`search_messages`, `read_history`, `read_thread`)
+are `medium` (require_approval) — the owner's private DMs are readable
+by anything driving the agent (prompt injection, another participant,
+workflow nodes) otherwise. `list_channels` is `low` (metadata-only).
+All write / act-as tools are `high`.
+
 ## Telegram Bot
 
 ### Setup Flow

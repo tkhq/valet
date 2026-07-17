@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { listTools, resolveActionPolicy } from './session-tools.js';
+import { listTools, resolveActionPolicy, matchesServiceFilter } from './session-tools.js';
 import { createTestDb } from '../test-utils/db.js';
 import { upsertActionPolicy } from '../lib/db/actions.js';
 import { upsertMcpToolCache } from '../lib/db/mcp-tool-cache.js';
@@ -440,5 +440,30 @@ describe('resolveActionPolicy', () => {
       actionId: 'salesforce.query',
       riskLevel: 'low',
     });
+  });
+});
+
+describe('matchesServiceFilter', () => {
+  it('matches a service exactly', () => {
+    expect(matchesServiceFilter('slack', 'slack')).toBe(true);
+    expect(matchesServiceFilter('slack-user', 'slack-user')).toBe(true);
+  });
+
+  it('matches hyphenated sub-services from a base-service filter', () => {
+    // The reason this function exists: `slack` should surface both the bot
+    // (`slack`) and the personal (`slack-user`) integrations.
+    expect(matchesServiceFilter('slack-user', 'slack')).toBe(true);
+    expect(matchesServiceFilter('google-drive', 'google')).toBe(true);
+    expect(matchesServiceFilter('google-calendar', 'google')).toBe(true);
+  });
+
+  it('stays boundary-aware — a base filter does not match an unrelated service', () => {
+    expect(matchesServiceFilter('github', 'git')).toBe(false);
+    expect(matchesServiceFilter('slackbot', 'slack')).toBe(false);
+    expect(matchesServiceFilter('slack', 'slack-user')).toBe(false);
+  });
+
+  it('empty filter matches everything', () => {
+    expect(matchesServiceFilter('slack-user', '')).toBe(true);
   });
 });

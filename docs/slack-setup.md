@@ -4,7 +4,12 @@ This guide walks through creating a Slack app and connecting it to Valet.
 
 ## Overview
 
-Valet uses an org-level Slack integration. One admin installs the app for the entire workspace, then individual users link their Slack accounts via a DM verification code.
+Valet has **two** Slack integrations that share a single Slack app:
+
+- **Slack (bot)** — org-level. One admin installs the app for the entire workspace with a bot token; individual users then link their Slack accounts via a DM verification code. The agent acts as the workspace bot. Steps 1–6 below cover this.
+- **Slack (personal)** — per-user. Each user connects their own Slack account through OAuth, and the agent can act *as that user* (search, read, post under their identity). This reuses the same Slack app but needs extra one-time configuration — see [Personal (per-user) Slack setup](#personal-per-user-slack-setup).
+
+You do not need a second Slack app for the personal integration. Add the user-token configuration to the same app you create in Step 1.
 
 ## Step 1: Create the Slack App
 
@@ -170,9 +175,90 @@ Once linked, messages you send in Slack channels where the bot is present will r
 | `users:read` | List workspace members (for the link typeahead) |
 | `users:read.email` | Look up users by email for identity linking |
 
+## Personal (per-user) Slack setup
+
+The **Slack (personal)** integration lets each user connect their own Slack account so the agent can act *as them* (search, read, post under their identity), independent of the org bot. It uses the **same Slack app** created in Step 1, plus the one-time configuration below. This is separate from the bot flow — a user can connect their personal account whether or not they've completed the bot link in Step 6.
+
+### Step A: Add User Token Scopes
+
+1. Open your Slack app at [api.slack.com/apps](https://api.slack.com/apps).
+2. Go to **OAuth & Permissions**.
+3. Under **Scopes → User Token Scopes** (not Bot Token Scopes), add every scope in [Required User Token Scopes](#required-user-token-scopes) below.
+
+Valet requests the full bundle on every connect and **refuses to store a partial credential**: if a workspace admin has restricted any requested scope, the connect flow fails with a `missing_scopes` error naming the gap instead of silently linking a degraded token.
+
+### Step B: Register the OAuth redirect URL
+
+1. Still under **OAuth & Permissions**, find **Redirect URLs**.
+2. Add exactly: `${API_PUBLIC_URL}/api/me/slack-user/oauth/callback`
+   (e.g. `https://valet.conner-7e8.workers.dev/api/me/slack-user/oauth/callback`). Use your deployed worker origin.
+3. Click **Save URLs**.
+
+Unlike the bot integration, the personal callback is served by the worker, not the client — the redirect URL must point at the worker origin.
+
+### Step C: Set the OAuth client secrets
+
+The personal flow uses Slack's OAuth client credentials (the bot flow does not). Find them under **Basic Information → App Credentials**, then set them as worker secrets:
+
+```bash
+wrangler secret put SLACK_CLIENT_ID --name <worker-name>
+wrangler secret put SLACK_CLIENT_SECRET --name <worker-name>
+```
+
+`SLACK_CLIENT_ID` unset is the most common cause of an "Invalid client_id" error at the Slack consent screen.
+
+### Step D: Reinstall the app
+
+Adding User Token Scopes changes the app's grant, so reinstall once for the new scopes to take effect: **OAuth & Permissions → Reinstall to Workspace** (or **Install App → Reinstall**). Bot-token behavior is unchanged, but the bot token *value* is regenerated on reinstall — if bot actions stop working afterward, update the org bot token (Step 4) with the new `xoxb-` value.
+
+### Step E: Connect (per user)
+
+Each user connects their own account:
+
+1. Go to **Integrations** in the Valet sidebar.
+2. The **Slack (personal)** card appears once `SLACK_CLIENT_ID`/`SLACK_CLIENT_SECRET` are configured.
+3. Click **Connect** and approve the Slack consent screen.
+
+On approval, Valet stores the user's encrypted personal token and the `slack_user.*` tools become available to their orchestrator. Whenever the scope set changes (e.g. after adding scopes in Step A), each user must **reconnect** to grant them.
+
+### Required User Token Scopes
+
+These 33 scopes are requested as **User Token Scopes** for the personal integration. They mirror the `SLACK_USER_SCOPES` bundle in `packages/plugin-slack-user/src/actions/provider.ts` and the `oauth_config.scopes.user` array in the app manifest.
+
+| Scope | Purpose |
+|-------|---------|
+| `search:read` | Search messages across the user's visible surface |
+| `channels:history`, `groups:history`, `im:history`, `mpim:history` | Read message history in public/private channels, DMs, group DMs |
+| `channels:read`, `groups:read`, `im:read`, `mpim:read` | List and look up those conversations |
+| `users:read` | List workspace members |
+| `users.profile:read` | Read the user's profile |
+| `team:read` | Read workspace metadata (team id/name captured at connect) |
+| `chat:write` | Post messages and DMs as the user |
+| `im:write`, `mpim:write` | Open a DM / group DM channel before posting (required by `send_dm`) |
+| `users.profile:write` | Set the user's status/profile |
+| `reactions:write`, `reactions:read` | Add and read reactions |
+| `dnd:write`, `dnd:read` | Set and read Do-Not-Disturb |
+| `files:read`, `files:write` | Read and upload files |
+| `pins:read`, `pins:write` | Read and add pins |
+| `bookmarks:read`, `bookmarks:write` | Read and add channel bookmarks |
+| `stars:read`, `stars:write` | Read and add saved items |
+| `reminders:read`, `reminders:write` | Read and create reminders |
+| `usergroups:read`, `usergroups:write` | Read and update user groups |
+| `emoji:read` | Read custom emoji |
+
 ## Troubleshooting
 
 **Events URL won't verify**: Make sure `SLACK_SIGNING_SECRET` is set in the worker environment and the worker is deployed. The events endpoint is at `/channels/slack/events`.
+
+**Personal connect shows "Invalid client_id"**: `SLACK_CLIENT_ID` is unset or wrong on the worker. Set it (Step C) with the value from Basic Information → App Credentials.
+
+**Personal connect shows "redirect_uri did not match"**: The redirect URL in Step B isn't registered on the app, or doesn't exactly match the worker origin. Add `${API_PUBLIC_URL}/api/me/slack-user/oauth/callback` and Save URLs.
+
+**Personal connect redirects with `reason=missing_scopes`**: Slack didn't grant every requested scope (usually a workspace admin restriction). Add the named scopes under User Token Scopes (Step A) and reconnect.
+
+**`slack_user.*` action fails with `missing_scope`**: The connected token predates a scope addition. Add the scope under User Token Scopes and have the user reconnect. For `send_dm` specifically, ensure `im:write`/`mpim:write` are granted.
+
+**Personal tools don't appear in `list_tools`**: The user hasn't connected, or connected before the integration was registered — have them click **Connect** on the Slack (personal) card. Note the service slug is `slack-user`; a base filter of `slack` also surfaces it.
 
 **Bot token rejected**: Ensure you're using the **Bot User OAuth Token** (starts with `xoxb-`), not a user token or app-level token.
 

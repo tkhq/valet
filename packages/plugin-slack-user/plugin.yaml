@@ -1,0 +1,4 @@
+name: slack-user
+version: 0.0.1
+description: Slack (personal) — per-user OAuth client acting AS the user (search, read, set status, post on behalf of). Separate from the org Slack bot integration.
+icon: "\U0001F464"

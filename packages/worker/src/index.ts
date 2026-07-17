@@ -37,6 +37,7 @@ import { notificationQueueRouter } from './routes/mailbox.js';
 import { channelsRouter } from './routes/channels.js';
 import { telegramApiRouter } from './routes/telegram.js';
 import { slackAdminRouter, slackUserRouter } from './routes/slack.js';
+import { slackUserOAuthRouter, slackUserCallbackRouter } from './routes/slack-user.js';
 import { adminGitHubRouter, githubAppSetupCallbackRouter } from './routes/admin-github.js';
 import { slackEventsRouter } from './routes/slack-events.js';
 import { channelWebhooksRouter } from './routes/channel-webhooks.js';
@@ -206,6 +207,12 @@ app.route('/channels', slackEventsRouter);
 // GitHub App manifest callback (unauthenticated — GitHub redirects here after app creation)
 app.route('/github', githubAppSetupCallbackRouter);
 
+// Slack (personal) OAuth callback (unauthenticated — Slack redirects the
+// browser here with no Authorization header; identity comes from the signed
+// state + browser-bound nonce cookie). Mounted here rather than under
+// /api/me/slack-user so it stays outside the bearer-auth middleware.
+app.route('/auth/slack-user', slackUserCallbackRouter);
+
 // Protected API routes
 app.use('/api/*', authMiddleware);
 // Tag the request's trace span with the authenticated principal so traces and logs
@@ -246,6 +253,7 @@ app.route('/api/admin/disabled-actions', disabledActionsRouter);
 app.route('/api/admin/default-skills', orgDefaultSkillsRouter);
 app.route('/api/action-invocations', actionInvocationsRouter);
 app.route('/api/me/slack', slackUserRouter);
+app.route('/api/me/slack-user', slackUserOAuthRouter);
 app.route('/api/me/github', githubMeRouter);
 app.route('/api/invites', invitesApiRouter);
 app.route('/api/usage', usageRouter);

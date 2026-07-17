@@ -30,6 +30,21 @@ export interface IntegrationConfig {
   filters?: Record<string, unknown>;
 }
 
+/**
+ * Response shape for `GET /api/me/slack-user`. Reports whether the worker
+ * has the Slack app credentials configured, whether the current user has
+ * linked their personal Slack account, and (when linked) the Slack team +
+ * user id captured at OAuth time.
+ */
+export interface SlackUserOAuthStatus {
+  /** SLACK_CLIENT_ID + SLACK_CLIENT_SECRET are set on the worker. */
+  oauthAvailable: boolean;
+  connected: boolean;
+  slackUserId: string | null;
+  teamId: string | null;
+  teamName: string | null;
+}
+
 // EventBus types
 export type EventBusEventType =
   | 'session.update'

@@ -1,12 +1,17 @@
 import type { Env } from '../env.js';
 import type { AppDb } from '../lib/drizzle.js';
-import { buildActionCredentials, type CredentialResult } from '../services/credentials.js';
+import { buildActionCredentials, revokeCredential, type CredentialResult } from '../services/credentials.js';
+import { updateIntegrationStatus } from '../lib/db/integrations.js';
 import { integrationRegistry } from '../integrations/registry.js';
 import { getUserIntegrations, getOrgIntegrations } from '../lib/db/integrations.js';
 import { invokeAction, markExecuted, markFailed } from '../services/actions.js';
 import { getDisabledActionsIndex, isActionDisabled } from '../lib/db/disabled-actions.js';
 import { listMcpToolCache, upsertMcpToolCache } from '../lib/db/mcp-tool-cache.js';
-import { getAutoEnabledServices, getDisabledPluginServices } from '../lib/db/plugins.js';
+import {
+  getAutoEnabledServices,
+  getDisabledPluginServices,
+  isServiceDisabledByPlugin,
+} from '../lib/db/plugins.js';
 import { getUserIdentityLinks, getOrchestratorIdentity } from '../lib/db.js';
 import { loadCustomMcpConnectorContext } from './custom-mcp-connectors.js';
 
@@ -199,7 +204,10 @@ export async function listTools(
     const provider = integrationRegistry.getProvider(service, customContext);
     if (filterService && !matchesServiceFilter(service, filterService, provider)) continue;
     if (disabledServiceSet.has(service)) continue;
-    if (disabledPluginServices.has(service)) continue;
+    // Uses isServiceDisabledByPlugin so hyphenated/underscored spellings of
+    // the same service both match. Sibling services are distinct: disabling
+    // `slack` does NOT disable `slack-user` (they are separate plugin toggles).
+    if (isServiceDisabledByPlugin(service, disabledPluginServices)) continue;
 
     const actionSource = integrationRegistry.getActions(service, customContext);
     if (!actionSource) continue;
@@ -378,7 +386,7 @@ export async function resolveActionPolicy(
       expiresAt: Date.now() + 60 * 1000, // 1 minute TTL
     };
   }
-  if (disabledPluginServicesCache.services.has(service)) {
+  if (isServiceDisabledByPlugin(service, disabledPluginServicesCache.services)) {
     throw new Error(`Action "${toolId}" is disabled by your organization.`);
   }
 
@@ -584,6 +592,44 @@ export async function executeAction(
 
   const durationMs = Date.now() - toolExecStart;
 
+  // Plugin signalled the stored credential is permanently invalid (e.g. Slack
+  // token_revoked). Clear the row and mark the user's integration for
+  // reconnect so the UI stops reporting `connected: true` and the agent's
+  // next attempt fails fast with a clear reconnect prompt instead of
+  // another provider-side rejection.
+  //
+  // Scoped to per-user credentials for user-scope providers (`slack-user`,
+  // per-user GitHub OAuth apps, etc.). Org bot tokens are managed by admins
+  // and shouldn't be nuked because one user's session hit a rate-limited
+  // token error; the isAuthError refresh path above handles those.
+  if (
+    actionResult.revokeCredential
+    && requiresUserCredential(provider)
+    && provider?.credentialScope === 'user'
+  ) {
+    try {
+      await revokeCredential(env, 'user', userId, service);
+      const userIntegrations = await getUserIntegrations(appDb, userId);
+      const userIntegration = userIntegrations.find((i) => i.service === service);
+      if (userIntegration) {
+        await updateIntegrationStatus(
+          appDb,
+          userIntegration.id,
+          'error',
+          'Token revoked at the provider. Reconnect from Integrations.',
+        );
+      }
+      opts.credentialCache?.invalidate('user', userId, service);
+    } catch (revokeErr) {
+      // Non-fatal: the agent still surfaces actionResult.error. We only log
+      // so the operator sees a broken cleanup path in the DO logs.
+      console.error(
+        `[session-tools] revokeCredential cleanup failed for user=${userId} service=${service}:`,
+        revokeErr,
+      );
+    }
+  }
+
   if (!actionResult.success) {
     await markFailed(appDb, invocationId, actionResult.error || 'Action failed');
   } else {
@@ -613,18 +659,25 @@ function customConnectorRequiresUserCredential(connector: { authType: string; cr
   return connector.credentialScope === 'user';
 }
 
-function matchesServiceFilter(
+export function matchesServiceFilter(
   service: string,
   filter: string,
   provider?: { displayName?: string; isCustomConnector?: boolean },
 ): boolean {
   const normalizedFilter = filter.trim().toLowerCase();
   if (!normalizedFilter) return true;
-  if (service.toLowerCase() === normalizedFilter) return true;
+  const normalizedService = service.toLowerCase();
+  if (normalizedService === normalizedFilter) return true;
+
+  // Sub-service prefix match: a base-service filter also matches its hyphenated
+  // sub-services, so `slack` returns both `slack` and `slack-user`, and `google`
+  // returns `google-drive`/`google-calendar`/etc. The trailing hyphen keeps this
+  // boundary-aware — `git` does NOT match `github`.
+  if (normalizedService.startsWith(`${normalizedFilter}-`)) return true;
 
   if (!provider?.isCustomConnector) return false;
 
-  return service.toLowerCase().includes(normalizedFilter)
+  return normalizedService.includes(normalizedFilter)
     || (provider.displayName ?? '').toLowerCase().includes(normalizedFilter);
 }
 
