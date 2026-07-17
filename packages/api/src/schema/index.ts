@@ -814,6 +814,60 @@ export const llmProviders = pgTable(
   (t) => [index("llm_providers_org").on(t.orgId)],
 );
 
+// ─── Session repo bindings (GitHub/repo integration plan, Task 2) ──────────
+//
+// One row per repo bound to a session (session-create route accepts
+// `repo`/`repos` and inserts a row per binding, position = array order).
+// No actual FK to `agent_sessions` — matches sibling tables' convention
+// (`session_threads`, `messages`) of a plain indexed `session_id` text
+// column with cascade-by-code, not by constraint.
+export const sessionRepos = pgTable(
+  "session_repos",
+  {
+    sessionId: text("session_id").notNull(),
+    host: text("host").notNull().default("github"),
+    fullName: text("full_name").notNull(),
+    cloneUrl: text("clone_url").notNull(),
+    ref: text("ref"),
+    auth: text("auth", { enum: ["auto", "app", "user"] })
+      .notNull()
+      .default("auto"),
+    position: integer("position").notNull(),
+  },
+  (t) => [
+    index("session_repos_session").on(t.sessionId),
+    uniqueIndex("session_repos_session_position").on(t.sessionId, t.position),
+  ],
+);
+
+// ─── GitHub App installations (GitHub/repo integration plan, Task 2) ───────
+//
+// One row per org-linked GitHub App installation. `cachedToken` /
+// `cachedTokenExpiresAt` cache the short-lived installation access token
+// (encrypted at rest by the writer, like `credentials.*Enc` columns) so
+// later tasks (sandbox clone auth) don't mint a new one per request.
+export const githubInstallations = pgTable(
+  "github_installations",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    installationId: bigint("installation_id", { mode: "number" }).notNull(),
+    accountLogin: text("account_login").notNull(),
+    accountType: text("account_type").notNull(),
+    repositorySelection: text("repository_selection"),
+    suspended: boolean("suspended").notNull().default(false),
+    linkedUserId: text("linked_user_id"),
+    cachedToken: text("cached_token"),
+    cachedTokenExpiresAt: bigint("cached_token_expires_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("github_installations_org_installation").on(t.orgId, t.installationId),
+    index("github_installations_org_account").on(t.orgId, t.accountLogin),
+  ],
+);
+
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -850,3 +904,5 @@ export type WorkflowSignalRow = typeof workflowSignals.$inferSelect;
 export type CredentialRow = typeof credentials.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
+export type SessionRepoRow = typeof sessionRepos.$inferSelect;
+export type GithubInstallationRow = typeof githubInstallations.$inferSelect;

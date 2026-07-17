@@ -58,11 +58,26 @@ export interface SessionSummary {
   updatedAt: number;
 }
 
+/** A single repo bound to a session (GitHub/repo integration plan, Task 2).
+ * `host` defaults to "github" server-side when omitted. `auth` selects how
+ * the sandbox authenticates the clone: "auto" (server picks), "app" (GitHub
+ * App installation token), or "user" (the session owner's linked OAuth
+ * token) — defaults to "auto". */
+export interface RepoBinding {
+  host?: string;
+  fullName: string;
+  cloneUrl: string;
+  ref?: string;
+  auth?: "auto" | "app" | "user";
+}
+
 export interface SessionDetail extends SessionSummary {
   messageCount: number;
   /** Session-default model id. Threads inherit when they have no override. */
   model?: string;
   profile: SandboxProfile;
+  /** Repos bound to this session, in position order. Omitted when unbound. */
+  repos?: RepoBinding[];
 }
 
 export interface CreateSessionRequest {
@@ -72,6 +87,10 @@ export interface CreateSessionRequest {
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
   profile?: SandboxProfile;
+  /** Multiple repo bindings. Mutually exclusive with `repo` (400 if both set). */
+  repos?: RepoBinding[];
+  /** Sugar for a single repo binding — equivalent to `repos: [repo]`. */
+  repo?: RepoBinding;
 }
 
 export interface ListSessionsResponse {

@@ -6,13 +6,19 @@ import { parseOrchestratorSessionId } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches, messages as messagesTable } from "../schema/index.js";
+import {
+  agentSessions,
+  childWatches,
+  messages as messagesTable,
+  sessionRepos,
+} from "../schema/index.js";
 import type {
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
   ListSessionsResponse,
   PauseSessionResponse,
+  RepoBinding,
   SandboxJwtResponse,
   SessionDetail,
   SessionStatus,
@@ -25,6 +31,61 @@ function newId(prefix: string): string {
   // Short URL-safe id; not cryptographic. Engine's own id collision domain is
   // separate (prefixed `sess-...` by the engine); we use `s_...` here.
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const REPO_AUTH_VALUES = ["auto", "app", "user"] as const;
+
+// Validates + normalizes the `repo`/`repos` create-request sugar into a flat
+// list (GitHub/repo integration plan, Task 2). Returns an error message on
+// the first invalid binding rather than a field-keyed map — the route
+// surfaces it as a flat 400 like every other validation error here.
+function parseRepoBindings(body: CreateSessionRequest): { repos: RepoBinding[] } | { error: string } {
+  if (body.repo !== undefined && body.repos !== undefined) {
+    return { error: "specify either 'repo' or 'repos', not both" };
+  }
+  const raw = body.repos ?? (body.repo !== undefined ? [body.repo] : undefined);
+  if (raw === undefined) return { repos: [] };
+  if (!Array.isArray(raw)) return { error: "repos must be an array" };
+  if (raw.length > 5) return { error: "at most 5 repo bindings are allowed" };
+
+  const repos: RepoBinding[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") {
+      return { error: "each repo binding must be an object" };
+    }
+    if (typeof r.fullName !== "string" || r.fullName.trim() === "") {
+      return { error: "repo binding fullName is required" };
+    }
+    if (typeof r.cloneUrl !== "string" || !r.cloneUrl.startsWith("https://")) {
+      return { error: "repo binding cloneUrl must be an https:// URL" };
+    }
+    if (r.auth !== undefined && !REPO_AUTH_VALUES.includes(r.auth)) {
+      return { error: "repo binding auth must be 'auto', 'app', or 'user'" };
+    }
+    repos.push({
+      host: r.host ?? "github",
+      fullName: r.fullName,
+      cloneUrl: r.cloneUrl,
+      ref: r.ref,
+      auth: r.auth ?? "auto",
+    });
+  }
+  return { repos };
+}
+
+async function getSessionRepos(db: AppDb, sessionId: string): Promise<RepoBinding[]> {
+  const rows = await db
+    .select()
+    .from(sessionRepos)
+    .where(eq(sessionRepos.sessionId, sessionId))
+    .orderBy(sessionRepos.position);
+  return rows.map((row) => ({
+    host: row.host,
+    fullName: row.fullName,
+    cloneUrl: row.cloneUrl,
+    ref: row.ref ?? undefined,
+    auth: row.auth,
+  }));
 }
 
 function rowToSummary(row: typeof agentSessions.$inferSelect): SessionSummary {
@@ -96,6 +157,12 @@ sessionsRouter.post("/", async (c) => {
   }
   const profile = body.profile ?? "headless";
 
+  const parsedRepos = parseRepoBindings(body);
+  if ("error" in parsedRepos) {
+    return c.json({ error: parsedRepos.error }, 400);
+  }
+  const { repos } = parsedRepos;
+
   // Auto-create the workspace dir if it doesn't exist; reject if the path
   // exists but is a file (Docker bind-mount needs a directory).
   try {
@@ -132,6 +199,20 @@ sessionsRouter.post("/", async (c) => {
       updatedAt: now,
     });
 
+  if (repos.length > 0) {
+    await db.insert(sessionRepos).values(
+      repos.map((repo, position) => ({
+        sessionId: id,
+        host: repo.host ?? "github",
+        fullName: repo.fullName,
+        cloneUrl: repo.cloneUrl,
+        ref: repo.ref ?? null,
+        auth: repo.auth ?? "auto",
+        position,
+      })),
+    );
+  }
+
   const detail: CreateSessionResponse = {
     id,
     workspace: body.workspace,
@@ -141,6 +222,7 @@ sessionsRouter.post("/", async (c) => {
     updatedAt: now,
     messageCount: 0,
     profile,
+    ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail, 201);
 });
@@ -180,11 +262,14 @@ sessionsRouter.get("/:id", async (c) => {
     model = engineSession.options.model.id;
   }
 
+  const repos = await getSessionRepos(db, id);
+
   const detail: GetSessionResponse = {
     ...rowToSummary(row),
     messageCount: Number(n ?? 0),
     model,
     profile: row.profile,
+    ...(repos.length > 0 ? { repos } : {}),
   };
   return c.json(detail);
 });

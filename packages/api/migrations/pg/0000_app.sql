@@ -525,3 +525,36 @@ CREATE TABLE "llm_providers" (
 CREATE INDEX "llm_providers_org" ON "llm_providers" ("org_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "llm_providers_org_kind_singleton" ON "llm_providers" ("org_id","kind") WHERE "kind" <> 'openai_compatible';
+--> statement-breakpoint
+CREATE TABLE "session_repos" (
+	"session_id" text NOT NULL,
+	"host" text DEFAULT 'github' NOT NULL,
+	"full_name" text NOT NULL,
+	"clone_url" text NOT NULL,
+	"ref" text,
+	"auth" text DEFAULT 'auto' NOT NULL,
+	"position" integer NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "session_repos_session" ON "session_repos" ("session_id");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "session_repos_session_position" ON "session_repos" ("session_id","position");
+--> statement-breakpoint
+CREATE TABLE "github_installations" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"installation_id" bigint NOT NULL,
+	"account_login" text NOT NULL,
+	"account_type" text NOT NULL,
+	"repository_selection" text,
+	"suspended" boolean DEFAULT false NOT NULL,
+	"linked_user_id" text,
+	"cached_token" text,
+	"cached_token_expires_at" bigint,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "github_installations_org_installation" ON "github_installations" ("org_id","installation_id");
+--> statement-breakpoint
+CREATE INDEX "github_installations_org_account" ON "github_installations" ("org_id","account_login");

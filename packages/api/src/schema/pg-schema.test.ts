@@ -29,6 +29,9 @@ import {
   memoryFiles,
   llmProviders,
   orgs,
+  agentSessions,
+  sessionRepos,
+  githubInstallations,
 } from "./index.js";
 
 const APP_TABLES = [
@@ -65,6 +68,8 @@ const APP_TABLES = [
   "credentials",
   "action_invocations",
   "llm_providers",
+  "session_repos",
+  "github_installations",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -278,6 +283,147 @@ describe("pg app schema + migrations", () => {
         models: [],
         createdAt: now,
       });
+    });
+  });
+
+  describe("session_repos", () => {
+    const now = Date.now();
+
+    it("round-trips a per-position insert/select with the position uniqueness index", async () => {
+      await drizzleDb.insert(agentSessions).values({
+        id: "sess-repo-1",
+        userId: "u1",
+        orgId: "org-repo-1",
+        workspace: "/tmp/sess-repo-1",
+        status: "active",
+        ownerType: "user",
+        ownerId: "u1",
+        profile: "headless",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await drizzleDb.insert(sessionRepos).values([
+        {
+          sessionId: "sess-repo-1",
+          host: "github",
+          fullName: "acme/widgets",
+          cloneUrl: "https://github.com/acme/widgets.git",
+          ref: "main",
+          auth: "auto",
+          position: 0,
+        },
+        {
+          sessionId: "sess-repo-1",
+          host: "github",
+          fullName: "acme/sprockets",
+          cloneUrl: "https://github.com/acme/sprockets.git",
+          auth: "app",
+          position: 1,
+        },
+      ]);
+
+      const rows = await drizzleDb
+        .select()
+        .from(sessionRepos)
+        .where(eq(sessionRepos.sessionId, "sess-repo-1"))
+        .orderBy(sessionRepos.position);
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toEqual({
+        sessionId: "sess-repo-1",
+        host: "github",
+        fullName: "acme/widgets",
+        cloneUrl: "https://github.com/acme/widgets.git",
+        ref: "main",
+        auth: "auto",
+        position: 0,
+      });
+      expect(rows[1]?.fullName).toBe("acme/sprockets");
+      expect(rows[1]?.ref).toBeNull();
+      expect(rows[1]?.auth).toBe("app");
+    });
+
+    it("rejects a duplicate (session_id, position) pair", async () => {
+      await drizzleDb.insert(agentSessions).values({
+        id: "sess-repo-2",
+        userId: "u1",
+        orgId: "org-repo-2",
+        workspace: "/tmp/sess-repo-2",
+        status: "active",
+        ownerType: "user",
+        ownerId: "u1",
+        profile: "headless",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await drizzleDb.insert(sessionRepos).values({
+        sessionId: "sess-repo-2",
+        fullName: "acme/widgets",
+        cloneUrl: "https://github.com/acme/widgets.git",
+        position: 0,
+      });
+
+      await expect(
+        drizzleDb.insert(sessionRepos).values({
+          sessionId: "sess-repo-2",
+          fullName: "acme/other",
+          cloneUrl: "https://github.com/acme/other.git",
+          position: 0,
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe("github_installations", () => {
+    const now = Date.now();
+
+    it("round-trips an insert/select and enforces the (org_id, installation_id) unique index", async () => {
+      await drizzleDb.insert(orgs).values({ id: "org-ghi-1", name: "Org GHI", createdAt: now });
+      await drizzleDb.insert(githubInstallations).values({
+        id: "ghi_1",
+        orgId: "org-ghi-1",
+        installationId: 12345,
+        accountLogin: "acme",
+        accountType: "Organization",
+        repositorySelection: "selected",
+        suspended: false,
+        cachedToken: "enc:abc",
+        cachedTokenExpiresAt: now + 3600_000,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const rows = await drizzleDb
+        .select()
+        .from(githubInstallations)
+        .where(eq(githubInstallations.id, "ghi_1"));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        id: "ghi_1",
+        orgId: "org-ghi-1",
+        installationId: 12345,
+        accountLogin: "acme",
+        accountType: "Organization",
+        repositorySelection: "selected",
+        suspended: false,
+        linkedUserId: null,
+        cachedToken: "enc:abc",
+        cachedTokenExpiresAt: now + 3600_000,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await expect(
+        drizzleDb.insert(githubInstallations).values({
+          id: "ghi_2",
+          orgId: "org-ghi-1",
+          installationId: 12345,
+          accountLogin: "acme-dupe",
+          accountType: "Organization",
+          suspended: false,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      ).rejects.toThrow();
     });
   });
 
