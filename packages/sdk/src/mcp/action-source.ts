@@ -1,3 +1,4 @@
+import { decode as decodeToon } from '@toon-format/toon';
 import { z } from 'zod';
 import type {
   ActionDefinition,
@@ -112,8 +113,17 @@ export class McpActionSource implements ActionSource {
       //      JSON into a text block; without parsing here, downstream
       //      template paths like `{{nodes.query.data.records}}` resolve
       //      to null because `data` is a string, not an object.
-      //   3. Raw text — for tools that legitimately return text/markdown
-      //      the JSON-parse falls through and callers see a string.
+      //   3. `content[].text` parsed as TOON, but ONLY when the text
+      //      carries a TOON structural marker (`[N]:`, `field[N]:`,
+      //      `field[N]{...}:`). Some servers (e.g. Attio) intentionally
+      //      emit TOON for token efficiency and do not populate
+      //      `structuredContent`. The marker gate is critical: the TOON
+      //      parser is lenient enough to coerce plain prose containing
+      //      a colon (`"Error: Invalid input"` → `{Error: 'Invalid input'}`)
+      //      into a synthetic object, which would silently corrupt
+      //      text-returning tools.
+      //   4. Raw text — for tools that legitimately return text/markdown
+      //      both parses fall through and callers see a string.
       if (result.structuredContent !== undefined) {
         return { success: true, data: result.structuredContent };
       }
@@ -122,7 +132,7 @@ export class McpActionSource implements ActionSource {
         .filter((c): c is { type: string; text: string } => c.type === 'text' && typeof c.text === 'string' && c.text.length > 0)
         .map((c) => c.text);
       const rawText = textParts.length === 1 ? textParts[0]! : textParts.join('\n');
-      const parsed = tryParseJson(rawText);
+      const parsed = tryParseJson(rawText) ?? tryDecodeToon(rawText);
       return { success: true, data: parsed !== undefined ? parsed : rawText };
     } catch (err) {
       return {
@@ -156,6 +166,36 @@ export class McpActionSource implements ActionSource {
 }
 
 /**
+ * A TOON structural marker for the first line of a document: an array-
+ * count prefix (`[N]:`), a nested array field (`field[N]:`), or a
+ * tabular header (`field[N]{col,col}:`). The colon must be followed by
+ * end-of-line (whitespace only) — a real TOON header stands alone on
+ * its line with the body on subsequent indented lines. Only matched
+ * against the first non-empty line of the payload.
+ *
+ * The trailing `\s*$` is what rejects markdown link-reference
+ * definitions like `[1]: https://example.com/guide` (routine in
+ * docs-Q&A MCP sources such as plugin-deepwiki and plugin-turnkey-docs)
+ * — those have a URL after the colon. Anchoring to the first line
+ * likewise rejects stack traces or prose that happen to embed
+ * `items[0]:` on a later line.
+ */
+const TOON_MARKER = /^[\w.-]*\[\d+\](?:\{[^}]*\})?:\s*$/;
+
+function firstNonEmptyLine(text: string): string | undefined {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return undefined;
+}
+
+/** Object/array => structured; primitive/null => undefined. */
+function asStructured(value: unknown): unknown {
+  return value !== null && typeof value === 'object' ? value : undefined;
+}
+
+/**
  * Try to parse text as JSON. Returns undefined on parse failure OR when
  * the parsed value is a bare string/number/boolean — bare primitives
  * suggest the tool intentionally returned text (e.g. `"hello"`) rather
@@ -167,9 +207,27 @@ function tryParseJson(text: string): unknown {
   const trimmed = text.trimStart();
   if (trimmed[0] !== '{' && trimmed[0] !== '[') return undefined;
   try {
-    const value = JSON.parse(text);
-    if (value !== null && typeof value === 'object') return value;
+    return asStructured(JSON.parse(text));
+  } catch {
     return undefined;
+  }
+}
+
+/**
+ * Try to decode text as TOON. Gated on a TOON structural marker
+ * (`[N]:`, `field[N]:`, `field[N]{...}:`) because the TOON parser is
+ * lenient — it will happily decode `"Error: Invalid input"` into
+ * `{Error: 'Invalid input'}`, which would silently corrupt any plain-
+ * text tool response containing a colon. Attio's MCP server is the
+ * motivating case: its payloads start with `[N]:` and it never
+ * populates structuredContent.
+ */
+function tryDecodeToon(text: string): unknown {
+  if (!text) return undefined;
+  const firstLine = firstNonEmptyLine(text);
+  if (!firstLine || !TOON_MARKER.test(firstLine)) return undefined;
+  try {
+    return asStructured(decodeToon(text));
   } catch {
     return undefined;
   }

@@ -594,6 +594,9 @@ importers:
 
   packages/sdk:
     dependencies:
+      '@toon-format/toon':
+        specifier: ^2.1.0
+        version: 2.1.0
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
