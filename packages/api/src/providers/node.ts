@@ -23,6 +23,7 @@ import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
+import { resolveImageBuilder } from "./image-builder.js";
 import type { Providers } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -178,6 +179,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // VALET_SANDBOX_BACKEND=docker|kubernetes|local, default docker — the
   // pre-Task-6 unconditional `new DockerSandboxProvider()` behavior.
   const sandboxProvider = buildSandboxProvider(process.env);
+  const imageBuilder = resolveImageBuilder(process.env);
   const eventStream = new PgEventStream(pgdb);
   const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
 
@@ -307,6 +309,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     encryptionKey: opts.encryptionKey,
     engineStore,
     sandboxProvider,
+    imageBuilder,
     eventStream,
     engineCredentials,
     engineHost,

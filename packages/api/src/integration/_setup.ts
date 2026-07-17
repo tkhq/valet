@@ -285,6 +285,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     encryptionKey: "test-key",
     engineStore,
     sandboxProvider,
+    // Prebuilds are out of scope for the integration harness (no real
+    // docker/kubernetes builder wired here); routes must treat this as
+    // "unavailable", same as a `local` sandbox-backend boot.
+    imageBuilder: null,
     eventStream,
     engineCredentials,
     engineHost,

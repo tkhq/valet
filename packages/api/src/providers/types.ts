@@ -8,6 +8,7 @@ import type {
   ValetPlugin,
 } from "@valet/engine";
 import type { RunHost, WorkflowStore } from "@valet/workflow";
+import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
@@ -29,6 +30,11 @@ export interface Providers {
   sandboxProvider: SandboxProvider;
   eventStream: EventStream;
   engineCredentials: CredentialStore;
+  /** Sandbox-image prebuild backend (sandbox images v2 plan). `null` when
+   * unresolvable for the configured `VALET_SANDBOX_BACKEND`/
+   * `VALET_IMAGE_BUILDER` (e.g. `local`, or `kubernetes` pre-T5) — callers
+   * must treat that as "prebuilds unavailable", not an error. */
+  imageBuilder: ImageBuilder | null;
 
   // Per-process Engine cache. Lives only on the server, not in engine.
   engineHost: EngineHost;
