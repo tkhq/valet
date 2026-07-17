@@ -142,6 +142,14 @@ export class DockerImageBuilder implements ImageBuilder {
     }
   }
 
+  /** No-op: the docker builder leaves nothing durable behind (the git-token
+   * temp dir is removed in `runBuild`'s `finally`, and dies with the process
+   * regardless), so there is nothing for the restart sweep to reclaim by row
+   * id. Present to satisfy `ImageBuilder.cleanupOrphan` uniformly. */
+  async cleanupOrphan(_prebuildId: string): Promise<void> {
+    // intentionally empty — see docblock
+  }
+
   /** Drains the FIFO queue one build at a time (concurrency cap 1). */
   private async pump(): Promise<void> {
     if (this.running) return;

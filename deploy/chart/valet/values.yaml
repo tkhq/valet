@@ -121,6 +121,14 @@ externalRegistry:
   # VALET_PREBUILD_REGISTRY carries this value verbatim and
   # VALET_PREBUILD_REGISTRY_INSECURE is NOT set (defaults to pushing/pulling
   # over TLS, standard for a real external registry).
+  #
+  # RETENTION LIMITATION: prebuild image retention (pruning stale prebuilt
+  # images beyond the newest 2 per config) currently wires NO registry
+  # credentials. It works against the bundled in-cluster registry, but for an
+  # external registry the retention manifest-DELETE would require auth — so
+  # retention is SKIPPED (with a logged warning) against an external registry.
+  # Stale images accumulate there until credentialed retention lands (a
+  # follow-up); prune them out of band for now.
   url: ""
   # Name of an existing `kubernetes.io/dockerconfigjson` Secret (created out
   # of band — this chart does not create it) in `sandbox.namespace`, used as

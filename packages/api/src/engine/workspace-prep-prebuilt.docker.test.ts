@@ -79,6 +79,7 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
     const builder = new DockerImageBuilder();
     const { buildId } = await builder.build({
       configId: "t4-cfg",
+      prebuildId: "pb-t4",
       cloneUrl: CLONE_URL,
       commitSha: bakedSha,
       baseImage: BASE_IMAGE,

@@ -48,11 +48,13 @@ rules:
     # new BuildKit Job per prebuild. delete: cancel() / terminal cleanup —
     # deletes with propagationPolicy Background so the Job's pod cascades.
     verbs: ["create", "get", "list", "watch", "delete"]
-  # ConfigMap holds the generated Dockerfile per build (no secret material —
-  # safe to create/get/delete alongside the Job's own lifecycle).
+  # ConfigMap holds the generated Dockerfile per build (no secret material).
+  # Kept minimal, mirroring the secrets rule below: the api only ever creates
+  # and deletes these by name — it never reads a build ConfigMap back — so no
+  # `get`/`list`/`watch`.
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["create", "get", "delete"]
+    verbs: ["create", "delete"]
   # Secret holds the per-build git clone token (see k8s-builder.ts's
   # docblock: created only for non-tokenless builds, deleted as soon as
   # `status()` observes a terminal build state, or immediately on cancel —

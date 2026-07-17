@@ -93,9 +93,17 @@ pass "Role has the expected batch/jobs verbs"
 # --- RBAC: configmaps/secrets (Task 5 Dockerfile/git-token resources) -----
 echo "$ROLE_BLOCK" | grep -q '"configmaps"' || fail "Role missing resource: configmaps"
 CONFIGMAPS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"configmaps"' | grep -m1 'verbs:')
-for verb in create get delete; do
+for verb in create delete; do
   echo "$CONFIGMAPS_VERBS" | grep -q "\"$verb\"" || fail "configmaps rule missing verb: $verb"
 done
+# configmaps grant is deliberately minimal (mirrors secrets below): no `get` —
+# the api only creates/deletes build ConfigMaps by name, never reads one back.
+if echo "$CONFIGMAPS_VERBS" | grep -q '"get"'; then
+  fail "configmaps rule grants 'get' — the api never reads a build ConfigMap back, keep this grant minimal"
+fi
+if echo "$CONFIGMAPS_VERBS" | grep -qE '"list"|"watch"'; then
+  fail "configmaps rule grants list/watch — unnecessary, keep this grant minimal"
+fi
 echo "$ROLE_BLOCK" | grep -q '"secrets"' || fail "Role missing resource: secrets"
 SECRETS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"secrets"' | grep -m1 'verbs:')
 for verb in create delete; do
@@ -109,7 +117,7 @@ fi
 if echo "$SECRETS_VERBS" | grep -qE '"list"|"watch"'; then
   fail "secrets rule grants list/watch — unnecessary, keep this grant minimal"
 fi
-pass "Role has the expected configmaps/secrets verbs, secrets grant kept minimal (no get/list/watch)"
+pass "Role has the expected configmaps/secrets verbs, both grants kept minimal (create/delete only, no get/list/watch)"
 
 # --- DATABASE_URL wiring: bundled vs external ---------------------------
 grep -q 'name: DATABASE_URL' "$TMP_DIR/bundled.yaml" || fail "bundled render: api Deployment missing DATABASE_URL env"

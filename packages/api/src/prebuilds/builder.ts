@@ -24,11 +24,27 @@ export interface ImageBuilder {
   /** Best-effort cancellation. Implementations that can't interrupt an
    * in-flight build may omit this. */
   cancel?(buildId: string): Promise<void>;
+
+  /** Best-effort delete of any cluster/host resources a build for
+   * `prebuildId` may have left behind, keyed by the PERSISTED prebuild ROW
+   * id (`prebuilds.id`) rather than the implementation's own `buildId`. This
+   * exists for the restart-recovery path: after a process restart the
+   * in-memory `buildId` mapping is gone, so `PrebuildService.sweepOrphanedBuilds`
+   * can only address orphaned resources by the durable row id. Implementations
+   * that leave nothing durable behind (e.g. the docker builder, whose temp
+   * dirs die with the process) implement this as a no-op. Must swallow
+   * "not found" — a resource that was already cleaned up is not an error. */
+  cleanupOrphan?(prebuildId: string): Promise<void>;
 }
 
 export interface PrebuildSpec {
   /** Caller-assigned identifier for the prebuild config this build is for. */
   configId: string;
+  /** The PERSISTED `prebuilds` ROW id this build is for. Backends that name
+   * durable cluster resources (the kubernetes builder's Job/Secret/ConfigMap)
+   * derive their names from this so an interrupted build's resources can be
+   * cleaned up by row id after a restart — see `ImageBuilder.cleanupOrphan`. */
+  prebuildId: string;
   cloneUrl: string;
   commitSha: string;
   baseImage: string;

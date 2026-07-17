@@ -425,6 +425,61 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       expect(byId.get("pb_already_pushed")?.status).toBe("pushed");
       expect(byId.get("pb_already_pushed")?.error).toBeNull();
     });
+
+    it("on the kubernetes backend, best-effort cleanupOrphan(rowId) for each swept row, swallowing failures", async () => {
+      const cleanupCalls: string[] = [];
+      // A kubernetes-backed builder whose cleanupOrphan records the row id and,
+      // for one specific row, throws — the sweep must isolate that failure and
+      // still fail every row + still attempt the other cleanups.
+      const k8sBuilder: ImageBuilder = {
+        backend: "kubernetes",
+        async build() {
+          return { buildId: "unused" };
+        },
+        async status() {
+          throw new Error("status should not be called by the sweep");
+        },
+        async cleanupOrphan(prebuildId: string) {
+          cleanupCalls.push(prebuildId);
+          if (prebuildId === "pb_k8s_boom") throw { code: 500 };
+        },
+      };
+      const k8sService = new PrebuildService({
+        db,
+        builder: k8sBuilder,
+        githubTokenDeps: githubTokenDeps(),
+        now: () => NOW,
+      });
+
+      const configId = await seedConfig(db);
+      for (const id of ["pb_k8s_building", "pb_k8s_boom"]) {
+        await db.insert(prebuilds).values({
+          id,
+          configId,
+          commitSha: id,
+          imageRef: `valet-registry:5000/acme-widgets:${id}`,
+          status: "building",
+          builderBackend: "kubernetes",
+          recipe: { recipe: [], setup: [] },
+          error: null,
+          logTail: null,
+          startedAt: NOW,
+          finishedAt: null,
+          createdAt: NOW,
+        });
+      }
+
+      await k8sService.start();
+      k8sService.stop();
+
+      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      // Both rows failed despite one cleanup throwing.
+      expect(byId.get("pb_k8s_building")?.status).toBe("failed");
+      expect(byId.get("pb_k8s_boom")?.status).toBe("failed");
+      // cleanupOrphan attempted for BOTH rows (by durable row id).
+      expect(cleanupCalls.sort()).toEqual(["pb_k8s_boom", "pb_k8s_building"]);
+    });
   });
 });
 
@@ -565,30 +620,90 @@ describe("imageRefFor / slugify", () => {
 });
 
 describe("defaultRetention (kubernetes)", () => {
-  it("HEADs the tag for its digest then DELETEs the manifest by digest, best-effort", async () => {
-    const calls: { method: string | undefined; url: string }[] = [];
+  it("HEADs the tag for its digest then DELETEs the manifest by digest, best-effort (insecure/bundled)", async () => {
+    const calls: { method: string | undefined; url: string; accept?: string }[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = typeof input === "string" ? input : input.toString();
-      calls.push({ method: init?.method, url });
+      const accept = init?.headers ? new Headers(init.headers).get("accept") ?? undefined : undefined;
+      calls.push({ method: init?.method, url, accept });
       if (init?.method === "HEAD") {
         return new Response(null, { status: 200, headers: { "Docker-Content-Digest": "sha256:deadbeef" } });
       }
       return new Response(null, { status: 202 });
     };
-    const retention = defaultRetention(undefined, fetchImpl);
+    const retention = defaultRetention(undefined, fetchImpl, true);
     await retention("kubernetes", ["my-registry:5000/acme-widgets:abc123"]);
 
-    expect(calls).toEqual([
+    expect(calls.map((c) => ({ method: c.method, url: c.url }))).toEqual([
       { method: "HEAD", url: "http://my-registry:5000/v2/acme-widgets/manifests/abc123" },
       { method: "DELETE", url: "http://my-registry:5000/v2/acme-widgets/manifests/sha256:deadbeef" },
     ]);
+    // The HEAD Accept must advertise the OCI media types — BuildKit pushes OCI
+    // manifests by default; without these the registry omits the digest header
+    // and retention silently no-ops.
+    expect(calls[0].accept).toContain("application/vnd.oci.image.manifest.v1+json");
+    expect(calls[0].accept).toContain("application/vnd.oci.image.index.v1+json");
+    expect(calls[0].accept).toContain("application/vnd.docker.distribution.manifest.v2+json");
+  });
+
+  it("HEAD+DELETEs a registry that returns an OCI-typed manifest (insecure/bundled)", async () => {
+    const calls: { method: string | undefined; url: string }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calls.push({ method: init?.method, url });
+      if (init?.method === "HEAD") {
+        // An OCI image-manifest content type + the digest header a real
+        // BuildKit push produces.
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/vnd.oci.image.manifest.v1+json",
+            "Docker-Content-Digest": "sha256:0c1feed",
+          },
+        });
+      }
+      return new Response(null, { status: 202 });
+    };
+    const retention = defaultRetention(undefined, fetchImpl, true);
+    await retention("kubernetes", ["valet-registry:5000/acme-widgets:ocitag"]);
+
+    expect(calls).toEqual([
+      { method: "HEAD", url: "http://valet-registry:5000/v2/acme-widgets/manifests/ocitag" },
+      { method: "DELETE", url: "http://valet-registry:5000/v2/acme-widgets/manifests/sha256:0c1feed" },
+    ]);
+  });
+
+  it("external registry (insecure=false): HEADs over https, logs a warning, and SKIPS the unauthenticated DELETE", async () => {
+    const calls: { method: string | undefined; url: string }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calls.push({ method: init?.method, url });
+      return new Response(null, { status: 200, headers: { "Docker-Content-Digest": "sha256:extdigest" } });
+    };
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      const retention = defaultRetention(undefined, fetchImpl, false);
+      await retention("kubernetes", ["registry.example.com/acme-widgets:abc123"]);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    // HTTPS scheme used when not insecure; only the HEAD fires (no DELETE).
+    expect(calls).toEqual([
+      { method: "HEAD", url: "https://registry.example.com/v2/acme-widgets/manifests/abc123" },
+    ]);
+    expect(warnings.some((w) => w.includes("external registry retention requires credentials"))).toBe(true);
   });
 
   it("swallows a fetch failure (network error, missing digest header) without throwing", async () => {
     const fetchImpl: typeof fetch = async () => {
       throw new Error("network unreachable");
     };
-    const retention = defaultRetention(undefined, fetchImpl);
+    const retention = defaultRetention(undefined, fetchImpl, true);
     await expect(retention("kubernetes", ["my-registry:5000/acme-widgets:abc123"])).resolves.toBeUndefined();
   });
 
@@ -598,7 +713,7 @@ describe("defaultRetention (kubernetes)", () => {
       calls.push({ method: init?.method });
       return new Response(null, { status: 200 });
     };
-    const retention = defaultRetention(undefined, fetchImpl);
+    const retention = defaultRetention(undefined, fetchImpl, true);
     await retention("kubernetes", ["my-registry:5000/acme-widgets:abc123"]);
     expect(calls).toEqual([{ method: "HEAD" }]);
   });
@@ -609,7 +724,7 @@ describe("defaultRetention (kubernetes)", () => {
       called = true;
       return new Response(null);
     };
-    await defaultRetention(undefined, fetchImpl)("kubernetes", []);
+    await defaultRetention(undefined, fetchImpl, true)("kubernetes", []);
     expect(called).toBe(false);
   });
 });

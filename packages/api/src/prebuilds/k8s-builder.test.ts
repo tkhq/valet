@@ -18,6 +18,7 @@ import { BUILDKIT_IMAGE, buildKitJobManifest, KubernetesImageBuilder, mapJobStat
 function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
   return {
     configId: "cfg-1",
+    prebuildId: "pb-1",
     cloneUrl: "https://github.com/octocat/Hello-World.git",
     commitSha: "abc123",
     baseImage: "alpine:3",
@@ -140,6 +141,34 @@ describe("buildKitJobManifest", () => {
     });
     expect(job.spec?.template.spec?.containers[0].image).toBe(BUILDKIT_IMAGE);
     expect(job.spec?.template.spec?.securityContext?.seccompProfile?.type).toBe("Unconfined");
+  });
+
+  it("sets the AppArmor-unconfined pod annotation for the buildkit container (rootless requirement)", () => {
+    const job = buildKitJobManifest({
+      id: "9",
+      namespace: "ns",
+      imageRef: "reg/foo:bar",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: false,
+    });
+    expect(job.spec?.template.metadata?.annotations).toMatchObject({
+      "container.apparmor.security.beta.kubernetes.io/buildkit": "unconfined",
+    });
+  });
+
+  it("sets ttlSecondsAfterFinished so a Job (and its pod) can't linger unbounded if cleanup is missed", () => {
+    const job = buildKitJobManifest({
+      id: "10",
+      namespace: "ns",
+      imageRef: "reg/foo:bar",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: false,
+    });
+    expect(job.spec?.ttlSecondsAfterFinished).toBe(3600);
   });
 
   it("threads resource requests/limits through to the container", () => {
@@ -265,19 +294,33 @@ function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure:
 }
 
 describe("KubernetesImageBuilder", () => {
-  it("build() creates a ConfigMap + Secret + Job named after the buildId", async () => {
+  it("build() creates a ConfigMap + Secret + Job named after the PERSISTED prebuild row id", async () => {
     const jobsApi = new FakeJobsApi();
     const builder = newBuilder(jobsApi);
+    // buildId (in-memory, counter-based) is distinct from the resource names
+    // (derived from the durable row id) on purpose — see cleanupOrphan.
     const { buildId } = await builder.build(baseSpec({ gitToken: "ghp_secret" }));
     expect(buildId).toBe("k8s-build-1");
     // dispatch is async — allow the microtask queue to flush.
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(jobsApi.jobs.has("valet-prebuild-1")).toBe(true);
-    expect(jobsApi.configMaps.has("valet-prebuild-1-dockerfile")).toBe(true);
-    expect(jobsApi.secrets.has("valet-prebuild-1-token")).toBe(true);
-    const secret = jobsApi.secrets.get("valet-prebuild-1-token");
+    expect(jobsApi.jobs.has("valet-prebuild-pb-1")).toBe(true);
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(true);
+    expect(jobsApi.secrets.has("valet-prebuild-pb-1-token")).toBe(true);
+    const secret = jobsApi.secrets.get("valet-prebuild-pb-1-token");
     expect(secret?.stringData.token).toBe("ghp_secret");
+  });
+
+  it("build() names resources from the row id even when it carries characters invalid in a k8s name", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi);
+    // A real row id is `pb_<uuid>` — the underscore is invalid in a DNS-1123
+    // resource name and must be normalized to `-`, consistently at build and
+    // cleanup time.
+    await builder.build(baseSpec({ prebuildId: "pb_AbC_123" }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(jobsApi.jobs.has("valet-prebuild-pb-abc-123")).toBe(true);
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-abc-123-dockerfile")).toBe(true);
   });
 
   it("build() omits the Secret entirely when the spec has no gitToken", async () => {
@@ -286,7 +329,7 @@ describe("KubernetesImageBuilder", () => {
     await builder.build(baseSpec());
     await new Promise((r) => setTimeout(r, 0));
     expect(jobsApi.secrets.size).toBe(0);
-    expect(jobsApi.configMaps.has("valet-prebuild-1-dockerfile")).toBe(true);
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(true);
   });
 
   it("status() reports building while the Job has active > 0, with a log tail", async () => {
@@ -294,7 +337,7 @@ describe("KubernetesImageBuilder", () => {
     const builder = newBuilder(jobsApi);
     const { buildId } = await builder.build(baseSpec());
     await new Promise((r) => setTimeout(r, 0));
-    jobsApi.setStatus("valet-prebuild-1", { active: 1 });
+    jobsApi.setStatus("valet-prebuild-pb-1", { active: 1 });
 
     const status = await builder.status(buildId);
     expect(status.state).toBe("building");
@@ -306,16 +349,16 @@ describe("KubernetesImageBuilder", () => {
     const builder = newBuilder(jobsApi);
     const { buildId } = await builder.build(baseSpec({ gitToken: "tok" }));
     await new Promise((r) => setTimeout(r, 0));
-    jobsApi.setStatus("valet-prebuild-1", { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] });
+    jobsApi.setStatus("valet-prebuild-pb-1", { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] });
 
     const status = await builder.status(buildId);
     expect(status.state).toBe("pushed");
-    expect(jobsApi.secrets.has("valet-prebuild-1-token")).toBe(false);
-    expect(jobsApi.configMaps.has("valet-prebuild-1-dockerfile")).toBe(false);
-    expect(jobsApi.deletedSecrets).toContain("valet-prebuild-1-token");
-    expect(jobsApi.deletedConfigMaps).toContain("valet-prebuild-1-dockerfile");
+    expect(jobsApi.secrets.has("valet-prebuild-pb-1-token")).toBe(false);
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(false);
+    expect(jobsApi.deletedSecrets).toContain("valet-prebuild-pb-1-token");
+    expect(jobsApi.deletedConfigMaps).toContain("valet-prebuild-pb-1-dockerfile");
     // The Job resource itself is NOT deleted on a terminal poll — only cancel() deletes it.
-    expect(jobsApi.jobs.get("valet-prebuild-1")?.deleted).toBe(false);
+    expect(jobsApi.jobs.get("valet-prebuild-pb-1")?.deleted).toBe(false);
   });
 
   it("status() reports failed on a Failed condition and cleans up", async () => {
@@ -323,12 +366,12 @@ describe("KubernetesImageBuilder", () => {
     const builder = newBuilder(jobsApi);
     const { buildId } = await builder.build(baseSpec());
     await new Promise((r) => setTimeout(r, 0));
-    jobsApi.setStatus("valet-prebuild-1", { failed: 1, conditions: [{ type: "Failed", status: "True" }] });
+    jobsApi.setStatus("valet-prebuild-pb-1", { failed: 1, conditions: [{ type: "Failed", status: "True" }] });
 
     const status = await builder.status(buildId);
     expect(status.state).toBe("failed");
     expect(status.error).toBeDefined();
-    expect(jobsApi.configMaps.has("valet-prebuild-1-dockerfile")).toBe(false);
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(false);
   });
 
   it("cancel() deletes the Job, Secret, and ConfigMap", async () => {
@@ -339,9 +382,9 @@ describe("KubernetesImageBuilder", () => {
 
     await builder.cancel(buildId);
 
-    expect(jobsApi.jobs.get("valet-prebuild-1")?.deleted).toBe(true);
-    expect(jobsApi.secrets.has("valet-prebuild-1-token")).toBe(false);
-    expect(jobsApi.configMaps.has("valet-prebuild-1-dockerfile")).toBe(false);
+    expect(jobsApi.jobs.get("valet-prebuild-pb-1")?.deleted).toBe(true);
+    expect(jobsApi.secrets.has("valet-prebuild-pb-1-token")).toBe(false);
+    expect(jobsApi.configMaps.has("valet-prebuild-pb-1-dockerfile")).toBe(false);
     const status = await builder.status(buildId);
     expect(status.state).toBe("failed");
     expect(status.error).toBe("cancelled");
@@ -351,13 +394,13 @@ describe("KubernetesImageBuilder", () => {
     const jobsApi = new FakeJobsApi();
     const builder = newBuilder(jobsApi);
     await builder.build(baseSpec()); // occupies the concurrency-1 slot
-    const second = await builder.build(baseSpec());
+    const second = await builder.build(baseSpec({ prebuildId: "pb-2" }));
     await new Promise((r) => setTimeout(r, 0));
-    expect(jobsApi.jobs.has("valet-prebuild-2")).toBe(false);
+    expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(false);
 
     await builder.cancel(second.buildId);
 
-    expect(jobsApi.jobs.has("valet-prebuild-2")).toBe(false);
+    expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(false);
     const status = await builder.status(second.buildId);
     expect(status.state).toBe("failed");
     expect(status.error).toBe("cancelled");
@@ -367,17 +410,57 @@ describe("KubernetesImageBuilder", () => {
     const jobsApi = new FakeJobsApi();
     const builder = newBuilder(jobsApi);
     const first = await builder.build(baseSpec());
-    const second = await builder.build(baseSpec());
+    const second = await builder.build(baseSpec({ prebuildId: "pb-2" }));
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(jobsApi.jobs.has("valet-prebuild-1")).toBe(true);
-    expect(jobsApi.jobs.has("valet-prebuild-2")).toBe(false);
+    expect(jobsApi.jobs.has("valet-prebuild-pb-1")).toBe(true);
+    expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(false);
     expect((await builder.status(second.buildId)).state).toBe("queued");
 
-    jobsApi.setStatus("valet-prebuild-1", { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] });
+    jobsApi.setStatus("valet-prebuild-pb-1", { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] });
     await builder.status(first.buildId);
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(jobsApi.jobs.has("valet-prebuild-2")).toBe(true);
+    expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(true);
+  });
+
+  it("cleanupOrphan(rowId) deletes the Job, Secret, and ConfigMap by the row-id-derived names", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi);
+    // Simulate an interrupted build's leftovers standing in the cluster: seed
+    // the three resources by their row-id names directly (the in-memory build
+    // map is gone after a restart, so cleanupOrphan only has the row id).
+    jobsApi.jobs.set("valet-prebuild-pb_xyz".replace("_", "-"), {
+      params: { namespace: "valet-sandboxes", body: {} },
+      status: {},
+      deleted: false,
+    });
+    jobsApi.secrets.set("valet-prebuild-pb-xyz-token", {
+      namespace: "valet-sandboxes",
+      name: "valet-prebuild-pb-xyz-token",
+      stringData: {},
+    });
+    jobsApi.configMaps.set("valet-prebuild-pb-xyz-dockerfile", {
+      namespace: "valet-sandboxes",
+      name: "valet-prebuild-pb-xyz-dockerfile",
+      data: {},
+    });
+
+    await builder.cleanupOrphan("pb_xyz");
+
+    expect(jobsApi.jobs.get("valet-prebuild-pb-xyz")?.deleted).toBe(true);
+    expect(jobsApi.deletedSecrets).toContain("valet-prebuild-pb-xyz-token");
+    expect(jobsApi.deletedConfigMaps).toContain("valet-prebuild-pb-xyz-dockerfile");
+  });
+
+  it("cleanupOrphan swallows NotFound (nothing to clean up) without throwing", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi);
+    // Delete adapters already 404-swallow; additionally make one throw a
+    // non-404 to confirm cleanupOrphan itself is best-effort and never rejects.
+    jobsApi.deleteSecret = async () => {
+      throw { code: 500 };
+    };
+    await expect(builder.cleanupOrphan("pb_never_existed")).resolves.toBeUndefined();
   });
 });

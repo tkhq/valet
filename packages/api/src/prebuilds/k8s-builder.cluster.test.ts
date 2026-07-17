@@ -61,6 +61,7 @@ describe.skipIf(!registryPresent())("KubernetesImageBuilder (live rancher-deskto
     async () => {
       const spec: PrebuildSpec = {
         configId: "cluster-smoke",
+        prebuildId: "pb-cluster-smoke",
         cloneUrl: "https://github.com/octocat/Hello-World.git",
         commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
         baseImage: "alpine:3",

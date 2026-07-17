@@ -46,6 +46,25 @@ const GIT_TOKEN_MOUNT_PATH = "/run/valet/git-token";
 const DOCKERFILE_MOUNT_DIR = "/dockerfile";
 const CONTEXT_MOUNT_DIR = "/ctx";
 const LOG_TAIL_LINES = 200;
+const BUILDKIT_CONTAINER_NAME = "buildkit";
+/** Belt-and-suspenders for the poll-side Secret/ConfigMap cleanup and the
+ * restart sweep: even if BOTH miss (api never observes the terminal poll AND
+ * never restarts to run the sweep), the Job — and via `Background`
+ * propagation its pod — is garbage-collected by the TTL-after-finished
+ * controller an hour after completion, so nothing lingers unbounded. */
+const TTL_SECONDS_AFTER_FINISHED = 3600;
+
+/** Row ids (`prebuilds.id`, e.g. `pb_<uuid>`) carry characters (`_`) that are
+ * invalid in a Kubernetes resource name (DNS-1123). Normalize to lowercase
+ * alphanumeric + `-`, collapsing invalid runs and trimming edge dashes, so the
+ * SAME row id maps to the SAME resource names at both `build()` and
+ * `cleanupOrphan()` time. */
+export function prebuildResourceId(prebuildId: string): string {
+  return prebuildId
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 function jobName(id: string): string {
   return `valet-prebuild-${id}`;
@@ -131,8 +150,21 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
     spec: {
       activeDeadlineSeconds: spec.activeDeadlineSeconds,
       backoffLimit: 0,
+      ttlSecondsAfterFinished: TTL_SECONDS_AFTER_FINISHED,
       template: {
-        metadata: { labels },
+        metadata: {
+          labels,
+          // moby/buildkit:rootless also needs AppArmor unconfined (alongside
+          // the seccomp profile below) to set up its rootless user namespace
+          // on AppArmor-enforcing nodes (Ubuntu/Debian defaults). Use the
+          // per-container ANNOTATION form (keyed by container name) rather
+          // than the newer securityContext.appArmorProfile field: the field
+          // only exists on k8s >= 1.30, whereas the annotation is honored
+          // across the versions this chart targets.
+          annotations: {
+            [`container.apparmor.security.beta.kubernetes.io/${BUILDKIT_CONTAINER_NAME}`]: "unconfined",
+          },
+        },
         spec: {
           restartPolicy: "Never",
           // moby/buildkit:rootless needs an unconfined seccomp profile to
@@ -142,7 +174,7 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
           securityContext: { seccompProfile: { type: "Unconfined" } },
           containers: [
             {
-              name: "buildkit",
+              name: BUILDKIT_CONTAINER_NAME,
               image: spec.buildkitImage,
               command: ["buildctl-daemonless.sh"],
               args,
@@ -187,6 +219,12 @@ export function mapJobStatus(status: {
 
 interface BuildRecord {
   id: string;
+  /** DNS-safe resource-name stem derived from the PERSISTED prebuild ROW id
+   * (`prebuildResourceId(spec.prebuildId)`). Job/Secret/ConfigMap names +
+   * the pod label selector are all built from this — NOT from the internal
+   * counter `id` — so `cleanupOrphan(prebuildId)` can address the same
+   * resources by row id after a restart drops the in-memory build map. */
+  resourceId: string;
   spec: PrebuildSpec;
   state: BuildStatus["state"];
   error?: string;
@@ -248,6 +286,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
     const buildId = `k8s-build-${id}`;
     this.builds.set(buildId, {
       id,
+      resourceId: prebuildResourceId(spec.prebuildId),
       spec,
       state: "queued",
       cleanedUp: false,
@@ -267,7 +306,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
       return { state: "queued" };
     }
 
-    const jobStatus = await this.jobsApi.getNamespacedJob({ namespace: this.namespace, name: jobName(rec.id) });
+    const jobStatus = await this.jobsApi.getNamespacedJob({ namespace: this.namespace, name: jobName(rec.resourceId) });
     if (jobStatus === null) {
       // Job already deleted (cancel, or a previous terminal poll's
       // cleanup raced a caller's status() — cleanup only removes the
@@ -282,7 +321,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
     try {
       const pods = await this.jobsApi.listPodsForJob({
         namespace: this.namespace,
-        labelSelector: `${PREBUILD_LABEL_KEY}=${rec.id}`,
+        labelSelector: `${PREBUILD_LABEL_KEY}=${rec.resourceId}`,
       });
       const pod = pods.items[0];
       if (pod) {
@@ -294,7 +333,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
     }
 
     if (state === "failed") {
-      rec.error = rec.error ?? `buildkit Job "${jobName(rec.id)}" failed`;
+      rec.error = rec.error ?? `buildkit Job "${jobName(rec.resourceId)}" failed`;
     }
 
     if ((state === "pushed" || state === "failed") && !rec.cleanedUp) {
@@ -329,7 +368,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
     rec.cleanedUp = true;
     rec.state = "failed";
     rec.error = "cancelled";
-    await this.jobsApi.deleteNamespacedJob({ namespace: this.namespace, name: jobName(rec.id) });
+    await this.jobsApi.deleteNamespacedJob({ namespace: this.namespace, name: jobName(rec.resourceId) });
     await this.cleanupSecretsAndConfig(rec);
     this.running.delete(buildId);
     void this.pump();
@@ -337,9 +376,29 @@ export class KubernetesImageBuilder implements ImageBuilder {
 
   private async cleanupSecretsAndConfig(rec: BuildRecord): Promise<void> {
     if (rec.hasGitToken) {
-      await this.jobsApi.deleteSecret({ namespace: this.namespace, name: secretName(rec.id) });
+      await this.jobsApi.deleteSecret({ namespace: this.namespace, name: secretName(rec.resourceId) });
     }
-    await this.jobsApi.deleteConfigMap({ namespace: this.namespace, name: configMapName(rec.id) });
+    await this.jobsApi.deleteConfigMap({ namespace: this.namespace, name: configMapName(rec.resourceId) });
+  }
+
+  /** Restart-recovery cleanup (see `ImageBuilder.cleanupOrphan`). Addresses
+   * the Job + Secret + ConfigMap by the DURABLE prebuild ROW id — not the
+   * in-memory `buildId`, which a restart drops — so `sweepOrphanedBuilds`
+   * can reclaim resources an interrupted build left behind. Each delete is
+   * best-effort and independent: a 404 is already treated as success by the
+   * adapter, and any other per-resource failure is swallowed so one stuck
+   * delete never blocks the other two. */
+  async cleanupOrphan(prebuildId: string): Promise<void> {
+    const name = prebuildResourceId(prebuildId);
+    await this.jobsApi
+      .deleteNamespacedJob({ namespace: this.namespace, name: jobName(name) })
+      .catch(() => {});
+    await this.jobsApi
+      .deleteSecret({ namespace: this.namespace, name: secretName(name) })
+      .catch(() => {});
+    await this.jobsApi
+      .deleteConfigMap({ namespace: this.namespace, name: configMapName(name) })
+      .catch(() => {});
   }
 
   /** Drains the FIFO queue up to `concurrency` outstanding Jobs at once. */
@@ -369,23 +428,23 @@ export class KubernetesImageBuilder implements ImageBuilder {
 
       await this.jobsApi.createConfigMap({
         namespace: this.namespace,
-        name: configMapName(rec.id),
+        name: configMapName(rec.resourceId),
         data: { [DOCKERFILE_CONFIGMAP_KEY]: dockerfile },
-        labels: { [PREBUILD_LABEL_KEY]: rec.id },
+        labels: { [PREBUILD_LABEL_KEY]: rec.resourceId },
       });
       if (this.cancelled.has(buildId)) {
-        await this.jobsApi.deleteConfigMap({ namespace: this.namespace, name: configMapName(rec.id) });
+        await this.jobsApi.deleteConfigMap({ namespace: this.namespace, name: configMapName(rec.resourceId) });
         return;
       }
 
       if (rec.hasGitToken) {
         await this.jobsApi.createSecret({
           namespace: this.namespace,
-          name: secretName(rec.id),
+          name: secretName(rec.resourceId),
           // `gitToken` is guaranteed defined here (`hasGitToken` mirrors
           // `Boolean(spec.gitToken)` at `build()` time).
           stringData: { [GIT_TOKEN_SECRET_KEY]: rec.spec.gitToken as string },
-          labels: { [PREBUILD_LABEL_KEY]: rec.id },
+          labels: { [PREBUILD_LABEL_KEY]: rec.resourceId },
         });
         if (this.cancelled.has(buildId)) {
           await this.cleanupSecretsAndConfig(rec);
@@ -394,7 +453,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
       }
 
       const manifest = buildKitJobManifest({
-        id: rec.id,
+        id: rec.resourceId,
         namespace: this.namespace,
         imageRef: rec.spec.imageRef,
         hasGitToken: rec.hasGitToken,
@@ -405,7 +464,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
       });
       await this.jobsApi.createNamespacedJob({ namespace: this.namespace, body: manifest });
       if (this.cancelled.has(buildId)) {
-        await this.jobsApi.deleteNamespacedJob({ namespace: this.namespace, name: jobName(rec.id) });
+        await this.jobsApi.deleteNamespacedJob({ namespace: this.namespace, name: jobName(rec.resourceId) });
         await this.cleanupSecretsAndConfig(rec);
         return;
       }

@@ -11,6 +11,7 @@ import type { PrebuildSpec } from "./builder.js";
 function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
   return {
     configId: "cfg-1",
+    prebuildId: "pb-1",
     cloneUrl: "https://github.com/octocat/Hello-World.git",
     commitSha: "abc123",
     baseImage: "alpine:3",
@@ -338,6 +339,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
 
     const { buildId } = await builder.build({
       configId: "live-test",
+      prebuildId: "pb-live",
       cloneUrl: "https://github.com/octocat/Hello-World.git",
       commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
       // Plain `alpine:3` has no `git` binary — the generated Dockerfile's
@@ -373,6 +375,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
 
     const { buildId } = await builder.build({
       configId: "live-test-fail",
+      prebuildId: "pb-live-fail",
       cloneUrl: "https://github.com/octocat/Hello-World.git",
       commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
       baseImage: "this-image-definitely-does-not-exist-anywhere:v999",

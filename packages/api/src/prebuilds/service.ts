@@ -43,9 +43,14 @@
  * to poll `status()`. There is no column for it on `prebuilds` (the row
  * shape is fixed by Task 1's migration) — this service keeps an in-memory
  * `Map<prebuildRowId, buildId>` instead. A process restart mid-build loses
- * the mapping: the row stays stuck at `queued`/`building` forever (never
- * silently "completes" from a lost poll). Acceptable pre-1.0 — a stuck row
- * is a visible, debuggable failure mode, not silent data corruption.
+ * the mapping, so `syncActiveBuilds` can no longer poll those builds; rather
+ * than leave the rows stuck at `queued`/`building` forever, `start()` runs
+ * `sweepOrphanedBuilds` once at boot to mark every still-active row `failed`
+ * ("interrupted by restart") and, on the kubernetes backend, best-effort
+ * `cleanupOrphan(rowId)` the BuildKit Job + git-token Secret + Dockerfile
+ * ConfigMap the interrupted build left behind (so a Secret can't outlive its
+ * build across a restart). A failed row is a visible, debuggable outcome —
+ * the operator re-triggers the build — not silent data corruption.
  *
  * ── Retention seam ─────────────────────────────────────────────────────
  * `retention(backend, imageRefs)` deletes the actual images beyond the
@@ -59,6 +64,14 @@
  * missing/already-gone image is not a failure. Tests inject `retention`
  * directly to assert "keeps exactly 2" without touching a real daemon or
  * registry.
+ *
+ * EXTERNAL-REGISTRY LIMITATION: the kubernetes retention path wires no
+ * registry credentials. It works against the bundled in-cluster registry
+ * (plain HTTP, no auth) but NOT against an authenticating external registry
+ * — there the manifest DELETE would 401. Rather than silently no-op, the
+ * default retention logs a one-line warning and skips the delete whenever the
+ * registry is not insecure (i.e. external). Credentialed external-registry
+ * retention is a follow-up.
  *
  * ── No token ever lands on a row or a response ────────────────────────────
  * `PrebuildSpec.gitToken` is minted fresh per `startBuild` call
@@ -169,33 +182,69 @@ function parseRegistryImageRef(imageRef: string): { host: string; name: string; 
   return { host: hostAndName.slice(0, slash), name: hostAndName.slice(slash + 1), tag };
 }
 
+/** The `Accept` header sent on the manifest HEAD. BuildKit pushes OCI
+ * manifests (`application/vnd.oci.image.*`) by DEFAULT, so an Accept limited
+ * to the docker schema2 media types makes the registry return the manifest
+ * WITHOUT a `Docker-Content-Digest` (content-type mismatch) — the HEAD then
+ * yields no digest, the DELETE is skipped, and retention silently no-ops.
+ * Advertise all four: docker schema2 + schema2 manifest-list, and the OCI
+ * image manifest + image index, comma-joined. */
+const MANIFEST_ACCEPT = [
+  "application/vnd.docker.distribution.manifest.v2+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.oci.image.index.v1+json",
+].join(", ");
+
 /** Deletes one image from a Docker Registry HTTP API v2 endpoint: HEAD the
- * tag's manifest (`Accept: application/vnd.docker.distribution.manifest.v2+json`)
- * to resolve its content digest, then DELETE the manifest by that digest
- * (registries reject delete-by-tag). Best-effort — every failure (network,
- * missing `Docker-Content-Digest` header, non-2xx) is swallowed, matching
+ * tag's manifest (`Accept: MANIFEST_ACCEPT` — see that constant) to resolve
+ * its content digest, then DELETE the manifest by that digest (registries
+ * reject delete-by-tag). Best-effort — every failure (network, missing
+ * `Docker-Content-Digest` header, non-2xx) is swallowed, matching
  * `dockerRmi`'s contract. Requires the registry configured with
  * `REGISTRY_STORAGE_DELETE_ENABLED=true` (set on the bundled chart's
  * registry StatefulSet) — a registry without delete enabled 4xxs the
- * DELETE, which this function silently treats the same as "already gone". */
-async function registryManifestDelete(imageRef: string, fetchImpl: typeof fetch): Promise<void> {
+ * DELETE, which this function silently treats the same as "already gone".
+ *
+ * `insecure` selects the scheme: `http` for the bundled in-cluster registry,
+ * `https` otherwise. EXTERNAL-REGISTRY LIMITATION: this path wires NO
+ * credentials, so against an authenticating external registry the DELETE
+ * would 401 and be silently swallowed. Rather than pretend retention works
+ * there, when `insecure` is false (i.e. an external registry) we log a
+ * one-line warning and skip the DELETE. Full credentialed external-registry
+ * retention is a follow-up (see the module docblock). */
+async function registryManifestDelete(imageRef: string, fetchImpl: typeof fetch, insecure: boolean): Promise<void> {
   const parsed = parseRegistryImageRef(imageRef);
   if (!parsed) return;
   const { host, name, tag } = parsed;
+  const scheme = insecure ? "http" : "https";
   try {
-    const headRes = await fetchImpl(`http://${host}/v2/${name}/manifests/${tag}`, {
+    const headRes = await fetchImpl(`${scheme}://${host}/v2/${name}/manifests/${tag}`, {
       method: "HEAD",
-      headers: { Accept: "application/vnd.docker.distribution.manifest.v2+json" },
+      headers: { Accept: MANIFEST_ACCEPT },
     });
     const digest = headRes.headers.get("docker-content-digest");
     if (!digest) return;
-    await fetchImpl(`http://${host}/v2/${name}/manifests/${digest}`, { method: "DELETE" });
+    if (!insecure) {
+      // External registry: no credential plumbing yet. Don't silently issue
+      // an unauthenticated DELETE that a real registry 401s and we swallow —
+      // surface the gap so operators know retention isn't happening here.
+      console.warn(
+        `prebuild retention: external registry retention requires credentials — skipping delete of ${imageRef}`,
+      );
+      return;
+    }
+    await fetchImpl(`${scheme}://${host}/v2/${name}/manifests/${digest}`, { method: "DELETE" });
   } catch {
     // best-effort — see docblock
   }
 }
 
-export function defaultRetention(spawnFn: SpawnFn = spawn as unknown as SpawnFn, fetchImpl: typeof fetch = fetch): RetentionFn {
+export function defaultRetention(
+  spawnFn: SpawnFn = spawn as unknown as SpawnFn,
+  fetchImpl: typeof fetch = fetch,
+  registryInsecure = false,
+): RetentionFn {
   return async (backend, imageRefs) => {
     if (imageRefs.length === 0) return;
     if (backend === "docker") {
@@ -206,7 +255,7 @@ export function defaultRetention(spawnFn: SpawnFn = spawn as unknown as SpawnFn,
     }
     if (backend === "kubernetes") {
       for (const imageRef of imageRefs) {
-        await registryManifestDelete(imageRef, fetchImpl);
+        await registryManifestDelete(imageRef, fetchImpl, registryInsecure);
       }
     }
   };
@@ -333,6 +382,13 @@ export interface PrebuildServiceDeps {
   pollIntervalMs?: number;
   schedulerIntervalMs?: number;
   retention?: RetentionFn;
+  /** Whether the prebuild registry is served over plain HTTP (the bundled
+   * in-cluster registry) vs TLS (an external registry). Selects the scheme
+   * the default kubernetes retention uses for its manifest HEAD/DELETE, and
+   * gates the external-registry credential warning. Defaults from
+   * `VALET_PREBUILD_REGISTRY_INSECURE` on `env`. Ignored when a custom
+   * `retention` is injected. */
+  registryInsecure?: boolean;
   /** Env the stock-sandbox-image fallback is resolved from
    * (`resolveDefaultImage(env)` — `VALET_SANDBOX_IMAGE`). Defaults to
    * `process.env`; tests inject a fixture object so the fallback doesn't
@@ -368,8 +424,9 @@ export class PrebuildService {
     this.newId = deps.newId ?? randomUUID;
     this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.schedulerIntervalMs = deps.schedulerIntervalMs ?? DEFAULT_SCHEDULER_INTERVAL_MS;
-    this.retention = deps.retention ?? defaultRetention();
     this.env = deps.env ?? process.env;
+    const registryInsecure = deps.registryInsecure ?? this.env.VALET_PREBUILD_REGISTRY_INSECURE === "true";
+    this.retention = deps.retention ?? defaultRetention(undefined, undefined, registryInsecure);
   }
 
   /** The wired builder's backend id, or `null` when prebuilds are
@@ -450,6 +507,7 @@ export class PrebuildService {
 
     const spec: PrebuildSpec = {
       configId: config.id,
+      prebuildId: row.id,
       cloneUrl: config.cloneUrl,
       commitSha: head.sha,
       baseImage,
@@ -611,10 +669,34 @@ export class PrebuildService {
    * the poll/scheduler intervals start, so `syncActiveBuilds` never races a
    * row this sweep is about to fail. */
   private async sweepOrphanedBuilds(): Promise<void> {
+    const orphaned = await this.db
+      .select({ id: prebuilds.id })
+      .from(prebuilds)
+      .where(inArray(prebuilds.status, ["queued", "building"]));
+    if (orphaned.length === 0) return;
+
     await this.db
       .update(prebuilds)
       .set({ status: "failed", error: "interrupted by restart", finishedAt: this.now() })
       .where(inArray(prebuilds.status, ["queued", "building"]));
+
+    // Best-effort: an interrupted build may have left durable cluster
+    // resources (BuildKit Job + git-token Secret + Dockerfile ConfigMap)
+    // standing — the in-memory buildId map that the poll-side cleanup relies
+    // on is gone after a restart, so `cleanupOrphan` deletes them by the
+    // durable ROW id instead (a no-op for backends with nothing durable to
+    // reclaim, e.g. docker). Isolated per row: one failing delete never
+    // blocks the rest of the sweep.
+    const builder = this.builder;
+    if (builder?.cleanupOrphan) {
+      for (const row of orphaned) {
+        try {
+          await builder.cleanupOrphan(row.id);
+        } catch (err) {
+          console.error(`prebuild sweep: cleanupOrphan(${row.id}) failed:`, err);
+        }
+      }
+    }
   }
 
   /** Runs the boot-time orphan sweep, then starts the unref'd poll (10s) and
