@@ -61,6 +61,7 @@ class GatewayTestSandboxProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      customImage: false,
       coldStartEstimateMs: 0,
     };
   }
@@ -109,6 +110,7 @@ class HibernatingGatewayTestSandboxProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: true,
+      customImage: false,
       coldStartEstimateMs: 0,
     };
   }

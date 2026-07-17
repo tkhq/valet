@@ -62,6 +62,7 @@ class HibernatingProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: true,
+      customImage: false,
       coldStartEstimateMs: 5000,
     };
   }
@@ -113,6 +114,7 @@ class PlainProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      customImage: false,
       coldStartEstimateMs: 5000,
     };
   }

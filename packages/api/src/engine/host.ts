@@ -27,12 +27,13 @@ import type { RepoBinding } from "../wire/types.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { buildWorkspacePrep } from "./workspace-prep.js";
+import { resolvePrebuildImage, type PrebuildResolution } from "../prebuilds/resolve.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { orchestratorIdentities, users } from "../schema/index.js";
+import { agentSessions, orchestratorIdentities, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
@@ -446,7 +447,15 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
-    const prepareSandbox = this.buildPrepareSandbox(meta);
+    // Prebuild resolution (sandbox images v2, Task 4): when the primary repo
+    // binding matches a config with a `pushed` image and the provider supports
+    // custom images, boot from that image and refresh it via fetch-on-start
+    // prep. `resolvePrebuildImage` never throws — any failure falls back to the
+    // stock `defaultImage`, so session build is never blocked on it.
+    const prebuild = await resolvePrebuildImage(this.opts.db, meta, this.opts.sandboxProvider);
+    const image = prebuild?.imageRef ?? this.opts.defaultImage;
+    if (prebuild) await this.recordPrebuildId(sessionId, prebuild.prebuildId);
+    const prepareSandbox = this.buildPrepareSandbox(meta, prebuild);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     const session = existing
       ? await engine.restoreSession({
@@ -455,7 +464,7 @@ export class EngineHost {
             userId: meta.userId,
             orgId: meta.orgId,
             workspace: meta.workspace,
-            sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile },
+            sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
             model,
             resolveModel,
             systemPrompt: SYSTEM_PROMPT,
@@ -471,7 +480,7 @@ export class EngineHost {
           userId: meta.userId,
           orgId: meta.orgId,
           workspace: meta.workspace,
-          sandbox: { workspace: meta.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile },
+          sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
           model,
           resolveModel,
           systemPrompt: SYSTEM_PROMPT,
@@ -550,14 +559,44 @@ export class EngineHost {
    * before this task (no `prepareSandbox` key at all, not
    * `prepareSandbox: undefined`).
    */
-  private buildPrepareSandbox(meta: SessionMeta): ((sandbox: Sandbox, epoch: number) => Promise<void>) | undefined {
+  private buildPrepareSandbox(
+    meta: SessionMeta,
+    prebuild?: PrebuildResolution | null,
+  ): ((sandbox: Sandbox, epoch: number) => Promise<void>) | undefined {
     if (!meta.repos || meta.repos.length === 0) return undefined;
     return buildWorkspacePrep({
       apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
       repos: meta.repos,
       userName: meta.userName,
       userEmail: meta.userEmail,
+      // When the session booted from a prebuilt image, the PRIMARY (position-0)
+      // binding's repo is baked into the image; fetch-on-start prep stages it
+      // out of the image rather than cloning, then conditionally re-installs.
+      // `resolvePrebuildImage` only returns non-null when `meta.repos[0]` is
+      // that repo, so this always describes the primary binding.
+      ...(prebuild
+        ? { prebuild: { bakedSha: prebuild.bakedSha, recipe: prebuild.recipe } }
+        : {}),
     });
+  }
+
+  /**
+   * Persist `agent_sessions.prebuild_id` for a session that resolved to a
+   * prebuilt image (sandbox images v2, Task 4). Best-effort: a write failure
+   * is logged, never thrown — the sandbox already points at the right image
+   * regardless of whether the bookkeeping row updates, and session build must
+   * never fail on prebuild resolution. Skipped when no app db is wired.
+   */
+  private async recordPrebuildId(sessionId: string, prebuildId: string): Promise<void> {
+    if (!this.opts.db) return;
+    try {
+      await this.opts.db
+        .update(agentSessions)
+        .set({ prebuildId })
+        .where(eq(agentSessions.id, sessionId));
+    } catch (err) {
+      console.error(`EngineHost: recording prebuild_id for session ${sessionId} failed:`, err);
+    }
   }
 
   /**

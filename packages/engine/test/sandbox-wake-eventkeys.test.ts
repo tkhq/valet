@@ -64,6 +64,7 @@ class HibernatingProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: this.hibernation,
+      customImage: false,
       coldStartEstimateMs: 5000,
     };
   }

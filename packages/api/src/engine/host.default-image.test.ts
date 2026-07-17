@@ -41,6 +41,7 @@ class RecordingSandboxProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      customImage: false,
       coldStartEstimateMs: 0,
     };
   }

@@ -180,6 +180,7 @@ describe("LocalSandboxProvider", () => {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      customImage: false,
       coldStartEstimateMs: 0,
     });
   });

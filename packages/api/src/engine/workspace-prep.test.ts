@@ -360,4 +360,136 @@ describe("buildWorkspacePrep", () => {
       expect(sandbox.execCalls.some((c) => c.command.includes("remote get-url"))).toBe(false);
     });
   });
+
+  describe("prebuilt image fetch-on-start", () => {
+    const PNPM_STEP = { id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" };
+    const DIFF_CMD = "git diff --name-only 'bakedsha' HEAD -- 'pnpm-lock.yaml'";
+
+    it("cold workspace: stages the baked repo with `cp -a` (never git clone), resets origin, fetches, checks out ref", async () => {
+      const sandbox = new RecordingSandbox();
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding({ ref: "main" })],
+        prebuild: { bakedSha: "bakedsha", recipe: [] },
+      });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      // Preserves untracked node_modules the baked install produced — a local
+      // git clone would drop them.
+      expect(commands).toContain("mkdir -p '.' && cp -a /prebuilt/repo/. '.'");
+      expect(commands.some((c) => c.startsWith("git clone"))).toBe(false);
+      expect(commands).toContain("git remote set-url origin 'https://github.com/acme/widgets.git'");
+      expect(commands).toContain("git fetch origin");
+      expect(commands).toContain("git checkout 'main'");
+    });
+
+    it("re-runs an install whose lockfile drifted between the baked sha and head", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(DIFF_CMD, { stdout: "pnpm-lock.yaml\n", stderr: "", exitCode: 0 });
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding()],
+        prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
+      });
+      await prep(sandbox, 1);
+      const installCall = sandbox.execCalls.find((c) => c.command === "pnpm install --frozen-lockfile");
+      expect(installCall).toBeDefined();
+      expect(installCall?.opts?.cwd).toBe(".");
+    });
+
+    it("skips the install when the lockfile is unchanged (cheap path)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(DIFF_CMD, { stdout: "", stderr: "", exitCode: 0 });
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding()],
+        prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
+      });
+      await prep(sandbox, 1);
+      expect(sandbox.execCalls.some((c) => c.command === "pnpm install --frozen-lockfile")).toBe(false);
+    });
+
+    it("a failed reinstall THROWS (startup-failure semantics — the spec requires the install to complete)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(DIFF_CMD, { stdout: "pnpm-lock.yaml\n", stderr: "", exitCode: 0 });
+      sandbox.setResult("pnpm install --frozen-lockfile", { stdout: "", stderr: "ERR_PNPM", exitCode: 1 });
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding()],
+        prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
+      });
+      await expect(prep(sandbox, 1)).rejects.toThrow(/prebuild reinstall/);
+    });
+
+    it("cp staging failure THROWS", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult("mkdir -p '.' && cp -a /prebuilt/repo/. '.'", { stdout: "", stderr: "no space", exitCode: 1 });
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding()],
+        prebuild: { bakedSha: "bakedsha", recipe: [] },
+      });
+      await expect(prep(sandbox, 1)).rejects.toThrow(/staging prebuilt repo/);
+    });
+
+    it("existing clone (restore / warm workspace): refreshes in place, never stages the image or reinstalls", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.markExistingClone(".");
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding({ ref: "main" })],
+        prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
+      });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands.some((c) => c.includes("cp -a /prebuilt/repo"))).toBe(false);
+      expect(commands).toContain("git fetch origin");
+      expect(commands).toContain("git checkout 'main'");
+      // Baked-image diff/reinstall is skipped — the workspace copy is authoritative.
+      expect(commands.some((c) => c.startsWith("git diff"))).toBe(false);
+      expect(commands.some((c) => c === "pnpm install --frozen-lockfile")).toBe(false);
+    });
+
+    it("offline-tolerant: a fetch failure on the staged repo logs and prep continues to reinstall", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult("git fetch origin", { stdout: "", stderr: "offline", exitCode: 1 });
+      sandbox.setResult(DIFF_CMD, { stdout: "", stderr: "", exitCode: 0 });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding({ ref: "main" })],
+        prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
+      });
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      errSpy.mockRestore();
+    });
+
+    it("only the primary (index-0) binding is prebuilt — a second binding clones normally", async () => {
+      const sandbox = new RecordingSandbox();
+      const repos = [
+        binding({ fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" }),
+        binding({ fullName: "acme/gadgets", cloneUrl: "https://github.com/acme/gadgets.git" }),
+      ];
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos,
+        prebuild: { bakedSha: "bakedsha", recipe: [] },
+      });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      // primary staged from the image (into its subdir), secondary cloned.
+      expect(commands).toContain("mkdir -p 'widgets' && cp -a /prebuilt/repo/. 'widgets'");
+      expect(commands).toContain("git clone 'https://github.com/acme/gadgets.git' 'gadgets'");
+      expect(commands.some((c) => c.startsWith("git clone 'https://github.com/acme/widgets.git'"))).toBe(false);
+    });
+
+    it("no prebuild: staging never happens (cold path byte-identical — clones as before)", async () => {
+      const sandbox = new RecordingSandbox();
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands.some((c) => c.includes("cp -a /prebuilt/repo"))).toBe(false);
+      expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
+    });
+  });
 });

@@ -93,6 +93,7 @@ export class SandboxAttachment {
         tunnels: false,
         warmPool: false,
         hibernation: false,
+        customImage: false,
       }),
       create: () => {
         throw new Error("SandboxAttachment.forSandbox: no provider available");

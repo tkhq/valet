@@ -243,6 +243,7 @@ export class VirtualSandboxProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      customImage: false,
       coldStartEstimateMs: 0,
     };
   }

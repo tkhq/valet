@@ -45,6 +45,7 @@ class TestProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: true,
+      customImage: false,
       coldStartEstimateMs: 0,
     };
   }

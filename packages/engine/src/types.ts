@@ -640,6 +640,16 @@ export interface SandboxCapabilities {
    * `resume` are absent and `SandboxAttachment.suspend()` is a refused no-op.
    */
   hibernation: boolean;
+  /**
+   * Whether the backend can boot a sandbox from an arbitrary, caller-supplied
+   * OCI image ref (`SandboxCreateOpts.image`). True for docker/kubernetes,
+   * where `image` selects the container image; false for local/virtual, which
+   * run against the host process/an in-memory fake and ignore `image`
+   * entirely. The prebuild-resolution layer consults this before pointing a
+   * session at a prebuilt image: a `customImage: false` provider always boots
+   * the stock runtime regardless of any matching prebuild.
+   */
+  customImage: boolean;
   coldStartEstimateMs?: number;
 }
 

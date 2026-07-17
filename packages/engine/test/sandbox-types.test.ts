@@ -20,6 +20,7 @@ describe("VirtualSandboxProvider: spec-aligned contract", () => {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      customImage: false,
       coldStartEstimateMs: 0,
     });
   });

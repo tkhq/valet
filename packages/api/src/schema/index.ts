@@ -323,6 +323,12 @@ export const agentSessions = pgTable(
     // web-created interactive sessions may request "full" — orchestrator,
     // child, and workflow sessions always hardcode "headless".
     profile: text("profile", { enum: ["headless", "full"] }).notNull().default("headless"),
+    // The `prebuilds.id` this session's sandbox booted from, when session
+    // create resolved the primary repo binding to a `pushed` prebuild image
+    // (sandbox images v2 plan, Task 4). Null for cold-start sessions (no
+    // matching config/prebuild, or a `customImage: false` provider). Nullable
+    // — the vast majority of sessions never resolve a prebuild.
+    prebuildId: text("prebuild_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

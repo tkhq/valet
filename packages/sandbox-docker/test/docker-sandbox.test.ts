@@ -328,6 +328,7 @@ describeDocker("DockerSandbox", () => {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      customImage: true,
       coldStartEstimateMs: 8000,
     });
   });

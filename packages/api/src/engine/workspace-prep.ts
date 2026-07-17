@@ -46,6 +46,7 @@
 import type { ExecResult, Sandbox } from "@valet/engine";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import { ownerOf } from "../services/session-github-token.js";
+import { PREBUILT_REPO_PATH, type RecipeStep } from "../prebuilds/recipe.js";
 import type { RepoBinding } from "../wire/types.js";
 
 /** Workspace-relative staging dir the two scripts are written to (via
@@ -71,6 +72,19 @@ export interface WorkspacePrepOpts {
   repos: RepoBinding[];
   userName?: string;
   userEmail?: string;
+  /**
+   * Set when the session booted from a prebuilt image (sandbox images v2,
+   * Task 4). Describes the PRIMARY (position-0) binding, whose repo is baked
+   * into the image at {@link PREBUILT_REPO_PATH}. On a cold workspace, prep
+   * stages that baked repo out of the image (`cp -a` — preserving the
+   * untracked `node_modules`/venv the baked installs produced, which a local
+   * `git clone` would drop) instead of cloning fresh, then refreshes `origin`
+   * and re-runs any install whose lockfile drifted between `bakedSha` and the
+   * fetched head. Only the index-0 binding is prebuilt; any others clone
+   * normally. Absent === no prebuild, every binding clones as before
+   * (byte-identical).
+   */
+  prebuild?: { bakedSha: string; recipe: RecipeStep[] };
 }
 
 /** POSIX single-quote escaping for values interpolated into `sh` command
@@ -281,6 +295,93 @@ async function prepBinding(sandbox: Sandbox, dir: string, binding: RepoBinding):
 }
 
 /**
+ * Stages the baked repo out of the prebuilt image into `dir` with `cp -a`.
+ * `cp -a` (archive: recursive, preserve, no-deref) copies EVERYTHING under
+ * `PREBUILT_REPO_PATH` — `.git`, the checked-out tree, AND the untracked
+ * `node_modules`/`.venv`/etc. the baked install steps produced. A local
+ * `git clone <path>` would copy only tracked git objects and silently drop
+ * those install artifacts, defeating the whole point of the prebuild. Failure
+ * THROWS — without the staged repo there's nothing to refresh (startup-failure
+ * semantics, engine seam Task 1). `dir` is workspace-relative; `mkdir -p`
+ * first so a multi-binding subdir (which git-clone would otherwise create)
+ * exists before the copy.
+ */
+async function stagePrebuiltRepo(sandbox: Sandbox, dir: string): Promise<void> {
+  const q = shQuote(dir);
+  const result = await safeExec(sandbox, `mkdir -p ${q} && cp -a ${PREBUILT_REPO_PATH}/. ${q}`);
+  if (result.exitCode !== 0) {
+    throw new Error(execFailureMessage(`workspace prep: staging prebuilt repo into ${dir} failed`, result));
+  }
+}
+
+/**
+ * Re-runs each recipe step whose lockfile drifted between the image's baked
+ * commit and the fetched head. `git diff --name-only <bakedSha> HEAD -- <lock>`
+ * naming the lockfile (or the diff command erroring — treated conservatively
+ * as "changed" so stale deps never ship silently) triggers the step. Offline
+ * with head still at `bakedSha` → empty diff → every step skipped (the cheap
+ * path). Unlike fetch/checkout, a reinstall failure is NOT tolerated: the spec
+ * requires the install to complete before the session is handed over, so a
+ * non-zero exit THROWS (prep fails → startup-failure semantics).
+ */
+async function conditionalReinstall(
+  sandbox: Sandbox,
+  dir: string,
+  prebuild: { bakedSha: string; recipe: RecipeStep[] },
+): Promise<void> {
+  for (const step of prebuild.recipe) {
+    const diff = await safeExec(
+      sandbox,
+      `git diff --name-only ${shQuote(prebuild.bakedSha)} HEAD -- ${shQuote(step.lockfile)}`,
+      { cwd: dir },
+    );
+    const changed = diff.exitCode !== 0 || diff.stdout.trim() !== "";
+    if (!changed) continue;
+    const install = await safeExec(sandbox, step.command, { cwd: dir });
+    if (install.exitCode !== 0) {
+      throw new Error(
+        execFailureMessage(`workspace prep: prebuild reinstall '${step.command}' (${step.lockfile}) failed`, install),
+      );
+    }
+  }
+}
+
+/**
+ * Prep for the PRIMARY binding when the session booted from a prebuilt image.
+ * A persistent workspace that already holds the repo (`.git` present — restore
+ * / warm PVC) takes the SAME offline-tolerant refresh path as any existing
+ * clone; the baked image is irrelevant then (the workspace copy is
+ * authoritative). Otherwise (cold workspace): stage the baked repo out of the
+ * image, reset `origin` to the real clone url, fetch + checkout the target ref
+ * (offline-tolerant), then conditionally re-run drifted installs.
+ */
+async function prepPrebuiltBinding(
+  sandbox: Sandbox,
+  dir: string,
+  binding: RepoBinding,
+  prebuild: { bakedSha: string; recipe: RecipeStep[] },
+): Promise<void> {
+  const hasGit = await dirHasGit(sandbox, dir);
+  if (hasGit) {
+    await refreshExistingClone(sandbox, dir, binding);
+    return;
+  }
+  await stagePrebuiltRepo(sandbox, dir);
+  // The baked clone's `origin` already points at `cloneUrl` (the Dockerfile
+  // cloned it), but reset it explicitly — non-secret url only — so a renamed
+  // remote can't leave the fetch below pointed at the wrong place. Best-effort:
+  // a failure here is logged, not fatal (the fetch would fail loudly anyway).
+  const setUrl = await safeExec(sandbox, `git remote set-url origin ${shQuote(binding.cloneUrl)}`, { cwd: dir });
+  if (setUrl.exitCode !== 0) {
+    console.error(
+      `workspace prep: git remote set-url origin failed for ${binding.fullName} (${dir}) — continuing: ${setUrl.stderr || setUrl.stdout}`,
+    );
+  }
+  await refreshExistingClone(sandbox, dir, binding);
+  await conditionalReinstall(sandbox, dir, prebuild);
+}
+
+/**
  * Builds the `prepareSandbox` closure for a session with repo bindings.
  * Callers (`EngineHost.buildSession`) only invoke this when
  * `meta.repos` is non-empty — an unbound session passes no
@@ -294,7 +395,13 @@ export function buildWorkspacePrep(opts: WorkspacePrepOpts): (sandbox: Sandbox, 
 
     const dirs = computeTargetDirs(opts.repos);
     for (let index = 0; index < opts.repos.length; index++) {
-      await prepBinding(sandbox, dirs[index], opts.repos[index]);
+      // The prebuilt image only bakes the PRIMARY (index-0) binding's repo;
+      // any other binding clones normally.
+      if (index === 0 && opts.prebuild) {
+        await prepPrebuiltBinding(sandbox, dirs[index], opts.repos[index], opts.prebuild);
+      } else {
+        await prepBinding(sandbox, dirs[index], opts.repos[index]);
+      }
     }
   };
 }
