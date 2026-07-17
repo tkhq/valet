@@ -38,7 +38,8 @@ export async function driveTurn({
   const ws = new WebSocket(`${wsUrl}/api/sessions/${sessionId}/ws`);
   let posted = false;
   let sawTurnEnd = false;
-  await new Promise<void>((resolve, reject) => {
+  try {
+    await new Promise<void>((resolve, reject) => {
     const overall = setTimeout(
       () => reject(new Error("driveTurn: overall timeout")),
       timeoutMs,
@@ -107,11 +108,19 @@ export async function driveTurn({
       if (settle) clearTimeout(settle);
       reject(new Error("ws error during driveTurn"));
     };
-  });
+    });
+  } finally {
+    // Always close, including on every rejection path (engine error, ws
+    // error, overall timeout) — an unclosed socket keeps the test server's
+    // `close()` pending indefinitely (Node's http Server.close() waits for
+    // open connections to end), which previously showed up as a hook
+    // timeout in callers that assert a turn *fails* (see
+    // `routes/llm-providers.e2e.test.ts`'s disabled-provider case).
+    ws.close();
+  }
   if (!sawTurnEnd) {
     throw new Error("driveTurn settled without ever seeing turn_end");
   }
-  ws.close();
   // Brief extra pause so engine's persistence (appendEntries / updateEntry)
   // has time to land before the test asserts on stored state.
   await new Promise((r) => setTimeout(r, 200));
