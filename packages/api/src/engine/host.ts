@@ -22,7 +22,8 @@ import {
 import type { ValetPlugin } from "@valet/engine";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
-import { listLlmProviders, parseModelId } from "../services/llm-providers.js";
+import { hasOrgKey } from "../services/model-catalog.js";
+import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orchestratorIdentities, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -645,10 +646,28 @@ export class EngineHost {
    * failure semantics for an explicit pick. Restore is untouched — it never
    * consults preferences at all (persisted model always wins).
    *
-   * One `listLlmProviders` query total (not one per preference / no catalog
-   * build), since only a row's `enabled` flag is needed here — known-kind
-   * namespaces with no row are the zero-config path and are always active,
-   * same as `resolveModelSpec`'s own no-row branch.
+   * One `listLlmProviders` query total (not one per preference / no full
+   * catalog build), plus one credential read per CUSTOM-namespaced
+   * preference entry (acceptable — preference lists are short and this only
+   * runs at session-build time, never per turn). "Active" mirrors the
+   * catalog's own `resolvable` definition (`services/model-catalog.ts`),
+   * which in turn mirrors `resolveModelSpec`'s throw condition:
+   *   - known kind (anthropic/openai/google), no row → always active
+   *     (zero-config path, same as `resolveModelSpec`'s no-row branch).
+   *   - known kind WITH a row → active iff `row.enabled`. A row with
+   *     neither an org key nor an env key is still "active" here because
+   *     `resolveModelSpec` does NOT throw for that case — it passes
+   *     `apiKey: undefined` through to pi-ai's own env fallback rather than
+   *     failing session build; that's a downstream completion-time concern,
+   *     not a reason to skip this preference entry.
+   *   - custom (`openai_compatible`) row → active iff `row.enabled` AND an
+   *     org credential exists at `llm:{row.id}` — custom providers have NO
+   *     env fallback, so a keyless custom row is exactly the case
+   *     `resolveModelSpec` throws `provider {name} has no API key` for, and
+   *     must not be treated as active here either (this is the key-delete
+   *     bug this fell through: an admin could delete the key backing
+   *     `orgPreferences[0]`, leaving new sessions with no key AND no
+   *     fallback until the array was rewritten).
    */
   private async orgPreferredModel(orgId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
@@ -657,8 +676,15 @@ export class EngineHost {
     const rows = await listLlmProviders(this.opts.db, orgId);
     for (const pref of prefs) {
       const { namespace } = parseModelId(pref);
-      const row = rows.find((r) => (r.kind === "openai_compatible" ? r.id : r.kind) === namespace);
-      const active = row ? row.enabled : namespace === "anthropic" || namespace === "openai" || namespace === "google";
+      const row = rows.find((r) => providerNamespace(r) === namespace);
+      let active: boolean;
+      if (!row) {
+        active = namespace === "anthropic" || namespace === "openai" || namespace === "google";
+      } else if (row.kind === "openai_compatible") {
+        active = row.enabled && (await hasOrgKey(this.opts.engineCredentials, orgId, row.id));
+      } else {
+        active = row.enabled;
+      }
       if (active) return pref;
     }
     return undefined;

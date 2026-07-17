@@ -52,7 +52,13 @@ const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
   google: "Google",
 };
 
-async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<boolean> {
+/** True when an org credential exists at `llm:{rowId}` — the sole
+ * resolvability signal for a custom (`openai_compatible`) row (no env
+ * fallback, mirrors `resolveModelSpec`'s throw condition). Exported so
+ * `engine/host.ts`'s `orgPreferredModel` can reuse this exact check instead
+ * of re-deriving "is this row usable" logic that could drift from the
+ * catalog's own `active` definition. */
+export async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<boolean> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
   return stored !== null;

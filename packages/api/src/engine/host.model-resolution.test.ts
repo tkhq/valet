@@ -292,6 +292,28 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("claude-haiku-4-5");
   });
 
+  it("new-session precedence: falls through past a keyless-but-enabled custom preference (fix a's pin — key-delete can't brick new sessions)", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    // enabled: true (default), but no org credential was ever saved for
+    // this row — same state as an admin deleting the key via DELETE
+    // .../:id/key without also rewriting orgPreferences.
+    await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`, "anthropic/claude-haiku-4-5"]);
+
+    const session = await engineHost.orchestratorSessionFor(
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+  });
+
   it("new-session precedence: falls through past a disabled provider to the next preference", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;

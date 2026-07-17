@@ -72,11 +72,28 @@ async function requireOrgAdmin(c: Context<AppEnv>) {
   return undefined;
 }
 
+/** A single custom-provider model entry, validated field-by-field. `id`/`name`
+ * are required strings; `contextWindow` and `pricing.{input,output}` are
+ * optional but MUST be numbers when present — they feed `Model.contextWindow`
+ * (compaction thresholds) and `Model.cost` directly, with no further
+ * validation downstream, so a non-numeric value here would silently corrupt
+ * turn-time model construction rather than fail loudly at config time. */
+function isValidLlmProviderModel(m: unknown): m is LlmProviderModel {
+  if (typeof m !== "object" || m === null) return false;
+  const rec = m as Record<string, unknown>;
+  if (typeof rec.id !== "string" || typeof rec.name !== "string") return false;
+  if (rec.contextWindow !== undefined && typeof rec.contextWindow !== "number") return false;
+  if (rec.pricing !== undefined) {
+    if (typeof rec.pricing !== "object" || rec.pricing === null) return false;
+    const pricing = rec.pricing as Record<string, unknown>;
+    if (typeof pricing.input !== "number" || typeof pricing.output !== "number") return false;
+  }
+  return true;
+}
+
 function isLlmProviderModelArray(v: unknown): v is LlmProviderModel[] {
   if (!Array.isArray(v)) return false;
-  return v.every(
-    (m) => typeof m === "object" && m !== null && typeof (m as Record<string, unknown>).id === "string" && typeof (m as Record<string, unknown>).name === "string",
-  );
+  return v.every(isValidLlmProviderModel);
 }
 
 /** `baseUrl` is required for `openai_compatible` and refused for known kinds. */
@@ -327,6 +344,21 @@ llmProvidersRouter.delete("/:id/key", async (c) => {
   const existing = await getLlmProvider(db, user.orgId, id);
   if (!existing) return c.json(PROVIDER_NOT_FOUND, 404);
 
+  // Custom (openai_compatible) providers have NO env fallback — deleting the
+  // key backing `orgPreferences[0]` leaves new sessions with nothing to fall
+  // back to until the array is rewritten (same failure `EngineHost.
+  // orgPreferredModel`'s active-provider walk now guards against on the
+  // read side). Known kinds are exempt: they may still resolve via an env
+  // var, and even when no env var is configured that's a deployment-time
+  // fact the read-side fall-through already covers, not something this
+  // write-time guard needs to duplicate.
+  if (existing.kind === "openai_compatible") {
+    const preferences = await getOrgModelPreferences(db, user.orgId);
+    if (isDefaultProviderNamespace(existing, preferences)) {
+      return c.json({ error: DEFAULT_PROVIDER_IN_USE_ERROR }, 409);
+    }
+  }
+
   const owner: CredentialOwner = { type: "org", id: user.orgId };
   await engineCredentials.delete(owner, `llm:${id}`);
 
@@ -401,10 +433,13 @@ llmProvidersRouter.post("/:id/probe", async (c) => {
   // `baseUrl` is admin-supplied and treated as trusted (same trust model as
   // the turn-time resolution path in services/model-resolution.ts). Bearer
   // stripping on cross-origin redirects is the fetch/undici runtime's
-  // spec-mandated behavior; we do not re-implement it here.
+  // spec-mandated behavior; we do not re-implement it here. Strip a trailing
+  // slash before joining so `https://x/v1` and `https://x/v1/` both probe
+  // `https://x/v1/models`, not `https://x/v1//models`.
+  const probeBaseUrl = existing.baseUrl.replace(/\/+$/, "");
   let upstream: Response;
   try {
-    upstream = await fetch(`${existing.baseUrl}/models`, {
+    upstream = await fetch(`${probeBaseUrl}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
   } catch (err) {

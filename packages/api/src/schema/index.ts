@@ -38,7 +38,7 @@ export const orgs = pgTable("orgs", {
   // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read as
   // JSON (`services/org.ts`'s `JSON.parse`/`JSON.stringify`) — jsonb.
   features: jsonb("features").notNull().default({}),
-  // Ordered list of namespaced model ids (e.g. `"anthropic:claude-opus-4"`)
+  // Ordered list of namespaced model ids (e.g. `"anthropic/claude-opus-4"`)
   // the org has opted into, most-preferred first. Read/written as JSON
   // (`services/org.ts`'s `getOrgModelPreferences`/`setOrgModelPreferences`)
   // — jsonb, mirroring the `features` column above.

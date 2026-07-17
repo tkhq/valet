@@ -325,7 +325,12 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
 
       const listRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
       const listBody = await j<ListLlmProvidersResponse>(listRes);
-      expect(listBody.providers.every((p) => p.hasKey === true || p.hasKey === false)).toBe(true);
+      // Both providers had keys PUT above (steps 2 and 4) and neither key was
+      // ever deleted, so both must still report `hasKey: true`.
+      const anthropicSummary = listBody.providers.find((p) => p.id === anthropicProvider.id);
+      const customSummary = listBody.providers.find((p) => p.id === customProvider.id);
+      expect(anthropicSummary?.hasKey).toBe(true);
+      expect(customSummary?.hasKey).toBe(true);
 
       // ── 9. Sweep: no response body recorded above contains a stored key.
       const allBodies = bodies.join("\n");

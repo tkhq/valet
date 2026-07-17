@@ -137,6 +137,51 @@ describe("POST /api/org/llm-providers", () => {
     expect(body.baseUrl).toBe("https://api.example.com/v1");
   });
 
+  it("400s when a custom model's contextWindow is not a number", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://api.example.com/v1",
+        models: [{ id: "m1", name: "Model 1", contextWindow: "128000" }],
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("400s when a custom model's pricing fields are not numbers", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://api.example.com/v1",
+        models: [{ id: "m1", name: "Model 1", pricing: { input: "1", output: 2 } }],
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts a custom model with valid numeric contextWindow and pricing", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://api.example.com/v1",
+        models: [{ id: "m1", name: "Model 1", contextWindow: 128_000, pricing: { input: 1, output: 2 } }],
+      }),
+    });
+    expect(res.status).toBe(201);
+  });
+
   it("409s creating a second known-kind provider for the same org (clean shape, not a raw 500)", async () => {
     api = await bootTestApi();
     await createAnthropicProvider(api.baseUrl);
@@ -432,6 +477,87 @@ describe("DELETE /api/org/llm-providers/:id/key", () => {
     const listRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
     const listBody = (await listRes.json()) as ListLlmProvidersResponse;
     expect(listBody.providers[0]?.hasKey).toBe(false);
+  });
+
+  it("204s revoking a known-kind provider's key even when it's the org default (env fallback may cover it)", async () => {
+    api = await bootTestApi();
+    const created = await createAnthropicProvider(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
+    });
+    await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ preferences: ["anthropic/claude-haiku-4-5"] }),
+    });
+
+    const delRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(204);
+  });
+
+  it("409s revoking a custom provider's key when it backs preferences[0]", async () => {
+    api = await bootTestApi();
+    const createRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openai_compatible", name: "Custom", baseUrl: "https://api.example.com/v1" }),
+    });
+    const created = (await createRes.json()) as CreateLlmProviderResponse;
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "custom-secret-1234" }),
+    });
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ models: [{ id: "m1", name: "M1" }] }),
+    });
+    const prefRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ preferences: [`${created.id}/m1`] }),
+    });
+    expect(prefRes.status).toBe(200);
+
+    const delRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(409);
+    const body = (await delRes.json()) as { error: string };
+    expect(body.error).toBe("provider is the org default model's provider");
+
+    // Key must still be present — the guard fired before any mutation.
+    const listRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
+    const listBody = (await listRes.json()) as ListLlmProvidersResponse;
+    expect(listBody.providers.find((p) => p.id === created.id)?.hasKey).toBe(true);
+  });
+
+  it("204s revoking a custom provider's key when it is NOT the org default", async () => {
+    api = await bootTestApi();
+    const createRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openai_compatible", name: "Custom", baseUrl: "https://api.example.com/v1" }),
+    });
+    const created = (await createRes.json()) as CreateLlmProviderResponse;
+    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ apiKey: "custom-secret-1234" }),
+    });
+
+    const delRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(204);
   });
 });
 
