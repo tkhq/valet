@@ -14,21 +14,34 @@ import {
 } from "@tanstack/react-query";
 import type {
   AddTeamMemberRequest,
+  CreateLlmProviderRequest,
+  CreateLlmProviderResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  GetLlmProviderPreferencesResponse,
+  ListLlmProvidersResponse,
   ListModelsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   MeResponse,
   OrgMembersResponse,
   OrgResponse,
+  PatchLlmProviderRequest,
+  PatchLlmProviderResponse,
   PatchMeRequest,
   PatchMeResponse,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
   PatchOrgRequest,
   PatchOrgResponse,
+  ProbeLlmProviderResponse,
+  PutLlmProviderKeyRequest,
+  PutLlmProviderKeyResponse,
+  PutLlmProviderPreferencesRequest,
+  PutLlmProviderPreferencesResponse,
   SetTeamMemberRoleRequest,
+  TestLlmProviderRequest,
+  TestLlmProviderResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
 
@@ -39,6 +52,8 @@ export const qkSettings = {
   org: () => ["settings", "org"] as const,
   orgMembers: () => ["settings", "org", "members"] as const,
   models: () => ["settings", "models"] as const,
+  llmProviders: () => ["settings", "llmProviders"] as const,
+  llmProviderPreferences: () => ["settings", "llmProviderPreferences"] as const,
   teams: () => ["settings", "teams"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
 };
@@ -76,6 +91,22 @@ export function useModels(opts?: UseQueryOptions<ListModelsResponse>) {
     // Static registry (pi-ai `getModels`, no provider call) — effectively
     // never changes within a session.
     staleTime: Infinity,
+    ...opts,
+  });
+}
+
+export function useLlmProviders(opts?: UseQueryOptions<ListLlmProvidersResponse>) {
+  return useQuery<ListLlmProvidersResponse>({
+    queryKey: qkSettings.llmProviders(),
+    queryFn: () => api.listLlmProviders(),
+    ...opts,
+  });
+}
+
+export function useLlmProviderPreferences(opts?: UseQueryOptions<GetLlmProviderPreferencesResponse>) {
+  return useQuery<GetLlmProviderPreferencesResponse>({
+    queryKey: qkSettings.llmProviderPreferences(),
+    queryFn: () => api.getLlmProviderPreferences(),
     ...opts,
   });
 }
@@ -149,6 +180,86 @@ export function useSetOrgMemberRole() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: qkSettings.orgMembers() });
+    },
+  });
+}
+
+// ── LLM providers ────────────────────────────────────────────────────────
+
+export function useCreateLlmProvider() {
+  const qc = useQueryClient();
+  return useMutation<CreateLlmProviderResponse, Error, CreateLlmProviderRequest>({
+    mutationFn: (body) => api.createLlmProvider(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function usePatchLlmProvider() {
+  const qc = useQueryClient();
+  return useMutation<PatchLlmProviderResponse, Error, { id: string; body: PatchLlmProviderRequest }>({
+    mutationFn: ({ id, body }) => api.patchLlmProvider(id, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function useDeleteLlmProvider() {
+  const qc = useQueryClient();
+  return useMutation<undefined, Error, string>({
+    mutationFn: (id) => api.deleteLlmProvider(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function usePutLlmProviderKey() {
+  const qc = useQueryClient();
+  return useMutation<PutLlmProviderKeyResponse, Error, { id: string; body: PutLlmProviderKeyRequest }>({
+    mutationFn: ({ id, body }) => api.putLlmProviderKey(id, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function useDeleteLlmProviderKey() {
+  const qc = useQueryClient();
+  return useMutation<undefined, Error, string>({
+    mutationFn: (id) => api.deleteLlmProviderKey(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function useProbeLlmProvider() {
+  return useMutation<ProbeLlmProviderResponse, Error, string>({
+    mutationFn: (id) => api.probeLlmProvider(id),
+  });
+}
+
+export function useTestLlmProvider() {
+  return useMutation<TestLlmProviderResponse, Error, { id: string; body: TestLlmProviderRequest }>({
+    mutationFn: ({ id, body }) => api.testLlmProvider(id, body),
+  });
+}
+
+export function usePutLlmProviderPreferences() {
+  const qc = useQueryClient();
+  return useMutation<PutLlmProviderPreferencesResponse, Error, PutLlmProviderPreferencesRequest>({
+    mutationFn: (body) => api.putLlmProviderPreferences(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.llmProviderPreferences() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
     },
   });
 }

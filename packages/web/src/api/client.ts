@@ -32,6 +32,10 @@ import type {
   ListDecisionsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
+  CreateLlmProviderRequest,
+  CreateLlmProviderResponse,
+  GetLlmProviderPreferencesResponse,
+  ListLlmProvidersResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
@@ -46,6 +50,8 @@ import type {
   MeResponse,
   OrgMembersResponse,
   OrgResponse,
+  PatchLlmProviderRequest,
+  PatchLlmProviderResponse,
   PatchMeRequest,
   PatchMeResponse,
   PatchOrchestratorInfoRequest,
@@ -59,8 +65,13 @@ import type {
   PatchSessionResponse,
   PatchThreadRequest,
   PatchThreadResponse,
+  ProbeLlmProviderResponse,
   PutCredentialRequest,
   PutCredentialResponse,
+  PutLlmProviderKeyRequest,
+  PutLlmProviderKeyResponse,
+  PutLlmProviderPreferencesRequest,
+  PutLlmProviderPreferencesResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -73,6 +84,8 @@ import type {
   SetTeamMemberRoleRequest,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
+  TestLlmProviderRequest,
+  TestLlmProviderResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
   WithdrawDecisionRequest,
@@ -317,6 +330,40 @@ export const api = {
       `/org/members/${encodeURIComponent(userId)}`,
       body,
     ),
+
+  // org LLM providers (llm-providers design: provider CRUD, key mgmt,
+  // custom-provider probe/test, model preferences)
+  listLlmProviders: () => request<ListLlmProvidersResponse>("GET", "/org/llm-providers"),
+  createLlmProvider: (body: CreateLlmProviderRequest) =>
+    request<CreateLlmProviderResponse>("POST", "/org/llm-providers", body),
+  patchLlmProvider: (id: string, body: PatchLlmProviderRequest) =>
+    request<PatchLlmProviderResponse>(
+      "PATCH",
+      `/org/llm-providers/${encodeURIComponent(id)}`,
+      body,
+    ),
+  deleteLlmProvider: (id: string) =>
+    request<undefined>("DELETE", `/org/llm-providers/${encodeURIComponent(id)}`),
+  putLlmProviderKey: (id: string, body: PutLlmProviderKeyRequest) =>
+    request<PutLlmProviderKeyResponse>(
+      "PUT",
+      `/org/llm-providers/${encodeURIComponent(id)}/key`,
+      body,
+    ),
+  deleteLlmProviderKey: (id: string) =>
+    request<undefined>("DELETE", `/org/llm-providers/${encodeURIComponent(id)}/key`),
+  probeLlmProvider: (id: string) =>
+    request<ProbeLlmProviderResponse>("POST", `/org/llm-providers/${encodeURIComponent(id)}/probe`),
+  testLlmProvider: (id: string, body: TestLlmProviderRequest) =>
+    request<TestLlmProviderResponse>(
+      "POST",
+      `/org/llm-providers/${encodeURIComponent(id)}/test`,
+      body,
+    ),
+  getLlmProviderPreferences: () =>
+    request<GetLlmProviderPreferencesResponse>("GET", "/org/llm-providers/preferences"),
+  putLlmProviderPreferences: (body: PutLlmProviderPreferencesRequest) =>
+    request<PutLlmProviderPreferencesResponse>("PUT", "/org/llm-providers/preferences", body),
 
   // org invites (org-admin only)
   listInvites: () => request<ListInvitesResponse>("GET", "/org/invites"),
