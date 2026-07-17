@@ -22,6 +22,7 @@ import {
 import type { ValetPlugin } from "@valet/engine";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
+import { listLlmProviders, parseModelId } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orchestratorIdentities, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -628,13 +629,39 @@ export class EngineHost {
     return resolved.model;
   }
 
-  /** `orgs.modelPreferences[0]` (the org default model), or `undefined` when
-   * unset or the host has no `db`. Uncached — a preferences change applies on
-   * the very next session build (split-settings decision 9). */
+  /**
+   * `orgs.modelPreferences`, walked in preference order to find the first
+   * entry backed by an ACTIVE provider, or `undefined` when unset, the host
+   * has no `db`, or every preference's provider is inactive (disabled, or
+   * deleted/unknown for custom namespaces). Uncached — a preferences change
+   * applies on the very next session build (split-settings decision 9).
+   *
+   * Spec: new sessions must never resolve to an inactive provider (llm-
+   * providers design doc decision 6) — disabling the provider behind
+   * `orgPreferences[0]` must fall through to the next preference, not throw.
+   * This only guards the new-session default tier; `overrideId` and the
+   * user's explicit `defaultModel` still resolve straight through to
+   * `resolveModelObject` and throw on a disabled provider, per the spec's
+   * failure semantics for an explicit pick. Restore is untouched — it never
+   * consults preferences at all (persisted model always wins).
+   *
+   * One `listLlmProviders` query total (not one per preference / no catalog
+   * build), since only a row's `enabled` flag is needed here — known-kind
+   * namespaces with no row are the zero-config path and are always active,
+   * same as `resolveModelSpec`'s own no-row branch.
+   */
   private async orgPreferredModel(orgId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
     const prefs = await getOrgModelPreferences(this.opts.db, orgId);
-    return prefs[0];
+    if (prefs.length === 0) return undefined;
+    const rows = await listLlmProviders(this.opts.db, orgId);
+    for (const pref of prefs) {
+      const { namespace } = parseModelId(pref);
+      const row = rows.find((r) => (r.kind === "openai_compatible" ? r.id : r.kind) === namespace);
+      const active = row ? row.enabled : namespace === "anthropic" || namespace === "openai" || namespace === "google";
+      if (active) return pref;
+    }
+    return undefined;
   }
 
   /**

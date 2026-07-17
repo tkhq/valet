@@ -292,6 +292,82 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("claude-haiku-4-5");
   });
 
+  it("new-session precedence: falls through past a disabled provider to the next preference", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+    await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`, "anthropic/claude-haiku-4-5"]);
+
+    const session = await engineHost.orchestratorSessionFor(
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+  });
+
+  it("new-session precedence: all preferences inactive falls through to the hardcoded default", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+    await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`]);
+
+    const session = await engineHost.orchestratorSessionFor(
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("claude-haiku-4-5");
+  });
+
+  it("restore still throws when the persisted model's provider was disabled after the fact", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineCredentials } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Custom",
+      baseUrl: "https://x/v1",
+      models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+    });
+    await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
+      type: "api_key",
+      apiKey: "org-custom",
+    });
+    const spec = `${row.id}/m1`;
+
+    const session = await engineHost.sessionFor("restore-disabled", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    await session.setModel(spec);
+    expect(session.options.model.id).toBe(spec);
+
+    engineHost.evictAll();
+    await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+
+    await expect(
+      engineHost.sessionFor("restore-disabled", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      }),
+    ).rejects.toThrow(/provider Custom is disabled/);
+  });
+
   it("restore-no-clobber: a persisted namespaced custom model restores verbatim", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineCredentials } = api.providers;
