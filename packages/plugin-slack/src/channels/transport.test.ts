@@ -1149,6 +1149,35 @@ describe('SlackTransport', () => {
       expect(completeBody.initial_comment).toBe('Here is the file');
     });
 
+    it('renders markdown in the caption to Slack mrkdwn on initial_comment', async () => {
+      // The caption is the sole carrier of the reply text once de-dup drops the
+      // standalone chat.postMessage, so it must be run through formatMarkdown —
+      // otherwise markdown (bold, links) reaches Slack literally.
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ ok: true, upload_url: 'https://upload.example.com', file_id: 'F1' }),
+      );
+      mockFetch.mockResolvedValueOnce(new Response('OK', { status: 200 }));
+      mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+      const result = await transport.sendMessage(
+        { channelType: 'slack', channelId: 'C456' },
+        {
+          attachments: [{
+            type: 'file' as const,
+            url: 'data:application/pdf;base64,JVBERi0=',
+            mimeType: 'application/pdf',
+            fileName: 'report.pdf',
+            caption: 'Here is the **bold** file',
+          }],
+        },
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      const completeBody = JSON.parse(mockFetch.mock.calls[2][1].body);
+      expect(completeBody.initial_comment).toBe('Here is the *bold* file');
+    });
+
     it('de-dups when the outbound carries the text as both markdown and caption', async () => {
       // The transport-agnostic outbound builder sets the reply text on both
       // `markdown` and the attachment caption so the text survives on transports

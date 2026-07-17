@@ -485,7 +485,7 @@ export class SlackTransport implements ChannelTransport {
       completeBody.thread_ts = target.threadId;
     }
     if (attachment.caption) {
-      completeBody.initial_comment = attachment.caption;
+      completeBody.initial_comment = this.formatMarkdown(attachment.caption);
     }
 
     const completeResult = await slackApiCall('files.completeUploadExternal', completeBody, token);
