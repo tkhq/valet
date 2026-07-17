@@ -868,6 +868,75 @@ export const githubInstallations = pgTable(
   ],
 );
 
+// ─── Sandbox image prebuilds (sandbox images v2 plan, Task 1) ──────────────
+//
+// Three tables: `image_catalog` (admin-registered base images an org can
+// pin a prebuild config to), `prebuild_configs` (one row per repo an org
+// has opted into nightly/manual prebuilds for), `prebuilds` (one row per
+// build attempt — `recipe` snapshots the RESOLVED `RecipeStep[]` at build
+// time, per `packages/api/src/prebuilds/recipe.ts`, so a later change to
+// detection logic never retroactively changes what an already-built image
+// claims to contain).
+
+export const imageCatalog = pgTable(
+  "image_catalog",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    name: text("name").notNull(),
+    ref: text("ref").notNull(),
+    pullSecretName: text("pull_secret_name"),
+    kind: text("kind", { enum: ["base"] })
+      .notNull()
+      .default("base"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("image_catalog_org").on(t.orgId)],
+);
+
+export const prebuildConfigs = pgTable(
+  "prebuild_configs",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    repoHost: text("repo_host").notNull().default("github"),
+    repoFullName: text("repo_full_name").notNull(),
+    cloneUrl: text("clone_url").notNull(),
+    baseImageId: text("base_image_id"),
+    schedule: text("schedule", { enum: ["nightly", "off"] })
+      .notNull()
+      .default("nightly"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("prebuild_configs_org").on(t.orgId),
+    uniqueIndex("prebuild_configs_org_repo").on(t.orgId, t.repoHost, t.repoFullName),
+  ],
+);
+
+export const prebuilds = pgTable(
+  "prebuilds",
+  {
+    id: text("id").primaryKey(),
+    configId: text("config_id").notNull(),
+    commitSha: text("commit_sha").notNull(),
+    imageRef: text("image_ref").notNull(),
+    status: text("status", {
+      enum: ["queued", "building", "pushed", "failed"],
+    }).notNull(),
+    builderBackend: text("builder_backend").notNull(),
+    recipe: jsonb("recipe").notNull(),
+    error: text("error"),
+    logTail: text("log_tail"),
+    startedAt: bigint("started_at", { mode: "number" }),
+    finishedAt: bigint("finished_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("prebuilds_config_status_created").on(t.configId, t.status, t.createdAt)],
+);
+
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -906,3 +975,6 @@ export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
 export type SessionRepoRow = typeof sessionRepos.$inferSelect;
 export type GithubInstallationRow = typeof githubInstallations.$inferSelect;
+export type ImageCatalogRow = typeof imageCatalog.$inferSelect;
+export type PrebuildConfigRow = typeof prebuildConfigs.$inferSelect;
+export type PrebuildRow = typeof prebuilds.$inferSelect;

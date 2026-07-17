@@ -558,3 +558,49 @@ CREATE TABLE "github_installations" (
 CREATE UNIQUE INDEX "github_installations_org_installation" ON "github_installations" ("org_id","installation_id");
 --> statement-breakpoint
 CREATE INDEX "github_installations_org_account" ON "github_installations" ("org_id","account_login");
+--> statement-breakpoint
+CREATE TABLE "image_catalog" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"name" text NOT NULL,
+	"ref" text NOT NULL,
+	"pull_secret_name" text,
+	"kind" text DEFAULT 'base' NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "image_catalog_org" ON "image_catalog" ("org_id");
+--> statement-breakpoint
+CREATE TABLE "prebuild_configs" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"repo_host" text DEFAULT 'github' NOT NULL,
+	"repo_full_name" text NOT NULL,
+	"clone_url" text NOT NULL,
+	"base_image_id" text,
+	"schedule" text DEFAULT 'nightly' NOT NULL,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "prebuild_configs_org" ON "prebuild_configs" ("org_id");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "prebuild_configs_org_repo" ON "prebuild_configs" ("org_id","repo_host","repo_full_name");
+--> statement-breakpoint
+CREATE TABLE "prebuilds" (
+	"id" text PRIMARY KEY NOT NULL,
+	"config_id" text NOT NULL,
+	"commit_sha" text NOT NULL,
+	"image_ref" text NOT NULL,
+	"status" text NOT NULL,
+	"builder_backend" text NOT NULL,
+	"recipe" jsonb NOT NULL,
+	"error" text,
+	"log_tail" text,
+	"started_at" bigint,
+	"finished_at" bigint,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "prebuilds_config_status_created" ON "prebuilds" ("config_id","status","created_at");
