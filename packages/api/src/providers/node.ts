@@ -253,6 +253,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     actionPluginByService,
     credentials: engineCredentials,
+    // GH-T10: lets a `github` workflow tool-node action resolve through
+    // `resolveGitHubToken` (same `key` `engineCredentials`/the sandbox
+    // credential route derive theirs from) instead of a raw credential read.
+    githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
   });
 
   // Approval attention (decision 12): the FIRST park on an approval node

@@ -40,7 +40,8 @@ import {
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
-import { actionInvocations } from "../schema/index.js";
+import { actionInvocations, sessionRepos } from "../schema/index.js";
+import { resolveGitHubToken, type GitHubAuthMode, type GitHubTokenDeps } from "../services/github-tokens.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -59,6 +60,18 @@ export interface ActionInvocationContext {
   userId: string;
   orgId: string;
   owner: Principal;
+  /**
+   * The REAL app session (`session_repos`) this invocation runs on behalf
+   * of, when there is one — distinct from `PluginActionContext.sessionId`
+   * (a synthetic `wf:invoke:{invocationId}` id `buildActionContext` mints
+   * below, which carries no repo-binding meaning). Today's only production
+   * caller (`../workflows/engine-deps.ts`'s `invokeAction`) never sets this
+   * — a workflow run has no live sandbox/session behind it — so `github`
+   * resolution falls through to the repo-less `auto` tier for every
+   * real invocation. The field exists so a future session-bound caller (or
+   * a test exercising the repo-bound branch) can opt in.
+   */
+  sessionId?: string;
 }
 
 export interface ActionInvokerOpts {
@@ -66,6 +79,21 @@ export interface ActionInvokerOpts {
   credentials: CredentialStore;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   clock?: () => number;
+  /**
+   * Deps for resolving `github` service credentials through the canonical
+   * token service (`services/github-tokens.ts`'s `resolveGitHubToken`)
+   * instead of a raw `CredentialStore` read. Optional — omit when the
+   * invoker never dispatches `github` actions; a `github` dispatch without
+   * this configured throws a clear wiring error rather than silently
+   * mis-resolving.
+   */
+  githubTokenDeps?: {
+    key: Buffer;
+    apiUrl?: string;
+    githubUrl?: string;
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+  };
 }
 
 export type ActionInvoker = (
@@ -145,7 +173,10 @@ async function computeResult(
     };
   }
   const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
-  const credentials = buildCredentialProvider(opts.credentials, owner, credentialService);
+  const credentials =
+    credentialService === "github"
+      ? buildGithubCredentialProvider(opts, ctx, owner)
+      : buildCredentialProvider(opts.credentials, owner, credentialService);
 
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
@@ -212,6 +243,101 @@ function buildCredentialProvider(store: CredentialStore, owner: CredentialOwner,
         scopes: stored.scopes,
         metadata: stored.metadata,
       };
+    },
+    request(): Promise<Credential> {
+      return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));
+    },
+  };
+}
+
+/** `owner/repo` → `owner` (empty string when malformed). Duplicated from
+ * `routes/sandbox-git-credential.ts`'s private `ownerOf` — that helper
+ * isn't exported (no shared home for two 3-line pure functions), so this
+ * copy keeps the same narrow contract rather than widening that file's
+ * surface for one caller. */
+function ownerOf(fullName: string): string {
+  return fullName.split("/", 1)[0] ?? "";
+}
+
+/** `owner/repo` → `repo` (empty string when there is no `/`). See `ownerOf` above. */
+function repoOf(fullName: string): string {
+  const idx = fullName.indexOf("/");
+  return idx === -1 ? "" : fullName.slice(idx + 1);
+}
+
+/** The session's primary (position-0) repo binding, translated into
+ * `resolveGitHubToken`'s `repo`/`auth` request shape. `undefined` when the
+ * invocation carries no `sessionId` or the session has no bindings — the
+ * caller then resolves with `auto` precedence and no repo, same as an
+ * unbound session. */
+async function primaryRepoBinding(
+  db: AppDb,
+  sessionId: string,
+): Promise<{ repo: { owner: string; name: string }; auth: GitHubAuthMode } | undefined> {
+  const rows = await db
+    .select()
+    .from(sessionRepos)
+    .where(eq(sessionRepos.sessionId, sessionId))
+    .orderBy(sessionRepos.position)
+    .limit(1);
+  const row = rows[0];
+  if (!row) return undefined;
+  return { repo: { owner: ownerOf(row.fullName), name: repoOf(row.fullName) }, auth: row.auth };
+}
+
+/**
+ * `CredentialProvider` for the `github` service — resolves through
+ * `resolveGitHubToken` (the canonical GitHub credential path, GitHub/repo
+ * integration plan Task 4) instead of a raw `CredentialStore.get` read.
+ * `purpose: "api"` matches how the 28 plugin-github actions use the
+ * resulting token (Octokit API calls, not `git` operations). A
+ * `GitHubAuthError` thrown by `resolveGitHubToken` is NOT caught here — it
+ * propagates out of `action.execute()` to `computeResult`'s existing
+ * try/catch, which maps it to `{ ok: false, error: err.message }` the same
+ * way any other thrown error becomes the action's error result (the
+ * message already names the gap and carries the connect hint, per
+ * `github-tokens.ts`'s doc comment).
+ */
+function buildGithubCredentialProvider(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  owner: CredentialOwner,
+): CredentialProvider {
+  return {
+    async get(service?: string): Promise<Credential | null> {
+      // A bare `.get()` or `.get("github")` is the only shape the
+      // plugin-github actions use; an explicit different service falls back
+      // to a plain store read (byte-identical to non-github services) —
+      // no plugin known to this codebase does this today, but the contract
+      // shouldn't silently reinterpret an unrelated service as "github".
+      if (service !== undefined && service !== "github") {
+        return buildCredentialProvider(opts.credentials, owner, service).get(service);
+      }
+      const tokenDeps = opts.githubTokenDeps;
+      if (!tokenDeps) {
+        throw new Error("action-invoker: github credential resolution requires githubTokenDeps to be configured");
+      }
+      const binding = ctx.sessionId ? await primaryRepoBinding(opts.db, ctx.sessionId) : undefined;
+      const deps: GitHubTokenDeps = {
+        db: opts.db,
+        credentials: opts.credentials,
+        key: tokenDeps.key,
+        apiUrl: tokenDeps.apiUrl,
+        githubUrl: tokenDeps.githubUrl,
+        fetchImpl: tokenDeps.fetchImpl,
+        now: tokenDeps.now,
+      };
+      const resolved = await resolveGitHubToken(deps, {
+        orgId: ctx.orgId,
+        userId: ctx.userId,
+        purpose: "api",
+        repo: binding?.repo,
+        auth: binding?.auth ?? "auto",
+      });
+      // `purpose: "api"` never returns `{ source: "none" }` (it throws
+      // instead) — `token` is non-null whenever resolution didn't throw.
+      if (resolved.token === null) return null;
+      return { accessToken: resolved.token };
     },
     request(): Promise<Credential> {
       return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));

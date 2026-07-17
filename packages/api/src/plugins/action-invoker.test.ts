@@ -7,7 +7,8 @@
  * context resolution (`resolveRunContext`) those go through is covered
  * separately in `../workflows/engine-deps.test.ts`.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
 import { Type } from "typebox";
 import type {
   ActionPlugin,
@@ -19,6 +20,11 @@ import type {
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { sessionRepos, githubInstallations } from "../schema/index.js";
+import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
+import { PgCredentialStore } from "./credential-store.js";
+import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
 
 async function makeDb(): Promise<AppDb> {
@@ -291,5 +297,223 @@ describe("buildActionInvoker", () => {
     const [a, b] = await Promise.all([invoke(req, userOwner), invoke(req, userOwner)]);
 
     expect(a).toEqual(b);
+  });
+});
+
+/**
+ * `github` service resolution (GH-T10) — the `github` credential provider
+ * must resolve through `resolveGitHubToken` instead of a raw
+ * `CredentialStore.get` read. Exercised against a real `PgCredentialStore`
+ * + the shared fake GitHub API server (`test-helpers/github-fixture.ts`),
+ * mirroring `services/github-tokens.test.ts`'s own harness rather than the
+ * `FakeCredentialStore` the rest of this file uses — `resolveGitHubToken`
+ * needs a real `CredentialStore` to persist single-flight refresh
+ * rotations against (not exercised here, but keeping one credential-store
+ * implementation per file avoids a second, divergent fake).
+ */
+describe("buildActionInvoker: github service resolution", () => {
+  const orgId = "gh-org";
+  const userId = "gh-user";
+  const NOW = 1_700_000_000_000;
+
+  const { privateKey: privateKeyPem } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  const appConfig: GithubAppConfig = {
+    appId: "1",
+    appSlug: "valet-app",
+    oauthClientId: "Iv1.abc",
+    htmlUrl: "https://github.com/apps/valet-app",
+    oauthClientSecret: "client-secret",
+    webhookSecret: "webhook-secret",
+    privateKeyPem,
+  };
+
+  let fixture: GithubFixture | undefined;
+
+  afterEach(async () => {
+    await fixture?.close();
+    fixture = undefined;
+  });
+
+  /** A minimal `github`-service action that mirrors how the real
+   * plugin-github actions consume the credential (`getOctokit` in
+   * `plugin-github/src/actions/actions.ts`): a bare `ctx.credentials.get()`,
+   * throwing the exact same connect-hint message on a missing token. */
+  function githubWhoamiAction(): PluginAction {
+    return {
+      id: "github.whoami",
+      name: "whoami",
+      description: "whoami",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        const token = cred?.accessToken;
+        if (!token) {
+          throw new Error("Missing GitHub access token. Connect the GitHub integration in Settings.");
+        }
+        return { success: true, data: { token } };
+      },
+    };
+  }
+
+  async function harness(): Promise<{ appDb: AppDb; credentials: PgCredentialStore }> {
+    const { appDb, pgdb } = await freshTestPgDb();
+    return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
+  }
+
+  function githubActionPluginByService(): Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }> {
+    return actionPluginByServiceOf("github", { service: "github", actions: [githubWhoamiAction()] });
+  }
+
+  it("user-connected: resolves the user's healthy github credential", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:n1" },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "user-tok" } });
+  });
+
+  it("unconnected + a sole installation: resolves an installation token (anonymous org path)", async () => {
+    const { appDb, credentials } = await harness();
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_999",
+      orgId,
+      installationId: 999,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:n1" },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-999" } });
+  });
+
+  it("repo-bound session with explicit binding auth:\"app\": installation token even when the user is connected", async () => {
+    const { appDb, credentials } = await harness();
+    // A healthy user credential IS connected — must be ignored because the
+    // binding's `auth` is the explicit "app" tier, not "auto".
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_1",
+      orgId,
+      installationId: 111,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const sessionId = "sess-1";
+    await appDb.insert(sessionRepos).values({
+      sessionId,
+      host: "github",
+      fullName: "acme/repo",
+      cloneUrl: "https://github.com/acme/repo.git",
+      auth: "app",
+      position: 0,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:n1" },
+      { userId, orgId, owner: { type: "user", id: userId }, sessionId },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-111" } });
+  });
+
+  it("unbound session, no user credential, no installation, no org PAT: the connect-hint error surfaces as the action's error result", async () => {
+    const { appDb, credentials } = await harness();
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:n1" },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({
+      error: expect.stringContaining("connect your GitHub account"),
+    });
+  });
+
+  it("non-github service is untouched: no githubTokenDeps required, resolveGitHubToken never consulted", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "secret-token" });
+    const fixture2 = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture2.action] });
+    // githubTokenDeps deliberately omitted — a non-github action must not need it.
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+      userOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
   });
 });

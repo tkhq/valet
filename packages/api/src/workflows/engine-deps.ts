@@ -62,7 +62,7 @@ import type {
 } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { buildActionInvoker } from "../plugins/action-invoker.js";
+import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
 import { orchestratorIdentities, workflowDefinitions } from "../schema/index.js";
 
 // Same compile-time-vs-runtime bridge `resolveModelId` solves in
@@ -83,6 +83,11 @@ export interface WorkflowEngineDepsOpts {
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   /** Credential store `invokeAction` scopes a `CredentialProvider` over (Task 3). */
   credentials: CredentialStore;
+  /** Threaded straight to `buildActionInvoker` (GH-T10) — lets the `github`
+   * service resolve through `resolveGitHubToken` instead of a raw
+   * credential-store read. Optional; omit in tests/deployments with no
+   * github plugin registered. */
+  githubTokenDeps?: ActionInvokerOpts["githubTokenDeps"];
 }
 
 function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: string } {
@@ -220,6 +225,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     db: opts.db,
     credentials: opts.credentials,
     actionPluginByService: opts.actionPluginByService,
+    githubTokenDeps: opts.githubTokenDeps,
   });
 
   return {
