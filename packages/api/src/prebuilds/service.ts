@@ -70,6 +70,7 @@ import { imageCatalog, prebuildConfigs, prebuilds, type PrebuildConfigRow, type 
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
+import { resolveDefaultImage } from "../providers/sandbox-backend.js";
 import { resolveRecipe, CANDIDATE_LOCKFILES, type ResolvedRecipe } from "./recipe.js";
 import type { SpawnFn } from "./docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "./builder.js";
@@ -245,10 +246,15 @@ export async function resolveRecipeFromGitHub(
 const NIGHTLY_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const DEFAULT_SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
-/** Fallback base image when neither `.valet/prebuild.yaml`'s `image` nor
- * the config's `baseImageId` (image_catalog) resolve one. Mirrors
- * `sandbox-backend.ts`'s `DockerSandboxProvider` default so a prebuild
- * without any base-image configuration still targets something runnable. */
+/** Last-resort fallback base image when neither `.valet/prebuild.yaml`'s
+ * `image`, the config's `baseImageId` (image_catalog), NOR
+ * `resolveDefaultImage(env)` (`VALET_SANDBOX_IMAGE`) resolve one. Spec
+ * decision 6: the fallback is the stock sandbox image — i.e. whatever
+ * `VALET_SANDBOX_IMAGE` resolves to when set, same as `DockerSandboxProvider`
+ * / `EngineHost`'s own default. This constant only fires when that env var
+ * is unset too, mirroring `DockerSandboxProvider.create`'s own
+ * `node:20-bookworm` default (see `resolveDefaultImage`'s doc comment in
+ * `sandbox-backend.ts`). */
 const FALLBACK_BASE_IMAGE = "node:20-bookworm";
 
 export interface PrebuildServiceDeps {
@@ -263,6 +269,11 @@ export interface PrebuildServiceDeps {
   pollIntervalMs?: number;
   schedulerIntervalMs?: number;
   retention?: RetentionFn;
+  /** Env the stock-sandbox-image fallback is resolved from
+   * (`resolveDefaultImage(env)` — `VALET_SANDBOX_IMAGE`). Defaults to
+   * `process.env`; tests inject a fixture object so the fallback doesn't
+   * depend on the host's ambient environment. */
+  env?: NodeJS.ProcessEnv;
 }
 
 function newPrebuildId(newId: () => string): string {
@@ -278,6 +289,7 @@ export class PrebuildService {
   private readonly pollIntervalMs: number;
   private readonly schedulerIntervalMs: number;
   private readonly retention: RetentionFn;
+  private readonly env: NodeJS.ProcessEnv;
   /** In-memory prebuild-row-id -> builder-buildId map; see the module doc
    * comment's "Build-id tracking is in-memory" note. */
   private readonly activeBuildIds = new Map<string, string>();
@@ -293,6 +305,7 @@ export class PrebuildService {
     this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.schedulerIntervalMs = deps.schedulerIntervalMs ?? DEFAULT_SCHEDULER_INTERVAL_MS;
     this.retention = deps.retention ?? defaultRetention();
+    this.env = deps.env ?? process.env;
   }
 
   /** The wired builder's backend id, or `null` when prebuilds are
@@ -318,7 +331,7 @@ export class PrebuildService {
         .limit(1);
       if (rows[0]) return rows[0].ref;
     }
-    return FALLBACK_BASE_IMAGE;
+    return resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
   }
 
   /** Starts a build for `configId`: resolves head sha + recipe via the
@@ -381,7 +394,21 @@ export class PrebuildService {
       imageRef,
       gitToken: gitToken.token ?? undefined,
     };
-    const { buildId } = await builder.build(spec);
+    let buildId: string;
+    try {
+      ({ buildId } = await builder.build(spec));
+    } catch (err) {
+      // `builder.build()` rejecting (e.g. daemon unreachable) must not
+      // strand the row at `queued` forever — mark it failed with a readable
+      // error instead of letting the route's caller see a raw 500 for a row
+      // that looks otherwise fine in the DB.
+      const message = err instanceof Error ? err.message : String(err);
+      await this.db
+        .update(prebuilds)
+        .set({ status: "failed", error: message, finishedAt: this.now() })
+        .where(eq(prebuilds.id, row.id));
+      throw new Error(`prebuild build dispatch failed: ${message}`);
+    }
     this.activeBuildIds.set(row.id, buildId);
 
     return row;
@@ -438,16 +465,25 @@ export class PrebuildService {
   }
 
   /** Keeps the newest 2 `pushed` builds per config; deletes the images
-   * (never the rows) for the rest via `this.retention`. */
+   * (never the rows) for the rest via `this.retention`. A stale row's
+   * `imageRef` is excluded from deletion when a KEPT row shares the same ref
+   * — a repeated-sha rebuild (re-running a build for a commit that's already
+   * pushed) produces a fresh row with the same `imageRefFor(...)` value as
+   * an earlier row for that sha; without this dedup, pruning the older row
+   * would delete the image the kept row still points at. */
   private async applyRetention(configId: string, backend: string): Promise<void> {
     const pushedRows = await this.db
       .select()
       .from(prebuilds)
       .where(and(eq(prebuilds.configId, configId), eq(prebuilds.status, "pushed")))
       .orderBy(desc(prebuilds.createdAt));
+    const kept = pushedRows.slice(0, 2);
     const stale = pushedRows.slice(2);
     if (stale.length === 0) return;
-    await this.retention(backend, stale.map((r) => r.imageRef));
+    const keptRefs = new Set(kept.map((r) => r.imageRef));
+    const staleRefs = [...new Set(stale.map((r) => r.imageRef).filter((ref) => !keptRefs.has(ref)))];
+    if (staleRefs.length === 0) return;
+    await this.retention(backend, staleRefs);
   }
 
   /** One scheduler pass: for every enabled `schedule: "nightly"` config,
@@ -503,10 +539,26 @@ export class PrebuildService {
     await this.startBuild(config.id);
   }
 
-  /** Starts the unref'd poll (10s) and scheduler (10min) intervals.
-   * Idempotent — a second call while already started is a no-op. */
-  start(): void {
+  /** Marks every `queued`/`building` row `failed` at boot. `activeBuildIds`
+   * is in-memory only (see the module doc comment's "Build-id tracking"
+   * note) — any row still `queued`/`building` when the PROCESS starts (not
+   * this call) necessarily belonged to a build no in-memory map entry
+   * survived for, i.e. an interrupted previous process. Runs once, before
+   * the poll/scheduler intervals start, so `syncActiveBuilds` never races a
+   * row this sweep is about to fail. */
+  private async sweepOrphanedBuilds(): Promise<void> {
+    await this.db
+      .update(prebuilds)
+      .set({ status: "failed", error: "interrupted by restart", finishedAt: this.now() })
+      .where(inArray(prebuilds.status, ["queued", "building"]));
+  }
+
+  /** Runs the boot-time orphan sweep, then starts the unref'd poll (10s) and
+   * scheduler (10min) intervals. Idempotent — a second call while already
+   * started is a no-op (it does not re-run the sweep). */
+  async start(): Promise<void> {
     if (this.pollTimer || this.schedulerTimer) return;
+    await this.sweepOrphanedBuilds();
     this.pollTimer = setInterval(() => {
       void this.syncActiveBuilds().catch((err) => console.error("prebuild poll pass failed:", err));
     }, this.pollIntervalMs);

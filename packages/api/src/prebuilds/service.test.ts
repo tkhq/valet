@@ -45,6 +45,20 @@ class FakeImageBuilder implements ImageBuilder {
   }
 }
 
+/** Fix round 1: exercises `startBuild`'s wrap-`builder.build()` path — a
+ * rejecting builder must not strand the row at `queued`. */
+class ThrowingImageBuilder implements ImageBuilder {
+  readonly backend = "docker";
+
+  async build(): Promise<{ buildId: string }> {
+    throw new Error("boom: docker daemon unreachable");
+  }
+
+  async status(): Promise<BuildStatus> {
+    throw new Error("ThrowingImageBuilder.status should never be called");
+  }
+}
+
 function b64(content: string): string {
   return Buffer.from(content, "utf8").toString("base64");
 }
@@ -197,6 +211,39 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       await service.startBuild(configId);
       expect(builder.specs[0].baseImage).toBeTruthy();
     });
+
+    it("falls back to VALET_SANDBOX_IMAGE (the stock sandbox image, spec decision 6) via the injected env, not the hardcoded node:20-bookworm", async () => {
+      const configId = await seedConfig(db);
+      const envService = new PrebuildService({
+        db,
+        builder,
+        githubTokenDeps: githubTokenDeps(),
+        now: () => NOW,
+        env: { VALET_SANDBOX_IMAGE: "ghcr.io/valet/sandbox:stock" },
+      });
+
+      await envService.startBuild(configId);
+
+      expect(builder.specs[0].baseImage).toBe("ghcr.io/valet/sandbox:stock");
+    });
+
+    it("marks the row failed (not stuck at queued) when builder.build() rejects", async () => {
+      const configId = await seedConfig(db);
+      const throwingService = new PrebuildService({
+        db,
+        builder: new ThrowingImageBuilder(),
+        githubTokenDeps: githubTokenDeps(),
+        now: () => NOW,
+      });
+
+      await expect(throwingService.startBuild(configId)).rejects.toThrow(/boom: docker daemon unreachable/);
+
+      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe("failed");
+      expect(rows[0].error).toContain("boom: docker daemon unreachable");
+      expect(rows[0].finishedAt).toBe(NOW);
+    });
   });
 
   describe("syncActiveBuilds", () => {
@@ -242,13 +289,27 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       const configId = await seedConfig(db);
       const shas = ["sha-a", "sha-b", "sha-c"];
       const imageRefs: string[] = [];
+      // Step the clock per build — `createdAt` ties under a fixed clock make
+      // `applyRetention`'s `ORDER BY createdAt DESC` (which decides "newest
+      // 2") ambiguous between rows, a latent flake source.
+      let clock = NOW;
+      const steppedService = new PrebuildService({
+        db,
+        builder,
+        githubTokenDeps: githubTokenDeps(),
+        now: () => clock,
+        retention: async (backend, imgRefs) => {
+          retentionCalls.push({ backend, imageRefs: imgRefs });
+        },
+      });
 
       for (const sha of shas) {
         currentSha = sha;
-        const row = await service.startBuild(configId);
+        clock += 1000;
+        const row = await steppedService.startBuild(configId);
         imageRefs.push(row.imageRef);
         builder.setState(builder.buildIds[builder.buildIds.length - 1], { state: "pushed" });
-        await service.syncActiveBuilds();
+        await steppedService.syncActiveBuilds();
       }
 
       expect(retentionCalls).toHaveLength(1);
@@ -258,6 +319,104 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       // Rows are history — never deleted, only the images are pruned.
       const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
       expect(rows.filter((r) => r.status === "pushed")).toHaveLength(3);
+    });
+
+    it("does not delete an image still referenced by a kept row when a repeated-sha rebuild shares its imageRef", async () => {
+      const configId = await seedConfig(db);
+      let clock = NOW;
+      const steppedService = new PrebuildService({
+        db,
+        builder,
+        githubTokenDeps: githubTokenDeps(),
+        now: () => clock,
+        retention: async (backend, imgRefs) => {
+          retentionCalls.push({ backend, imageRefs: imgRefs });
+        },
+      });
+
+      async function pushBuild(sha: string) {
+        currentSha = sha;
+        clock += 1000;
+        const row = await steppedService.startBuild(configId);
+        builder.setState(builder.buildIds[builder.buildIds.length - 1], { state: "pushed" });
+        await steppedService.syncActiveBuilds();
+        return row;
+      }
+
+      const rowA = await pushBuild("sha-a");
+      const rowB = await pushBuild("sha-b");
+      // Rebuild the SAME sha as rowA — `imageRefFor` is keyed on sha, so
+      // this produces a row whose imageRef equals rowA's, even though it's
+      // a distinct `prebuilds` row.
+      const rowA2 = await pushBuild("sha-a");
+      expect(rowA2.imageRef).toBe(rowA.imageRef);
+
+      // Kept-by-recency: rowA2 and rowB. Stale: rowA — but its imageRef is
+      // still referenced by kept rowA2, so nothing should be deleted.
+      expect(retentionCalls).toHaveLength(0);
+
+      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      expect(rows.filter((r) => r.status === "pushed")).toHaveLength(3);
+    });
+  });
+
+  describe("start()", () => {
+    it("sweeps queued/building rows to failed (interrupted by restart) before starting the poll/scheduler intervals", async () => {
+      const configId = await seedConfig(db);
+      await db.insert(prebuilds).values({
+        id: "pb_stuck_building",
+        configId,
+        commitSha: "stuckbuilding",
+        imageRef: "valet-prebuild/acme-widgets:stuckbuilding",
+        status: "building",
+        builderBackend: "docker",
+        recipe: { recipe: [], setup: [] },
+        error: null,
+        logTail: null,
+        startedAt: NOW,
+        finishedAt: null,
+        createdAt: NOW,
+      });
+      await db.insert(prebuilds).values({
+        id: "pb_stuck_queued",
+        configId,
+        commitSha: "stuckqueued",
+        imageRef: "valet-prebuild/acme-widgets:stuckqueued",
+        status: "queued",
+        builderBackend: "docker",
+        recipe: { recipe: [], setup: [] },
+        error: null,
+        logTail: null,
+        startedAt: NOW,
+        finishedAt: null,
+        createdAt: NOW,
+      });
+      // A pushed row from a prior process must be left alone by the sweep.
+      await db.insert(prebuilds).values({
+        id: "pb_already_pushed",
+        configId,
+        commitSha: "donesha",
+        imageRef: "valet-prebuild/acme-widgets:donesha",
+        status: "pushed",
+        builderBackend: "docker",
+        recipe: { recipe: [], setup: [] },
+        error: null,
+        logTail: null,
+        startedAt: NOW,
+        finishedAt: NOW,
+        createdAt: NOW,
+      });
+
+      await service.start();
+
+      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      expect(byId.get("pb_stuck_building")?.status).toBe("failed");
+      expect(byId.get("pb_stuck_building")?.error).toBe("interrupted by restart");
+      expect(byId.get("pb_stuck_queued")?.status).toBe("failed");
+      expect(byId.get("pb_stuck_queued")?.error).toBe("interrupted by restart");
+      expect(byId.get("pb_already_pushed")?.status).toBe("pushed");
+      expect(byId.get("pb_already_pushed")?.error).toBeNull();
     });
   });
 });

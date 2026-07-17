@@ -179,10 +179,14 @@ console.log("channel host started");
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
 
-// Prebuild orchestration (sandbox images v2 plan, Task 3): begin the 10s
-// build-status poll + 10min nightly-scheduler intervals. A no-op backend
-// (`imageBuilder: null`) still starts harmlessly — every pass short-circuits.
-providers.prebuildService.start();
+// Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
+// queued/building rows orphaned by a prior process crash/restart, then begin
+// the 10s build-status poll + 10min nightly-scheduler intervals. A no-op
+// backend (`imageBuilder: null`) still starts harmlessly — every pass
+// short-circuits.
+await providers.prebuildService.start().catch((err) => {
+  console.error("prebuildService.start failed:", err);
+});
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.
