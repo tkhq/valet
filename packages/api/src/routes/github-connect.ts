@@ -188,6 +188,12 @@ githubConnectRouter.get("/callback", async (c) => {
   if (!login) return c.json({ error: "malformed response from GitHub" }, 502);
 
   const now = Date.now();
+  // The user's `github` credential is a SINGLE slot shared with the manual
+  // PAT-paste route (PUT /api/credentials/github): last write wins, and
+  // DELETE /api/me/github removes whichever token occupies it. Deliberate —
+  // the token service treats PATs and App-OAuth tokens uniformly, so one
+  // slot keeps resolution single-keyed. The connect UI is expected to warn
+  // before replacing an existing repo-capable credential.
   await engineCredentials.save({ type: "user", id: user.id }, GITHUB_CREDENTIAL_SERVICE, {
     type: "oauth2",
     accessToken: parsedToken.accessToken,
