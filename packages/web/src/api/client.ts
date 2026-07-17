@@ -63,6 +63,7 @@ import type {
   PatchOrgResponse,
   PatchSessionRequest,
   PatchSessionResponse,
+  PauseSessionResponse,
   PatchThreadRequest,
   PatchThreadResponse,
   ProbeLlmProviderResponse,
@@ -180,6 +181,8 @@ export const api = {
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
+  pauseSession: (id: string) =>
+    request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
 
   // orchestrator (session ids contain colons — always encoded above too, but
   // this entry point never touches a raw id itself, only ensures one exists)

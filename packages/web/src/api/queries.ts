@@ -26,6 +26,7 @@ import type {
   PatchIdentityLinkRequest,
   PatchSessionResponse,
   PatchThreadResponse,
+  PauseSessionResponse,
   ResolveDecisionRequest,
   SandboxJwtResponse,
   SetNotificationPreferenceRequest,
@@ -113,6 +114,21 @@ export function useDeleteSession() {
   return useMutation<{ ok: true }, Error, string>({
     mutationFn: (id) => api.deleteSession(id),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
+}
+
+/** POST /:id/pause (sandbox hibernation plan, Task 5) — the sandbox's
+ * terminal state transition arrives over the `sandbox.status` stream, but
+ * the session row's `status` field only updates via this response, so the
+ * session detail query still needs an explicit invalidation. */
+export function usePauseSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PauseSessionResponse, Error, void>({
+    mutationFn: () => api.pauseSession(sessionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
   });

@@ -1,11 +1,25 @@
 import { useNavigate } from "@tanstack/react-router";
-import { Trash2 } from "lucide-react";
+import { useState } from "react";
+import { Moon, Trash2 } from "lucide-react";
 import type { SessionDetail } from "@valet/api/wire";
 import { Badge, Button, Spinner, Tooltip } from "~/components/primitives";
-import { useDeleteSession, useSetSessionModel } from "~/api/queries";
+import { useDeleteSession, usePauseSession, useSetSessionModel } from "~/api/queries";
+import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 import { ModelPicker } from "./model-picker";
 import { cn } from "~/lib/cn";
+
+/** Server sends `{ error: "a turn is running" }` / `{ error: "sandbox is not
+ * ready to pause" }` for the documented 409s (sandbox hibernation plan, Task
+ * 4); fall back to the mutation's own message for anything else (network
+ * failure, capability-off 409, unexpected shape). */
+function extractPauseError(err: unknown): string {
+  if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
+    const message = (err.payload as Record<string, unknown>).error;
+    if (typeof message === "string" && message) return message;
+  }
+  return err instanceof Error ? err.message : "Failed to pause session.";
+}
 
 export function SessionHeader({
   session,
@@ -21,6 +35,8 @@ export function SessionHeader({
   const navigate = useNavigate();
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
+  const pause = usePauseSession(session.id);
+  const [pauseError, setPauseError] = useState<string | null>(null);
 
   async function destroy() {
     if (!confirm(`Delete session and tear down its sandbox?`)) return;
@@ -29,6 +45,15 @@ export function SessionHeader({
       navigate({ to: "/" });
     } catch (err) {
       console.error("delete failed:", err);
+    }
+  }
+
+  async function pauseSession() {
+    setPauseError(null);
+    try {
+      await pause.mutateAsync();
+    } catch (err) {
+      setPauseError(extractPauseError(err));
     }
   }
 
@@ -41,6 +66,7 @@ export function SessionHeader({
         <div className="text-xs text-muted font-mono truncate">{session.workspace}</div>
       </div>
       <div className="ml-auto flex items-center gap-2">
+        {pauseError && <span className="text-xs text-danger-500">{pauseError}</span>}
         <Tooltip content="Session-default model. Threads inherit unless overridden.">
           <span>
             <ModelPicker
@@ -53,6 +79,17 @@ export function SessionHeader({
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
         <AgentStatusBadge status={agentStatus} />
+        <Tooltip content="Pause session — sandbox sleeps until the next message">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={pauseSession}
+            disabled={sandbox?.state !== "ready" || pause.isPending}
+            aria-label="Pause session"
+          >
+            {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
+          </Button>
+        </Tooltip>
         <Tooltip content="Delete session">
           <Button
             variant="ghost"
@@ -94,6 +131,7 @@ export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: num
     ready: { dot: "bg-success-500", label: "workspace ready" },
     idle: { dot: "bg-success-500", label: "workspace idle" },
     snapshotting: { dot: "bg-amber-500", label: "workspace snapshotting…" },
+    suspended: { dot: "bg-neutral-400", label: "sleeping — will wake on message" },
     released: { dot: "bg-neutral-400", label: "workspace released" },
     error: { dot: "bg-danger-500", label: "workspace error" },
   };
