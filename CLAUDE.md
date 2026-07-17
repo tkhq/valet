@@ -79,6 +79,11 @@ We are NOT in production. There is no real data to preserve. When you change an 
 - **Docker-backend gateway testing needs a `full`-capable image.** `make dev-local`'s default sandbox-docker image (plain `node:20-bookworm`) has no ttyd/code-server/gateway. Point `VALET_SANDBOX_IMAGE` at an image built from `docker/Dockerfile.sandbox-k8s` to exercise the Terminal/VS Code tabs against the docker backend.
 - **`full`-profile sandboxes receive `VALET_SESSION_ID` and `VALET_SANDBOX_PROFILE` env vars**, in addition to the existing `VALET_SANDBOX_JWT_SECRET`. The gateway enforces `sid === VALET_SESSION_ID` from the JWT claims — a JWT valid for one session is rejected inside a different session's sandbox even with a correct signature.
 - **Any new package that imports `ws` must declare BOTH `@types/ws` AND `@types/node`.** `@types/ws`'s own type-resolution chain walks up to `@types/node`; if the local `devDependencies` only has `@types/ws`, pnpm's workspace layout can resolve `@types/node` from an unrelated ancestor `node_modules` instead of the package's own, silently pulling in the wrong Node types. This recurred on this branch (`packages/sandbox-gateway`) even after the earlier `@types/ws`-only fix in `packages/api` — declare both explicitly in every `ws`-consuming package.
+- **A test run "failing" with `WebSocket is not defined` is almost always the Node-20-vs-22 trap, not a real regression** — re-verify under Node 22 (`source ~/.nvm/nvm.sh && nvm use 22`) before trusting the failure.
+
+### Sandbox hibernation gotchas
+
+- **`VALET_SANDBOX_IDLE_MINUTES`** controls the host's idle-sweep hibernation window (default `30`, `0` disables). It only does anything on the `kubernetes` sandbox backend — `capabilities().hibernation` is `false` for docker/local/virtual, so the sweep is a no-op there regardless of this env var.
 
 ---
 
