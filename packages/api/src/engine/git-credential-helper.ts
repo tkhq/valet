@@ -30,9 +30,13 @@ const ROUTE_PATH = "/api/sandbox/git-credential";
  * `git-credential-valet` — a git credential helper (see `gitcredentials(7)`).
  *
  * git invokes it as `helper <verb>` and pipes the request attributes
- * (`protocol=`, `host=`, `path=`, …) on stdin, one `key=value` per line,
- * terminated by a blank line. Only the `get` verb does work; `store` and
- * `erase` are no-ops (exit 0). On `get` we:
+ * (`protocol=`, `host=`, and — ONLY when `credential.useHttpPath` is true —
+ * `path=`) on stdin, one `key=value` per line, terminated by a blank line.
+ * HARD PREREQUISITE: git does NOT send `path=` by default, and this helper
+ * derives `owner` from it — workspace prep MUST run
+ * `git config --global credential.useHttpPath true` in the sandbox or the
+ * helper exits silently and every clone runs anonymous. Only the `get` verb
+ * does work; `store` and `erase` are no-ops (exit 0). On `get` we:
  *   1. parse `host` and `path` from stdin,
  *   2. derive `owner` as the first path segment (`owner/repo.git` → `owner`),
  *   3. POST `{host, owner}` to the credential route with the sandbox token,
