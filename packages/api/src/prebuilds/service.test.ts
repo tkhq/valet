@@ -12,7 +12,7 @@ import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } fr
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, prebuildConfigs, prebuilds, imageCatalog } from "../schema/index.js";
-import type { GitHubTokenDeps } from "../services/github-tokens.js";
+import { GitHubAuthError, type GitHubTokenDeps } from "../services/github-tokens.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "./builder.js";
 import {
   DEFAULT_PREBUILD_REGISTRY_HOST,
@@ -250,6 +250,75 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       expect(rows[0].status).toBe("failed");
       expect(rows[0].error).toContain("boom: docker daemon unreachable");
       expect(rows[0].finishedAt).toBe(NOW);
+    });
+
+    // Live-dogfood fix: a PUBLIC repo with ZERO GitHub configuration (no App
+    // installation, no user credential, no org PAT) must still rebuild —
+    // the spec's exit criteria require "configure nothing" to work for
+    // public repos. `resolveGitHubToken(purpose:"api")`'s `auto` tier
+    // THROWS `GitHubAuthError` when nothing is configured (unlike `git`,
+    // which already falls back to tokenless); the service must catch that
+    // and retry the head-sha + recipe reads unauthenticated.
+    it("resolves a public repo's head sha + recipe unauthenticated when no GitHub credential is configured at all", async () => {
+      const zeroConfigOrgId = "org-zero-config";
+      const configId = await seedConfig(db, {
+        id: "pbc_zero_config",
+        orgId: zeroConfigOrgId,
+        repoFullName: "acme/public-widgets",
+        cloneUrl: "https://github.com/acme/public-widgets.git",
+      });
+
+      const row = await service.startBuild(configId);
+
+      expect(row.status).toBe("queued");
+      expect(row.commitSha).toBe("headsha1");
+      expect(builder.specs).toHaveLength(1);
+      // No credential exists for this org, so the clone token is absent too
+      // (the `git`-purpose `auto` tier is already tokenless-capable) — a
+      // public clone proceeds bare.
+      expect(builder.specs[0].gitToken).toBeUndefined();
+
+      // The head-sha + contents reads for this org's config went out with
+      // no Authorization header — confirms the unauthenticated fallback,
+      // not a lucky pass with a leftover credentialed request.
+      const repoCalls = fixture.calls.filter((c) => c.path === "/repos/acme/public-widgets");
+      const commitCalls = fixture.calls.filter((c) => c.path === "/repos/acme/public-widgets/commits/main");
+      expect(repoCalls.length).toBeGreaterThan(0);
+      expect(commitCalls.length).toBeGreaterThan(0);
+      for (const call of [...repoCalls, ...commitCalls]) {
+        expect(call.authHeader).toBeUndefined();
+      }
+    });
+
+    it("surfaces a clear connect-GitHub error (not the raw credential-missing throw) when an unauthenticated read 404s, e.g. a private repo with zero GitHub configuration", async () => {
+      const privateFixture = startGithubFixture({
+        getRepo: () => ({ status: 404, body: { message: "Not Found" } }),
+      });
+      try {
+        const privateDeps: GitHubTokenDeps = { ...githubTokenDeps(), apiUrl: privateFixture.url, githubUrl: privateFixture.url };
+        const privateService = new PrebuildService({
+          db,
+          builder,
+          githubTokenDeps: privateDeps,
+          now: () => NOW,
+        });
+        const configId = await seedConfig(db, {
+          id: "pbc_private_zero_config",
+          orgId: "org-zero-config-private",
+          repoFullName: "acme/private-widgets",
+          cloneUrl: "https://github.com/acme/private-widgets.git",
+        });
+
+        await expect(privateService.startBuild(configId)).rejects.toThrow(
+          /not accessible without a GitHub credential/,
+        );
+        await expect(privateService.startBuild(configId)).rejects.toBeInstanceOf(GitHubAuthError);
+
+        const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+        expect(rows).toHaveLength(0); // never dispatched — failed before the row was inserted
+      } finally {
+        await privateFixture.close();
+      }
     });
   });
 

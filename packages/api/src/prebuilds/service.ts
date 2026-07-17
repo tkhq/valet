@@ -85,7 +85,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { imageCatalog, prebuildConfigs, prebuilds, type PrebuildConfigRow, type PrebuildRow } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
-import { resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
+import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { resolveDefaultImage } from "../providers/sandbox-backend.js";
 import { resolveRecipe, CANDIDATE_LOCKFILES, type ResolvedRecipe } from "./recipe.js";
@@ -273,15 +273,27 @@ function githubFetchOf(deps: GitHubTokenDeps): typeof fetch {
   return deps.fetchImpl ?? fetch;
 }
 
-async function fetchGithubJson(deps: GitHubTokenDeps, token: string, path: string): Promise<unknown> {
-  const res = await githubFetchOf(deps)(`${githubApiBase(deps)}${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "User-Agent": "Valet-App",
-    },
-  });
-  if (!res.ok) throw new Error(`GitHub API ${path} responded ${res.status}`);
+/** `token: null` sends the request unauthenticated (public-repo fallback —
+ * see `resolveApiTokenOrNull` below). On a non-ok response for an
+ * unauthenticated request, throws `GitHubAuthError` with a message that
+ * names the actual gap ("not accessible without a credential") rather than
+ * the generic HTTP-status error a caller would otherwise see — the repo is
+ * either private (needs a credential) or genuinely gone. */
+async function fetchGithubJson(deps: GitHubTokenDeps, token: string | null, path: string): Promise<unknown> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "Valet-App",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await githubFetchOf(deps)(`${githubApiBase(deps)}${path}`, { headers });
+  if (!res.ok) {
+    if (!token) {
+      throw new GitHubAuthError(
+        "repository not accessible without a GitHub credential — connect GitHub or install the App",
+      );
+    }
+    throw new Error(`GitHub API ${path} responded ${res.status}`);
+  }
   return res.json();
 }
 
@@ -299,7 +311,7 @@ export interface ResolvedHead {
  * calls, not a clone). */
 export async function resolveHeadSha(
   deps: GitHubTokenDeps,
-  token: string,
+  token: string | null,
   owner: string,
   repo: string,
 ): Promise<ResolvedHead> {
@@ -321,7 +333,7 @@ export async function resolveHeadSha(
  * "content-fetch error" note. */
 async function readGithubFile(
   deps: GitHubTokenDeps,
-  token: string,
+  token: string | null,
   owner: string,
   repo: string,
   sha: string,
@@ -343,7 +355,7 @@ async function readGithubFile(
  * local-checkout caller would. */
 export async function resolveRecipeFromGitHub(
   deps: GitHubTokenDeps,
-  token: string,
+  token: string | null,
   owner: string,
   repo: string,
   sha: string,
@@ -354,6 +366,32 @@ export async function resolveRecipeFromGitHub(
     if ((await read(lockfile)) !== null) files.push(lockfile);
   }
   return resolveRecipe(files, read);
+}
+
+/** Resolves an `api`-purpose GitHub token for `owner/repo`, falling back to
+ * `null` (unauthenticated) when NO credential is configured at all —
+ * `resolveGitHubToken`'s `auto`+`api` tier throws `GitHubAuthError` rather
+ * than returning `{token:null}` in that case (unlike `git`, which is
+ * already tokenless-capable), and a zero-config org would otherwise be
+ * unable to ever resolve a public repo's head sha/recipe (spec's exit
+ * criteria explicitly requires "configure nothing" to work for public
+ * repos). The credentialed path is tried FIRST (better rate limits, and
+ * required for private repos) — this only kicks in when resolution itself
+ * throws, not when a request later 404s. Any other error (e.g. explicit
+ * `auth` mode) propagates unchanged. */
+async function resolveApiTokenOrNull(
+  deps: GitHubTokenDeps,
+  orgId: string,
+  owner: string,
+  repo: string,
+): Promise<string | null> {
+  try {
+    const result = await resolveGitHubToken(deps, { orgId, purpose: "api", repo: { owner, name: repo } });
+    return result.token;
+  } catch (err) {
+    if (err instanceof GitHubAuthError) return null;
+    throw err;
+  }
 }
 
 const NIGHTLY_MIN_AGE_MS = 24 * 60 * 60 * 1000;
@@ -468,17 +506,10 @@ export class PrebuildService {
     const owner = ownerOf(config.repoFullName);
     const repo = repoOf(config.repoFullName);
 
-    const apiToken = await resolveGitHubToken(this.githubTokenDeps, {
-      orgId: config.orgId,
-      purpose: "api",
-      repo: { owner, name: repo },
-    });
-    if (!apiToken.token) {
-      throw new Error(`no GitHub API token resolved for ${config.repoFullName}`);
-    }
+    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, config.orgId, owner, repo);
 
-    const head = await resolveHeadSha(this.githubTokenDeps, apiToken.token, owner, repo);
-    const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken.token, owner, repo, head.sha);
+    const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
+    const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
     const baseImage = await this.resolveBaseImage(config, resolved.image);
 
     const gitToken = await resolveGitHubToken(this.githubTokenDeps, {
@@ -649,13 +680,8 @@ export class PrebuildService {
 
     const owner = ownerOf(config.repoFullName);
     const repo = repoOf(config.repoFullName);
-    const apiToken = await resolveGitHubToken(this.githubTokenDeps, {
-      orgId: config.orgId,
-      purpose: "api",
-      repo: { owner, name: repo },
-    });
-    if (!apiToken.token) return; // no credential — nothing this pass can do
-    const head = await resolveHeadSha(this.githubTokenDeps, apiToken.token, owner, repo);
+    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, config.orgId, owner, repo);
+    const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
     if (head.sha === lastPushedSha) return; // no change — skip
 
     await this.startBuild(config.id);
