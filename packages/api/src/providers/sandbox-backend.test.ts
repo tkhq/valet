@@ -12,7 +12,13 @@ import * as k8s from "@kubernetes/client-node";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import { KubernetesSandboxProvider } from "@valet/sandbox-kubernetes";
-import { buildSandboxProvider, parseSandboxBackend, resolveDefaultImage, resolveKubeConfig } from "./sandbox-backend.js";
+import {
+  buildSandboxProvider,
+  parseSandboxBackend,
+  resolveDefaultImage,
+  resolveIdleMinutes,
+  resolveKubeConfig,
+} from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
   const kc = new k8s.KubeConfig();
@@ -110,6 +116,28 @@ describe("resolveDefaultImage", () => {
     expect(resolveDefaultImage({ VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:full" })).toBe(
       "ghcr.io/example/sandbox:full",
     );
+  });
+});
+
+describe("resolveIdleMinutes", () => {
+  it("defaults to 30 when VALET_SANDBOX_IDLE_MINUTES is unset", () => {
+    expect(resolveIdleMinutes({})).toBe(30);
+  });
+
+  it("parses a positive VALET_SANDBOX_IDLE_MINUTES value", () => {
+    expect(resolveIdleMinutes({ VALET_SANDBOX_IDLE_MINUTES: "5" })).toBe(5);
+  });
+
+  it("treats an explicit 0 as disabled", () => {
+    expect(resolveIdleMinutes({ VALET_SANDBOX_IDLE_MINUTES: "0" })).toBe(0);
+  });
+
+  it("treats a negative value as disabled", () => {
+    expect(resolveIdleMinutes({ VALET_SANDBOX_IDLE_MINUTES: "-5" })).toBe(0);
+  });
+
+  it("treats a non-numeric value as disabled", () => {
+    expect(resolveIdleMinutes({ VALET_SANDBOX_IDLE_MINUTES: "bogus" })).toBe(0);
   });
 });
 

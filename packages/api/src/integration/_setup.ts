@@ -23,7 +23,7 @@ import {
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { createDefaultNodeExecutors, LocalRunHost, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { EngineHost } from "../engine/host.js";
+import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { resolveOrgId } from "../lib/org.js";
@@ -93,6 +93,18 @@ export interface BootTestApiOpts {
    * in here (or call `providers.channelHost.start()` themselves).
    */
   startChannelHost?: boolean;
+  /** Forwarded to `EngineHostOpts.idleMinutes` (sandbox hibernation plan,
+   * Task 3) — unset by default, matching `EngineHost`'s own "sweep off"
+   * default. Idle-sweep tests set this (with a `sandboxProvider` whose
+   * `capabilities().hibernation` is `true`) to exercise the sweep. */
+  idleMinutes?: number;
+  /** Forwarded to `EngineHostOpts.onHibernate`. */
+  onHibernate?: EngineHostOpts["onHibernate"];
+  /** Forwarded to `EngineHostOpts.onWake`. */
+  onWake?: EngineHostOpts["onWake"];
+  /** Forwarded to `EngineHostOpts.idleSweepTestHooks` — test-only race
+   * injection for the idle sweep's re-check. */
+  idleSweepTestHooks?: EngineHostOpts["idleSweepTestHooks"];
 }
 
 /** Grabs a free ephemeral port by briefly binding and releasing a socket. A
@@ -193,6 +205,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     blobs,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
+    idleMinutes: opts.idleMinutes,
+    onHibernate: opts.onHibernate,
+    onWake: opts.onWake,
+    idleSweepTestHooks: opts.idleSweepTestHooks,
     db,
     apiBaseUrl,
     plugins,

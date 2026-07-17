@@ -110,6 +110,22 @@ export function resolveDefaultImage(env: NodeJS.ProcessEnv): string | undefined 
   return env.VALET_SANDBOX_IMAGE;
 }
 
+/**
+ * Resolves `EngineHostOpts.idleMinutes` from `VALET_SANDBOX_IDLE_MINUTES`
+ * (sandbox hibernation plan, Task 3). Unset → `30` (the default idle
+ * window). `0`, negative, or non-numeric → `0`, which `EngineHost` reads as
+ * "idle sweep disabled" — it only starts the sweep interval when
+ * `idleMinutes > 0` AND the sandbox provider reports
+ * `capabilities().hibernation === true`.
+ */
+export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_SANDBOX_IDLE_MINUTES;
+  if (raw === undefined || raw === "") return 30;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n;
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a

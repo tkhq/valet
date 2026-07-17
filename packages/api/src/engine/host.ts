@@ -102,6 +102,43 @@ export interface EngineHostOpts {
    * FRESH — see the call sites below — never cached on the host instance.
    */
   plugins?: ValetPlugin[];
+  /**
+   * Idle window (minutes) before a `ready` sandbox is hibernated (sandbox
+   * hibernation plan, Task 3). `resolveIdleMinutes` (sandbox-backend.ts)
+   * parses `VALET_SANDBOX_IDLE_MINUTES`; default `30`, `0`/invalid → `0`
+   * (disabled). The idle sweep's `setInterval` only starts when this is
+   * `> 0` AND `sandboxProvider.capabilities().hibernation === true`.
+   */
+  idleMinutes?: number;
+  /**
+   * Best-effort hook (sandbox hibernation plan, Task 3/4 seam): invoked
+   * after the idle sweep successfully suspends a session's sandbox. Task 4
+   * wires this to stamp `agent_sessions.status = "hibernated"` — this
+   * package (Task 3) only exposes the seam. Errors are caught and logged,
+   * never thrown into the sweep loop.
+   */
+  onHibernate?: (sessionId: string) => Promise<void> | void;
+  /**
+   * Best-effort hook (sandbox hibernation plan, Task 3/4 seam): invoked the
+   * first time a previously-suspended session's attachment reaches `ready`
+   * again (a `suspended → provisioning → ready` wake sequence, tracked via
+   * the attachment's own `onStatus`). Task 4 wires this to clear the
+   * hibernated status back to `"active"`. Errors are caught and logged,
+   * never thrown into the attachment's status-listener path.
+   */
+  onWake?: (sessionId: string) => Promise<void> | void;
+  /**
+   * Test-only injection point for the idle sweep's race rule: a submission
+   * admitted between the idleness check and the actual `suspend()` call
+   * must win (the sweep must NOT suspend a session a caller just woke).
+   * `beforeSuspend` fires after the idle sweep's first idleness check but
+   * BEFORE its mandatory re-check of `listUnsettledSubmissions` — a test
+   * can use it to admit a submission mid-sweep and assert the re-check
+   * catches it. Never set outside tests.
+   */
+  idleSweepTestHooks?: {
+    beforeSuspend?: (sessionId: string) => Promise<void> | void;
+  };
 }
 
 export interface SessionMeta {
@@ -146,7 +183,126 @@ export class EngineHost {
    */
   private inflight = new Map<string, Promise<Session>>();
 
-  constructor(private readonly opts: EngineHostOpts) {}
+  /**
+   * Idle-sweep interval handle (sandbox hibernation plan, Task 3), or
+   * `null` when disabled (`idleMinutes <= 0` or the provider doesn't
+   * report `hibernation` capability). ONE interval for the whole host,
+   * 60s cadence, `.unref()`'d so it never keeps the process alive on its
+   * own. Cleared in `evictAll()` (the shutdown path).
+   */
+  private sweepInterval: NodeJS.Timeout | null = null;
+
+  constructor(private readonly opts: EngineHostOpts) {
+    const idleMinutes = opts.idleMinutes ?? 0;
+    if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
+      this.sweepInterval = setInterval(() => {
+        this.runIdleSweep().catch((err) => console.error("EngineHost: idle sweep failed:", err));
+      }, 60_000);
+      this.sweepInterval.unref?.();
+    }
+  }
+
+  /**
+   * Idle sweep tick (sandbox hibernation plan, Task 3, decision 3/6):
+   * iterates the host's in-memory session cache ONLY — a session evicted
+   * from cache, or never restored after an api restart, keeps a running
+   * pod/sandbox that this sweep cannot see or suspend. Boot-restore only
+   * rehydrates sessions with unsettled submissions, so an idle-but-running
+   * sandbox from before a restart hibernates only when the session is next
+   * touched (accepted Stage 1 limitation — decision 6 rejected a second,
+   * cluster-side expiry authority).
+   */
+  private async runIdleSweep(): Promise<void> {
+    const idleMs = (this.opts.idleMinutes ?? 0) * 60_000;
+    if (idleMs <= 0) return;
+    const now = Date.now();
+    for (const [sessionId, entry] of this.cache) {
+      try {
+        await this.maybeSuspendIdleSession(sessionId, entry.session, now, idleMs);
+      } catch (err) {
+        console.error(`EngineHost: idle sweep failed for session ${sessionId}:`, err);
+      }
+    }
+  }
+
+  /**
+   * Idleness (spec decision 3): no unsettled submissions AND the sandbox
+   * has been `ready` with no queue activity for at least `idleMs`, judged
+   * against `latestActivityAt` (falling back to the session's `createdAt`
+   * when it has never had any queue activity) AND the attachment is
+   * currently `ready` (never touches `detached`/`provisioning`/`suspended`/
+   * `error`/`released` attachments).
+   *
+   * Race rule: `listUnsettledSubmissions` is checked once here, then
+   * RE-CHECKED immediately before calling `suspend()` — a submission
+   * admitted in between wins and the suspend is skipped.
+   * `idleSweepTestHooks.beforeSuspend` fires between the two checks so
+   * tests can inject that race deterministically.
+   */
+  private async maybeSuspendIdleSession(
+    sessionId: string,
+    session: Session,
+    now: number,
+    idleMs: number,
+  ): Promise<void> {
+    if (session.attachment.state !== "ready") return;
+
+    const unsettled = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
+    if (unsettled.length > 0) return;
+
+    let sinceMs = await this.opts.engineStore.latestActivityAt(sessionId);
+    if (sinceMs == null) {
+      const data = await this.opts.engineStore.getSession(sessionId);
+      // No queue activity ever recorded and no session row (shouldn't
+      // happen for a cached session, but fail safe) — treat as just-active
+      // so we never suspend on missing data.
+      sinceMs = data?.createdAt ?? now;
+    }
+    if (sinceMs >= now - idleMs) return;
+
+    await this.opts.idleSweepTestHooks?.beforeSuspend?.(sessionId);
+
+    // Re-check immediately before suspending — a submission admitted since
+    // the check above wins.
+    const recheck = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
+    if (recheck.length > 0) return;
+    if (session.attachment.state !== "ready") return;
+
+    await session.attachment.suspend();
+
+    if (this.opts.onHibernate) {
+      Promise.resolve(this.opts.onHibernate(sessionId)).catch((err) =>
+        console.error(`EngineHost: onHibernate failed for session ${sessionId}:`, err),
+      );
+    }
+  }
+
+  /**
+   * Wires the attachment's `onStatus` listener that drives `opts.onWake`
+   * (sandbox hibernation plan, Task 3/4 seam): tracks a per-attachment
+   * `wasSuspended` flag, firing `onWake` the first time the attachment
+   * reaches `ready` after having been `suspended` (a
+   * `suspended → provisioning → ready` wake sequence). Called once per
+   * cached session build, right after `this.cache.set(...)` — the listener
+   * lives as long as that `Session`'s attachment instance does.
+   */
+  private trackHibernationWake(sessionId: string, session: Session): void {
+    let wasSuspended = false;
+    session.attachment.onStatus((status) => {
+      if (status.state === "suspended") {
+        wasSuspended = true;
+        return;
+      }
+      if (status.state === "ready" && wasSuspended) {
+        wasSuspended = false;
+        if (this.opts.onWake) {
+          Promise.resolve(this.opts.onWake(sessionId)).catch((err) =>
+            console.error(`EngineHost: onWake failed for session ${sessionId}:`, err),
+          );
+        }
+      }
+    });
+  }
 
   /**
    * Resolve (or lazily create) the Session for an app session id. If the
@@ -235,6 +391,7 @@ export class EngineHost {
         });
 
     this.cache.set(sessionId, { engine, session });
+    this.trackHibernationWake(sessionId, session);
     // Retention: after a successful restore of an existing session, prune
     // durable events for submissions that settled outside the retention
     // window. Fire-and-forget — never block or fail the restore.
@@ -423,6 +580,7 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     this.cache.set(sessionId, { engine, session });
+    this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
 
     await this.ensureOrchestratorIdentity(db, principal, meta.orgId, sessionId);
@@ -577,6 +735,10 @@ export class EngineHost {
    */
   evictAll(): void {
     for (const id of [...this.cache.keys()]) this.evictCache(id);
+    if (this.sweepInterval) {
+      clearInterval(this.sweepInterval);
+      this.sweepInterval = null;
+    }
   }
 
   /**
@@ -823,6 +985,7 @@ export class EngineHost {
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
     this.cache.set(childSessionId, { engine, session });
+    this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
     return session;
   }
@@ -910,6 +1073,7 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     this.cache.set(sessionId, { engine, session });
+    this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
     return session;
   }
