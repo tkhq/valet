@@ -188,6 +188,15 @@ app.route('/webhooks', webhooksRouter);
 // Must be mounted before both the legacy callback router and the generic /auth router
 app.route('/auth/github', githubAuthRouter);
 
+// Slack (personal) OAuth callback (unauthenticated — Slack redirects the
+// browser here with no Authorization header; identity comes from the signed
+// state, and the final credential bind happens on the authenticated
+// /api/me/slack-user/oauth/claim call). MUST be mounted before the generic
+// /auth router: oauthRouter registers GET /:provider/callback, and Hono
+// dispatches in registration order, so mounting after would shadow
+// /auth/slack-user/callback with the login-OAuth handler.
+app.route('/auth/slack-user', slackUserCallbackRouter);
+
 // OAuth routes (no auth required — handles login flow)
 app.route('/auth', oauthRouter);
 
@@ -206,12 +215,6 @@ app.route('/channels', slackEventsRouter);
 
 // GitHub App manifest callback (unauthenticated — GitHub redirects here after app creation)
 app.route('/github', githubAppSetupCallbackRouter);
-
-// Slack (personal) OAuth callback (unauthenticated — Slack redirects the
-// browser here with no Authorization header; identity comes from the signed
-// state + browser-bound nonce cookie). Mounted here rather than under
-// /api/me/slack-user so it stays outside the bearer-auth middleware.
-app.route('/auth/slack-user', slackUserCallbackRouter);
 
 // Protected API routes
 app.use('/api/*', authMiddleware);

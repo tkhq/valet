@@ -142,8 +142,9 @@ export function useSlackUserOAuthStatus() {
 /**
  * Kick off the Slack (personal) OAuth flow. The server returns a Slack
  * authorize URL with a signed state token; we redirect the browser to it.
- * Slack then redirects back to `/api/me/slack-user/oauth/callback`, which
- * exchanges the code and finally redirects to `/integrations?slack_user=…`.
+ * Slack then redirects back to the worker's `/auth/slack-user/callback`,
+ * which exchanges the code and redirects here with
+ * `/integrations?slack_user=claim&claim=…` — redeemed by useClaimSlackUser.
  */
 export function useStartSlackUserOAuth() {
   return useMutation({
@@ -151,6 +152,23 @@ export function useStartSlackUserOAuth() {
       const res = await api.post<{ authorizeUrl: string }>('/me/slack-user/oauth/start', {});
       window.location.href = res.authorizeUrl;
       return res;
+    },
+  });
+}
+
+/**
+ * Redeem the claim blob the OAuth callback handed back via the redirect.
+ * The worker binds the Slack credential only if the blob was issued for the
+ * authenticated user — this call is the final, authenticated step of the
+ * connect flow.
+ */
+export function useClaimSlackUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (claim: string) =>
+      api.post<{ linked: boolean; teamName: string | null }>('/me/slack-user/oauth/claim', { claim }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: slackKeys.userOAuthStatus() });
     },
   });
 }
