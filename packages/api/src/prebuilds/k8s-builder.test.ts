@@ -141,6 +141,23 @@ describe("buildKitJobManifest", () => {
     });
     expect(job.spec?.template.spec?.containers[0].image).toBe(BUILDKIT_IMAGE);
     expect(job.spec?.template.spec?.securityContext?.seccompProfile?.type).toBe("Unconfined");
+    expect(job.spec?.template.spec?.securityContext?.runAsUser).toBe(1000);
+    expect(job.spec?.template.spec?.securityContext?.runAsGroup).toBe(1000);
+  });
+
+  it("sets BUILDKITD_FLAGS=--oci-worker-no-process-sandbox (rootless-on-k8s requirement, unprivileged)", () => {
+    const job = buildKitJobManifest({
+      id: "11",
+      namespace: "ns",
+      imageRef: "reg/foo:bar",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: false,
+    });
+    expect(job.spec?.template.spec?.containers[0].env).toMatchObject([
+      { name: "BUILDKITD_FLAGS", value: "--oci-worker-no-process-sandbox" },
+    ]);
   });
 
   it("sets the AppArmor-unconfined pod annotation for the buildkit container (rootless requirement)", () => {

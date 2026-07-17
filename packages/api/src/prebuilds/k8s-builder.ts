@@ -168,16 +168,27 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
         spec: {
           restartPolicy: "Never",
           // moby/buildkit:rootless needs an unconfined seccomp profile to
-          // create user namespaces for its rootless runtime — documented
-          // upstream requirement (github.com/moby/buildkit rootless docs),
-          // not a Valet-specific choice.
-          securityContext: { seccompProfile: { type: "Unconfined" } },
+          // create user namespaces for its rootless runtime, PLUS
+          // runAsUser/runAsGroup 1000 (the rootless image's built-in
+          // unprivileged user) — documented upstream requirement
+          // (moby/buildkit kubernetes rootless examples:
+          // https://github.com/moby/buildkit/blob/master/docs/rootless.md
+          // and examples/kubernetes/), not a Valet-specific choice.
+          // Consolidated at pod level since it applies to the single
+          // buildkit container.
+          securityContext: { runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: "Unconfined" } },
           containers: [
             {
               name: BUILDKIT_CONTAINER_NAME,
               image: spec.buildkitImage,
               command: ["buildctl-daemonless.sh"],
               args,
+              // Also required for rootless BuildKit on Kubernetes when not
+              // running privileged: without this, the first RUN step fails
+              // with "runc run failed: ... error mounting proc to rootfs at
+              // /proc: operation not permitted" (moby/buildkit rootless
+              // docs/examples).
+              env: [{ name: "BUILDKITD_FLAGS", value: "--oci-worker-no-process-sandbox" }],
               ...(spec.resources ? { resources: spec.resources } : {}),
               volumeMounts,
             },
