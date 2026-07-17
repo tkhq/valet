@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
@@ -15,6 +16,7 @@ export function ModelPreferencesSection() {
   const modelsQ = useModels();
   const prefsQ = useLlmProviderPreferences();
   const putPrefs = usePutLlmProviderPreferences();
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const preferences = prefsQ.data?.preferences ?? [];
   const catalog = modelsQ.data?.models ?? [];
@@ -22,7 +24,11 @@ export function ModelPreferencesSection() {
   const unlisted = catalog.filter((m) => !preferences.includes(m.id));
 
   function save(next: string[]) {
-    putPrefs.mutate({ preferences: next });
+    setSaveError(null);
+    putPrefs.mutate(
+      { preferences: next },
+      { onError: (err) => setSaveError(err instanceof Error ? err.message : String(err)) },
+    );
   }
 
   function moveUp(index: number) {
@@ -60,6 +66,7 @@ export function ModelPreferencesSection() {
       {(modelsQ.error || prefsQ.error) && (
         <p className="py-4 text-sm text-danger-500">Failed to load model preferences.</p>
       )}
+      {saveError && <p className="text-xs text-danger-500">{saveError}</p>}
 
       {modelsQ.data && prefsQ.data && (
         <div className="space-y-4 py-4">

@@ -334,18 +334,20 @@ describe("ModelPreferencesSection", () => {
     const user = userEvent.setup();
     render(<ModelPreferencesSection />);
     await user.click(screen.getByRole("button", { name: "Move Claude One down" }));
-    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith({
-      preferences: ["openai/gpt-1", "anthropic/claude-1"],
-    });
+    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
+      { preferences: ["openai/gpt-1", "anthropic/claude-1"] },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
   });
 
   it("removing a row posts the array without it", async () => {
     const user = userEvent.setup();
     render(<ModelPreferencesSection />);
     await user.click(screen.getByRole("button", { name: "Remove Claude One" }));
-    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith({
-      preferences: ["openai/gpt-1"],
-    });
+    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
+      { preferences: ["openai/gpt-1"] },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
   });
 
   it("lists unlisted active catalog models with an add affordance", async () => {
@@ -354,8 +356,21 @@ describe("ModelPreferencesSection", () => {
     render(<ModelPreferencesSection />);
     expect(screen.getByText("GPT One")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Add" }));
-    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith({
-      preferences: ["anthropic/claude-1", "openai/gpt-1"],
+    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
+      { preferences: ["anthropic/claude-1", "openai/gpt-1"] },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("surfaces an error message when the save mutation rejects", async () => {
+    const user = userEvent.setup();
+    putLlmProviderPreferencesMutate.mockImplementation((_vars, opts) => {
+      opts.onError(new Error("invalid model ids: openai/gpt-1"));
     });
+    render(<ModelPreferencesSection />);
+
+    await user.click(screen.getByRole("button", { name: "Remove Claude One" }));
+
+    expect(await screen.findByText("invalid model ids: openai/gpt-1")).toBeTruthy();
   });
 });
