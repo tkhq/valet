@@ -221,6 +221,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     sandboxJwtMaster: opts.sandboxJwtMaster,
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
+    // GH-T10 fix: session `github` actions resolve through the token service
+    // (same `key` `engineCredentials`/the workflow invoker/the sandbox
+    // credential route derive theirs from) instead of a raw credential read.
+    githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);

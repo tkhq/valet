@@ -1117,6 +1117,19 @@ export interface CreateSessionOptions {
    * does not.
    */
   prepareSandbox?: (sandbox: Sandbox, epoch: number) => Promise<void>;
+  /**
+   * Optional host-provided credential resolver. Absent === raw store read —
+   * existing paths unchanged (the session-scoped `CredentialProvider`
+   * `Session.credentialProvider()` returns reads `providers.credentials`
+   * directly, byte-identical to before). When present it REPLACES that read:
+   * `Session.credentialProvider()` calls it with `(owner, service)` and uses
+   * its return value directly — a `null` return yields `null` with NO store
+   * fallback. The host implementation is the single decision point (e.g. the
+   * api resolves `github` through the token service and delegates every other
+   * service to the raw store itself), so the engine never re-reads the store
+   * behind a resolver it was given.
+   */
+  credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;

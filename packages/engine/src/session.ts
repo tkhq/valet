@@ -25,6 +25,7 @@ import type {
   SessionData,
   SessionEntry,
   SkillSource,
+  StoredCredential,
   ThreadData,
   ToolDef,
   WriteFence,
@@ -647,12 +648,23 @@ export class Session {
   credentialProvider(): CredentialProvider {
     const owner: CredentialOwner = { type: "user", id: this.options.userId };
     const credStore = this.providers.credentials;
-    const session = this;
+    // Host-provided resolver (Task 10 fix): when present it REPLACES the raw
+    // store read for EVERY service — the host is the single decision point
+    // (e.g. resolve `github` through the token service, delegate the rest to
+    // the store itself). A resolver return of `null` yields `null`; there is
+    // NO store fallback behind a resolver. Absent === byte-identical raw read.
+    const resolver = this.options.credentialResolver;
+    const read = (service: string): Promise<StoredCredential | null> =>
+      resolver
+        ? resolver(owner, service)
+        : credStore
+          ? credStore.get(owner, service)
+          : Promise.resolve(null);
     return {
       async get(service?: string) {
-        if (!credStore) return null;
+        if (!resolver && !credStore) return null;
         if (!service) return null; // session-level provider has no default service
-        const stored = await credStore.get(owner, service);
+        const stored = await read(service);
         if (!stored) return null;
         return {
           accessToken: stored.accessToken ?? stored.apiKey ?? "",
@@ -666,8 +678,8 @@ export class Session {
         // V1 prototype: credential request is a decision gate too — but the
         // ToolContext.requestDecision in Thread is the canonical mechanism.
         // Here we only attempt to read; if missing, we throw.
-        if (!credStore) throw new Error(`credential ${service} not available (no store)`);
-        const stored = await credStore.get(owner, service);
+        if (!resolver && !credStore) throw new Error(`credential ${service} not available (no store)`);
+        const stored = await read(service);
         if (!stored) throw new Error(`credential ${service} not connected: ${reason}`);
         return {
           accessToken: stored.accessToken ?? stored.apiKey ?? "",

@@ -1,0 +1,71 @@
+/**
+ * Session-scoped GitHub token resolution (GH-T10 fix). Bridges an app
+ * `session_repos` binding to the canonical `resolveGitHubToken` path so that
+ * BOTH the live-agent `github` action path (`engine/host.ts`'s
+ * `credentialResolver`) and the workflow tool-node path
+ * (`plugins/action-invoker.ts`) share one binding-selection + resolution
+ * helper instead of duplicating `ownerOf`/`repoOf`/`primaryRepoBinding`
+ * (third-caller rule — extracted here now that host.ts is the third caller).
+ */
+import { eq } from "drizzle-orm";
+import type { AppQueryable } from "../lib/drizzle.js";
+import { sessionRepos } from "../schema/index.js";
+import {
+  resolveGitHubToken,
+  type GitHubAuthMode,
+  type GitHubTokenDeps,
+  type ResolvedGitHubToken,
+} from "./github-tokens.js";
+
+/** `owner/repo` → `owner` (empty string when malformed). */
+function ownerOf(fullName: string): string {
+  return fullName.split("/", 1)[0] ?? "";
+}
+
+/** `owner/repo` → `repo` (empty string when there is no `/`). */
+function repoOf(fullName: string): string {
+  const idx = fullName.indexOf("/");
+  return idx === -1 ? "" : fullName.slice(idx + 1);
+}
+
+/**
+ * The session's primary (position-0) repo binding translated into
+ * `resolveGitHubToken`'s `repo`/`auth` request shape, or `undefined` when the
+ * session has no bindings — the caller then resolves with `auto` precedence
+ * and no repo, same as an unbound session.
+ */
+export async function primaryRepoBinding(
+  db: AppQueryable,
+  sessionId: string,
+): Promise<{ repo: { owner: string; name: string }; auth: GitHubAuthMode } | undefined> {
+  const rows = await db
+    .select()
+    .from(sessionRepos)
+    .where(eq(sessionRepos.sessionId, sessionId))
+    .orderBy(sessionRepos.position)
+    .limit(1);
+  const row = rows[0];
+  if (!row) return undefined;
+  return { repo: { owner: ownerOf(row.fullName), name: repoOf(row.fullName) }, auth: row.auth };
+}
+
+/**
+ * Resolve a GitHub token for a session: loads the session's primary repo
+ * binding (when `sessionId` is given and the session has one) and calls
+ * `resolveGitHubToken` with the binding's `repo`/`auth`, falling back to
+ * repo-less `auto` resolution otherwise. A `GitHubAuthError` from
+ * `resolveGitHubToken` propagates to the caller unchanged.
+ */
+export async function resolveSessionGitHubToken(
+  deps: GitHubTokenDeps,
+  args: { orgId: string; userId?: string; sessionId?: string; purpose: "git" | "api" },
+): Promise<ResolvedGitHubToken> {
+  const binding = args.sessionId ? await primaryRepoBinding(deps.db, args.sessionId) : undefined;
+  return resolveGitHubToken(deps, {
+    orgId: args.orgId,
+    userId: args.userId,
+    purpose: args.purpose,
+    repo: binding?.repo,
+    auth: binding?.auth ?? "auto",
+  });
+}

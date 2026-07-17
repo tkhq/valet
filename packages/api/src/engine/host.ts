@@ -13,15 +13,19 @@ import {
   type CredentialStore,
   type EventStream,
   type Principal,
+  type CredentialOwner,
   type Sandbox,
   type SandboxProvider,
   type Session,
   type SessionData,
   type SessionStore,
+  type StoredCredential,
   type ResolvedModel,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
+import { GitHubAuthError } from "../services/github-tokens.js";
+import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { buildWorkspacePrep } from "./workspace-prep.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -105,6 +109,24 @@ export interface EngineHostOpts {
    * FRESH — see the call sites below — never cached on the host instance.
    */
   plugins?: ValetPlugin[];
+  /**
+   * Deps for resolving a session's `github` credential through the canonical
+   * token service (`services/github-tokens.ts`'s `resolveGitHubToken`, via
+   * `resolveSessionGitHubToken`) instead of a raw `CredentialStore` read
+   * (GH-T10 fix). When present (with `db`), every session build gets a
+   * `credentialResolver` that routes `github` through the token service —
+   * honoring the session's primary repo binding auth — and delegates every
+   * other service to the raw store (byte-identical). Absent === no resolver
+   * at all: sessions read credentials straight from the store as before.
+   * Same shape/`key` `ActionInvokerOpts.githubTokenDeps` uses.
+   */
+  githubTokenDeps?: {
+    key: Buffer;
+    apiUrl?: string;
+    githubUrl?: string;
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+  };
   /**
    * Idle window (minutes) before a `ready` sandbox is hibernated (sandbox
    * hibernation plan, Task 3). `resolveIdleMinutes` (sandbox-backend.ts)
@@ -425,6 +447,7 @@ export class EngineHost {
     const profile = meta.profile ?? "headless";
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     const prepareSandbox = this.buildPrepareSandbox(meta);
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -440,6 +463,7 @@ export class EngineHost {
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
             ...(prepareSandbox ? { prepareSandbox } : {}),
+            ...(credentialResolver ? { credentialResolver } : {}),
           },
         })
       : await engine.createSession({
@@ -455,6 +479,7 @@ export class EngineHost {
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
           ...(prepareSandbox ? { prepareSandbox } : {}),
+          ...(credentialResolver ? { credentialResolver } : {}),
         });
 
     this.cache.set(sessionId, { engine, session });
@@ -531,6 +556,68 @@ export class EngineHost {
       userName: meta.userName,
       userEmail: meta.userEmail,
     });
+  }
+
+  /**
+   * Builds the `credentialResolver` (engine `CreateSessionOptions` seam,
+   * GH-T10 fix) for a session, or `undefined` when `githubTokenDeps`/`db`
+   * aren't wired — callers must conditionally spread the result so an
+   * unresolved session's options stay byte-identical to before this fix (no
+   * `credentialResolver` key at all → the engine reads the raw store).
+   *
+   * The resolver is the SINGLE decision point for this session's credentials:
+   *  - `github` → `resolveSessionGitHubToken` (`purpose: "api"`), which honors
+   *    the session's primary `session_repos` binding auth when it has one and
+   *    resolves repo-less `auto` otherwise. A `GitHubAuthError` propagates
+   *    unchanged — the engine surfaces it as the tool's error result, hint
+   *    text intact. Synthesizes a `StoredCredential` the engine's
+   *    `credentialProvider` maps to `{ accessToken }`.
+   *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
+   *    read, byte-identical to the engine's default (store-backed) path.
+   *
+   * DEVIATION (for T12): workflow tool-node invocations
+   * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
+   * their `github` actions resolve repo-less `auto` — the session-bound
+   * branch of `resolveSessionGitHubToken` is exercised only from a real
+   * session build (this resolver) today, not from the shipped workflow
+   * engine, until workflow runs gain session context.
+   */
+  private buildCredentialResolver(
+    sessionId: string,
+    userId: string,
+    orgId: string,
+  ): ((owner: CredentialOwner, service: string) => Promise<StoredCredential | null>) | undefined {
+    const tokenDeps = this.opts.githubTokenDeps;
+    const db = this.opts.db;
+    const credentials = this.opts.engineCredentials;
+    if (!tokenDeps || !db) return undefined;
+    return async (owner, service) => {
+      if (service !== "github") {
+        // Byte-identical to the engine's default store-backed read.
+        return credentials.get(owner, service);
+      }
+      const resolved = await resolveSessionGitHubToken(
+        {
+          db,
+          credentials,
+          key: tokenDeps.key,
+          apiUrl: tokenDeps.apiUrl,
+          githubUrl: tokenDeps.githubUrl,
+          fetchImpl: tokenDeps.fetchImpl,
+          now: tokenDeps.now,
+        },
+        { orgId, userId, sessionId, purpose: "api" },
+      );
+      // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
+      // rather than returning a null token; a null here would be a contract
+      // violation upstream, so surface it as the same unconnected gap.
+      if (resolved.token === null) {
+        throw new GitHubAuthError(
+          "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
+        );
+      }
+      return { type: "oauth2", accessToken: resolved.token };
+    };
   }
 
   /**
@@ -617,11 +704,13 @@ export class EngineHost {
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
       workspace,
       purpose: "orchestrator" as const,
+      ...(credentialResolver ? { credentialResolver } : {}),
       owner: principal,
       queueMode,
       sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
@@ -1065,11 +1154,13 @@ export class EngineHost {
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
+    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "child" as const,
+      ...(credentialResolver ? { credentialResolver } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
@@ -1154,11 +1245,13 @@ export class EngineHost {
     const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
+    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "workflow" as const,
+      ...(credentialResolver ? { credentialResolver } : {}),
       owner: opts.owner,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
