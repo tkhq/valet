@@ -1,0 +1,69 @@
+# GitHub / Repo Integration Design — App-first credentials, repo sessions, in-sandbox credential helper
+
+**Date:** 2026-07-16
+**Status:** Draft
+**Scope:** The v2 stack's GitHub and repository integration: a GitHub App-first credential model (self-serve App creation, org installations, short-lived installation tokens, user App-OAuth with refresh), repo-bound sessions (multi-repo, picker, clone-on-first-provision via a new engine prep seam), an in-sandbox git credential helper (no resident tokens), the token-resolution service all consumers share, and the settings surfaces for both. Supersedes the interim plan `docs/plans/2026-07-16-repo-sessions.md` (absorbed here). This is the foundation `2026-07-15-sandbox-images-v2-design.md` (prebuilds) builds on.
+
+## Context
+
+- **The v2 action surface already exists**: `packages/plugin-github` ships 28 actions + 12 trigger definitions reading a flat `"github"` credential via `ctx.credentials.get()`. What's missing is everything underneath: credential acquisition, repo-bound sessions, git in sandboxes.
+- **v2 today**: sessions have no repo concept (no picker, no clone-at-start; sandboxes have `git` but are "repo-blind" — `mintSandboxEnv` injects no git/repo material). The only way to populate a `github` credential is manual PAT paste (`PUT /api/credentials/:service`) or the side effect of better-auth GitHub social login — whose token has default `read:user user:email` scopes (useless for repos), is saved create-only, and never captures `expiresAt`. There is **no refresh machinery anywhere in v2**: `StoredCredential.expiresAt` is written but never read. `/settings/connected-accounts` is Telegram-only.
+- **Legacy (packages/worker) end-state** after three design iterations was GitHub App unified auth: manifest-flow App creation, `github_installations` table synced by webhooks, installation tokens minted per repo owner, App-based user OAuth. Two lessons learned the hard way, both avoided here: legacy grew **two inconsistent implementations** of credential resolution (`resolveRepoCredential` = user-OAuth-only, with the org-App fallback as a bespoke branch in `env-assembly.ts`) and **two installation-token minting paths** (cached and uncached). Legacy's generic `RepoProvider` interface only ever had GitHub implementations, and its shape was distorted by GitHub specifics (mintToken-as-passthrough).
+- The credential store (`packages/api/src/plugins/credential-store.ts`) is a flat encrypted `(ownerType, ownerId, service)` KV — deliberately dumb; it stays that way.
+
+## Decisions (locked)
+
+1. **GitHub App-first.** One GitHub App per deployment, created self-serve via GitHub's manifest flow from admin settings (works on localhost — the manifest redirect round-trips through the browser). App credentials (`appId`, private key, OAuth client id/secret, webhook secret) are stored in the org credential store under service `github_app` (org-owned, encrypted) — never in env or config files. The manual PAT route survives as an escape hatch: a pasted user/org `github` PAT participates in resolution as a non-expiring OAuth token.
+
+2. **Installations: on-demand discovery + optional webhook sync (both first-class).** New app-side table `github_installations`: `{ id, orgId, installationId, accountLogin, accountType, repositorySelection, suspended, createdAt, updatedAt }`. Populated by discovery (`GET /app/installations` with the App JWT) on setup, on "Refresh installations", and on settings-page open; when `VALET_PUBLIC_URL` is set, the App webhook endpoint (HMAC-verified, hardened-ingress shape like the Telegram webhook) keeps it live on `installation` events. Deployments without a public URL get the identical feature set minus real-time sync — the Telegram long-poll/webhook precedent.
+
+3. **One token service, one resolution function.** `resolveGitHubToken(deps, { orgId, userId, purpose, repo? })` in a single api service module is the ONLY implementation of credential resolution — every consumer (repos listing, clone prep, the sandbox credential-helper route, the 28 actions' `CredentialProvider`, later prebuild clones) goes through it:
+   - `purpose: "git"` (clone/fetch/push/prebuild): installation token for `repo.owner` → user App-OAuth/PAT → **tokenless** (public repos clone bare; a private-repo failure surfaces git's own error plus a "connect GitHub or install the App on {owner}" hint). No token is ever required to bind a repo.
+   - `purpose: "api"` (plugin actions): user App-OAuth/PAT → installation for the session's bound primary-repo owner → the org's sole installation when exactly one exists → clear error. The user→installation fallback is the **anonymous org-token path**: members with no personal GitHub connection get working GitHub actions through the org installation, attributed to the App bot (`{app}[bot]`). Not admin-gated; connecting a personal account upgrades attribution, not access.
+   - Installation tokens are minted through ONE cached path (encrypted cache column on `github_installations`, 5-minute expiry margin). No second minting implementation, ever.
+
+4. **User App-OAuth + the refresh subsystem.** "Connect GitHub" (settings, distinct from sign-in) runs the App's user-OAuth authorize flow; callback saves `{ accessToken, refreshToken, expiresAt }` to the user-owned `github` credential. The token service treats `expiresAt - 5min` as stale and refreshes **single-flight** via the App's refresh endpoint, persisting the rotated pair atomically; refresh failure marks the credential unhealthy (surfaced in settings; resolution falls through per decision 3). Liveness logic lives entirely in the token service — the credential store stays dumb. The provisioning auto-save (social login) gets fixed en route: capture `expiresAt`; its create-only-hook limitation is documented, and its low-scope token is treated as connect-state "identity-only" in the UI (not repo-capable).
+
+5. **Repo-bound sessions, multi-repo from day one.** New table `session_repos`: `{ sessionId, host, fullName, cloneUrl, ref?, position }` — position 0 is the **primary** (drives default workspace naming and, later, prebuild resolution; secondaries always clone at prep). `CreateSessionRequest.repos?: RepoBinding[]` (with `repo?` sugar for one element); https clone URLs only. Workspace layout: single repo → `/workspace/<repoName>` is the repo root (today's ergonomics); multiple → side-by-side `/workspace/<name>` dirs. Unbound sessions are byte-identical to today. Mid-session binding additions are a non-goal this pass.
+
+6. **Clone-on-first-provision via a new engine seam (adversarial review required).** `prepareSandbox?: (sandbox, epoch) => Promise<void>` on the session options object (the `resolveModel?` precedent): awaited inside the provision path after readiness, **before any waiter receives the sandbox** (the only race-free point); prep rejection fails the provision like a startup failure (no half-prepared handout); runs once per (sandbox, epoch) — re-provisions re-run it, hibernation wakes (same epoch) skip it. Absent hook = byte-identical. The api's prep implementation owns idempotence: `.git` exists → `fetch` + checkout (best-effort, offline-tolerant); else clone each binding sequentially. The engine seam knows nothing about git or GitHub.
+
+7. **In-sandbox credentials: a dynamic credential helper, never resident tokens.** Prep installs a `valet-git-credential` helper and sets it as the sandbox's git `credential.helper`. On any git auth need it calls `POST /api/sandbox/git-credential` (authenticated by the existing `VALET_SANDBOX_TOKEN`), passing host+owner; the api resolves via decision 3 (`purpose: "git"`) **scoped to the union of the session's bound-repo owners** — a compromised sandbox cannot enumerate other installations — and returns a short-lived token the helper emits to git without writing to disk. Fresh token per operation: 1h installation expiry becomes irrelevant, wakes/restarts need no refresh choreography, the agent never sees a resident secret, and no `GIT_*`/`GH_TOKEN` env is ever injected. The clone in prep uses the same helper. `gh` CLI is baked into the sandbox images and wired to the same helper for git ops; `gh api`-style calls use a thin wrapper that fetches a token per invocation the same way. Git identity: `user.name`/`user.email` from the valet user profile set in the sandbox git config at prep.
+
+8. **Generic where it's real, GitHub-specific where it isn't.** One thin api-side port:
+   ```ts
+   interface RepoHost {
+     readonly id: string;                      // "github"
+     listRepos(ctx): Promise<RepoListItem[]>;
+     resolveGitToken(ctx, req: { owner: string; repo: string; purpose: "git" | "api" }): Promise<GitTokenResult | null>;
+   }
+   ```
+   The repos route, clone prep, credential-helper route, and the actions' credential path consume the port, dispatched by clone-URL host. The App manifest flow, installations table, minting, and OAuth refresh are GitHub mechanics kept **private behind** the GitHub implementation — not abstracted (legacy's `RepoProvider` lesson). Data shapes (`session_repos.host`, `RepoListItem`) are provider-ready; a future GitLab implementation is a new `RepoHost`, no schema change.
+
+9. **`GET /api/repos`** (any authed member): union of installation repos (per installed owner) + the user's App-OAuth repos, deduped by fullName, with `connected`/`installed` flags for picker hints; no credential and no installations → `{ repos: [], connected: false }` soft state (picker shows a connect hint). The session-create picker is optional typeahead single-select with an "add another repo" affordance; selection auto-fills the workspace path; no selection = today's flow.
+
+10. **Settings surfaces.**
+    - **Organization → GitHub (admin):** no App → "Create GitHub App" (manifest flow, org or personal target); with App → App card (name/id, "Install on GitHub" deep link, installations list with owner/selection/suspended, "Refresh installations", webhook status when public URL).
+    - **Connected accounts (user):** GitHub row — Connect (App user-OAuth), connection state incl. token health (expired / refresh-failing / identity-only-scope badges), Disconnect (revoke + delete). Plus a generic credentials list from `GET /api/credentials` with revoke, making pasted PATs and other services visible/manageable at last.
+
+## Exit criteria (the dogfood)
+
+On a live deployment: create a real GitHub App via the manifest flow from admin settings; install it on an org; "Refresh installations" shows it (and with `VALET_PUBLIC_URL`, an uninstall shows up without refreshing). Pick a private org repo in the new-session dialog → session clones it on first prompt, agent runs a command in the repo, pushes a commit that lands bot-attributed with the user's name/email in the author field. Connect a personal GitHub account → a plugin action (e.g. create_issue) attributes as the user; disconnect → same action still works via the installation (bot-attributed). Bind two repos to one session → both present side by side. Bind a public repo with zero credentials configured → clones fine. Token freshness: a session older than 1h keeps pushing (helper re-mints); a user token past 8h refreshes transparently on next API action. Sessions with no repo remain byte-identical to today.
+
+## Testing
+
+- **Resolution unit:** the full precedence matrix (both purposes × installation/user-OAuth/PAT/tokenless/none), owner-scoping of the helper route (unbound owner → 403), sole-installation fallback, unhealthy-credential fallthrough.
+- **Refresh:** stale detection at the 5-min margin, single-flight under concurrent reads, rotated refresh-token persistence, refresh-failure marking; installation-token cache re-mint at margin.
+- **App flows:** manifest state signing/validation, setup-callback exchange (fixture GitHub), discovery sync upsert/removal, webhook HMAC + installation event handling, suspended installations excluded from resolution.
+- **Prep/clone:** public tokenless clone, private clone via helper, multi-repo layout, `.git`-exists fetch path, prep failure → startup-failure semantics, unbound session byte-identical; token-discipline pins (no token in any exec argv, `git remote get-url origin` credential-less, no `GIT_*`/`GH_TOKEN` in sandbox env).
+- **Engine seam:** `prepareSandbox?` ordering (before waiters), once-per-epoch, wake-skip, absent-hook byte-identical — adversarially reviewed like every engine touchpoint.
+- **Fixture-first everywhere** (fake GitHub API on port 0); one live-gated e2e behind a real App credential set.
+
+## Non-goals
+
+- Webhook-**triggered** workflows (the App webhook ships for installation sync only; wiring plugin-github's 12 trigger definitions to it is a later pass).
+- Non-GitHub hosts (the `RepoHost` port and provider-ready shapes are the extent of it this pass).
+- Mid-session repo binding additions (agents can clone public repos themselves; private additions come later as a PATCH + on-demand prep).
+- PAT deprecation; per-repo permission mirroring inside valet; org-level PAT sharing UI beyond what exists.
+- gh CLI auth for arbitrary non-bound hosts; SSH clone URLs.
+- Prebuilds (spec `2026-07-15-sandbox-images-v2-design.md` — builds directly on this foundation: build-time clones use decision 3's `purpose: "git"` with the config's repo owner, and `.valet/prebuild.yaml` reading rides the same clone).
