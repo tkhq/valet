@@ -13,6 +13,7 @@ import {
   type CredentialStore,
   type EventStream,
   type Principal,
+  type Sandbox,
   type SandboxProvider,
   type Session,
   type SessionData,
@@ -20,6 +21,8 @@ import {
   type ResolvedModel,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import type { RepoBinding } from "../wire/types.js";
+import { buildWorkspacePrep } from "./workspace-prep.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { hasOrgKey } from "../services/model-catalog.js";
@@ -166,6 +169,22 @@ export interface SessionMeta {
   /** Interactive-service profile (sandbox auth gateway plan, Task 5).
    * Defaults to "headless" when omitted. */
   profile?: "headless" | "full";
+  /**
+   * Repo bindings for this session (GitHub/repo integration plan, Task 9),
+   * in position order. When non-empty, `buildSession` wires a
+   * `prepareSandbox` hook (`workspace-prep.ts`) that clones them via the
+   * credential helper on first cold boot. Absent/empty === no prep — the
+   * session's `CreateSessionOptions`/`RestoreSessionOptions` get no
+   * `prepareSandbox` key at all, byte-identical to before this task.
+   */
+  repos?: RepoBinding[];
+  /**
+   * Git identity (`user.name`/`user.email`) configured sandbox-global by
+   * workspace prep, from the session owner's profile. Only consulted when
+   * `repos` is non-empty; falls back to a generic identity when unset.
+   */
+  userName?: string;
+  userEmail?: string;
 }
 
 interface CacheEntry {
@@ -405,6 +424,7 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
+    const prepareSandbox = this.buildPrepareSandbox(meta);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -419,6 +439,7 @@ export class EngineHost {
             tools: extras.tools.length ? extras.tools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
+            ...(prepareSandbox ? { prepareSandbox } : {}),
           },
         })
       : await engine.createSession({
@@ -433,6 +454,7 @@ export class EngineHost {
           tools: extras.tools.length ? extras.tools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
+          ...(prepareSandbox ? { prepareSandbox } : {}),
         });
 
     this.cache.set(sessionId, { engine, session });
@@ -490,6 +512,25 @@ export class EngineHost {
       VALET_SESSION_ID: sessionId,
       VALET_SANDBOX_PROFILE: profile,
     };
+  }
+
+  /**
+   * Builds the `prepareSandbox` hook for a session with repo bindings
+   * (GitHub/repo integration plan, Task 9), or `undefined` when `meta.repos`
+   * is empty/absent — callers must conditionally spread the result rather
+   * than always setting the key, so an unbound session's
+   * `CreateSessionOptions`/`RestoreSessionOptions` stay byte-identical to
+   * before this task (no `prepareSandbox` key at all, not
+   * `prepareSandbox: undefined`).
+   */
+  private buildPrepareSandbox(meta: SessionMeta): ((sandbox: Sandbox, epoch: number) => Promise<void>) | undefined {
+    if (!meta.repos || meta.repos.length === 0) return undefined;
+    return buildWorkspacePrep({
+      apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
+      repos: meta.repos,
+      userName: meta.userName,
+      userEmail: meta.userEmail,
+    });
   }
 
   /**

@@ -8,6 +8,23 @@
  * See CLAUDE.md's persistence-shape-drift guidance: this routing decision
  * used to be exercised only by the key-gated Docker E2E.
  */
+import type { RepoBinding } from "./wire/types.js";
+
+/** The regular (non-workflow) session restore meta this module threads
+ * from `lookupAgentSession` into `sessionFor` — mirrors `EngineHost`'s
+ * `SessionMeta` (GitHub/repo integration plan, Task 9's `repos`/
+ * `userName`/`userEmail` addition, following the `profile` precedent) but
+ * declared locally so this module stays importable without pulling in
+ * `engine/host.ts`. */
+export interface RestoreSessionMeta {
+  userId: string;
+  orgId: string;
+  workspace: string;
+  profile: "headless" | "full";
+  repos?: RepoBinding[];
+  userName?: string;
+  userEmail?: string;
+}
 
 /**
  * Narrow, dependency-injected surface for {@link restoreOneSession} — lets
@@ -17,15 +34,8 @@
  */
 export interface RestoreSessionDeps {
   ensureWorkflowSession: (sessionId: string) => Promise<{ id: string }>;
-  lookupAgentSession: (
-    sessionId: string,
-  ) => Promise<
-    { userId: string; orgId: string; workspace: string; profile: "headless" | "full" } | undefined
-  >;
-  sessionFor: (
-    sessionId: string,
-    meta: { userId: string; orgId: string; workspace: string; profile: "headless" | "full" },
-  ) => Promise<unknown>;
+  lookupAgentSession: (sessionId: string) => Promise<RestoreSessionMeta | undefined>;
+  sessionFor: (sessionId: string, meta: RestoreSessionMeta) => Promise<unknown>;
 }
 
 /**

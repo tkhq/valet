@@ -6,7 +6,7 @@
  * persistence-shape-drift guidance.
  */
 import { describe, it, expect, vi } from "vitest";
-import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
+import { restoreOneSession, type RestoreSessionDeps, type RestoreSessionMeta } from "./boot-restore.js";
 
 function makeDeps(overrides: Partial<RestoreSessionDeps> = {}): {
   deps: RestoreSessionDeps;
@@ -16,10 +16,12 @@ function makeDeps(overrides: Partial<RestoreSessionDeps> = {}): {
 } {
   const ensureWorkflowSession = vi.fn(async (sessionId: string) => ({ id: sessionId }));
   const lookupAgentSession = vi.fn(
-    async () =>
-      ({ userId: "u1", orgId: "o1", workspace: "/tmp/ws", profile: "headless" }) as
-        | { userId: string; orgId: string; workspace: string; profile: "headless" | "full" }
-        | undefined,
+    async (): Promise<RestoreSessionMeta | undefined> => ({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/tmp/ws",
+      profile: "headless",
+    }),
   );
   const sessionFor = vi.fn(async () => undefined);
   return {

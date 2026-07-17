@@ -15,7 +15,7 @@ import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, sessionRepos, users } from "../schema/index.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
@@ -85,12 +85,34 @@ async function loadEngineSession(
 ): Promise<{ session: typeof agentSessions.$inferSelect; engineSession: EngineSession } | { error: Response }> {
   const session = await loadOwnedSession(c);
   if (!session) return { error: c.json({ error: "session not found" }, 404) };
-  const { engineHost } = c.var.providers;
+  const { engineHost, db } = c.var.providers;
+
+  // Repo bindings + git identity (GitHub/repo integration plan, Task 9) —
+  // threaded the same way `profile` is, so the first `sessionFor` call to
+  // actually build the session (create or restore) wires `prepareSandbox`.
+  // No-op reads once the session is already cached (`sessionFor` returns
+  // early without touching `meta`).
+  const [repoRows, userRows] = await Promise.all([
+    db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, session.id)).orderBy(sessionRepos.position),
+    db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, session.userId)).limit(1),
+  ]);
+
   const engineSession = await engineHost.sessionFor(session.id, {
     userId: session.userId,
     orgId: session.orgId,
     workspace: session.workspace,
     profile: session.profile,
+    repos: repoRows.length
+      ? repoRows.map((r) => ({
+          host: r.host,
+          fullName: r.fullName,
+          cloneUrl: r.cloneUrl,
+          ref: r.ref ?? undefined,
+          auth: r.auth,
+        }))
+      : undefined,
+    userName: userRows[0]?.name,
+    userEmail: userRows[0]?.email,
   });
   return { session, engineSession };
 }

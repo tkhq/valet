@@ -1,0 +1,331 @@
+/**
+ * Unit coverage for `buildWorkspacePrep` (GitHub/repo integration plan,
+ * Task 9) against a recording fake `Sandbox` — no engine, no docker. See
+ * `workspace-prep.ts`'s header for the sequence and the relative-path
+ * discipline this pins.
+ */
+import { describe, it, expect, vi } from "vitest";
+import type { ExecOpts, ExecResult, Sandbox } from "@valet/engine";
+import { buildWorkspacePrep } from "./workspace-prep.js";
+import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import type { RepoBinding } from "../wire/types.js";
+
+const API_URL = "https://api.valet.test";
+const STAGED_HELPER = ".valet-prep/git-credential-valet";
+const STAGED_GH = ".valet-prep/valet-gh";
+const INSTALL_CMD =
+  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh";
+
+interface ExecCall {
+  command: string;
+  opts?: ExecOpts;
+}
+
+/** Recording fake `Sandbox`: tracks every `exec`/`writeFile` call and lets
+ * the test script per-command exit codes (default success) and a fake
+ * filesystem (`.git` presence, directory contents) for the layout /
+ * existing-clone branches. Directory keys are workspace-relative, matching
+ * `workspace-prep.ts`'s relative-path discipline (`.` = workspace root). */
+class RecordingSandbox implements Sandbox {
+  readonly id = "sb-test";
+  execCalls: ExecCall[] = [];
+  writes = new Map<string, string>();
+  private gitDirs = new Set<string>();
+  private dirs = new Map<string, string[]>();
+  execResults = new Map<string, ExecResult>();
+
+  /** Mark `<dir>/.git` as present, so `dirHasGit` reports an existing clone. */
+  markExistingClone(dir: string): void {
+    this.gitDirs.add(dir);
+  }
+
+  /** Mark `dir` as present with the given entries (empty array = exists-but-empty). */
+  setDirEntries(dir: string, entries: string[]): void {
+    this.dirs.set(dir, entries);
+  }
+
+  /** Override the result for an exact command string. */
+  setResult(command: string, result: ExecResult): void {
+    this.execResults.set(command, result);
+  }
+
+  async readFile(): Promise<string> {
+    throw new Error("not implemented");
+  }
+  async readBinary(): Promise<Uint8Array> {
+    throw new Error("not implemented");
+  }
+  async writeFile(path: string, content: string): Promise<void> {
+    this.writes.set(path, content);
+  }
+  async writeBinary(): Promise<void> {
+    throw new Error("not implemented");
+  }
+  async readdir(path: string): Promise<string[]> {
+    const entries = this.dirs.get(path);
+    if (entries === undefined) throw new Error(`ENOENT: ${path}`);
+    return entries;
+  }
+  async stat(path: string): Promise<{ isFile: boolean; isDirectory: boolean; size: number }> {
+    if (path.endsWith("/.git") && this.gitDirs.has(path.slice(0, -"/.git".length))) {
+      return { isFile: false, isDirectory: true, size: 0 };
+    }
+    throw new Error(`ENOENT: ${path}`);
+  }
+  async mkdir(): Promise<void> {}
+  async rm(): Promise<void> {}
+  async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
+    this.execCalls.push({ command, opts });
+    return this.execResults.get(command) ?? { stdout: "", stderr: "", exitCode: 0 };
+  }
+}
+
+function binding(overrides: Partial<RepoBinding> = {}): RepoBinding {
+  return {
+    host: "github",
+    fullName: "acme/widgets",
+    cloneUrl: "https://github.com/acme/widgets.git",
+    auth: "auto",
+    ...overrides,
+  };
+}
+
+describe("buildWorkspacePrep", () => {
+  it("stages the credential helper + gh wrapper verbatim at a workspace-relative path, installs into /usr/local/bin, and wires git config", async () => {
+    const sandbox = new RecordingSandbox();
+    const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+
+    await prep(sandbox, 1);
+
+    // Never writeFile'd directly to an absolute /usr/local/bin path — see
+    // the file header on why that's broken for sandbox-docker.
+    expect(sandbox.writes.get(STAGED_HELPER)).toBe(gitCredentialHelperScript(API_URL));
+    expect(sandbox.writes.get(STAGED_GH)).toBe(ghWrapperScript(API_URL));
+    expect(sandbox.writes.has("/usr/local/bin/git-credential-valet")).toBe(false);
+
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(commands).toContain(INSTALL_CMD);
+    expect(commands).toContain("git config --global credential.helper '/usr/local/bin/git-credential-valet'");
+    // Hard prerequisite (Task 8 review): without this, git never sends
+    // `path=` to the helper and every clone runs anonymous.
+    expect(commands).toContain("git config --global credential.useHttpPath true");
+    // Discovered against a real Docker sandbox: without this, git refuses
+    // to operate on the bind-mounted workspace ("dubious ownership").
+    expect(commands).toContain("git config --global --add safe.directory '*'");
+    // Staging dir cleanup is best-effort, but still attempted.
+    expect(commands).toContain("rm -rf '.valet-prep'");
+  });
+
+  it("configures user.name/user.email from meta, falling back to a generic identity", async () => {
+    const sandbox = new RecordingSandbox();
+    const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+    await prep(sandbox, 1);
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(commands).toContain("git config --global user.name 'Valet Agent'");
+    expect(commands).toContain("git config --global user.email 'agent@valet.local'");
+  });
+
+  it("uses the session owner's name/email when provided", async () => {
+    const sandbox = new RecordingSandbox();
+    const prep = buildWorkspacePrep({
+      apiUrl: API_URL,
+      repos: [binding()],
+      userName: "Ada Lovelace",
+      userEmail: "ada@example.com",
+    });
+    await prep(sandbox, 1);
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(commands).toContain("git config --global user.name 'Ada Lovelace'");
+    expect(commands).toContain("git config --global user.email 'ada@example.com'");
+  });
+
+  describe("layouts", () => {
+    it("single binding clones into the workspace root itself (relative '.')", async () => {
+      const sandbox = new RecordingSandbox();
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding({ fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" })],
+      });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
+    });
+
+    it("multiple bindings clone each into <repoName> (relative), in position order", async () => {
+      const sandbox = new RecordingSandbox();
+      const repos = [
+        binding({ fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" }),
+        binding({ fullName: "acme/gadgets", cloneUrl: "https://github.com/acme/gadgets.git" }),
+      ];
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos });
+      await prep(sandbox, 1);
+      const cloneCommands = sandbox.execCalls.map((c) => c.command).filter((c) => c.startsWith("git clone"));
+      expect(cloneCommands).toEqual([
+        "git clone 'https://github.com/acme/widgets.git' 'widgets'",
+        "git clone 'https://github.com/acme/gadgets.git' 'gadgets'",
+      ]);
+    });
+
+    it("clones with --branch when ref is set", async () => {
+      const sandbox = new RecordingSandbox();
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding({ ref: "release/1.0" })] });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.' --branch 'release/1.0'");
+    });
+
+    it("clones into an existing-but-empty workspace root (single-binding subtlety)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setDirEntries(".", []); // root pre-created empty by session create
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
+    });
+
+    it("throws when the clone target is non-empty with no .git present", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setDirEntries(".", ["some-stray-file.txt"]);
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await expect(prep(sandbox, 1)).rejects.toThrow(/not empty/);
+    });
+  });
+
+  describe("existing clone vs fresh clone", () => {
+    it("fetch+checkout an existing clone instead of cloning again", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.markExistingClone(".");
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding({ ref: "main" })] });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands.some((c) => c.startsWith("git clone"))).toBe(false);
+      expect(commands).toContain("git fetch origin");
+      expect(commands).toContain("git checkout 'main'");
+      const fetchCall = sandbox.execCalls.find((c) => c.command === "git fetch origin");
+      expect(fetchCall?.opts?.cwd).toBe(".");
+    });
+
+    it("skips checkout when no ref is pinned on an existing clone", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.markExistingClone(".");
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands).toContain("git fetch origin");
+      expect(commands.some((c) => c.startsWith("git checkout"))).toBe(false);
+    });
+
+    it("offline-tolerant: fetch failure on an existing clone logs and prep continues (does not throw)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.markExistingClone(".");
+      sandbox.setResult("git fetch origin", { stdout: "", stderr: "network unreachable", exitCode: 1 });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding({ ref: "main" })] });
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      expect(errSpy).toHaveBeenCalled();
+      // checkout still attempted despite the fetch failure.
+      expect(sandbox.execCalls.map((c) => c.command)).toContain("git checkout 'main'");
+      errSpy.mockRestore();
+    });
+
+    it("offline-tolerant: checkout failure on an existing clone logs and prep continues (does not throw)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.markExistingClone(".");
+      sandbox.setResult("git checkout 'main'", { stdout: "", stderr: "unknown revision", exitCode: 1 });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding({ ref: "main" })] });
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+  });
+
+  describe("failure propagation", () => {
+    it("clone failure THROWS (prep fails → startup-failure semantics)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult("git clone 'https://github.com/acme/widgets.git' '.'", {
+        stdout: "",
+        stderr: "fatal: repository not found",
+        exitCode: 128,
+      });
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await expect(prep(sandbox, 1)).rejects.toThrow(/git clone failed/);
+    });
+
+    it("credential helper install failure THROWS before any clone is attempted", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(INSTALL_CMD, { stdout: "", stderr: "permission denied", exitCode: 1 });
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await expect(prep(sandbox, 1)).rejects.toThrow(/installing credential helper/);
+      expect(sandbox.execCalls.some((c) => c.command.startsWith("git clone"))).toBe(false);
+      expect(sandbox.execCalls.some((c) => c.command.startsWith("git config"))).toBe(false);
+    });
+
+    it("credential.helper config failure THROWS before any clone is attempted", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult("git config --global credential.helper '/usr/local/bin/git-credential-valet'", {
+        stdout: "",
+        stderr: "permission denied",
+        exitCode: 1,
+      });
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await expect(prep(sandbox, 1)).rejects.toThrow(/credential.helper/);
+      expect(sandbox.execCalls.some((c) => c.command.startsWith("git clone"))).toBe(false);
+    });
+
+    it("a later binding still clones after an earlier binding's offline-tolerant failure", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.markExistingClone("widgets");
+      sandbox.setResult("git fetch origin", { stdout: "", stderr: "offline", exitCode: 1 });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const repos = [
+        binding({ fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" }),
+        binding({ fullName: "acme/gadgets", cloneUrl: "https://github.com/acme/gadgets.git" }),
+      ];
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos });
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      expect(sandbox.execCalls.map((c) => c.command)).toContain(
+        "git clone 'https://github.com/acme/gadgets.git' 'gadgets'",
+      );
+      errSpy.mockRestore();
+    });
+  });
+
+  describe("token discipline", () => {
+    it("no token material appears in any exec argv or written file content", async () => {
+      const sandbox = new RecordingSandbox();
+      const repos = [
+        binding({ fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git", ref: "main" }),
+      ];
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos,
+        userName: "Ada Lovelace",
+        userEmail: "ada@example.com",
+      });
+      await prep(sandbox, 1);
+
+      // No exec argv ever carries token-shaped material — the helper
+      // resolves auth out-of-band at clone time, not via anything prep
+      // passes on the command line.
+      for (const call of sandbox.execCalls) {
+        expect(call.command).not.toContain("VALET_SANDBOX_TOKEN=");
+        expect(call.command.toLowerCase()).not.toMatch(/x-valet-sandbox:|bearer /);
+      }
+      // Written script content is byte-identical to Task 8's generators —
+      // pinned exactly (not merely "no secret substring") — which
+      // themselves assert no token material is embedded (see
+      // git-credential-helper.ts's own golden tests).
+      expect(sandbox.writes.get(STAGED_HELPER)).toBe(gitCredentialHelperScript(API_URL));
+      expect(sandbox.writes.get(STAGED_GH)).toBe(ghWrapperScript(API_URL));
+    });
+
+    it("never rewrites `git remote get-url origin` with embedded credentials", async () => {
+      const sandbox = new RecordingSandbox();
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await prep(sandbox, 1);
+      expect(sandbox.execCalls.some((c) => c.command.includes("remote set-url"))).toBe(false);
+      expect(sandbox.execCalls.some((c) => c.command.includes("remote get-url"))).toBe(false);
+    });
+  });
+});

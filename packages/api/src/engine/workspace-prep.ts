@@ -1,0 +1,274 @@
+/**
+ * Sandbox prep: clone bound repos via the credential helper (GitHub/repo
+ * integration plan, Task 9). `buildWorkspacePrep` returns the closure wired
+ * as `prepareSandbox` on `CreateSessionOptions` (engine seam, Task 1) — it
+ * runs once per (sandbox, epoch) after a freshly cold-booted sandbox reports
+ * ready and BEFORE any waiter observes it.
+ *
+ * ── Sequence ───────────────────────────────────────────────────────────
+ *   1. Install `git-credential-valet` + `valet-gh` (Task 8's script
+ *      generators, written verbatim — no token material embedded) and wire
+ *      git to use the helper. HARD PREREQUISITE (Task 8 review): git does
+ *      NOT send `path=` to credential helpers by default, and the helper
+ *      derives `owner` from it, so `credential.useHttpPath` MUST be set or
+ *      every clone runs anonymous.
+ *   2. Set `user.name`/`user.email` (sandbox-global git config) from the
+ *      session owner's profile, falling back to a generic identity.
+ *   3. Per binding, in position order: an existing clone (`.git` present)
+ *      gets a best-effort `fetch`/`checkout` — failures are logged and
+ *      prep continues (offline-tolerant); otherwise a fresh `git clone`,
+ *      whose failure THROWS (prep fails → startup-failure semantics, per
+ *      the engine seam's contract).
+ *
+ * ── Path discipline (relative-only) ───────────────────────────────────────
+ * Every `readFile`/`writeFile`/`exec` call this module makes uses a path
+ * RELATIVE to the sandbox's default cwd (which every `Sandbox` provider
+ * defines as the session workspace root) or, for the credential scripts,
+ * a plain absolute in-container path used only inside an `exec` command
+ * string. This is deliberate, not stylistic: `Sandbox.writeFile`'s
+ * "absolute path" branch resolves differently per backend — for
+ * `sandbox-docker` an absolute path outside the bind-mounted workspace
+ * (e.g. `/usr/local/bin/...`) resolves against the HOST filesystem (broken:
+ * writes to the host machine, not the container, and usually EACCES),
+ * while `sandbox-local` treats it as a literal host path by design (no
+ * isolation). Relative paths are the one contract every backend honors
+ * identically. So the credential scripts are staged at a workspace-relative
+ * path via `writeFile`, then moved into place via `exec` (which really
+ * does execute inside the sandbox's own filesystem/container for every
+ * backend) — never `writeFile`ed directly to `/usr/local/bin`.
+ *
+ * ── Token discipline ───────────────────────────────────────────────────
+ * No token material ever appears in an exec argv or written file: the
+ * credential helper resolves auth out-of-band via
+ * `POST /api/sandbox/git-credential` at clone time. This module only ever
+ * interpolates non-secret values (`apiUrl`, repo URLs/paths, git identity).
+ */
+import type { ExecResult, Sandbox } from "@valet/engine";
+import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import type { RepoBinding } from "../wire/types.js";
+
+/** Workspace-relative staging dir the two scripts are written to (via
+ * `Sandbox.writeFile`, which only reliably targets workspace-relative
+ * paths — see the file header) before `exec` moves them into place. */
+const STAGING_DIR = ".valet-prep";
+
+/** Final, real in-sandbox locations — referenced only inside `exec`
+ * command strings, never passed to `writeFile` directly. */
+const HELPER_PATH = "/usr/local/bin/git-credential-valet";
+const GH_WRAPPER_PATH = "/usr/local/bin/valet-gh";
+
+const DEFAULT_USER_NAME = "Valet Agent";
+const DEFAULT_USER_EMAIL = "agent@valet.local";
+
+export interface WorkspacePrepOpts {
+  /** This process's externally-reachable API base URL — baked into the
+   * generated scripts (not secret; the token they use is read from the
+   * sandbox's own env at call time). */
+  apiUrl: string;
+  /** Repo bindings, in position order. Must be non-empty — callers only
+   * build this closure when bindings exist. */
+  repos: RepoBinding[];
+  userName?: string;
+  userEmail?: string;
+}
+
+/** POSIX single-quote escaping for values interpolated into `sh` command
+ * strings passed to `Sandbox.exec`. */
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function posixJoin(a: string, b: string): string {
+  return `${a.replace(/\/+$/, "")}/${b}`;
+}
+
+/** `owner/repo` → `repo` (the segment after the first "/"; the whole
+ * string when there is no "/"). */
+function repoNameOf(fullName: string): string {
+  const idx = fullName.indexOf("/");
+  return idx === -1 ? fullName : fullName.slice(idx + 1);
+}
+
+/** Workspace-relative target clone dir for binding at `index` (position
+ * order): the single binding clones into the workspace root itself
+ * (`.`, i.e. the sandbox's default cwd); with multiple bindings each gets
+ * its own `<repoName>` subdirectory relative to that root. */
+function targetDirFor(repos: RepoBinding[], index: number): string {
+  if (repos.length === 1) return ".";
+  return repoNameOf(repos[index].fullName);
+}
+
+/** Runs `sandbox.exec`, converting a rejection into a synthetic failed
+ * `ExecResult` so callers can treat "exec threw" and "exec returned
+ * non-zero" uniformly. */
+async function safeExec(sandbox: Sandbox, command: string, opts?: { cwd?: string }): Promise<ExecResult> {
+  try {
+    return await sandbox.exec(command, opts);
+  } catch (err) {
+    return { stdout: "", stderr: err instanceof Error ? err.message : String(err), exitCode: 1 };
+  }
+}
+
+function execFailureMessage(label: string, result: ExecResult): string {
+  const detail = result.stderr.trim() || result.stdout.trim();
+  return detail ? `${label}: ${detail}` : label;
+}
+
+/** Stages the two Task 8 scripts at a workspace-relative path (via
+ * `writeFile`), then `exec`s them into `/usr/local/bin` with mode 755 and
+ * wires git to use the helper for every host (`credential.helper` + the
+ * hard prerequisite `credential.useHttpPath`). Throws on any failure — an
+ * unconfigured sandbox can't authenticate any clone below. */
+async function installCredentialHelper(sandbox: Sandbox, apiUrl: string): Promise<void> {
+  await sandbox.mkdir(STAGING_DIR);
+  const stagedHelper = posixJoin(STAGING_DIR, "git-credential-valet");
+  const stagedGhWrapper = posixJoin(STAGING_DIR, "valet-gh");
+  await sandbox.writeFile(stagedHelper, gitCredentialHelperScript(apiUrl));
+  await sandbox.writeFile(stagedGhWrapper, ghWrapperScript(apiUrl));
+
+  const install = await sandbox.exec(
+    [
+      "mkdir -p /usr/local/bin",
+      `cp ${shQuote(stagedHelper)} ${HELPER_PATH}`,
+      `cp ${shQuote(stagedGhWrapper)} ${GH_WRAPPER_PATH}`,
+      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH}`,
+    ].join(" && "),
+  );
+  if (install.exitCode !== 0) {
+    throw new Error(execFailureMessage("workspace prep: installing credential helper failed", install));
+  }
+  // Best-effort cleanup of the staging dir — never fatal.
+  await safeExec(sandbox, `rm -rf ${shQuote(STAGING_DIR)}`);
+
+  const helperConfig = await sandbox.exec(`git config --global credential.helper ${shQuote(HELPER_PATH)}`);
+  if (helperConfig.exitCode !== 0) {
+    throw new Error(execFailureMessage("workspace prep: git config credential.helper failed", helperConfig));
+  }
+
+  // HARD PREREQUISITE (Task 8 review): without this, git never sends
+  // `path=` to the helper and every clone runs anonymous.
+  const useHttpPath = await sandbox.exec("git config --global credential.useHttpPath true");
+  if (useHttpPath.exitCode !== 0) {
+    throw new Error(execFailureMessage("workspace prep: git config credential.useHttpPath failed", useHttpPath));
+  }
+
+  // Discovered running this against a real Docker sandbox (docker-gated
+  // integration test): the workspace bind-mount is owned by the HOST
+  // user's uid, but `git` runs as whatever uid `docker exec` defaults to
+  // (root in a stock image) — a uid mismatch git treats as "dubious
+  // ownership" and refuses to operate on (`fatal: detected dubious
+  // ownership in repository at '/workspace'`), which would otherwise
+  // silently brick every clone/fetch/checkout below. `*` covers every
+  // binding's target dir regardless of layout.
+  const safeDirectory = await sandbox.exec("git config --global --add safe.directory '*'");
+  if (safeDirectory.exitCode !== 0) {
+    throw new Error(execFailureMessage("workspace prep: git config safe.directory failed", safeDirectory));
+  }
+}
+
+async function configureGitIdentity(sandbox: Sandbox, userName?: string, userEmail?: string): Promise<void> {
+  const name = userName?.trim() || DEFAULT_USER_NAME;
+  const email = userEmail?.trim() || DEFAULT_USER_EMAIL;
+
+  const nameResult = await sandbox.exec(`git config --global user.name ${shQuote(name)}`);
+  if (nameResult.exitCode !== 0) {
+    throw new Error(execFailureMessage("workspace prep: git config user.name failed", nameResult));
+  }
+  const emailResult = await sandbox.exec(`git config --global user.email ${shQuote(email)}`);
+  if (emailResult.exitCode !== 0) {
+    throw new Error(execFailureMessage("workspace prep: git config user.email failed", emailResult));
+  }
+}
+
+/** True when `<dir>/.git` exists (file or directory — a worktree's `.git`
+ * is a file), i.e. `dir` already holds a clone. `dir` is workspace-relative
+ * (`.` or a subdir name). */
+async function dirHasGit(sandbox: Sandbox, dir: string): Promise<boolean> {
+  try {
+    const st = await sandbox.stat(posixJoin(dir, ".git"));
+    return st.isDirectory || st.isFile;
+  } catch {
+    return false;
+  }
+}
+
+/** `git clone` requires an empty (or non-existent) target directory.
+ * Session create pre-creates the workspace root, so the single-binding
+ * case clones into an existing-but-empty dir — fine. A non-empty dir with
+ * no `.git` is an unrecoverable prep state; throw with a clear message
+ * rather than silently clobbering or nesting. */
+async function assertCloneTargetEmpty(sandbox: Sandbox, dir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await sandbox.readdir(dir);
+  } catch {
+    return; // doesn't exist yet — git clone will create it.
+  }
+  if (entries.length > 0) {
+    throw new Error(`workspace prep: clone target ${dir} exists and is not empty (no .git present)`);
+  }
+}
+
+/** Best-effort refresh of an already-cloned dir: `git fetch origin`, then
+ * `git checkout {ref}` when a ref is pinned. Offline-tolerant — failures
+ * are logged and prep continues to the next binding, never thrown. */
+async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
+  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir });
+  if (fetch.exitCode !== 0) {
+    console.error(
+      `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — continuing: ${fetch.stderr || fetch.stdout}`,
+    );
+  }
+  if (binding.ref) {
+    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref)}`, { cwd: dir });
+    if (checkout.exitCode !== 0) {
+      console.error(
+        `workspace prep: git checkout ${binding.ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
+      );
+    }
+  }
+}
+
+/** Fresh clone into `dir` (workspace-relative). Failure THROWS — this is
+ * the "prep fails → startup-failure" path (engine seam, Task 1). */
+async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
+  await assertCloneTargetEmpty(sandbox, dir);
+
+  const parts = [`git clone ${shQuote(binding.cloneUrl)} ${shQuote(dir)}`];
+  if (binding.ref) parts.push(`--branch ${shQuote(binding.ref)}`);
+  const command = parts.join(" ");
+
+  const result = await safeExec(sandbox, command);
+  if (result.exitCode !== 0) {
+    throw new Error(execFailureMessage(`workspace prep: git clone failed for ${binding.fullName}`, result));
+  }
+}
+
+async function prepBinding(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
+  const hasGit = await dirHasGit(sandbox, dir);
+  if (hasGit) {
+    await refreshExistingClone(sandbox, dir, binding);
+    return;
+  }
+  await cloneFresh(sandbox, dir, binding);
+}
+
+/**
+ * Builds the `prepareSandbox` closure for a session with repo bindings.
+ * Callers (`EngineHost.buildSession`) only invoke this when
+ * `meta.repos` is non-empty — an unbound session passes no
+ * `prepareSandbox` at all, keeping the provision path byte-identical to
+ * before this task.
+ */
+export function buildWorkspacePrep(opts: WorkspacePrepOpts): (sandbox: Sandbox, epoch: number) => Promise<void> {
+  return async (sandbox: Sandbox) => {
+    await installCredentialHelper(sandbox, opts.apiUrl);
+    await configureGitIdentity(sandbox, opts.userName, opts.userEmail);
+
+    for (let index = 0; index < opts.repos.length; index++) {
+      const binding = opts.repos[index];
+      const dir = targetDirFor(opts.repos, index);
+      await prepBinding(sandbox, dir, binding);
+    }
+  };
+}
