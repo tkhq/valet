@@ -96,6 +96,7 @@ import {
   getSandbox,
   resolvePodName,
   sandboxStatus,
+  setOperatingMode,
   type SandboxCustomObjectsApi,
   type SandboxPodsApi,
   type SandboxPodStatusApi,
@@ -467,8 +468,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       persistentWorkspace: true,
       tunnels: false,
       warmPool: false,
-      // Task 2 flips this to true alongside the real suspend/resume impl.
-      hibernation: false,
+      hibernation: true,
       coldStartEstimateMs: 8000,
     };
   }
@@ -535,6 +535,41 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
   async status(id: string): Promise<SandboxStatus> {
     return sandboxStatus(this.deps.objectsApi, this.cfg, id, this.deps.podsApi, this.deps.podStatusApi);
+  }
+
+  /**
+   * Hibernation seam (Task 2, paired with `capabilities().hibernation`).
+   * Merge-patches `spec.operatingMode: Suspended` — the controller reacts by
+   * scaling the backing pod to zero while retaining the CR and its
+   * owner-referenced workspace PVC (never a delete). Idempotent: patching an
+   * already-suspended CR is a no-op re-apply of the same merge, matching
+   * `setOperatingMode`'s contract. Does NOT wait for the pod to actually
+   * disappear — `status()` (via `sandboxStatus`'s Suspended short-circuit)
+   * reflects the CR's intent immediately regardless of how long the
+   * controller takes to tear the pod down.
+   */
+  async suspend(id: string): Promise<void> {
+    await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Suspended");
+  }
+
+  /**
+   * Wakes a suspended CR. Merge-patches `spec.operatingMode: Running`, then
+   * polls (via `waitReady`, the same helper `create()` uses) until the
+   * controller has reconciled a fresh backing pod and it reaches Ready —
+   * this method does NOT return early. This matters because the engine's
+   * `SandboxAttachment.doResume` (`packages/engine/src/sandbox/
+   * attachment.ts`) awaits `provider.resume(id)` and immediately marks the
+   * attachment `ready` on return, with no readiness poll of its own — it
+   * relies entirely on `provider.create()`/`provider.resume()` not
+   * resolving until the sandbox is actually usable (the same contract
+   * `create()` already honors via its own `waitReady` call after
+   * `applySandbox`). Idempotent: patching an already-Running CR just
+   * re-applies the same merge and `waitReady` returns immediately since the
+   * CR is already Ready.
+   */
+  async resume(id: string): Promise<void> {
+    await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Running");
+    await this.waitReady(id);
   }
 
   private makeSandbox(id: string): KubernetesSandbox {

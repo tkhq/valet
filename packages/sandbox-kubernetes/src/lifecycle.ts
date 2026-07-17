@@ -98,6 +98,7 @@
  *   `Always` is strictly better for this workload shape.
  */
 import type * as k8s from "@kubernetes/client-node";
+import { setHeaderOptions } from "@kubernetes/client-node";
 import type { SandboxStatus } from "@valet/engine";
 import type {
   K8sProviderConfig,
@@ -192,6 +193,20 @@ export interface ListSandboxParams {
   labelSelector?: string;
 }
 
+/** Params for the merge-patch `setOperatingMode` uses — `body` is
+ * deliberately narrowed to exactly `{ spec: { operatingMode } }` (not the
+ * broader `SandboxCR`/`SandboxCRRead` shapes) since a JSON merge-patch body
+ * must contain ONLY the fields being changed; sending anything wider would
+ * risk clobbering fields this call has no business touching. */
+export interface PatchSandboxParams {
+  group: string;
+  version: string;
+  namespace: string;
+  plural: string;
+  name: string;
+  body: { spec: { operatingMode: "Running" | "Suspended" } };
+}
+
 /** The subset of `@kubernetes/client-node`'s `CustomObjectsApi` this
  * module drives. Every real method here is typed `any` in/out upstream
  * (CRDs are schemaless to the client) — we narrow to `unknown` and
@@ -203,6 +218,13 @@ export interface SandboxCustomObjectsApi {
   replaceNamespacedCustomObject(params: ReplaceSandboxParams): Promise<unknown>;
   deleteNamespacedCustomObject(params: DeleteSandboxParams): Promise<unknown>;
   listNamespacedCustomObject(params: ListSandboxParams): Promise<unknown>;
+  /** JSON merge-patch (`Content-Type: application/merge-patch+json`) —
+   * NEVER a PUT-replace (see `applySandbox`'s docblock on why `replace` is
+   * unsafe for controller-owned fields). Real adapter wires the
+   * `application/merge-patch+json` content type explicitly, since
+   * client-node's default patch content-type negotiation prefers
+   * `application/json-patch+json` (see `customObjectsApiAdapter`). */
+  patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown>;
 }
 
 export interface ListPodsParams {
@@ -233,6 +255,16 @@ export function customObjectsApiAdapter(api: k8s.CustomObjectsApi): SandboxCusto
     replaceNamespacedCustomObject: (params) => api.replaceNamespacedCustomObject(params),
     deleteNamespacedCustomObject: (params) => api.deleteNamespacedCustomObject(params),
     listNamespacedCustomObject: (params) => api.listNamespacedCustomObject(params),
+    // client-node's generated patch method negotiates Content-Type from
+    // ["application/json-patch+json", "application/merge-patch+json"] and
+    // always picks the FIRST supported one (json-patch) — there is no
+    // per-call param for it on the request shape itself. `setHeaderOptions`
+    // appends a middleware that overwrites the Content-Type header after
+    // the request is built but before it is sent; the body bytes are
+    // identical either way (both are plain JSON), only the server's
+    // interpretation of the Content-Type header differs.
+    patchNamespacedCustomObject: (params) =>
+      api.patchNamespacedCustomObject(params, setHeaderOptions("Content-Type", "application/merge-patch+json")),
   };
 }
 
@@ -460,6 +492,32 @@ export async function deleteSandbox(api: SandboxCustomObjectsApi, cfg: K8sProvid
   }
 }
 
+/**
+ * Merge-patches `spec.operatingMode`, driving the CRD's hibernation seam
+ * (Task 2). The body is EXACTLY `{ spec: { operatingMode: mode } }` — a JSON
+ * merge-patch, never a full-object PUT-replace (`applySandbox` is the wrong
+ * tool here: it GETs+replaces the whole spec, which would clobber
+ * controller-owned fields on a CR that's already been reconciled).
+ * Idempotent: patching the same mode twice is a no-op from the caller's
+ * perspective (the apiserver just re-applies the same merge).
+ */
+export async function setOperatingMode(
+  api: SandboxCustomObjectsApi,
+  cfg: K8sProviderConfig,
+  name: string,
+  mode: "Running" | "Suspended",
+): Promise<void> {
+  const { group, version } = parseApiVersion(cfg.apiVersion);
+  await api.patchNamespacedCustomObject({
+    group,
+    version,
+    namespace: cfg.namespace,
+    plural: SANDBOX_PLURAL,
+    name,
+    body: { spec: { operatingMode: mode } },
+  });
+}
+
 export async function listSandboxes(
   api: SandboxCustomObjectsApi,
   cfg: K8sProviderConfig,
@@ -487,6 +545,11 @@ export async function listSandboxes(
  *
  * Mapping (per the brief, defensive since Task 3 only observed the happy
  * path):
+ *   - `operatingMode === "Suspended"` → "idle", BEFORE any condition
+ *     inspection (Task 2: a suspended CR's backing pod is deliberately
+ *     gone — without this branch first, the Ready condition going stale/
+ *     False would misread as "provisioning", not the intentional hibernated
+ *     state it actually is)
  *   - no `Ready` condition at all → "provisioning" (CR just created,
  *     controller hasn't reconciled yet)
  *   - a condition whose `type` looks like an error/failure signal
@@ -495,7 +558,14 @@ export async function listSandboxes(
  *   - `Ready` condition present but `status` is `"False"`/`"Unknown"` →
  *     "provisioning"
  */
-export function mapConditionsToStatus(id: string, conditions: SandboxCondition[]): SandboxStatus {
+export function mapConditionsToStatus(
+  id: string,
+  conditions: SandboxCondition[],
+  operatingMode?: "Running" | "Suspended",
+): SandboxStatus {
+  if (operatingMode === "Suspended") {
+    return { id, state: "idle" };
+  }
   const errorCondition = conditions.find((c) => c.status === "True" && /error|fail/i.test(c.type));
   if (errorCondition) {
     return { id, state: "error", error: errorCondition.message ?? errorCondition.reason ?? errorCondition.type };
@@ -674,8 +744,15 @@ export async function sandboxStatus(
   if (cr === null) {
     return { id: name, state: "released" };
   }
+  if (cr.spec.operatingMode === "Suspended") {
+    // Short-circuits before the pod-failure classification below: a
+    // suspended CR's backing pod is deliberately gone, so resolving it and
+    // checking for a terminal failure is both wasted work and would
+    // misclassify "the pod I intentionally scaled to zero" as an error.
+    return { id: name, state: "idle" };
+  }
   const conditions = cr.status?.conditions ?? [];
-  const baseline = mapConditionsToStatus(name, conditions);
+  const baseline = mapConditionsToStatus(name, conditions, cr.spec.operatingMode);
 
   if (podsApi && podStatusApi) {
     const podName = await resolvePodName(api, podsApi, cfg, name).catch(() => null);

@@ -153,6 +153,7 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
       };
     },
     capabilities: provider.capabilities(),
+    provider,
     supportsAbort: true,
     shell: "full",
     // This suite's factory always creates headless (profile omitted)

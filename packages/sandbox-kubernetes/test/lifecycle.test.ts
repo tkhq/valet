@@ -13,6 +13,7 @@ import {
   parseSandboxCRRead,
   resolvePodName,
   sandboxStatus,
+  setOperatingMode,
 } from "../src/lifecycle.js";
 import type {
   CreateSandboxParams,
@@ -20,6 +21,7 @@ import type {
   GetSandboxParams,
   ListPodsParams,
   ListSandboxParams,
+  PatchSandboxParams,
   PodStatusInfo,
   ReplaceSandboxParams,
   SandboxCustomObjectsApi,
@@ -65,6 +67,7 @@ class FakeCustomObjectsApi implements SandboxCustomObjectsApi {
   private store = new Map<string, SandboxCRRead>();
   public createCalls = 0;
   public replaceCalls = 0;
+  public patchCalls: PatchSandboxParams[] = [];
 
   seed(cr: SandboxCRRead): void {
     this.store.set(cr.metadata.name, cr);
@@ -128,6 +131,25 @@ class FakeCustomObjectsApi implements SandboxCustomObjectsApi {
 
   async listNamespacedCustomObject(_params: ListSandboxParams): Promise<unknown> {
     return { items: Array.from(this.store.values()) };
+  }
+
+  /** Merge-patch semantics: applies ONLY `body.spec.operatingMode` onto the
+   * existing CR, mirroring the real apiserver's merge-patch behavior (never
+   * a full-object replace, unlike `replaceNamespacedCustomObject`). Records
+   * the exact params it was called with so tests can pin the body shape and
+   * verb. */
+  async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
+    this.patchCalls.push(params);
+    const existing = this.store.get(params.name);
+    if (!existing) {
+      throw new FakeApiError(404, `sandboxes.agents.x-k8s.io "${params.name}" not found`);
+    }
+    const patched: SandboxCRRead = {
+      ...existing,
+      spec: { ...existing.spec, operatingMode: params.body.spec.operatingMode },
+    };
+    this.store.set(params.name, patched);
+    return patched;
   }
 }
 
@@ -204,6 +226,25 @@ describe("mapConditionsToStatus (pure)", () => {
       { type: "Error", status: "False" },
     ]);
     expect(status).toEqual({ id: "sess-1", state: "ready" });
+  });
+
+  it("maps operatingMode=Suspended to idle BEFORE inspecting conditions at all — even Ready=True or an error condition", () => {
+    expect(
+      mapConditionsToStatus("sess-1", [{ type: "Ready", status: "True", reason: "DependenciesReady" }], "Suspended"),
+    ).toEqual({ id: "sess-1", state: "idle" });
+    expect(
+      mapConditionsToStatus("sess-1", [{ type: "Error", status: "True", message: "boom" }], "Suspended"),
+    ).toEqual({ id: "sess-1", state: "idle" });
+    expect(mapConditionsToStatus("sess-1", [], "Suspended")).toEqual({ id: "sess-1", state: "idle" });
+  });
+
+  it("a Running (or unset) operatingMode leaves the existing mapping byte-identical (pin)", () => {
+    expect(
+      mapConditionsToStatus("sess-1", [{ type: "Ready", status: "True", reason: "DependenciesReady" }], "Running"),
+    ).toEqual({ id: "sess-1", state: "ready" });
+    expect(
+      mapConditionsToStatus("sess-1", [{ type: "Ready", status: "True", reason: "DependenciesReady" }], undefined),
+    ).toEqual({ id: "sess-1", state: "ready" });
   });
 });
 
@@ -580,6 +621,80 @@ describe("sandboxStatus", () => {
       id: "sess-1",
       state: "ready",
     });
+  });
+
+  it("maps a Suspended CR to idle — even with podsApi/podStatusApi wired and a Ready=True condition still on the CR", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    const cr = toCRRead(manifest);
+    cr.spec = { ...cr.spec, operatingMode: "Suspended" };
+    cr.status = { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] };
+    api.seed(cr);
+    // podsApi/podStatusApi are wired but must never be consulted — asserted
+    // below by throwing if they are.
+    const podsApi: SandboxPodsApi = {
+      listNamespacedPod: async () => {
+        throw new Error("must not resolve a pod for a Suspended CR");
+      },
+    };
+    const podStatusApi: SandboxPodStatusApi = {
+      getPodStatus: async () => {
+        throw new Error("must not query pod status for a Suspended CR");
+      },
+    };
+    await expect(sandboxStatus(api, cfg, "sess-1", podsApi, podStatusApi)).resolves.toEqual({
+      id: "sess-1",
+      state: "idle",
+    });
+  });
+});
+
+describe("setOperatingMode", () => {
+  it("merge-patches spec.operatingMode via patchNamespacedCustomObject — never create/replace/delete", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    api.seed(toCRRead(manifest));
+
+    await setOperatingMode(api, cfg, "sess-1", "Suspended");
+
+    expect(api.patchCalls).toHaveLength(1);
+    const call = api.patchCalls[0];
+    expect(call.name).toBe("sess-1");
+    expect(call.namespace).toBe(cfg.namespace);
+    // Body is EXACTLY { spec: { operatingMode: mode } } — no other fields,
+    // never the full manifest (a merge-patch must carry only the changed
+    // fields).
+    expect(call.body).toEqual({ spec: { operatingMode: "Suspended" } });
+    expect(Object.keys(call.body)).toEqual(["spec"]);
+    expect(Object.keys(call.body.spec)).toEqual(["operatingMode"]);
+    expect(api.createCalls).toBe(0);
+    expect(api.replaceCalls).toBe(0);
+    expect(api.get("sess-1")?.spec.operatingMode).toBe("Suspended");
+  });
+
+  it("patches to Running to wake", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    api.seed(toCRRead(manifest));
+    await setOperatingMode(api, cfg, "sess-1", "Running");
+    expect(api.patchCalls[0].body).toEqual({ spec: { operatingMode: "Running" } });
+  });
+
+  it("is idempotent — patching the same mode twice in a row does not error", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", {});
+    api.seed(toCRRead(manifest));
+    await setOperatingMode(api, cfg, "sess-1", "Suspended");
+    await expect(setOperatingMode(api, cfg, "sess-1", "Suspended")).resolves.toBeUndefined();
+    expect(api.patchCalls).toHaveLength(2);
+  });
+
+  it("propagates non-404 errors", async () => {
+    const api = new FakeCustomObjectsApi();
+    api.patchNamespacedCustomObject = async () => {
+      throw new FakeApiError(500, "boom");
+    };
+    await expect(setOperatingMode(api, cfg, "sess-1", "Suspended")).rejects.toThrow(/boom/);
   });
 });
 
