@@ -97,8 +97,9 @@ class KeyRecordingStream extends InMemoryEventStream {
   readonly appended: Array<{ key: string; event: BusEvent }> = [];
   override async append(event: BusEvent, eventKey: string, fence?: WriteFence): Promise<{ offset: string }> {
     const res = await super.append(event, eventKey, fence);
-    // Only record keys that actually landed a new row (dedup hits reuse the
-    // existing offset but must not double-count here).
+    // Records every append call, whether or not it deduped against an
+    // existing row — the dedup proof is the absence of duplicate key
+    // strings in the assertions below, not filtering here.
     this.appended.push({ key: eventKey, event });
     return res;
   }

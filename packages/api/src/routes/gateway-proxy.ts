@@ -214,6 +214,12 @@ async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
   if (!row) return c.json({ error: "not found" }, 404);
 
   const sessionId = row.id;
+  // Stamp gateway activity as soon as ownership is confirmed — every
+  // proxied request (not just ones that reach a ready sandbox) counts, so a
+  // request that arrives just as the sandbox is mid-wake still resets the
+  // idle clock (final-review fix wave, hibernation arc — see
+  // `EngineHost.touchGatewayActivity`'s doc comment).
+  c.var.providers.engineHost.touchGatewayActivity(sessionId);
   const prefix = gatewayPrefix(sessionId);
   const url = new URL(c.req.url);
   const rewrittenPath = rewritePath(url.pathname, prefix);
@@ -366,6 +372,11 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
               return;
             }
 
+            // Connection established by an owning user — counts as gateway
+            // activity same as the HTTP proxy's entry stamp (final-review
+            // fix wave, hibernation arc).
+            providers.engineHost.touchGatewayActivity(sessionId);
+
             let session;
             try {
               session = await providers.engineHost.sessionFor(sessionId, {
@@ -434,6 +445,11 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
         },
 
         onMessage(evt) {
+          // Client -> backend traffic only (keystrokes/input) — deliberately
+          // not stamped on backend -> client frames, which would count idle
+          // terminal output/heartbeats as activity (final-review fix wave,
+          // hibernation arc — see `EngineHost.touchGatewayActivity`).
+          providers.engineHost.touchGatewayActivity(sessionId);
           let payload: string | ArrayBuffer;
           try {
             payload = toBackendPayload(evt.data);

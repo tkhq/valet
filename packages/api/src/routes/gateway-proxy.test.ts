@@ -530,4 +530,87 @@ describe("session gateway reverse-proxy", () => {
 
     expect(echoed).toBe("hello-through-the-gateway");
   });
+
+  it("HTTP proxy stamps EngineHost.touchGatewayActivity on every proxied request (final-review fix wave, hibernation arc)", async () => {
+    const sessionId = "gw-touch-http";
+    fakeBackend = await startFakeBackend();
+    const jwtSecret = deriveSandboxJwtSecret(internalToken(), sessionId);
+    gateway = startGateway({
+      port: 0,
+      sessionId,
+      jwtSecret,
+      targets: { ttyd: fakeBackend.ttydPort, vscode: fakeBackend.vscodePort },
+    });
+    const gatewayPort = (gateway.server.address() as AddressInfo).port;
+
+    api = await bootTestApi({
+      sandboxProvider: new GatewayTestSandboxProvider({ host: "127.0.0.1", port: gatewayPort }),
+    });
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    await warmSandbox(api, { id: sessionId, userId: "local-user" });
+
+    const touchSpy = vi.spyOn(api.providers.engineHost, "touchGatewayActivity");
+
+    const mintRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/sandbox-jwt`, {
+      method: "POST",
+      headers: { "x-valet-test-user-id": "local-user" },
+    });
+    const { token } = (await mintRes.json()) as { token: string };
+
+    const res = await fetch(
+      `${api.baseUrl}/api/sessions/${sessionId}/gateway/vscode/?token=${encodeURIComponent(token)}`,
+      { headers: { "x-valet-test-user-id": "local-user" } },
+    );
+    expect(res.status).toBe(200);
+    expect(touchSpy).toHaveBeenCalledWith(sessionId);
+  });
+
+  it("WS proxy stamps EngineHost.touchGatewayActivity on open and on client->backend messages (final-review fix wave, hibernation arc)", async () => {
+    const sessionId = "gw-touch-ws";
+    fakeBackend = await startFakeBackend();
+    const jwtSecret = deriveSandboxJwtSecret(internalToken(), sessionId);
+    gateway = startGateway({
+      port: 0,
+      sessionId,
+      jwtSecret,
+      targets: { ttyd: fakeBackend.ttydPort, vscode: fakeBackend.vscodePort },
+    });
+    const gatewayPort = (gateway.server.address() as AddressInfo).port;
+
+    api = await bootTestApi({
+      sandboxProvider: new GatewayTestSandboxProvider({ host: "127.0.0.1", port: gatewayPort }),
+    });
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    await warmSandbox(api, { id: sessionId, userId: "local-user" });
+
+    const touchSpy = vi.spyOn(api.providers.engineHost, "touchGatewayActivity");
+
+    const mintRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/sandbox-jwt`, {
+      method: "POST",
+      headers: { "x-valet-test-user-id": "local-user" },
+    });
+    const { token } = (await mintRes.json()) as { token: string };
+
+    const wsUrl = `${api.wsUrl}/api/sessions/${sessionId}/gateway/ttyd/?token=${encodeURIComponent(token)}`;
+    const ws = new WebSocket(wsUrl, "tty");
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("WS echo timed out")), 5_000);
+      ws.onopen = () => ws.send("hello");
+      ws.onmessage = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      ws.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error("ws error"));
+      };
+    });
+    ws.close();
+
+    expect(touchSpy).toHaveBeenCalledWith(sessionId);
+    // Called at least twice: once for WS `onOpen`, once for the client's
+    // `onMessage` frame — the doc comment's "at minimum" stamping points.
+    expect(touchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
 });

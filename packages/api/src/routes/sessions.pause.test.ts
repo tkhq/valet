@@ -1,9 +1,10 @@
 /**
  * POST /api/sessions/:id/pause (sandbox hibernation plan, Task 4) — manual
  * hibernation. Owner-gated like every other `/api/sessions/:id` route
- * (unknown/not-owned ids 404); 409s when a turn is running/gated or the
- * provider lacks hibernation capability; happy path suspends the sandbox
- * and stamps the row `"hibernated"`.
+ * (unknown/not-owned ids 404); 409s when there's ANY unsettled submission
+ * (queued, running, or gated — matching the idle sweep's own stricter
+ * check) or the provider lacks hibernation capability; happy path suspends
+ * the sandbox and stamps the row `"hibernated"`.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
@@ -135,6 +136,34 @@ async function admitRunning(api: TestApi, sessionId: string, threadId: string): 
   expect(claimed?.status).toBe("running");
 }
 
+/** Admits a queue item and leaves it unclaimed (`"queued"`) — never reaches
+ * `running`/`blocked_on_decision_gate`. */
+async function admitQueued(api: TestApi, sessionId: string, threadId: string): Promise<void> {
+  const now = Date.now();
+  const { engineStore } = api.providers;
+  await engineStore.saveThread(sessionId, {
+    id: threadId,
+    sessionId,
+    key: `web:${threadId}`,
+    status: "active",
+    queueMode: "followup",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const item: QueueItem = {
+    id: `q-${nextItemId++}`,
+    threadId,
+    content: "waiting in line",
+    status: "queued",
+    attemptCount: 0,
+    maxAttempts: 10,
+    timeoutAt: now + 3_600_000,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await engineStore.admitSubmission(sessionId, threadId, item);
+}
+
 describe("POST /api/sessions/:id/pause", () => {
   let api: TestApi | undefined;
 
@@ -175,6 +204,22 @@ describe("POST /api/sessions/:id/pause", () => {
     await seedSession(api, { id: sessionId, userId: "local-user" });
     await warmSession(api, { id: sessionId, userId: "local-user" });
     await admitRunning(api, sessionId, "th-pause-running");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body).toEqual({ error: "a turn is running" });
+
+    expect(provider.suspendCalls).toEqual([]);
+  });
+
+  it("409s with 'a turn is running' when a submission is merely queued (never claimed)", async () => {
+    const provider = new HibernatingTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = "pause-queued";
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    await warmSession(api, { id: sessionId, userId: "local-user" });
+    await admitQueued(api, sessionId, "th-pause-queued");
 
     const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, { method: "POST" });
     expect(res.status).toBe(409);

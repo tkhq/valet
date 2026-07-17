@@ -210,6 +210,21 @@ export class EngineHost {
    */
   private sweepInterval: NodeJS.Timeout | null = null;
 
+  /**
+   * In-memory `sessionId -> Date.now()` of the last gateway-proxy touch
+   * (final-review fix wave, hibernation arc): interactive Terminal/VS Code
+   * traffic through `routes/gateway-proxy.ts` generates zero engine queue
+   * activity (no submission is ever admitted), so without this map the idle
+   * sweep would suspend a sandbox out from under a live terminal/editor tab.
+   * Host-local, matching the sweep's own in-memory scope (`this.cache`) — a
+   * gateway touch on process A never counts toward process B's sweep, same
+   * limitation the sweep already accepts for its cache. Stamped by
+   * `touchGatewayActivity` on every proxied HTTP request and WS open/
+   * client-to-backend message; read by `maybeSuspendIdleSession` alongside
+   * `latestActivityAt`, taking whichever is more recent.
+   */
+  private gatewayTouch = new Map<string, number>();
+
   constructor(private readonly opts: EngineHostOpts) {
     const idleMinutes = opts.idleMinutes ?? 0;
     if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
@@ -246,10 +261,10 @@ export class EngineHost {
   /**
    * Idleness (spec decision 3): no unsettled submissions AND the sandbox
    * has been `ready` with no queue activity for at least `idleMs`, judged
-   * against `latestActivityAt` (falling back to the session's `createdAt`
-   * when it has never had any queue activity) AND the attachment is
-   * currently `ready` (never touches `detached`/`provisioning`/`suspended`/
-   * `error`/`released` attachments).
+   * against `max(latestActivityAt ?? createdAt, gatewayTouch ?? 0)` — see
+   * `touchGatewayActivity`'s doc comment for why the gateway side is
+   * needed — AND the attachment is currently `ready` (never touches
+   * `detached`/`provisioning`/`suspended`/`error`/`released` attachments).
    *
    * Race rule: `listUnsettledSubmissions` is checked once here, then
    * RE-CHECKED immediately before calling `suspend()` — a submission
@@ -276,6 +291,8 @@ export class EngineHost {
       // so we never suspend on missing data.
       sinceMs = data?.createdAt ?? now;
     }
+    const gatewayTouchMs = this.gatewayTouch.get(sessionId) ?? 0;
+    if (gatewayTouchMs > sinceMs) sinceMs = gatewayTouchMs;
     if (sinceMs >= now - idleMs) return;
 
     await this.opts.idleSweepTestHooks?.beforeSuspend?.(sessionId);
@@ -763,6 +780,13 @@ export class EngineHost {
    */
   evictAll(): void {
     for (const id of [...this.cache.keys()]) this.evictCache(id);
+    this.clearSweepInterval();
+  }
+
+  /** Shared by `evictAll()`/`destroyAll()` — both are terminal, whole-host
+   * teardown paths and neither should leave the sweep `setInterval` running
+   * against an emptied cache. */
+  private clearSweepInterval(): void {
     if (this.sweepInterval) {
       clearInterval(this.sweepInterval);
       this.sweepInterval = null;
@@ -777,11 +801,30 @@ export class EngineHost {
   async destroyAll(): Promise<void> {
     const ids = [...this.cache.keys()];
     await Promise.allSettled(ids.map((id) => this.destroy(id)));
+    this.clearSweepInterval();
   }
 
   /** True if a session is currently cached in this process. */
   isLive(sessionId: string): boolean {
     return this.cache.has(sessionId);
+  }
+
+  /**
+   * Stamps `sessionId`'s last-gateway-touch time to `Date.now()` (final-
+   * review fix wave, hibernation arc). Called by `routes/gateway-proxy.ts`
+   * at the cheapest correct points that prove a human is actively using the
+   * "full"-profile Terminal/VS Code tab: HTTP proxy entry (every request),
+   * WS `onOpen` (connection established), and WS client-to-backend
+   * `onMessage` (keystrokes/input) — deliberately NOT every backend-to-
+   * client frame, which would count idle terminal output/heartbeats as
+   * activity. A plain `Map.set` — cheap enough to call unconditionally,
+   * including per WS message. Never evicted/pruned: a stale entry for a
+   * long-gone session is a few bytes in a `Map` and is harmless, since
+   * `maybeSuspendIdleSession` only ever reads it for sessions currently in
+   * `this.cache`.
+   */
+  touchGatewayActivity(sessionId: string): void {
+    this.gatewayTouch.set(sessionId, Date.now());
   }
 
   /**

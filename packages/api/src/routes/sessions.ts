@@ -295,8 +295,13 @@ sessionsRouter.post("/:id/pause", async (c) => {
     return c.json({ error: "provider does not support hibernation" }, 409);
   }
 
+  // ANY unsettled submission blocks — not just running/gated — matching the
+  // idle sweep's own (stricter) `listUnsettledSubmissions.length > 0` check
+  // in `maybeSuspendIdleSession` (`EngineHost`). A merely-queued item would
+  // otherwise get orphaned by a pause that suspends the sandbox out from
+  // under it before it's ever claimed.
   const unsettled = await engineStore.listUnsettledSubmissions(id);
-  if (unsettled.some((item) => item.status === "running" || item.status === "blocked_on_decision_gate")) {
+  if (unsettled.length > 0) {
     return c.json({ error: "a turn is running" }, 409);
   }
 

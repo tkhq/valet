@@ -296,6 +296,57 @@ describe("EngineHost idle sweep", () => {
     setIntervalSpy.mockRestore();
   });
 
+  it("does not suspend a session whose only recent activity is a gateway touch", async () => {
+    vi.useFakeTimers();
+    const provider = new HibernatingTestProvider();
+    const store = new InMemorySessionStore();
+    const host = buildHost(store, provider, { idleMinutes: 1 });
+
+    const sessionId = "s-gateway-touch";
+    const session = await buildReadySession(host, sessionId);
+    await stampActivity(store, sessionId, "th-gateway-touch");
+
+    // Tick 1 @ +60s: sinceMs(0) sits exactly on the boundary — not idle yet.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(session.attachment.state).toBe("ready");
+
+    // A gateway touch right at the boundary resets the clock, same as queue
+    // activity would — without this, the sweep would suspend a sandbox a
+    // terminal/VS Code tab is actively using.
+    host.touchGatewayActivity(sessionId);
+
+    // Tick 2 @ +120s: still within the window measured from the touch.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(session.attachment.state).toBe("ready");
+
+    // Tick 3 @ +180s: 120s past the touch — idle, suspends.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(session.attachment.state).toBe("suspended");
+
+    host.evictAll();
+  });
+
+  it("suspends once the gateway touch ages past the idle window", async () => {
+    vi.useFakeTimers();
+    const provider = new HibernatingTestProvider();
+    const store = new InMemorySessionStore();
+    const host = buildHost(store, provider, { idleMinutes: 1 });
+
+    const sessionId = "s-gateway-touch-stale";
+    const session = await buildReadySession(host, sessionId);
+    await stampActivity(store, sessionId, "th-gateway-touch-stale");
+    host.touchGatewayActivity(sessionId);
+
+    // Two ticks (120s) clears the 60s window measured from the touch, same
+    // boundary behavior as queue-activity idleness above.
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(session.attachment.state).toBe("suspended");
+    expect(provider.suspendCalls.length).toBe(1);
+
+    host.evictAll();
+  });
+
   it("invokes onHibernate after a successful suspend and onWake on the next ready", async () => {
     vi.useFakeTimers();
     const provider = new HibernatingTestProvider();
