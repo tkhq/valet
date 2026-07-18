@@ -3,9 +3,12 @@ import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { googleWorkspacePlugin } from "./actions/actions.js";
 
-function readSkill(file: string): string {
-  return readFileSync(fileURLToPath(new URL(`../skills/${file}`, import.meta.url)), "utf8");
-}
+// Static string literals (not a `${file}` template) so the single-binary
+// esbuild bundle's inline-assets plugin can statically resolve and inline
+// each skill's bytes at build time — see packages/api/build/inline-assets.mjs.
+const driveMd = readFileSync(fileURLToPath(new URL("../skills/google-drive.md", import.meta.url)), "utf8");
+const docsMd = readFileSync(fileURLToPath(new URL("../skills/google-docs.md", import.meta.url)), "utf8");
+const sheetsMd = readFileSync(fileURLToPath(new URL("../skills/google-sheets.md", import.meta.url)), "utf8");
 
 const plugin: ValetPlugin = {
   name: "google-workspace",
@@ -13,9 +16,9 @@ const plugin: ValetPlugin = {
   description: "Google Workspace integration — Drive, Docs, and Sheets with unified OAuth and labels-based access guard",
   actions: [googleWorkspacePlugin],
   skills: [
-    loadSkillFromMarkdown(readSkill("google-drive.md"), "plugin", "google-drive"),
-    loadSkillFromMarkdown(readSkill("google-docs.md"), "plugin", "google-docs"),
-    loadSkillFromMarkdown(readSkill("google-sheets.md"), "plugin", "google-sheets"),
+    loadSkillFromMarkdown(driveMd, "plugin", "google-drive"),
+    loadSkillFromMarkdown(docsMd, "plugin", "google-docs"),
+    loadSkillFromMarkdown(sheetsMd, "plugin", "google-sheets"),
   ],
   credentials: [
     {
