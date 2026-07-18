@@ -39,13 +39,13 @@ const COMMANDS: Record<string, CommandImporter> = {
   send: () => import("./cli/commands/send.js"),
   gates: () => import("./cli/commands/gates.js"),
   status: () => import("./cli/commands/status.js"),
-  login: notImpl,
-  logout: notImpl,
-  instance: notImpl,
-  config: notImpl,
+  login: () => import("./cli/commands/login.js"),
+  logout: () => import("./cli/commands/logout.js"),
+  instance: () => import("./cli/commands/instance.js"),
+  config: () => import("./cli/commands/config.js"),
   chat: notImpl,
   mcp: notImpl,
-  reset: notImpl,
+  reset: () => import("./cli/commands/reset.js"),
 };
 
 const USAGE = `valet <command> [options]
