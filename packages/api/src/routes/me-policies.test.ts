@@ -354,6 +354,68 @@ describe("PUT /api/me/policy-overrides — cross-dimension bounds", () => {
   });
 });
 
+// ── PUT /api/me/policy-overrides — matcher-blind bounds (finding C1) ─────
+//
+// `validateActionIdOverrideBounds` resolves the org-side decision with
+// `params: undefined`. Before the C1 fix it did so WITHOUT stripping the org
+// policies' `paramMatchers`, so a matcher-carrying org policy evaluated every
+// matcher to false, fell out of precedence, and the bounds check accepted a
+// member's `allow` override — which then outranked that same org policy at
+// rung 2 whenever the params DID match at real invocation. The fix strips
+// `paramMatchers` from org rows ("might match" ⇒ treat as matching) before
+// resolving. These pin that a matcher-carrying org policy still blocks the
+// override; a refactor back to the matcher-blind resolveActionPolicy path
+// would fail here instead of silently reopening the bypass.
+
+describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C1)", () => {
+  async function putOrgPolicy(target: Record<string, unknown>) {
+    return fetch(`${api!.baseUrl}/api/org/policies`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify(target),
+    });
+  }
+
+  it("a matcher-scoped org require_approval blocks an actionId-scoped allow override", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const orgRes = await putOrgPolicy({
+      actionId: "github.create_issue",
+      mode: "require_approval",
+      paramMatchers: [{ path: "repo", op: "eq", value: "prod" }],
+    });
+    expect(orgRes.status).toBe(201);
+
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("require_approval");
+  });
+
+  it("a matcher-scoped workflow-only org require_approval also blocks the allow override", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const orgRes = await putOrgPolicy({
+      actionId: "github.create_issue",
+      mode: "require_approval",
+      appliesIn: "workflow",
+      paramMatchers: [{ path: "repo", op: "eq", value: "prod" }],
+    });
+    expect(orgRes.status).toBe(201);
+
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("require_approval");
+  });
+});
+
 // ── Overrides: DELETE by target ───────────────────────────────────────────
 
 describe("DELETE /api/me/policy-overrides", () => {
