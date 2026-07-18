@@ -17,6 +17,9 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
+    "build:assets": "node build/copy-assets.mjs",
+    "build:bundle": "node build.mjs",
+    "build": "pnpm run build:assets && pnpm run build:bundle",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
@@ -72,6 +75,7 @@
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
     "drizzle-kit": "^0.31.9",
+    "esbuild": "^0.28.1",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }

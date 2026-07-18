@@ -7,7 +7,7 @@ Branch: `feat/single-binary-cli` (worktree). Plan: `docs/plans/2026-07-17-single
 
 ## Tasks
 - [x] Plan written + committed
-- [ ] T1 — Uniform asset-read seam (kill migration readdir)
+- [x] T1 — Uniform asset-read seam (kill migration readdir) — commit 53c870cc; both reviews PASS
 - [ ] T2 — esbuild bundle + inline/copy assets + bundle guard
 - [ ] T3 — CLI scaffold + config/profiles + precedence
 - [ ] T4 — HTTP/WS InstanceClient library

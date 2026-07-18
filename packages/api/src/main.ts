@@ -21,6 +21,7 @@ import { buildAuth } from "./auth/index.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
+import { webDistPath } from "./assets/base.js";
 
 /**
  * Eager restore of sessions with unsettled submissions. On boot the store may
@@ -201,10 +202,12 @@ const authWiring: AuthWiring = authConfig
     }
   : {};
 
-// Bundled production image only (docker/Dockerfile.api sets this to the
-// baked-in `packages/web/dist`) — unset in `make dev-local`, where Vite's
-// own dev server serves the web app. See `static-web.ts`.
-const webDistDir = process.env.VALET_WEB_DIST_DIR;
+// Bundled single-binary (`VALET_BUNDLED=1`) → the SPA baked beside the bundle
+// at `dist/assets/web`. Dev/tsx → `VALET_WEB_DIST_DIR` (unset in
+// `make dev-local`, where Vite's own dev server serves the web app), or the
+// baked-in `packages/web/dist` in the legacy docker image. See
+// `static-web.ts` and `assets/base.ts`.
+const webDistDir = webDistPath();
 const { app, injectWebSocket, webServed } = createApp(providers, authWiring, { webDistDir });
 // A set-but-unmounted dist means the bundled image shipped without a valid
 // build (missing/incomplete web/dist/index.html) — the api would boot and
