@@ -86,7 +86,7 @@ mePolicyOverridesRouter.get("/", async (c) => {
 // ── PUT /api/me/policy-overrides — upsert by target ──────────────────────
 
 mePolicyOverridesRouter.put("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, actionPluginByService } = c.var.providers;
   const user = c.var.user;
 
   let body: PutPolicyOverrideRequest;
@@ -118,14 +118,20 @@ mePolicyOverridesRouter.put("/", async (c) => {
     return c.json({ error: (err as Error).message }, 400);
   }
 
-  const result = await upsertOverride(db, user.orgId, user.id, {
-    service: body.service,
-    actionId: body.actionId,
-    riskLevel: body.riskLevel,
-    mode: body.mode,
-    paramMatchers,
-    now: Date.now(),
-  });
+  const result = await upsertOverride(
+    db,
+    user.orgId,
+    user.id,
+    {
+      service: body.service,
+      actionId: body.actionId,
+      riskLevel: body.riskLevel,
+      mode: body.mode,
+      paramMatchers,
+      now: Date.now(),
+    },
+    actionPluginByService,
+  );
   if (!result.ok) return c.json({ error: result.error }, 400);
 
   const resp: PutPolicyOverrideResponse = toOverrideWire(result.row);

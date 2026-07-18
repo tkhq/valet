@@ -396,6 +396,53 @@ describe("GET /api/org/action-log — keyset pagination", () => {
     expect(seen[24]).toBe("inv_local-org_0");
   });
 
+  it("the invocationId tiebreaker prevents dup/skip when rows share startedAt across a page boundary", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const base = {
+      service: "github", actionId: "github.create_issue", riskLevel: "high" as const,
+      resolvedMode: "allow" as const, baseMode: "allow" as const, matchedPolicyId: null,
+      matchedGrantId: null, matchedOverrideId: null, status: "completed" as const, sessionId: "s1",
+      workflowExecutionId: null, userId: "local-user", orgId: "local-org", params: null,
+      paramsTruncated: null, result: null, resultTruncated: null, error: null, durationMs: 5,
+    };
+    // Rows "tie_b"/"tie_c"/"tie_d" all share startedAt=2000 — with limit=2 the
+    // sort (startedAt desc, invocationId desc) puts "tie_d" on page 1 and
+    // "tie_c"/"tie_b" on page 2, straddling the page boundary INSIDE the tied
+    // group. "tie_a" (startedAt=3000) and "tie_e" (startedAt=1000) bound the
+    // tied group on either side so the boundary isn't just "the last page".
+    await db.insert(actionInvocations).values([
+      { ...base, invocationId: "tie_a", createdAt: 3000, startedAt: 3000 },
+      { ...base, invocationId: "tie_d", createdAt: 2000, startedAt: 2000 },
+      { ...base, invocationId: "tie_c", createdAt: 2000, startedAt: 2000 },
+      { ...base, invocationId: "tie_b", createdAt: 2000, startedAt: 2000 },
+      { ...base, invocationId: "tie_e", createdAt: 1000, startedAt: 1000 },
+    ]);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const url = new URL(`${api.baseUrl}/api/org/action-log`);
+      url.searchParams.set("limit", "2");
+      if (cursor) url.searchParams.set("cursor", cursor);
+      const res = await fetch(url, { headers: HEADERS });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as ListActionLogResponse;
+      seen.push(...body.entries.map((e) => e.invocationId));
+      pages += 1;
+      if (!body.nextCursor) break;
+      cursor = body.nextCursor;
+      if (pages > 10) throw new Error("pagination did not terminate");
+    }
+
+    expect(new Set(seen).size).toBe(5); // no duplicates
+    expect(seen).toHaveLength(5); // no skips
+    // Deterministic full order: startedAt desc, then invocationId desc
+    // within the tied startedAt=2000 group.
+    expect(seen).toEqual(["tie_a", "tie_d", "tie_c", "tie_b", "tie_e"]);
+  });
+
   it("nextCursor is null on the last page", async () => {
     api = await bootTestApi();
     await seedInvocations(api, 3);
