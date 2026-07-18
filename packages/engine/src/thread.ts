@@ -2036,6 +2036,7 @@ export class Thread {
       sandbox: session.sandbox,
       config: session.options.toolConfig,
       owner: session.owner,
+      policyResolver: session.options.policyResolver,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,

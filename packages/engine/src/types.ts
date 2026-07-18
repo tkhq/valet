@@ -1,5 +1,8 @@
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@mariozechner/pi-ai";
+// Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
+// exists only for the type checker (both directions are `import type`).
+import type { ApprovalMode } from "./plugin-catalog.js";
 
 // ── Identity / authoring ──────────────────────────────────────────
 
@@ -374,6 +377,13 @@ export interface ToolContext {
    */
   owner?: Principal;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
+  /**
+   * Optional host policy resolver consulted by `call_tool` before invoking a
+   * plugin action. Absent === the engine's built-in riskLevel→approvalMode
+   * fallback (`approvalModeFor`), byte-identical to pre-policy behavior.
+   * Threaded from `CreateSessionOptions.policyResolver` via `buildToolContext`.
+   */
+  policyResolver?: PolicyResolver;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
   signal: AbortSignal;
@@ -536,6 +546,107 @@ export interface SuspendedTurnState {
   ordinal: number;
   attempt: number;
   createdAt: number;
+}
+
+// ── Policy resolution (org policy engine seam) ─────────────────────
+
+/**
+ * Input handed to a host `PolicyResolver` when `call_tool` is about to
+ * invoke a plugin action. `appliesIn` is `"session"` from the interactive
+ * `call_tool` path; a future workflow-mode invoker (T3) passes `"workflow"`.
+ */
+export interface PolicyResolveInput {
+  service: string;
+  actionId: string;
+  riskLevel: RiskLevel;
+  params: Record<string, unknown> | undefined;
+  userId?: string;
+  orgId?: string;
+  sessionId: string;
+  threadId: string;
+  appliesIn: "session" | "workflow";
+}
+
+/**
+ * The host's decision for one action invocation. `mode` drives `call_tool`:
+ * `allow` → straight through; `require_approval` → open an approval gate;
+ * `deny` → refuse. `provenance` is opaque to the engine and rides into the
+ * gate `context` and every audit record so the host can explain the call.
+ */
+export interface PolicyDecision {
+  mode: ApprovalMode;
+  provenance: {
+    baseMode: ApprovalMode;
+    matchedPolicyId?: string;
+    matchedGrantId?: string;
+    matchedOverrideId?: string;
+    source: string;
+  };
+  /**
+   * Extra gate actions the host wants offered on a require_approval gate.
+   * Actions flagged `approves: true` are treated as approval by `call_tool`
+   * AFTER `onResolution` runs. The engine strips the `approves` flag to plain
+   * `DecisionAction`s before opening the gate.
+   */
+  extraGateActions?: (DecisionAction & { approves: boolean })[];
+}
+
+/**
+ * Audit record emitted (fire-and-forget) by `call_tool` for every
+ * plugin-action invocation attempt made through a host `PolicyResolver`.
+ * `status` is the terminal disposition of the attempt:
+ *  - `denied`    — resolver returned `deny`; the action never ran.
+ *  - `rejected`  — a require_approval gate was not approved (human deny or an
+ *                  `onResolution` throw); the action never ran.
+ *  - `completed` — `action.execute` returned (success or handled failure).
+ *  - `error`     — `action.execute` threw, or validated params were rejected.
+ * `allowed` / `approved` are reserved for non-executing callers (workflow
+ * mode / T3); `call_tool` collapses those into `completed`/`error` and relies
+ * on `resolvedMode` + `provenance` to show whether the call was allowed
+ * outright or approved through a gate. `durationMs` is set for executed paths.
+ */
+export interface PolicyInvocationRecord {
+  service: string;
+  actionId: string;
+  toolId: string;
+  riskLevel: RiskLevel;
+  sessionId: string;
+  threadId: string;
+  userId?: string;
+  orgId?: string;
+  appliesIn: "session" | "workflow";
+  summary?: string;
+  status: "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
+  resolvedMode: ApprovalMode;
+  provenance: PolicyDecision["provenance"];
+  durationMs?: number;
+  error?: string;
+}
+
+/**
+ * Optional host-provided policy port. Absent === the engine's built-in
+ * riskLevel→approvalMode fallback (`approvalModeFor`), byte-identical to
+ * pre-policy behavior. Present === `call_tool` consults it per invocation.
+ */
+export interface PolicyResolver {
+  resolve(input: PolicyResolveInput): Promise<PolicyDecision>;
+  /**
+   * Host side effects on gate resolution (grant/policy writes). Awaited by
+   * `call_tool` BEFORE it interprets the resolution; a throw fails the
+   * approval closed (the resolution is treated as not-approved). Best-effort
+   * otherwise.
+   */
+  onResolution?(
+    input: PolicyResolveInput,
+    decision: PolicyDecision,
+    resolution: DecisionResolution,
+  ): Promise<void>;
+  /**
+   * Audit sink for every invocation attempt. Fire-and-forget — `call_tool`
+   * never awaits it and swallows rejections, so it must never be relied on to
+   * gate execution.
+   */
+  onInvocation?(record: PolicyInvocationRecord): Promise<void>;
 }
 
 // ── Sandbox ────────────────────────────────────────────────────────
@@ -1140,6 +1251,22 @@ export interface CreateSessionOptions {
    * behind a resolver it was given.
    */
   credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
+  /**
+   * Optional host-provided org-policy resolver. Absent === the engine's
+   * built-in fallback: `call_tool` derives approval from each action's
+   * riskLevel (`approvalModeFor`) exactly as before — no resolver machinery
+   * runs, gate default actions are unchanged, and no audit records are
+   * emitted. When present, `call_tool` consults it per invocation:
+   *  - `resolve()` returns a `PolicyDecision` (`allow` → straight through,
+   *    `require_approval` → open a gate, `deny` → refuse);
+   *  - `onResolution?` runs on gate resolution before the outcome is
+   *    interpreted (a throw fails the approval closed);
+   *  - `onInvocation?` receives a fire-and-forget audit record per attempt.
+   * A throwing `resolve()` fails closed to `require_approval` with provenance
+   * source `resolver_error` (keeps a human in the loop rather than bricking on
+   * a transient store error). Threaded onto `ToolContext.policyResolver`.
+   */
+  policyResolver?: PolicyResolver;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
