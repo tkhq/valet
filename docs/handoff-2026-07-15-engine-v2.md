@@ -1,6 +1,6 @@
 # Engine v2 — Session Handoff (updated 2026-07-16b: spec queue underway)
 
-> For the next agent picking up work on branch `portable-runtime-v1-spec`. Read this first, then the memory file `project_engine_v2_status.md`, then the ledger `.superpowers/sdd/progress.md`.
+> For the next agent picking up work on branch `dev-v2` (the v2 development trunk — formerly `portable-runtime-v1-spec`; feature branches PR against `dev-v2`, not `main`). Read this first, then the memory file `project_engine_v2_status.md`, then the ledger `.superpowers/sdd/progress.md`.
 
 ## TL;DR
 
