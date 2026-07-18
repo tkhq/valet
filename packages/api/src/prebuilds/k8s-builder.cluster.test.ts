@@ -42,7 +42,9 @@ function registryPresent(): boolean {
   return svc.status === 0;
 }
 
-describe.skipIf(!registryPresent())("KubernetesImageBuilder (live rancher-desktop, bundled registry)", () => {
+// Also skip in CI: this needs a live rancher-desktop k8s cluster + kubectl
+// context, which the GitHub runner does not have (`CI` = GitHub Actions).
+describe.skipIf(!registryPresent() || !!process.env.CI)("KubernetesImageBuilder (live rancher-desktop, bundled registry)", () => {
   const kc = loadRancherDesktopKubeConfig(k8s.KubeConfig);
   const jobsApi = batchJobsApiAdapter(kc.makeApiClient(k8s.BatchV1Api), kc.makeApiClient(k8s.CoreV1Api));
   const builder = new KubernetesImageBuilder({

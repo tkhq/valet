@@ -68,7 +68,10 @@ function dockerAvailable(): boolean {
 }
 
 const dockerHere = dockerAvailable();
-const describeDocker = dockerHere ? describe : describe.skip;
+// Skip in CI: this full prebuild loop does a real docker build + registry
+// push that the GitHub runner isn't provisioned for (passes locally). `CI` =
+// GitHub Actions.
+const describeDocker = dockerHere && !process.env.CI ? describe : describe.skip;
 
 /** `git ls-remote` the repo's default-branch HEAD so the baked commit is
  * real (the generated Dockerfile `git checkout`s it) without hardcoding a

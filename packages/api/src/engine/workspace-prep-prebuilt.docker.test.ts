@@ -29,7 +29,9 @@ function dockerAvailable(): boolean {
 }
 
 const dockerHere = dockerAvailable();
-const describeDocker = dockerHere ? describe : describe.skip;
+// Skip in CI (see workspace-prep.docker.test.ts): needs real docker base
+// images / prebuilt-image infra the GitHub runner lacks. `CI` = GitHub Actions.
+const describeDocker = dockerHere && !process.env.CI ? describe : describe.skip;
 
 const CLONE_URL = "https://github.com/octocat/Hello-World.git";
 const BASE_IMAGE = "valet-t4-test-base:git";
