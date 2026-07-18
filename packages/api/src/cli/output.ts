@@ -75,3 +75,16 @@ export function printErr(s: string): void {
 export function emitNdjson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
+
+/**
+ * Render a simple left-aligned column table as a single string (no trailing
+ * newline). Columns are padded to the widest cell (header included); the last
+ * column is left un-padded so trailing whitespace never leaks. Cells are
+ * joined by two spaces. Pure — used by the human-readable command outputs.
+ */
+export function renderTable(header: string[], rows: string[][]): string {
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
+  const fmt = (cols: string[]): string =>
+    cols.map((c, i) => (i === cols.length - 1 ? c : c.padEnd(widths[i]))).join("  ");
+  return [fmt(header), ...rows.map(fmt)].join("\n");
+}

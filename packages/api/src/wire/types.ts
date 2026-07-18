@@ -1354,4 +1354,7 @@ export interface HealthResponse {
   service: string;
   ts: number;
   version?: string;
+  /** Resolved sandbox backend (`docker` | `local` | `kubernetes`) the server
+   * is running. Append-only; existing consumers ignore it. */
+  sandboxBackend?: string;
 }

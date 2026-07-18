@@ -16,7 +16,9 @@ import { buildAuthMiddleware } from "./middleware/auth.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
-import type { AuthConfigResponse } from "./wire/types.js";
+import type { AuthConfigResponse, HealthResponse } from "./wire/types.js";
+import { VALET_VERSION } from "./version.js";
+import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
@@ -107,10 +109,19 @@ export function createApp(
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
 
-  // Public health check (no auth).
-  app.get("/api/health", (c) =>
-    c.json({ ok: true, service: "valet-api", ts: Date.now() }),
-  );
+  // Public health check (no auth). Carries the running binary's version and
+  // the resolved sandbox backend so `valet status` can report client/server
+  // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
+  app.get("/api/health", (c) => {
+    const body: HealthResponse = {
+      ok: true,
+      service: "valet-api",
+      ts: Date.now(),
+      version: VALET_VERSION,
+      sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
+    };
+    return c.json(body);
+  });
 
   // better-auth owns everything under /api/auth/* (signup, login, session,
   // social + SSO callbacks, api-key endpoints, MCP OAuth). Mounted BEFORE
