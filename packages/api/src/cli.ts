@@ -43,7 +43,7 @@ const COMMANDS: Record<string, CommandImporter> = {
   logout: () => import("./cli/commands/logout.js"),
   instance: () => import("./cli/commands/instance.js"),
   config: () => import("./cli/commands/config.js"),
-  chat: notImpl,
+  chat: () => import("./cli/commands/chat.js"),
   mcp: notImpl,
   reset: () => import("./cli/commands/reset.js"),
 };
