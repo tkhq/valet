@@ -80,8 +80,11 @@ function ensureAssetDir() {
   const tar = readFileSync(assetsTarPath);
   const hash = createHash("sha256").update(tar).digest("hex").slice(0, 16);
   const target = join(tmpdir(), `valet-assets-${hash}`);
-  const marker = join(target, ".complete");
-  if (existsSync(marker)) return target; // already extracted by a prior run
+  // Reuse a prior extraction only if it looks intact — both the completion
+  // marker AND a known asset present, so a tmp-reaper that evicted files while
+  // leaving the marker can't hand back a corrupt dir (→ PGlite ENOENT).
+  const looksComplete = (dir) => existsSync(join(dir, ".complete")) && existsSync(join(dir, "pglite", "pglite.wasm"));
+  if (looksComplete(target)) return target;
 
   const staging = mkdtempSync(join(tmpdir(), "valet-assets-stage-"));
   extractTar(tar, staging);
@@ -92,11 +95,11 @@ function ensureAssetDir() {
   } catch {
     // Target already exists — a concurrent/earlier boot won. It was renamed
     // from a complete staging dir, so it's complete: reuse it, discard ours.
-    if (existsSync(marker)) {
+    if (looksComplete(target)) {
       rmSync(staging, { recursive: true, force: true });
       return target;
     }
-    // Unexpected (exists but no marker): use our own complete staging dir.
+    // Unexpected (exists but incomplete): use our own complete staging dir.
     return staging;
   }
 }
