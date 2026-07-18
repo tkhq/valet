@@ -21,6 +21,44 @@ const RISK_LEVELS: readonly RiskLevelWire[] = ["low", "medium", "high", "critica
 const MODES: readonly ApprovalModeWire[] = ["allow", "require_approval", "deny"];
 const APPLIES_IN: readonly PolicyAppliesInWire[] = ["any", "session", "workflow"];
 const MATCHER_OPS = ["eq", "neq", "regex", "in", "not_in", "gt", "gte", "lt", "lte", "exists", "not_exists"] as const;
+const NUMERIC_MATCHER_OPS = new Set<ParamMatcherWire["op"]>(["gt", "gte", "lt", "lte"]);
+const LIST_MATCHER_OPS = new Set<ParamMatcherWire["op"]>(["in", "not_in"]);
+
+/**
+ * The matcher-row editor stores the typed value as a plain string
+ * regardless of op (so switching a row's op never loses or garbles what's
+ * typed); this converts that raw string into the shape the API's matcher
+ * engine (`packages/api/src/policies/matchers.ts`) actually requires per
+ * op — `evaluateMatcher` silently returns `false` for gt/gte/lt/lte unless
+ * both sides are `number` (a matcher created with a string `value` there is
+ * NOT a validation error, it's a policy that quietly never matches), and
+ * `validateParamMatchers` 400s in/not_in unless `value` is an array.
+ */
+export type MatcherValueResult =
+  | { ok: true; value: string | number | string[] }
+  | { ok: false; error: string };
+
+export function matcherValueForOp(op: ParamMatcherWire["op"], raw: string): MatcherValueResult {
+  if (NUMERIC_MATCHER_OPS.has(op)) {
+    const trimmed = raw.trim();
+    const n = Number(trimmed);
+    if (trimmed.length === 0 || !Number.isFinite(n)) {
+      return { ok: false, error: `Matcher value must be a number for op "${op}"` };
+    }
+    return { ok: true, value: n };
+  }
+  if (LIST_MATCHER_OPS.has(op)) {
+    const items = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (items.length === 0) {
+      return { ok: false, error: `Matcher value must be a comma-separated list for op "${op}"` };
+    }
+    return { ok: true, value: items };
+  }
+  return { ok: true, value: raw };
+}
 
 type TargetKind = "service" | "actionId" | "riskLevel";
 
@@ -259,9 +297,15 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
 
   function submit() {
     setError(null);
-    const paramMatchers: ParamMatcherWire[] = matchers
-      .filter((m) => m.path.trim().length > 0)
-      .map((m) => ({ path: m.path.trim(), op: m.op, value: m.value }));
+    const paramMatchers: ParamMatcherWire[] = [];
+    for (const m of matchers.filter((row) => row.path.trim().length > 0)) {
+      const result = matcherValueForOp(m.op, m.value);
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      paramMatchers.push({ path: m.path.trim(), op: m.op, value: result.value });
+    }
 
     const target =
       targetKind === "service"
@@ -430,7 +474,14 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
               </select>
               <Input
                 aria-label="Matcher value"
-                placeholder="value"
+                type={NUMERIC_MATCHER_OPS.has(m.op) ? "number" : "text"}
+                placeholder={
+                  NUMERIC_MATCHER_OPS.has(m.op)
+                    ? "0"
+                    : LIST_MATCHER_OPS.has(m.op)
+                      ? "a, b, c"
+                      : "value"
+                }
                 value={m.value}
                 onChange={(e) => updateMatcherRow(m.key, { value: e.target.value })}
                 className="w-40"

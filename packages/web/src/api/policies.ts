@@ -1,9 +1,12 @@
 /**
  * TanStack Query hooks for the action-policies web surfaces (Task 5):
- * org-admin policy CRUD + preview + action log, and the per-user
- * policy-overrides / runtime-grants surfaces. Mirrors the factory idiom in
- * `src/api/settings.ts` — query-key factory object, one hook per read,
- * mutations invalidate the keys they affect.
+ * org-admin policy CRUD + action log, and the per-user policy-overrides /
+ * runtime-grants surfaces. Mirrors the factory idiom in `src/api/
+ * settings.ts` — query-key factory object, one hook per read, mutations
+ * invalidate the keys they affect. No `usePreviewOrgPolicy` hook: no web
+ * surface calls `POST /api/org/policies/preview` (Fix round 1, YAGNI) — the
+ * route itself is untouched and `api.previewOrgPolicy` still exists in
+ * `client.ts` if a later task wants to wire it up.
  */
 import {
   useMutation,
@@ -25,8 +28,6 @@ import type {
   ListPolicyOverridesResponse,
   PatchOrgPolicyRequest,
   PatchOrgPolicyResponse,
-  PreviewOrgPolicyRequest,
-  PreviewOrgPolicyResponse,
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
 } from "@valet/api/wire";
@@ -100,12 +101,6 @@ export function useDeleteOrgPolicy() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkPolicies.orgPolicies() });
     },
-  });
-}
-
-export function usePreviewOrgPolicy() {
-  return useMutation<PreviewOrgPolicyResponse, Error, PreviewOrgPolicyRequest>({
-    mutationFn: (body) => api.previewOrgPolicy(body),
   });
 }
 

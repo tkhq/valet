@@ -122,7 +122,7 @@ describe("PoliciesSection — new policy target one-of", () => {
 });
 
 describe("PoliciesSection — matcher rows", () => {
-  it("adding a matcher row includes it in paramMatchers on submit", async () => {
+  it("a gt matcher submits a NUMBER value, not a string (matchers.ts requires number for gt/gte/lt/lte)", async () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
 
@@ -134,7 +134,37 @@ describe("PoliciesSection — matcher rows", () => {
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 
     const call = createOrgPolicyMutate.mock.calls[0][0];
-    expect(call.paramMatchers).toEqual([{ path: "amount", op: "gt", value: "100" }]);
+    expect(call.paramMatchers).toEqual([{ path: "amount", op: "gt", value: 100 }]);
+  });
+
+  it("an in matcher submits an ARRAY value from a comma-separated list (validateParamMatchers requires an array)", async () => {
+    const user = userEvent.setup();
+    render(<PoliciesSection />);
+
+    await user.click(screen.getByRole("button", { name: "Add matcher" }));
+    await user.type(screen.getByLabelText("Matcher path"), "status");
+    await user.selectOptions(screen.getByLabelText("Matcher operator"), "in");
+    await user.type(screen.getByLabelText("Matcher value"), "a, b ,c");
+    await user.selectOptions(screen.getByLabelText("Service", { selector: "#policy-service" }), "gmail");
+    await user.click(screen.getByRole("button", { name: "Create policy" }));
+
+    const call = createOrgPolicyMutate.mock.calls[0][0];
+    expect(call.paramMatchers).toEqual([{ path: "status", op: "in", value: ["a", "b", "c"] }]);
+  });
+
+  it("a non-numeric gt value blocks submit and shows a visible error", async () => {
+    const user = userEvent.setup();
+    render(<PoliciesSection />);
+
+    await user.click(screen.getByRole("button", { name: "Add matcher" }));
+    await user.type(screen.getByLabelText("Matcher path"), "amount");
+    await user.selectOptions(screen.getByLabelText("Matcher operator"), "gt");
+    await user.type(screen.getByLabelText("Matcher value"), "not-a-number");
+    await user.selectOptions(screen.getByLabelText("Service", { selector: "#policy-service" }), "gmail");
+    await user.click(screen.getByRole("button", { name: "Create policy" }));
+
+    expect(createOrgPolicyMutate).not.toHaveBeenCalled();
+    expect(screen.getByText('Matcher value must be a number for op "gt"')).toBeTruthy();
   });
 
   it("removing a matcher row omits it from the submitted payload", async () => {
