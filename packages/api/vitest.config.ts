@@ -15,6 +15,14 @@ export default defineConfig({
     // default scan would execute those broken compiled copies. Harmless to the
     // inner projects (they only include `src/**`).
     exclude: ["**/node_modules/**", "**/dist/**"],
+    // Generous timeout at the OUTER level. When this package runs as a project
+    // of the ROOT vitest config (`projects: ['packages/api']`), the inner
+    // projects' own `testTimeout` is not applied — the shared/outer config is —
+    // so without this the CI runner (slower PGlite boot, docker pulls, app
+    // boots) hits vitest's 5s default and times out. Belt-and-suspenders with
+    // the inner values below (used when running this config directly).
+    testTimeout: 120_000,
+    hookTimeout: 120_000,
     projects: [
       {
         test: {
@@ -23,7 +31,8 @@ export default defineConfig({
           include: ["src/**/*.test.ts", "test/**/*.test.ts"],
           exclude: ["src/integration/**"],
           setupFiles: ["./vitest.setup.ts"],
-          testTimeout: 10_000,
+          testTimeout: 120_000,
+          hookTimeout: 120_000,
         },
       },
       {
@@ -31,7 +40,8 @@ export default defineConfig({
           name: "integration",
           environment: "node",
           include: ["src/integration/**/*.test.ts"],
-          testTimeout: 10_000,
+          testTimeout: 120_000,
+          hookTimeout: 120_000,
         },
       },
     ],
