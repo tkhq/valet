@@ -54,12 +54,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Workspace deps export `dist/` (gitignored), so build them before any
-      # consumer (store tests, the api bundle, the web build) resolves them.
-      # web/api/worker/client are excluded — they have special builds handled
-      # below (web) or are not needed (worker/client).
-      - name: Build workspace deps
-        run: pnpm -r --filter "!@valet/web" --filter "!@valet/api" --filter "!@valet/worker" --filter "!@valet/client" build
+      # Workspace deps export `dist/` (gitignored). The root tsconfig is a
+      # composite project-references build (`tsc --build`, emits — no noEmit),
+      # so `pnpm typecheck` compiles AND emits every referenced package's dist
+      # (shared, engine, sdk, store-postgres, api, plugins, …; web is excluded
+      # and built via vite below). A fresh checkout has no tsbuildinfo, so this
+      # is a full build. Doubles as a typecheck gate.
+      - name: Build workspace deps (tsc --build, emits dists)
+        run: pnpm typecheck
 
       - name: Create the smoke database
         run: psql "$TEST_DATABASE_URL" -c 'CREATE DATABASE valet_smoke'
