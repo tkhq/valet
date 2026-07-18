@@ -16,10 +16,10 @@ import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
 
-const USAGE = "usage: valet config <get|set> serve.<port|sandbox|dataDir|authMode> [value]";
+const USAGE = "usage: valet config <get|set> serve.<port|sandbox|dataDir|authMode|databaseUrl> [value]";
 
 /** The settable `serve.*` fields. Anything else is rejected. */
-const SERVE_FIELDS = ["port", "sandbox", "dataDir", "authMode"] as const;
+const SERVE_FIELDS = ["port", "sandbox", "dataDir", "authMode", "databaseUrl"] as const;
 type ServeField = (typeof SERVE_FIELDS)[number];
 
 const SANDBOX_VALUES = ["docker", "local", "kubernetes"] as const;
@@ -68,6 +68,9 @@ export function coerceServeValue(field: ServeField, raw: string): CoerceResult {
     case "dataDir":
       if (raw === "") return { ok: false, error: "serve.dataDir must not be empty" };
       return { ok: true, value: raw };
+    case "databaseUrl":
+      if (raw === "") return { ok: false, error: "serve.databaseUrl must not be empty" };
+      return { ok: true, value: raw };
   }
 }
 
@@ -85,8 +88,10 @@ export function setServeField(config: ValetConfig, field: ServeField, value: num
     if (value === "docker" || value === "local" || value === "kubernetes") serve.sandbox = value;
   } else if (field === "authMode") {
     if (value === "stub" || value === "real") serve.authMode = value;
-  } else if (typeof value === "string") {
-    serve.dataDir = value;
+  } else if (field === "dataDir") {
+    if (typeof value === "string") serve.dataDir = value;
+  } else if (field === "databaseUrl") {
+    if (typeof value === "string") serve.databaseUrl = value;
   }
   return { ...config, serve };
 }

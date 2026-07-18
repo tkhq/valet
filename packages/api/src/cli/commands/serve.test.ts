@@ -7,6 +7,7 @@ import {
   claimServeLock,
   isLiveLock,
   parseLock,
+  redactDbUrl,
   resolveServeSettings,
   upsertLocalProfile,
   type ServeLock,
@@ -102,6 +103,56 @@ describe("serve/resolveServeSettings dataDir", () => {
     expect(
       resolveServeSettings({ flags: {}, env: { VALET_DATA_DIR: "/b" }, config: {}, dockerReachable: false }).dataDir,
     ).toBe("/b");
+  });
+});
+
+describe("serve/resolveServeSettings databaseUrl", () => {
+  const flag = "postgres://f/db";
+  const envUrl = "postgres://e/db";
+  const cfgUrl = "postgres://c/db";
+
+  it("flag beats env beats config", () => {
+    expect(
+      resolveServeSettings({
+        flags: { databaseUrl: flag },
+        env: { DATABASE_URL: envUrl },
+        config: { serve: { databaseUrl: cfgUrl } },
+        dockerReachable: false,
+      }).databaseUrl,
+    ).toBe(flag);
+    expect(
+      resolveServeSettings({
+        flags: {},
+        env: { DATABASE_URL: envUrl },
+        config: { serve: { databaseUrl: cfgUrl } },
+        dockerReachable: false,
+      }).databaseUrl,
+    ).toBe(envUrl);
+    expect(
+      resolveServeSettings({ flags: {}, env: {}, config: { serve: { databaseUrl: cfgUrl } }, dockerReachable: false })
+        .databaseUrl,
+    ).toBe(cfgUrl);
+  });
+
+  it("is undefined (embedded pglite) when no source sets it", () => {
+    expect(resolveServeSettings({ flags: {}, env: {}, config: {}, dockerReachable: false }).databaseUrl).toBeUndefined();
+  });
+
+  it("treats an empty env DATABASE_URL as unset", () => {
+    expect(
+      resolveServeSettings({ flags: {}, env: { DATABASE_URL: "" }, config: { serve: { databaseUrl: cfgUrl } }, dockerReachable: false })
+        .databaseUrl,
+    ).toBe(cfgUrl);
+  });
+});
+
+describe("serve/redactDbUrl", () => {
+  it("masks the password", () => {
+    expect(redactDbUrl("postgres://user:secret@host:5432/db")).toBe("postgres://user:***@host:5432/db");
+  });
+
+  it("leaves a passwordless url untouched", () => {
+    expect(redactDbUrl("postgres://host:5432/db")).toBe("postgres://host:5432/db");
   });
 });
 

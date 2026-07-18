@@ -44,6 +44,7 @@ export interface ServeFlags {
   port?: string;
   sandbox?: string;
   dataDir?: string;
+  databaseUrl?: string;
 }
 
 export interface ServeSettingsInput {
@@ -62,6 +63,16 @@ export interface ServeSettings {
   authStub: boolean;
   /** True when `backend` came from docker auto-detect, not an explicit source. */
   backendAutoDetected: boolean;
+  /** Remote Postgres connection string. When set, the server uses node-postgres
+   * (`pg.Pool`) against this DB instead of the embedded PGlite in `dataDir`.
+   * Unset → embedded PGlite. */
+  databaseUrl?: string;
+}
+
+/** Redact the password in a Postgres connection string for log output.
+ * `postgres://user:secret@host/db` → `postgres://user:***@host/db`. */
+export function redactDbUrl(url: string): string {
+  return url.replace(/:[^:@]*@/, ":***@");
 }
 
 function isSandboxKind(value: string): value is SandboxKind {
@@ -116,11 +127,18 @@ export function resolveServeSettings(input: ServeSettingsInput): ServeSettings {
 
   const dataDir = resolveDataDir({ flag: flags.dataDir, env: env.VALET_DATA_DIR, config: config.serve });
 
+  // Remote Postgres: flag > env DATABASE_URL > config.serve.databaseUrl. Empty
+  // string counts as unset. Absent → embedded PGlite in dataDir.
+  const databaseUrl =
+    flags.databaseUrl ??
+    (env.DATABASE_URL && env.DATABASE_URL !== "" ? env.DATABASE_URL : undefined) ??
+    config.serve?.databaseUrl;
+
   // Stub auth unless a real secret is configured (same knob `make dev-local`
   // uses). Empty string counts as unset.
   const authStub = !env.BETTER_AUTH_SECRET;
 
-  return { port, backend, dataDir, authStub, backendAutoDetected };
+  return { port, backend, dataDir, authStub, backendAutoDetected, databaseUrl };
 }
 
 /**
@@ -265,6 +283,11 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
       ? "sandbox backend: local (no docker daemon detected)"
       : `sandbox backend: ${settings.backend}`,
   );
+  printLine(
+    settings.databaseUrl
+      ? `database: remote postgres (${redactDbUrl(settings.databaseUrl)})`
+      : `database: embedded pglite (${settings.dataDir})`,
+  );
 
   const lockPath = join(settings.dataDir, "serve.lock");
 
@@ -273,6 +296,12 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   process.env.PORT = String(settings.port);
   process.env.VALET_SANDBOX_BACKEND = settings.backend;
   process.env.VALET_DATA_DIR = settings.dataDir;
+  // Remote Postgres overrides the embedded PGlite (providers/node.ts branches on
+  // DATABASE_URL). Only set it when resolved so an unset flag/config doesn't
+  // clobber an inherited env value.
+  if (settings.databaseUrl) {
+    process.env.DATABASE_URL = settings.databaseUrl;
+  }
   if (settings.authStub && !process.env.BETTER_AUTH_SECRET) {
     process.env.VALET_LOCAL_AUTH = "1";
   }
@@ -370,6 +399,8 @@ function parseServeFlags(args: string[]): ServeFlags {
       flags.sandbox = take(arg.startsWith("--sandbox=") ? arg.slice("--sandbox=".length) : undefined);
     } else if (arg === "--data-dir" || arg.startsWith("--data-dir=")) {
       flags.dataDir = take(arg.startsWith("--data-dir=") ? arg.slice("--data-dir=".length) : undefined);
+    } else if (arg === "--database-url" || arg.startsWith("--database-url=")) {
+      flags.databaseUrl = take(arg.startsWith("--database-url=") ? arg.slice("--database-url=".length) : undefined);
     }
   }
   return flags;

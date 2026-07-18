@@ -36,3 +36,71 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  # Exercises the REMOTE Postgres path (node-postgres / pg.Pool) that the
+  # embedded-PGlite gates never cover: the store contract against a real DB,
+  # plus a serve smoke of both the Node bundle and the native binary booted
+  # with DATABASE_URL — asserting migrations land in the remote DB and data
+  # survives a kill -9 + reboot. Runs on every PR/push (ongoing), one platform.
+  remote-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: valet_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Store contract runs against valet_test; the serve smokes use a separate
+      # valet_smoke DB (created below) so the two can't cross-contaminate.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/valet_test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/valet_smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.17
+
+      - run: pnpm install --frozen-lockfile
+
+      # No registry regeneration needed: registry.gen.ts is committed and the
+      # api build + store suite consume it as-is.
+
+      - name: Create the smoke database
+        run: psql "$TEST_DATABASE_URL" -c 'CREATE DATABASE valet_smoke'
+
+      - name: Store contract against real Postgres
+        run: pnpm --filter @valet/store-postgres test
+
+      - name: Build web + server bundle + asset archive
+        run: |
+          pnpm --filter @valet/web build
+          pnpm --filter @valet/api run build:assets
+          pnpm --filter @valet/api run build:bundle
+          pnpm --filter @valet/api run build:tar
+
+      - name: Remote-pg smoke — Node bundle
+        run: scripts/ci-remote-pg-smoke.sh node packages/api/dist/valet-api.mjs
+
+      - name: Compile native binary (linux-x64)
+        run: node packages/api/build/compile-binary.mjs
+
+      - name: Remote-pg smoke — native binary
+        run: scripts/ci-remote-pg-smoke.sh packages/api/dist/valet-linux-x64

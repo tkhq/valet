@@ -15,6 +15,9 @@ export interface ServeConfig {
   sandbox?: "docker" | "local" | "kubernetes";
   dataDir?: string;
   authMode?: "stub" | "real";
+  /** Remote Postgres connection string. Set → the server uses node-postgres
+   * against this DB instead of the embedded PGlite in `dataDir`. */
+  databaseUrl?: string;
 }
 
 export interface ProfileConfig {
