@@ -15,13 +15,8 @@ import { printErr, printLine } from "./cli/output.js";
 import type { CommandModule } from "./cli/types.js";
 import { VALET_VERSION } from "./version.js";
 
-/**
- * Lazy importer for a command module. Registering a real command later is a
- * one-line change: swap the `_notimpl` importer for the real module's.
- */
+/** Lazy importer for a command module. */
 type CommandImporter = () => Promise<CommandModule>;
-
-const notImpl: CommandImporter = () => import("./cli/commands/_notimpl.js");
 
 /**
  * The subcommand dispatch table. `serve` boots the product; every other
@@ -30,8 +25,7 @@ const notImpl: CommandImporter = () => import("./cli/commands/_notimpl.js");
  * Every entry is a lazy importer so unrelated deps stay off any single
  * command's path — `serve` never pays for the client/TUI deps, and the client
  * commands never pay for the heavy server graph (`serve` itself imports
- * `main.ts` lazily, inside `run`). Commands not yet built point at
- * `_notimpl`; later tasks replace the importer with the real module.
+ * `main.ts` lazily, inside `run`).
  */
 const COMMANDS: Record<string, CommandImporter> = {
   serve: () => import("./cli/commands/serve.js"),
@@ -44,7 +38,7 @@ const COMMANDS: Record<string, CommandImporter> = {
   instance: () => import("./cli/commands/instance.js"),
   config: () => import("./cli/commands/config.js"),
   chat: () => import("./cli/commands/chat.js"),
-  mcp: notImpl,
+  mcp: () => import("./cli/commands/mcp.js"),
   reset: () => import("./cli/commands/reset.js"),
 };
 
