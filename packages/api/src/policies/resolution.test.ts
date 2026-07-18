@@ -36,6 +36,7 @@ function orgPolicy(overrides: Partial<ActionPolicyRow> = {}): ActionPolicyRow {
     appliesIn: "any",
     expiresAt: null,
     revokedAt: null,
+    updatedAt: NOW,
     ...overrides,
   };
 }
@@ -59,6 +60,7 @@ function override(overrides: Partial<ActionPolicyOverrideRow> = {}): ActionPolic
     riskLevel: null,
     mode: "allow",
     paramMatchers: [],
+    updatedAt: NOW,
     ...overrides,
   };
 }
@@ -167,6 +169,50 @@ describe("resolvePolicyDecision — rung 0: org deny is absolute", () => {
       mode: "allow",
       provenance: { baseMode: "allow", matchedPolicyId: "apol_allow_action", source: "org_policy" },
     });
+  });
+});
+
+describe("resolvePolicyDecision — same-specificity tie-break (deterministic)", () => {
+  it("deny-vs-allow tie at the same specificity resolves to deny (most restrictive wins)", () => {
+    const r = rows({
+      policies: [
+        orgPolicy({ id: "apol_allow", actionId: "gmail.send_email", mode: "allow", updatedAt: NOW }),
+        orgPolicy({ id: "apol_deny", actionId: "gmail.send_email", mode: "deny", updatedAt: NOW }),
+      ],
+    });
+    const decision = resolvePolicyDecision(r, baseInput(), undefined);
+    expect(decision.mode).toBe("deny");
+    expect(decision.provenance.matchedPolicyId).toBe("apol_deny");
+  });
+
+  it("require_approval-vs-allow tie resolves to require_approval (order-independent)", () => {
+    // Both orderings of the same two rows must pick require_approval — proving
+    // the winner is not the DB encounter order.
+    const forward = rows({
+      policies: [
+        orgPolicy({ id: "apol_allow", actionId: "gmail.send_email", mode: "allow", updatedAt: NOW }),
+        orgPolicy({ id: "apol_req", actionId: "gmail.send_email", mode: "require_approval", updatedAt: NOW }),
+      ],
+    });
+    const reversed = rows({
+      policies: [
+        orgPolicy({ id: "apol_req", actionId: "gmail.send_email", mode: "require_approval", updatedAt: NOW }),
+        orgPolicy({ id: "apol_allow", actionId: "gmail.send_email", mode: "allow", updatedAt: NOW }),
+      ],
+    });
+    expect(resolvePolicyDecision(forward, baseInput(), undefined).provenance.matchedPolicyId).toBe("apol_req");
+    expect(resolvePolicyDecision(reversed, baseInput(), undefined).provenance.matchedPolicyId).toBe("apol_req");
+  });
+
+  it("same-mode tie breaks on newest updatedAt", () => {
+    const r = rows({
+      policies: [
+        orgPolicy({ id: "apol_old", actionId: "gmail.send_email", mode: "allow", updatedAt: NOW - 10 }),
+        orgPolicy({ id: "apol_new", actionId: "gmail.send_email", mode: "allow", updatedAt: NOW }),
+      ],
+    });
+    const decision = resolvePolicyDecision(r, baseInput(), undefined);
+    expect(decision.provenance.matchedPolicyId).toBe("apol_new");
   });
 });
 

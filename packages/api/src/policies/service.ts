@@ -22,7 +22,7 @@
  * non-interactive `appliesIn: "workflow"` enforcement path.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type {
   ActionPlugin,
   ApprovalMode,
@@ -100,6 +100,7 @@ export async function loadPolicyRows(db: AppDb, scope: PolicyRowScope): Promise<
     appliesIn: r.appliesIn,
     expiresAt: r.expiresAt,
     revokedAt: r.revokedAt,
+    updatedAt: r.updatedAt,
   }));
 
   let grants: RuntimeGrantRow[] = [];
@@ -142,6 +143,7 @@ export async function loadPolicyRows(db: AppDb, scope: PolicyRowScope): Promise<
       riskLevel: r.riskLevel,
       mode: r.mode,
       paramMatchers: r.paramMatchers,
+      updatedAt: r.updatedAt,
     }));
   }
 
@@ -321,15 +323,24 @@ export class AlwaysAllowNotAdminError extends Error {
  * `AlwaysAllowNotAdminError` (nothing is written). Reinstates a previously
  * revoked row (`revoked_at → null`) so "always allow" after an admin revoked
  * it works, while a replayed resolution upserts identical values.
+ *
+ * After the upsert, soft-revokes any OTHER live action-scope org policy on the
+ * same `actionId` whose mode is NOT `deny` (I1): an admin clicking "always
+ * allow" is explicitly superseding whatever gated this action, so a lingering
+ * duplicate-target `require_approval` (or a stale `allow`) row must not stay
+ * live to re-tie against the always-allow row under the deterministic
+ * tie-break. Deny rows are never touched — an org deny is absolute and a
+ * non-admin-overridable kill switch, not something an approval prompt clears.
  */
 export async function writeAlwaysAllowPolicy(db: AppDb, write: AlwaysAllowWrite): Promise<void> {
   const admin = await isOrgAdmin(db, write.orgId, write.grantedBy);
   if (!admin) throw new AlwaysAllowNotAdminError(write.orgId, write.grantedBy);
 
+  const policyId = alwaysAllowPolicyId(write.orgId, write.actionId);
   await db
     .insert(actionPolicies)
     .values({
-      id: alwaysAllowPolicyId(write.orgId, write.actionId),
+      id: policyId,
       orgId: write.orgId,
       principalType: "org",
       principalId: write.orgId,
@@ -350,6 +361,20 @@ export async function writeAlwaysAllowPolicy(db: AppDb, write: AlwaysAllowWrite)
       target: actionPolicies.id,
       set: { mode: "allow", revokedAt: null, managedBy: write.grantedBy, updatedAt: write.now },
     });
+
+  await db
+    .update(actionPolicies)
+    .set({ revokedAt: write.now, updatedAt: write.now })
+    .where(
+      and(
+        eq(actionPolicies.orgId, write.orgId),
+        eq(actionPolicies.principalType, "org"),
+        eq(actionPolicies.actionId, write.actionId),
+        isNull(actionPolicies.revokedAt),
+        ne(actionPolicies.id, policyId),
+        ne(actionPolicies.mode, "deny"),
+      ),
+    );
 }
 
 // ── Audit sink ─────────────────────────────────────────────────────

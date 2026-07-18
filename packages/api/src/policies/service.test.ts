@@ -318,6 +318,53 @@ describe("buildPolicyResolver", () => {
     expect(await db.select().from(actionPolicies)).toHaveLength(0);
   });
 
+  it("always_allow supersedes a pre-existing action-scope require_approval (I1 effectiveness)", async () => {
+    // A standing admin require_approval gate on the exact action.
+    await db.insert(actionPolicies).values({
+      id: "p_req", orgId: ORG, principalType: "org", principalId: ORG,
+      service: null, actionId: "create_issue", riskLevel: null, mode: "require_approval",
+      paramMatchers: [], appliesIn: "any", origin: "admin", managedBy: ADMIN,
+      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+    const d = await resolver.resolve(input);
+    expect(d.mode).toBe("require_approval");
+    await resolver.onResolution?.(input, d, { actionId: GATE_ACTION_ALWAYS_ALLOW, resolvedBy: ADMIN, resolvedAt: 1, gateOrdinal: 0 });
+
+    // Next resolve for the identical action returns allow, sourced from the
+    // always-allow row — not a require_approval tie against the stale gate row.
+    const next = await resolveActionPolicy(db, {
+      orgId: ORG, userId: MEMBER, service: "github", actionId: "create_issue",
+      riskLevel: "high", params: undefined, appliesIn: "session", sessionId: SESSION,
+      pluginDefault: undefined, now: 8000,
+    });
+    expect(next.mode).toBe("allow");
+    expect(next.provenance.source).toBe("org_policy");
+    expect(next.provenance.matchedPolicyId).toBe(alwaysAllowPolicyId(ORG, "create_issue"));
+
+    // The competing require_approval row was soft-revoked (its cause is gone).
+    const req = (await db.select().from(actionPolicies).where(eq(actionPolicies.id, "p_req")))[0];
+    expect(req.revokedAt).not.toBeNull();
+  });
+
+  it("always_allow never touches a competing action-scope deny", async () => {
+    await db.insert(actionPolicies).values({
+      id: "p_deny", orgId: ORG, principalType: "org", principalId: ORG,
+      service: null, actionId: "create_issue", riskLevel: null, mode: "deny",
+      paramMatchers: [], appliesIn: "any", origin: "admin", managedBy: ADMIN,
+      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+    await writeAlwaysAllowPolicy(db, { orgId: ORG, actionId: "create_issue", grantedBy: ADMIN, now: 9000 });
+    const deny = (await db.select().from(actionPolicies).where(eq(actionPolicies.id, "p_deny")))[0];
+    expect(deny.revokedAt).toBeNull();
+    // Org deny stays absolute regardless of the new always-allow row.
+    const next = await resolveActionPolicy(db, {
+      orgId: ORG, userId: MEMBER, service: "github", actionId: "create_issue",
+      riskLevel: "high", params: undefined, appliesIn: "session", sessionId: SESSION,
+      pluginDefault: undefined, now: 9500,
+    });
+    expect(next.mode).toBe("deny");
+  });
+
   it("onResolution is a NO-OP for a synthetic resolver_error decision", async () => {
     const synthetic = {
       mode: "require_approval" as const,

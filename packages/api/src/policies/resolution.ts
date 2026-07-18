@@ -59,6 +59,9 @@ export interface ActionPolicyRow {
   appliesIn: PolicyAppliesIn;
   expiresAt: number | null;
   revokedAt: number | null;
+  /** Last-write timestamp (ms) — the final tie-break in `mostSpecific` when
+   *  two rows share both specificity and mode-restrictiveness (newest wins). */
+  updatedAt: number;
 }
 
 /** Row shape `resolvePolicyDecision` needs from `runtime_grants`. Grants are
@@ -80,6 +83,8 @@ export interface ActionPolicyOverrideRow {
   riskLevel: RiskLevel | null;
   mode: ApprovalMode;
   paramMatchers: ParamMatcher[];
+  /** Last-write timestamp (ms) — final tie-break in `mostSpecific`. */
+  updatedAt: number;
 }
 
 export interface PolicyResolutionRows {
@@ -140,11 +145,36 @@ interface Targeted {
   riskLevel: unknown;
 }
 
+/** Rows `mostSpecific` ranks — target dimensions plus the two tie-break axes
+ *  (mode-restrictiveness, then recency). Both `ActionPolicyRow` and
+ *  `ActionPolicyOverrideRow` satisfy this. */
+interface Rankable extends Targeted {
+  mode: ApprovalMode;
+  updatedAt: number;
+}
+
 /** action=3, service=2, riskLevel=1 — higher wins ties in `mostSpecific`. */
 function targetSpecificity(row: Targeted): 1 | 2 | 3 {
   if (row.actionId !== null) return 3;
   if (row.service !== null) return 2;
   return 1;
+}
+
+/** Tie-break ordering within a single specificity tier: the most RESTRICTIVE
+ *  mode wins so a duplicate-target org row can never be silently loosened by
+ *  DB encounter order (deny > require_approval > allow). */
+const MODE_RESTRICTIVENESS: Record<ApprovalMode, number> = { deny: 3, require_approval: 2, allow: 1 };
+
+/** Positive when `a` should outrank `b`: higher specificity first, then more
+ *  restrictive mode, then newer `updatedAt`. Fully deterministic — no reliance
+ *  on `loadPolicyRows`' (unordered) DB encounter order, which duplicate-target
+ *  org rows would otherwise let leak into the outcome. */
+function comparePrecedence(a: Rankable, b: Rankable): number {
+  const spec = targetSpecificity(a) - targetSpecificity(b);
+  if (spec !== 0) return spec;
+  const restr = MODE_RESTRICTIVENESS[a.mode] - MODE_RESTRICTIVENESS[b.mode];
+  if (restr !== 0) return restr;
+  return a.updatedAt - b.updatedAt;
 }
 
 function matchesTarget(
@@ -181,19 +211,14 @@ function matchesGrantRow(row: RuntimeGrantRow, input: PolicyResolutionInput): bo
   return row.workflowExecutionId !== null && row.workflowExecutionId === input.workflowExecutionId;
 }
 
-/** Picks the single most specific matching row. When multiple rows share
- *  the top specificity, the first one encountered wins — every pinned
- *  precedence test constructs at most one candidate per specificity level,
- *  so this tie-break is never exercised by outcome-affecting cases. */
-function mostSpecific<T extends Targeted>(rows: T[]): T | undefined {
+/** Picks the single winning row by `comparePrecedence`: most specific first,
+ *  then most restrictive mode, then newest `updatedAt`. Deterministic even
+ *  when duplicate-target rows tie on specificity (loadPolicyRows has no
+ *  ORDER BY, and duplicate-target org rows are creatable). */
+function mostSpecific<T extends Rankable>(rows: T[]): T | undefined {
   let best: T | undefined;
-  let bestScore = 0;
   for (const row of rows) {
-    const score = targetSpecificity(row);
-    if (score > bestScore) {
-      best = row;
-      bestScore = score;
-    }
+    if (best === undefined || comparePrecedence(row, best) > 0) best = row;
   }
   return best;
 }

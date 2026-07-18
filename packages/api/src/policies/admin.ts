@@ -23,8 +23,8 @@ import {
   type RuntimeGrantRow,
 } from "../schema/index.js";
 import { validateParamMatchers, type ParamMatcher } from "./matchers.js";
-import { grantPolicyKey } from "./resolution.js";
-import { resolveActionPolicy } from "./service.js";
+import { grantPolicyKey, resolvePolicyDecision, type PolicyResolutionRows } from "./resolution.js";
+import { loadPolicyRows } from "./service.js";
 
 /** Service→plugin index shape `validateOverrideBounds` needs to look up an
  *  actionId's `service`/`riskLevel`/plugin default — same map shape as
@@ -269,6 +269,18 @@ function blockedByOrgPolicy(row: OrgPolicyDimensionRow): TargetValidation {
  * service- or riskLevel-scoped org policy could silently apply to it at
  * invocation time with nothing here to catch it.
  *
+ * Matcher-blind resolution (finding C1): the bounds check resolves with
+ * `params: undefined`, so an org policy carrying `paramMatchers` would
+ * evaluate every matcher to false and silently drop out of precedence —
+ * letting a member's `allow` override be accepted, then outrank that same
+ * org `require_approval` at rung 2 whenever the params DID match at real
+ * invocation. To close it, org policy rows are stripped of their
+ * `paramMatchers` before resolution here ("a matcher MIGHT match" ⇒ treat
+ * the row as matching). Full-precedence resolution is preserved, so a
+ * genuinely more-specific org `allow` still legitimately unblocks the
+ * override. This resolves the pure core directly (not `resolveActionPolicy`)
+ * precisely so the row set can be transformed before precedence runs.
+ *
  * Resolved TWICE, once per `appliesIn` context (`"session"` and
  * `"workflow"`), and blocked if EITHER resolves org deny/require_approval —
  * fix round 2 (Important). A per-user override carries no `appliesIn` of its
@@ -297,17 +309,28 @@ async function validateActionIdOverrideBounds(
       error: `cannot set override mode "allow": action "${actionId}" is not in the plugin catalog and can't be verified against org policy`,
     };
   }
+  // Org policy alone: no userId/sessionId scope, so `loadPolicyRows` returns
+  // empty grants/overrides. Strip `paramMatchers` so a matcher-scoped org
+  // policy is treated as "might match" instead of silently dropping out when
+  // we resolve with `params: undefined` (C1).
+  const loaded = await loadPolicyRows(db, { orgId });
+  const matcherBlind: PolicyResolutionRows = {
+    ...loaded,
+    policies: loaded.policies.map((p) => (p.paramMatchers.length > 0 ? { ...p, paramMatchers: [] } : p)),
+  };
   for (const appliesIn of ["session", "workflow"] as const) {
-    const decision = await resolveActionPolicy(db, {
-      orgId,
-      service: found.service,
-      actionId,
-      riskLevel: found.riskLevel,
-      params: undefined,
-      appliesIn,
-      pluginDefault: found.pluginDefault,
-      now,
-    });
+    const decision = resolvePolicyDecision(
+      matcherBlind,
+      {
+        service: found.service,
+        actionId,
+        riskLevel: found.riskLevel,
+        params: undefined,
+        appliesIn,
+        now,
+      },
+      found.pluginDefault,
+    );
     if (decision.provenance.source === "org_policy" && (decision.mode === "deny" || decision.mode === "require_approval")) {
       return {
         ok: false,
