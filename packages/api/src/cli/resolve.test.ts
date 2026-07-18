@@ -1,14 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ValetConfig } from "./config.js";
 import { NoInstanceError, ProfileNotFoundError } from "./exit.js";
-import {
-  firstDefined,
-  resolveDataDir,
-  resolveInstance,
-  resolvePort,
-  resolveSandbox,
-  SERVE_DEFAULTS,
-} from "./resolve.js";
+import { firstDefined, resolveDataDir, resolveInstance, SERVE_DEFAULTS } from "./resolve.js";
 
 describe("cli/resolve firstDefined", () => {
   it("returns the first non-null/undefined value", () => {
@@ -18,31 +11,9 @@ describe("cli/resolve firstDefined", () => {
   });
 });
 
-describe("cli/resolve resolvePort", () => {
-  it("flag beats env beats config beats default", () => {
-    expect(resolvePort({ flag: 1, env: "2", config: { port: 3 } })).toBe(1);
-    expect(resolvePort({ env: "2", config: { port: 3 } })).toBe(2);
-    expect(resolvePort({ config: { port: 3 } })).toBe(3);
-    expect(resolvePort({})).toBe(SERVE_DEFAULTS.port);
-  });
-
-  it("ignores an unparseable env value", () => {
-    expect(resolvePort({ env: "not-a-number", config: { port: 5 } })).toBe(5);
-  });
-});
-
-describe("cli/resolve resolveSandbox", () => {
-  it("flag beats env beats config beats default", () => {
-    expect(resolveSandbox({ flag: "local", env: "kubernetes", config: { sandbox: "docker" } })).toBe("local");
-    expect(resolveSandbox({ env: "kubernetes", config: { sandbox: "docker" } })).toBe("kubernetes");
-    expect(resolveSandbox({ config: { sandbox: "local" } })).toBe("local");
-    expect(resolveSandbox({})).toBe(SERVE_DEFAULTS.sandbox);
-  });
-
-  it("ignores an invalid backend name and falls through", () => {
-    expect(resolveSandbox({ flag: "bogus", config: { sandbox: "kubernetes" } })).toBe("kubernetes");
-  });
-});
+// Note: serve's port/sandbox precedence lives in resolveServeSettings
+// (cli/commands/serve.ts) and is tested in serve.test.ts. resolve.ts owns only
+// the shared dataDir + instance resolvers.
 
 describe("cli/resolve resolveDataDir", () => {
   it("flag beats env beats config beats default", () => {

@@ -18,43 +18,18 @@ export function firstDefined<T>(...values: Array<T | undefined | null>): T | und
   return undefined;
 }
 
-/** Built-in defaults for serve options (the lowest-precedence source). */
+/** Built-in defaults for the lowest-precedence source.
+ *
+ * Only `dataDir` lives here. Serve's port/sandbox precedence (incl. the 8788
+ * serve default and docker→local auto-detect) is owned by
+ * `resolveServeSettings` in `cli/commands/serve.ts` — do NOT reintroduce
+ * port/sandbox defaults here; a second, divergent resolver was the drift trap
+ * this deletion removed. */
 export const SERVE_DEFAULTS = {
-  port: 8787,
-  sandbox: "docker" as const,
   dataDir: resolve(homedir(), ".valet"),
 };
 
-export interface PortSources {
-  flag?: number;
-  env?: string;
-  config?: ServeConfig;
-}
-
-/** Resolve the serve port: flag > env (`PORT`) > config.serve.port > 8787. */
-export function resolvePort(sources: PortSources): number {
-  const envPort = parseIntOrUndefined(sources.env);
-  return firstDefined(sources.flag, envPort, sources.config?.port, SERVE_DEFAULTS.port) ?? SERVE_DEFAULTS.port;
-}
-
 export type SandboxKind = "docker" | "local" | "kubernetes";
-
-export interface SandboxSources {
-  flag?: string;
-  env?: string;
-  config?: ServeConfig;
-}
-
-/** Resolve the sandbox backend: flag > env > config.serve.sandbox > docker. */
-export function resolveSandbox(sources: SandboxSources): SandboxKind {
-  const candidate = firstDefined(
-    normalizeSandbox(sources.flag),
-    normalizeSandbox(sources.env),
-    sources.config?.sandbox,
-    SERVE_DEFAULTS.sandbox,
-  );
-  return candidate ?? SERVE_DEFAULTS.sandbox;
-}
 
 export interface DataDirSources {
   flag?: string;
@@ -98,15 +73,4 @@ export function resolveInstance(sources: InstanceSources): ResolvedInstance {
   if (profile === undefined) throw new ProfileNotFoundError(name);
 
   return { name, url: profile.url, apiKey: profile.apiKey };
-}
-
-function parseIntOrUndefined(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const n = Number.parseInt(value, 10);
-  return Number.isNaN(n) ? undefined : n;
-}
-
-function normalizeSandbox(value: string | undefined): SandboxKind | undefined {
-  if (value === "docker" || value === "local" || value === "kubernetes") return value;
-  return undefined;
 }
