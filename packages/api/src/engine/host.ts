@@ -28,6 +28,7 @@ import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { buildWorkspacePrep } from "./workspace-prep.js";
 import { resolvePrebuildImage, type PrebuildResolution } from "../prebuilds/resolve.js";
+import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { hasOrgKey } from "../services/model-catalog.js";
@@ -183,6 +184,17 @@ export interface EngineHostOpts {
   idleSweepTestHooks?: {
     beforeSuspend?: (sessionId: string) => Promise<void> | void;
   };
+  /**
+   * Registry pull-preflight config for prebuilt-image resolution (sandbox
+   * images v2 final-review Fix 3). When set, `resolvePrebuildImage` HEADs a
+   * resolved kubernetes-backend image ref against the registry before booting
+   * from it — a down registry / pruned image degrades to a COLD start instead
+   * of an `ImagePullBackOff`. Absent (docker/local dev, tests) === no
+   * preflight; the resolution proceeds as before. Threaded from
+   * `VALET_PREBUILD_REGISTRY_INSECURE`/`VALET_PREBUILD_REGISTRY_PUSH` in
+   * `providers/node.ts`, mirroring `resolveImageBuilder`'s own registry env.
+   */
+  prebuildPreflight?: PrebuildPreflightOpts;
 }
 
 export interface SessionMeta {
@@ -452,7 +464,12 @@ export class EngineHost {
     // custom images, boot from that image and refresh it via fetch-on-start
     // prep. `resolvePrebuildImage` never throws — any failure falls back to the
     // stock `defaultImage`, so session build is never blocked on it.
-    const prebuild = await resolvePrebuildImage(this.opts.db, meta, this.opts.sandboxProvider);
+    const prebuild = await resolvePrebuildImage(
+      this.opts.db,
+      meta,
+      this.opts.sandboxProvider,
+      this.opts.prebuildPreflight,
+    );
     const image = prebuild?.imageRef ?? this.opts.defaultImage;
     if (prebuild) await this.recordPrebuildId(sessionId, prebuild.prebuildId);
     const prepareSandbox = this.buildPrepareSandbox(meta, prebuild);

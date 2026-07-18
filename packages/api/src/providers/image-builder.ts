@@ -17,6 +17,7 @@
 import * as k8s from "@kubernetes/client-node";
 import { batchJobsApiAdapter } from "@valet/sandbox-kubernetes";
 import type { ImageBuilder } from "../prebuilds/builder.js";
+import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { DockerImageBuilder, type SpawnFn } from "../prebuilds/docker-builder.js";
 import { KubernetesImageBuilder } from "../prebuilds/k8s-builder.js";
 import { parseSandboxBackend, resolveKubeConfig } from "./sandbox-backend.js";
@@ -123,4 +124,23 @@ export function resolveImageBuilder(
     case "none":
       return null;
   }
+}
+
+/**
+ * Registry pull-preflight config for `resolvePrebuildImage` (sandbox images v2
+ * final-review Fix 3). Returns `undefined` for any non-kubernetes sandbox
+ * backend (docker images are daemon-local — no registry pull, nothing to
+ * preflight). For kubernetes, mirrors `resolveImageBuilder`'s own registry env
+ * resolution (`VALET_PREBUILD_REGISTRY_INSECURE`, `VALET_PREBUILD_REGISTRY_PUSH`)
+ * so the preflight HEADs the SAME registry, over the SAME in-cluster PUSH host,
+ * with the SAME scheme the builder pushed with.
+ */
+export function resolvePrebuildPreflight(env: NodeJS.ProcessEnv): PrebuildPreflightOpts | undefined {
+  if (parseSandboxBackend(env.VALET_SANDBOX_BACKEND) !== "kubernetes") return undefined;
+  const registryInsecure =
+    env.VALET_PREBUILD_REGISTRY_INSECURE !== undefined
+      ? env.VALET_PREBUILD_REGISTRY_INSECURE === "true"
+      : env.VALET_PREBUILD_REGISTRY === undefined;
+  const registryPushHost = env.VALET_PREBUILD_REGISTRY_PUSH || undefined;
+  return { registryInsecure, ...(registryPushHost ? { registryPushHost } : {}) };
 }

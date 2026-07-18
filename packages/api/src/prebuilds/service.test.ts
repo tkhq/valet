@@ -170,7 +170,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       expect(row.status).toBe("queued");
       expect(row.commitSha).toBe("headsha1");
       expect(row.builderBackend).toBe("docker");
-      expect(row.imageRef).toBe(imageRefFor("docker", "acme", "widgets", "headsha1"));
+      expect(row.imageRef).toBe(imageRefFor("docker", configId, "acme", "widgets", "headsha1"));
       expect(row.recipe).toEqual({
         recipe: [{ id: "npm-ci", lockfile: "package-lock.json", command: "npm ci" }],
         setup: [],
@@ -670,21 +670,31 @@ describe("PrebuildService.runSchedulerPass", () => {
 });
 
 describe("imageRefFor / slugify", () => {
-  it("slugifies owner/repo into the valet-prebuild convention for docker", () => {
+  it("slugifies configId/owner/repo into the valet-prebuild convention for docker (config as a path segment)", () => {
     expect(slugify("Acme_Corp")).toBe("acme-corp");
-    expect(imageRefFor("docker", "Acme Corp", "My Repo!", "abc123")).toBe("valet-prebuild/acme-corp-my-repo:abc123");
+    expect(imageRefFor("docker", "cfg_ABC", "Acme Corp", "My Repo!", "abc123")).toBe(
+      "valet-prebuild/cfg-abc/acme-corp-my-repo:abc123",
+    );
   });
 
-  it("kubernetes: prefixes the registry host onto <owner>-<repo>:<sha>, no valet-prebuild/ segment", () => {
-    expect(imageRefFor("kubernetes", "acme", "widgets", "abc123", "my-registry:5000")).toBe(
-      "my-registry:5000/acme-widgets:abc123",
+  it("kubernetes: prefixes the registry host onto <configSlug>/<owner>-<repo>:<sha>", () => {
+    expect(imageRefFor("kubernetes", "cfg1", "acme", "widgets", "abc123", "my-registry:5000")).toBe(
+      "my-registry:5000/cfg1/acme-widgets:abc123",
     );
   });
 
   it("kubernetes: defaults to the bundled in-cluster registry host when none is supplied", () => {
-    expect(imageRefFor("kubernetes", "acme", "widgets", "abc123")).toBe(
-      `${DEFAULT_PREBUILD_REGISTRY_HOST}/acme-widgets:abc123`,
+    expect(imageRefFor("kubernetes", "cfg1", "acme", "widgets", "abc123")).toBe(
+      `${DEFAULT_PREBUILD_REGISTRY_HOST}/cfg1/acme-widgets:abc123`,
     );
+  });
+
+  it("two configs for the same repo+sha get distinct repository paths (no cross-config collision)", () => {
+    const a = imageRefFor("kubernetes", "cfg-org-a", "acme", "widgets", "sha", "reg:5000");
+    const b = imageRefFor("kubernetes", "cfg-org-b", "acme", "widgets", "sha", "reg:5000");
+    expect(a).not.toBe(b);
+    expect(a).toBe("reg:5000/cfg-org-a/acme-widgets:sha");
+    expect(b).toBe("reg:5000/cfg-org-b/acme-widgets:sha");
   });
 });
 

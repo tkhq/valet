@@ -23,7 +23,7 @@ import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
-import { resolveImageBuilder } from "./image-builder.js";
+import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { PrebuildService } from "../prebuilds/service.js";
 import type { Providers } from "./types.js";
 
@@ -218,6 +218,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
     idleMinutes: resolveIdleMinutes(process.env),
+    ...(resolvePrebuildPreflight(process.env) ? { prebuildPreflight: resolvePrebuildPreflight(process.env) } : {}),
     ...buildHibernationHooks(db),
     db,
     apiBaseUrl: opts.apiBaseUrl,

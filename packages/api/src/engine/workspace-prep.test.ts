@@ -365,7 +365,7 @@ describe("buildWorkspacePrep", () => {
     const PNPM_STEP = { id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" };
     const DIFF_CMD = "git diff --name-only 'bakedsha' HEAD -- 'pnpm-lock.yaml'";
 
-    it("cold workspace: stages the baked repo with `cp -a` (never git clone), resets origin, fetches, checks out ref", async () => {
+    it("cold workspace: stages the baked repo with `cp -a` (never git clone), resets origin, fetches, force-checks-out origin's ref", async () => {
       const sandbox = new RecordingSandbox();
       const prep = buildWorkspacePrep({
         apiUrl: API_URL,
@@ -380,7 +380,72 @@ describe("buildWorkspacePrep", () => {
       expect(commands.some((c) => c.startsWith("git clone"))).toBe(false);
       expect(commands).toContain("git remote set-url origin 'https://github.com/acme/widgets.git'");
       expect(commands).toContain("git fetch origin");
-      expect(commands).toContain("git checkout 'main'");
+      // The baked LOCAL `main` sits at bakedSha; a plain `git checkout main`
+      // would stay there (git does not fast-forward an existing branch on
+      // checkout), so the workspace would never reach upstream head. A
+      // reset-to-origin `checkout -B main origin/main` is the only form that
+      // advances the freshly-staged tree past the baked commit.
+      expect(commands).toContain("git checkout -B 'main' 'origin/main'");
+      expect(commands.some((c) => c === "git checkout 'main'")).toBe(false);
+    });
+
+    it("cold workspace, no ref pinned: resolves origin/HEAD's default branch and force-checks-out origin's head", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult("git symbolic-ref refs/remotes/origin/HEAD", {
+        stdout: "refs/remotes/origin/trunk\n",
+        stderr: "",
+        exitCode: 0,
+      });
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding()], // no ref
+        prebuild: { bakedSha: "bakedsha", recipe: [] },
+      });
+      await prep(sandbox, 1);
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands).toContain("git symbolic-ref refs/remotes/origin/HEAD");
+      expect(commands).toContain("git checkout -B 'trunk' 'origin/trunk'");
+    });
+
+    it("cold workspace, no ref and origin/HEAD unresolvable: stays at the baked commit (no checkout), logs", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult("git symbolic-ref refs/remotes/origin/HEAD", {
+        stdout: "",
+        stderr: "ref refs/remotes/origin/HEAD is not a symbolic ref",
+        exitCode: 1,
+      });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding()],
+        prebuild: { bakedSha: "bakedsha", recipe: [] },
+      });
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      const commands = sandbox.execCalls.map((c) => c.command);
+      expect(commands.some((c) => c.startsWith("git checkout"))).toBe(false);
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+
+    it("cold workspace: fetch failure stays at the baked commit — no checkout, no reinstall (offline-tolerant)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult("git fetch origin", { stdout: "", stderr: "offline", exitCode: 1 });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding({ ref: "main" })],
+        prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
+      });
+      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      const commands = sandbox.execCalls.map((c) => c.command);
+      // Fetch failed → do NOT advance the tree; leaving HEAD at the baked sha
+      // means the `bakedSha..HEAD` diff is empty and no install re-runs.
+      expect(commands.some((c) => c.startsWith("git checkout"))).toBe(false);
+      expect(commands.some((c) => c.startsWith("git symbolic-ref"))).toBe(false);
+      expect(commands.some((c) => c.startsWith("git diff"))).toBe(false);
+      expect(commands.some((c) => c === "pnpm install --frozen-lockfile")).toBe(false);
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
     });
 
     it("re-runs an install whose lockfile drifted between the baked sha and head", async () => {
@@ -451,20 +516,6 @@ describe("buildWorkspacePrep", () => {
       // Baked-image diff/reinstall is skipped — the workspace copy is authoritative.
       expect(commands.some((c) => c.startsWith("git diff"))).toBe(false);
       expect(commands.some((c) => c === "pnpm install --frozen-lockfile")).toBe(false);
-    });
-
-    it("offline-tolerant: a fetch failure on the staged repo logs and prep continues to reinstall", async () => {
-      const sandbox = new RecordingSandbox();
-      sandbox.setResult("git fetch origin", { stdout: "", stderr: "offline", exitCode: 1 });
-      sandbox.setResult(DIFF_CMD, { stdout: "", stderr: "", exitCode: 0 });
-      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      const prep = buildWorkspacePrep({
-        apiUrl: API_URL,
-        repos: [binding({ ref: "main" })],
-        prebuild: { bakedSha: "bakedsha", recipe: [PNPM_STEP] },
-      });
-      await expect(prep(sandbox, 1)).resolves.toBeUndefined();
-      errSpy.mockRestore();
     });
 
     it("only the primary (index-0) binding is prebuilt — a second binding clones normally", async () => {

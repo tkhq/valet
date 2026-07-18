@@ -270,6 +270,67 @@ async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: Repo
   }
 }
 
+/** Resolves the remote's default branch name from `refs/remotes/origin/HEAD`
+ * (set by the bake clone, and preserved through `cp -a`). Returns e.g. `main`
+ * for `refs/remotes/origin/main`, or `null` when the symbolic ref is absent /
+ * unparseable (e.g. a bare remote with no HEAD) — the caller then leaves the
+ * staged tree at the baked commit rather than guessing a branch. */
+async function resolveRemoteDefaultBranch(sandbox: Sandbox, dir: string): Promise<string | null> {
+  const res = await safeExec(sandbox, "git symbolic-ref refs/remotes/origin/HEAD", { cwd: dir });
+  if (res.exitCode !== 0) return null;
+  const prefix = "refs/remotes/origin/";
+  const ref = res.stdout.trim();
+  if (!ref.startsWith(prefix)) return null;
+  const branch = ref.slice(prefix.length);
+  return branch.length > 0 ? branch : null;
+}
+
+/**
+ * Advances a FRESHLY-STAGED prebuilt repo (just `cp -a`'d out of the image, so
+ * HEAD *and* the baked local branch both sit at `bakedSha`) to upstream head.
+ *
+ * `git fetch origin` then `git checkout -B <ref> origin/<ref>`. The `-B` is
+ * load-bearing (spec decision 7): a plain `git checkout <ref>` would land on
+ * the STALE LOCAL branch the bake left at `bakedSha` — git does NOT
+ * fast-forward an already-existing branch on checkout — so the workspace would
+ * never reach upstream head and `conditionalReinstall`'s `bakedSha..HEAD` diff
+ * would always be empty (the reinstall trigger dead in the common path). `-B`
+ * resets the local branch to origin's just-fetched head, actually moving the
+ * tree forward. When no ref is pinned, the remote's default branch (from
+ * `origin/HEAD`) is used.
+ *
+ * Returns whether the fetch SUCCEEDED: `false` on an offline fetch, so the
+ * caller skips the conditional reinstall entirely — the tree never left
+ * `bakedSha`, exactly the baked state, and re-running installs against an
+ * unchanged lockfile would be pointless work. Offline-tolerant throughout:
+ * every failure is logged, none thrown (a prebuild is an optimization, never a
+ * correctness dependency). This path is ONLY for the freshly-staged case;
+ * warm restores keep the in-place `refreshExistingClone` behavior.
+ */
+async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<boolean> {
+  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir });
+  if (fetch.exitCode !== 0) {
+    console.error(
+      `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — staying at the baked commit, skipping reinstall: ${fetch.stderr || fetch.stdout}`,
+    );
+    return false;
+  }
+  const ref = binding.ref ?? (await resolveRemoteDefaultBranch(sandbox, dir));
+  if (!ref) {
+    console.error(
+      `workspace prep: could not resolve a remote default branch for ${binding.fullName} (${dir}) — staying at the baked commit`,
+    );
+    return true;
+  }
+  const checkout = await safeExec(sandbox, `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`, { cwd: dir });
+  if (checkout.exitCode !== 0) {
+    console.error(
+      `workspace prep: git checkout -B ${ref} origin/${ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
+    );
+  }
+  return true;
+}
+
 /** Fresh clone into `dir` (workspace-relative). Failure THROWS — this is
  * the "prep fails → startup-failure" path (engine seam, Task 1). */
 async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
@@ -360,8 +421,11 @@ async function conditionalReinstall(
  * / warm PVC) takes the SAME offline-tolerant refresh path as any existing
  * clone; the baked image is irrelevant then (the workspace copy is
  * authoritative). Otherwise (cold workspace): stage the baked repo out of the
- * image, reset `origin` to the real clone url, fetch + checkout the target ref
- * (offline-tolerant), then conditionally re-run drifted installs.
+ * image, reset `origin` to the real clone url, fetch + `checkout -B` the target
+ * ref off origin's head (`refreshStagedPrebuild` — moves the tree PAST the
+ * baked commit, unlike a plain checkout of the stale baked local branch), then
+ * conditionally re-run drifted installs — but ONLY when the fetch succeeded (an
+ * offline fetch leaves HEAD at `bakedSha`, so there is nothing to reinstall).
  */
 async function prepPrebuiltBinding(
   sandbox: Sandbox,
@@ -385,8 +449,8 @@ async function prepPrebuiltBinding(
       `workspace prep: git remote set-url origin failed for ${binding.fullName} (${dir}) — continuing: ${setUrl.stderr || setUrl.stdout}`,
     );
   }
-  await refreshExistingClone(sandbox, dir, binding);
-  await conditionalReinstall(sandbox, dir, prebuild);
+  const fetched = await refreshStagedPrebuild(sandbox, dir, binding);
+  if (fetched) await conditionalReinstall(sandbox, dir, prebuild);
 }
 
 /**

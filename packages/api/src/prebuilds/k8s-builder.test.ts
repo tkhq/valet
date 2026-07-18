@@ -37,6 +37,14 @@ describe("pushRefFor", () => {
     );
   });
 
+  it("preserves the config-scoped path segment (splits on the FIRST slash only)", () => {
+    // Org-scoped image paths (`<host>/<configSlug>/<owner>-<repo>:<tag>`) put a
+    // config segment between host and repo — the host swap must keep it intact.
+    expect(
+      pushRefFor("localhost:30500/cfg-org-a/octocat-hello-world:abc123", "valet-registry.valet-sandboxes.svc.cluster.local:5000"),
+    ).toBe("valet-registry.valet-sandboxes.svc.cluster.local:5000/cfg-org-a/octocat-hello-world:abc123");
+  });
+
   it("is a no-op when the push host is undefined (no split configured)", () => {
     expect(pushRefFor("localhost:30500/octocat-hello-world:abc123", undefined)).toBe(
       "localhost:30500/octocat-hello-world:abc123",

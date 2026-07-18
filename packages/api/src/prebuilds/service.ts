@@ -92,6 +92,7 @@ import { resolveRecipe, CANDIDATE_LOCKFILES, type ResolvedRecipe } from "./recip
 import type { SpawnFn } from "./docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "./builder.js";
 import { pushRefFor } from "./k8s-builder.js";
+import { headRegistryManifest, parseRegistryImageRef } from "./registry.js";
 
 /** Thrown by `startBuild`/`rebuild` when no `ImageBuilder` is wired
  * (`Providers.imageBuilder === null`) — routes map this to a 409 with an
@@ -129,21 +130,40 @@ export function slugify(value: string): string {
  * `VALET_PREBUILD_REGISTRY`). */
 export const DEFAULT_PREBUILD_REGISTRY_HOST = "valet-registry:5000";
 
-/** `valet-prebuild/<owner>-<repo>:<sha>` for the docker backend (spec
- * decision, task brief); `<registryHost>/<owner>-<repo>:<sha>` for the
- * kubernetes backend (Task 5) — `registryHost` comes from
+/**
+ * `valet-prebuild/<configSlug>/<owner>-<repo>:<sha>` for the docker backend
+ * (spec decision, task brief); `<registryHost>/<configSlug>/<owner>-<repo>:<sha>`
+ * for the kubernetes backend (Task 5) — `registryHost` comes from
  * `VALET_PREBUILD_REGISTRY` (threaded by `startBuild`'s caller below),
- * defaulting to the bundled registry's in-cluster Service DNS name. */
-export function imageRefFor(backend: string, owner: string, repo: string, sha: string, registryHost?: string): string {
-  const slug = `${slugify(owner)}-${slugify(repo)}`;
+ * defaulting to the bundled registry's in-cluster Service DNS name.
+ *
+ * The `<configSlug>` (DNS/OCI-safe lowercase of the `prebuild_configs.id`) is a
+ * distinct segment in the REPOSITORY PATH — NOT the tag. Without it, two orgs
+ * (or two configs) prebuilding the SAME repo at the SAME sha with different
+ * bases/recipes collapse to one tag (`<host>/<owner>-<repo>:<sha>`), colliding
+ * last-write-wins, and retention's kept-ref dedup — scoped per config — could
+ * let one config delete another's still-referenced image. Per-config nesting
+ * gives every config its own repository namespace. Registry paths allow the
+ * nesting; `pushRefFor`/`parseRegistryImageRef` split on the FIRST `/` only, so
+ * the extra path segment rides along untouched through host swaps + retention.
+ */
+export function imageRefFor(
+  backend: string,
+  configId: string,
+  owner: string,
+  repo: string,
+  sha: string,
+  registryHost?: string,
+): string {
+  const path = `${slugify(configId)}/${slugify(owner)}-${slugify(repo)}`;
   switch (backend) {
     case "kubernetes": {
       const host = registryHost ?? DEFAULT_PREBUILD_REGISTRY_HOST;
-      return `${host}/${slug}:${sha}`;
+      return `${host}/${path}:${sha}`;
     }
     case "docker":
     default:
-      return `valet-prebuild/${slug}:${sha}`;
+      return `valet-prebuild/${path}:${sha}`;
   }
 }
 
@@ -168,37 +188,8 @@ function dockerRmi(spawnFn: SpawnFn, imageRef: string): Promise<void> {
   });
 }
 
-/** Splits a `<host>/<name>:<tag>` ref into its parts. Returns `null` when
- * the ref doesn't contain a `/` (i.e. it's a docker-backend-shaped ref like
- * `valet-prebuild/foo:sha` with no registry host — never expected to reach
- * this function since callers only invoke it for `backend === "kubernetes"`
- * refs, but defensive rather than throwing on an unexpected shape). */
-function parseRegistryImageRef(imageRef: string): { host: string; name: string; tag: string } | null {
-  const lastColon = imageRef.lastIndexOf(":");
-  if (lastColon < 0) return null;
-  const hostAndName = imageRef.slice(0, lastColon);
-  const tag = imageRef.slice(lastColon + 1);
-  const slash = hostAndName.indexOf("/");
-  if (slash < 0) return null;
-  return { host: hostAndName.slice(0, slash), name: hostAndName.slice(slash + 1), tag };
-}
-
-/** The `Accept` header sent on the manifest HEAD. BuildKit pushes OCI
- * manifests (`application/vnd.oci.image.*`) by DEFAULT, so an Accept limited
- * to the docker schema2 media types makes the registry return the manifest
- * WITHOUT a `Docker-Content-Digest` (content-type mismatch) — the HEAD then
- * yields no digest, the DELETE is skipped, and retention silently no-ops.
- * Advertise all four: docker schema2 + schema2 manifest-list, and the OCI
- * image manifest + image index, comma-joined. */
-const MANIFEST_ACCEPT = [
-  "application/vnd.docker.distribution.manifest.v2+json",
-  "application/vnd.docker.distribution.manifest.list.v2+json",
-  "application/vnd.oci.image.manifest.v1+json",
-  "application/vnd.oci.image.index.v1+json",
-].join(", ");
-
 /** Deletes one image from a Docker Registry HTTP API v2 endpoint: HEAD the
- * tag's manifest (`Accept: MANIFEST_ACCEPT` — see that constant) to resolve
+ * tag's manifest (`Accept: MANIFEST_ACCEPT` — see `registry.ts`) to resolve
  * its content digest, then DELETE the manifest by that digest (registries
  * reject delete-by-tag). Best-effort — every failure (network, missing
  * `Docker-Content-Digest` header, non-2xx) is swallowed, matching
@@ -217,25 +208,22 @@ const MANIFEST_ACCEPT = [
 async function registryManifestDelete(imageRef: string, fetchImpl: typeof fetch, insecure: boolean): Promise<void> {
   const parsed = parseRegistryImageRef(imageRef);
   if (!parsed) return;
-  const { host, name, tag } = parsed;
-  const scheme = insecure ? "http" : "https";
+  const { host, name } = parsed;
+  const headRes = await headRegistryManifest(imageRef, fetchImpl, insecure);
+  if (!headRes) return;
+  const digest = headRes.headers.get("docker-content-digest");
+  if (!digest) return;
+  if (!insecure) {
+    // External registry: no credential plumbing yet. Don't silently issue
+    // an unauthenticated DELETE that a real registry 401s and we swallow —
+    // surface the gap so operators know retention isn't happening here.
+    console.warn(
+      `prebuild retention: external registry retention requires credentials — skipping delete of ${imageRef}`,
+    );
+    return;
+  }
   try {
-    const headRes = await fetchImpl(`${scheme}://${host}/v2/${name}/manifests/${tag}`, {
-      method: "HEAD",
-      headers: { Accept: MANIFEST_ACCEPT },
-    });
-    const digest = headRes.headers.get("docker-content-digest");
-    if (!digest) return;
-    if (!insecure) {
-      // External registry: no credential plumbing yet. Don't silently issue
-      // an unauthenticated DELETE that a real registry 401s and we swallow —
-      // surface the gap so operators know retention isn't happening here.
-      console.warn(
-        `prebuild retention: external registry retention requires credentials — skipping delete of ${imageRef}`,
-      );
-      return;
-    }
-    await fetchImpl(`${scheme}://${host}/v2/${name}/manifests/${digest}`, { method: "DELETE" });
+    await fetchImpl(`http://${host}/v2/${name}/manifests/${digest}`, { method: "DELETE" });
   } catch {
     // best-effort — see docblock
   }
@@ -529,7 +517,7 @@ export class PrebuildService {
       repo: { owner, name: repo },
     });
 
-    const imageRef = imageRefFor(builder.backend, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
+    const imageRef = imageRefFor(builder.backend, config.id, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
     const now = this.now();
     const row: PrebuildRow = {
       id: newPrebuildId(this.newId),

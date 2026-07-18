@@ -146,6 +146,80 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
   );
 
   it(
+    "advances a freshly-staged prebuild PAST the baked commit when upstream moved, and re-runs the drifted install",
+    async () => {
+      // Real-git freshness scenario (spec decision 7), no external network: a
+      // LOCAL bare repo stands in for `origin`. We bake at commit A (clone into
+      // /prebuilt/repo), then advance the bare origin to commit B with a
+      // lockfile change. `buildWorkspacePrep` must fetch + `checkout -B` the
+      // workspace to B (a plain `git checkout` of the stale baked local branch
+      // would stay at A), and the `bakedSha..HEAD` lockfile drift must trigger
+      // the reinstall step.
+      sandbox = await provider.create({ workspace: tmp, image: BASE_IMAGE });
+
+      // Everything below runs INSIDE the container (absolute container paths).
+      const setup = await sandbox.exec(
+        [
+          "set -e",
+          "git config --global user.email seed@test.local",
+          "git config --global user.name Seed",
+          "git config --global --add safe.directory '*'",
+          // Pin the default branch so the bare origin's HEAD and the seed's
+          // branch agree (older git defaults to `master`); otherwise the bake
+          // clone's origin/HEAD dangles and rev-parse HEAD fails.
+          "git config --global init.defaultBranch main",
+          "git init --bare /origin.git",
+          "mkdir /seed && cd /seed && git init -q",
+          "printf A > lock.txt && printf hello > file.txt",
+          "git add -A && git commit -q -m A",
+          "git remote add origin /origin.git && git push -q origin main",
+          // Bake: clone at commit A into /prebuilt/repo (sets origin/HEAD).
+          "git clone -q /origin.git /prebuilt/repo",
+          "git -C /prebuilt/repo rev-parse HEAD > /baked_sha",
+          // Advance origin to commit B (lockfile drift).
+          "cd /seed && printf B > lock.txt && git add -A && git commit -q -m B && git push -q origin main",
+          "git -C /seed rev-parse HEAD > /head_sha",
+        ].join("\n"),
+      );
+      expect(setup.exitCode, setup.stderr).toBe(0);
+
+      const bakedShaLocal = (await sandbox.exec("cat /baked_sha")).stdout.trim();
+      const headShaLocal = (await sandbox.exec("cat /head_sha")).stdout.trim();
+      expect(bakedShaLocal).toMatch(/^[0-9a-f]{40}$/);
+      expect(headShaLocal).toMatch(/^[0-9a-f]{40}$/);
+      expect(headShaLocal).not.toBe(bakedShaLocal);
+
+      const localBinding: RepoBinding = {
+        host: "github",
+        fullName: "seed/repo",
+        cloneUrl: "/origin.git",
+        auth: "auto",
+        ref: "main",
+      };
+      const prep = buildWorkspacePrep({
+        apiUrl: "http://127.0.0.1:1", // unreachable — local file remote needs no creds
+        repos: [localBinding],
+        prebuild: {
+          bakedSha: bakedShaLocal,
+          recipe: [{ id: "marker", lockfile: "lock.txt", command: "sh -c 'printf done > REINSTALL_MARKER.txt'" }],
+        },
+      });
+      await prep(sandbox, 1);
+
+      // The workspace advanced to origin's head (commit B), NOT the baked A.
+      const head = await sandbox.exec("git rev-parse HEAD");
+      expect(head.exitCode).toBe(0);
+      expect(head.stdout.trim()).toBe(headShaLocal);
+
+      // The lockfile drift (A→B) drove the conditional reinstall.
+      const marker = await sandbox.exec("cat REINSTALL_MARKER.txt");
+      expect(marker.exitCode).toBe(0);
+      expect(marker.stdout.trim()).toBe("done");
+    },
+    120_000,
+  );
+
+  it(
     "cold path still works: an ordinary (non-prebuilt) session clones from the same base image",
     async () => {
       sandbox = await provider.create({ workspace: tmp, image: BASE_IMAGE });
