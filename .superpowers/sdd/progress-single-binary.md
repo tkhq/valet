@@ -8,7 +8,7 @@ Branch: `feat/single-binary-cli` (worktree). Plan: `docs/plans/2026-07-17-single
 ## Tasks
 - [x] Plan written + committed
 - [x] T1 — Uniform asset-read seam (kill migration readdir) — commit 53c870cc; both reviews PASS
-- [ ] T2 — esbuild bundle + inline/copy assets + bundle guard
+- [x] T2 — esbuild bundle + inline/copy assets + bundle guard — commit 25ca43d2; both PASS; full single-file bundle (18.4mb) boots under plain node; note: pglite wasm compile needs ~15s at boot (raise sleeps in integration tests)
 - [ ] T3 — CLI scaffold + config/profiles + precedence
 - [ ] T4 — HTTP/WS InstanceClient library
 - [ ] T5 — `valet serve` command + sandbox detect + implicit local profile

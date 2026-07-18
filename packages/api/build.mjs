@@ -26,7 +26,10 @@ const external = [
 ];
 
 await build({
-  entryPoints: [resolve(here, "src/main.ts")],
+  // Entry is the CLI dispatcher (`valet <subcommand>`); `serve` lazily
+  // imports main.ts, every other subcommand lazily imports its command
+  // module, so `serve` pays nothing for the client/TUI deps.
+  entryPoints: [resolve(here, "src/cli.ts")],
   outfile: resolve(here, "dist/valet-api.mjs"),
   bundle: true,
   platform: "node",
