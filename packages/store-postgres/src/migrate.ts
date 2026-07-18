@@ -1,9 +1,5 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import type { PgDb } from "./db.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Bumped whenever the engine schema (0000_engine.sql) changes shape.
@@ -15,7 +11,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  */
 export const ENGINE_SCHEMA_VERSION = "2";
 
-const migrationsDir = join(__dirname, "..", "migrations", "pg");
+/**
+ * The one pre-1.0 engine migration. CLAUDE.md rule: we edit `0000` in place,
+ * never add `0001`/`0002`, so this is an explicit single-file read rather than
+ * a directory scan. Read via `new URL(..., import.meta.url)` so the asset
+ * resolves relative to this module (the seam a later bundling step relies on).
+ */
+const ENGINE_MIGRATION_FILES = ["0000_engine.sql"] as const;
+
+const migrationSql: Record<(typeof ENGINE_MIGRATION_FILES)[number], () => string> = {
+  "0000_engine.sql": () =>
+    readFileSync(new URL("../migrations/pg/0000_engine.sql", import.meta.url), "utf8"),
+};
 
 /**
  * Apply this package's postgres migrations to an open PgDb. Async — mirrors
@@ -33,18 +40,14 @@ export async function applyEngineMigrations(db: PgDb): Promise<void> {
     )
   `);
 
-  const files = readdirSync(migrationsDir)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-
-  for (const file of files) {
+  for (const file of ENGINE_MIGRATION_FILES) {
     const applied = await db.query(
       "SELECT 1 FROM __valet_engine_migrations WHERE filename = $1",
       [file],
     );
     if (applied.rows.length > 0) continue;
 
-    const sql = readFileSync(join(migrationsDir, file), "utf8");
+    const sql = migrationSql[file]();
     const statements = sql
       .split(/-->\s*statement-breakpoint/)
       .map((s) => s.trim())
