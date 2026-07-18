@@ -743,6 +743,11 @@ export type GetWorkflowRunResponse = WorkflowRunDetail;
 export interface ResolveWorkflowApprovalRequest {
   approved: boolean;
   note?: string;
+  /** "Grant the rest of this run" (action-policies plan, Task 3/6): exact
+   *  `(service, actionId)` pairs to authorize for the remainder of the run
+   *  via an exec-scoped runtime grant. Only consulted by the approval node
+   *  executor when `approved` is `true`; ignored on a denial. */
+  grantActions?: Array<{ service: string; actionId: string }>;
 }
 
 export interface ResolveWorkflowApprovalResponse {

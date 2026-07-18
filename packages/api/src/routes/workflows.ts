@@ -367,12 +367,24 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (typeof body.approved !== "boolean") {
     return c.json({ error: "approved is required" }, 400);
   }
+  let grantActions: Array<{ service: string; actionId: string }> | undefined;
+  if (body.grantActions !== undefined) {
+    if (
+      !Array.isArray(body.grantActions) ||
+      !body.grantActions.every(
+        (g) => g && typeof g === "object" && typeof g.service === "string" && typeof g.actionId === "string",
+      )
+    ) {
+      return c.json({ error: "grantActions must be an array of { service, actionId }" }, 400);
+    }
+    grantActions = body.grantActions;
+  }
 
   await workflowStore.insertSignal({
     runId,
     signalId: `approval:${nodeId}:resolution`,
     signalType: `approval:${nodeId}`,
-    payload: { approved: body.approved, resolvedBy: user.id, note: body.note },
+    payload: { approved: body.approved, resolvedBy: user.id, note: body.note, grantActions },
     createdAt: Date.now(),
   });
   await workflowRunHost.wake(runId);
