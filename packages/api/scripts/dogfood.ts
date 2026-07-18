@@ -19,7 +19,6 @@ import { homedir } from "node:os";
 import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { serve } from "@hono/node-server";
 import { createApp } from "../src/app.js";
 import { buildNodeProviders } from "../src/providers/node.js";
 import type { WireEvent } from "../src/wire/types.js";
@@ -51,11 +50,13 @@ const providers = await buildNodeProviders({
 });
 
 process.env.VALET_LOCAL_AUTH = "1"; // auth stub
-const { app, injectWebSocket } = createApp(providers);
-const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
-  console.log(`[dogfood] server listening on http://localhost:${info.port}`);
+const { startServer } = createApp(providers);
+const server = startServer({
+  port: PORT,
+  onListen: (boundPort) => {
+    console.log(`[dogfood] server listening on http://localhost:${boundPort}`);
+  },
 });
-injectWebSocket(server);
 
 // ── Step 1: create session.
 
@@ -171,7 +172,7 @@ async function shutdown(code: number): Promise<never> {
   } catch (err) {
     console.error("destroyAll failed:", err);
   }
-  server.close(() => process.exit(code));
+  void server.close().finally(() => process.exit(code));
   setTimeout(() => process.exit(code), 5_000).unref();
   await new Promise(() => {}); // never resolves; satisfies `Promise<never>`
   throw new Error("unreachable");

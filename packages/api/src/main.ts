@@ -9,12 +9,12 @@
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
-import { serve } from "@hono/node-server";
 import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createApp, type AuthWiring } from "./app.js";
+import { selectServerAdapter } from "./server-adapter.js";
 import { buildNodeProviders } from "./providers/node.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
@@ -235,7 +235,11 @@ const authWiring: AuthWiring = authConfig
 // baked-in `packages/web/dist` in the legacy docker image. See
 // `static-web.ts` and `assets/base.ts`.
 const webDistDir = webDistPath();
-const { app, injectWebSocket, webServed } = createApp(providers, authWiring, { webDistDir });
+// Runtime seam: Node (`serve` + `injectWebSocket`) by default, Bun
+// (`Bun.serve` + `hono/bun`) inside a `bun --compile` binary. See
+// server-adapter.ts.
+const adapter = await selectServerAdapter();
+const { app, startServer, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
 // A set-but-unmounted dist means the bundled image shipped without a valid
 // build (missing/incomplete web/dist/index.html) — the api would boot and
 // silently 404 JSON at `/` instead of serving the SPA. Fail loud at boot.
@@ -246,19 +250,19 @@ if (webDistDir && !webServed) {
   process.exit(1);
 }
 
-const server = serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`@valet/api listening on http://localhost:${info.port}`);
-  console.log(`  data dir: ${dataDir}`);
-  console.log(`  db:       ${databaseUrl ? databaseUrl.replace(/:[^:@]*@/, ":***@") : `pglite:${pgDataDir}`}`);
-  console.log(`  blobs:    ${blobsRoot}`);
-  console.log(
-    `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
-  );
-  console.log(`  web:      ${webServed ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
+const server = startServer({
+  port,
+  onListen: (boundPort) => {
+    console.log(`@valet/api listening on http://localhost:${boundPort}`);
+    console.log(`  data dir: ${dataDir}`);
+    console.log(`  db:       ${databaseUrl ? databaseUrl.replace(/:[^:@]*@/, ":***@") : `pglite:${pgDataDir}`}`);
+    console.log(`  blobs:    ${blobsRoot}`);
+    console.log(
+      `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
+    );
+    console.log(`  web:      ${webServed ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
+  },
 });
-
-// Attach the WS upgrade handler to the running http server.
-injectWebSocket(server);
 
 // ── Graceful shutdown — evict live sandboxes so containers don't leak. This
 // does NOT call process.exit: the caller (direct-entry guard below, or the
@@ -293,7 +297,7 @@ async function close(): Promise<void> {
   } catch (err) {
     console.error("evictAll failed:", err);
   }
-  await new Promise<void>((res) => server.close(() => res()));
+  await server.close();
 }
 
 // Last-resort guards. A single bad request must not take down the server
