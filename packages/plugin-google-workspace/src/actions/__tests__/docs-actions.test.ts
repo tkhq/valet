@@ -224,7 +224,9 @@ describe('executeDocsAction', () => {
     ).toBe(true);
   });
 
-  it('replace_section_by_heading fills an empty last section, clamping the insert below doc end and issuing no delete', async () => {
+  it('replace_section_by_heading fills an empty last section as its own paragraph, leaving the heading intact', async () => {
+    // trailingHeadingDoc: "Conclusion\n" is [13,24), the final paragraph.
+    // docEndIndex is 24; headingEndIndex is 24.
     const { batchRequests } = stubDocsApi(trailingHeadingDoc());
 
     const result = await executeDocsAction(
@@ -234,19 +236,65 @@ describe('executeDocsAction', () => {
     );
     expect(result.success).toBe(true);
 
-    // The section is empty (heading is the final paragraph), so nothing is deleted.
+    // The section is empty (heading is the final paragraph), so nothing is
+    // deleted — a deleteContentRange would either be a no-op or reach the
+    // terminal newline and 400.
     const deletes = batchRequests
       .map((r) => (r.deleteContentRange as { range?: unknown } | undefined)?.range)
       .filter((r): r is unknown => !!r);
     expect(deletes).toHaveLength(0);
 
-    // Insert must land at docEndIndex-1 (23), NOT at docEndIndex (24) — the Docs
-    // API rejects an insertion at the segment end index.
     const inserts = batchRequests
       .map((r) => r.insertText as { location?: { index?: number }; text?: string } | undefined)
       .filter((r): r is { location?: { index?: number }; text?: string } => !!r);
-    expect(inserts.some((i) => i.location?.index === 23 && i.text === 'Wrapping up.')).toBe(true);
-    expect(inserts.some((i) => i.location?.index === 24)).toBe(false);
+
+    // A single paragraph break is inserted at docEndIndex-1 (23) to close the
+    // heading paragraph and open a fresh one below it.
+    expect(inserts.some((i) => i.location?.index === 23 && i.text === '\n')).toBe(true);
+
+    // The body is inserted into that new paragraph (at the old doc end, 24) so it
+    // forms its own paragraph rather than merging onto the heading line.
+    expect(inserts.some((i) => i.location?.index === 24 && i.text === 'Wrapping up.')).toBe(true);
+
+    // CORE FIX (FINDING 1): every NORMAL_TEXT isolation range lies entirely after
+    // the heading — it must NOT overlap the heading paragraph [13,24), which would
+    // downgrade the heading to NORMAL_TEXT. headingEndIndex is 24.
+    const headingEndIndex = 24;
+    const normalRanges = paragraphStyleRequests(batchRequests).filter(
+      (r) => r.paragraphStyle?.namedStyleType === 'NORMAL_TEXT',
+    );
+    expect(normalRanges.length).toBeGreaterThan(0);
+    for (const r of normalRanges) {
+      expect(r.range?.startIndex).toBeGreaterThanOrEqual(headingEndIndex);
+    }
+  });
+
+  it('replace_section_by_heading with preserveHeading=false never deletes the terminal newline of an empty last section', async () => {
+    // trailingHeadingDoc: "Conclusion\n" is [13,24), docEndIndex is 24. Removing
+    // the heading must cap the delete at docEndIndex-1 (23); a range reaching 24
+    // includes the terminal newline and the Docs API rejects it.
+    const { batchRequests } = stubDocsApi(trailingHeadingDoc());
+
+    const result = await executeDocsAction(
+      'docs.replace_section_by_heading',
+      {
+        documentId: 'doc-2',
+        headingText: 'Conclusion',
+        markdown: 'Wrapping up.',
+        preserveHeading: false,
+      },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const deletes = batchRequests
+      .map((r) => (r.deleteContentRange as { range?: { startIndex?: number; endIndex?: number } } | undefined)?.range)
+      .filter((r): r is { startIndex?: number; endIndex?: number } => !!r);
+    // FINDING 2: any emitted delete stops at or below docEndIndex-1 (23).
+    for (const range of deletes) {
+      expect(range.endIndex).toBeLessThanOrEqual(23);
+      expect(range.endIndex).not.toBe(24);
+    }
   });
 
   it('insert_markdown_at_index clamps an index at the document end to docEndIndex-1', async () => {

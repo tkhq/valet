@@ -1473,16 +1473,27 @@ async function executeAction(
         const deleteStart = p.preserveHeading
           ? section.bodyStartIndex
           : section.headingStartIndex;
-        const deleteEnd = section.bodyEndIndex;
-        // Clamp the insertion index strictly below the document end index. The
-        // Docs API requires an insertion index less than the segment end index.
-        // For an empty last section (a trailing heading with no body) deleteStart
-        // equals the document end, so an unclamped insert 400s. Use the same
-        // docEndIndex findHeadingSection uses to cap bodyEndIndex.
         const docEndIndex = getEndIndex(bodyResult.body);
-        const insertIndex = Math.min(Math.max(1, deleteStart), docEndIndex - 1);
+        // Cap the delete end one below the document end index. The document's
+        // terminal newline can never sit inside a deleteContentRange — the Docs
+        // API rejects any range that reaches the segment end. For a genuinely
+        // empty section this caps deleteEnd at or below deleteStart, so nothing
+        // is deleted.
+        const deleteEnd = Math.min(section.bodyEndIndex, docEndIndex - 1);
 
-        // 1. Delete the existing section content (if any).
+        // Empty section at the very end of the document: the heading is the
+        // final paragraph and there is no body paragraph to insert into. When we
+        // keep the heading, inserting at the clamped index would land inside the
+        // heading paragraph (before its terminating newline), merging the body
+        // onto the heading line — and the NORMAL_TEXT isolation pass would then
+        // overlap and downgrade the heading. Mirror docs.append_markdown: insert
+        // a paragraph break to close the heading and open a fresh paragraph,
+        // advance past it, then insert the body into that new paragraph.
+        const needsParagraphBreak =
+          p.preserveHeading && deleteStart >= docEndIndex - 1;
+
+        // 1. Delete the existing section content (only when capping still leaves
+        //    something to remove — an empty section deletes nothing).
         if (deleteEnd > deleteStart) {
           const deleteResult = await executeBatchUpdate(docId, token, [
             { deleteContentRange: { range: { startIndex: deleteStart, endIndex: deleteEnd } } },
@@ -1492,7 +1503,27 @@ async function executeAction(
           }
         }
 
-        // 2. Insert the new body, style-isolated so plain paragraphs default to
+        // 2. Choose the insertion index, opening a fresh paragraph first when the
+        //    heading is the document's final paragraph.
+        let insertIndex: number;
+        if (needsParagraphBreak) {
+          const breakResult = await executeBatchUpdate(docId, token, [
+            { insertText: { location: { index: docEndIndex - 1 }, text: '\n' } },
+          ]);
+          if (!breakResult.success) {
+            return {
+              success: false,
+              error: breakResult.error || 'Failed to open a new paragraph for the section body',
+            };
+          }
+          // The break closed the heading paragraph at docEndIndex-1; the freshly
+          // opened paragraph now starts at the old document end index.
+          insertIndex = docEndIndex;
+        } else {
+          insertIndex = Math.min(Math.max(1, deleteStart), docEndIndex - 1);
+        }
+
+        // 3. Insert the new body, style-isolated so plain paragraphs default to
         //    NORMAL_TEXT instead of inheriting the surrounding heading style.
         const result = await insertMarkdown(token, docId, p.markdown, {
           startIndex: insertIndex,
