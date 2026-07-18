@@ -20,6 +20,8 @@
     "build:assets": "node build/copy-assets.mjs",
     "build:bundle": "node build.mjs",
     "build": "pnpm run build:assets && pnpm run build:bundle",
+    "build:tar": "node build/make-assets-tar.mjs",
+    "build:binary": "pnpm run build:assets && pnpm run build:bundle && pnpm run build:tar && node build/compile-binary.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
