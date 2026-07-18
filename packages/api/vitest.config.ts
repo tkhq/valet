@@ -14,7 +14,17 @@ export default defineConfig({
     // projects' `src/**`-only includes are not applied, so without this a
     // default scan would execute those broken compiled copies. Harmless to the
     // inner projects (they only include `src/**`).
-    exclude: ["**/node_modules/**", "**/dist/**"],
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      // In CI, EXCLUDE infra-dependent e2e suites entirely (not merely skip):
+      // some build a real k8s/docker client at module/collection scope, which
+      // throws on the GitHub runner (no cluster/images) before a `describe.skip`
+      // can take effect. They run unchanged locally (`CI` unset).
+      ...(process.env.CI
+        ? ["**/*.cluster.test.ts", "**/*.docker.test.ts", "**/integration/prebuilds.e2e.test.ts"]
+        : []),
+    ],
     // Generous timeout at the OUTER level. When this package runs as a project
     // of the ROOT vitest config (`projects: ['packages/api']`), the inner
     // projects' own `testTimeout` is not applied — the shared/outer config is —
