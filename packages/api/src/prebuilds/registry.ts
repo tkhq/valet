@@ -104,5 +104,10 @@ export async function prebuildImagePullable(imageRef: string, opts: PrebuildPref
     opts.registryInsecure,
     opts.timeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS,
   );
-  return res !== null && res.ok;
+  if (res === null) return false;
+  // 401/403 means "this credential-less preflight can't tell", NOT "absent":
+  // against a credentialed external registry the kubelet holds the
+  // pullSecret and may well pull fine — treat auth rejections as pullable
+  // rather than silently cold-starting every prebuilt session.
+  return res.ok || res.status === 401 || res.status === 403;
 }

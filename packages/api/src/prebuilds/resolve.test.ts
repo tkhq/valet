@@ -283,6 +283,17 @@ describe("resolvePrebuildImage", () => {
       expect(res).toBeNull();
     });
 
+    it("credentialed external registry (HEAD 401): resolves to the prebuilt ref — kubelet holds the pullSecret", async () => {
+      await seedPushed();
+      const fetchImpl: typeof fetch = async () => new Response(null, { status: 401 });
+      const res = await resolvePrebuildImage(db, meta(), fakeProvider(true, "kubernetes"), {
+        registryInsecure: false,
+        registryPushHost: "registry.example.com",
+        fetchImpl,
+      });
+      expect(res?.imageRef).toBe("localhost:30500/cfg1/acme-widgets:newsha");
+    });
+
     it("docker backend: no preflight (daemon-local image), resolves without any fetch", async () => {
       const cfg = await seedConfig(db);
       await seedPrebuild(db, cfg, {
