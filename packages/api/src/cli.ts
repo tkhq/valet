@@ -35,10 +35,10 @@ const notImpl: CommandImporter = () => import("./cli/commands/_notimpl.js");
  */
 const COMMANDS: Record<string, CommandImporter> = {
   serve: () => import("./cli/commands/serve.js"),
-  sessions: notImpl,
-  send: notImpl,
-  gates: notImpl,
-  status: notImpl,
+  sessions: () => import("./cli/commands/sessions.js"),
+  send: () => import("./cli/commands/send.js"),
+  gates: () => import("./cli/commands/gates.js"),
+  status: () => import("./cli/commands/status.js"),
   login: notImpl,
   logout: notImpl,
   instance: notImpl,
