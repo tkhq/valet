@@ -1,0 +1,124 @@
+name: Release CLI
+
+# Builds the single-binary CLI distribution on a version tag.
+#
+# Packaging status (single-binary CLI spec #5, T11 spike verdict): the shipping
+# artifact is the esbuild bundle (`dist/valet-api.mjs`) run under Node. Native
+# per-platform binaries via `bun build --compile` are OWED — the spike failed
+# the WebSocket gate (`@hono/node-ws` upgrade does not fire under a compiled Bun
+# binary; see docs/specs/2026-07-15-single-binary-cli-design.md Deviations). So
+# this workflow ships the bundle + its sibling assets as a tarball; native
+# binaries are surfaced as owed, not built here.
+#
+# The bundle is NOT self-contained: it resolves web/pglite/migrations/plugin
+# assets from a sibling `assets/` dir (assetBase() → VALET_ASSET_DIR ?? the
+# bundle's own directory). The tarball preserves that layout so `node
+# valet-api.mjs serve` works after extraction with no extra config.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag/label for a manual build (no Release is published)"
+        required: false
+
+permissions:
+  contents: write # create the GitHub Release + upload assets
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: pnpm install --frozen-lockfile
+
+      # registry.gen.ts is committed, but regenerate so a tag always reflects
+      # the current plugin set.
+      - name: Generate plugin registries
+        run: make generate-registries
+
+      - name: Build web SPA
+        run: pnpm --filter @valet/web build
+
+      - name: Build API bundle + copy assets
+        run: pnpm --filter @valet/api run build
+
+      - name: Verify the bundle boots under Node
+        run: |
+          set -euo pipefail
+          DATA_DIR="$(mktemp -d)"
+          PORT=8799
+          VALET_BUNDLED=1 VALET_LOCAL_AUTH=1 ANTHROPIC_API_KEY=sk-ant-ci-placeholder \
+            node packages/api/dist/valet-api.mjs serve --port "$PORT" --data-dir "$DATA_DIR" --sandbox local &
+          SERVE_PID=$!
+          trap 'kill "$SERVE_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS "http://localhost:$PORT/api/health" >/dev/null 2>&1; then
+              echo "bundle booted and served /api/health"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "bundle did not become healthy within 60s" >&2
+          exit 1
+
+      - name: Package bundle + assets
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          VERSION="${VERSION:-dev}"
+          STAGE="valet-cli-${VERSION}"
+          mkdir -p "$STAGE"
+          cp packages/api/dist/valet-api.mjs "$STAGE/"
+          cp -R packages/api/dist/assets "$STAGE/assets"
+          cat > "$STAGE/README.txt" <<'EOF'
+          Valet single-binary CLI (bundle distribution).
+
+          Requires Node 22+ on PATH. Run:
+
+            node valet-api.mjs serve
+
+          then open the printed web URL. `valet-api.mjs` must stay next to the
+          `assets/` directory (web SPA, PGlite wasm, migrations, plugin content).
+          Every subcommand works via `node valet-api.mjs <command>` — e.g.
+          `node valet-api.mjs chat`, `node valet-api.mjs status --json`.
+
+          Native single-file binaries (no Node required) are not yet shipped —
+          the Bun `--compile` path is owed pending a WebSocket-adapter change.
+          EOF
+          tar -czf "valet-cli-${VERSION}-bundle.tgz" "$STAGE"
+          echo "ARTIFACT=valet-cli-${VERSION}-bundle.tgz" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: valet-cli-bundle
+          path: ${{ env.ARTIFACT }}
+
+      # Publish a GitHub Release only for real tag pushes (not manual dispatch).
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARTIFACT }}
+          body: |
+            Valet single-binary CLI — bundle distribution (`${{ github.ref_name }}`).
+
+            Run with Node 22+: extract and `node valet-api.mjs serve`.
+
+            Native per-platform binaries are owed (Bun `--compile` deferred — see
+            the spec Deviations for the WebSocket-adapter blocker).
