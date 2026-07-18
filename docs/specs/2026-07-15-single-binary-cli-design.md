@@ -1,7 +1,7 @@
 # Single Binary + CLI Design — the full product experience in one file
 
 **Date:** 2026-07-15
-**Status:** Draft
+**Status:** Implemented (bundle distribution; native single-file binary deferred — see Deviations)
 **Scope:** Packaging Valet as a self-contained per-platform binary (`valet serve` = the full product on embedded PGlite) that is simultaneously the CLI client for any instance, local or remote: scriptable session commands, an interactive `valet chat` TUI, instance/profile admin, and agent wiring against the instance's MCP HTTP endpoint. The MCP tool surface itself is a separate design; this spec wires clients to it.
 
 ## Context
@@ -61,3 +61,19 @@ On a clean machine with nothing installed (no node, no pnpm, no Docker): downloa
 - Browser-assisted `valet login` (API-key paste this pass).
 - A stdio MCP bridge (HTTP endpoint only, by decision).
 - npm-installable CLI package (`npx valet`) — possible later repackaging of the same bundle, not this pass.
+
+## Deviations & owed items (as implemented)
+
+Implemented on branch `feat/single-binary-cli` (PR against `dev-v2`). Plan: `docs/plans/2026-07-17-single-binary-cli.md`; ledger: `.superpowers/sdd/progress-single-binary.md`. What shipped vs. the locked decisions:
+
+**Packaging — bundle only; native single-file binary deferred (decision 4).** The esbuild bundle (`packages/api/dist/valet-api.mjs`, run under Node 22) is the shipping artifact — it kills runtime `tsx`, slims the image, and runs the whole product. The Bun `compile` spike (T11) ran the go/no-go gate in order and **stopped at a hard failure on gate (b)**: `@hono/node-ws`'s WS upgrade never fires under a `bun build --compile` binary (no `101`, no frames; the same client gets `101`+frames against the Node bundle). Gate (a) better-auth login round-trip (scrypt + HMAC cookies) PASSED under Bun; gate (c) PGlite kill-test was not reached. Per decision 4 this yields the **bundle-only / Node SEA fallback** verdict. Native binaries are owed; the only path to revisit compile is decision 4's own escape hatch — replace `@hono/node-server`+`@hono/node-ws` with `Bun.serve` native WebSocket handlers behind the `main.ts` `serve`/`injectWebSocket` seam (a real implementation task, not a spike). The bundle is also not yet self-contained: web SPA + PGlite wasm/data + migrations + plugin markdown ship as sibling `assets/` resolved via `assetBase()` (`VALET_ASSET_DIR` ?? the bundle's dir); true embedding is the binary's concern.
+
+**MCP wiring uses a documented placeholder token (decision on `/mcp`).** `valet mcp setup` emits/merges a Claude Code streamable-HTTP config for `<instance>/mcp`, but `/mcp` is guarded by better-auth **MCP OAuth (`Authorization: Bearer`)**, not the `x-api-key` the other routes use, and is only mounted when real auth is configured. The CLI cannot mint an MCP bearer token yet, so the command provisions the config shape + honestly documents the OAuth requirement (a `<MCP_OAUTH_TOKEN>` placeholder, or `--token` if the user already has one). The OAuth handshake is owed to the MCP-tool-surface pass.
+
+**`login` is API-key paste only (matches non-goals).** Real-auth `vlt_` keys are minted via the web UI (better-auth `POST /api/auth/api-key/create`); the CLI verifies a pasted key via `GET /api/me` before persisting.
+
+**One additive API surface change only.** `GET /api/health` gained `version` + `sandboxBackend` (append-only on `HealthResponse`); no engine/auth/wire change beyond that. `valet status` reports client↔server version skew off it.
+
+**`valet serve` default backend flip.** `serve` auto-detects `docker` if a reachable daemon is found, else `local` (decision 2). The api Docker image's ENTRYPOINT is now `cli.ts serve`, so an *unconfigured* container auto-detects `local` (no in-container daemon) rather than the prior explicit default — real deployments (the k8s chart) always set `VALET_SANDBOX_BACKEND` explicitly, so they are unaffected.
+
+**Owed test coverage (recorded, not silently dropped).** The CLI e2e suite (`packages/api/src/integration/cli.e2e.test.ts`, opt-in via `VALET_CLI_E2E=1`) covers status / session CRUD / exit-code matrix / keyless login-logout against a real spawned `valet serve`. Deferred: (1) real-auth login e2e (needs a logged-in better-auth session to mint a key); (2) the `gates resolve` round-trip and human-mode `send` (both need a real agent turn, gated on `ANTHROPIC_API_KEY`); (3) native-binary CI release (the `.github/workflows/release-cli.yml` workflow ships the Node bundle on tag; native binaries are owed with the compile decision above).
