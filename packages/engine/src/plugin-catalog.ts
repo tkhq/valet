@@ -415,6 +415,12 @@ function makeCallTool(catalog: Catalog): ToolDef {
       }
 
       const resolver = ctx.policyResolver;
+      // Deterministic per-(tool_id, args) key — identical to the resumeKey
+      // handed to ctx.requestDecision when a gate opens for this call.
+      // Recorded on every audit record (even allow/deny, which never open a
+      // gate) so a host sink can correlate all records for one (tool, args)
+      // pair.
+      const resumeKey = `${qualifiedId(entry)}:${stableJson(a.params ?? {})}`;
 
       // ── Decision phase ────────────────────────────────────────────
       // Absent resolver: byte-identical to pre-policy behavior — derive the
@@ -430,7 +436,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
             type: "approval",
             title: `Approve ${entry.action.name}?`,
             body: `${a.summary}\n\ntool_id=${a.tool_id}\nargs=${stableJson(a.params ?? {})}`,
-            resumeKey: `${qualifiedId(entry)}:${stableJson(a.params ?? {})}`,
+            resumeKey,
             context: {
               riskLevel: entry.action.riskLevel,
               service: entry.service,
@@ -468,6 +474,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
         orgId: ctx.orgId,
         appliesIn: "session",
         summary: a.summary,
+        resumeKey,
       };
 
       let decision: PolicyDecision;
@@ -492,9 +499,25 @@ function makeCallTool(catalog: Catalog): ToolDef {
         return { text: `denied: ${a.tool_id} is blocked by org policy` };
       }
 
+      // Populated only when a gate actually opens below (require_approval),
+      // so the terminal audit record can carry it — absent for allow/deny.
+      let gateOrdinal: number | undefined;
+
       if (decision.mode === "require_approval") {
         // Strip `approves` before the gate — the gate only understands
         // DecisionActions; the approval semantics stay engine-side.
+        // Reject reserved ids up front: "approve"/"deny" are the engine's
+        // own default gate actions (added below), so a host extra reusing
+        // one would silently collide with — or shadow — the built-in
+        // approve/deny semantics.
+        for (const extra of decision.extraGateActions ?? []) {
+          if (extra.id === "approve" || extra.id === "deny") {
+            throw new Error(
+              `PolicyDecision.extraGateActions: id "${extra.id}" is reserved for the ` +
+                `engine's built-in approve/deny actions and cannot be reused by a host action`,
+            );
+          }
+        }
         const extras: DecisionAction[] = (decision.extraGateActions ?? []).map(
           ({ approves: _approves, ...rest }) => rest,
         );
@@ -502,7 +525,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
           type: "approval",
           title: `Approve ${entry.action.name}?`,
           body: `${a.summary}\n\ntool_id=${a.tool_id}\nargs=${stableJson(a.params ?? {})}`,
-          resumeKey: `${qualifiedId(entry)}:${stableJson(a.params ?? {})}`,
+          resumeKey,
           actions: [
             { id: "approve", label: "Approve", style: "primary" },
             { id: "deny", label: "Deny", style: "danger" },
@@ -516,6 +539,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
             provenance: decision.provenance,
           },
         });
+        gateOrdinal = resolution.gateOrdinal;
         // onResolution is awaited BEFORE the outcome is interpreted; a throw
         // fails the approval closed (treated as not-approved).
         let onResolutionThrew = false;
@@ -534,6 +558,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
             status: "rejected",
             resolvedMode: "require_approval",
             provenance: decision.provenance,
+            gateOrdinal,
           });
           return {
             text: onResolutionThrew
@@ -546,7 +571,12 @@ function makeCallTool(catalog: Catalog): ToolDef {
       // allow, or an approved require_approval → execute with audit.
       return executeAction(entry, a, ctx, {
         resolver,
-        record: { ...baseRecord, resolvedMode: decision.mode, provenance: decision.provenance },
+        record: {
+          ...baseRecord,
+          resolvedMode: decision.mode,
+          provenance: decision.provenance,
+          gateOrdinal,
+        },
       });
     },
   };

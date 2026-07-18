@@ -529,6 +529,19 @@ export interface DecisionResolution {
   resolvedBy: string;
   resolvedAt: number;
   source?: { channelType?: string; channelId?: string; messageId?: string };
+  /**
+   * The resolved gate's ordinal (see `DecisionGate.ordinal`), stamped on by
+   * `Thread.requestDecision` — both on the live-registration path (from the
+   * gate it just opened/joined) and the restart-replay short-circuit path
+   * (from the persisted gate entry) — before the resolution is handed back
+   * to the calling tool. Callers (e.g. `call_tool`'s policy audit) use this
+   * to distinguish a replayed resolution from a fresh one for the same
+   * resumeKey: a true restart replay carries the SAME ordinal as the
+   * original decision, while a new legitimate call for identical args mints
+   * a new (incremented) ordinal. Absent only for resolutions constructed
+   * outside the engine's gate machinery (e.g. hand-built in tests).
+   */
+  gateOrdinal?: number;
 }
 
 export interface SuspendedTurnState {
@@ -621,6 +634,23 @@ export interface PolicyInvocationRecord {
   provenance: PolicyDecision["provenance"];
   durationMs?: number;
   error?: string;
+  /**
+   * The deterministic resumeKey `call_tool` derives for this invocation
+   * (`${tool_id}:${stableJson(params)}`) — same value passed as
+   * `DecisionGateRequest.resumeKey` when a gate opens. Always present, even
+   * for `allow`/`deny` dispositions that never open a gate, so an audit sink
+   * can correlate every record for a given (tool, args) pair.
+   */
+  resumeKey: string;
+  /**
+   * The resolved decision gate's ordinal (`DecisionResolution.gateOrdinal`),
+   * present only when a gate was actually opened for this invocation
+   * (`require_approval`, both `rejected` and post-approval outcomes). A host
+   * audit sink can use (resumeKey, gateOrdinal) as the true dedup key: a
+   * restart-replay double-fire reuses the SAME gateOrdinal as the original
+   * record, while a second legitimate identical call mints a new one.
+   */
+  gateOrdinal?: number;
 }
 
 /**

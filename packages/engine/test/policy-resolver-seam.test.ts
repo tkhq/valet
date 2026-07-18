@@ -415,3 +415,178 @@ describe("policyResolver seam: fail-closed + audit edges", () => {
     expect(result.text).toContain("ok");
   });
 });
+
+// ── Invocation record discriminators (resumeKey + gateOrdinal) ─────
+//
+// The unique key an audit sink needs to tell a restart-replay double-fire
+// apart from a second legitimate identical call is (resumeKey, gateOrdinal):
+// a true replay resumes the SAME gate (same ordinal), while a fresh
+// legitimate repeat for identical args opens a NEW gate (new ordinal).
+// `Thread.requestDecision` is what mints/replays ordinals; simulating a real
+// restart replay would require the full Thread/store harness (heavy for a
+// catalog-level unit test), so this suite pins the two things `call_tool`
+// itself is responsible for: (1) `resumeKey` is always present and
+// deterministic from (tool_id, params), and (2) `gateOrdinal` is threaded
+// verbatim from whatever `ctx.requestDecision` resolves with, and two
+// sequential calls with identical args each get their own (mock-supplied)
+// ordinal — i.e. the plumbing distinguishes them when the gate layer does.
+// The replay-carries-the-same-ordinal half is covered by construction: it's
+// asserted directly on `Thread.requestDecision` behavior, not here.
+describe("policyResolver seam: invocation record discriminators", () => {
+  it("resumeKey is present and deterministic for allow (no gate opened)", async () => {
+    const { resolver, invocations } = makeResolver();
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver }),
+    );
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver }),
+    );
+    expect(invocations).toHaveLength(2);
+    expect(invocations[0].resumeKey).toBe("github.get_issue:{\n  \"n\": 1\n}");
+    expect(invocations[0].resumeKey).toBe(invocations[1].resumeKey);
+    expect(invocations[0].gateOrdinal).toBeUndefined();
+  });
+
+  it("resumeKey is present on a deny record (no gate opened)", async () => {
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "deny", provenance: { baseMode: "deny", source: "org_policy" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver }),
+    );
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0].resumeKey).toBe("github.get_issue:{\n  \"n\": 1\n}");
+    expect(invocations[0].gateOrdinal).toBeUndefined();
+  });
+
+  it("require_approval: gateOrdinal is threaded from the resolution onto the completed record", async () => {
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async () => ({
+          actionId: "approve",
+          resolvedBy: "u1",
+          resolvedAt: Date.now(),
+          gateOrdinal: 0,
+        }),
+      }),
+    );
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0].status).toBe("completed");
+    expect(invocations[0].gateOrdinal).toBe(0);
+    expect(invocations[0].resumeKey).toBe("github.get_issue:{\n  \"n\": 1\n}");
+  });
+
+  it("require_approval: gateOrdinal is threaded onto a rejected record too", async () => {
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async () => ({
+          actionId: "deny",
+          resolvedBy: "u1",
+          resolvedAt: Date.now(),
+          gateOrdinal: 0,
+        }),
+      }),
+    );
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0].status).toBe("rejected");
+    expect(invocations[0].gateOrdinal).toBe(0);
+  });
+
+  it("two sequential require_approval calls with identical args each carry the ordinal the gate layer assigned — a legitimate repeat gets a NEW ordinal, distinct from a replay of the first", async () => {
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    // First call: gate opens at ordinal 0 (as Thread.requestDecision would
+    // mint for the first decision on this resumeKey).
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async () => ({
+          actionId: "approve",
+          resolvedBy: "u1",
+          resolvedAt: Date.now(),
+          gateOrdinal: 0,
+        }),
+      }),
+    );
+    // Second call, identical tool_id + params: a legitimate repeat mints a
+    // fresh gate at ordinal 1 (Thread.requestDecision's ordinal+1 rule for a
+    // resumeKey whose latest gate is already terminal) — NOT a replay, which
+    // would instead short-circuit to the same ordinal (0) without this
+    // second call.execute happening at all.
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async () => ({
+          actionId: "approve",
+          resolvedBy: "u1",
+          resolvedAt: Date.now(),
+          gateOrdinal: 1,
+        }),
+      }),
+    );
+    expect(invocations).toHaveLength(2);
+    expect(invocations[0].resumeKey).toBe(invocations[1].resumeKey);
+    expect(invocations[0].gateOrdinal).toBe(0);
+    expect(invocations[1].gateOrdinal).toBe(1);
+    expect(invocations[0].gateOrdinal).not.toBe(invocations[1].gateOrdinal);
+  });
+});
+
+// ── Reserved gate action ids ────────────────────────────────────────
+
+describe("policyResolver seam: reserved extraGateActions ids", () => {
+  it("throws when a host extra action reuses id 'approve'", async () => {
+    const { resolver } = makeResolver({
+      decision: {
+        mode: "require_approval",
+        provenance: { baseMode: "require_approval", source: "s" },
+        extraGateActions: [{ id: "approve", label: "Sneaky", approves: true }],
+      },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await expect(
+      callTool.execute(
+        { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+        makeCtx({ policyResolver: resolver }),
+      ),
+    ).rejects.toThrow(/reserved/i);
+  });
+
+  it("throws when a host extra action reuses id 'deny'", async () => {
+    const { resolver } = makeResolver({
+      decision: {
+        mode: "require_approval",
+        provenance: { baseMode: "require_approval", source: "s" },
+        extraGateActions: [{ id: "deny", label: "Sneaky", approves: false }],
+      },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await expect(
+      callTool.execute(
+        { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+        makeCtx({ policyResolver: resolver }),
+      ),
+    ).rejects.toThrow(/reserved/i);
+  });
+});
