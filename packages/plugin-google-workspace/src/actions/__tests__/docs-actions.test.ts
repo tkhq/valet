@@ -40,6 +40,30 @@ function sampleDoc() {
   };
 }
 
+// A document whose LAST paragraph is a heading with no body — a heading-only
+// placeholder section, e.g. an outline ending with "Conclusion" to be filled in.
+//
+//   [1,7)    "Intro\n"        HEADING_2
+//   [7,13)   "Body.\n"        NORMAL_TEXT
+//   [13,24)  "Conclusion\n"   HEADING_2  (final paragraph, empty section)
+//
+// docEndIndex is 24. The empty last section's bodyStartIndex equals docEndIndex,
+// so an unclamped insert would target index 24 (== segment end) and 400.
+function trailingHeadingDoc() {
+  return {
+    documentId: 'doc-2',
+    title: 'Outline',
+    body: {
+      content: [
+        para('Intro\n', 'HEADING_2', 1),
+        para('Body.\n', 'NORMAL_TEXT', 7),
+        para('Conclusion\n', 'HEADING_2', 13),
+      ],
+    },
+    lists: {},
+  };
+}
+
 /**
  * Stub fetch so GET /documents/{id} returns the fixture and every
  * :batchUpdate POST records its requests. Returns the shared request log.
@@ -198,6 +222,49 @@ describe('executeDocsAction', () => {
         (r) => r.paragraphStyle?.namedStyleType === 'NORMAL_TEXT' && r.range?.startIndex === 5,
       ),
     ).toBe(true);
+  });
+
+  it('replace_section_by_heading fills an empty last section, clamping the insert below doc end and issuing no delete', async () => {
+    const { batchRequests } = stubDocsApi(trailingHeadingDoc());
+
+    const result = await executeDocsAction(
+      'docs.replace_section_by_heading',
+      { documentId: 'doc-2', headingText: 'Conclusion', markdown: 'Wrapping up.' },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    // The section is empty (heading is the final paragraph), so nothing is deleted.
+    const deletes = batchRequests
+      .map((r) => (r.deleteContentRange as { range?: unknown } | undefined)?.range)
+      .filter((r): r is unknown => !!r);
+    expect(deletes).toHaveLength(0);
+
+    // Insert must land at docEndIndex-1 (23), NOT at docEndIndex (24) — the Docs
+    // API rejects an insertion at the segment end index.
+    const inserts = batchRequests
+      .map((r) => r.insertText as { location?: { index?: number }; text?: string } | undefined)
+      .filter((r): r is { location?: { index?: number }; text?: string } => !!r);
+    expect(inserts.some((i) => i.location?.index === 23 && i.text === 'Wrapping up.')).toBe(true);
+    expect(inserts.some((i) => i.location?.index === 24)).toBe(false);
+  });
+
+  it('insert_markdown_at_index clamps an index at the document end to docEndIndex-1', async () => {
+    const { batchRequests } = stubDocsApi(sampleDoc());
+
+    // sampleDoc docEndIndex is 51; index 51 is the segment end and must be clamped.
+    const result = await executeDocsAction(
+      'docs.insert_markdown_at_index',
+      { documentId: 'doc-1', index: 51, markdown: 'Tail.' },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const inserts = batchRequests
+      .map((r) => r.insertText as { location?: { index?: number }; text?: string } | undefined)
+      .filter((r): r is { location?: { index?: number }; text?: string } => !!r);
+    expect(inserts.some((i) => i.location?.index === 50 && i.text === 'Tail.')).toBe(true);
+    expect(inserts.some((i) => i.location?.index === 51)).toBe(false);
   });
 
   it('read_section_by_heading errors when neither headingText nor headingId is given', async () => {

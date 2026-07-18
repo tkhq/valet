@@ -1474,7 +1474,13 @@ async function executeAction(
           ? section.bodyStartIndex
           : section.headingStartIndex;
         const deleteEnd = section.bodyEndIndex;
-        const insertIndex = Math.max(1, deleteStart);
+        // Clamp the insertion index strictly below the document end index. The
+        // Docs API requires an insertion index less than the segment end index.
+        // For an empty last section (a trailing heading with no body) deleteStart
+        // equals the document end, so an unclamped insert 400s. Use the same
+        // docEndIndex findHeadingSection uses to cap bodyEndIndex.
+        const docEndIndex = getEndIndex(bodyResult.body);
+        const insertIndex = Math.min(Math.max(1, deleteStart), docEndIndex - 1);
 
         // 1. Delete the existing section content (if any).
         if (deleteEnd > deleteStart) {
@@ -1511,8 +1517,20 @@ async function executeAction(
         };
         const docId = normalizeDocumentId(p.documentId);
 
+        // Clamp the caller-supplied index strictly below the document end index.
+        // The Docs API requires an insertion index less than the segment end
+        // index, so an index at or beyond the document end would 400.
+        const fetchResult = await fetchDocument(token, docId, {
+          fields: 'body(content(endIndex))',
+        });
+        if (!fetchResult.ok) return fetchResult.result;
+        const bodyResult = getBodyContent(fetchResult.doc);
+        if ('error' in bodyResult) return { success: false, error: bodyResult.error };
+        const docEndIndex = getEndIndex(bodyResult.body);
+        const insertIndex = Math.min(Math.max(1, p.index), docEndIndex - 1);
+
         const result = await insertMarkdown(token, docId, p.markdown, {
-          startIndex: p.index,
+          startIndex: insertIndex,
           isolateNormalStyle: true,
         });
 
@@ -1520,7 +1538,7 @@ async function executeAction(
         return {
           success: true,
           data: {
-            message: `Successfully inserted ${p.markdown.length} characters of markdown at index ${p.index}.\n\n${debugSummary}`,
+            message: `Successfully inserted ${p.markdown.length} characters of markdown at index ${insertIndex}.\n\n${debugSummary}`,
           },
         };
       }
