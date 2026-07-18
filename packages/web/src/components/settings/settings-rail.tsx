@@ -24,6 +24,7 @@ const YOU_ITEMS = [
   { to: "/settings/notifications", label: "Notifications" },
   { to: "/settings/connected-accounts", label: "Connected accounts" },
   { to: "/settings/api-keys", label: "API keys" },
+  { to: "/settings/policies", label: "Policies" },
 ] as const;
 
 const ORGANIZATION_ITEMS = [
@@ -33,6 +34,8 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/models", label: "Models" },
   { to: "/settings/organization/github", label: "GitHub" },
   { to: "/settings/organization/sandbox-images", label: "Sandbox images" },
+  { to: "/settings/organization/policies", label: "Policies" },
+  { to: "/settings/organization/action-log", label: "Action log" },
 ] as const;
 
 export function SettingsRail() {
