@@ -213,6 +213,19 @@ const docsCommentsSchema: JsonSchema = {
   additionalProperties: true,
 };
 
+const docsSectionSchema: JsonSchema = {
+  type: 'object',
+  properties: {
+    sectionMarkdown: stringSchema,
+    headingLevel: integerSchema,
+    startIndex: integerSchema,
+    endIndex: integerSchema,
+    nextBoundaryHeading: nullableStringSchema,
+  },
+  required: ['sectionMarkdown', 'headingLevel', 'startIndex', 'endIndex'],
+  additionalProperties: true,
+};
+
 const docsTextIndexSchema: JsonSchema = {
   type: 'object',
   properties: {
@@ -419,6 +432,9 @@ const workspaceOutputSchemas: Record<string, JsonSchema> = {
   },
   'docs.append_markdown': messageSchema,
   'docs.replace_document_with_markdown': messageSchema,
+  'docs.read_section_by_heading': docsSectionSchema,
+  'docs.replace_section_by_heading': messageSchema,
+  'docs.insert_markdown_at_index': messageSchema,
   'docs.insert_table': messageSchema,
   'docs.insert_table_with_data': messageSchema,
   'docs.insert_image': messageSchema,

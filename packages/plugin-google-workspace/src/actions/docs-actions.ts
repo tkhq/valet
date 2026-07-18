@@ -34,7 +34,7 @@ import {
   insertMarkdown,
   formatInsertResult,
 } from './docs-markdown.js';
-import type { DocsBody, DocsLists } from './docs-markdown.js';
+import type { DocsBody, DocsLists, StructuralElement } from './docs-markdown.js';
 import { withGoogleWorkspaceOutputSchemas } from './workspace-output-schemas.js';
 
 // ─── Action Definitions ──────────────────────────────────────────────────────
@@ -172,6 +172,63 @@ const allActions: ActionDefinition[] = [
       preserveTitle: z.boolean().optional(),
       tabId: z.string().optional(),
       firstHeadingAsTitle: z.boolean().optional(),
+    }),
+  },
+
+  // ── Section-Level Editing ────────────────────────────────────────────────
+
+  {
+    id: 'docs.read_section_by_heading',
+    name: 'Read Section by Heading',
+    description:
+      'Read a section as markdown by locating its heading (by exact text or heading id). The section runs from just after the heading to the next heading of the same or higher level. Returns the section markdown, heading level, section body character range, and the next boundary heading.',
+    riskLevel: 'low',
+    params: z.object({
+      documentId: z.string().describe('Document ID or full Google Docs URL'),
+      headingText: z
+        .string()
+        .optional()
+        .describe('Exact text of the heading paragraph to locate'),
+      headingId: z
+        .string()
+        .optional()
+        .describe('paragraphStyle heading id of the heading paragraph to locate'),
+    }),
+  },
+  {
+    id: 'docs.replace_section_by_heading',
+    name: 'Replace Section by Heading',
+    description:
+      'Replace a section body with rendered markdown, located by its heading (exact text or heading id). Replaces only the body from just after the heading up to the next heading of the same or higher level. Inserted paragraphs default to NORMAL_TEXT and do not inherit the heading style. Keeps the heading paragraph when preserveHeading is true.',
+    riskLevel: 'medium',
+    params: z.object({
+      documentId: z.string().describe('Document ID or full Google Docs URL'),
+      headingText: z
+        .string()
+        .optional()
+        .describe('Exact text of the heading paragraph to locate'),
+      headingId: z
+        .string()
+        .optional()
+        .describe('paragraphStyle heading id of the heading paragraph to locate'),
+      markdown: z.string().min(1).describe('Markdown to render as the new section body'),
+      preserveHeading: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe('Keep the heading paragraph (replace only the body). Default true.'),
+    }),
+  },
+  {
+    id: 'docs.insert_markdown_at_index',
+    name: 'Insert Markdown at Index',
+    description:
+      'Insert rendered markdown at a specific 1-based character index. Inserted paragraphs default to NORMAL_TEXT and do not inherit the paragraph style in effect at the insertion point; heading/list/table styling is applied only where the markdown specifies it.',
+    riskLevel: 'medium',
+    params: z.object({
+      documentId: z.string().describe('Document ID or full Google Docs URL'),
+      index: z.number().int().min(1).describe('1-based character index'),
+      markdown: z.string().min(1).describe('Markdown to render and insert'),
     }),
   },
 
@@ -580,6 +637,118 @@ function extractPlainText(bodyContent: unknown[]): string {
     }
   }
   return text;
+}
+
+// ─── Section Boundary Detection ──────────────────────────────────────────────
+
+/** Numeric section level for a paragraph's named style (HEADING_1..6 only). */
+function paragraphHeadingLevel(element: Record<string, unknown>): number | null {
+  const para = element.paragraph as
+    | { paragraphStyle?: { namedStyleType?: string } }
+    | undefined;
+  const styleType = para?.paragraphStyle?.namedStyleType;
+  if (!styleType) return null;
+  const match = styleType.match(/^HEADING_([1-6])$/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+export interface HeadingSection {
+  headingLevel: number;
+  headingText: string;
+  headingStartIndex: number;
+  headingEndIndex: number;
+  /** First character of the section body (just after the heading paragraph). */
+  bodyStartIndex: number;
+  /** End of the section body: the next boundary heading's start, or the last
+   *  deletable index of the document when the section is the last one. */
+  bodyEndIndex: number;
+  nextBoundaryHeading: string | null;
+  bodyElements: unknown[];
+}
+
+/**
+ * Locate a heading paragraph in a document body and the section it introduces.
+ *
+ * The heading is matched by exact (trimmed) text or by its paragraphStyle
+ * headingId. The section body runs from just after the heading paragraph up to
+ * the next paragraph that is a heading of the same or a higher level (a lower
+ * or equal numeric level); that paragraph is the boundary. If no such boundary
+ * exists the section extends to the end of the body. Only HEADING_1..6 count as
+ * section headings — TITLE and SUBTITLE are treated as body content.
+ */
+export function findHeadingSection(
+  bodyContent: unknown[],
+  target: { headingText?: string; headingId?: string },
+): HeadingSection | null {
+  const elements = bodyContent as Record<string, unknown>[];
+  const wantText = target.headingText?.trim();
+
+  let headingIdx = -1;
+  let headingLevel = 0;
+  for (let i = 0; i < elements.length; i++) {
+    const level = paragraphHeadingLevel(elements[i]);
+    if (level === null) continue;
+    if (target.headingId) {
+      const para = elements[i].paragraph as
+        | { paragraphStyle?: { headingId?: string } }
+        | undefined;
+      if (para?.paragraphStyle?.headingId === target.headingId) {
+        headingIdx = i;
+        headingLevel = level;
+        break;
+      }
+    } else if (wantText !== undefined) {
+      if (extractPlainText([elements[i]]).trim() === wantText) {
+        headingIdx = i;
+        headingLevel = level;
+        break;
+      }
+    }
+  }
+
+  if (headingIdx === -1) return null;
+
+  const headingEl = elements[headingIdx];
+  const headingStartIndex = (headingEl.startIndex as number | undefined) ?? 1;
+  const headingEndIndex = headingEl.endIndex as number;
+
+  // Scan forward for the next same-or-higher-level heading (numeric <=).
+  let boundaryIdx = -1;
+  for (let j = headingIdx + 1; j < elements.length; j++) {
+    const level = paragraphHeadingLevel(elements[j]);
+    if (level !== null && level <= headingLevel) {
+      boundaryIdx = j;
+      break;
+    }
+  }
+
+  const docEndIndex = getEndIndex(elements);
+  let bodyEndIndex: number;
+  let nextBoundaryHeading: string | null;
+  let bodyElements: unknown[];
+  if (boundaryIdx === -1) {
+    // No boundary: section runs to the end of the body. The document's final
+    // newline cannot be deleted, so the deletable/insertable body ends one
+    // character before the document end.
+    bodyEndIndex = Math.max(headingEndIndex, docEndIndex - 1);
+    nextBoundaryHeading = null;
+    bodyElements = elements.slice(headingIdx + 1);
+  } else {
+    bodyEndIndex = elements[boundaryIdx].startIndex as number;
+    nextBoundaryHeading = extractPlainText([elements[boundaryIdx]]).trim() || null;
+    bodyElements = elements.slice(headingIdx + 1, boundaryIdx);
+  }
+
+  return {
+    headingLevel,
+    headingText: extractPlainText([headingEl]).trim(),
+    headingStartIndex,
+    headingEndIndex,
+    bodyStartIndex: headingEndIndex,
+    bodyEndIndex,
+    nextBoundaryHeading,
+    bodyElements,
+  };
 }
 
 // ─── Action Execution ────────────────────────────────────────────────────────
@@ -1218,6 +1387,140 @@ async function executeAction(
           success: true,
           data: {
             message: `Successfully replaced document content with ${p.markdown.length} characters of markdown.\n\n${debugSummary}`,
+          },
+        };
+      }
+
+      // ── docs.read_section_by_heading ────────────────────────────────
+      case 'docs.read_section_by_heading': {
+        const p = allActions.find((a) => a.id === actionId)!.params.parse(params) as {
+          documentId: string;
+          headingText?: string;
+          headingId?: string;
+        };
+        if (!p.headingText && !p.headingId) {
+          return { success: false, error: 'Provide either headingText or headingId to locate the section.' };
+        }
+        const docId = normalizeDocumentId(p.documentId);
+
+        const fetchResult = await fetchDocument(token, docId);
+        if (!fetchResult.ok) return fetchResult.result;
+
+        const bodyResult = getBodyContent(fetchResult.doc);
+        if ('error' in bodyResult) return { success: false, error: bodyResult.error };
+
+        const section = findHeadingSection(bodyResult.body, {
+          headingText: p.headingText,
+          headingId: p.headingId,
+        });
+        if (!section) {
+          return {
+            success: false,
+            error: `Could not find a heading matching ${p.headingId ? `id "${p.headingId}"` : `text "${p.headingText}"`}.`,
+          };
+        }
+
+        const sectionMarkdown = docsJsonToMarkdown(
+          { content: section.bodyElements as StructuralElement[] },
+          bodyResult.lists,
+        );
+
+        return {
+          success: true,
+          data: {
+            sectionMarkdown,
+            headingLevel: section.headingLevel,
+            startIndex: section.bodyStartIndex,
+            endIndex: section.bodyEndIndex,
+            nextBoundaryHeading: section.nextBoundaryHeading,
+          },
+        };
+      }
+
+      // ── docs.replace_section_by_heading ─────────────────────────────
+      case 'docs.replace_section_by_heading': {
+        const p = allActions.find((a) => a.id === actionId)!.params.parse(params) as {
+          documentId: string;
+          headingText?: string;
+          headingId?: string;
+          markdown: string;
+          preserveHeading: boolean;
+        };
+        if (!p.headingText && !p.headingId) {
+          return { success: false, error: 'Provide either headingText or headingId to locate the section.' };
+        }
+        const docId = normalizeDocumentId(p.documentId);
+
+        const fetchResult = await fetchDocument(token, docId);
+        if (!fetchResult.ok) return fetchResult.result;
+
+        const bodyResult = getBodyContent(fetchResult.doc);
+        if ('error' in bodyResult) return { success: false, error: bodyResult.error };
+
+        const section = findHeadingSection(bodyResult.body, {
+          headingText: p.headingText,
+          headingId: p.headingId,
+        });
+        if (!section) {
+          return {
+            success: false,
+            error: `Could not find a heading matching ${p.headingId ? `id "${p.headingId}"` : `text "${p.headingText}"`}.`,
+          };
+        }
+
+        // Preserve the heading -> replace body only (from just after the
+        // heading). Otherwise replace the heading paragraph too.
+        const deleteStart = p.preserveHeading
+          ? section.bodyStartIndex
+          : section.headingStartIndex;
+        const deleteEnd = section.bodyEndIndex;
+        const insertIndex = Math.max(1, deleteStart);
+
+        // 1. Delete the existing section content (if any).
+        if (deleteEnd > deleteStart) {
+          const deleteResult = await executeBatchUpdate(docId, token, [
+            { deleteContentRange: { range: { startIndex: deleteStart, endIndex: deleteEnd } } },
+          ]);
+          if (!deleteResult.success) {
+            return { success: false, error: deleteResult.error || 'Failed to delete existing section content' };
+          }
+        }
+
+        // 2. Insert the new body, style-isolated so plain paragraphs default to
+        //    NORMAL_TEXT instead of inheriting the surrounding heading style.
+        const result = await insertMarkdown(token, docId, p.markdown, {
+          startIndex: insertIndex,
+          isolateNormalStyle: true,
+        });
+
+        const debugSummary = formatInsertResult(result);
+        return {
+          success: true,
+          data: {
+            message: `Successfully replaced the "${section.headingText}" section with ${p.markdown.length} characters of markdown${p.preserveHeading ? ' (heading preserved)' : ''}.\n\n${debugSummary}`,
+          },
+        };
+      }
+
+      // ── docs.insert_markdown_at_index ───────────────────────────────
+      case 'docs.insert_markdown_at_index': {
+        const p = allActions.find((a) => a.id === actionId)!.params.parse(params) as {
+          documentId: string;
+          index: number;
+          markdown: string;
+        };
+        const docId = normalizeDocumentId(p.documentId);
+
+        const result = await insertMarkdown(token, docId, p.markdown, {
+          startIndex: p.index,
+          isolateNormalStyle: true,
+        });
+
+        const debugSummary = formatInsertResult(result);
+        return {
+          success: true,
+          data: {
+            message: `Successfully inserted ${p.markdown.length} characters of markdown at index ${p.index}.\n\n${debugSummary}`,
           },
         };
       }

@@ -31,6 +31,18 @@ export interface ConvertOptions {
   startIndex?: number; // default: 1
   tabId?: string;
   firstHeadingAsTitle?: boolean;
+  /**
+   * Force every non-heading paragraph the markdown produces to NORMAL_TEXT.
+   *
+   * The renderer normally leaves plain paragraphs without an explicit
+   * namedStyleType, so when content is inserted in the middle of a document the
+   * new paragraphs inherit the named style already in effect at the insertion
+   * point (a HEADING_2 heading, for example). Section-level edit primitives
+   * insert right after a heading, so they set this to isolate the inserted body
+   * as normal text. Paragraphs the markdown explicitly marks as headings keep
+   * their heading style.
+   */
+  isolateNormalStyle?: boolean;
 }
 
 /** Metadata returned by insertMarkdown(). */
@@ -489,6 +501,7 @@ interface ConversionContext {
   currentHeadingLevel?: number;
   titleConsumed: boolean;
   firstHeadingAsTitle: boolean;
+  isolateNormalStyle: boolean;
 }
 
 // --- Constants ---
@@ -583,6 +596,7 @@ export function convertMarkdownToRequests(
     tabId,
     titleConsumed: false,
     firstHeadingAsTitle: options?.firstHeadingAsTitle ?? false,
+    isolateNormalStyle: options?.isolateNormalStyle ?? false,
   };
 
   for (const token of tokens) {
@@ -1341,6 +1355,31 @@ function finalizeFormatting(context: ConversionContext): void {
     }
   }
 
+  // Style isolation — force non-heading paragraphs to NORMAL_TEXT so inserted
+  // content does not inherit the named style in effect at the insertion point
+  // (e.g. a HEADING_2 heading it was inserted right after). Heading paragraphs
+  // are handled by the pass above and are excluded here. Only runs when the
+  // caller opts in via isolateNormalStyle.
+  if (context.isolateNormalStyle) {
+    const normalStyleRanges: { startIndex: number; endIndex: number }[] = [
+      ...context.normalParagraphRanges,
+      ...context.hrRanges,
+      ...context.pendingListItems
+        .filter((item) => item.endIndex !== undefined && item.endIndex > item.startIndex)
+        .map((item) => ({ startIndex: item.startIndex, endIndex: item.endIndex! })),
+    ];
+
+    for (const normalRange of normalStyleRanges) {
+      const request = buildUpdateParagraphStyleRequest(
+        normalRange.startIndex,
+        normalRange.endIndex,
+        { namedStyleType: 'NORMAL_TEXT' },
+        context.tabId,
+      );
+      if (request) context.formatRequests.push(request.request);
+    }
+  }
+
   // Normal paragraph spacing (8pt spaceBelow)
   for (const normalRange of context.normalParagraphRanges) {
     const range: Record<string, unknown> = {
@@ -1579,17 +1618,24 @@ export async function insertMarkdown(
   token: string,
   documentId: string,
   markdown: string,
-  options?: { startIndex?: number; tabId?: string; firstHeadingAsTitle?: boolean },
+  options?: {
+    startIndex?: number;
+    tabId?: string;
+    firstHeadingAsTitle?: boolean;
+    isolateNormalStyle?: boolean;
+  },
 ): Promise<InsertMarkdownResult> {
   const overallStart = performance.now();
   const startIndex = options?.startIndex ?? 1;
   const tabId = options?.tabId;
 
   const parseStart = performance.now();
-  const conversionOptions: ConvertOptions | undefined =
-    options?.firstHeadingAsTitle
-      ? { startIndex, tabId, firstHeadingAsTitle: true }
-      : { startIndex, tabId };
+  const conversionOptions: ConvertOptions = {
+    startIndex,
+    tabId,
+    firstHeadingAsTitle: options?.firstHeadingAsTitle ?? false,
+    isolateNormalStyle: options?.isolateNormalStyle ?? false,
+  };
   const requests = convertMarkdownToRequests(markdown, conversionOptions);
   const parseElapsedMs = Math.round(performance.now() - parseStart);
 
