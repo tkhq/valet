@@ -9,7 +9,8 @@ Branch: `feat/single-binary-cli` (worktree). Plan: `docs/plans/2026-07-17-single
 - [x] Plan written + committed
 - [x] T1 — Uniform asset-read seam (kill migration readdir) — commit 53c870cc; both reviews PASS
 - [x] T2 — esbuild bundle + inline/copy assets + bundle guard — commit 25ca43d2; both PASS; full single-file bundle (18.4mb) boots under plain node; note: pglite wasm compile needs ~15s at boot (raise sleeps in integration tests)
-- [ ] T3 — CLI scaffold + config/profiles + precedence
+- [x] T3 — CLI scaffold + config/profiles + precedence — commit cf03a1e7; both PASS. Minor owed: coerce/validate nested config values (serve.port could be a string from hand-edited config) — T5 should coerce when reading.
+  Interfaces: dispatch table Record<string,()=>Promise<CommandModule>>; CommandModule.run(args, ctx)->number; CliContext{command,config}; ExitCode{OK=0,Usage=2,GatePending=3,TurnError=4,AuthFailure=5,Unreachable=6}; CliError hierarchy (ConfigError,ProfileNotFoundError,NoInstanceError,AuthError,UnreachableError,ApiError); config loadConfig/saveConfig/configPath; resolvePort/resolveSandbox/resolveDataDir/resolveInstance; output parseGlobalFlags/printJson/printLine/printErr/emitNdjson.
 - [ ] T4 — HTTP/WS InstanceClient library
 - [ ] T5 — `valet serve` command + sandbox detect + implicit local profile
 - [ ] T6 — Scriptable commands (sessions/send/gates/status) + health version
