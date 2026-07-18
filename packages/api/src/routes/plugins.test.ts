@@ -78,6 +78,10 @@ describe("GET /api/plugins", () => {
         connectLabel: "Fixture API key",
         connected: false,
         dynamic: true,
+        actions: [
+          { id: "fixture.ping", name: "fixture.ping", riskLevel: "low" },
+          { id: "fixture.pong", name: "fixture.pong", riskLevel: "low" },
+        ],
       },
     ]);
 
@@ -89,6 +93,28 @@ describe("GET /api/plugins", () => {
     expect(bare?.services).toEqual([]);
     expect(bare?.actionCount).toBe(1);
     expect(bare?.dynamic).toBeUndefined();
+  });
+
+  it("exposes actions:[] for a declared credential service with no matching action plugin", async () => {
+    const noActionsPlugin: ValetPlugin = {
+      name: "creds-only-plugin",
+      version: "1.0.0",
+      credentials: [{ service: "credsonly", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [noActionsPlugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    const plugin = plugins.find((p) => p.name === "creds-only-plugin");
+    expect(plugin?.services).toEqual([
+      {
+        service: "credsonly",
+        type: "api_key",
+        configKeys: ["apiKey"],
+        connected: false,
+        actions: [],
+      },
+    ]);
   });
 
   it("flips connected:true after a credential is saved for the service", async () => {

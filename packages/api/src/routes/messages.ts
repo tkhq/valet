@@ -33,6 +33,8 @@ import type {
 } from "../wire/types.js";
 import { engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { isOrgAdmin } from "../services/org.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -316,6 +318,20 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   }
   if (body.actionId === undefined && body.value === undefined) {
     return c.json({ error: "actionId or value is required" }, 400);
+  }
+
+  // Route-level 403 for `always_allow` (action-policies plan, Task 4):
+  // defense-in-depth's front half — `onResolution` (T3) already fails this
+  // closed for a non-admin resolver, but only after the engine has already
+  // opened/consumed the gate. Rejecting here means a non-admin never sees
+  // the button "work" only to fail late; the button itself should be hidden
+  // client-side, this is the server-side backstop.
+  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW) {
+    const { db } = c.var.providers;
+    const user = c.var.user;
+    if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+      return c.json({ error: "org admin required for always_allow" }, 403);
+    }
   }
 
   // Confirm the gate is actually pending in this session before resolving.

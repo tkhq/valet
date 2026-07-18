@@ -761,6 +761,16 @@ export interface GetMemoryTreeResponse {
 
 export type CredentialKind = "oauth2" | "api_key" | "bot_token" | "service_account";
 
+/** One statically-declared action, for the org-policy admin UI's target
+ *  picker (action-policies plan, Task 4) — `id` is the fully-qualified
+ *  action id (`"github.create_issue"`), matching what `action_policies.
+ *  action_id` / `action_policy_overrides.action_id` store. */
+export interface PluginActionSummary {
+  id: string;
+  name: string;
+  riskLevel: RiskLevelWire;
+}
+
 export interface PluginServiceSummary {
   /** Credential store key — defaults to the plugin name when the
    * declaration omits its own `service` (see `CredentialDeclaration`). */
@@ -773,6 +783,9 @@ export interface PluginServiceSummary {
   /** Set (to `true`) only when an `ActionPlugin` for this service declares
    * `resolveActions` — the plugin's action list isn't fully known statically. */
   dynamic?: true;
+  /** Statically-declared actions for this service (empty when the plugin
+   * only declares `resolveActions` dynamic discovery, or none at all). */
+  actions: PluginActionSummary[];
 }
 
 export interface PluginSummary {
@@ -1340,4 +1353,199 @@ export interface GetPrebuildsMetaResponse {
  * the one prebuild read a non-admin member can hit. */
 export interface GetPrebuildForRepoResponse {
   prebuild: { commitSha: string; finishedAt: number } | null;
+}
+
+// ─── Action policies (action-policies plan, Task 4) ─────────────────────────
+//
+// `/api/org/policies` (admin CRUD + action log), `/api/me/policy-overrides`,
+// `/api/me/grants`. See `packages/api/src/policies/resolution.ts` for the
+// precedence semantics these rows feed and `packages/api/src/policies/
+// admin.ts` for the CRUD/pagination service layer backing these routes.
+
+export type RiskLevelWire = "low" | "medium" | "high" | "critical";
+export type ApprovalModeWire = "allow" | "require_approval" | "deny";
+export type PolicyAppliesInWire = "any" | "workflow" | "session";
+
+export interface ParamMatcherWire {
+  path: string;
+  op: "eq" | "neq" | "regex" | "in" | "not_in" | "gt" | "gte" | "lt" | "lte" | "exists" | "not_exists";
+  value?: unknown;
+}
+
+export interface ActionPolicyWire {
+  id: string;
+  service: string | null;
+  actionId: string | null;
+  riskLevel: RiskLevelWire | null;
+  mode: ApprovalModeWire;
+  paramMatchers: ParamMatcherWire[];
+  appliesIn: PolicyAppliesInWire;
+  origin: "settings" | "approval_prompt" | "workflow_editor" | "admin";
+  managedBy: string | null;
+  expiresAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListOrgPoliciesResponse {
+  policies: ActionPolicyWire[];
+}
+
+/** Exactly one of `service`/`actionId`/`riskLevel` — matches the DB CHECK
+ *  constraint; the route 400s otherwise. */
+export interface CreateOrgPolicyRequest {
+  service?: string;
+  actionId?: string;
+  riskLevel?: RiskLevelWire;
+  mode: ApprovalModeWire;
+  paramMatchers?: ParamMatcherWire[];
+  appliesIn?: PolicyAppliesInWire;
+  expiresAt?: number | null;
+}
+
+export type CreateOrgPolicyResponse = ActionPolicyWire;
+
+/** Rule fields only — `service`/`actionId`/`riskLevel` (the row's target
+ *  identity) are immutable after creation; re-target by deleting and
+ *  recreating. */
+export interface PatchOrgPolicyRequest {
+  mode?: ApprovalModeWire;
+  paramMatchers?: ParamMatcherWire[];
+  appliesIn?: PolicyAppliesInWire;
+  expiresAt?: number | null;
+}
+
+export type PatchOrgPolicyResponse = ActionPolicyWire;
+
+/** DELETE soft-revokes (stamps `revokedAt`) rather than row-deleting; the
+ *  response echoes the now-revoked row. */
+export type DeleteOrgPolicyResponse = ActionPolicyWire;
+
+/** POST /api/org/policies/preview — dry-run the resolver against a
+ *  synthetic invocation, without writing anything. Admin-only, same gate as
+ *  the rest of `/api/org/policies`. */
+export interface PreviewOrgPolicyRequest {
+  service: string;
+  actionId: string;
+  riskLevel: RiskLevelWire;
+  params?: Record<string, unknown>;
+  appliesIn: "session" | "workflow";
+  sessionId?: string;
+  workflowExecutionId?: string;
+  userId?: string;
+}
+
+export interface PreviewOrgPolicyResponse {
+  mode: ApprovalModeWire;
+  provenance: {
+    baseMode: ApprovalModeWire;
+    matchedPolicyId?: string;
+    matchedGrantId?: string;
+    matchedOverrideId?: string;
+    source: string;
+  };
+}
+
+export type ActionInvocationStatusWire = "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
+
+export interface ActionLogEntryWire {
+  invocationId: string;
+  createdAt: number;
+  service: string | null;
+  actionId: string | null;
+  riskLevel: RiskLevelWire | null;
+  /** The policy DECISION for this invocation — key audit/action-log
+   *  consumers on this, not `status` (execution outcome). */
+  resolvedMode: ApprovalModeWire | null;
+  baseMode: ApprovalModeWire | null;
+  matchedPolicyId: string | null;
+  matchedGrantId: string | null;
+  matchedOverrideId: string | null;
+  status: ActionInvocationStatusWire | null;
+  sessionId: string | null;
+  workflowExecutionId: string | null;
+  userId: string | null;
+  params: unknown;
+  paramsTruncated: boolean | null;
+  result: unknown;
+  resultTruncated: boolean | null;
+  error: string | null;
+  durationMs: number | null;
+  startedAt: number | null;
+}
+
+/** Keyset-paginated — `cursor` is opaque (base64url of `{s, id}`, see
+ *  `policies/admin.ts`'s `ActionLogCursor`). `nextCursor` is `null` at the
+ *  end of the result set. */
+export interface ListActionLogResponse {
+  entries: ActionLogEntryWire[];
+  nextCursor: string | null;
+}
+
+export interface ActionPolicyOverrideWire {
+  id: string;
+  service: string | null;
+  actionId: string | null;
+  riskLevel: RiskLevelWire | null;
+  mode: ApprovalModeWire;
+  paramMatchers: ParamMatcherWire[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListPolicyOverridesResponse {
+  overrides: ActionPolicyOverrideWire[];
+}
+
+/** PUT /api/me/policy-overrides — upsert-BY-TARGET, not by row id: the
+ *  caller has at most one override per (service|actionId|riskLevel) target,
+ *  so the target triple IS the addressing key. A second PUT for the same
+ *  target updates the existing row in place. */
+export interface PutPolicyOverrideRequest {
+  service?: string;
+  actionId?: string;
+  riskLevel?: RiskLevelWire;
+  mode: ApprovalModeWire;
+  paramMatchers?: ParamMatcherWire[];
+}
+
+export type PutPolicyOverrideResponse = ActionPolicyOverrideWire;
+
+/** DELETE /api/me/policy-overrides — same target-addressing as PUT; the
+ *  target triple goes in the request body (DELETE-with-body, since there's
+ *  no per-row id in the URL to delete by). */
+export interface DeletePolicyOverrideRequest {
+  service?: string;
+  actionId?: string;
+  riskLevel?: RiskLevelWire;
+}
+
+export interface DeletePolicyOverrideResponse {
+  ok: true;
+}
+
+export interface RuntimeGrantWire {
+  id: string;
+  sessionId: string | null;
+  workflowExecutionId: string | null;
+  policyKey: string;
+  grantedBy: string;
+  createdAt: number;
+}
+
+export interface ListGrantsResponse {
+  grants: RuntimeGrantWire[];
+}
+
+/** DELETE /api/me/grants — revokes (stamps `revokedAt`, never row-deletes)
+ *  the caller's own live grant matching this exact scope + policy key. */
+export interface DeleteGrantRequest {
+  sessionId?: string;
+  workflowExecutionId?: string;
+  service: string;
+  actionId: string;
+}
+
+export interface DeleteGrantResponse {
+  ok: true;
 }
