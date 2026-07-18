@@ -8,6 +8,13 @@ import { defineConfig } from "vitest/config";
 // before this file existed — same include glob, no setupFiles.
 export default defineConfig({
   test: {
+    // Exclude compiled output. `tsc --build` (run by `pnpm typecheck`) emits
+    // `dist/**/*.test.js`; when this package is run as a project of the ROOT
+    // vitest config (`projects: ['packages/api']`), the inner unit/integration
+    // projects' `src/**`-only includes are not applied, so without this a
+    // default scan would execute those broken compiled copies. Harmless to the
+    // inner projects (they only include `src/**`).
+    exclude: ["**/node_modules/**", "**/dist/**"],
     projects: [
       {
         test: {
