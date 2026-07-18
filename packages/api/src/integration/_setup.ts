@@ -243,6 +243,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     apiBaseUrl,
     plugins,
+    actionPluginByService,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);

@@ -34,6 +34,22 @@ export type OnApprovalPending = (info: {
   details?: unknown;
 }) => Promise<void> | void;
 
+/**
+ * Host seam (action-policies plan, Task 3): when an approval is resolved with
+ * a "grant the rest of this run" choice, the executor calls this with the
+ * exact `(service, actionId)` pairs the approver authorized. The host
+ * (`packages/api`) writes one exec-scoped runtime grant per entry so
+ * subsequent `tool` nodes hitting those actions run grant-clean instead of
+ * re-failing `require_approval`. Portable — the workflow package never
+ * touches the policy db itself. Best-effort: a throw must not abort the
+ * approved node (the host implementation swallows/logs its own errors).
+ */
+export type OnApprovalGrant = (info: {
+  runId: string;
+  resolvedBy: string;
+  grants: Array<{ service: string; actionId: string }>;
+}) => Promise<void> | void;
+
 export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
   run: WorkflowRun;
   node: TNode;
@@ -67,6 +83,7 @@ export interface NodeExecutorArgs<TNode extends WorkflowNode = WorkflowNode> {
   clock: () => number;
   engine: WorkflowEngineDeps;
   onApprovalPending?: OnApprovalPending;
+  onApprovalGrant?: OnApprovalGrant;
 }
 
 /**

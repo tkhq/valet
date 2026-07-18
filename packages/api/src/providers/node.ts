@@ -5,9 +5,16 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
-import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
+import { eq } from "drizzle-orm";
+import {
+  createDefaultNodeExecutors,
+  LocalRunHost,
+  type OnApprovalGrant,
+  type OnApprovalPending,
+} from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
+import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
+import { writeExecutionGrant } from "../policies/service.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
@@ -225,6 +232,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     sandboxJwtMaster: opts.sandboxJwtMaster,
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
+    actionPluginByService,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
@@ -297,11 +305,43 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     }
   };
 
+  // "Grant the rest of this run" (action-policies plan, Task 3): an approval
+  // resolved with `grantActions` writes one exec-scoped runtime grant per
+  // authorized `(service, actionId)` so downstream `tool` nodes stop failing
+  // `require_approval`. Best-effort — a failure here must not abort the
+  // approved node; `writeExecutionGrant` is idempotent under replay.
+  const onApprovalGrant: OnApprovalGrant = async (info) => {
+    try {
+      const run = await workflowStore.getRun(info.runId);
+      if (!run?.params.workflowId) return;
+      const defRows = await db
+        .select({ orgId: workflowDefinitions.orgId })
+        .from(workflowDefinitions)
+        .where(eq(workflowDefinitions.id, run.params.workflowId))
+        .limit(1);
+      const orgId = defRows[0]?.orgId;
+      if (!orgId) return;
+      const now = Date.now();
+      for (const g of info.grants) {
+        await writeExecutionGrant(db, info.runId, {
+          orgId,
+          service: g.service,
+          actionId: g.actionId,
+          grantedBy: info.resolvedBy,
+          now,
+        });
+      }
+    } catch (err) {
+      console.error(`workflow approval grant write failed for run ${info.runId}:`, err);
+    }
+  };
+
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
+    onApprovalGrant,
     crashAt: opts.workflowCrashAt,
   });
 

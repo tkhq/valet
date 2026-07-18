@@ -43,6 +43,7 @@ import {
   type NodeExecuteResult,
   type NodeExecutorArgs,
   type NodeExecutorRegistry,
+  type OnApprovalGrant,
   type OnApprovalPending,
 } from './nodes/index.js';
 import type { NodeCheckpoint, RunParkState, RunWaitCondition, WorkflowRun, WorkflowStore } from './store.js';
@@ -53,6 +54,7 @@ export interface InterpreterDeps {
   clock: () => number;
   executors?: NodeExecutorRegistry;
   onApprovalPending?: OnApprovalPending;
+  onApprovalGrant?: OnApprovalGrant;
   /**
    * Host-only extension point (Phase 5 plan decision 20): invoked
    * synchronously right after `store.beginTerminalize` succeeds, before
@@ -81,7 +83,7 @@ export interface InterpreterDeps {
 const ITERATION = 0;
 
 export async function driveUntilPark(runId: string, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
-  const { store, engine, clock, onApprovalPending, onBeginTerminalize } = deps;
+  const { store, engine, clock, onApprovalPending, onApprovalGrant, onBeginTerminalize } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
 
   while (true) {
@@ -151,6 +153,7 @@ export async function driveUntilPark(runId: string, attempt: number, deps: Inter
         clock,
         engine,
         onApprovalPending,
+        onApprovalGrant,
       };
       const outcome = await invokeExecutor(node, executors, argsBase);
 

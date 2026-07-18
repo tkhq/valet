@@ -21,8 +21,10 @@ import {
   type SessionStore,
   type StoredCredential,
   type ResolvedModel,
+  type PolicyResolver,
 } from "@valet/engine";
-import type { ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, ValetPlugin } from "@valet/engine";
+import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
 import type { RepoBinding } from "../wire/types.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
@@ -111,6 +113,14 @@ export interface EngineHostOpts {
    * FRESH — see the call sites below — never cached on the host instance.
    */
   plugins?: ValetPlugin[];
+  /**
+   * Assembled service→ActionPlugin index (plugin-system-v2 Task 4's
+   * `assemblePlugins` output). Used only to look up a plugin's
+   * `defaultApprovalMode` inside the policy resolver (action-policies plan,
+   * Task 3) — org policies/grants apply regardless, so an absent map just
+   * means the plugin-default rung falls through to the risk default.
+   */
+  actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   /**
    * Deps for resolving a session's `github` credential through the canonical
    * token service (`services/github-tokens.ts`'s `resolveGitHubToken`, via
@@ -278,6 +288,17 @@ export class EngineHost {
    * `latestActivityAt`, taking whichever is more recent.
    */
   private gatewayTouch = new Map<string, number>();
+
+  /**
+   * Lazily-built, host-wide policy resolver (action-policies plan, Task 3).
+   * ONE instance shared by every session build — all per-invocation context
+   * (org/user/session/service/params) rides in on the engine's
+   * `PolicyResolveInput`, so the resolver holds no session state. Present
+   * whenever an app `db` is wired (org policies/grants/audit all need it);
+   * absent in db-less tests, which then get the engine's byte-identical
+   * pre-policy approval path.
+   */
+  private policyResolverInstance: PolicyResolver | null = null;
 
   constructor(private readonly opts: EngineHostOpts) {
     const idleMinutes = opts.idleMinutes ?? 0;
@@ -474,6 +495,7 @@ export class EngineHost {
     if (prebuild) await this.recordPrebuildId(sessionId, prebuild.prebuildId);
     const prepareSandbox = this.buildPrepareSandbox(meta, prebuild);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
+    const policyResolver = this.getPolicyResolver();
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -490,6 +512,7 @@ export class EngineHost {
             roles: extras.roles.length ? extras.roles : undefined,
             ...(prepareSandbox ? { prepareSandbox } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
+            ...(policyResolver ? { policyResolver } : {}),
           },
         })
       : await engine.createSession({
@@ -506,6 +529,7 @@ export class EngineHost {
           roles: extras.roles.length ? extras.roles : undefined,
           ...(prepareSandbox ? { prepareSandbox } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
+          ...(policyResolver ? { policyResolver } : {}),
         });
 
     this.cache.set(sessionId, { engine, session });
@@ -651,6 +675,23 @@ export class EngineHost {
    * answer the "is github connected" question discovery actually asks; that's
    * a follow-up seam, not new surface built in this wave.
    */
+  /**
+   * The host-wide `PolicyResolver` (action-policies plan, Task 3), or
+   * `undefined` when no app `db` is wired (db-less tests keep the engine's
+   * built-in risk→approval fallback, byte-identical to pre-policy behavior).
+   * Built once and memoized — the resolver is session-agnostic.
+   */
+  private getPolicyResolver(): PolicyResolver | undefined {
+    if (!this.opts.db) return undefined;
+    if (!this.policyResolverInstance) {
+      this.policyResolverInstance = buildPolicyResolver({
+        db: this.opts.db,
+        actionPluginByService: this.opts.actionPluginByService ?? new Map(),
+      });
+    }
+    return this.policyResolverInstance;
+  }
+
   private buildCredentialResolver(
     sessionId: string,
     userId: string,
@@ -774,12 +815,14 @@ export class EngineHost {
 
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
+    const policyResolver = this.getPolicyResolver();
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
       workspace,
       purpose: "orchestrator" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
+      ...(policyResolver ? { policyResolver } : {}),
       owner: principal,
       queueMode,
       sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
@@ -936,7 +979,19 @@ export class EngineHost {
       await entry.session.destroy();
     } finally {
       this.cache.delete(sessionId);
-      if (this.opts.db) await revokeSandboxTokens(this.opts.db, sessionId);
+      if (this.opts.db) {
+        await revokeSandboxTokens(this.opts.db, sessionId);
+        // Grant expiry (action-policies plan, Task 3): a stopped session's
+        // runtime grants must not survive to quiet a future action on a
+        // rebuilt session reusing the same id. Idempotent (guarded on
+        // `revoked_at IS NULL`); best-effort — a failure here must not mask
+        // the destroy, so it's logged, not thrown.
+        try {
+          await revokeSessionGrants(this.opts.db, sessionId);
+        } catch (err) {
+          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+        }
+      }
     }
   }
 
@@ -1224,12 +1279,14 @@ export class EngineHost {
 
     const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
+    const policyResolver = this.getPolicyResolver();
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "child" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
+      ...(policyResolver ? { policyResolver } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
@@ -1315,12 +1372,14 @@ export class EngineHost {
 
     const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
+    const policyResolver = this.getPolicyResolver();
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
+      ...(policyResolver ? { policyResolver } : {}),
       owner: opts.owner,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,

@@ -41,7 +41,7 @@
  * audit sink / UI can explain "org policy said X, but you have a live grant
  * so it ran anyway."
  */
-import type { ApprovalMode, RiskLevel } from "@valet/engine";
+import type { ApprovalMode, PolicyProvenanceSource, RiskLevel } from "@valet/engine";
 import { evaluateMatchers, type ParamMatcher } from "./matchers.js";
 
 export type PolicyAppliesIn = "any" | "workflow" | "session";
@@ -115,7 +115,7 @@ export interface PolicyDecisionProvenance {
   matchedPolicyId?: string;
   matchedGrantId?: string;
   matchedOverrideId?: string;
-  source: string;
+  source: PolicyProvenanceSource;
 }
 
 export interface PolicyDecision {
@@ -227,7 +227,7 @@ export function resolvePolicyDecision(
   // Honest base mode (rungs 3-5), computed up front so provenance can
   // report it even when a higher rung wins below.
   let baseMode: ApprovalMode;
-  let baseSource: string;
+  let baseSource: PolicyProvenanceSource;
   const basePolicyId = orgMatch?.id;
   if (orgMatch) {
     baseMode = orgMatch.mode;

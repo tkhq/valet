@@ -581,6 +581,23 @@ export interface PolicyResolveInput {
 }
 
 /**
+ * Which precedence rung produced a `PolicyDecision`. Tightened from a bare
+ * `string` to this literal union (action-policies plan, T3 review carry-
+ * forward) so the host resolver + audit sink share one closed vocabulary:
+ * `resolver_error` is the synthetic fail-closed source the engine stamps when
+ * a host `resolve()` throws (see `call_tool`); every other member is produced
+ * by the host's pure precedence core (`policies/resolution.ts`). This is a
+ * type-narrowing only — the runtime string values are unchanged.
+ */
+export type PolicyProvenanceSource =
+  | "org_policy"
+  | "runtime_grant"
+  | "override"
+  | "plugin_default"
+  | "risk_default"
+  | "resolver_error";
+
+/**
  * The host's decision for one action invocation. `mode` drives `call_tool`:
  * `allow` → straight through; `require_approval` → open an approval gate;
  * `deny` → refuse. `provenance` is opaque to the engine and rides into the
@@ -593,7 +610,7 @@ export interface PolicyDecision {
     matchedPolicyId?: string;
     matchedGrantId?: string;
     matchedOverrideId?: string;
-    source: string;
+    source: PolicyProvenanceSource;
   };
   /**
    * Extra gate actions the host wants offered on a require_approval gate.
