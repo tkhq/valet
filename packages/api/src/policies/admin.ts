@@ -591,13 +591,16 @@ export async function revokeMyGrant(
 
 // ── action_invocations: keyset-paginated action log ──────────────────
 
-/** Opaque cursor payload: `s` = `coalesce(started_at, 0)` at the last row of
- *  the previous page, `id` = that row's `invocationId` (tiebreaker for rows
- *  sharing the same `s`). Both are part of the sort key, so the pair is a
- *  stable resume point even under concurrent inserts — a row inserted after
- *  the first page was read either sorts before the cursor (invisible, same
- *  as before it existed) or after it (visible on a later page), never
- *  duplicated or skipped within the paginated range already returned. */
+/** Opaque cursor payload: `s` = `created_at` at the last row of the previous
+ *  page, `id` = that row's `invocationId` (tiebreaker for rows sharing the
+ *  same `created_at`). Both are part of the sort key, so the pair is a stable
+ *  resume point even under concurrent inserts — a row inserted after the first
+ *  page was read either sorts before the cursor (invisible, same as before it
+ *  existed) or after it (visible on a later page), never duplicated or skipped
+ *  within the paginated range already returned. `created_at` (not
+ *  `started_at`) keys the sort so denied/rejected rows and workflow rows —
+ *  all of which have a null `started_at` — interleave chronologically instead
+ *  of collapsing to `coalesce(...,0)` at the tail (I3). */
 export interface ActionLogCursor {
   s: number;
   id: string;
@@ -627,11 +630,12 @@ export interface ActionLogFilters {
   userId?: string;
   resolvedMode?: ApprovalMode;
   status?: NonNullable<ActionInvocationRow["status"]>;
-  /** Inclusive epoch-ms bounds on `startedAt`. A row with a null `startedAt`
-   *  never matches a `from`/`to` filter (SQL `NULL >= x` is unknown, not
-   *  true) — rows never explicitly started (e.g. denied before dispatch)
-   *  are excluded from a time-bounded query, not surfaced at an arbitrary
-   *  edge of the range. */
+  /** Inclusive epoch-ms bounds on `createdAt` (the row's emission time, always
+   *  populated) — NOT `startedAt` (I3). Keying the window on `createdAt` keeps
+   *  denied/rejected and workflow rows (null `startedAt`) inside a
+   *  time-bounded query instead of silently dropping them: SQL `NULL >= x` is
+   *  unknown, so a `startedAt`-keyed `from`/`to` excluded every never-started
+   *  row regardless of when it actually happened. */
   from?: number;
   to?: number;
 }
@@ -645,13 +649,16 @@ export interface ActionLogPage {
 }
 
 /**
- * Keyset pagination on `(coalesce(started_at, 0) DESC, invocation_id DESC)`
- * — the first cursor-paginated route in this codebase. Keyset (not
- * offset/limit) so pages stay stable under concurrent inserts: a row
- * inserted ahead of the cursor after page 1 was read never re-shifts
- * page 2's contents, unlike `OFFSET N` which would skip or repeat rows.
- * `invocationId` breaks ties within the same `startedAt` millisecond
- * deterministically (`startedAt` alone is not unique enough under load).
+ * Keyset pagination on `(created_at DESC, invocation_id DESC)` — the first
+ * cursor-paginated route in this codebase. `created_at` (always populated),
+ * NOT `coalesce(started_at, 0)` (I3): keying on `started_at` sank every
+ * denied/rejected and workflow row (null `started_at`) to the tail and, via
+ * `NULL >= x`, out of any `from`/`to` window — burying exactly the denials an
+ * admin most wants to see. Keyset (not offset/limit) so pages stay stable
+ * under concurrent inserts: a row inserted ahead of the cursor after page 1
+ * was read never re-shifts page 2's contents, unlike `OFFSET N` which would
+ * skip or repeat rows. `invocationId` breaks ties within the same `createdAt`
+ * millisecond deterministically (`createdAt` alone is not unique under load).
  *
  * `limit+1` is fetched to detect "more pages exist" without a second
  * COUNT query; the (limit+1)th row (if present) is trimmed off and its
@@ -663,11 +670,11 @@ export async function listActionLog(db: AppDb, orgId: string, filters: ActionLog
   if (filters.userId !== undefined) conditions.push(eq(actionInvocations.userId, filters.userId));
   if (filters.resolvedMode !== undefined) conditions.push(eq(actionInvocations.resolvedMode, filters.resolvedMode));
   if (filters.status !== undefined) conditions.push(eq(actionInvocations.status, filters.status));
-  if (filters.from !== undefined) conditions.push(sql`${actionInvocations.startedAt} >= ${filters.from}`);
-  if (filters.to !== undefined) conditions.push(sql`${actionInvocations.startedAt} <= ${filters.to}`);
+  if (filters.from !== undefined) conditions.push(sql`${actionInvocations.createdAt} >= ${filters.from}`);
+  if (filters.to !== undefined) conditions.push(sql`${actionInvocations.createdAt} <= ${filters.to}`);
   if (cursor) {
     conditions.push(
-      sql`(coalesce(${actionInvocations.startedAt}, 0), ${actionInvocations.invocationId}) < (${cursor.s}, ${cursor.id})`,
+      sql`(${actionInvocations.createdAt}, ${actionInvocations.invocationId}) < (${cursor.s}, ${cursor.id})`,
     );
   }
 
@@ -675,13 +682,13 @@ export async function listActionLog(db: AppDb, orgId: string, filters: ActionLog
     .select()
     .from(actionInvocations)
     .where(and(...conditions))
-    .orderBy(sql`coalesce(${actionInvocations.startedAt}, 0) desc`, desc(actionInvocations.invocationId))
+    .orderBy(desc(actionInvocations.createdAt), desc(actionInvocations.invocationId))
     .limit(limit + 1);
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
-  const nextCursor = hasMore && last ? encodeActionLogCursor({ s: last.startedAt ?? 0, id: last.invocationId }) : undefined;
+  const nextCursor = hasMore && last ? encodeActionLogCursor({ s: last.createdAt, id: last.invocationId }) : undefined;
 
   return { rows: page, nextCursor };
 }

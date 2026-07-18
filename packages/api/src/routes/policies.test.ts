@@ -7,7 +7,10 @@
  * harness always resolves the caller to `local-org`, so any row seeded
  * under another org id is "cross-org" from every test request's POV.
  */
+import { eq } from "drizzle-orm";
+import { Type } from "typebox";
 import { describe, it, expect, afterEach } from "vitest";
+import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionInvocations, actionPolicies } from "../schema/index.js";
 import type {
@@ -288,6 +291,28 @@ describe("DELETE /api/org/policies/:id — soft revoke", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("404s for a cross-org policy id (no existence leak)", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const now = Date.now();
+    await db.insert(actionPolicies).values({
+      id: "p_cross_del", orgId: "other-org", principalType: "org", principalId: "other-org",
+      service: "github", actionId: null, riskLevel: null, mode: "allow", paramMatchers: [],
+      appliesIn: "any", origin: "admin", managedBy: "x", expiresAt: null, revokedAt: null,
+      createdAt: now, updatedAt: now,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/org/policies/p_cross_del`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(404);
+    // The cross-org row is untouched — the 404 is indistinguishable from a
+    // genuinely missing id.
+    const row = (await db.select().from(actionPolicies).where(eq(actionPolicies.id, "p_cross_del")))[0];
+    expect(row.revokedAt).toBeNull();
+  });
 });
 
 // ── Preview endpoint ─────────────────────────────────────────────────────
@@ -328,6 +353,39 @@ describe("POST /api/org/policies/preview", () => {
       body: JSON.stringify({ service: "github", actionId: "x", riskLevel: "low", appliesIn: "session" }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("resolves the real plugin default (rung 4) when it differs from the risk default", async () => {
+    // A plugin whose `defaultApprovalMode` is require_approval on a LOW-risk
+    // action (risk default would be allow). With no org policy/override, the
+    // preview must surface the plugin default, not the risk default — I4.
+    const lowAction = {
+      id: "widgets.ping",
+      name: "Ping",
+      description: "low-risk fixture action",
+      riskLevel: "low" as const,
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true as const, data: {} }),
+    };
+    const plugin: ValetPlugin = {
+      name: "preview-fixture",
+      version: "0.0.1",
+      actions: [{ service: "widgets", actions: [lowAction], defaultApprovalMode: "require_approval" }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+
+    const res = await fetch(`${api.baseUrl}/api/org/policies/preview`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        service: "widgets", actionId: "widgets.ping", riskLevel: "low",
+        appliesIn: "session", sessionId: "s1",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PreviewOrgPolicyResponse;
+    expect(body.mode).toBe("require_approval");
+    expect(body.provenance.source).toBe("plugin_default");
   });
 });
 
@@ -406,17 +464,21 @@ describe("GET /api/org/action-log — keyset pagination", () => {
       workflowExecutionId: null, userId: "local-user", orgId: "local-org", params: null,
       paramsTruncated: null, result: null, resultTruncated: null, error: null, durationMs: 5,
     };
-    // Rows "tie_b"/"tie_c"/"tie_d" all share startedAt=2000 — with limit=2 the
-    // sort (startedAt desc, invocationId desc) puts "tie_d" on page 1 and
+    // Rows "tie_b"/"tie_c"/"tie_d" all share createdAt=2000 — with limit=2 the
+    // sort (createdAt desc, invocationId desc) puts "tie_d" on page 1 and
     // "tie_c"/"tie_b" on page 2, straddling the page boundary INSIDE the tied
-    // group. "tie_a" (startedAt=3000) and "tie_e" (startedAt=1000) bound the
+    // group. "tie_a" (createdAt=3000) and "tie_e" (createdAt=1000) bound the
     // tied group on either side so the boundary isn't just "the last page".
+    // `startedAt` is null on every row — the sort keys on `createdAt` (I3), so
+    // the ordering must hold with no startedAt at all (under the old
+    // coalesce(started_at,0) sort these would all collapse to 0 and order by
+    // invocationId alone, i.e. tie_e first — the wrong answer).
     await db.insert(actionInvocations).values([
-      { ...base, invocationId: "tie_a", createdAt: 3000, startedAt: 3000 },
-      { ...base, invocationId: "tie_d", createdAt: 2000, startedAt: 2000 },
-      { ...base, invocationId: "tie_c", createdAt: 2000, startedAt: 2000 },
-      { ...base, invocationId: "tie_b", createdAt: 2000, startedAt: 2000 },
-      { ...base, invocationId: "tie_e", createdAt: 1000, startedAt: 1000 },
+      { ...base, invocationId: "tie_a", createdAt: 3000, startedAt: null },
+      { ...base, invocationId: "tie_d", createdAt: 2000, startedAt: null },
+      { ...base, invocationId: "tie_c", createdAt: 2000, startedAt: null },
+      { ...base, invocationId: "tie_b", createdAt: 2000, startedAt: null },
+      { ...base, invocationId: "tie_e", createdAt: 1000, startedAt: null },
     ]);
 
     const seen: string[] = [];
@@ -438,9 +500,33 @@ describe("GET /api/org/action-log — keyset pagination", () => {
 
     expect(new Set(seen).size).toBe(5); // no duplicates
     expect(seen).toHaveLength(5); // no skips
-    // Deterministic full order: startedAt desc, then invocationId desc
-    // within the tied startedAt=2000 group.
+    // Deterministic full order: createdAt desc, then invocationId desc
+    // within the tied createdAt=2000 group.
     expect(seen).toEqual(["tie_a", "tie_d", "tie_c", "tie_b", "tie_e"]);
+  });
+
+  it("a denied row (null startedAt) interleaves by createdAt, not sorted to the tail", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const shared = {
+      service: "github", actionId: "github.create_issue", riskLevel: "high" as const,
+      matchedPolicyId: null, matchedGrantId: null, matchedOverrideId: null, sessionId: "s1",
+      workflowExecutionId: null, userId: "local-user", orgId: "local-org", params: null,
+      paramsTruncated: null, result: null, resultTruncated: null, error: null, durationMs: 5,
+    };
+    // A denial (null startedAt) chronologically BETWEEN two executed rows.
+    // Under the old coalesce(started_at,0) sort it collapsed to 0 and sank to
+    // the tail; keyed on createdAt (I3) it interleaves where it belongs.
+    await db.insert(actionInvocations).values([
+      { ...shared, invocationId: "exec_new", createdAt: 3000, startedAt: 3000, resolvedMode: "allow", baseMode: "allow", status: "completed" },
+      { ...shared, invocationId: "denied_mid", createdAt: 2000, startedAt: null, resolvedMode: "deny", baseMode: "deny", status: "denied" },
+      { ...shared, invocationId: "exec_old", createdAt: 1000, startedAt: 1000, resolvedMode: "allow", baseMode: "allow", status: "completed" },
+    ]);
+
+    const res = await fetch(`${api.baseUrl}/api/org/action-log`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListActionLogResponse;
+    expect(body.entries.map((e) => e.invocationId)).toEqual(["exec_new", "denied_mid", "exec_old"]);
   });
 
   it("nextCursor is null on the last page", async () => {
@@ -497,7 +583,7 @@ describe("GET /api/org/action-log — keyset pagination", () => {
         workflowExecutionId: null, params: null, paramsTruncated: null, result: null, resultTruncated: null, error: null,
       },
       {
-        invocationId: "inv_out_of_range", createdAt: now, service: "github", actionId: "github.create_issue",
+        invocationId: "inv_out_of_range", createdAt: now - 100_000, service: "github", actionId: "github.create_issue",
         riskLevel: "high", resolvedMode: "allow", baseMode: "allow", status: "completed",
         sessionId: "s1", userId: "local-user", orgId: "local-org", durationMs: 1, startedAt: now - 100_000,
         matchedPolicyId: null, matchedGrantId: null, matchedOverrideId: null,

@@ -235,7 +235,7 @@ policiesRouter.post("/preview", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db } = c.var.providers;
+  const { db, actionPluginByService } = c.var.providers;
   const user = c.var.user;
 
   let body: PreviewOrgPolicyRequest;
@@ -274,7 +274,10 @@ policiesRouter.post("/preview", async (c) => {
     appliesIn: body.appliesIn,
     sessionId: body.sessionId,
     workflowExecutionId: body.workflowExecutionId,
-    pluginDefault: undefined,
+    // Resolve the real plugin default (rung 4) so the preview matches live
+    // resolution when the plugin declares a `defaultApprovalMode` that differs
+    // from the risk default (I4) — same lookup me-policies bounds use.
+    pluginDefault: actionPluginByService.get(body.service)?.actionPlugin.defaultApprovalMode,
     now: Date.now(),
   });
   const resp: PreviewOrgPolicyResponse = decision;

@@ -1437,6 +1437,11 @@ export interface PreviewOrgPolicyRequest {
   appliesIn: "session" | "workflow";
   sessionId?: string;
   workflowExecutionId?: string;
+  /** Whose per-user overrides to fold into the preview. An admin may preview
+   *  another member's effective resolution by passing that member's id here;
+   *  the `orgId` is ALWAYS forced to the calling admin's own org (never taken
+   *  from the request), so this can only ever reveal resolution within the
+   *  caller's org, never cross-org. Omit to preview with no override layer. */
   userId?: string;
 }
 

@@ -191,6 +191,11 @@ async function computeResult(
       ? buildGithubCredentialProvider(opts, ctx, owner)
       : buildCredentialProvider(opts.credentials, owner, credentialService);
 
+  // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
+  // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
+  // exists once the action is resolved. Discovery may touch credentials (an
+  // MCP-proxy plugin lists its tools over an authenticated upstream), but no
+  // action is EXECUTED here; enforcement below still gates the actual call.
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
     const resolved = await entry.actionPlugin.resolveActions({ credentials });
