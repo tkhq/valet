@@ -1500,7 +1500,12 @@ export interface ListPolicyOverridesResponse {
 /** PUT /api/me/policy-overrides — upsert-BY-TARGET, not by row id: the
  *  caller has at most one override per (service|actionId|riskLevel) target,
  *  so the target triple IS the addressing key. A second PUT for the same
- *  target updates the existing row in place. */
+ *  target updates the existing row in place. A `mode: "allow"` write is
+ *  bounds-checked against org policy (`validateOverrideBounds`,
+ *  `policies/admin.ts`) before it's accepted — an `actionId` not found in
+ *  the plugin catalog fails CLOSED (400), which also covers an action only
+ *  reachable via a plugin's dynamic `resolveActions` seam (intentional, safe
+ *  direction — not a gap). */
 export interface PutPolicyOverrideRequest {
   service?: string;
   actionId?: string;

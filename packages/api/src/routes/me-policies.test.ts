@@ -306,6 +306,41 @@ describe("PUT /api/me/policy-overrides — cross-dimension bounds", () => {
     expect(res.status).toBe(200);
   });
 
+  it("EXPLOIT (fix round 2): a workflow-only org require_approval blocks an actionId-scoped allow override", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    // appliesIn:"workflow" org policies are invisible to a session-only
+    // bounds check, but a per-user override has no appliesIn of its own —
+    // it's consulted on the workflow-side resolution path too
+    // (action-invoker.ts resolves with appliesIn:"workflow" + a real
+    // userId), so a session-only bound left this outrankable at rung 2.
+    const orgRes = await putOrgPolicy({ actionId: "github.create_issue", mode: "require_approval", appliesIn: "workflow" });
+    expect(orgRes.status).toBe(201);
+
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("require_approval");
+  });
+
+  it("a workflow-only org policy scoped to a DIFFERENT service does not block an unrelated actionId override", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const orgRes = await putOrgPolicy({ service: "slack", mode: "require_approval", appliesIn: "workflow" });
+    expect(orgRes.status).toBe(201);
+
+    // No org policy touches github in either appliesIn context — still
+    // permitted (allow/unset in both session and workflow contexts).
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
   it("400s an unknown actionId override (fails closed — can't be verified against org policy)", async () => {
     api = await bootTestApi({ plugins: PLUGINS });
     const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {

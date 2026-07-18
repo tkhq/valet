@@ -262,10 +262,26 @@ function blockedByOrgPolicy(row: OrgPolicyDimensionRow): TargetValidation {
  * Blocks only when an ORG policy (not a plugin default or the engine's risk
  * default) resolves deny/require_approval — matching spec decision 3, which
  * bounds the override against the org's OWN policy, never against a mere
- * default. An actionId absent from the static plugin catalog fails CLOSED:
- * with no way to know its real service/riskLevel, a service- or
- * riskLevel-scoped org policy could silently apply to it at invocation time
- * with nothing here to catch it.
+ * default. An actionId absent from the static plugin catalog fails CLOSED
+ * (this also covers an action only reachable via a plugin's dynamic
+ * `resolveActions` seam — intentional, same "unverifiable ⇒ refuse" logic,
+ * not an oversight): with no way to know its real service/riskLevel, a
+ * service- or riskLevel-scoped org policy could silently apply to it at
+ * invocation time with nothing here to catch it.
+ *
+ * Resolved TWICE, once per `appliesIn` context (`"session"` and
+ * `"workflow"`), and blocked if EITHER resolves org deny/require_approval —
+ * fix round 2 (Important). A per-user override carries no `appliesIn` of its
+ * own (`matchesOverrideRow` never filters on it — see `resolution.ts`), so
+ * it applies to BOTH session and workflow invocations, but an org policy's
+ * `appliesIn` DOES filter which context it matches
+ * (`action-invoker.ts` resolves workflow-side actions with
+ * `appliesIn: "workflow"` and a real `userId`, so the override IS consulted
+ * there too). Checking only `"session"` left an org policy scoped
+ * `appliesIn: "workflow"` invisible to this bound while still being
+ * outranked by the override at real workflow invocation time — the same
+ * class of permanent bypass finding 1 closed for the target-dimension axis,
+ * reopened one axis over.
  */
 async function validateActionIdOverrideBounds(
   db: AppDb,
@@ -281,21 +297,23 @@ async function validateActionIdOverrideBounds(
       error: `cannot set override mode "allow": action "${actionId}" is not in the plugin catalog and can't be verified against org policy`,
     };
   }
-  const decision = await resolveActionPolicy(db, {
-    orgId,
-    service: found.service,
-    actionId,
-    riskLevel: found.riskLevel,
-    params: undefined,
-    appliesIn: "session",
-    pluginDefault: found.pluginDefault,
-    now,
-  });
-  if (decision.provenance.source === "org_policy" && (decision.mode === "deny" || decision.mode === "require_approval")) {
-    return {
-      ok: false,
-      error: `cannot set override mode "allow": org policy for action "${actionId}" currently resolves "${decision.mode}"`,
-    };
+  for (const appliesIn of ["session", "workflow"] as const) {
+    const decision = await resolveActionPolicy(db, {
+      orgId,
+      service: found.service,
+      actionId,
+      riskLevel: found.riskLevel,
+      params: undefined,
+      appliesIn,
+      pluginDefault: found.pluginDefault,
+      now,
+    });
+    if (decision.provenance.source === "org_policy" && (decision.mode === "deny" || decision.mode === "require_approval")) {
+      return {
+        ok: false,
+        error: `cannot set override mode "allow": org policy for action "${actionId}" currently resolves "${decision.mode}" (appliesIn: "${appliesIn}")`,
+      };
+    }
   }
   return { ok: true };
 }
