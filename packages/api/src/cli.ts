@@ -24,14 +24,17 @@ type CommandImporter = () => Promise<CommandModule>;
 const notImpl: CommandImporter = () => import("./cli/commands/_notimpl.js");
 
 /**
- * The subcommand dispatch table. `serve` is handled separately (it boots the
- * product via `./main.js` rather than a `run(args, ctx)` client command).
+ * The subcommand dispatch table. `serve` boots the product; every other
+ * command is a client of a running instance.
  *
- * Every entry is a lazy importer so unrelated deps stay off the `serve`
- * path. Commands not yet built point at `_notimpl`; later tasks replace the
- * importer with the real module (which must export `run(args, ctx)`).
+ * Every entry is a lazy importer so unrelated deps stay off any single
+ * command's path — `serve` never pays for the client/TUI deps, and the client
+ * commands never pay for the heavy server graph (`serve` itself imports
+ * `main.ts` lazily, inside `run`). Commands not yet built point at
+ * `_notimpl`; later tasks replace the importer with the real module.
  */
 const COMMANDS: Record<string, CommandImporter> = {
+  serve: () => import("./cli/commands/serve.js"),
   sessions: notImpl,
   send: notImpl,
   gates: notImpl,
@@ -88,17 +91,6 @@ async function main(): Promise<number> {
   }
 
   const rest = argv.slice(1);
-
-  // `serve` boots the product. TEMPORARY: main.ts self-boots on import today,
-  // so importing it here starts the server exactly as before.
-  // TODO(T5): refactor main.ts into an exported `startServer()` and give
-  // `serve` real flags + sandbox detection; then call that instead.
-  if (first === "serve") {
-    await import("./main.js");
-    // main.js keeps the process alive (server listening); this return is
-    // effectively unreached, but keeps the control flow well-typed.
-    return ExitCode.OK;
-  }
 
   const importer = COMMANDS[first];
   if (importer === undefined) {
