@@ -592,6 +592,25 @@ export class InMemorySessionStore implements SessionStore {
     return true;
   }
 
+  async releaseSubmission(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+  ): Promise<void> {
+    const r = this.row(sessionId);
+    const item = r.queueItems.get(itemId);
+    if (!item || item.threadId !== threadId) return;
+    // CAS: only the owning attempt may release, and only from `running`.
+    if (item.status !== "running" || item.attemptId !== fence.attemptId) return;
+    item.status = "queued";
+    item.attemptId = undefined;
+    item.ownerId = undefined;
+    item.leaseExpiresAt = undefined;
+    item.updatedAt = Date.now();
+    this.attemptMarkers.delete(`${itemId}:${fence.attemptId}`);
+  }
+
   async setSubmissionBlocked(
     sessionId: string,
     threadId: string,

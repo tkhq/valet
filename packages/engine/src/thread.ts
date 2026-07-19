@@ -121,6 +121,14 @@ export class Thread {
   private gates = new GateManager();
   private mode: QueueMode;
   private aborted = false;
+  /**
+   * Set by `runItem` when a turn errored solely because the host resolver
+   * yielded no usable model credentials (the turn never reached the model).
+   * The claim loop reads it to release the claim back to `queued` rather than
+   * settling the submission `failed` — so it stays abortable and re-runs once
+   * credentials resolve. Reset at the start of every turn.
+   */
+  private turnLackedCredentials = false;
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
   private currentToolCalls = new Map<string, MessagePart>();
@@ -1115,6 +1123,21 @@ export class Thread {
         turnError = err;
         this.emitError("run_failed", err instanceof Error ? err.message : String(err));
       }
+
+      // The turn couldn't run because no model credentials resolved: release the
+      // claim back to `queued` (fenced) instead of settling it `failed`, so the
+      // submission stays abortable and re-runs once credentials appear. A racing
+      // abort settles it `aborted` via the queued settle-unclaimed path.
+      const releaseFence = this.fence;
+      if (this.turnLackedCredentials && !turnFailed && releaseFence) {
+        this.turnLackedCredentials = false;
+        this.runningItem = null;
+        this.fence = undefined;
+        await store.releaseSubmission(this.session.id, this.id, claimed.id, releaseFence);
+        await this.emitQueueState();
+        return;
+      }
+
       try {
         await this.settleTurn(claimed, turnFailed ? { error: turnError } : undefined);
       } catch (err) {
@@ -1566,6 +1589,7 @@ export class Thread {
       entryContent = text;
     }
     this.aborted = false;
+    this.turnLackedCredentials = false;
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
@@ -1635,6 +1659,18 @@ export class Thread {
       } catch (err) {
         this.emitError("agent_failed", err instanceof Error ? err.message : String(err));
       }
+
+      // A turn that errored while the host resolver produced no usable key never
+      // reached the model — the submission couldn't run, so it must not be
+      // burned as `failed`. Flag it (turnApiKey is still live here, cleared in
+      // the finally) so the claim loop releases the claim back to `queued`.
+      // Faux/keyed turns don't match: they complete, or carry a resolved key.
+      const lastMsg = this.agent.state.messages[this.agent.state.messages.length - 1];
+      this.turnLackedCredentials =
+        this.session.options.resolveModel !== undefined &&
+        !this.turnApiKey &&
+        lastMsg?.role === "assistant" &&
+        lastMsg.stopReason === "error";
 
       // Proactive compaction: if this turn pushed us past usable, run a
       // compaction pass before yielding back to the queue. Reactive

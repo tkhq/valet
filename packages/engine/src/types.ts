@@ -1015,6 +1015,19 @@ export interface SessionStore {
     outcome: SubmissionOutcome,
     opts?: { mergedIntoItemId?: string },
   ): Promise<boolean>;
+  /**
+   * Fenced release of a claimed turn back to `queued` (attempt cleared, lease
+   * dropped) without settling it — for a turn that could not run at all (e.g.
+   * the host resolver yielded no usable model credentials). The submission stays
+   * claimable and abortable. CAS-guarded on `status = 'running'` + the caller's
+   * attempt id, so a superseding attempt's later release is a no-op.
+   */
+  releaseSubmission(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+  ): Promise<void>;
   /** Fenced: running↔blocked_on_decision_gate transitions for the claimed turn. */
   setSubmissionBlocked(
     sessionId: string,

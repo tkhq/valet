@@ -1031,6 +1031,23 @@ export class PgSessionStore implements SessionStore {
     return result.rowCount > 0;
   }
 
+  async releaseSubmission(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+  ): Promise<void> {
+    const result = await this.db.query(
+      `UPDATE engine_queue_items
+       SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL, updated_at = $1
+       WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5`,
+      [Date.now(), itemId, sessionId, threadId, fence.attemptId],
+    );
+    if (result.rowCount > 0) {
+      await this.deleteAttemptMarker(itemId, fence.attemptId);
+    }
+  }
+
   async setSubmissionBlocked(
     sessionId: string,
     threadId: string,
