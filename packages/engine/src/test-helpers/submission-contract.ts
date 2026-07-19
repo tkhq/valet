@@ -928,6 +928,84 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded?.status).toBe("running");
     });
 
+    // --- releaseSubmission (fenced running→queued, no settlement) ---
+
+    it("releases a running item claimed by the caller's attempt back to queued + deletes the marker", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      expect(claimed?.status).toBe("running");
+      await store.insertAttemptMarker(item.id, "att-1");
+
+      await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-1",
+      });
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("queued");
+      expect(loaded?.attemptId).toBeUndefined();
+      expect(loaded?.ownerId).toBeUndefined();
+      expect(loaded?.leaseExpiresAt).toBeUndefined();
+      // attemptCount is retained (bounds retries); the marker is gone.
+      expect(loaded?.attemptCount).toBe(1);
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
+
+      // Re-claimable after release.
+      const reclaimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-2",
+        ownerId: "owner-1",
+      });
+      expect(reclaimed?.status).toBe("running");
+      expect(reclaimed?.attemptCount).toBe(2);
+    });
+
+    it("is a no-op on an attempt-id mismatch (a superseding attempt owns it now)", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-live",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-live");
+
+      // A stale attempt tries to release — must not touch the live claim.
+      await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-stale",
+      });
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("running");
+      expect(loaded?.attemptId).toBe("att-live");
+      expect(await store.hasAttemptMarker(item.id, "att-live")).toBe(true);
+    });
+
+    it("is a no-op when the item is not running (e.g. still queued)", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+
+      await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-none",
+      });
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("queued");
+    });
+
     // --- Abort + blocked ---
 
     it("requestAbort stamps abortRequestedAt on unsettled items in scope only; first write wins", async () => {

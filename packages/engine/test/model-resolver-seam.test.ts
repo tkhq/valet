@@ -200,4 +200,47 @@ describe("host model resolver seam", () => {
     const okThread = await thread.setModel("prov_x/m1");
     expect(okThread.toModel).toBe("prov_x/m1");
   });
+
+  it("credential-less turns release back to queued, then settle `failed` with a visible error at the cap (no forever-spin / entry leak)", async () => {
+    const faux = makeFaux("seam-nocreds");
+    const model = faux.getModel();
+    // Every turn ends in an agent error (a keyless provider surfaces as
+    // stopReason:"error"); the resolver yields NO apiKey, so each run is
+    // credential-less and hits the release path.
+    faux.setResponses(
+      Array.from({ length: 8 }, () => fauxAssistantMessage("boom", { stopReason: "error" })),
+    );
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model, apiKey: undefined }),
+    });
+    const thread = session.thread();
+
+    const r = await session.prompt("go");
+    // Drive claim cycles directly (no real 5s sweep). Each credential-less cycle
+    // releases the head back to `queued` until the cap, then settles it `failed`.
+    for (let i = 0; i < 8; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, r.queueItemId))?.status === "settled") break;
+    }
+
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toMatch(/no usable API key/i);
+    // The release cap bounds retries, so it settles at attemptCount === 3.
+    expect(item?.attemptCount).toBe(3);
+
+    // Bounded error-entry growth: at most one assistant entry per claim cycle,
+    // capped by MAX_CREDENTIAL_RELEASES (3) — not an unbounded leak.
+    const entries = await store.getEntries(session.id, thread.id);
+    const assistantEntries = entries.filter((e) => e.type === "message" && e.role === "assistant");
+    expect(assistantEntries.length).toBeLessThanOrEqual(3);
+  });
 });

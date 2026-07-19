@@ -74,6 +74,15 @@ import type {
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
 
+/**
+ * How many times a turn may be released back to `queued` for want of model
+ * credentials before the submission is settled `failed` with a visible error.
+ * Keeps a racing abort inside its window (the abort settles the item well
+ * inside the first cycle) while bounding retries — and error-entry growth — for
+ * a session whose LLM key is genuinely missing/invalid.
+ */
+const MAX_CREDENTIAL_RELEASES = 3;
+
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 
@@ -1124,18 +1133,41 @@ export class Thread {
         this.emitError("run_failed", err instanceof Error ? err.message : String(err));
       }
 
-      // The turn couldn't run because no model credentials resolved: release the
-      // claim back to `queued` (fenced) instead of settling it `failed`, so the
-      // submission stays abortable and re-runs once credentials appear. A racing
-      // abort settles it `aborted` via the queued settle-unclaimed path.
+      // The turn couldn't run because no model credentials resolved. For the
+      // first few attempts, release the claim back to `queued` (fenced) instead
+      // of settling `failed`, so the submission stays abortable and re-runs once
+      // credentials appear — a racing abort settles it `aborted` via the queued
+      // settle-unclaimed path. Past the cap, settle `failed` with a visible
+      // credentials error so a genuinely key-less session gets one bounded,
+      // surfaced failure instead of a silent forever-spin + error-entry leak.
       const releaseFence = this.fence;
       if (this.turnLackedCredentials && !turnFailed && releaseFence) {
         this.turnLackedCredentials = false;
-        this.runningItem = null;
-        this.fence = undefined;
-        await store.releaseSubmission(this.session.id, this.id, claimed.id, releaseFence);
-        await this.emitQueueState();
-        return;
+        // Mirror settleTurn's guards: a successor attempt may own the item now.
+        if (this.staleFenceDetected) {
+          this.runningItem = null;
+          this.fence = undefined;
+          return;
+        }
+        const current = await store.getQueueItem(this.session.id, claimed.id);
+        if (!current || current.status !== "running") {
+          this.runningItem = null;
+          this.fence = undefined;
+          return;
+        }
+        if (current.attemptCount < MAX_CREDENTIAL_RELEASES) {
+          this.runningItem = null;
+          this.fence = undefined;
+          await store.releaseSubmission(this.session.id, this.id, claimed.id, releaseFence);
+          await this.emitQueueState();
+          return;
+        }
+        // Cap reached — fall through to settle `failed`. decideTurnOutcome still
+        // yields to a racing abort/supersession first.
+        turnFailed = true;
+        turnError = new Error(
+          `no usable API key for model "${this.turnModelSpec()}" — configure an org LLM key or set the provider's API key env var`,
+        );
       }
 
       try {
