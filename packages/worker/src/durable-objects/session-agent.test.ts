@@ -546,6 +546,7 @@ function createMockCtx() {
       sql,
       setAlarm: vi.fn(),
       getAlarm: vi.fn(),
+      deleteAlarm: vi.fn(),
     },
     blockConcurrencyWhile(fn: () => Promise<void>) {
       initPromise = Promise.resolve(fn());
@@ -959,7 +960,7 @@ describe('SessionAgentDO', () => {
       expect((agent as any).sessionState.status).toBe('backoff');
     });
 
-    it('a trip leaves the prompt queue untouched', async () => {
+    it('an orchestrator trip leaves the prompt queue untouched', async () => {
       const { agent, sql } = await armRecovery();
       let clock = 1_779_300_000_000;
       vi.spyOn(Date, 'now').mockImplementation(() => clock);
@@ -985,6 +986,65 @@ describe('SessionAgentDO', () => {
       expect(sql.queue.get('in-flight')?.status).toBe('queued');
       expect(sql.queue.get('waiting')?.status).toBe('queued');
       expect(sql.queue.size).toBe(2);
+    });
+
+    it('a regular-session trip terminates, and the stop path clears its queue', async () => {
+      // The contrast with the orchestrator case above. The breaker still edits
+      // nothing itself, but a regular session ends through the normal stop path,
+      // and stopping a session clears its queue as any stop does — the session
+      // is over, so nothing left queued could ever run.
+      const { agent, sql } = await armRecovery('sess-regular');
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      (agent as any).lifecycle.terminateSandbox = vi.fn().mockResolvedValue(undefined);
+
+      (agent as any).promptQueue.enqueue({ id: 'in-flight', content: 'boom', status: 'processing', channelKey: 'web:a' });
+      (agent as any).promptQueue.enqueue({ id: 'waiting', content: 'later', channelKey: 'web:b' });
+
+      for (let i = 0; i < 4; i++) {
+        await (agent as any).performRecovery('sandbox_lost');
+        clock += 3_000;
+        await driveReady(agent);
+        clock += 62_000;
+      }
+
+      expect((agent as any).sessionState.status).toBe('terminated');
+      expect(sql.queue.size).toBe(0);
+    });
+
+    it('a session terminated by a trip can be revived once through ensure-running', async () => {
+      const { agent, spawnSandbox } = await armRecovery('sess-regular');
+      let clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      // A session sitting terminated with the breaker already past its threshold
+      // — the state a trip leaves behind.
+      (agent as any).sessionState.status = 'terminated';
+      (agent as any).sessionState.recoveryAttemptCount = 4;
+
+      const res = await (agent as any).handleEnsureRunning();
+
+      // Reviving is a new lifecycle: the breaker starts clean, so the attempt
+      // actually spawns instead of re-tripping on the inherited count.
+      expect(res.status).toBe(202);
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1);
+      expect(spawnSandbox).toHaveBeenCalledOnce();
+      expect((agent as any).sessionState.status).toBe('initializing');
+    });
+
+    it('ensure-running on a live session does not reset the breaker', async () => {
+      const { agent } = await armRecovery('sess-regular');
+      vi.spyOn(Date, 'now').mockImplementation(() => 1_779_300_000_000);
+
+      // Scoping check for the revival reset above: were it unconditional,
+      // repeated ensure-running calls would defeat the breaker the way
+      // reset-on-ready did.
+      (agent as any).sessionState.status = 'running';
+      (agent as any).sessionState.recoveryAttemptCount = 3;
+
+      await (agent as any).handleEnsureRunning();
+
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(3);
     });
 
     it('reports the in-flight prompt ids as context when it trips', async () => {

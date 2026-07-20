@@ -5756,6 +5756,15 @@ export class SessionAgentDO {
             { status: 500 },
           );
         }
+        // Reviving a terminated session is a new lifecycle, the same as a fresh
+        // start, so it starts from a clean breaker — otherwise a session that
+        // was terminated by a trip could never come back, since the inherited
+        // count is already past the threshold and re-trips on the first attempt.
+        // Deliberately narrow: resetting on every ensure_running would let
+        // repeated calls defeat the breaker the way reset-on-ready did.
+        if (status === 'terminated') {
+          this.sessionState.resetRecoveryState();
+        }
         await this.performRecovery('ensure_running');
         return Response.json({ status: 'recovering' }, { status: 202 });
       }
@@ -5856,7 +5865,9 @@ export class SessionAgentDO {
    *    resumes an already-counted failure
    * 5. Circuit breaker: on trip, stop the automatic recovery loop — backoff
    *    (orchestrators) or terminate (regular sessions) — and report the in-flight
-   *    prompt ids so an operator can act. The queue itself is never modified.
+   *    prompt ids so an operator can act. The breaker never edits the queue
+   *    itself; a terminated session's queue is cleared by the stop path, as on
+   *    any stop.
    * 6. Otherwise: transition to 'initializing' and respawn the sandbox
    */
   private async performRecovery(reason: string): Promise<void> {
@@ -5931,8 +5942,9 @@ export class SessionAgentDO {
       const isOrchestrator = sessionId?.startsWith('orchestrator:') ?? false;
 
       // Report what was in flight so an operator has somewhere to start. This is
-      // context, not attribution — the breaker never drops or rewrites a prompt,
-      // and remediation (e.g. clearing the queue) is a deliberate human action.
+      // context, not attribution — the breaker never drops or rewrites a prompt
+      // on its own, and remediation (e.g. clearing the queue on a session that
+      // is still alive) is a deliberate human action.
       const inFlightContext = inFlightPromptIds.length > 0 ? inFlightPromptIds.join(', ') : 'none';
       console.warn(
         `[SessionAgentDO] Recovery circuit breaker tripped for session ${sessionId} after ${attemptCount} attempts (reason: ${reason}) — in-flight prompts at loss: ${inFlightContext}`,
@@ -5984,7 +5996,9 @@ export class SessionAgentDO {
         // Alarm will be rescheduled by the caller with backoffDeadline from collectAlarmDeadlines
         return;
       } else {
-        // Regular sessions terminate after exhausting recovery attempts
+        // Regular sessions terminate after exhausting recovery attempts. The
+        // stop path clears the queue, as it does on every stop — the session is
+        // over, so nothing left queued could run.
         console.log(`[SessionAgentDO] Circuit breaker tripped for session ${sessionId} — terminating (recovery exhausted)`);
         this.emitAuditEvent('session.recovery_exhausted', `Recovery exhausted after ${attemptCount} attempts`);
         await this.handleStop('recovery_exhausted');
