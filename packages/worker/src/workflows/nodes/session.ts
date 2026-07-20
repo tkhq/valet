@@ -25,6 +25,7 @@ import { createSession } from '../../services/sessions.js';
 import { fetchMessagesFromDO } from '../../services/session-cross.js';
 import { parseOrRepairStructuredJson } from '../../lib/llm/structured-output.js';
 import { buildTemplateContext } from '../context.js';
+import { pickFinalAssistantReply } from '../assistant-reply.js';
 import { assembleWorkflowOutputRepairEnv, resolveWorkflowOutputRepairModel } from '../output-repair.js';
 import { coerceTemplateString } from '../templates.js';
 import { pollSessionUntilIdle } from '../polling.js';
@@ -129,13 +130,6 @@ function parseJsonOutput(content: string): { parsed: true; value: unknown } | { 
   }
 }
 
-function finalAssistantMessage(messages: WorkflowSessionMessage[]): WorkflowSessionMessage | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i]?.role === 'assistant') return messages[i];
-  }
-  return messages[messages.length - 1];
-}
-
 async function attachWaitedSessionOutput(
   args: NodeExecutorArgs<StartSessionNode | PromptSessionNode>,
   result: SessionStartResult | SessionPromptResult,
@@ -149,34 +143,53 @@ async function attachWaitedSessionOutput(
     return JSON.stringify(messages);
   });
   const transcript = JSON.parse(messagesJson) as WorkflowSessionMessage[];
-  const lastMessage = finalAssistantMessage(transcript);
-
-  if (lastMessage) {
-    result.lastMessage = lastMessage;
-    result.response = lastMessage.content;
-    if (args.node.outputSchema) {
-      const repairModel = await resolveWorkflowOutputRepairModel({
-        env: args.env,
-        userId: args.params.userId,
-        explicitModel: sessionOutputRepairModel(args.node),
-      });
-      const repairEnv = await assembleWorkflowOutputRepairEnv(args.env);
-      const structured = await parseOrRepairStructuredJson({
-        env: repairEnv,
-        modelId: repairModel,
-        text: lastMessage.content,
-        outputSchema: args.node.outputSchema,
-        contextLabel: `session node "${args.node.id}"`,
-      });
-      result.output = structured.value;
-    } else {
-      const parsedOutput = parseJsonOutput(lastMessage.content);
-      if (parsedOutput.parsed) result.output = parsedOutput.value;
-    }
-  }
-
   if (sessionResultMode(args.node) === 'transcript') {
     result.transcript = transcript;
+  }
+
+  // A session that reports success must have produced a usable final reply —
+  // otherwise the schema-repair pipeline below would fabricate blank values
+  // from an errored or missing turn and the node would lie about succeeding.
+  // Non-completed waits (e.g. timeout) keep their lifecycle result so
+  // downstream branches on finalStatus still work; they just never fabricate
+  // output from an unusable reply.
+  const completed = result.finalStatus === 'completed';
+  const reply = pickFinalAssistantReply(transcript);
+  if (!reply.ok) {
+    if (!completed) return;
+    if (reply.reason === 'turn_error') {
+      throw new Error(`session node "${args.node.id}": the session's final turn failed: ${reply.error}`);
+    }
+    throw new Error(`session node "${args.node.id}": session reached "${result.waitStatus}" without an assistant reply`);
+  }
+
+  const lastMessage = reply.message;
+  result.lastMessage = lastMessage;
+  result.response = lastMessage.content;
+  if (args.node.outputSchema) {
+    if (!lastMessage.content.trim()) {
+      if (completed) {
+        throw new Error(`session node "${args.node.id}": outputSchema is set but the final assistant reply is empty`);
+      }
+      return;
+    }
+    const repairModel = await resolveWorkflowOutputRepairModel({
+      env: args.env,
+      userId: args.params.userId,
+      explicitModel: sessionOutputRepairModel(args.node),
+    });
+    const repairEnv = await assembleWorkflowOutputRepairEnv(args.env);
+    const structured = await parseOrRepairStructuredJson({
+      env: repairEnv,
+      modelId: repairModel,
+      text: lastMessage.content,
+      outputSchema: args.node.outputSchema,
+      contextLabel: `session node "${args.node.id}"`,
+    });
+    result.output = structured.value;
+  } else {
+    const parsedOutput = parseJsonOutput(lastMessage.content);
+    if (parsedOutput.parsed) result.output = parsedOutput.value;
   }
 }
 

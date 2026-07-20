@@ -18,6 +18,7 @@ import { parseOrRepairStructuredJson } from '../../lib/llm/structured-output.js'
 import { renderTemplate } from '../../lib/workflow-dag/expression.js';
 import { parseDurationMs } from '../../lib/workflow-dag/duration.js';
 import { dispatchOrchestratorPrompt } from '../../services/orchestrator.js';
+import { pickFinalAssistantReply } from '../assistant-reply.js';
 import { buildTemplateContext } from '../context.js';
 import { assembleWorkflowOutputRepairEnv, resolveWorkflowOutputRepairModel } from '../output-repair.js';
 import { coerceTemplateString } from '../templates.js';
@@ -125,8 +126,25 @@ export async function executeOrchestrator(args: NodeExecutorArgs<OrchestratorNod
     },
   );
   const transcript = JSON.parse(threadMessagesJson) as WorkflowThreadMessage[];
-  const lastMessage = finalAssistantMessage(transcript);
-  const structuredOutput = lastMessage && args.node.outputSchema
+
+  // Same contract as the session node: an idle thread must have a usable
+  // final assistant reply, or the node fails loudly instead of feeding an
+  // errored/missing turn into schema repair (which fabricates blank values).
+  // Timed-out waits keep their lifecycle result for downstream branching.
+  const completed = finalStatus === 'idle';
+  const reply = pickFinalAssistantReply(transcript);
+  if (!reply.ok && completed) {
+    if (reply.reason === 'turn_error') {
+      throw new Error(`orchestrator node "${args.node.id}": the orchestrator's final turn failed: ${reply.error}`);
+    }
+    throw new Error(`orchestrator node "${args.node.id}": thread went idle without an assistant reply`);
+  }
+  const lastMessage = reply.ok ? reply.message : undefined;
+  const hasParsableReply = lastMessage !== undefined && lastMessage.content.trim().length > 0;
+  if (args.node.outputSchema && completed && !hasParsableReply) {
+    throw new Error(`orchestrator node "${args.node.id}": outputSchema is set but the final assistant reply is empty`);
+  }
+  const structuredOutput = hasParsableReply && args.node.outputSchema
     ? await parseOrRepairStructuredJson({
       env: await assembleWorkflowOutputRepairEnv(args.env),
       modelId: await resolveWorkflowOutputRepairModel({
@@ -151,13 +169,6 @@ export async function executeOrchestrator(args: NodeExecutorArgs<OrchestratorNod
     ...(structuredOutput ? { output: structuredOutput.value } : {}),
     ...(args.node.resultMode === 'transcript' ? { transcript } : {}),
   };
-}
-
-function finalAssistantMessage(messages: WorkflowThreadMessage[]): WorkflowThreadMessage | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i]?.role === 'assistant') return messages[i];
-  }
-  return messages[messages.length - 1];
 }
 
 function toWorkflowThreadMessage(message: Message): WorkflowThreadMessage {

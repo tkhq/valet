@@ -177,6 +177,9 @@ describe('executeSession — start mode', () => {
   it('reports a completed workflow status and preserves the observed wait status when wait.mode is until_idle', async () => {
     createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
     pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock.mockResolvedValue([
+      { id: 'msg-a', sessionId: 'sess-1', role: 'assistant', content: 'done', createdAt: '2026-06-12T00:00:01.000Z' },
+    ]);
     const node: SessionNode = {
       id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
       wait: { mode: 'until_idle', timeout: '1h' },
@@ -185,6 +188,74 @@ describe('executeSession — start mode', () => {
     expect(pollMock).toHaveBeenCalled();
     expect(out.finalStatus).toBe('completed');
     expect(out.waitStatus).toBe('idle');
+  });
+
+  it('fails loudly when a completed session has no assistant reply', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock.mockResolvedValue([]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
+      wait: { mode: 'until_idle', timeout: '1h' },
+    };
+    await expect(executeSession(buildArgs(node))).rejects.toThrow(/without an assistant reply/);
+  });
+
+  it('fails loudly with the turn error when the final turn errored, instead of repairing blanks', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock.mockResolvedValue([
+      { id: 'msg-user', sessionId: 'sess-1', role: 'user', content: 'go', createdAt: '2026-06-12T00:00:00.000Z' },
+      {
+        id: 'msg-err',
+        sessionId: 'sess-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          { type: 'error', message: 'OpenCode prompt sync failed: 500 — {"name":"UnknownError"}' },
+          { type: 'finish', reason: 'error' },
+        ],
+        createdAt: '2026-06-12T00:00:01.000Z',
+      },
+    ]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', required: ['company'], properties: { company: { type: 'string' } } },
+    };
+    await expect(executeSession(buildArgs(node))).rejects.toThrow(/OpenCode prompt sync failed: 500/);
+    expect(parseOrRepairStructuredJsonMock).not.toHaveBeenCalled();
+  });
+
+  it('fails loudly when outputSchema is set but the final assistant reply is empty', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock.mockResolvedValue([
+      { id: 'msg-a', sessionId: 'sess-1', role: 'assistant', content: '', parts: [{ type: 'finish', reason: 'end_turn' }], createdAt: '2026-06-12T00:00:01.000Z' },
+    ]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', required: ['company'], properties: { company: { type: 'string' } } },
+    };
+    await expect(executeSession(buildArgs(node))).rejects.toThrow(/final assistant reply is empty/);
+    expect(parseOrRepairStructuredJsonMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the lifecycle result without fabricating output when a timed-out wait has no reply', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('timed_out');
+    fetchMessagesFromDOMock.mockResolvedValue([]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', required: ['company'], properties: { company: { type: 'string' } } },
+    };
+    const out = await executeSession(buildArgs(node));
+    expect(out.finalStatus).toBe('timed_out');
+    expect(out.output).toBeUndefined();
+    expect(out.response).toBeUndefined();
+    expect(parseOrRepairStructuredJsonMock).not.toHaveBeenCalled();
   });
 
   it('returns the final assistant response and parsed JSON output after waiting until idle', async () => {

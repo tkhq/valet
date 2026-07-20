@@ -111,7 +111,15 @@ describe('executeOrchestrator', () => {
   it('polls until idle when wait.mode is until_idle and returns finalStatus', async () => {
     dispatchMock.mockResolvedValue({ dispatched: true, sessionId: 'orchestrator:user-1', threadId: 'thread-1' });
     pollThreadMock.mockResolvedValue('idle');
-    getThreadMessagesMock.mockResolvedValue([]);
+    getThreadMessagesMock.mockResolvedValue([
+      {
+        id: 'msg-a',
+        sessionId: 'orchestrator:user-1',
+        role: 'assistant',
+        content: 'done',
+        createdAt: new Date('2026-06-12T00:00:01.000Z'),
+      },
+    ]);
     const node: OrchestratorNode = {
       id: 'orch', type: 'orchestrator', prompt: 'go', wait: { mode: 'until_idle', timeout: '1h' },
     };
@@ -121,6 +129,51 @@ describe('executeOrchestrator', () => {
       sessionId: 'orchestrator:user-1',
       threadId: 'thread-1',
     }));
+  });
+
+  it('fails loudly when the idle thread has no assistant reply', async () => {
+    dispatchMock.mockResolvedValue({ dispatched: true, sessionId: 'orchestrator:user-1', threadId: 'thread-1' });
+    pollThreadMock.mockResolvedValue('idle');
+    getThreadMessagesMock.mockResolvedValue([]);
+    const node: OrchestratorNode = {
+      id: 'orch', type: 'orchestrator', prompt: 'go', wait: { mode: 'until_idle', timeout: '1h' },
+    };
+    await expect(executeOrchestrator(args(node))).rejects.toThrow(/without an assistant reply/);
+  });
+
+  it('fails loudly with the turn error when the final thread turn errored', async () => {
+    dispatchMock.mockResolvedValue({ dispatched: true, sessionId: 'orchestrator:user-1', threadId: 'thread-1' });
+    pollThreadMock.mockResolvedValue('idle');
+    getThreadMessagesMock.mockResolvedValue([
+      {
+        id: 'msg-err',
+        sessionId: 'orchestrator:user-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          { type: 'error', message: 'model blew up' },
+          { type: 'finish', reason: 'error' },
+        ],
+        createdAt: new Date('2026-06-12T00:00:01.000Z'),
+      },
+    ]);
+    const node: OrchestratorNode = {
+      id: 'orch', type: 'orchestrator', prompt: 'go', wait: { mode: 'until_idle', timeout: '1h' },
+    };
+    await expect(executeOrchestrator(args(node))).rejects.toThrow(/model blew up/);
+  });
+
+  it('keeps the lifecycle result without output when the wait timed out with no reply', async () => {
+    dispatchMock.mockResolvedValue({ dispatched: true, sessionId: 'orchestrator:user-1', threadId: 'thread-1' });
+    pollThreadMock.mockResolvedValue('timed_out');
+    getThreadMessagesMock.mockResolvedValue([]);
+    const node: OrchestratorNode = {
+      id: 'orch', type: 'orchestrator', prompt: 'go', wait: { mode: 'until_idle', timeout: '1h' },
+    };
+    const out = await executeOrchestrator(args(node));
+    expect(out).toMatchObject({ dispatched: true, finalStatus: 'timed_out', waited: true });
+    expect(out.response).toBeUndefined();
+    expect(out.output).toBeUndefined();
   });
 
   it('returns the last thread message after waiting until idle', async () => {
