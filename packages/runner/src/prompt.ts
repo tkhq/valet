@@ -309,10 +309,29 @@ function attachmentSummary(attachments: PromptAttachment[]): string {
  * unresolvable reference throws a descriptive error here instead of being
  * forwarded.
  */
-/** True when a model reference has no provider prefix in either dialect. */
-export function isBareModelRef(model: string): boolean {
-  const trimmed = model.trim();
-  return !trimmed.includes("/") && !trimmed.includes(":");
+// First-separator split, duplicated from @valet/shared's splitModelRef: the
+// shared package's exports point at dist/, which the sandbox image installs
+// but never builds (the runner's shared imports are type-only at runtime), so
+// a value import would fail at boot. Keep semantics in sync with
+// packages/shared/src/model-ref.ts.
+function splitModelRefLocal(ref: string): { provider: string; model: string } | null {
+  const trimmed = ref.trim();
+  const slash = trimmed.indexOf("/");
+  const colon = trimmed.indexOf(":");
+  const sep = slash === -1 ? colon : colon === -1 ? slash : Math.min(slash, colon);
+  if (sep <= 0 || sep >= trimmed.length - 1) return null;
+  return { provider: trimmed.slice(0, sep), model: trimmed.slice(sep + 1) };
+}
+
+/** Providers owning `bareModel` among "provider/model" discovered ids. */
+function ownersOfBareModel(knownModelIds: Iterable<string>, bareModel: string): string[] {
+  const providers = new Set<string>();
+  for (const id of knownModelIds) {
+    const idx = id.indexOf("/");
+    if (idx === -1) continue;
+    if (id.slice(idx + 1) === bareModel) providers.add(id.slice(0, idx));
+  }
+  return [...providers];
 }
 
 export function resolveModelRef(
@@ -320,25 +339,40 @@ export function resolveModelRef(
   knownModelIds: Iterable<string>,
 ): { providerID: string; modelID: string } {
   const trimmed = model.trim();
-  const slash = trimmed.indexOf("/");
-  const colon = trimmed.indexOf(":");
-  const sep = slash === -1 ? colon : colon === -1 ? slash : Math.min(slash, colon);
-  if (sep > 0 && sep < trimmed.length - 1) {
-    return { providerID: trimmed.slice(0, sep), modelID: trimmed.slice(sep + 1) };
-  }
-  const providers = new Set<string>();
+  const parts = splitModelRefLocal(trimmed);
+  const knownProviders = new Set<string>();
   for (const id of knownModelIds) {
     const idx = id.indexOf("/");
-    if (idx === -1) continue;
-    if (id.slice(idx + 1) === trimmed) providers.add(id.slice(0, idx));
+    if (idx > 0) knownProviders.add(id.slice(0, idx));
   }
-  const provider = providers.size === 1 ? [...providers][0] : undefined;
-  if (provider) {
-    return { providerID: provider, modelID: trimmed };
+
+  if (parts) {
+    // With no discovery knowledge we can't judge the prefix — forward as-is
+    // rather than blocking on a failed/unavailable /provider fetch.
+    if (knownProviders.size === 0 || knownProviders.has(parts.provider)) {
+      return { providerID: parts.provider, modelID: parts.model };
+    }
+    // The prefix isn't a connected provider. It may not be a prefix at all:
+    // model names can embed separators (e.g. "llama3:70b" splits into a bogus
+    // provider "llama3"), so try the whole reference as a bare model name.
+    const owners = ownersOfBareModel(knownModelIds, trimmed);
+    if (owners.length === 1) {
+      return { providerID: owners[0], modelID: trimmed };
+    }
+    throw new Error(
+      `Cannot resolve model "${model}": provider "${parts.provider}" is not connected (connected: ${[...knownProviders].join(", ")})` +
+      `${owners.length > 1 ? ` and "${trimmed}" is ambiguous across providers (${owners.join(", ")})` : ""}. ` +
+      `Use "provider/model-id" (e.g. "anthropic/claude-sonnet-4-5").`,
+    );
   }
-  const reason = providers.size === 0
+
+  const owners = ownersOfBareModel(knownModelIds, trimmed);
+  if (owners.length === 1) {
+    return { providerID: owners[0], modelID: trimmed };
+  }
+  const reason = owners.length === 0
     ? "no connected provider offers it"
-    : `it is ambiguous across providers (${[...providers].join(", ")})`;
+    : `it is ambiguous across providers (${owners.join(", ")})`;
   throw new Error(
     `Cannot resolve model "${model}": ${reason}. Use "provider/model-id" (e.g. "anthropic/claude-sonnet-4-5").`,
   );
@@ -2769,14 +2803,15 @@ export class PromptHandler {
   }
 
   /**
-   * Make sure model discovery has produced a non-empty id set before a bare
-   * (unprefixed) model reference is resolved. Boot deliberately backgrounds
+   * Make sure model discovery has produced a non-empty id set before a model
+   * reference is resolved. Boot deliberately backgrounds
    * fetchAvailableModels() after signaling idle, so the first prompt into a
-   * cold sandbox can race discovery — and the publish-time validator blesses
-   * bare session-node models on the promise that the runner resolves them at
-   * dispatch. Single-flight so concurrent prompts share one /provider call;
-   * a still-empty set after the fetch falls through to resolveModelRef's
-   * descriptive error.
+   * cold sandbox can race discovery — and resolution needs the set both to
+   * resolve bare refs and to vet prefixed refs against connected providers.
+   * Single-flight so concurrent prompts share one /provider call; a
+   * still-empty set after the fetch degrades to resolveModelRef's
+   * no-knowledge passthrough for prefixed refs and descriptive error for
+   * bare ones.
    */
   private async ensureModelDiscovery(): Promise<void> {
     if (this.discoveredModelIds.size > 0) return;
@@ -3268,7 +3303,9 @@ export class PromptHandler {
     const url = `${this.opencodeUrl}/session/${sessionId}/prompt_async`;
     console.log(`[PromptHandler] POST ${url}${model ? ` (model: ${model})` : ''}${attachments?.length ? ` (attachments: ${attachments.length})` : ''}`);
 
-    if (model && isBareModelRef(model)) await this.ensureModelDiscovery();
+    // Resolution consults the discovered provider set for bare refs AND to
+    // vet prefixed refs against connected providers — ensure it's populated.
+    if (model && this.discoveredModelIds.size === 0) await this.ensureModelDiscovery();
     const body = this.buildPromptBody(content, model, attachments, author, channelType, channelId);
 
     const res = await fetch(url, {
@@ -3302,7 +3339,9 @@ export class PromptHandler {
     const url = `${this.opencodeUrl}/session/${sessionId}/message`;
     console.log(`[PromptHandler] POST ${url}${model ? ` (model: ${model})` : ''}${attachments?.length ? ` (attachments: ${attachments.length})` : ''}`);
 
-    if (model && isBareModelRef(model)) await this.ensureModelDiscovery();
+    // Resolution consults the discovered provider set for bare refs AND to
+    // vet prefixed refs against connected providers — ensure it's populated.
+    if (model && this.discoveredModelIds.size === 0) await this.ensureModelDiscovery();
     const body = this.buildPromptBody(content, model, attachments, author, channelType, channelId);
 
     const res = await fetch(url, {

@@ -24,6 +24,7 @@ import type {
   PromptSessionNode,
   LlmNode,
 } from '@valet/shared';
+import { splitModelRef, isBareModelRef } from '@valet/shared';
 import { parseTemplate, parseExpression, TemplateParseError } from './expression.js';
 import { lintTemplateReferences } from './template-lint.js';
 import { allowedIfOperations, isIfOperationSupported, normalizeIfOperation } from './if-operations.js';
@@ -659,28 +660,21 @@ function validateNode(
 }
 
 /**
- * Split a session-node model reference on its first "/" or ":". Sessions run
- * on OpenCode, whose provider set is open (any connected provider), so unlike
- * llm/repairModel this doesn't restrict the provider prefix. Returns null for
- * bare ids (no separator) — those are legal and resolved by the runner against
+ * Session-node model references split with the shared first-separator rule.
+ * Sessions run on OpenCode, whose provider set is open (any connected
+ * provider), so unlike llm/repairModel this doesn't restrict the provider
+ * prefix. Bare ids (no separator) are legal — resolved by the runner against
  * the sandbox's discovered models at dispatch time.
  */
 function splitSessionModelRef(model: string): { provider: string; catalogId: string } | null {
-  const slash = model.indexOf('/');
-  const colon = model.indexOf(':');
-  const sep = slash === -1 ? colon : colon === -1 ? slash : Math.min(slash, colon);
-  if (sep === -1) return null;
-  const provider = model.slice(0, sep);
-  return { provider, catalogId: `${provider}/${model.slice(sep + 1)}` };
+  const ref = splitModelRef(model);
+  return ref ? { provider: ref.provider, catalogId: `${ref.provider}/${ref.model}` } : null;
 }
 
 function validateSessionModelShape(nodeId: string, model: string, errors: WorkflowValidationError[]): void {
   const trimmed = model.trim();
-  const slash = trimmed.indexOf('/');
-  const colon = trimmed.indexOf(':');
-  const sep = slash === -1 ? colon : colon === -1 ? slash : Math.min(slash, colon);
   // Bare ids pass here; a separator at either edge is a half-written prefix.
-  if (trimmed.length === 0 || sep === 0 || sep === trimmed.length - 1) {
+  if (trimmed.length === 0 || (splitModelRef(trimmed) === null && !isBareModelRef(trimmed))) {
     errors.push({
       scope: 'node',
       nodeId,

@@ -18,7 +18,7 @@ import { parseOrRepairStructuredJson } from '../../lib/llm/structured-output.js'
 import { renderTemplate } from '../../lib/workflow-dag/expression.js';
 import { parseDurationMs } from '../../lib/workflow-dag/duration.js';
 import { dispatchOrchestratorPrompt } from '../../services/orchestrator.js';
-import { pickFinalAssistantReply, replyMayStillArrive, REPLY_REFETCH_ATTEMPTS, REPLY_REFETCH_DELAY_MS } from '../assistant-reply.js';
+import { fetchReplyWithRetry, replyIsFinalized } from '../assistant-reply.js';
 import { buildTemplateContext } from '../context.js';
 import { assembleWorkflowOutputRepairEnv, resolveWorkflowOutputRepairModel } from '../output-repair.js';
 import { coerceTemplateString } from '../templates.js';
@@ -117,34 +117,26 @@ export async function executeOrchestrator(args: NodeExecutorArgs<OrchestratorNod
     pollKey: `orchestrator-poll:${args.node.id}${iSuffix}`,
     timeoutMs,
   });
-  // The thread's idleness is read from the live DO, but the transcript comes
-  // from D1, which the DO flushes asynchronously — so a just-idled thread can
-  // briefly show no finalized reply. Re-read a couple of times before judging.
-  const completed = finalStatus === 'idle';
-  const maxAttempts = completed ? REPLY_REFETCH_ATTEMPTS : 1;
-  let transcript: WorkflowThreadMessage[] = [];
-  let reply = pickFinalAssistantReply(transcript);
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    if (attempt > 0) {
-      await args.step.sleep(`orchestrator-output-wait:${args.node.id}${iSuffix}:${attempt}`, REPLY_REFETCH_DELAY_MS);
-    }
-    // Attempt 0 keeps the original step key so executions in flight across a
-    // deploy replay against their cached result.
-    const stepKey = `orchestrator-thread-output:${args.node.id}${iSuffix}${attempt > 0 ? `:retry-${attempt}` : ''}`;
-    const threadMessagesJson = await args.step.do(stepKey, async () => {
-      const db = getDb(args.env.DB);
-      const messages = await getThreadMessages(db, threadId);
-      return JSON.stringify(messages.map(toWorkflowThreadMessage));
-    });
-    transcript = JSON.parse(threadMessagesJson) as WorkflowThreadMessage[];
-    reply = pickFinalAssistantReply(transcript);
-    if (!replyMayStillArrive(reply)) break;
-  }
-
   // Same contract as the session node: an idle thread must have a usable
   // final assistant reply, or the node fails loudly instead of feeding an
   // errored/missing turn into schema repair (which fabricates blank values).
-  // Timed-out waits keep their lifecycle result for downstream branching.
+  // The thread's idleness is read from the live DO but the transcript comes
+  // from D1, which the DO flushes asynchronously — the shared retry policy
+  // re-reads before judging. Timed-out waits keep their lifecycle result for
+  // downstream branching.
+  const completed = finalStatus === 'idle';
+  const { transcript, reply } = await fetchReplyWithRetry<WorkflowThreadMessage>({
+    step: args.step,
+    strict: completed,
+    fetchKey: `orchestrator-thread-output:${args.node.id}${iSuffix}`,
+    sleepKeyPrefix: `orchestrator-output-wait:${args.node.id}${iSuffix}`,
+    fetchTranscript: async () => {
+      const db = getDb(args.env.DB);
+      const messages = await getThreadMessages(db, threadId);
+      return messages.map(toWorkflowThreadMessage);
+    },
+  });
+
   if (!reply.ok && completed) {
     if (reply.reason === 'turn_error') {
       throw new Error(`orchestrator node "${args.node.id}": the orchestrator's final turn failed: ${reply.error}`);
@@ -152,9 +144,16 @@ export async function executeOrchestrator(args: NodeExecutorArgs<OrchestratorNod
     throw new Error(`orchestrator node "${args.node.id}": thread went idle without an assistant reply`);
   }
   const lastMessage = reply.ok ? reply.message : undefined;
-  const hasParsableReply = lastMessage !== undefined && lastMessage.content.trim().length > 0;
+  // Only a finalized turn's text is trustworthy input for structured output —
+  // repairing a mid-stream message's truncated text fabricates schema-valid
+  // values (a timed-out wait can surface the still-running turn).
+  const hasParsableReply = lastMessage !== undefined
+    && lastMessage.content.trim().length > 0
+    && replyIsFinalized(lastMessage);
   if (args.node.outputSchema && completed && !hasParsableReply) {
-    throw new Error(`orchestrator node "${args.node.id}": outputSchema is set but the final assistant reply is empty`);
+    throw new Error(lastMessage !== undefined && !replyIsFinalized(lastMessage)
+      ? `orchestrator node "${args.node.id}": outputSchema is set but the final assistant reply never finalized`
+      : `orchestrator node "${args.node.id}": outputSchema is set but the final assistant reply is empty`);
   }
   const structuredOutput = hasParsableReply && args.node.outputSchema
     ? await parseOrRepairStructuredJson({

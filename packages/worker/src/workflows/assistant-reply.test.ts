@@ -69,6 +69,10 @@ describe('replyMayStillArrive', () => {
     expect(replyMayStillArrive(result)).toBe(true);
   });
 
+  it('is false for legacy messages with no parts array — they will never gain a finish part', () => {
+    expect(replyMayStillArrive(pickFinalAssistantReply([{ role: 'assistant', content: 'legacy reply' }]))).toBe(false);
+  });
+
   it('is false for finalized turns and for turn errors (errors are final)', () => {
     expect(replyMayStillArrive(pickFinalAssistantReply([finished('done')]))).toBe(false);
     const errored = pickFinalAssistantReply([

@@ -17,10 +17,9 @@ describe('parseModelId', () => {
   });
 
   it('rejects bare ids and separator-at-edge forms', () => {
-    for (const bad of ['claude-sonnet-4-5', ':claude', '/claude', '']) {
+    for (const bad of ['claude-sonnet-4-5', ':claude', '/claude', '', 'anthropic:', 'anthropic/']) {
       expect(() => parseModelId(bad)).toThrow(/invalid model id/);
     }
-    expect(() => parseModelId('anthropic:')).toThrow(/missing model name/);
   });
 
   it('rejects providers outside the AI SDK whitelist in either dialect', () => {

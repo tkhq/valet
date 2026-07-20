@@ -317,6 +317,45 @@ describe('executeSession — start mode', () => {
     );
   });
 
+  it('stays lenient when the session was terminated without a reply — normal lifecycle, not a failure', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('terminated');
+    fetchMessagesFromDOMock.mockResolvedValue([]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', required: ['company'], properties: { company: { type: 'string' } } },
+    };
+    const out = await executeSession(buildArgs(node));
+    expect(out.finalStatus).toBe('completed');
+    expect(out.waitStatus).toBe('terminated');
+    expect(out.output).toBeUndefined();
+    expect(fetchMessagesFromDOMock).toHaveBeenCalledTimes(1);
+    expect(parseOrRepairStructuredJsonMock).not.toHaveBeenCalled();
+  });
+
+  it('never schema-repairs a mid-stream (unfinalized) reply on a timed-out wait', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('timed_out');
+    fetchMessagesFromDOMock.mockResolvedValue([
+      {
+        id: 'msg-a', sessionId: 'sess-1', role: 'assistant', content: '{"company":"Acm',
+        parts: [{ type: 'text', text: '{"company":"Acm', streaming: true }],
+        createdAt: '2026-06-12T00:00:01.000Z',
+      },
+    ]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', required: ['company'], properties: { company: { type: 'string' } } },
+    };
+    const out = await executeSession(buildArgs(node));
+    expect(out.finalStatus).toBe('timed_out');
+    expect(out.response).toBe('{"company":"Acm');
+    expect(out.output).toBeUndefined();
+    expect(parseOrRepairStructuredJsonMock).not.toHaveBeenCalled();
+  });
+
   it('keeps the lifecycle result without fabricating output when a timed-out wait has no reply', async () => {
     createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
     pollMock.mockResolvedValue('timed_out');
@@ -490,6 +529,33 @@ describe('executeSession — prompt mode', () => {
     const sent = (a.fetchMock.mock.calls[0]![0] as Request).clone();
     const body = await sent.json() as Record<string, unknown>;
     expect(body.threadId).toBe('thread-9');
+  });
+
+  it('scopes reply picking AND the transcript to the targeted thread', async () => {
+    assertSessionAccessMock.mockResolvedValue({ id: 'sess-1', status: 'idle' });
+    pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock.mockResolvedValue([
+      { id: 'u1', sessionId: 'sess-1', role: 'user', content: 'go', threadId: 'thread-9', createdAt: '2026-06-12T00:00:00.000Z' },
+      {
+        id: 'a1', sessionId: 'sess-1', role: 'assistant', content: 'targeted reply', threadId: 'thread-9',
+        parts: [{ type: 'text', text: 'targeted reply' }, { type: 'finish', reason: 'end_turn' }],
+        createdAt: '2026-06-12T00:00:01.000Z',
+      },
+      {
+        id: 'a2', sessionId: 'sess-1', role: 'assistant', content: 'concurrent other-thread turn', threadId: 'thread-OTHER',
+        parts: [{ type: 'text', text: 'concurrent other-thread turn' }, { type: 'finish', reason: 'end_turn' }],
+        createdAt: '2026-06-12T00:00:02.000Z',
+      },
+    ]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'prompt',
+      sessionId: 'sess-1', prompt: 'go', threadId: 'thread-9',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      resultMode: 'transcript',
+    };
+    const out = await executeSession(buildArgs(node));
+    expect(out.response).toBe('targeted reply');
+    expect(out.transcript?.map((m) => m.id)).toEqual(['u1', 'a1']);
   });
 
   it('rejects when both threadId and forceNewThread are set', async () => {

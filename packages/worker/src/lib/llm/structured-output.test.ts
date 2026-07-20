@@ -56,7 +56,7 @@ describe('parseModelId', () => {
   });
 
   it('rejects empty model name', () => {
-    expect(() => parseModelId('anthropic:')).toThrow(/missing model name/);
+    expect(() => parseModelId('anthropic:')).toThrow(/invalid model id/);
   });
 });
 

@@ -1393,9 +1393,27 @@ describe("resolveModelRef", () => {
       providerID: "ollama",
       modelID: "llama3:70b",
     });
-    expect(resolveModelRef("openrouter:anthropic/claude-sonnet-4-5", known)).toEqual({
+  });
+
+  it("re-resolves a colon-tagged bare model name whose fake prefix is not a connected provider", () => {
+    // "llama3:70b" typed without the ollama/ prefix splits into bogus
+    // provider "llama3" — the whole ref must fall through to bare lookup.
+    expect(resolveModelRef("llama3:70b", known)).toEqual({
+      providerID: "ollama",
+      modelID: "llama3:70b",
+    });
+  });
+
+  it("throws a descriptive error for a prefixed ref on an unconnected provider", () => {
+    expect(() => resolveModelRef("openrouter:anthropic/claude-sonnet-4-5", known)).toThrow(
+      /provider "openrouter" is not connected \(connected: anthropic, openai, ollama\)/,
+    );
+  });
+
+  it("forwards prefixed refs untouched when discovery is empty (no knowledge to judge)", () => {
+    expect(resolveModelRef("openrouter:some-model", [])).toEqual({
       providerID: "openrouter",
-      modelID: "anthropic/claude-sonnet-4-5",
+      modelID: "some-model",
     });
   });
 
@@ -1493,7 +1511,7 @@ describe("ensureModelDiscovery (bare-id cold-start race)", () => {
     expect(promptIdx).toBeGreaterThan(providerIdx);
   });
 
-  it("skips the discovery fetch entirely for prefixed models", async () => {
+  it("skips the discovery fetch when the set is already populated", async () => {
     const fetchCalls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -1501,6 +1519,7 @@ describe("ensureModelDiscovery (bare-id cold-start race)", () => {
       return new Response(null, { status: 204 });
     }));
     const handler = createHandler(createAgentClientMock());
+    (handler as any).discoveredModelIds = new Set(["anthropic/claude-sonnet-4-5"]);
     await (handler as any).sendPromptAsync("ses_1", "hi", "anthropic:claude-sonnet-4-5");
     expect(fetchCalls.some((u) => u.endsWith("/provider"))).toBe(false);
   });

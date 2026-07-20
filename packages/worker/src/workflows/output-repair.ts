@@ -1,7 +1,9 @@
+import { splitModelRef } from '@valet/shared';
 import type { Env } from '../env.js';
 import { getDb } from '../lib/drizzle.js';
 import { getOrgSettings } from '../lib/db/org.js';
 import { getUserById } from '../lib/db/users.js';
+import { parseModelId } from '../lib/llm/model-id.js';
 import { assembleLlmProviderEnv } from '../lib/llm/provider-env.js';
 
 export async function resolveWorkflowOutputRepairModel(params: {
@@ -11,14 +13,30 @@ export async function resolveWorkflowOutputRepairModel(params: {
 }): Promise<string | undefined> {
   if (params.explicitModel) return normalizeWorkflowModelId(params.explicitModel);
 
+  // Preferences hold catalog ids from the model picker, which can name any
+  // connected OpenCode provider — but repair runs on the worker-side AI SDK,
+  // which only supports its whitelisted providers. Take the first preference
+  // the repair pipeline can actually run instead of failing at repair time.
   const db = getDb(params.env.DB);
   const user = await getUserById(db, params.userId);
-  const userModel = user?.modelPreferences?.[0];
-  if (userModel) return normalizeWorkflowModelId(userModel);
+  const userModel = firstRunnableModel(user?.modelPreferences);
+  if (userModel) return userModel;
 
   const org = await getOrgSettings(db);
-  const orgModel = org.modelPreferences?.[0];
-  return orgModel ? normalizeWorkflowModelId(orgModel) : undefined;
+  return firstRunnableModel(org.modelPreferences);
+}
+
+function firstRunnableModel(preferences: string[] | null | undefined): string | undefined {
+  for (const candidate of preferences ?? []) {
+    const normalized = normalizeWorkflowModelId(candidate);
+    try {
+      parseModelId(normalized);
+      return normalized;
+    } catch {
+      // not runnable by the AI SDK — try the next preference
+    }
+  }
+  return undefined;
 }
 
 export async function assembleWorkflowOutputRepairEnv(env: Env): Promise<Env> {
@@ -27,14 +45,6 @@ export async function assembleWorkflowOutputRepairEnv(env: Env): Promise<Env> {
 }
 
 export function normalizeWorkflowModelId(modelId: string): string {
-  const trimmed = modelId.trim();
-  const colon = trimmed.indexOf(':');
-  if (colon > 0) return trimmed;
-
-  const slash = trimmed.indexOf('/');
-  if (slash > 0) {
-    return `${trimmed.slice(0, slash)}:${trimmed.slice(slash + 1)}`;
-  }
-
-  return trimmed;
+  const ref = splitModelRef(modelId);
+  return ref ? `${ref.provider}:${ref.model}` : modelId.trim();
 }

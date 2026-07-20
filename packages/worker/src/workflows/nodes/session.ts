@@ -25,7 +25,7 @@ import { createSession } from '../../services/sessions.js';
 import { fetchMessagesFromDO } from '../../services/session-cross.js';
 import { parseModelId, parseOrRepairStructuredJson } from '../../lib/llm/structured-output.js';
 import { buildTemplateContext } from '../context.js';
-import { pickFinalAssistantReply, replyMayStillArrive, REPLY_REFETCH_ATTEMPTS, REPLY_REFETCH_DELAY_MS } from '../assistant-reply.js';
+import { fetchReplyWithRetry, replyIsFinalized } from '../assistant-reply.js';
 import { assembleWorkflowOutputRepairEnv, normalizeWorkflowModelId, resolveWorkflowOutputRepairModel } from '../output-repair.js';
 import { coerceTemplateString } from '../templates.js';
 import { pollSessionUntilIdle } from '../polling.js';
@@ -139,37 +139,31 @@ async function attachWaitedSessionOutput(
 ): Promise<void> {
   result.waited = true;
 
-  const completed = result.finalStatus === 'completed';
-  const maxAttempts = completed ? REPLY_REFETCH_ATTEMPTS : 1;
-  let transcript: WorkflowSessionMessage[] = [];
-  let reply = pickFinalAssistantReply(transcript);
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    if (attempt > 0) {
-      await args.step.sleep(`session-output-wait:${args.node.id}${iSuffix}:${attempt}`, REPLY_REFETCH_DELAY_MS);
-    }
-    // Attempt 0 keeps the original step key so executions in flight across a
-    // deploy replay against their cached result.
-    const stepKey = `session-output:${args.node.id}${iSuffix}${attempt > 0 ? `:retry-${attempt}` : ''}`;
-    const messagesJson = await args.step.do(stepKey, async () => {
-      const messages = await fetchMessagesFromDO(args.env, sessionId, 5000);
-      return JSON.stringify(messages);
-    });
-    transcript = JSON.parse(messagesJson) as WorkflowSessionMessage[];
-    reply = pickFinalAssistantReply(scopeToThread(transcript, threadId));
-    if (!replyMayStillArrive(reply)) break;
-  }
+  // Strict only for a genuine idle: a session that finished responding must
+  // have produced a usable final reply, or the schema-repair pipeline below
+  // would fabricate blank values from an errored/missing turn and the node
+  // would lie about succeeding. 'terminated'/'hibernated' also map to
+  // finalStatus 'completed', but a user-stopped or sleeping session without a
+  // reply is a normal lifecycle outcome — downstream branches on waitStatus,
+  // and failing the workflow for it would be wrong (see polling.ts). Timeouts
+  // are lenient for the same reason.
+  const strict = result.waitStatus === 'idle';
+  const { transcript, reply } = await fetchReplyWithRetry<WorkflowSessionMessage>({
+    step: args.step,
+    strict,
+    fetchKey: `session-output:${args.node.id}${iSuffix}`,
+    sleepKeyPrefix: `session-output-wait:${args.node.id}${iSuffix}`,
+    fetchTranscript: () => fetchMessagesFromDO(args.env, sessionId, 5000),
+    scope: (messages) => scopeToThread(messages, threadId),
+  });
   if (sessionResultMode(args.node) === 'transcript') {
-    result.transcript = transcript;
+    // The transcript view honors the same thread scoping as reply picking, so
+    // the two outputs of one node can't describe different turns.
+    result.transcript = scopeToThread(transcript, threadId);
   }
 
-  // A session that reports success must have produced a usable final reply —
-  // otherwise the schema-repair pipeline below would fabricate blank values
-  // from an errored or missing turn and the node would lie about succeeding.
-  // Non-completed waits (e.g. timeout) keep their lifecycle result so
-  // downstream branches on finalStatus still work; they just never fabricate
-  // output from an unusable reply.
   if (!reply.ok) {
-    if (!completed) return;
+    if (!strict) return;
     if (reply.reason === 'turn_error') {
       throw new Error(`session node "${args.node.id}": the session's final turn failed: ${reply.error}`);
     }
@@ -179,10 +173,16 @@ async function attachWaitedSessionOutput(
   const lastMessage = reply.message;
   result.lastMessage = lastMessage;
   result.response = lastMessage.content;
+  // Only a finalized turn's text is trustworthy input for structured output —
+  // a mid-stream message that survived the retries (or arrived on a lenient
+  // path) is truncated text, and repairing it fabricates schema-valid values.
+  const finalized = replyIsFinalized(lastMessage);
   if (args.node.outputSchema) {
-    if (!lastMessage.content.trim()) {
-      if (completed) {
-        throw new Error(`session node "${args.node.id}": outputSchema is set but the final assistant reply is empty`);
+    if (!lastMessage.content.trim() || !finalized) {
+      if (strict) {
+        throw new Error(finalized
+          ? `session node "${args.node.id}": outputSchema is set but the final assistant reply is empty`
+          : `session node "${args.node.id}": outputSchema is set but the final assistant reply never finalized`);
       }
       return;
     }
@@ -200,7 +200,7 @@ async function attachWaitedSessionOutput(
       contextLabel: `session node "${args.node.id}"`,
     });
     result.output = structured.value;
-  } else {
+  } else if (finalized) {
     const parsedOutput = parseJsonOutput(lastMessage.content);
     if (parsedOutput.parsed) result.output = parsedOutput.value;
   }
