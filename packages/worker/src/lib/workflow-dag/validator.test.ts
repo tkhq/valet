@@ -1133,6 +1133,99 @@ describe('validateAgainstAvailableModels', () => {
   });
 });
 
+describe('session node model validation', () => {
+  const CATALOG = [
+    {
+      provider: 'Anthropic',
+      models: [
+        { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
+        { id: 'anthropic/claude-opus-4-8', name: 'Claude Opus 4.8' },
+      ],
+    },
+    { provider: 'OpenAI', models: [{ id: 'openai/gpt-5', name: 'GPT-5' }] },
+  ];
+
+  function sessionDef(model: string, extra: Record<string, unknown> = {}): WorkflowDefinition {
+    return definition({
+      nodes: [
+        { id: 'enrich', type: 'session', mode: 'start', prompt: 'do it', workspace: 'ws', model, ...extra },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'enrich', to: 'finish' }],
+    } as Partial<WorkflowDefinition>);
+  }
+
+  it('accepts both separator dialects when the model is in the catalog', () => {
+    expect(validateAgainstAvailableModels(sessionDef('anthropic/claude-sonnet-4-5'), CATALOG)).toEqual([]);
+    expect(validateAgainstAvailableModels(sessionDef('anthropic:claude-sonnet-4-5'), CATALOG)).toEqual([]);
+  });
+
+  it('rejects a model missing from the catalog with suggestions', () => {
+    const errs = validateAgainstAvailableModels(sessionDef('anthropic:claude-sonnet-5-fake'), CATALOG);
+    expect(errs).toEqual([
+      expect.objectContaining({
+        nodeId: 'enrich',
+        path: 'model',
+        code: 'llm_model_unavailable',
+        message: expect.stringContaining('anthropic/claude-sonnet-4-5'),
+      }),
+    ]);
+  });
+
+  it('accepts a bare model id owned by exactly one provider', () => {
+    expect(validateAgainstAvailableModels(sessionDef('gpt-5'), CATALOG)).toEqual([]);
+  });
+
+  it('rejects a bare model id owned by multiple providers as ambiguous', () => {
+    const catalog = [...CATALOG, { provider: 'Bedrock', models: [{ id: 'bedrock/gpt-5', name: 'GPT-5 (Bedrock)' }] }];
+    const errs = validateAgainstAvailableModels(sessionDef('gpt-5'), catalog);
+    expect(errs.some((e) => e.code === 'llm_model_unavailable' && /ambiguous/.test(e.message))).toBe(true);
+  });
+
+  it('rejects a bare model id no provider offers', () => {
+    const errs = validateAgainstAvailableModels(sessionDef('claude-sonnet-9'), CATALOG);
+    expect(errs.some((e) => e.code === 'llm_model_unavailable' && e.path === 'model')).toBe(true);
+  });
+
+  it('skips catalog membership for providers the catalog does not know', () => {
+    expect(validateAgainstAvailableModels(sessionDef('openrouter/some-model'), CATALOG)).toEqual([]);
+  });
+
+  it('checks session.model in the environment pass even without repairModel', () => {
+    const errs = validateAgainstEnvironment(sessionDef('anthropic:claude-sonnet-5-fake'), {} as Env, {
+      availableModels: CATALOG,
+    });
+    expect(errs.some((e) => e.code === 'llm_model_unavailable' && e.path === 'model')).toBe(true);
+  });
+
+  it('does not double-report session.model when repairModel is also set', () => {
+    const def = sessionDef('anthropic:claude-sonnet-5-fake', {
+      repairModel: 'anthropic:claude-opus-4-8',
+      wait: { mode: 'until_idle' },
+      outputSchema: { type: 'object' },
+    });
+    const errs = validateAgainstEnvironment(def, { ANTHROPIC_API_KEY: 'sk-ant' } as Env, {
+      availableModels: CATALOG,
+    });
+    const modelErrors = errs.filter((e) => e.path === 'model' && e.code === 'llm_model_unavailable');
+    expect(modelErrors).toHaveLength(1);
+  });
+
+  it('rejects malformed model references at the structural pass', () => {
+    for (const bad of [':claude-sonnet-4-5', 'anthropic/', 'anthropic:', '/claude-sonnet-4-5', '  ']) {
+      const errs = validateDefinition(sessionDef(bad));
+      expect(
+        errs.some((e) => e.code === 'llm_model_id_invalid' && e.path === 'model' && e.nodeId === 'enrich'),
+        `expected malformed model error for ${JSON.stringify(bad)}`,
+      ).toBe(true);
+    }
+  });
+
+  it('allows bare model ids at the structural pass (resolved later)', () => {
+    expect(validateDefinition(sessionDef('claude-sonnet-4-5')).filter((e) => e.path === 'model')).toEqual([]);
+  });
+});
+
 describe('validateDefinition — body-level templates and per-node baseline', () => {
   it('surfaces a foreach body llm template parse error', () => {
     const def = definition({

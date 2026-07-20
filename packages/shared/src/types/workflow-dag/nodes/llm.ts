@@ -32,7 +32,7 @@ the raw string. Use the schema option when downstream nodes need a typed
 field rather than free-form text.`,
   fields: {
     model: {
-      help: 'Optional. Falls back to the org default LLM key when unset. Use a vendor-prefixed ID (e.g. anthropic/claude-sonnet-4-6) to pin a specific model.',
+      help: 'Optional. Falls back to the org default LLM key when unset. Use a provider-prefixed ID to pin a specific model — "anthropic:claude-sonnet-4-6" and "anthropic/claude-sonnet-4-6" are both accepted. Supported providers: anthropic, openai, google.',
     },
     outputSchema: {
       help: 'Optional JSON Schema. When set, the model is constrained to JSON matching this shape and the node output is the parsed object rather than a string.',

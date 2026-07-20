@@ -12,9 +12,14 @@ import type { Env } from '../../env.js';
 export type LlmProvider = 'anthropic' | 'openai' | 'google';
 
 export function parseModelId(modelId: string): { provider: LlmProvider; model: string } {
-  const idx = modelId.indexOf(':');
+  // Both separator dialects appear in the product: "provider:model" (workflow
+  // llm nodes) and "provider/model" (the model catalog and UI pickers). Split
+  // on whichever comes first so either form works.
+  const colon = modelId.indexOf(':');
+  const slash = modelId.indexOf('/');
+  const idx = colon === -1 ? slash : slash === -1 ? colon : Math.min(colon, slash);
   if (idx <= 0) {
-    throw new Error(`invalid model id "${modelId}" — expected provider-prefixed form like "anthropic:claude-sonnet-4-5"`);
+    throw new Error(`invalid model id "${modelId}" — expected provider-prefixed form like "anthropic:claude-sonnet-4-5" or "anthropic/claude-sonnet-4-5"`);
   }
   const prefix = modelId.slice(0, idx);
   const model = modelId.slice(idx + 1);

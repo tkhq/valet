@@ -2354,7 +2354,7 @@ Edges from an \`if\` node must include \`fromOutput\`:
 }
 \`\`\`
 
-Model IDs use \`provider:model\`, not \`provider/model\`. Supported providers are \`anthropic\`, \`openai\`, and \`google\`. The provider API key must be configured as an org LLM key in the admin UI/DB, or as a Worker env fallback secret; otherwise validation/test-run returns an environment error. The model must also exist in the configured model catalog used by the settings pages/model picker; stale model IDs are rejected with \`llm_model_unavailable\` and suggestions. \`maxOutputTokens\` is not required, but omitting it returns a warning.
+Model IDs are provider-prefixed; both \`provider:model\` and \`provider/model\` are accepted. Supported providers for \`llm\` nodes are \`anthropic\`, \`openai\`, and \`google\`. The provider API key must be configured as an org LLM key in the admin UI/DB, or as a Worker env fallback secret; otherwise validation/test-run returns an environment error. The model must also exist in the configured model catalog used by the settings pages/model picker; stale model IDs are rejected with \`llm_model_unavailable\` and suggestions. \`maxOutputTokens\` is not required, but omitting it returns a warning.
 
 \`tool\` calls a remote integration action:
 
@@ -2518,7 +2518,9 @@ Set \`resultMode: "transcript"\` to also output the full ordered thread transcri
 
 When a session node waits until idle, use \`{{nodes.start_session.data.finalStatus}}\` for workflow branching. It is \`"completed"\` when the session reached an idle/terminal success state. The raw observed session state is also available as \`{{nodes.start_session.data.waitStatus}}\` (\`"idle"\`, \`"hibernated"\`, \`"terminated"\`, or \`"timed_out"\`). The final assistant message text is available at \`{{nodes.start_session.data.response}}\`.
 
-Session nodes also support \`outputSchema\` and \`repairModel\`. With \`outputSchema\`, the final assistant message must be JSON matching that schema; malformed or schema-invalid JSON is repaired up to three times. The validated object is stored under \`{{nodes.start_session.data.output}}\` so lifecycle fields like \`sessionId\`, \`threadId\`, and \`finalStatus\` cannot be overwritten by agent output.
+Start-mode session nodes accept an optional \`model\` for the spawned session (e.g. \`"model": "anthropic/claude-sonnet-4-5"\`; the \`provider:model\` form is also accepted, and unlike \`llm\` nodes any connected provider works). Unset means the persona default, then user/org preferences. Unknown models are rejected at publish time against the model catalog.
+
+Session nodes also support \`outputSchema\` and \`repairModel\`. With \`outputSchema\`, the final assistant message must be JSON matching that schema; malformed or schema-invalid JSON is repaired up to three times. The validated object is stored under \`{{nodes.start_session.data.output}}\` so lifecycle fields like \`sessionId\`, \`threadId\`, and \`finalStatus\` cannot be overwritten by agent output. If the session's final turn errored (or produced no assistant reply), the node fails with that error instead of returning empty output — check the execution's node error for the underlying cause.
 
 \`\`\`json
 {

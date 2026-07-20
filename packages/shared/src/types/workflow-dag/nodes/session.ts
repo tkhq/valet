@@ -106,6 +106,9 @@ also include the ordered session transcript.`,
     personaId: {
       help: 'Which agent persona to attach to the session. Personas bundle a system prompt, default model, and tool set. Pick "Default persona" to use the org default.',
     },
+    model: {
+      help: 'Optional model for the session, as "provider/model-id" (e.g. "anthropic/claude-sonnet-4-5"); "provider:model-id" is also accepted. Unset = the persona default, then user/org preferences.',
+    },
     repo: {
       help: 'Optional repo to clone into the workspace at session start. Provide either a Git URL (http/https/ssh) or a GitHub repo full name like owner/repo to use the installation-scoped clone.',
     },
