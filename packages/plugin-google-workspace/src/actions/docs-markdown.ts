@@ -493,6 +493,13 @@ interface ConversionContext {
   pendingListItems: PendingListItem[];
   openListItemStack: number[];
   hrRanges: { startIndex: number; endIndex: number }[];
+  /**
+   * Empty paragraphs emitted purely to separate a code block or table from the
+   * content that follows. They carry no markdown-specified style, so the
+   * NORMAL_TEXT isolation pass has to cover them or they inherit the named style
+   * in effect at the insertion point.
+   */
+  blockSeparatorRanges: { startIndex: number; endIndex: number }[];
   codeBlockRanges: CodeBlockRange[];
   tableState?: TableState;
   inTableCell: boolean;
@@ -590,6 +597,7 @@ export function convertMarkdownToRequests(
     pendingListItems: [],
     openListItemStack: [],
     hrRanges: [],
+    blockSeparatorRanges: [],
     codeBlockRanges: [],
     tableState: undefined,
     inTableCell: false,
@@ -1060,6 +1068,7 @@ function handleCodeBlockToken(
   context.currentIndex = tableStartIndex + EMPTY_1x1_TABLE_SIZE + textLength;
 
   // 5. Newline after table for paragraph separation
+  recordBlockSeparator(context);
   mdInsertText('\n', context);
 }
 
@@ -1198,10 +1207,22 @@ function handleTableClose(
   context.currentIndex = tableStartIndex + emptyTableSize + cumulativeTextLength;
 
   // Newline after table
+  recordBlockSeparator(context);
   mdInsertText('\n', context);
 }
 
 // --- Insert helper ---
+
+/**
+ * Record the empty paragraph about to be emitted at the current index as a block
+ * separator, so style isolation can reset it to NORMAL_TEXT.
+ */
+function recordBlockSeparator(context: ConversionContext): void {
+  context.blockSeparatorRanges.push({
+    startIndex: context.currentIndex,
+    endIndex: context.currentIndex + 1,
+  });
+}
 
 function mdInsertText(text: string, context: ConversionContext): void {
   const location: Record<string, unknown> = { index: context.currentIndex };
@@ -1364,6 +1385,7 @@ function finalizeFormatting(context: ConversionContext): void {
     const normalStyleRanges: { startIndex: number; endIndex: number }[] = [
       ...context.normalParagraphRanges,
       ...context.hrRanges,
+      ...context.blockSeparatorRanges,
       ...context.pendingListItems
         .filter((item) => item.endIndex !== undefined && item.endIndex > item.startIndex)
         .map((item) => ({ startIndex: item.startIndex, endIndex: item.endIndex! })),

@@ -193,6 +193,7 @@ const allActions: ActionDefinition[] = [
         .string()
         .optional()
         .describe('paragraphStyle heading id of the heading paragraph to locate'),
+      tabId: z.string().optional(),
     }),
   },
   {
@@ -217,6 +218,7 @@ const allActions: ActionDefinition[] = [
         .optional()
         .default(true)
         .describe('Keep the heading paragraph (replace only the body). Default true.'),
+      tabId: z.string().optional(),
     }),
   },
   {
@@ -229,6 +231,7 @@ const allActions: ActionDefinition[] = [
       documentId: z.string().describe('Document ID or full Google Docs URL'),
       index: z.number().int().min(1).describe('1-based character index'),
       markdown: z.string().min(1).describe('Markdown to render and insert'),
+      tabId: z.string().optional(),
     }),
   },
 
@@ -1397,16 +1400,20 @@ async function executeAction(
           documentId: string;
           headingText?: string;
           headingId?: string;
+          tabId?: string;
         };
         if (!p.headingText && !p.headingId) {
           return { success: false, error: 'Provide either headingText or headingId to locate the section.' };
         }
         const docId = normalizeDocumentId(p.documentId);
 
-        const fetchResult = await fetchDocument(token, docId);
+        const fetchResult = await fetchDocument(token, docId, {
+          includeTabsContent: !!p.tabId,
+          fields: p.tabId ? 'tabs' : 'body(content),lists',
+        });
         if (!fetchResult.ok) return fetchResult.result;
 
-        const bodyResult = getBodyContent(fetchResult.doc);
+        const bodyResult = getBodyContent(fetchResult.doc, p.tabId);
         if ('error' in bodyResult) return { success: false, error: bodyResult.error };
 
         const section = findHeadingSection(bodyResult.body, {
@@ -1425,13 +1432,21 @@ async function executeAction(
           bodyResult.lists,
         );
 
+        // Clamp the published range strictly below the segment end, matching the
+        // write paths. When the heading is the document's final paragraph the raw
+        // body range sits at the segment end index, which the Docs API rejects on
+        // any follow-up insert or delete.
+        const docEndIndex = getEndIndex(bodyResult.body);
+        const publishedStart = Math.min(section.bodyStartIndex, docEndIndex - 1);
+        const publishedEnd = Math.min(section.bodyEndIndex, docEndIndex - 1);
+
         return {
           success: true,
           data: {
             sectionMarkdown,
             headingLevel: section.headingLevel,
-            startIndex: section.bodyStartIndex,
-            endIndex: section.bodyEndIndex,
+            startIndex: publishedStart,
+            endIndex: publishedEnd,
             nextBoundaryHeading: section.nextBoundaryHeading,
           },
         };
@@ -1445,16 +1460,20 @@ async function executeAction(
           headingId?: string;
           markdown: string;
           preserveHeading: boolean;
+          tabId?: string;
         };
         if (!p.headingText && !p.headingId) {
           return { success: false, error: 'Provide either headingText or headingId to locate the section.' };
         }
         const docId = normalizeDocumentId(p.documentId);
 
-        const fetchResult = await fetchDocument(token, docId);
+        const fetchResult = await fetchDocument(token, docId, {
+          includeTabsContent: !!p.tabId,
+          fields: p.tabId ? 'tabs' : 'body(content),lists',
+        });
         if (!fetchResult.ok) return fetchResult.result;
 
-        const bodyResult = getBodyContent(fetchResult.doc);
+        const bodyResult = getBodyContent(fetchResult.doc, p.tabId);
         if ('error' in bodyResult) return { success: false, error: bodyResult.error };
 
         const section = findHeadingSection(bodyResult.body, {
@@ -1489,14 +1508,22 @@ async function executeAction(
         // overlap and downgrade the heading. Mirror docs.append_markdown: insert
         // a paragraph break to close the heading and open a fresh paragraph,
         // advance past it, then insert the body into that new paragraph.
-        const needsParagraphBreak =
-          p.preserveHeading && deleteStart >= docEndIndex - 1;
+        // In the true trailing-heading case the heading's endIndex is the document
+        // end index, so deleteStart (the body start) equals docEndIndex. Comparing
+        // against docEndIndex-1 would also catch a last section that already has a
+        // single empty body paragraph, where inserting a break is unnecessary.
+        const needsParagraphBreak = p.preserveHeading && deleteStart >= docEndIndex;
 
         // 1. Delete the existing section content (only when capping still leaves
         //    something to remove — an empty section deletes nothing).
         if (deleteEnd > deleteStart) {
+          const deleteRange: Record<string, unknown> = {
+            startIndex: deleteStart,
+            endIndex: deleteEnd,
+          };
+          if (p.tabId) deleteRange.tabId = p.tabId;
           const deleteResult = await executeBatchUpdate(docId, token, [
-            { deleteContentRange: { range: { startIndex: deleteStart, endIndex: deleteEnd } } },
+            { deleteContentRange: { range: deleteRange } },
           ]);
           if (!deleteResult.success) {
             return { success: false, error: deleteResult.error || 'Failed to delete existing section content' };
@@ -1507,8 +1534,10 @@ async function executeAction(
         //    heading is the document's final paragraph.
         let insertIndex: number;
         if (needsParagraphBreak) {
+          const breakLocation: Record<string, unknown> = { index: docEndIndex - 1 };
+          if (p.tabId) breakLocation.tabId = p.tabId;
           const breakResult = await executeBatchUpdate(docId, token, [
-            { insertText: { location: { index: docEndIndex - 1 }, text: '\n' } },
+            { insertText: { location: breakLocation, text: '\n' } },
           ]);
           if (!breakResult.success) {
             return {
@@ -1527,6 +1556,7 @@ async function executeAction(
         //    NORMAL_TEXT instead of inheriting the surrounding heading style.
         const result = await insertMarkdown(token, docId, p.markdown, {
           startIndex: insertIndex,
+          tabId: p.tabId,
           isolateNormalStyle: true,
         });
 
@@ -1545,6 +1575,7 @@ async function executeAction(
           documentId: string;
           index: number;
           markdown: string;
+          tabId?: string;
         };
         const docId = normalizeDocumentId(p.documentId);
 
@@ -1552,16 +1583,18 @@ async function executeAction(
         // The Docs API requires an insertion index less than the segment end
         // index, so an index at or beyond the document end would 400.
         const fetchResult = await fetchDocument(token, docId, {
-          fields: 'body(content(endIndex))',
+          includeTabsContent: !!p.tabId,
+          fields: p.tabId ? 'tabs' : 'body(content(endIndex))',
         });
         if (!fetchResult.ok) return fetchResult.result;
-        const bodyResult = getBodyContent(fetchResult.doc);
+        const bodyResult = getBodyContent(fetchResult.doc, p.tabId);
         if ('error' in bodyResult) return { success: false, error: bodyResult.error };
         const docEndIndex = getEndIndex(bodyResult.body);
         const insertIndex = Math.min(Math.max(1, p.index), docEndIndex - 1);
 
         const result = await insertMarkdown(token, docId, p.markdown, {
           startIndex: insertIndex,
+          tabId: p.tabId,
           isolateNormalStyle: true,
         });
 

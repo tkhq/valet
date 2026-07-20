@@ -773,7 +773,7 @@ description: How to use Google Docs tools effectively — reading documents with
 
 # Google Docs
 
-You have full read/write access to Google Docs through the Google Workspace integration. The 26 available tools support surgical index-based editing, full markdown rewrites, formatting, tab management, and comments.
+You have full read/write access to Google Docs through the Google Workspace integration. The 29 available tools support surgical index-based editing, section-level reads and rewrites, full markdown rewrites, formatting, tab management, and comments.
 
 Documents are created via \`drive.create_document\` (not a docs action). All tools that accept \`documentId\` accept either a bare document ID or a full Google Docs URL.
 
@@ -787,6 +787,7 @@ Documents are created via \`drive.create_document\` (not a docs action). All too
 ### Read / Get
 
 - **\`docs.read_document\`** — Read document content. Use \`format=markdown\` for human-readable output, \`format=text\` for plain text, or \`format=json\` for raw document structure (large output — prefer \`find_text_index\` when you only need a position).
+- **\`docs.read_section_by_heading\`** — Read one section as markdown, located by heading text or heading id. Returns the section markdown, heading level, the section's body character range, and the next boundary heading. Much lighter than reading the whole document when you only care about one section.
 - **\`docs.list_comments\`** — List all comments on a document (open or resolved).
 - **\`docs.get_comment\`** — Get a single comment by ID, including all replies.
 
@@ -804,6 +805,8 @@ Documents are created via \`drive.create_document\` (not a docs action). All too
 **Markdown-based writes:**
 - **\`docs.append_markdown\`** — Convert markdown and append at the end of the document.
 - **\`docs.replace_document_with_markdown\`** — Replace the entire document body with rendered markdown content.
+- **\`docs.replace_section_by_heading\`** — Replace one section's body with rendered markdown, located by heading text or heading id. Keeps the heading paragraph unless \`preserveHeading\` is false. Inserted paragraphs default to NORMAL_TEXT rather than inheriting the heading style.
+- **\`docs.insert_markdown_at_index\`** — Render markdown and insert it at a specific character index, with the same NORMAL_TEXT default.
 
 **Structural insertion:**
 - **\`docs.insert_table\`** — Insert an empty table at a specific index.
@@ -909,6 +912,23 @@ docs.append_markdown({ documentId: "...", markdown: "## New Section\\n\\nContent
 
 Use \`append_markdown\` when the content has headings, lists, tables, or other formatting. Use \`append_text\` for simple unformatted additions.
 
+### Section-Level Editing
+
+When the document is organised under headings, work a section at a time instead of reading the whole thing and computing indices by hand:
+
+\`\`\`
+1. docs.read_section_by_heading({ documentId: "...", headingText: "Risks" })
+   → Returns the section markdown plus its body range and the next boundary heading
+
+2. docs.replace_section_by_heading({
+     documentId: "...",
+     headingText: "Risks",
+     markdown: "Updated content...\\n\\n- point one\\n- point two"
+   })
+\`\`\`
+
+The section runs from just after the heading paragraph to the next heading of the same or higher level, so replacing "Risks" never touches the section after it. The heading itself is kept by default; pass \`preserveHeading: false\` to replace the heading too. When you need content somewhere that isn't a section boundary, \`docs.insert_markdown_at_index\` renders markdown at an index you already have from \`find_text_index\` or a section read.
+
 ### Working with Tabs
 
 Multi-tab documents require listing tabs first:
@@ -965,7 +985,7 @@ The style property name is \`linkUrl\` (not \`link\`). This applies to both \`ap
 When the Drive Labels Guard is active (configured per organization), all docs tools that operate on a specific document are subject to label enforcement. The guard classifies each action:
 
 - **\`docs.list_tabs\`** — list/search (label filter applied to results)
-- **\`docs.read_document\`, \`docs.find_text_index\`, \`docs.list_comments\`, \`docs.get_comment\`** — read/get (document must carry a required label)
+- **\`docs.read_document\`, \`docs.read_section_by_heading\`, \`docs.find_text_index\`, \`docs.list_comments\`, \`docs.get_comment\`** — read/get (document must carry a required label)
 - All write/modify tools — require the document to carry a required label before the edit proceeds
 
 If a document does not carry the required label, the tool returns \`"File not found or access denied"\` regardless of actual permissions. This is intentional — it is indistinguishable from a 404 to prevent information leakage.

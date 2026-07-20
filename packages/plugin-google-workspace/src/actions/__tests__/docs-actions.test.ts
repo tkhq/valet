@@ -64,11 +64,78 @@ function trailingHeadingDoc() {
   };
 }
 
+// A two-tab document. Tab 1 is a decoy whose text deliberately repeats the
+// heading being targeted, at different indices, so an operation that ignores
+// tabId resolves against tab 1 and edits the wrong content.
+//
+// Tab "t.one":
+//   [1,13)   "Section One\n"   HEADING_2
+//   [13,26)  "Body of one.\n"  NORMAL_TEXT
+//
+// Tab "t.two":
+//   [1,13)   "Section One\n"   HEADING_2
+//   [13,29)  "Tab two body.\n" NORMAL_TEXT   (different length than tab one)
+function twoTabDoc() {
+  return {
+    documentId: 'doc-3',
+    title: 'Tabbed',
+    tabs: [
+      {
+        tabProperties: { tabId: 't.one', title: 'First', index: 0 },
+        documentTab: {
+          body: {
+            content: [
+              para('Section One\n', 'HEADING_2', 1),
+              para('Body of one.\n', 'NORMAL_TEXT', 13),
+            ],
+          },
+          lists: {},
+        },
+      },
+      {
+        tabProperties: { tabId: 't.two', title: 'Second', index: 1 },
+        documentTab: {
+          body: {
+            content: [
+              para('Section One\n', 'HEADING_2', 1),
+              para('Tab two body.\n', 'NORMAL_TEXT', 13),
+            ],
+          },
+          lists: {},
+        },
+      },
+    ],
+  };
+}
+
+/** Every location/range object carried by a batchUpdate request, flattened. */
+function locationsAndRanges(reqs: Record<string, unknown>[]): Record<string, unknown>[] {
+  const found: Record<string, unknown>[] = [];
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if ((key === 'location' || key === 'range') && value && typeof value === 'object') {
+        found.push(value as Record<string, unknown>);
+      }
+      walk(value);
+    }
+  };
+  walk(reqs);
+  return found;
+}
+
 /**
  * Stub fetch so GET /documents/{id} returns the fixture and every
  * :batchUpdate POST records its requests. Returns the shared request log.
  */
-function stubDocsApi(doc: unknown): { batchRequests: Record<string, unknown>[] } {
+function stubDocsApi(doc: unknown): {
+  batchRequests: Record<string, unknown>[];
+  fetchMock: ReturnType<typeof vi.fn>;
+} {
   const batchRequests: Record<string, unknown>[] = [];
   const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
     if (typeof url === 'string' && url.includes(':batchUpdate')) {
@@ -81,7 +148,7 @@ function stubDocsApi(doc: unknown): { batchRequests: Record<string, unknown>[] }
     return new Response(JSON.stringify(doc), { status: 200 });
   });
   vi.stubGlobal('fetch', fetchMock);
-  return { batchRequests };
+  return { batchRequests, fetchMock };
 }
 
 const ctx = { credentials: { access_token: 'tok' }, userId: 'u' };
@@ -262,7 +329,7 @@ describe('executeDocsAction', () => {
     // forms its own paragraph rather than merging onto the heading line.
     expect(inserts.some((i) => i.location?.index === 24 && i.text === 'Wrapping up.')).toBe(true);
 
-    // CORE FIX (FINDING 1): every NORMAL_TEXT isolation range lies entirely after
+    // Every NORMAL_TEXT isolation range lies entirely after
     // the heading — it must NOT overlap the heading paragraph [13,24), which would
     // downgrade the heading to NORMAL_TEXT. headingEndIndex is 24.
     const headingEndIndex = 24;
@@ -296,7 +363,7 @@ describe('executeDocsAction', () => {
     const deletes = batchRequests
       .map((r) => (r.deleteContentRange as { range?: { startIndex?: number; endIndex?: number } } | undefined)?.range)
       .filter((r): r is { startIndex?: number; endIndex?: number } => !!r);
-    // FINDING 2: any emitted delete stops at or below docEndIndex-1 (23).
+    // Any emitted delete stops at or below docEndIndex-1 (23).
     for (const range of deletes) {
       expect(range.endIndex).toBeLessThanOrEqual(23);
       expect(range.endIndex).not.toBe(24);
@@ -321,6 +388,60 @@ describe('executeDocsAction', () => {
     expect(inserts.some((i) => i.location?.index === 51)).toBe(false);
   });
 
+  it('read_section_by_heading clamps the published range for a trailing heading', async () => {
+    // trailingHeadingDoc: "Conclusion\n" is [13,24) and docEndIndex is 24, so the
+    // raw body range sits at the segment end. A follow-up insert or delete at 24
+    // is rejected by the Docs API, so the published range stops at 23.
+    stubDocsApi(trailingHeadingDoc());
+
+    const result = await executeDocsAction(
+      'docs.read_section_by_heading',
+      { documentId: 'doc-2', headingText: 'Conclusion' },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const data = result.data as { startIndex: number; endIndex: number };
+    expect(data.startIndex).toBe(23);
+    expect(data.endIndex).toBe(23);
+  });
+
+  it('replace_section_by_heading reuses an existing empty last paragraph instead of adding a break', async () => {
+    // "Conclusion\n" [13,24) followed by an empty NORMAL_TEXT paragraph [24,25).
+    // docEndIndex is 25 and the body start is 24, so there is already a paragraph
+    // to write into and no separating break is needed.
+    const doc = {
+      documentId: 'doc-4',
+      title: 'Outline',
+      body: {
+        content: [
+          para('Intro\n', 'HEADING_2', 1),
+          para('Body.\n', 'NORMAL_TEXT', 7),
+          para('Conclusion\n', 'HEADING_2', 13),
+          para('\n', 'NORMAL_TEXT', 24),
+        ],
+      },
+      lists: {},
+    };
+    const { batchRequests } = stubDocsApi(doc);
+
+    const result = await executeDocsAction(
+      'docs.replace_section_by_heading',
+      { documentId: 'doc-4', headingText: 'Conclusion', markdown: 'Wrapping up.' },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const inserts = batchRequests
+      .map((r) => r.insertText as { location?: { index?: number }; text?: string } | undefined)
+      .filter((r): r is { location?: { index?: number }; text?: string } => !!r);
+
+    // No separating paragraph break is emitted ahead of the body: the first
+    // write is the body itself, straight into the existing empty paragraph.
+    expect(inserts[0]).toMatchObject({ location: { index: 24 }, text: 'Wrapping up.' });
+    expect(inserts.some((i) => i.location?.index === 24 && i.text === '\n')).toBe(false);
+  });
+
   it('read_section_by_heading errors when neither headingText nor headingId is given', async () => {
     stubDocsApi(sampleDoc());
     const result = await executeDocsAction(
@@ -339,6 +460,184 @@ describe('executeDocsAction', () => {
       ctx,
     );
     expect(result.success).toBe(false);
+  });
+});
+
+describe('executeDocsAction — section primitives are tab-scoped', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('read_section_by_heading reads the requested tab, not the first one', async () => {
+    const { fetchMock } = stubDocsApi(twoTabDoc());
+
+    const result = await executeDocsAction(
+      'docs.read_section_by_heading',
+      { documentId: 'doc-3', headingText: 'Section One', tabId: 't.two' },
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    // The tabId reaches the fetch: tab content has to be requested explicitly.
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('includeTabsContent')).toBe('true');
+    expect(url.searchParams.get('fields')).toContain('tabs');
+
+    const data = result.data as { sectionMarkdown: string };
+    expect(data.sectionMarkdown).toContain('Tab two body.');
+    expect(data.sectionMarkdown).not.toContain('Body of one.');
+  });
+
+  it('replace_section_by_heading stamps tabId on every emitted location and range', async () => {
+    const { batchRequests, fetchMock } = stubDocsApi(twoTabDoc());
+
+    const result = await executeDocsAction(
+      'docs.replace_section_by_heading',
+      {
+        documentId: 'doc-3',
+        headingText: 'Section One',
+        markdown: 'Replacement body.',
+        tabId: 't.two',
+      },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('includeTabsContent')).toBe('true');
+
+    // The delete is bounded by tab two's own indices [13,26) — resolving against
+    // tab one would cap the delete at 25 instead, truncating the replacement.
+    const deletes = batchRequests
+      .map((r) => (r.deleteContentRange as { range?: { startIndex?: number; endIndex?: number; tabId?: string } } | undefined)?.range)
+      .filter((r): r is { startIndex?: number; endIndex?: number; tabId?: string } => !!r);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]).toMatchObject({ startIndex: 13, endIndex: 26, tabId: 't.two' });
+
+    const targets = locationsAndRanges(batchRequests);
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target.tabId).toBe('t.two');
+    }
+  });
+
+  it('insert_markdown_at_index stamps tabId on every emitted location and range', async () => {
+    const { batchRequests, fetchMock } = stubDocsApi(twoTabDoc());
+
+    const result = await executeDocsAction(
+      'docs.insert_markdown_at_index',
+      { documentId: 'doc-3', index: 13, markdown: 'Inserted.', tabId: 't.two' },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('includeTabsContent')).toBe('true');
+
+    const targets = locationsAndRanges(batchRequests);
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target.tabId).toBe('t.two');
+    }
+  });
+
+  it('replace_section_by_heading rejects an unknown tabId instead of editing the first tab', async () => {
+    const { batchRequests } = stubDocsApi(twoTabDoc());
+
+    const result = await executeDocsAction(
+      'docs.replace_section_by_heading',
+      {
+        documentId: 'doc-3',
+        headingText: 'Section One',
+        markdown: 'Replacement body.',
+        tabId: 't.missing',
+      },
+      ctx,
+    );
+
+    expect(result.success).toBe(false);
+    expect(batchRequests).toHaveLength(0);
+  });
+});
+
+describe('executeDocsAction — block separators are style-isolated', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('resets the paragraph a code fence leaves behind to NORMAL_TEXT', async () => {
+    const { batchRequests } = stubDocsApi(sampleDoc());
+
+    const result = await executeDocsAction(
+      'docs.replace_section_by_heading',
+      {
+        documentId: 'doc-1',
+        headingText: 'Section One',
+        markdown: 'Intro.\n\n```\ncode();\n```\n\nOutro.',
+      },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    // The code fence emits a trailing empty paragraph purely as a separator.
+    // Without isolation it inherits the surrounding HEADING_2, leaving a
+    // heading-styled blank line inside the replaced section.
+    // Every emitted newline position must fall inside a NORMAL_TEXT range.
+    // Newlines that terminate a text paragraph are covered by that paragraph's
+    // own range; the block's trailing separator is a paragraph of its own and is
+    // only covered once it is tracked as a separator.
+    const newlineInserts = batchRequests
+      .map((r) => r.insertText as { location?: { index?: number }; text?: string } | undefined)
+      .filter((r): r is { location?: { index?: number }; text?: string } => r?.text === '\n');
+    expect(newlineInserts.length).toBeGreaterThan(0);
+
+    const normalRanges = paragraphStyleRequests(batchRequests).filter(
+      (r) => r.paragraphStyle?.namedStyleType === 'NORMAL_TEXT',
+    );
+    for (const insert of newlineInserts) {
+      const index = insert.location?.index as number;
+      expect(
+        normalRanges.some(
+          (r) => (r.range?.startIndex ?? 0) <= index && (r.range?.endIndex ?? 0) > index,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('resets the paragraph a table leaves behind to NORMAL_TEXT', async () => {
+    const { batchRequests } = stubDocsApi(sampleDoc());
+
+    const result = await executeDocsAction(
+      'docs.replace_section_by_heading',
+      {
+        documentId: 'doc-1',
+        headingText: 'Section One',
+        markdown: 'Intro.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nOutro.',
+      },
+      ctx,
+    );
+    expect(result.success).toBe(true);
+
+    // Every emitted newline position must fall inside a NORMAL_TEXT range.
+    // Newlines that terminate a text paragraph are covered by that paragraph's
+    // own range; the block's trailing separator is a paragraph of its own and is
+    // only covered once it is tracked as a separator.
+    const newlineInserts = batchRequests
+      .map((r) => r.insertText as { location?: { index?: number }; text?: string } | undefined)
+      .filter((r): r is { location?: { index?: number }; text?: string } => r?.text === '\n');
+    expect(newlineInserts.length).toBeGreaterThan(0);
+
+    const normalRanges = paragraphStyleRequests(batchRequests).filter(
+      (r) => r.paragraphStyle?.namedStyleType === 'NORMAL_TEXT',
+    );
+    for (const insert of newlineInserts) {
+      const index = insert.location?.index as number;
+      expect(
+        normalRanges.some(
+          (r) => (r.range?.startIndex ?? 0) <= index && (r.range?.endIndex ?? 0) > index,
+        ),
+      ).toBe(true);
+    }
   });
 });
 
