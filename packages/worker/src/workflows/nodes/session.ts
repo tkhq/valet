@@ -23,10 +23,10 @@ import { workflowSpawnedSessions } from '../../lib/schema/workflow-spawned-sessi
 import { iterationSuffix, NO_RETRY } from '../types.js';
 import { createSession } from '../../services/sessions.js';
 import { fetchMessagesFromDO } from '../../services/session-cross.js';
-import { parseOrRepairStructuredJson } from '../../lib/llm/structured-output.js';
+import { parseModelId, parseOrRepairStructuredJson } from '../../lib/llm/structured-output.js';
 import { buildTemplateContext } from '../context.js';
-import { pickFinalAssistantReply } from '../assistant-reply.js';
-import { assembleWorkflowOutputRepairEnv, resolveWorkflowOutputRepairModel } from '../output-repair.js';
+import { pickFinalAssistantReply, replyMayStillArrive, REPLY_REFETCH_ATTEMPTS, REPLY_REFETCH_DELAY_MS } from '../assistant-reply.js';
+import { assembleWorkflowOutputRepairEnv, normalizeWorkflowModelId, resolveWorkflowOutputRepairModel } from '../output-repair.js';
 import { coerceTemplateString } from '../templates.js';
 import { pollSessionUntilIdle } from '../polling.js';
 import type { NodeExecutorArgs } from '../types.js';
@@ -135,14 +135,29 @@ async function attachWaitedSessionOutput(
   result: SessionStartResult | SessionPromptResult,
   sessionId: string,
   iSuffix: string,
+  threadId?: string,
 ): Promise<void> {
   result.waited = true;
 
-  const messagesJson = await args.step.do(`session-output:${args.node.id}${iSuffix}`, async () => {
-    const messages = await fetchMessagesFromDO(args.env, sessionId, 5000);
-    return JSON.stringify(messages);
-  });
-  const transcript = JSON.parse(messagesJson) as WorkflowSessionMessage[];
+  const completed = result.finalStatus === 'completed';
+  const maxAttempts = completed ? REPLY_REFETCH_ATTEMPTS : 1;
+  let transcript: WorkflowSessionMessage[] = [];
+  let reply = pickFinalAssistantReply(transcript);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (attempt > 0) {
+      await args.step.sleep(`session-output-wait:${args.node.id}${iSuffix}:${attempt}`, REPLY_REFETCH_DELAY_MS);
+    }
+    // Attempt 0 keeps the original step key so executions in flight across a
+    // deploy replay against their cached result.
+    const stepKey = `session-output:${args.node.id}${iSuffix}${attempt > 0 ? `:retry-${attempt}` : ''}`;
+    const messagesJson = await args.step.do(stepKey, async () => {
+      const messages = await fetchMessagesFromDO(args.env, sessionId, 5000);
+      return JSON.stringify(messages);
+    });
+    transcript = JSON.parse(messagesJson) as WorkflowSessionMessage[];
+    reply = pickFinalAssistantReply(scopeToThread(transcript, threadId));
+    if (!replyMayStillArrive(reply)) break;
+  }
   if (sessionResultMode(args.node) === 'transcript') {
     result.transcript = transcript;
   }
@@ -153,8 +168,6 @@ async function attachWaitedSessionOutput(
   // Non-completed waits (e.g. timeout) keep their lifecycle result so
   // downstream branches on finalStatus still work; they just never fabricate
   // output from an unusable reply.
-  const completed = result.finalStatus === 'completed';
-  const reply = pickFinalAssistantReply(transcript);
   if (!reply.ok) {
     if (!completed) return;
     if (reply.reason === 'turn_error') {
@@ -193,9 +206,32 @@ async function attachWaitedSessionOutput(
   }
 }
 
+/**
+ * Reply picking is scoped to the dispatched thread when the node targeted one
+ * (prompt mode with threadId/forceNewThread) — otherwise an unrelated
+ * concurrent turn elsewhere in the session could be judged as "the reply".
+ * Falls back to the whole transcript when messages carry no thread
+ * attribution at all (older sessions), where filtering would drop everything.
+ */
+function scopeToThread(messages: WorkflowSessionMessage[], threadId?: string): WorkflowSessionMessage[] {
+  if (!threadId) return messages;
+  if (!messages.some((m) => m.threadId !== undefined)) return messages;
+  return messages.filter((m) => m.threadId === threadId);
+}
+
 function sessionOutputRepairModel(node: StartSessionNode | PromptSessionNode): string | undefined {
   if (node.repairModel) return node.repairModel;
-  return node.mode === 'start' ? node.model : undefined;
+  if (node.mode !== 'start' || !node.model) return undefined;
+  // The session model doubles as the repair-model fallback only when the
+  // worker-side AI SDK can actually run it. session.model legally admits bare
+  // ids and any OpenCode provider; repair requires a provider-prefixed id on
+  // a supported provider. Anything else falls through to user/org preferences.
+  try {
+    parseModelId(normalizeWorkflowModelId(node.model));
+    return node.model;
+  } catch {
+    return undefined;
+  }
 }
 
 // ─── start mode ─────────────────────────────────────────────────────────────
@@ -395,7 +431,7 @@ async function executePrompt(args: NodeExecutorArgs<PromptSessionNode>): Promise
     });
     promptResult.waitStatus = waitStatus;
     promptResult.finalStatus = sessionFinalStatusFromWaitStatus(waitStatus);
-    await attachWaitedSessionOutput(args, promptResult, sessionId, iSuffix);
+    await attachWaitedSessionOutput(args, promptResult, sessionId, iSuffix, effectiveThreadId);
   }
 
   return promptResult;

@@ -1198,6 +1198,19 @@ describe('session node model validation', () => {
     expect(errs.some((e) => e.code === 'llm_model_unavailable' && e.path === 'model')).toBe(true);
   });
 
+  it('still reports session.model unavailability when repairModel is malformed', () => {
+    const def = sessionDef('anthropic:claude-sonnet-5-fake', {
+      repairModel: 'not-a-model-id',
+      wait: { mode: 'until_idle' },
+      outputSchema: { type: 'object' },
+    });
+    const errs = validateAgainstEnvironment(def, { ANTHROPIC_API_KEY: 'sk-ant' } as Env, {
+      availableModels: CATALOG,
+    });
+    expect(errs.some((e) => e.path === 'repairModel' && e.code === 'llm_model_id_invalid')).toBe(true);
+    expect(errs.filter((e) => e.path === 'model' && e.code === 'llm_model_unavailable')).toHaveLength(1);
+  });
+
   it('does not double-report session.model when repairModel is also set', () => {
     const def = sessionDef('anthropic:claude-sonnet-5-fake', {
       repairModel: 'anthropic:claude-opus-4-8',

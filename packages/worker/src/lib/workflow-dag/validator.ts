@@ -1551,7 +1551,7 @@ function collectEnvErrors(
         });
       }
       if (modelLookup) {
-        collectModelAvailabilityErrors(node, errors, modelLookup);
+        collectRepairModelAvailabilityErrors(node, errors, modelLookup);
       }
     } catch (err) {
       errors.push({
@@ -1566,11 +1566,11 @@ function collectEnvErrors(
   // session.model: catalog membership only. The session's provider keys live
   // in the sandbox (auth.json), not the worker env, so there is no
   // hasProviderKey check — an unknown model still fails publish with
-  // suggestions instead of an opaque runtime 500 from OpenCode. Skipped when
-  // repairModel is set: the block above already ran the availability pass
-  // (which covers session.model too) for this node.
-  if (node.type === 'session' && node.mode === 'start' && node.model && !node.repairModel && modelLookup) {
-    collectModelAvailabilityErrors(node, errors, modelLookup);
+  // suggestions instead of an opaque runtime 500 from OpenCode. Unconditional:
+  // the repairModel block above checks only repairModel, so a malformed
+  // repairModel can't suppress this check and a valid one can't double-run it.
+  if (modelLookup) {
+    collectSessionModelAvailabilityErrors(node, errors, modelLookup);
   }
 
   // tool nodes are NOT validated at publish time. Built-in integrations
@@ -1620,81 +1620,93 @@ function collectModelAvailabilityErrors(
     }
   }
 
-  // session.model is dispatched to OpenCode in the sandbox — the catalog is
-  // the same one the session model pickers use, so membership is checkable
-  // here even though the provider keys live sandbox-side. No early returns:
-  // the repairModel block below must stay reachable for the same node.
-  if (node.type === 'session' && node.mode === 'start' && node.model) {
-    const model = node.model.trim();
-    const ref = splitSessionModelRef(model);
-    if (ref) {
-      const providerModels = modelLookup.byProvider.get(ref.provider);
-      // Unknown provider (e.g. a custom one) — can't verify, mirror llm's behavior.
-      if (providerModels && providerModels.length > 0 && !modelLookup.ids.has(ref.catalogId)) {
-        const suggestions = rankedModelSuggestions(ref.catalogId, providerModels).slice(0, 8).join(', ');
-        errors.push({
-          scope: 'node',
-          nodeId: node.id,
-          path: 'model',
-          code: 'llm_model_unavailable',
-          message: `session node "${node.id}" uses model "${node.model}", but it is not in the configured model catalog for provider "${ref.provider}".${suggestions ? ` Available models include: ${suggestions}` : ''}`,
-        });
-      }
-    } else if (model.length > 0) {
-      // Bare id — must resolve to exactly one provider or the runner can't
-      // dispatch it.
-      const owners = [...modelLookup.ids].filter((id) => id.slice(id.indexOf('/') + 1) === model);
-      if (owners.length > 1) {
-        errors.push({
-          scope: 'node',
-          nodeId: node.id,
-          path: 'model',
-          code: 'llm_model_unavailable',
-          message: `session node "${node.id}" model "${node.model}" is ambiguous across providers (${owners.join(', ')}) — prefix it with the provider (e.g. "${owners[0]}")`,
-        });
-      } else if (owners.length === 0) {
-        const suggestions = rankedModelSuggestions(model, [...modelLookup.ids]).slice(0, 8).join(', ');
-        errors.push({
-          scope: 'node',
-          nodeId: node.id,
-          path: 'model',
-          code: 'llm_model_unavailable',
-          message: `session node "${node.id}" uses model "${node.model}", but it is not in the configured model catalog.${suggestions ? ` Available models include: ${suggestions}` : ''}`,
-        });
-      }
-    }
-  }
-
-  if ((node.type === 'session' || node.type === 'orchestrator') && node.repairModel) {
-    try {
-      const { provider, catalogId } = workflowModelToCatalogId(node.repairModel);
-      const providerModels = modelLookup.byProvider.get(provider);
-      if (!providerModels || providerModels.length === 0) return;
-      if (modelLookup.ids.has(catalogId)) return;
-
-      const suggestions = rankedModelSuggestions(catalogId, providerModels)
-        .slice(0, 8)
-        .map(catalogIdToWorkflowId)
-        .join(', ');
-      errors.push({
-        scope: 'node',
-        nodeId: node.id,
-        path: 'repairModel',
-        code: 'llm_model_unavailable',
-        message: `${node.type} node "${node.id}" uses repair model "${node.repairModel}", but it is not in the configured model catalog for provider "${provider}".${suggestions ? ` Available models include: ${suggestions}` : ''}`,
-      });
-    } catch (err) {
-      errors.push({
-        scope: 'node',
-        nodeId: node.id,
-        path: 'repairModel',
-        code: 'llm_model_id_invalid',
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  collectSessionModelAvailabilityErrors(node, errors, modelLookup);
+  collectRepairModelAvailabilityErrors(node, errors, modelLookup);
 
   if (node.type === 'foreach') {
     collectModelAvailabilityErrors(node.body as WorkflowNode, errors, modelLookup);
+  }
+}
+
+// session.model is dispatched to OpenCode in the sandbox — the catalog is
+// the same one the session model pickers use, so membership is checkable
+// even though the provider keys live sandbox-side.
+function collectSessionModelAvailabilityErrors(
+  node: WorkflowNode,
+  errors: WorkflowValidationError[],
+  modelLookup: AvailableModelLookup,
+): void {
+  if (node.type !== 'session' || node.mode !== 'start' || !node.model) return;
+  const model = node.model.trim();
+  const ref = splitSessionModelRef(model);
+  if (ref) {
+    const providerModels = modelLookup.byProvider.get(ref.provider);
+    // Unknown provider (e.g. a custom one) — can't verify, mirror llm's behavior.
+    if (providerModels && providerModels.length > 0 && !modelLookup.ids.has(ref.catalogId)) {
+      const suggestions = rankedModelSuggestions(ref.catalogId, providerModels).slice(0, 8).join(', ');
+      errors.push({
+        scope: 'node',
+        nodeId: node.id,
+        path: 'model',
+        code: 'llm_model_unavailable',
+        message: `session node "${node.id}" uses model "${node.model}", but it is not in the configured model catalog for provider "${ref.provider}".${suggestions ? ` Available models include: ${suggestions}` : ''}`,
+      });
+    }
+  } else if (model.length > 0) {
+    // Bare id — must resolve to exactly one provider or the runner can't
+    // dispatch it.
+    const owners = [...modelLookup.ids].filter((id) => id.slice(id.indexOf('/') + 1) === model);
+    if (owners.length > 1) {
+      errors.push({
+        scope: 'node',
+        nodeId: node.id,
+        path: 'model',
+        code: 'llm_model_unavailable',
+        message: `session node "${node.id}" model "${node.model}" is ambiguous across providers (${owners.join(', ')}) — prefix it with the provider (e.g. "${owners[0]}")`,
+      });
+    } else if (owners.length === 0) {
+      const suggestions = rankedModelSuggestions(model, [...modelLookup.ids]).slice(0, 8).join(', ');
+      errors.push({
+        scope: 'node',
+        nodeId: node.id,
+        path: 'model',
+        code: 'llm_model_unavailable',
+        message: `session node "${node.id}" uses model "${node.model}", but it is not in the configured model catalog.${suggestions ? ` Available models include: ${suggestions}` : ''}`,
+      });
+    }
+  }
+}
+
+function collectRepairModelAvailabilityErrors(
+  node: WorkflowNode,
+  errors: WorkflowValidationError[],
+  modelLookup: AvailableModelLookup,
+): void {
+  if ((node.type !== 'session' && node.type !== 'orchestrator') || !node.repairModel) return;
+  try {
+    const { provider, catalogId } = workflowModelToCatalogId(node.repairModel);
+    const providerModels = modelLookup.byProvider.get(provider);
+    if (!providerModels || providerModels.length === 0) return;
+    if (modelLookup.ids.has(catalogId)) return;
+
+    const suggestions = rankedModelSuggestions(catalogId, providerModels)
+      .slice(0, 8)
+      .map(catalogIdToWorkflowId)
+      .join(', ');
+    errors.push({
+      scope: 'node',
+      nodeId: node.id,
+      path: 'repairModel',
+      code: 'llm_model_unavailable',
+      message: `${node.type} node "${node.id}" uses repair model "${node.repairModel}", but it is not in the configured model catalog for provider "${provider}".${suggestions ? ` Available models include: ${suggestions}` : ''}`,
+    });
+  } catch (err) {
+    errors.push({
+      scope: 'node',
+      nodeId: node.id,
+      path: 'repairModel',
+      code: 'llm_model_id_invalid',
+      message: err instanceof Error ? err.message : String(err),
+    });
   }
 }
