@@ -297,6 +297,47 @@ function attachmentSummary(attachments: PromptAttachment[]): string {
     .join(',');
 }
 
+/**
+ * Translate a valet model reference into OpenCode's `{ providerID, modelID }`.
+ *
+ * Accepts both dialects in use across the product — "provider/model"
+ * (OpenCode/catalog format) and "provider:model" (workflow llm-node format) —
+ * splitting on whichever separator appears first, so model tags that contain
+ * the other character (e.g. "ollama/llama3:70b") keep working. A bare model id
+ * is resolved against the discovered model catalog. OpenCode responds to an
+ * unknown or empty providerID with an opaque 500 UnknownError, so an
+ * unresolvable reference throws a descriptive error here instead of being
+ * forwarded.
+ */
+export function resolveModelRef(
+  model: string,
+  knownModelIds: Iterable<string>,
+): { providerID: string; modelID: string } {
+  const trimmed = model.trim();
+  const slash = trimmed.indexOf("/");
+  const colon = trimmed.indexOf(":");
+  const sep = slash === -1 ? colon : colon === -1 ? slash : Math.min(slash, colon);
+  if (sep > 0 && sep < trimmed.length - 1) {
+    return { providerID: trimmed.slice(0, sep), modelID: trimmed.slice(sep + 1) };
+  }
+  const providers = new Set<string>();
+  for (const id of knownModelIds) {
+    const idx = id.indexOf("/");
+    if (idx === -1) continue;
+    if (id.slice(idx + 1) === trimmed) providers.add(id.slice(0, idx));
+  }
+  const provider = providers.size === 1 ? [...providers][0] : undefined;
+  if (provider) {
+    return { providerID: provider, modelID: trimmed };
+  }
+  const reason = providers.size === 0
+    ? "no connected provider offers it"
+    : `it is ambiguous across providers (${[...providers].join(", ")})`;
+  throw new Error(
+    `Cannot resolve model "${model}": ${reason}. Use "provider/model-id" (e.g. "anthropic/claude-sonnet-4-5").`,
+  );
+}
+
 function timeoutFromEnv(name: string, fallbackMs: number): number {
   const raw = process.env[name];
   if (!raw) return fallbackMs;
@@ -912,6 +953,10 @@ export class PromptHandler {
 
   // Model context limits — populated from provider discovery, used for pre-compaction flush
   private modelContextLimits = new Map<string, number>();
+
+  // "provider/model" ids for every model on a connected provider, populated by
+  // fetchAvailableModels(). Used to resolve bare model references to a provider.
+  private discoveredModelIds = new Set<string>();
 
   // Last-resort default model — first model discovered from connected providers.
   // Used when no explicit model and no model preferences are configured, to avoid
@@ -2752,6 +2797,7 @@ export class PromptHandler {
           if (m.limit?.context && m.limit.context > 0) {
             this.modelContextLimits.set(`${provider.id}/${m.id}`, m.limit.context);
           }
+          this.discoveredModelIds.add(`${provider.id}/${m.id}`);
           return {
             id: `${provider.id}/${m.id}`,
             name: m.name || m.id,
@@ -3173,18 +3219,11 @@ export class PromptHandler {
       parts: promptParts,
     };
     if (model) {
-      // OpenCode expects model as { providerID, modelID }
-      // Our model IDs come from the provider list as raw model IDs (e.g. "claude-sonnet-4-5")
-      // with the provider known separately, but we store them with a provider prefix
-      // like "providerID/modelID" or just "modelID" if provider is implicit.
-      const slashIdx = model.indexOf("/");
-      if (slashIdx !== -1) {
-        body.model = { providerID: model.slice(0, slashIdx), modelID: model.slice(slashIdx + 1) };
-      } else {
-        // No provider prefix — need to find which provider owns this model
-        // For now, pass just the modelID and let OpenCode figure it out
-        body.model = { providerID: "", modelID: model };
-      }
+      // OpenCode expects model as { providerID, modelID }. Model references
+      // arrive in either product dialect ("provider/model" or "provider:model")
+      // or occasionally bare; resolveModelRef normalizes or throws a
+      // descriptive error — OpenCode 500s opaquely on an unknown providerID.
+      body.model = resolveModelRef(model, this.discoveredModelIds);
     }
     console.log(`[PromptHandler] buildPromptBody: model=${model ?? 'none'} → ${body.model ? JSON.stringify(body.model) : 'no model'} parts=${promptParts.length}`);
     return body;

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentClient } from "./agent-client.js";
-import { ChannelSession, PromptHandler } from "./prompt.js";
+import { ChannelSession, PromptHandler, resolveModelRef } from "./prompt.js";
 
 type FetchCall = {
   url: string;
@@ -1359,5 +1359,70 @@ describe("PromptHandler text file extraction", () => {
     expect(readFileSync(pdfPath!, "utf8")).toContain("%PDF-1.4");
     const fileParts = body.parts.filter((p) => p.type === "file");
     expect(fileParts).toHaveLength(0);
+  });
+});
+
+describe("resolveModelRef", () => {
+  const known = [
+    "anthropic/claude-sonnet-4-5",
+    "anthropic/claude-opus-4-1",
+    "openai/gpt-5",
+    "ollama/llama3:70b",
+  ];
+
+  it("splits slash-separated references (OpenCode/catalog dialect)", () => {
+    expect(resolveModelRef("anthropic/claude-sonnet-4-5", known)).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-5",
+    });
+  });
+
+  it("splits colon-separated references (workflow llm-node dialect)", () => {
+    expect(resolveModelRef("anthropic:claude-sonnet-4-5", known)).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-5",
+    });
+  });
+
+  it("splits on the first separator so model tags keep embedded ones", () => {
+    expect(resolveModelRef("ollama/llama3:70b", known)).toEqual({
+      providerID: "ollama",
+      modelID: "llama3:70b",
+    });
+    expect(resolveModelRef("ollama:llama3:70b", known)).toEqual({
+      providerID: "ollama",
+      modelID: "llama3:70b",
+    });
+    expect(resolveModelRef("openrouter:anthropic/claude-sonnet-4-5", known)).toEqual({
+      providerID: "openrouter",
+      modelID: "anthropic/claude-sonnet-4-5",
+    });
+  });
+
+  it("resolves a bare model id owned by exactly one provider", () => {
+    expect(resolveModelRef("gpt-5", known)).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5",
+    });
+  });
+
+  it("throws on a bare model id no provider offers", () => {
+    expect(() => resolveModelRef("claude-sonnet-9", known)).toThrow(
+      /Cannot resolve model "claude-sonnet-9": no connected provider offers it/,
+    );
+  });
+
+  it("throws on a bare model id offered by multiple providers", () => {
+    const ambiguous = [...known, "bedrock/gpt-5"];
+    expect(() => resolveModelRef("gpt-5", ambiguous)).toThrow(/ambiguous across providers/);
+  });
+
+  it("throws when discovery is empty instead of sending an empty providerID", () => {
+    expect(() => resolveModelRef("claude-sonnet-4-5", [])).toThrow(/Cannot resolve model/);
+  });
+
+  it("treats a trailing separator as unresolvable rather than an empty modelID", () => {
+    expect(() => resolveModelRef("anthropic/", known)).toThrow(/Cannot resolve model/);
+    expect(() => resolveModelRef(":claude-sonnet-4-5", known)).toThrow(/Cannot resolve model/);
   });
 });
