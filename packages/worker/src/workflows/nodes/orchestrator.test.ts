@@ -163,6 +163,49 @@ describe('executeOrchestrator', () => {
     await expect(executeOrchestrator(args(node))).rejects.toThrow(/model blew up/);
   });
 
+  it('fails loudly when outputSchema is set but the final assistant reply is empty', async () => {
+    dispatchMock.mockResolvedValue({ dispatched: true, sessionId: 'orchestrator:user-1', threadId: 'thread-1' });
+    pollThreadMock.mockResolvedValue('idle');
+    getThreadMessagesMock.mockResolvedValue([
+      {
+        id: 'msg-a',
+        sessionId: 'orchestrator:user-1',
+        role: 'assistant',
+        content: '',
+        parts: [{ type: 'finish', reason: 'end_turn' }],
+        createdAt: new Date('2026-06-12T00:00:01.000Z'),
+      },
+    ]);
+    const node: OrchestratorNode = {
+      id: 'orch', type: 'orchestrator', prompt: 'go', wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', properties: { answer: { type: 'string' } } },
+    };
+    await expect(executeOrchestrator(args(node))).rejects.toThrow(/final assistant reply is empty/);
+  });
+
+  it('recovers a reply that lands after a D1-flush-lag refetch instead of failing', async () => {
+    dispatchMock.mockResolvedValue({ dispatched: true, sessionId: 'orchestrator:user-1', threadId: 'thread-1' });
+    pollThreadMock.mockResolvedValue('idle');
+    getThreadMessagesMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'msg-a',
+          sessionId: 'orchestrator:user-1',
+          role: 'assistant',
+          content: 'done',
+          parts: [{ type: 'text', text: 'done' }, { type: 'finish', reason: 'end_turn' }],
+          createdAt: new Date('2026-06-12T00:00:01.000Z'),
+        },
+      ]);
+    const node: OrchestratorNode = {
+      id: 'orch', type: 'orchestrator', prompt: 'go', wait: { mode: 'until_idle', timeout: '1h' },
+    };
+    const out = await executeOrchestrator(args(node));
+    expect(out.response).toBe('done');
+    expect(getThreadMessagesMock).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the lifecycle result without output when the wait timed out with no reply', async () => {
     dispatchMock.mockResolvedValue({ dispatched: true, sessionId: 'orchestrator:user-1', threadId: 'thread-1' });
     pollThreadMock.mockResolvedValue('timed_out');

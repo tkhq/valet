@@ -32,11 +32,16 @@ vi.mock('../polling.js', () => ({
   pollSessionUntilIdle: (...args: unknown[]) => pollMock(...args),
 }));
 
-vi.mock('../../lib/llm/structured-output.js', () => ({
+vi.mock('../../lib/llm/structured-output.js', async (importOriginal) => ({
+  // Keep the real parseModelId — session.ts uses it to decide whether the
+  // session model can double as the repair-model fallback.
+  ...(await importOriginal<typeof import('../../lib/llm/structured-output.js')>()),
   parseOrRepairStructuredJson: (...args: unknown[]) => parseOrRepairStructuredJsonMock(...args),
 }));
 
-vi.mock('../output-repair.js', () => ({
+vi.mock('../output-repair.js', async (importOriginal) => ({
+  // Keep the real normalizeWorkflowModelId for the same fallback check.
+  ...(await importOriginal<typeof import('../output-repair.js')>()),
   assembleWorkflowOutputRepairEnv: async (env: unknown) => env,
   resolveWorkflowOutputRepairModel: async (params: { explicitModel?: string }) => params.explicitModel,
 }));
@@ -127,7 +132,10 @@ function buildArgs(node: SessionNode, sessionDoMock?: DurableObjectFetchMock) {
         const fn = (typeof configOrFn === 'function' ? configOrFn : maybeFn) as () => Promise<unknown>;
         return fn();
       },
-    } as WorkflowStep,
+      sleep: async () => {},
+      sleepUntil: async () => {},
+      waitForEvent: async () => { throw new Error('waitForEvent is not used in session node tests'); },
+    } satisfies WorkflowStep,
     fetchMock,
   };
 }
@@ -240,6 +248,73 @@ describe('executeSession — start mode', () => {
     };
     await expect(executeSession(buildArgs(node))).rejects.toThrow(/final assistant reply is empty/);
     expect(parseOrRepairStructuredJsonMock).not.toHaveBeenCalled();
+  });
+
+  it('recovers a reply that lands after a transcript-lag refetch instead of failing', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'msg-a', sessionId: 'sess-1', role: 'assistant', content: '{"ok":true}',
+          parts: [{ type: 'text', text: '{"ok":true}' }, { type: 'finish', reason: 'end_turn' }],
+          createdAt: '2026-06-12T00:00:01.000Z',
+        },
+      ]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main',
+      wait: { mode: 'until_idle', timeout: '1h' },
+    };
+    const out = await executeSession(buildArgs(node));
+    expect(out.finalStatus).toBe('completed');
+    expect(out.response).toBe('{"ok":true}');
+    expect(fetchMessagesFromDOMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not use a bare session model as the repair-model fallback', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock.mockResolvedValue([
+      {
+        id: 'msg-a', sessionId: 'sess-1', role: 'assistant', content: 'not json',
+        parts: [{ type: 'text', text: 'not json' }, { type: 'finish', reason: 'end_turn' }],
+        createdAt: '2026-06-12T00:00:01.000Z',
+      },
+    ]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main', model: 'gpt-5',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', properties: { company: { type: 'string' } } },
+    };
+    await executeSession(buildArgs(node));
+    // The AI SDK repair pipeline can't run a bare id ("gpt-5" has no provider);
+    // the node must fall through to user/org preferences (undefined here)
+    // instead of passing the session model along.
+    expect(parseOrRepairStructuredJsonMock).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: undefined }),
+    );
+  });
+
+  it('uses a provider-prefixed session model as the repair-model fallback in either dialect', async () => {
+    createSessionMock.mockResolvedValue({ ok: true, session: { id: 'ignored-mock-id', status: 'initializing' } });
+    pollMock.mockResolvedValue('idle');
+    fetchMessagesFromDOMock.mockResolvedValue([
+      {
+        id: 'msg-a', sessionId: 'sess-1', role: 'assistant', content: 'not json',
+        parts: [{ type: 'text', text: 'not json' }, { type: 'finish', reason: 'end_turn' }],
+        createdAt: '2026-06-12T00:00:01.000Z',
+      },
+    ]);
+    const node: SessionNode = {
+      id: 's', type: 'session', mode: 'start', prompt: 'go', workspace: 'main', model: 'anthropic/claude-sonnet-4-5',
+      wait: { mode: 'until_idle', timeout: '1h' },
+      outputSchema: { type: 'object', properties: { company: { type: 'string' } } },
+    };
+    await executeSession(buildArgs(node));
+    expect(parseOrRepairStructuredJsonMock).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: 'anthropic/claude-sonnet-4-5' }),
+    );
   });
 
   it('keeps the lifecycle result without fabricating output when a timed-out wait has no reply', async () => {
