@@ -50,6 +50,12 @@ const eventTypeSchema = z.enum([
   'fromGmail',
 ]);
 
+/** The subset that can be supplied to events.insert. Google derives `fromGmail`
+ *  events from Gmail itself and documents them as not creatable, so accepting
+ *  the value here would only trade a clear schema rejection for a 400 from the
+ *  API. It stays valid as a list filter and in read-back output. */
+const creatableEventTypeSchema = eventTypeSchema.exclude(['fromGmail']);
+
 // ─── Output Schemas (shared) ────────────────────────────────────────────────
 
 const calendarEventDateTimeOutputSchema = {
@@ -159,7 +165,7 @@ const createEvent: ActionDefinition = {
   id: 'calendar.create_event',
   name: 'Create Event',
   description:
-    'Creates a new event on a Google Calendar. Supports timed events (start/end with dateTime) and all-day events (start/end with date). Set sendUpdates to email invitations to attendees. Optionally set eventType (birthday, default, focusTime, outOfOffice, workingLocation, fromGmail) and colorId (Google event color "1"-"11"). eventType is fixed at creation and cannot be changed later.',
+    'Creates a new event on a Google Calendar. Supports timed events (start/end with dateTime) and all-day events (start/end with date). Set sendUpdates to email invitations to attendees. Optionally set eventType (birthday, default, focusTime, outOfOffice, workingLocation) and colorId (Google event color "1"-"11"). eventType is fixed at creation and cannot be changed later.',
   riskLevel: 'medium',
   params: z.object({
     calendarId: z
@@ -183,10 +189,10 @@ const createEvent: ActionDefinition = {
       )
       .optional()
       .describe('List of attendees to invite.'),
-    eventType: eventTypeSchema
+    eventType: creatableEventTypeSchema
       .optional()
       .describe(
-        'Event type: birthday, default, focusTime, outOfOffice, workingLocation, or fromGmail. Some types require additional fields enforced by Google. It cannot be changed after the event is created.',
+        'Event type: birthday, default, focusTime, outOfOffice, or workingLocation. Some types require additional fields enforced by Google. fromGmail is not accepted — Google derives those events from Gmail. It cannot be changed after the event is created.',
       ),
     colorId: z
       .string()

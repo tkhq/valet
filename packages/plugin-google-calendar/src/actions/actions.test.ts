@@ -84,6 +84,22 @@ describe('calendar.create_event eventType/colorId', () => {
     expect(body.eventType).toBe('birthday');
   });
 
+  it('rejects fromGmail on create instead of letting the API reject it', async () => {
+    const result = await googleCalendarActions.execute(
+      'calendar.create_event',
+      {
+        summary: 'Flight to SFO',
+        start: { date: '2026-04-15' },
+        end: { date: '2026-04-16' },
+        eventType: 'fromGmail',
+      },
+      ctx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('omits eventType and colorId from the insert body when not provided', async () => {
     fetchMock.mockResolvedValueOnce(jsonOk({ id: 'evt-2', summary: 'Sync' }));
 
