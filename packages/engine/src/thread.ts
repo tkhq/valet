@@ -88,6 +88,19 @@ const MAX_MERGE_DELEGATION_DEPTH = 5;
  */
 const MAX_CREDENTIAL_ATTEMPTS = 3;
 
+/**
+ * Minimum spacing between COUNTED credential-release cycles. External kicks
+ * (submitPrompt, resume, submitDecision, abort) fire `void this.kick()`
+ * unconditionally, so without a floor a burst of user actions would burn all
+ * MAX_CREDENTIAL_ATTEMPTS in milliseconds — the "5s sweep is the backoff"
+ * intent would never be enforced. Releases landing inside this window still
+ * release (the claim never sticks) but count as the SAME cycle: the budget
+ * then meaningfully spans ~3 sweep cycles. Kept just under the sweep interval
+ * so each 5s sweep tick counts. Tests override via
+ * `CreateSessionOptions.credentialReleaseBackoffMs`.
+ */
+const CREDENTIAL_RELEASE_BACKOFF_MS = 4_000;
+
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 
@@ -152,11 +165,14 @@ export class Thread {
    * Credential-less claim attempts per submission, keyed by itemId. Kept
    * Thread-local instead of reading the store's `attemptCount` (shared with
    * lease-expiry reconciliation — a lease recycle must not burn the
-   * credential budget). Entries are deleted when the item settles
-   * (`emitSettled` — every settlement path routes through it). A process
-   * restart resets the map; the budget simply re-bounds after restart.
+   * credential budget). `lastAt` is the time of the last COUNTED cycle:
+   * releases within `CREDENTIAL_RELEASE_BACKOFF_MS` of it are the same cycle
+   * and do not advance `count`. Entries are deleted when the item settles
+   * (`emitSettled` — every settlement path routes through it) and when the
+   * item leaves this thread's ownership mid-release. A process restart resets
+   * the map; the budget simply re-bounds after restart.
    */
-  private credentialAttempts = new Map<string, number>();
+  private credentialAttempts = new Map<string, { count: number; lastAt: number }>();
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
   private currentToolCalls = new Map<string, MessagePart>();
@@ -998,7 +1014,7 @@ export class Thread {
       try {
         resolved = resolver ? await resolver(modelId) : resolveModelId(modelId);
       } catch (err) {
-        if (!(err instanceof NoCredentialsError) || !err.model) throw err;
+        if (!(err instanceof NoCredentialsError)) throw err;
         resolved = { model: err.model };
       }
       if (!resolved) {
@@ -1071,13 +1087,16 @@ export class Thread {
       resolved = await resolver(this.turnModelSpec());
     } catch (err) {
       if (err instanceof NoCredentialsError) {
-        // Mid-turn continuation with no key anywhere: proceed without
-        // stamping a model — but clear any previously-resolved key so a
-        // now-revoked credential is not reused for the continuation. The
-        // continuation fails with the provider's own error and the turn
-        // settles `failed` normally (same as pre-seam behavior; the pre-run
-        // release path only applies to turns that haven't started).
+        // Mid-turn continuation with no key anywhere: still stamp the
+        // resolved MODEL (mirroring the success branch) so a setModel that
+        // happened while keyless mid-gate takes effect on the resumed
+        // continuation instead of silently continuing on the stale model —
+        // and clear any previously-resolved key so a now-revoked credential
+        // is not reused. The continuation then fails with the provider's own
+        // error and the turn settles `failed` normally (the pre-run release
+        // path only applies to turns that haven't started).
         this.turnApiKey = undefined;
+        this.agent.state.model = err.model;
         return;
       }
       throw err;
@@ -1127,7 +1146,15 @@ export class Thread {
       if (this.paused) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
-      if (!head) return;
+      if (!head) {
+        // No claimable work left: any surviving credential-budget entries are
+        // for items that settled OUTSIDE this thread's own settlement paths
+        // (e.g. the admin force-settle endpoint writes straight to the store)
+        // — emitSettled never ran for them, so sweep the map here to keep the
+        // bypass paths leak-free.
+        this.credentialAttempts.clear();
+        return;
+      }
 
       // A previous settlement durably recorded its outcome (reserve) but the
       // finalize half failed transiently: retry it under the item's stored
@@ -1184,83 +1211,103 @@ export class Thread {
       // path. Past the cap, settle `failed` with the host's own credentials
       // error so a genuinely key-less session gets one bounded, surfaced
       // failure instead of a silent forever-spin.
+      // From here to the end of the iteration the claim is installed: every
+      // exit — release-success return, ownership-loss bail, cap fall-through,
+      // settleTurn success or throw, and any transient store throw inside the
+      // credential-release block — must clear runningItem/fence exactly once,
+      // via the single finally below. A store throw escaping with the claim
+      // still set would wedge the thread (heartbeat renews the lease forever,
+      // nothing ever settles the item).
       const releaseFence = this.fence;
-      if (this.turnLackedCredentials && !turnFailed && releaseFence) {
-        this.turnLackedCredentials = false;
-        // Mirror settleTurn's guards: a successor attempt may own the item now.
-        if (this.staleFenceDetected) {
-          this.runningItem = null;
-          this.fence = undefined;
-          return;
-        }
-        const current = await store.getQueueItem(this.session.id, claimed.id);
-        if (!current || current.status !== "running") {
-          this.runningItem = null;
-          this.fence = undefined;
-          return;
-        }
-        if (!current.supersededByItemId) {
-          const attempts = (this.credentialAttempts.get(claimed.id) ?? 0) + 1;
-          this.credentialAttempts.set(claimed.id, attempts);
-          if (attempts < MAX_CREDENTIAL_ATTEMPTS) {
-            // The release CAS is the atomic authority, not the `current`
-            // snapshot above: it refuses when a supersession stamp landed
-            // between the snapshot read and this commit (TOCTOU window).
-            const released = await store.releaseSubmission(
-              this.session.id,
-              this.id,
-              claimed.id,
-              releaseFence,
-            );
-            if (released) {
-              this.runningItem = null;
-              this.fence = undefined;
-              await this.emitQueueState();
-              // Deliberately NO re-kick here: the session's 5s sweep interval is
-              // the retry backoff. With pre-run credential detection an immediate
-              // re-kick would burn all attempts in milliseconds and defeat the
-              // "wait for a key to appear" grace window.
-              return;
-            }
-            // CAS refused. Re-read to decide who owns the item now: if it is
-            // still running under OUR attempt (a supersession stamped after
-            // the snapshot), we must settle it ourselves — fall through to
-            // settleTurn with turnFailed false so decideTurnOutcome yields
-            // `superseded`. A bare CAS-fail must never strand the item
-            // running+superseded.
-            const after = await store.getQueueItem(this.session.id, claimed.id);
-            if (
-              !after ||
-              after.status !== "running" ||
-              after.attemptId !== releaseFence.attemptId
-            ) {
-              // A successor attempt owns it (or it settled/changed state):
-              // nothing of ours left to settle — clean up like the
-              // stale-fence path.
-              this.runningItem = null;
-              this.fence = undefined;
-              return;
-            }
-          } else {
-            // Cap reached — fall through to settle `failed` with the HOST's
-            // message. decideTurnOutcome still yields to a racing
-            // abort/supersession first.
-            turnFailed = true;
-            turnError =
-              this.credentialError ??
-              new Error(
-                `no usable API key for model "${this.turnModelSpec()}" — configure an org LLM key or set the provider's API key env var`,
-              );
-          }
-        }
-        // A superseding submission claimed this item mid-attempt: do NOT
-        // release (a re-queued superseded item is skipped by both
-        // unsettledHead and the store's claim head — an orphan that hangs
-        // awaitResult forever). Fall through to settleTurn with turnFailed
-        // still false so decideTurnOutcome settles it `superseded`.
-      }
-
       try {
+        if (this.turnLackedCredentials && !turnFailed && releaseFence) {
+          this.turnLackedCredentials = false;
+          // Mirror settleTurn's guards: a successor attempt may own the item now.
+          if (this.staleFenceDetected) {
+            this.credentialAttempts.delete(claimed.id);
+            return;
+          }
+          const current = await store.getQueueItem(this.session.id, claimed.id);
+          if (!current || current.status !== "running") {
+            this.credentialAttempts.delete(claimed.id);
+            return;
+          }
+          if (!current.supersededByItemId) {
+            // Backoff-aware budget: a release landing within
+            // CREDENTIAL_RELEASE_BACKOFF_MS of the last COUNTED cycle is the
+            // same cycle (external kicks fire on every submit/resume/abort —
+            // a burst must not burn the budget in milliseconds). Only a
+            // counted cycle advances `count` and moves `lastAt`.
+            const now = Date.now();
+            const backoffMs =
+              this.session.options.credentialReleaseBackoffMs ?? CREDENTIAL_RELEASE_BACKOFF_MS;
+            const prev = this.credentialAttempts.get(claimed.id);
+            const withinBackoff = prev !== undefined && now - prev.lastAt < backoffMs;
+            const count = prev === undefined ? 1 : withinBackoff ? prev.count : prev.count + 1;
+            this.credentialAttempts.set(claimed.id, {
+              count,
+              lastAt: prev !== undefined && withinBackoff ? prev.lastAt : now,
+            });
+            if (withinBackoff || count < MAX_CREDENTIAL_ATTEMPTS) {
+              // The release CAS is the atomic authority, not the `current`
+              // snapshot above: it refuses when a supersession stamp landed
+              // between the snapshot read and this commit (TOCTOU window).
+              const released = await store.releaseSubmission(
+                this.session.id,
+                this.id,
+                claimed.id,
+                releaseFence,
+              );
+              if (released) {
+                await this.emitQueueState();
+                // Deliberately NO re-kick here: the session's 5s sweep interval
+                // is the retry backoff. With pre-run credential detection an
+                // immediate re-kick would burn all attempts in milliseconds and
+                // defeat the "wait for a key to appear" grace window.
+                return;
+              }
+              // CAS refused. Re-read to decide who owns the item now: if it is
+              // still running under OUR attempt (a supersession stamped after
+              // the snapshot), we must settle it ourselves — fall through to
+              // settleTurn with turnFailed false so decideTurnOutcome yields
+              // `superseded`. A bare CAS-fail must never strand the item
+              // running+superseded.
+              const after = await store.getQueueItem(this.session.id, claimed.id);
+              if (
+                !after ||
+                after.status !== "running" ||
+                after.attemptId !== releaseFence.attemptId
+              ) {
+                // A successor attempt owns it (or it settled/changed state):
+                // nothing of ours left to settle — clean up like the
+                // stale-fence path. The item left our ownership, so its
+                // budget entry is dead weight — drop it.
+                this.credentialAttempts.delete(claimed.id);
+                return;
+              }
+            } else {
+              // Cap reached — settle `failed` with the HOST's message.
+              // decideTurnOutcome still yields to a racing abort/supersession
+              // first. Append the user entry NOW (every credential attempt
+              // returned pre-append, so this cannot double-append): the
+              // transcript must record what the user asked when the failure
+              // surfaces.
+              await this.appendUserEntry(claimed);
+              turnFailed = true;
+              turnError =
+                this.credentialError ??
+                new Error(
+                  `no usable API key for model "${this.turnModelSpec()}" — configure an org LLM key or set the provider's API key env var`,
+                );
+            }
+          }
+          // A superseding submission claimed this item mid-attempt: do NOT
+          // release (a re-queued superseded item is skipped by both
+          // unsettledHead and the store's claim head — an orphan that hangs
+          // awaitResult forever). Fall through to settleTurn with turnFailed
+          // still false so decideTurnOutcome settles it `superseded`.
+        }
+
         await this.settleTurn(claimed, turnFailed ? { error: turnError } : undefined);
       } catch (err) {
         // Transient (non-stale) settlement failure: keep the attempt marker so
@@ -1359,8 +1406,20 @@ export class Thread {
     current: QueueItem,
     turnFailure?: { error: unknown },
   ): SubmissionOutcome {
+    // Agent messages carry no queueItemId, so scope the transcript read with
+    // the in-memory turn marker instead: `currentAssistantMessageId` is
+    // cleared at turn start (runItem) and set on the turn's own
+    // `message_start`, so an undefined value means the trailing assistant
+    // message predates this item (e.g. the credential-cap path appends
+    // nothing) — its stopReason must not decide this item's outcome. A real
+    // abort OF THIS ITEM still wins via the durable `abortRequestedAt` stamp
+    // checked below, which `Thread.abort` writes before interrupting the
+    // stream.
     const last = this.agent.state.messages[this.agent.state.messages.length - 1];
-    const stop = last && last.role === "assistant" ? last.stopReason : undefined;
+    const stop =
+      this.currentAssistantMessageId !== undefined && last && last.role === "assistant"
+        ? last.stopReason
+        : undefined;
     if (current.supersededByItemId) return { outcome: "superseded" };
     if (current.abortRequestedAt !== undefined || stop === "aborted") return { outcome: "aborted" };
     // A throw outside the agent stream (tool building, store I/O, model
@@ -1698,7 +1757,16 @@ export class Thread {
     );
   }
 
-  private async runItem(item: QueueItem): Promise<void> {
+  /**
+   * Build and persist the turn's user MessageEntry (signal envelope handling
+   * included) under the current fence, and return the text the model actually
+   * sees this turn. Called by `runItem` on the normal path and by the claim
+   * loop's credential-cap branch — a capped keyless submission must still
+   * leave a transcript record of what the user asked (every pre-cap
+   * credential attempt returns BEFORE appending, so the cap append is the
+   * item's first and only one).
+   */
+  private async appendUserEntry(item: QueueItem): Promise<string> {
     // Signal content persists as its raw body + `signal` metadata; the text
     // the model actually sees this turn is the same rendered XML envelope
     // `entriesToAgentMessages` would reconstruct on reload (single render
@@ -1714,6 +1782,36 @@ export class Thread {
       text = promptText(item.content);
       entryContent = text;
     }
+    // QueueItem.metadata flows through onto the entry so synthetic flags like
+    // compaction_continue survive into the DAG for client UIs and for later
+    // restoration.
+    const userEntry: MessageEntry = {
+      id: uid("e"),
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: entryContent,
+      signal: signalMeta,
+      author: item.author,
+      channel: item.channel,
+      // signalStamp (when present) has already been lifted into `signal`
+      // above; stripping it here avoids duplicating the sender stamp into
+      // the persisted entry's metadata (and onto the wire) a second time.
+      // Built as a fresh object so the queue item's own stored metadata is
+      // never mutated.
+      metadata: stripSignalStamp(item.metadata),
+      queueItemId: item.id,
+      createdAt: Date.now(),
+    };
+    await this.fencedWrite(() =>
+      this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
+    );
+    return text;
+  }
+
+  private async runItem(item: QueueItem): Promise<void> {
     this.aborted = false;
     this.turnLackedCredentials = false;
     this.credentialError = undefined;
@@ -1752,32 +1850,9 @@ export class Thread {
       this.session.attachment.warm();
     }
 
-    // Persist user message entry. QueueItem.metadata flows through onto the
-    // entry so synthetic flags like compaction_continue survive into the DAG
-    // for client UIs and for later restoration.
-    const userEntry: MessageEntry = {
-      id: uid("e"),
-      sessionId: this.session.id,
-      threadId: this.id,
-      parentId: null,
-      type: "message",
-      role: "user",
-      content: entryContent,
-      signal: signalMeta,
-      author: item.author,
-      channel: item.channel,
-      // signalStamp (when present) has already been lifted into `signal`
-      // above; stripping it here avoids duplicating the sender stamp into
-      // the persisted entry's metadata (and onto the wire) a second time.
-      // Built as a fresh object so the queue item's own stored metadata is
-      // never mutated.
-      metadata: stripSignalStamp(item.metadata),
-      queueItemId: item.id,
-      createdAt: Date.now(),
-    };
-    await this.fencedWrite(() =>
-      this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
-    );
+    // Persist the user message entry (shared helper — the claim loop's
+    // credential-cap branch appends the same entry shape).
+    const text = await this.appendUserEntry(item);
 
     // Build the AgentTool list with closures over this turn's ToolContext.
     this.agent.state.tools = this.buildTools();

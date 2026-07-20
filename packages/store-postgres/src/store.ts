@@ -1044,8 +1044,11 @@ export class PgSessionStore implements SessionStore {
     // marker at all. `superseded_by_item_id IS NULL` is part of the CAS: a
     // superseded item released to `queued` would be an orphan (skipped by the
     // claim head), so the release refuses and reports the miss to the caller.
-    let matched = false;
-    await this.db.transaction(async (tx) => {
+    // The matched flag is RETURNED from the transaction callback, never
+    // hoisted into outer state: the node-postgres wrapper retries the whole
+    // callback on serialization failures (40P01), and a mutated outer
+    // variable would leak a stale first-try value across the retry.
+    return this.db.transaction(async (tx) => {
       const result = await tx.query(
         `UPDATE engine_queue_items
          SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL, updated_at = $1
@@ -1053,15 +1056,13 @@ export class PgSessionStore implements SessionStore {
            AND superseded_by_item_id IS NULL`,
         [Date.now(), itemId, sessionId, threadId, fence.attemptId],
       );
-      if (result.rowCount > 0) {
-        matched = true;
-        await tx.query("DELETE FROM engine_attempt_markers WHERE item_id = $1 AND attempt_id = $2", [
-          itemId,
-          fence.attemptId,
-        ]);
-      }
+      if (result.rowCount === 0) return false;
+      await tx.query("DELETE FROM engine_attempt_markers WHERE item_id = $1 AND attempt_id = $2", [
+        itemId,
+        fence.attemptId,
+      ]);
+      return true;
     });
-    return matched;
   }
 
   async setSubmissionBlocked(

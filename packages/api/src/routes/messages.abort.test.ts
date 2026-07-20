@@ -124,6 +124,12 @@ describe("POST /threads/:threadId/abort", () => {
     const threadB = engineSession.threadById(threadBSummary.id);
     expect(threadB).not.toBeNull();
 
+    // Pause A first: without this, the session's 5s sweep can drive A's
+    // keyless item through its bounded credential-release cycles DURING the
+    // abort HTTP round-trip and settle it `failed` before the read below —
+    // a racy false negative. Paused, A's item durably stays `queued`, which
+    // keeps the strong not-settled assertion sound.
+    await threadA.pause();
     const receiptA = await threadA.submitPrompt("say hello on A", {});
 
     // Abort thread B — a different, idle thread — should not touch A's

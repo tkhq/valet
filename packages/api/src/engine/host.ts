@@ -1064,7 +1064,7 @@ export class EngineHost {
     try {
       resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
     } catch (err) {
-      if (err instanceof NoCredentialsError && err.model) return err.model;
+      if (err instanceof NoCredentialsError) return err.model;
       throw err;
     }
     if (!resolved) {

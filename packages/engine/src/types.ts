@@ -1184,6 +1184,15 @@ export interface CreateSessionOptions {
   /** Max unsettled, non-superseded submissions a single thread may hold. Default MAX_PENDING_PER_THREAD (20). */
   maxPendingPerThread?: number;
   /**
+   * Minimum spacing (ms) between COUNTED credential-release cycles for a
+   * keyless submission: releases landing inside the window still release but
+   * do not advance the bounded credential-attempt budget (external kicks fire
+   * on every submit/resume/abort; a burst must not burn the budget in
+   * milliseconds). Default CREDENTIAL_RELEASE_BACKOFF_MS (4000, just under
+   * the 5s sweep). Tests pass 0 to make every release cycle count.
+   */
+  credentialReleaseBackoffMs?: number;
+  /**
    * Ordered fragments assembled into the agent's system prompt once at
    * construction (Phase 4 decision 6): `base systemPrompt + "\n\n" +
    * fragments sorted by (order ?? 100, name)`. Landed BEFORE per-turn role

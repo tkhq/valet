@@ -15,7 +15,9 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
+  fauxToolCall,
   registerFauxProvider,
+  Type,
   type FauxProvider,
 } from "@mariozechner/pi-ai";
 import {
@@ -25,7 +27,9 @@ import {
   NoCredentialsError,
   VirtualSandboxProvider,
   type BusEvent,
+  type DecisionGate,
   type ResolvedModel,
+  type ToolDef,
 } from "../src/index.js";
 
 const cleanups: Array<() => void> = [];
@@ -87,6 +91,19 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
     await new Promise((r) => setTimeout(r, 5));
   }
   throw new Error("waitFor: timed out");
+}
+
+/** Async-predicate variant of waitFor, for polling store state. */
+async function waitForAsync(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 2000,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error("waitForAsync: timed out");
 }
 
 describe("host model resolver seam", () => {
@@ -219,6 +236,9 @@ describe("host model resolver seam", () => {
       resolveModel: async (): Promise<ResolvedModel | null> => {
         throw new NoCredentialsError(hostMessage, model);
       },
+      // Make every driven kick a counted credential cycle (the default 4s
+      // backoff would coalesce this test's rapid kicks into one cycle).
+      credentialReleaseBackoffMs: 0,
     });
     const thread = session.thread();
 
@@ -238,10 +258,11 @@ describe("host model resolver seam", () => {
     // 2 releases + 1 terminal attempt (MAX_CREDENTIAL_ATTEMPTS = 3).
     expect(item?.attemptCount).toBe(3);
 
-    // Pre-run detection: a turn that never ran appends NOTHING — no duplicate
-    // user entries, no assistant error entries, across all attempts.
+    // Pre-run credential attempts append NOTHING; the CAP attempt appends
+    // exactly the user entry (the transcript must record what was asked when
+    // the failure surfaces) and never an assistant error entry.
     const entries = await store.getEntries(session.id, thread.id);
-    expect(entries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(0);
+    expect(entries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(1);
     expect(entries.filter((e) => e.type === "message" && e.role === "assistant")).toHaveLength(0);
   });
 
@@ -263,6 +284,7 @@ describe("host model resolver seam", () => {
         if (calls <= 2) throw new NoCredentialsError("no key yet", model);
         return { model, apiKey: "fresh-key" };
       },
+      credentialReleaseBackoffMs: 0,
     });
     const thread = session.thread();
 
@@ -446,6 +468,7 @@ describe("host model resolver seam", () => {
       resolveModel: async (): Promise<ResolvedModel | null> => {
         throw new NoCredentialsError(hostMessage, model);
       },
+      credentialReleaseBackoffMs: 0,
     });
     const thread = session.thread();
 
@@ -490,5 +513,243 @@ describe("host model resolver seam", () => {
     expect(item?.outcome?.outcome).toBe("failed");
     expect(item?.outcome?.error).toBe(hostMessage);
     expect(item?.attemptCount).toBe(5);
+  });
+
+  it("a burst of external kicks inside the backoff window counts as ONE credential cycle — never caps the item", async () => {
+    const faux = makeFaux("seam-burst");
+    const model = faux.getModel();
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        throw new NoCredentialsError("no key", model);
+      },
+      // Deliberately DEFAULT backoff — the pin is that rapid kicks (each
+      // submit/resume/abort fires one unconditionally) coalesce into a single
+      // counted cycle instead of burning the budget in milliseconds.
+    });
+    const thread = session.thread();
+
+    const r = await session.prompt("go");
+    for (let i = 0; i < 8; i++) {
+      await thread.kick();
+    }
+
+    // Eight rapid kicks: without the backoff window this caps and settles
+    // `failed` well before the 4th kick (see the cap test). With it, the
+    // burst is one cycle — the item is still released `queued`, waiting for
+    // a key.
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    expect(item?.status).toBe("queued");
+  });
+
+  it("a prior turn's aborted stopReason never decides a later capped keyless submission — it settles failed with the host message", async () => {
+    const faux = makeFaux("seam-staleabort");
+    const model = faux.getModel();
+    // Turn one's stream ends `aborted` — its trailing assistant message stays
+    // in agent.state across turns.
+    faux.setResponses([fauxAssistantMessage("stopped", { stopReason: "aborted" })]);
+
+    const hostMessage = "no key for turn two";
+    let calls = 0;
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        calls += 1;
+        if (calls === 1) return { model, apiKey: "k" };
+        throw new NoCredentialsError(hostMessage, model);
+      },
+      credentialReleaseBackoffMs: 0,
+    });
+    const thread = session.thread();
+
+    const r1 = await session.prompt("one");
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r1.queueItemId))?.status === "settled",
+    );
+    expect((await store.getQueueItem(session.id, r1.queueItemId))?.outcome?.outcome).toBe(
+      "aborted",
+    );
+
+    // Submission two is keyless and caps. Its own turn appended no assistant
+    // message, so the trailing `aborted` message in agent.state is turn ONE's
+    // — it must not decide this item's outcome (that would discard the
+    // credentials error and mislabel the failure `aborted`).
+    const r2 = await session.prompt("two");
+    for (let i = 0; i < 8; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, r2.queueItemId))?.status === "settled") break;
+    }
+    const two = await store.getQueueItem(session.id, r2.queueItemId);
+    expect(two?.status).toBe("settled");
+    expect(two?.outcome?.outcome).toBe("failed");
+    expect(two?.outcome?.error).toBe(hostMessage);
+  });
+
+  it("restart wakeup: a released keyless item is re-driven by restoreSession itself and completes once a key exists", async () => {
+    const faux = makeFaux("seam-restart");
+    const model = faux.getModel();
+    faux.setResponses([fauxAssistantMessage("done after restart")]);
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    let hasKey = false;
+    const options = {
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        if (!hasKey) throw new NoCredentialsError("no key", model);
+        return { model, apiKey: "k" };
+      },
+      credentialReleaseBackoffMs: 0,
+    };
+
+    const engineA = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const sessionA = await engineA.createSession(options);
+    const r = await sessionA.prompt("go");
+    await sessionA.thread().kick();
+    // Released back to `queued` with NO attempt id — the restart window in
+    // which reconciliation's resume path short-circuits.
+    const released = await store.getQueueItem(sessionA.id, r.queueItemId);
+    expect(released?.status).toBe("queued");
+    expect(released?.attemptId).toBeUndefined();
+    // Silence engine A entirely so only the restore-side wakeup can drive it.
+    sessionA.suspendTimers();
+
+    hasKey = true;
+    const engineB = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    await engineB.restoreSession({ sessionId: sessionA.id, options });
+
+    // NO external prompt, kick, or sweep: restore's own queued-head wakeup
+    // must claim and complete the item.
+    await waitForAsync(
+      async () => (await store.getQueueItem(sessionA.id, r.queueItemId))?.status === "settled",
+    );
+    const item = await store.getQueueItem(sessionA.id, r.queueItemId);
+    expect(item?.outcome?.outcome).toBe("completed");
+  });
+
+  it("gate replay after restart stamps the resolver's model even when keyless — the resumed continuation runs on it", async () => {
+    // Scenario: setModel to Y while the turn is suspended on a gate and the
+    // org is keyless; the engine restarts; the gate was resolved while down.
+    // The replayed continuation must run on Y (the model attached to the
+    // resolver's NoCredentialsError), not the stale restore-time model X.
+    const fauxX = makeFaux("seam-resume-x");
+    const fauxY = makeFaux("seam-resume-y");
+    const modelX = fauxX.getModel();
+    const modelY = fauxY.getModel();
+    fauxX.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "a" }, { id: "tc1" })], {
+        stopReason: "toolUse",
+      }),
+      // Must NOT be consumed after the restart — the continuation belongs on Y.
+      fauxAssistantMessage("on-X"),
+    ]);
+    fauxY.setResponses([fauxAssistantMessage("on-Y")]);
+
+    const gateTool: ToolDef = {
+      name: "do_thing",
+      description: "gated thing",
+      parameters: Type.Object({ arg: Type.String() }),
+      execute: async (args, ctx) => {
+        const resolution = await ctx.requestDecision({
+          type: "approval",
+          title: "approve?",
+          body: `arg=${String(args.arg)}`,
+          resumeKey: `do_thing:${String(args.arg)}`,
+        });
+        return { text: resolution.actionId };
+      },
+    };
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+
+    const engineA = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const sessionA = await engineA.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: modelX,
+      tools: [gateTool],
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model: modelX, apiKey: "k" }),
+    });
+    void sessionA.prompt("do the thing");
+    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
+    const gateEvent = events.find((e) => e.event.type === "decision_gate");
+    const gate = (gateEvent?.event as { gate: DecisionGate }).gate;
+    // Let the blocked/suspended writes land durably before "crashing".
+    await waitForAsync(
+      async () =>
+        (await store.getQueueItem(sessionA.id, gate.queueItemId))?.status ===
+        "blocked_on_decision_gate",
+    );
+    sessionA.suspendTimers();
+
+    // The gate is resolved DURABLY while this node is "down" — both the gate
+    // row and the DAG's decision_gate entry (the replay path reads the
+    // resolution from the entry), mirroring resolveDecision's durable writes.
+    const resolution = { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() };
+    await store.saveDecisionGate(sessionA.id, gate.threadId, {
+      ...gate,
+      status: "resolved",
+      resolution,
+      updatedAt: Date.now(),
+    });
+    const gateEntries = await store.getEntries(sessionA.id, gate.threadId);
+    const gateEntry = gateEntries.find((e) => e.type === "decision_gate" && e.gate.id === gate.id);
+    expect(gateEntry?.type).toBe("decision_gate");
+    if (gateEntry?.type === "decision_gate") {
+      gateEntry.resolution = resolution;
+      gateEntry.gate = { ...gateEntry.gate, status: "resolved", resolution };
+      await store.updateEntry(sessionA.id, gate.threadId, gateEntry);
+    }
+
+    // Restart: the resolver is now keyless and resolves the thread's spec to
+    // model Y (as a setModel-while-keyless would).
+    const engineB = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    await engineB.restoreSession({
+      sessionId: sessionA.id,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: modelX,
+        tools: [gateTool],
+        resolveModel: async (): Promise<ResolvedModel | null> => {
+          throw new NoCredentialsError("no key anywhere", modelY);
+        },
+      },
+    });
+
+    await waitForAsync(
+      async () => (await store.getQueueItem(sessionA.id, gate.queueItemId))?.status === "settled",
+      4000,
+    );
+    const entries = await store.getEntries(sessionA.id, gate.threadId);
+    const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
+    const lastAssistant = assistants[assistants.length - 1];
+    // The continuation streamed on Y — proof the keyless resume stamped the
+    // resolver's model instead of silently continuing on stale X.
+    expect(lastAssistant?.content).toBe("on-Y");
   });
 });

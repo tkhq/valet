@@ -53,9 +53,16 @@ export class StaleAttemptError extends Error {
  * its key.
  */
 export class NoCredentialsError extends Error {
+  /**
+   * `model` is REQUIRED: the error means "the spec resolved to this model but
+   * no credential exists for it" — a throw site that cannot name the model it
+   * resolved has a different failure (unknown spec, disabled provider) and
+   * must throw a plain Error instead. Catch sites rely on this: they accept
+   * the spec via `err.model` (setModel, session build) without re-checking.
+   */
   constructor(
     message: string,
-    public readonly model?: Model<any>,
+    public readonly model: Model<any>,
   ) {
     super(message);
     this.name = "NoCredentialsError";

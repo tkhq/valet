@@ -334,6 +334,25 @@ export class Session {
       // zombie's late writes fail, so eager takeover stays safe.
       await this.reconcileItem(item, { startup: true });
     }
+    // Durable wakeup for still-queued heads. A `queued` item carries no
+    // attempt id (admission never sets one; a credential release explicitly
+    // clears it), so the decision tree's `resume` action short-circuits in
+    // `resumeInterrupted` — and right after a restart no sweep timer is armed
+    // yet (`ensureTimers` runs on the first claim). Without this kick a
+    // released credential-less item — or any queued-at-crash item — would sit
+    // queued forever until an unrelated external prompt. Fire-and-forget: the
+    // drive is asynchronous (same contract as submitPrompt's kick); the kick
+    // itself arms the timers on claim, so the 5s sweep takes over as the
+    // retry backoff.
+    const remaining = await this.providers.store.listUnsettledSubmissions(this.id);
+    const queuedThreadIds = new Set(
+      remaining
+        .filter((i) => i.status === "queued" && !i.supersededByItemId)
+        .map((i) => i.threadId),
+    );
+    for (const t of this.threads.values()) {
+      if (queuedThreadIds.has(t.id)) void t.kick();
+    }
   }
 
   /**
@@ -600,7 +619,7 @@ export class Session {
     try {
       next = resolver ? (await resolver(modelId))?.model : resolveSessionModel(modelId);
     } catch (err) {
-      if (!(err instanceof NoCredentialsError) || !err.model) throw err;
+      if (!(err instanceof NoCredentialsError)) throw err;
       next = err.model;
     }
     if (!next) throw new Error(`unknown model id: ${modelId}`);
