@@ -680,6 +680,20 @@ export class PromptQueue {
     return (rows[0]?.ts as number | null) ?? 0;
   }
 
+  /** Ids of every in-flight (processing) prompt, oldest first. Read-only:
+   *  the recovery circuit breaker reports these as diagnostic context when it
+   *  trips so an operator can see what was in flight. It deliberately does not
+   *  single out a culprit — under concurrent multi-channel dispatch there is no
+   *  crash-linked signal that identifies which prompt took the sandbox down. */
+  getProcessingIds(): string[] {
+    return this.sql
+      .exec(
+        "SELECT id FROM prompt_queue WHERE status = 'processing' ORDER BY received_at ASC, created_at ASC",
+      )
+      .toArray()
+      .map((row) => row.id as string);
+  }
+
   /** Per-row received_at lookup. */
   getReceivedAtById(messageId: string): number {
     const rows = this.sql

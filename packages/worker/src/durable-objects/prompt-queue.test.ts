@@ -512,6 +512,28 @@ describe('PromptQueue', () => {
     });
   });
 
+  describe('getProcessingIds', () => {
+    it('returns only in-flight entries, oldest first', () => {
+      pq.enqueue({ id: 'p1', content: 'a', status: 'processing', channelKey: 'web:a' });
+      pq.enqueue({ id: 'p2', content: 'b', status: 'processing', channelKey: 'web:b' });
+      pq.enqueue({ id: 'p3', content: 'c', channelKey: 'web:c' });
+
+      expect(pq.getProcessingIds()).toEqual(['p1', 'p2']);
+    });
+
+    it('is empty when nothing is in flight', () => {
+      pq.enqueue({ id: 'p1', content: 'a' });
+      expect(pq.getProcessingIds()).toEqual([]);
+    });
+
+    it('does not modify the queue', () => {
+      pq.enqueue({ id: 'p1', content: 'a', status: 'processing' });
+      pq.getProcessingIds();
+      expect(pq.processingCount).toBe(1);
+      expect(pq.length).toBe(0);
+    });
+  });
+
   describe('dropEntry', () => {
     it('marks a single entry as completed', () => {
       pq.enqueue({ id: 'p1', content: 'bad', status: 'processing' });

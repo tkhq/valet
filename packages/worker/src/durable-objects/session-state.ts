@@ -423,6 +423,10 @@ export class SessionState {
     this.initialPrompt = undefined;
     this.initialModel = undefined;
     this.parentThreadId = undefined;
+    // A reused well-known DO (e.g. orchestrator:{userId}) must not inherit a
+    // recovery breaker count from a prior lifecycle, or its first sandbox loss
+    // could trip the breaker with no rapid-failure loop behind it.
+    this.resetRecoveryState();
     // Set optional fields
     if (params.sandboxId) this.sandboxId = params.sandboxId;
     if (params.tunnelUrls) this.tunnelUrls = params.tunnelUrls;

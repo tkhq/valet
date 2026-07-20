@@ -407,6 +407,15 @@ Queued user prompts are single-slot replaceable by default: a newly queued follo
 - 5-minute watchdog alarm: detects stuck `processing` prompts when no runner connected.
 - Error safety-net alarm: forces completion if runner reports error but never sends `complete`.
 
+**Recovery circuit breaker:** When the runner grace period expires, `performRecovery` respawns the sandbox and increments a persisted attempt counter. Reaching ready does not reset that counter — reaching ready only proves the sandbox booted, not that it will stay up, so resetting there let a sandbox that crashed immediately after every boot respawn indefinitely. The breaker instead cools down once the runner has held ready continuously for `RECOVERY_STABLE_INTERVAL_MS` (two grace periods), measured as uptime (`now − readyAt`) from an alarm rather than as boot latency at the ready signal. `readyAt` is stamped only on the first ready after a recovery or a fresh start, so a transient sub-grace reconnect cannot restart the uptime clock without a real failure. The counter is also cleared on a clean idle-hibernation and on a fresh `handleStart`, so a reused well-known DO does not inherit a stale count.
+
+After more than three consecutive losses with no stable interval between them the breaker trips and the automatic respawn loop stops. What happens next depends on the session type:
+
+- **Orchestrators** enter `backoff` on an escalating tier (1m, then 5m, then a 15m cap). When a backoff expires the session attempts recovery once more; that retry resumes the tripped attempt count rather than resetting it, so continued flapping advances the tier instead of settling into a fixed-interval loop. Whether the retry succeeds depends entirely on whether the underlying infrastructure has recovered — the breaker bounds the retry rate, it does not guarantee the session comes back.
+- **Regular sessions** terminate through the normal stop path (`recovery_exhausted`).
+
+A trip does not modify the prompt queue. Nothing is deleted, quarantined, or moved to a terminal state: whatever was queued or in flight when the sandbox was lost stays queued. The breaker records the ids of the prompts that were in flight at the loss in a `recovery.breaker_tripped` audit event and in a structured warning log, but that is diagnostic context only, not an accusation — a crashing sandbox emits no signal that identifies which prompt brought it down, and under concurrent multi-channel dispatch the oldest in-flight row is frequently not the culprit. Remediation is an operator action: an on-call engineer reads the reported ids, decides whether a prompt is genuinely poisonous, and clears the queue if so.
+
 ### Thread Resume
 
 For orchestrator sessions, thread identity is durable across sandbox hibernation, runner restarts, and orchestrator session rotation:
