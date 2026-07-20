@@ -3,6 +3,7 @@ import type { AppDb } from '../lib/drizzle.js';
 import { getDb } from '../lib/drizzle.js';
 import { createDoTracer, parseTraceparent, type DoTracer } from '../lib/do-tracing.js';
 import { activeTraceparent } from '../lib/tracing.js';
+import { log } from '../lib/log.js';
 import type { Context } from '@opentelemetry/api';
 import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
 import { getCredential, type CredentialResult } from '../services/credentials.js';
@@ -5946,9 +5947,12 @@ export class SessionAgentDO {
       // on its own, and remediation (e.g. clearing the queue on a session that
       // is still alive) is a deliberate human action.
       const inFlightContext = inFlightPromptIds.length > 0 ? inFlightPromptIds.join(', ') : 'none';
-      console.warn(
-        `[SessionAgentDO] Recovery circuit breaker tripped for session ${sessionId} after ${attemptCount} attempts (reason: ${reason}) — in-flight prompts at loss: ${inFlightContext}`,
-      );
+      log.warn('recovery circuit breaker tripped', {
+        sessionId,
+        attemptCount,
+        reason,
+        promptIds: inFlightPromptIds,
+      });
       this.emitAuditEvent(
         'recovery.breaker_tripped',
         `Recovery stopped after ${attemptCount} attempts — in-flight prompts at loss: ${inFlightContext}`,

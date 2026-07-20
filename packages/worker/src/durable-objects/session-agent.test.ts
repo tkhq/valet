@@ -1032,13 +1032,29 @@ describe('SessionAgentDO', () => {
       expect((agent as any).sessionState.status).toBe('initializing');
     });
 
-    it('ensure-running on a live session does not reset the breaker', async () => {
+    it('ensure-running on an errored session recovers without resetting the breaker', async () => {
       const { agent } = await armRecovery('sess-regular');
       vi.spyOn(Date, 'now').mockImplementation(() => 1_779_300_000_000);
 
-      // Scoping check for the revival reset above: were it unconditional,
-      // repeated ensure-running calls would defeat the breaker the way
-      // reset-on-ready did.
+      // Scoping check for the revival reset above. 'error' shares the dead-state
+      // branch with 'terminated' but is not a deliberate end of the lifecycle —
+      // it is where a flapping session lands — so the reset must not apply to it.
+      // Were it unconditional, repeated ensure-running calls on an errored
+      // session would defeat the breaker the way reset-on-ready did.
+      (agent as any).sessionState.status = 'error';
+      (agent as any).sessionState.recoveryAttemptCount = 2;
+
+      await (agent as any).handleEnsureRunning();
+
+      // The recovery this triggers advances the count from the inherited 2; a
+      // reset first would have it come back as 1.
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(3);
+    });
+
+    it('ensure-running on a live session leaves the breaker count alone', async () => {
+      const { agent } = await armRecovery('sess-regular');
+      vi.spyOn(Date, 'now').mockImplementation(() => 1_779_300_000_000);
+
       (agent as any).sessionState.status = 'running';
       (agent as any).sessionState.recoveryAttemptCount = 3;
 
@@ -1072,7 +1088,17 @@ describe('SessionAgentDO', () => {
         'recovery.breaker_tripped',
         expect.stringContaining('p-a, p-b'),
       );
-      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('in-flight prompts at loss: p-a, p-b'));
+      // The warning is structured: the ids are a field, so an on-call engineer
+      // can filter on them rather than grepping a message string.
+      const tripLine = consoleWarn.mock.calls
+        .map((call) => { try { return JSON.parse(String(call[0])); } catch { return null; } })
+        .find((entry) => entry?.message === 'recovery circuit breaker tripped');
+      expect(tripLine).toMatchObject({
+        level: 'warn',
+        promptIds: ['p-a', 'p-b'],
+        attemptCount: 4,
+        reason: 'sandbox_lost',
+      });
     });
 
     it('a clean idle-hibernation clears a lingering breaker count', async () => {
