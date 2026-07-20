@@ -1036,26 +1036,32 @@ export class PgSessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     fence: WriteFence,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // CAS release + marker delete must be atomic: a crash between the two
     // would leave a queued item with a live-looking attempt marker (InMemory
     // is already atomic; PG must match). The marker is deleted ONLY when the
     // CAS matched — a stale caller's release is a full no-op that touches no
-    // marker at all.
+    // marker at all. `superseded_by_item_id IS NULL` is part of the CAS: a
+    // superseded item released to `queued` would be an orphan (skipped by the
+    // claim head), so the release refuses and reports the miss to the caller.
+    let matched = false;
     await this.db.transaction(async (tx) => {
       const result = await tx.query(
         `UPDATE engine_queue_items
          SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL, updated_at = $1
-         WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5`,
+         WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5
+           AND superseded_by_item_id IS NULL`,
         [Date.now(), itemId, sessionId, threadId, fence.attemptId],
       );
       if (result.rowCount > 0) {
+        matched = true;
         await tx.query("DELETE FROM engine_attempt_markers WHERE item_id = $1 AND attempt_id = $2", [
           itemId,
           fence.attemptId,
         ]);
       }
     });
+    return matched;
   }
 
   async setSubmissionBlocked(

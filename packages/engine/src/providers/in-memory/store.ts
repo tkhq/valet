@@ -597,18 +597,22 @@ export class InMemorySessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     fence: WriteFence,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);
-    if (!item || item.threadId !== threadId) return;
-    // CAS: only the owning attempt may release, and only from `running`.
-    if (item.status !== "running" || item.attemptId !== fence.attemptId) return;
+    if (!item || item.threadId !== threadId) return false;
+    // CAS: only the owning attempt may release, only from `running`, and only
+    // when NOT superseded — a superseded item re-queued would be an orphan
+    // (skipped by the claim head), so the release refuses and reports the miss.
+    if (item.status !== "running" || item.attemptId !== fence.attemptId) return false;
+    if (item.supersededByItemId) return false;
     item.status = "queued";
     item.attemptId = undefined;
     item.ownerId = undefined;
     item.leaseExpiresAt = undefined;
     item.updatedAt = Date.now();
     this.attemptMarkers.delete(`${itemId}:${fence.attemptId}`);
+    return true;
   }
 
   async setSubmissionBlocked(

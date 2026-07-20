@@ -1072,10 +1072,12 @@ export class Thread {
     } catch (err) {
       if (err instanceof NoCredentialsError) {
         // Mid-turn continuation with no key anywhere: proceed without
-        // stamping — the continuation fails with the provider's own error
-        // and the turn settles `failed` normally (same as pre-seam behavior;
-        // the pre-run release path only applies to turns that haven't
-        // started).
+        // stamping a model — but clear any previously-resolved key so a
+        // now-revoked credential is not reused for the continuation. The
+        // continuation fails with the provider's own error and the turn
+        // settles `failed` normally (same as pre-seam behavior; the pre-run
+        // release path only applies to turns that haven't started).
+        this.turnApiKey = undefined;
         return;
       }
       throw err;
@@ -1201,25 +1203,55 @@ export class Thread {
           const attempts = (this.credentialAttempts.get(claimed.id) ?? 0) + 1;
           this.credentialAttempts.set(claimed.id, attempts);
           if (attempts < MAX_CREDENTIAL_ATTEMPTS) {
-            this.runningItem = null;
-            this.fence = undefined;
-            await store.releaseSubmission(this.session.id, this.id, claimed.id, releaseFence);
-            await this.emitQueueState();
-            // Deliberately NO re-kick here: the session's 5s sweep interval is
-            // the retry backoff. With pre-run credential detection an immediate
-            // re-kick would burn all attempts in milliseconds and defeat the
-            // "wait for a key to appear" grace window.
-            return;
-          }
-          // Cap reached — fall through to settle `failed` with the HOST's
-          // message. decideTurnOutcome still yields to a racing
-          // abort/supersession first.
-          turnFailed = true;
-          turnError =
-            this.credentialError ??
-            new Error(
-              `no usable API key for model "${this.turnModelSpec()}" — configure an org LLM key or set the provider's API key env var`,
+            // The release CAS is the atomic authority, not the `current`
+            // snapshot above: it refuses when a supersession stamp landed
+            // between the snapshot read and this commit (TOCTOU window).
+            const released = await store.releaseSubmission(
+              this.session.id,
+              this.id,
+              claimed.id,
+              releaseFence,
             );
+            if (released) {
+              this.runningItem = null;
+              this.fence = undefined;
+              await this.emitQueueState();
+              // Deliberately NO re-kick here: the session's 5s sweep interval is
+              // the retry backoff. With pre-run credential detection an immediate
+              // re-kick would burn all attempts in milliseconds and defeat the
+              // "wait for a key to appear" grace window.
+              return;
+            }
+            // CAS refused. Re-read to decide who owns the item now: if it is
+            // still running under OUR attempt (a supersession stamped after
+            // the snapshot), we must settle it ourselves — fall through to
+            // settleTurn with turnFailed false so decideTurnOutcome yields
+            // `superseded`. A bare CAS-fail must never strand the item
+            // running+superseded.
+            const after = await store.getQueueItem(this.session.id, claimed.id);
+            if (
+              !after ||
+              after.status !== "running" ||
+              after.attemptId !== releaseFence.attemptId
+            ) {
+              // A successor attempt owns it (or it settled/changed state):
+              // nothing of ours left to settle — clean up like the
+              // stale-fence path.
+              this.runningItem = null;
+              this.fence = undefined;
+              return;
+            }
+          } else {
+            // Cap reached — fall through to settle `failed` with the HOST's
+            // message. decideTurnOutcome still yields to a racing
+            // abort/supersession first.
+            turnFailed = true;
+            turnError =
+              this.credentialError ??
+              new Error(
+                `no usable API key for model "${this.turnModelSpec()}" — configure an org LLM key or set the provider's API key env var`,
+              );
+          }
         }
         // A superseding submission claimed this item mid-attempt: do NOT
         // release (a re-queued superseded item is skipped by both

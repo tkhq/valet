@@ -364,6 +364,73 @@ describe("host model resolver seam", () => {
     expect(two?.status).not.toBe("settled");
   });
 
+  it("TOCTOU: a supersession stamped between the thread's snapshot and the release CAS settles `superseded`, never orphaned queued", async () => {
+    const faux = makeFaux("seam-toctou");
+    const model = faux.getModel();
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        throw new NoCredentialsError("no key", model);
+      },
+    });
+    const thread = session.thread();
+
+    // Interpose on the store seam: by the time the thread calls
+    // releaseSubmission it has ALREADY taken its getQueueItem snapshot (which
+    // saw no supersession). Stamping the supersession here — before
+    // delegating to the real CAS — is exactly the TOCTOU window: the stamp
+    // lands after the check, before the commit. The CAS must refuse and the
+    // thread must settle the item `superseded` itself.
+    const realRelease = store.releaseSubmission.bind(store);
+    let steerStamped = false;
+    const steerId = "q-toctou-steer";
+    vi.spyOn(store, "releaseSubmission").mockImplementation(
+      async (sessionId, threadId, itemId, fence) => {
+        if (!steerStamped) {
+          steerStamped = true;
+          const now = Date.now();
+          await store.admitSubmission(
+            sessionId,
+            threadId,
+            {
+              id: steerId,
+              threadId,
+              content: "steer",
+              status: "queued",
+              attemptCount: 0,
+              maxAttempts: 10,
+              timeoutAt: now + 3_600_000,
+              createdAt: now,
+              updatedAt: now,
+            },
+            { steer: true },
+          );
+        }
+        return realRelease(sessionId, threadId, itemId, fence);
+      },
+    );
+
+    const r = await session.prompt("go");
+    for (let i = 0; i < 4; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, r.queueItemId))?.status === "settled") break;
+    }
+
+    const one = await store.getQueueItem(session.id, r.queueItemId);
+    expect(steerStamped).toBe(true);
+    // Settled `superseded` on the SAME attempt — never released back to
+    // `queued` with the supersession stamp set (the orphan that hangs
+    // awaitResult forever).
+    expect(one?.status).toBe("settled");
+    expect(one?.outcome?.outcome).toBe("superseded");
+  });
+
   it("a lease recycle (store attemptCount bump) does not burn the credential budget", async () => {
     const faux = makeFaux("seam-lease");
     const model = faux.getModel();

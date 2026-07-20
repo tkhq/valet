@@ -943,10 +943,11 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(claimed?.status).toBe("running");
       await store.insertAttemptMarker(item.id, "att-1");
 
-      await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
         itemId: item.id,
         attemptId: "att-1",
       });
+      expect(released).toBe(true);
 
       const loaded = await store.getQueueItem(SESSION_ID, item.id);
       expect(loaded?.status).toBe("queued");
@@ -985,10 +986,11 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       await store.insertAttemptMarker(item.id, "att-stale");
 
       // A stale attempt tries to release — must not touch the live claim.
-      await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
         itemId: item.id,
         attemptId: "att-stale",
       });
+      expect(released).toBe(false);
 
       const loaded = await store.getQueueItem(SESSION_ID, item.id);
       expect(loaded?.status).toBe("running");
@@ -1002,13 +1004,52 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       const item = makeItem();
       await store.admitSubmission(SESSION_ID, THREAD_ID, item);
 
-      await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
         itemId: item.id,
         attemptId: "att-none",
       });
+      expect(released).toBe(false);
 
       const loaded = await store.getQueueItem(SESSION_ID, item.id);
       expect(loaded?.status).toBe("queued");
+    });
+
+    it("REFUSES to release a running item that has been superseded (returns false, no state change, markers untouched)", async () => {
+      // TOCTOU pin: a supersession stamp landing between the caller's
+      // getQueueItem snapshot and this CAS must make the release refuse —
+      // releasing a superseded item to `queued` orphans it (skipped by the
+      // claim head and unsettledHead; nothing would ever settle it).
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-1");
+
+      // Steer admission stamps supersededByItemId on the running item.
+      const steer = makeItem();
+      const { supersededItemIds } = await store.admitSubmission(SESSION_ID, THREAD_ID, steer, {
+        steer: true,
+      });
+      expect(supersededItemIds).toContain(item.id);
+
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-1",
+      });
+      expect(released).toBe(false);
+
+      // Full no-op: still running under the same attempt, supersession stamp
+      // intact, marker untouched — the caller must settle it `superseded`.
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("running");
+      expect(loaded?.attemptId).toBe("att-1");
+      expect(loaded?.supersededByItemId).toBe(steer.id);
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
     });
 
     // --- Abort + blocked ---

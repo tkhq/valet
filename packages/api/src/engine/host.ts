@@ -1098,11 +1098,13 @@ export class EngineHost {
    *   - known kind (anthropic/openai/google), no row → always active
    *     (zero-config path, same as `resolveModelSpec`'s no-row branch).
    *   - known kind WITH a row → active iff `row.enabled`. A row with
-   *     neither an org key nor an env key is still "active" here because
-   *     `resolveModelSpec` does NOT throw for that case — it passes
-   *     `apiKey: undefined` through to pi-ai's own env fallback rather than
-   *     failing session build; that's a downstream completion-time concern,
-   *     not a reason to skip this preference entry.
+   *     neither an org key nor an env key is still "active" here even
+   *     though `resolveModelSpec` now throws `NoCredentialsError` for that
+   *     case — session build goes through `resolveModelObject`, which
+   *     swallows `NoCredentialsError` and returns the attached model, so a
+   *     keyless org still builds; keylessness is a turn-time concern (the
+   *     engine's pre-run release/cap path), not a reason to skip this
+   *     preference entry.
    *   - custom (`openai_compatible`) row → active iff `row.enabled` AND an
    *     org credential exists at `llm:{row.id}` — custom providers have NO
    *     env fallback, so a keyless custom row is exactly the case
