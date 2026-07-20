@@ -1448,6 +1448,10 @@ async function executeAction(
             startIndex: publishedStart,
             endIndex: publishedEnd,
             nextBoundaryHeading: section.nextBoundaryHeading,
+            // Indices are scoped to a single tab, so echo the segment they were
+            // resolved against. Without it a caller can feed them into a
+            // follow-up edit that defaults to the first tab.
+            ...(p.tabId ? { tabId: p.tabId } : {}),
           },
         };
       }

@@ -483,9 +483,12 @@ describe('executeDocsAction — section primitives are tab-scoped', () => {
     expect(url.searchParams.get('includeTabsContent')).toBe('true');
     expect(url.searchParams.get('fields')).toContain('tabs');
 
-    const data = result.data as { sectionMarkdown: string };
+    const data = result.data as { sectionMarkdown: string; tabId?: string };
     expect(data.sectionMarkdown).toContain('Tab two body.');
     expect(data.sectionMarkdown).not.toContain('Body of one.');
+    // The published indices are tab-scoped, so the result names the tab they
+    // were resolved against — a caller reusing them must target the same tab.
+    expect(data.tabId).toBe('t.two');
   });
 
   it('replace_section_by_heading stamps tabId on every emitted location and range', async () => {

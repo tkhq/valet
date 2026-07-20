@@ -221,6 +221,7 @@ const docsSectionSchema: JsonSchema = {
     startIndex: integerSchema,
     endIndex: integerSchema,
     nextBoundaryHeading: nullableStringSchema,
+    tabId: stringSchema,
   },
   required: ['sectionMarkdown', 'headingLevel', 'startIndex', 'endIndex'],
   additionalProperties: true,
