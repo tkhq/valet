@@ -322,8 +322,10 @@ export class Session {
 
   /**
    * Reconcile every unsettled submission of this session through the normative
-   * decision tree (spec §Reconciliation). Called on rehydrate and, for
-   * expired-lease items, from the sweep. Idempotent — re-running is safe.
+   * decision tree (spec §Reconciliation). Called only from `restoreSession`
+   * (the sweep goes through `reconcileItem` directly, never this method), so
+   * the end-of-reconcile kick below runs once per rehydrate. Idempotent —
+   * re-running is safe.
    */
   async reconcile(): Promise<void> {
     const items = await this.providers.store.listUnsettledSubmissions(this.id);

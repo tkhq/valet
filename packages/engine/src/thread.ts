@@ -1259,6 +1259,11 @@ export class Thread {
                 releaseFence,
               );
               if (released) {
+                // The item is no longer running: drop the claim before the
+                // emit so the queue_state envelope isn't tagged with a
+                // queueItemId that just went back to `queued` (the finally
+                // re-clears harmlessly).
+                this.runningItem = null;
                 await this.emitQueueState();
                 // Deliberately NO re-kick here: the session's 5s sweep interval
                 // is the retry backoff. With pre-run credential detection an
