@@ -309,6 +309,12 @@ function attachmentSummary(attachments: PromptAttachment[]): string {
  * unresolvable reference throws a descriptive error here instead of being
  * forwarded.
  */
+/** True when a model reference has no provider prefix in either dialect. */
+export function isBareModelRef(model: string): boolean {
+  const trimmed = model.trim();
+  return !trimmed.includes("/") && !trimmed.includes(":");
+}
+
 export function resolveModelRef(
   model: string,
   knownModelIds: Iterable<string>,
@@ -957,6 +963,9 @@ export class PromptHandler {
   // "provider/model" ids for every model on a connected provider, populated by
   // fetchAvailableModels(). Used to resolve bare model references to a provider.
   private discoveredModelIds = new Set<string>();
+  // Single-flight guard for ensureModelDiscovery() so concurrent bare-model
+  // prompts don't stampede /provider.
+  private modelDiscoveryInFlight: Promise<AvailableModels> | null = null;
 
   // Last-resort default model — first model discovered from connected providers.
   // Used when no explicit model and no model preferences are configured, to avoid
@@ -2759,6 +2768,26 @@ export class PromptHandler {
     }
   }
 
+  /**
+   * Make sure model discovery has produced a non-empty id set before a bare
+   * (unprefixed) model reference is resolved. Boot deliberately backgrounds
+   * fetchAvailableModels() after signaling idle, so the first prompt into a
+   * cold sandbox can race discovery — and the publish-time validator blesses
+   * bare session-node models on the promise that the runner resolves them at
+   * dispatch. Single-flight so concurrent prompts share one /provider call;
+   * a still-empty set after the fetch falls through to resolveModelRef's
+   * descriptive error.
+   */
+  private async ensureModelDiscovery(): Promise<void> {
+    if (this.discoveredModelIds.size > 0) return;
+    if (!this.modelDiscoveryInFlight) {
+      this.modelDiscoveryInFlight = this.fetchAvailableModels().finally(() => {
+        this.modelDiscoveryInFlight = null;
+      });
+    }
+    await this.modelDiscoveryInFlight;
+  }
+
   async fetchAvailableModels(): Promise<AvailableModels> {
     try {
       const res = await fetch(`${this.opencodeUrl}/provider`);
@@ -2787,6 +2816,11 @@ export class PromptHandler {
       // API keys stored in ~/.local/share/opencode/auth.json (via start.sh)
       const connectedSet = new Set(data.connected || []);
       const result: AvailableModels = [];
+      // Rebuild rather than accumulate: OpenCode restarts can change the
+      // connected-provider set, and stale ids would let resolveModelRef route
+      // a bare id to a provider that no longer exists. Built aside and swapped
+      // at the end so a concurrent resolveModelRef never sees a half-empty set.
+      const freshModelIds = new Set<string>();
 
       for (const provider of data.all) {
         if (!connectedSet.has(provider.id)) continue;
@@ -2797,7 +2831,7 @@ export class PromptHandler {
           if (m.limit?.context && m.limit.context > 0) {
             this.modelContextLimits.set(`${provider.id}/${m.id}`, m.limit.context);
           }
-          this.discoveredModelIds.add(`${provider.id}/${m.id}`);
+          freshModelIds.add(`${provider.id}/${m.id}`);
           return {
             id: `${provider.id}/${m.id}`,
             name: m.name || m.id,
@@ -2820,6 +2854,7 @@ export class PromptHandler {
         }
       }
 
+      this.discoveredModelIds = freshModelIds;
       console.log(`[PromptHandler] Discovered ${result.reduce((n, p) => n + p.models.length, 0)} models from ${result.length} providers`);
 
       // Cache the first discovered model as a last-resort default.
@@ -3233,6 +3268,7 @@ export class PromptHandler {
     const url = `${this.opencodeUrl}/session/${sessionId}/prompt_async`;
     console.log(`[PromptHandler] POST ${url}${model ? ` (model: ${model})` : ''}${attachments?.length ? ` (attachments: ${attachments.length})` : ''}`);
 
+    if (model && isBareModelRef(model)) await this.ensureModelDiscovery();
     const body = this.buildPromptBody(content, model, attachments, author, channelType, channelId);
 
     const res = await fetch(url, {
@@ -3266,6 +3302,7 @@ export class PromptHandler {
     const url = `${this.opencodeUrl}/session/${sessionId}/message`;
     console.log(`[PromptHandler] POST ${url}${model ? ` (model: ${model})` : ''}${attachments?.length ? ` (attachments: ${attachments.length})` : ''}`);
 
+    if (model && isBareModelRef(model)) await this.ensureModelDiscovery();
     const body = this.buildPromptBody(content, model, attachments, author, channelType, channelId);
 
     const res = await fetch(url, {

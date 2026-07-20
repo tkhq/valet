@@ -569,7 +569,9 @@ async function main() {
   agentClient.sendAgentStatus("idle");
   console.log("[Runner] Ready — sent initial agentStatus: idle to DO");
 
-  // Discover models in background — not needed for prompt handling
+  // Discover models in background. Prefixed model refs don't need this, and
+  // bare refs lazily await ensureModelDiscovery() at dispatch — this warm-up
+  // just makes that await a no-op in the common case.
   promptHandler.fetchAvailableModels().then((models) => {
     if (models.length > 0) {
       agentClient.sendModels(models);

@@ -1426,3 +1426,91 @@ describe("resolveModelRef", () => {
     expect(() => resolveModelRef(":claude-sonnet-4-5", known)).toThrow(/Cannot resolve model/);
   });
 });
+
+describe("buildPromptBody model resolution (incident path)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("translates a colon-dialect model into OpenCode's { providerID, modelID }", () => {
+    const handler = createHandler(createAgentClientMock());
+    const body = (handler as any).buildPromptBody("hi", "anthropic:claude-sonnet-4-5");
+    expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-5" });
+  });
+
+  it("translates a slash-dialect model identically", () => {
+    const handler = createHandler(createAgentClientMock());
+    const body = (handler as any).buildPromptBody("hi", "anthropic/claude-sonnet-4-5");
+    expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-5" });
+  });
+
+  it("never emits an empty providerID: unresolvable refs throw instead", () => {
+    const handler = createHandler(createAgentClientMock());
+    expect(() => (handler as any).buildPromptBody("hi", "claude-sonnet-4-5")).toThrow(/Cannot resolve model/);
+  });
+
+  it("resolves a bare model against discovered models", () => {
+    const handler = createHandler(createAgentClientMock());
+    (handler as any).discoveredModelIds = new Set(["anthropic/claude-sonnet-4-5"]);
+    const body = (handler as any).buildPromptBody("hi", "claude-sonnet-4-5");
+    expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-5" });
+  });
+});
+
+describe("ensureModelDiscovery (bare-id cold-start race)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function providerResponse() {
+    return jsonResponse({
+      all: [
+        {
+          id: "anthropic",
+          name: "Anthropic",
+          models: { "claude-sonnet-4-5": { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" } },
+        },
+      ],
+      connected: ["anthropic"],
+    });
+  }
+
+  it("lazily fetches discovery before dispatching a bare model when the set is empty", async () => {
+    const fetchCalls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      fetchCalls.push(url);
+      if (url.endsWith("/provider")) return providerResponse();
+      return new Response(null, { status: 204 });
+    }));
+    const handler = createHandler(createAgentClientMock());
+    await (handler as any).sendPromptAsync("ses_1", "hi", "claude-sonnet-4-5");
+    const providerIdx = fetchCalls.findIndex((u) => u.endsWith("/provider"));
+    const promptIdx = fetchCalls.findIndex((u) => u.includes("/prompt_async"));
+    expect(providerIdx).toBeGreaterThan(-1);
+    expect(promptIdx).toBeGreaterThan(providerIdx);
+  });
+
+  it("skips the discovery fetch entirely for prefixed models", async () => {
+    const fetchCalls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      fetchCalls.push(url);
+      return new Response(null, { status: 204 });
+    }));
+    const handler = createHandler(createAgentClientMock());
+    await (handler as any).sendPromptAsync("ses_1", "hi", "anthropic:claude-sonnet-4-5");
+    expect(fetchCalls.some((u) => u.endsWith("/provider"))).toBe(false);
+  });
+
+  it("rebuilds (not accumulates) the discovered set so restarts drop stale providers", async () => {
+    const handler = createHandler(createAgentClientMock());
+    (handler as any).discoveredModelIds = new Set(["gone-provider/old-model"]);
+    vi.stubGlobal("fetch", vi.fn(async () => providerResponse()));
+    await handler.fetchAvailableModels();
+    const ids = [...(handler as any).discoveredModelIds];
+    expect(ids).toEqual(["anthropic/claude-sonnet-4-5"]);
+  });
+});
