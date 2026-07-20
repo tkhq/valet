@@ -18,8 +18,20 @@ export function formatOutput(data: unknown): string {
  * starting at that cursor, so what is missing is NEWER and is reached by paging forward
  * from the last message shown. Telling the reader to look the wrong way costs it a whole
  * round-trip, so the two cases get different wording.
+ *
+ * A page can also be cut short because it grew past the payload ceiling rather than past
+ * the requested window. Raising the limit then changes nothing — the same newest messages
+ * come back and the same older ones are dropped again — so that case tells the reader to
+ * move the window with `after` instead.
  */
-export function paginationHint(shown: number, mode: "recent" | "after"): string {
+export function paginationHint(shown: number, mode: "recent" | "after" | "size"): string {
+  if (mode === "size") {
+    return (
+      `[${shown} messages shown — the page hit its size limit, so older messages were dropped. ` +
+      `A higher 'limit' returns the same page; use 'after' with a timestamp from earlier in ` +
+      `the conversation to read the dropped stretch in its own, smaller window.]`
+    )
+  }
   if (mode === "after") {
     return (
       `[${shown} messages shown from the cursor — newer messages exist. ` +

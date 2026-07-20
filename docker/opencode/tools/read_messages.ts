@@ -39,6 +39,7 @@ export default tool({
       const data = (await res.json()) as {
         messages: Array<Record<string, unknown>>
         hasMore?: boolean
+        moreReason?: "window" | "size"
       }
 
       if (!data.messages || data.messages.length === 0) {
@@ -48,7 +49,9 @@ export default tool({
       const output = formatOutput(stripToolResults(data.messages))
       if (!data.hasMore) return output
 
-      return `${output}\n\n${paginationHint(data.messages.length, args.after ? "after" : "recent")}`
+      const mode =
+        data.moreReason === "size" ? "size" : args.after ? "after" : "recent"
+      return `${output}\n\n${paginationHint(data.messages.length, mode)}`
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return `Failed to read messages: ${msg}`

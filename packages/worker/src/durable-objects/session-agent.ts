@@ -3604,6 +3604,7 @@ export class SessionAgentDO {
               requestId,
               messages: result.messages!,
               hasMore: result.hasMore,
+              moreReason: result.moreReason,
             });
           }
         } catch (err) {

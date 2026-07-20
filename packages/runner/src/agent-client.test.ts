@@ -123,21 +123,25 @@ describe("resolvePromptAttachmentReferences", () => {
 describe("session-messages hasMore relay", () => {
   // These modules import Bun APIs and cannot be loaded under the Node test runner, so
   // the hop-by-hop plumbing is asserted against their source — the same approach the
-  // gateway idle-timeout contract above uses.
+  // gateway idle-timeout contract above uses. Both the flag and the reason behind it
+  // have to survive every hop, since the tool words its advice from the reason.
   it("resolves the pending read with the flag the DO sent", () => {
     const clientSource = readFileSync(new URL("./agent-client.ts", import.meta.url), "utf8");
-    expect(clientSource).toContain(
-      'this.resolvePendingRequest(msg.requestId, { messages: msg.messages ?? [], hasMore: msg.hasMore });',
-    );
+    expect(clientSource).toContain("hasMore: msg.hasMore,");
+    expect(clientSource).toContain("moreReason: msg.moreReason,");
   });
 
   it("returns the flag from the gateway route the sandbox tool reads", () => {
     const gatewaySource = readFileSync(new URL("./gateway.ts", import.meta.url), "utf8");
-    expect(gatewaySource).toContain("c.json({ messages: result.messages, hasMore: result.hasMore })");
+    expect(gatewaySource).toContain(
+      "c.json({ messages: result.messages, hasMore: result.hasMore, moreReason: result.moreReason })",
+    );
   });
 
   it("carries the flag across the runner entrypoint", () => {
     const binSource = readFileSync(new URL("./bin.ts", import.meta.url), "utf8");
-    expect(binSource).toContain("return { messages: result.messages, hasMore: result.hasMore };");
+    expect(binSource).toContain(
+      "return { messages: result.messages, hasMore: result.hasMore, moreReason: result.moreReason };",
+    );
   });
 });

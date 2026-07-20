@@ -31,6 +31,7 @@ import {
   applyPagePayloadBudget,
   forwardMessages,
   getSessionMessages,
+  getSessionStatus,
   terminateChild,
   truncateOversizedParts,
 } from './session-cross.js';
@@ -277,6 +278,161 @@ describe('getSessionMessages window selection', () => {
     // Trimming drops the oldest messages, so the newest survive.
     expect(result.messages!.at(-1)!.id).toBe('m-19');
     expect(result.hasMore).toBe(true);
+  });
+});
+
+describe('forwardMessages leaves the payload it persists alone', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getSessionMock.mockResolvedValue({
+      id: 'child-1',
+      userId: 'user-1',
+      title: 'Child Session',
+      workspace: 'repo',
+    });
+  });
+
+  it('forwards a screenshot with its base64 data intact', async () => {
+    // Forwarded messages are written into the destination session's own store and
+    // broadcast to its clients, so capping here would not bound a transient read — it
+    // would persist a truncated screenshot in place of the real one.
+    const screenshot = 'A'.repeat(MAX_TOOL_RESULT_CHARS * 3);
+    const env = messagesResponseEnv([
+      {
+        id: 'm-img',
+        role: 'assistant',
+        content: 'here is the screen',
+        parts: { type: 'image', mimeType: 'image/png', data: screenshot },
+        createdAt: '2026-04-06T12:00:00.000Z',
+      },
+    ]);
+
+    const result = await forwardMessages(env, {} as any, 'user-1', 'child-1');
+
+    const parts = result.messages![0].parts as { data: string; mimeType: string };
+    expect(parts.data).toBe(screenshot);
+    expect(parts.data).not.toContain('[truncated');
+    expect(parts.mimeType).toBe('image/png');
+  });
+
+  it('forwards an oversized tool result verbatim', async () => {
+    const dump = 'z'.repeat(MAX_TOOL_RESULT_CHARS + 1_000);
+    const env = messagesResponseEnv([
+      {
+        id: 'm-tool',
+        role: 'assistant',
+        content: 'done',
+        parts: [{ type: 'tool-call', toolName: 'calendar', status: 'complete', result: dump }],
+        createdAt: '2026-04-06T12:00:00.000Z',
+      },
+    ]);
+
+    const result = await forwardMessages(env, {} as any, 'user-1', 'child-1');
+
+    const parts = result.messages![0].parts as Array<{ result: string }>;
+    expect(parts[0].result).toBe(dump);
+  });
+});
+
+describe('getSessionStatus recent messages', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getSessionMock.mockResolvedValue({
+      id: 'child-1',
+      userId: 'user-1',
+      title: 'Child Session',
+      workspace: 'repo',
+      status: 'running',
+    });
+  });
+
+  /** DO stand-in that answers /messages like the real endpoint and /status with runtime state. */
+  function statusEnv(messages: unknown[], captureUrl?: (url: string) => void) {
+    return {
+      SESSIONS: {
+        idFromName: vi.fn((name: string) => `do:${name}`),
+        get: vi.fn(() => ({
+          fetch: vi.fn((req: Request) => {
+            const url = new URL(req.url);
+            if (url.pathname !== '/messages') {
+              return Promise.resolve(new Response(JSON.stringify({ runnerConnected: true, runnerBusy: false, queuedPrompts: 0 })));
+            }
+            captureUrl?.(req.url);
+            const limit = Number(url.searchParams.get('limit') ?? messages.length);
+            const page = url.searchParams.get('tail') === '1'
+              ? messages.slice(Math.max(0, messages.length - limit))
+              : messages.slice(0, limit);
+            return Promise.resolve(new Response(JSON.stringify({ messages: page })));
+          }),
+        })),
+      },
+    } as unknown as Env;
+  }
+
+  it('returns the newest ten messages of a long session, not its opening ten', async () => {
+    const env = statusEnv(conversation(200));
+
+    const result = await getSessionStatus({} as any, env, 'user-1', 'child-1');
+
+    const recent = result.sessionStatus!.recentMessages;
+    expect(recent).toHaveLength(10);
+    expect((recent[0] as any).id).toBe('m-190');
+    // An orchestrator reads this to decide whether the child is finished.
+    expect(recent.at(-1)!.content).toBe('FINAL ANSWER');
+  });
+
+  it('asks the DO for a tail window', async () => {
+    let requestedUrl = '';
+    const env = statusEnv(conversation(30), (url) => {
+      requestedUrl = url;
+    });
+
+    await getSessionStatus({} as any, env, 'user-1', 'child-1');
+
+    const params = new URL(requestedUrl).searchParams;
+    expect(params.get('tail')).toBe('1');
+    expect(params.get('limit')).toBe('10');
+  });
+});
+
+describe('getSessionMessages truncation reason', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getSessionMock.mockResolvedValue({ id: 'child-1', userId: 'user-1' });
+  });
+
+  it('reports a window truncation when the conversation outgrows the limit', async () => {
+    const env = messagesResponseEnv(conversation(120));
+
+    const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
+
+    expect(result.hasMore).toBe(true);
+    expect(result.moreReason).toBe('window');
+  });
+
+  it('reports a size truncation when the page is trimmed to the payload budget', async () => {
+    const bulky = Array.from({ length: 20 }, (_, i) => ({
+      id: `m-${i}`,
+      role: 'assistant',
+      content: 'q'.repeat(60_000),
+      createdAt: new Date(Date.UTC(2026, 3, 6, 12, 0, i)).toISOString(),
+    }));
+    const env = messagesResponseEnv(bulky);
+
+    const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
+
+    // A larger limit cannot help here, so the reason has to say so.
+    expect(result.hasMore).toBe(true);
+    expect(result.moreReason).toBe('size');
+  });
+
+  it('reports no reason when the whole conversation fits', async () => {
+    const env = messagesResponseEnv(conversation(3));
+
+    const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
+
+    expect(result.hasMore).toBe(false);
+    expect(result.moreReason).toBeUndefined();
   });
 });
 

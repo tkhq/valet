@@ -39,6 +39,11 @@ export const MAX_PAGE_PAYLOAD_BYTES = 768 * 1024;
  * JSON.stringify — and one longer than MAX_TOOL_RESULT_CHARS is replaced by its
  * truncated prefix plus a marker naming how many characters were dropped. Parts that
  * need no capping are returned by identity, so the common case allocates nothing.
+ *
+ * Capping is lossy, so it belongs only on a read whose result is relayed to a sandbox
+ * and then discarded. Callers that persist or re-broadcast what they read — forwarding
+ * in particular — must leave parts alone, or a forwarded screenshot would be stored as
+ * a truncated prefix of its own base64.
  */
 export function truncateOversizedParts(parts: unknown): unknown {
   if (parts === null || parts === undefined) return parts;
@@ -97,7 +102,11 @@ export function applyPagePayloadBudget<T>(
   return { messages: kept, dropped: messages.length - kept.length };
 }
 
-/** Fetch messages from another session's DO via internal HTTP endpoint. */
+/**
+ * Fetch messages from another session's DO via internal HTTP endpoint. Messages come
+ * back exactly as the target stored them: this reader is shared by paths that persist
+ * and re-broadcast what they read, so any lossy shaping is left to the caller.
+ */
 export async function fetchMessagesFromDO(
   env: Env,
   targetSessionId: string,
@@ -150,9 +159,7 @@ export async function fetchMessagesFromDO(
       createdAt: string;
     }>;
   };
-  return data.messages.map((m) =>
-    m.parts === undefined ? m : { ...m, parts: truncateOversizedParts(m.parts) },
-  );
+  return data.messages;
 }
 
 // ─── spawnChild ───────────────────────────────────────────────────────────────
@@ -386,6 +393,15 @@ export async function sendSessionMessage(
 
 // ─── getSessionMessages ───────────────────────────────────────────────────────
 
+/**
+ * Why a page left messages behind, which decides what the caller should do next.
+ * `window` means the requested window was smaller than the conversation, so a larger
+ * `limit` reaches more of it. `size` means the page hit MAX_PAGE_PAYLOAD_BYTES and was
+ * trimmed; raising the limit there refetches the same newest messages and drops the
+ * same older ones again, so the caller has to move the window with `after` instead.
+ */
+export type MoreReason = 'window' | 'size';
+
 export type GetSessionMessagesResult =
   | { messages: Array<{
       id?: string;
@@ -402,8 +418,8 @@ export type GetSessionMessagesResult =
       opencodeSessionId?: string;
       threadId?: string;
       createdAt: string;
-    }>; hasMore: boolean; error?: undefined }
-  | { error: string; messages?: undefined; hasMore?: undefined };
+    }>; hasMore: boolean; moreReason?: MoreReason; error?: undefined }
+  | { error: string; messages?: undefined; hasMore?: undefined; moreReason?: undefined };
 
 export async function getSessionMessages(
   env: Env,
@@ -430,15 +446,26 @@ export async function getSessionMessages(
   // truncated one; the probe row is dropped from whichever end the window grew towards.
   const fetched = await fetchMessagesFromDO(env, targetSessionId, effectiveLimit + 1, after, tail);
   let hasMore = fetched.length > effectiveLimit;
+  let moreReason: MoreReason | undefined = hasMore ? 'window' : undefined;
   const page = hasMore
     ? tail
       ? fetched.slice(fetched.length - effectiveLimit)
       : fetched.slice(0, effectiveLimit)
     : fetched;
 
-  const budgeted = applyPagePayloadBudget(page, tail ? 'start' : 'end');
-  if (budgeted.dropped > 0) hasMore = true;
-  return { messages: budgeted.messages, hasMore };
+  // This page is relayed to a sandbox over the Runner↔DO socket and then dropped, so it
+  // is the one read that may shape what it returns. Cap each part, then trim the page as
+  // a whole; a size trim overrides the window reason because it changes the advice the
+  // caller needs — a bigger window cannot undo a size trim.
+  const capped = page.map((m) =>
+    m.parts === undefined ? m : { ...m, parts: truncateOversizedParts(m.parts) },
+  );
+  const budgeted = applyPagePayloadBudget(capped, tail ? 'start' : 'end');
+  if (budgeted.dropped > 0) {
+    hasMore = true;
+    moreReason = 'size';
+  }
+  return { messages: budgeted.messages, hasMore, ...(moreReason ? { moreReason } : {}) };
 }
 
 // ─── forwardMessages ─────────────────────────────────────────────────────────
@@ -572,8 +599,10 @@ export async function getSessionStatus(
     return { error: 'Session not found or access denied' };
   }
 
-  // Fetch recent messages from the target DO's local SQLite (not D1)
-  const recentMessages = await fetchMessagesFromDO(env, targetSessionId, 10);
+  // Fetch recent messages from the target DO's local SQLite (not D1). The caller is
+  // judging whether the session is done, so the window has to come from the end of the
+  // conversation — the opening ten messages of a long session say nothing about that.
+  const recentMessages = await fetchMessagesFromDO(env, targetSessionId, 10, undefined, true);
 
   // Fetch live runner/sandbox status from target DO
   let liveStatus: {

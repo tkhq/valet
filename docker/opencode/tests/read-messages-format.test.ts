@@ -22,6 +22,14 @@ describe('paginationHint', () => {
     expect(hint).not.toContain('older messages exist');
     expect(hint).not.toContain('earlier messages exist');
   });
+
+  it('tells a size-capped read to move the window rather than raise the limit', () => {
+    const hint = paginationHint(12, 'size');
+    expect(hint).toContain('size limit');
+    expect(hint).toContain("use 'after'");
+    // Raising the limit refetches the same page and drops the same messages again.
+    expect(hint).not.toContain("higher 'limit' if");
+  });
 });
 
 describe('stripToolResults', () => {

@@ -130,6 +130,13 @@ export type DOToRunnerMessage =
       }>;
       /** True when the session holds messages outside the returned window. */
       hasMore?: boolean;
+      /**
+       * Why messages were left out: 'window' when the requested window was smaller than
+       * the conversation, 'size' when the page was trimmed to stay under the payload
+       * ceiling. The two need opposite advice — a larger window helps the first and is
+       * useless for the second.
+       */
+      moreReason?: 'window' | 'size';
       error?: string;
     }
   | {
