@@ -980,6 +980,9 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
         ownerId: "owner-1",
       });
       await store.insertAttemptMarker(item.id, "att-live");
+      // A leftover marker for the STALE attempt (e.g. its own insert before it
+      // lost the item) must survive too — the stale release is a full no-op.
+      await store.insertAttemptMarker(item.id, "att-stale");
 
       // A stale attempt tries to release — must not touch the live claim.
       await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
@@ -991,6 +994,8 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded?.status).toBe("running");
       expect(loaded?.attemptId).toBe("att-live");
       expect(await store.hasAttemptMarker(item.id, "att-live")).toBe(true);
+      // Full no-op: it deleted NEITHER its own stale marker NOR the live one.
+      expect(await store.hasAttemptMarker(item.id, "att-stale")).toBe(true);
     });
 
     it("is a no-op when the item is not running (e.g. still queued)", async () => {
