@@ -49,8 +49,17 @@ export default tool({
       const output = formatOutput(stripToolResults(data.messages))
       if (!data.hasMore) return output
 
-      const mode =
-        data.moreReason === "size" ? "size" : args.after ? "after" : "recent"
+      // The trim is directional, so the hint has to know both why the page was cut and
+      // which way this read was travelling: a size trim on a cursor read drops the newest
+      // messages, and telling that reader to look earlier points it back over ground it
+      // has already covered.
+      const mode = data.moreReason === "size"
+        ? args.after
+          ? "size-after"
+          : "size"
+        : args.after
+          ? "after"
+          : "recent"
       return `${output}\n\n${paginationHint(data.messages.length, mode)}`
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

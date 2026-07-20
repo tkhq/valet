@@ -381,6 +381,30 @@ describe('getSessionStatus recent messages', () => {
     expect(recent.at(-1)!.content).toBe('FINAL ANSWER');
   });
 
+  it('bounds a status payload carrying an oversized screenshot', async () => {
+    // The status result is relayed over the same Runner↔DO socket as a message read and
+    // printed verbatim by the sandbox tool, so a child that just took a screenshot must
+    // not push the frame over its 1MB limit.
+    const older = conversation(9);
+    const env = statusEnv([
+      ...older,
+      {
+        id: 'm-shot',
+        role: 'assistant',
+        content: 'here is the screen',
+        parts: { type: 'image', mimeType: 'image/png', data: 'A'.repeat(900_000) },
+        createdAt: '2026-04-06T12:30:00.000Z',
+      },
+    ]);
+
+    const result = await getSessionStatus({} as any, env, 'user-1', 'child-1');
+
+    const recent = result.sessionStatus!.recentMessages;
+    expect(recent.length).toBeGreaterThan(0);
+    const bytes = new TextEncoder().encode(JSON.stringify(recent)).length;
+    expect(bytes).toBeLessThanOrEqual(MAX_PAGE_PAYLOAD_BYTES);
+  });
+
   it('asks the DO for a tail window', async () => {
     let requestedUrl = '';
     const env = statusEnv(conversation(30), (url) => {
@@ -568,6 +592,53 @@ describe('getSessionMessages truncates oversized tool results end to end', () =>
     expect(parts[0]).toEqual({ type: 'text', text: 'here is the report' });
     expect(parts[1].result).toContain('[truncated');
     expect(parts[1].result.length).toBeLessThan(big.length);
+  });
+});
+
+describe('a single message larger than the page ceiling', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getSessionMock.mockResolvedValue({ id: 'child-1', userId: 'user-1' });
+  });
+
+  /** One turn carrying many tool calls: each part survives the per-field cap, the turn does not. */
+  const turnWithManyToolCalls = () => ({
+    id: 'm-fat',
+    role: 'assistant',
+    content: 'done',
+    parts: Array.from({ length: 30 }, (_, i) => ({
+      type: 'tool-call',
+      callId: `c${i}`,
+      toolName: 'grep',
+      status: 'complete',
+      result: 'r'.repeat(60_000),
+    })),
+    createdAt: '2026-04-06T12:00:00.000Z',
+  });
+
+  it('trims the message under the ceiling instead of emitting an oversize frame', async () => {
+    const env = messagesResponseEnv([turnWithManyToolCalls()]);
+
+    const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
+
+    expect(result.messages).toHaveLength(1);
+    const bytes = new TextEncoder().encode(JSON.stringify(result.messages)).length;
+    expect(bytes).toBeLessThanOrEqual(MAX_PAGE_PAYLOAD_BYTES);
+    // The surviving parts are still the real ones, with a marker for what went.
+    const parts = result.messages![0].parts as Array<Record<string, unknown>>;
+    expect(parts.length).toBeGreaterThan(1);
+    expect(JSON.stringify(parts)).toContain('elided');
+  });
+
+  it('bounds the same turn on a status read', async () => {
+    const env = messagesResponseEnv([turnWithManyToolCalls()]);
+
+    const result = await getSessionStatus({} as any, env, 'user-1', 'child-1');
+
+    const recent = result.sessionStatus!.recentMessages;
+    expect(recent).toHaveLength(1);
+    const bytes = new TextEncoder().encode(JSON.stringify(recent)).length;
+    expect(bytes).toBeLessThanOrEqual(MAX_PAGE_PAYLOAD_BYTES);
   });
 });
 

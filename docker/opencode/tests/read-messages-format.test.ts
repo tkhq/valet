@@ -30,6 +30,19 @@ describe('paginationHint', () => {
     // Raising the limit refetches the same page and drops the same messages again.
     expect(hint).not.toContain("higher 'limit' if");
   });
+
+  it('sends a size-capped cursor read forwards, not back over messages it has seen', () => {
+    const tail = paginationHint(12, 'size');
+    const cursor = paginationHint(12, 'size-after');
+
+    expect(cursor).not.toBe(tail);
+    expect(cursor).toContain('size limit');
+    expect(cursor).toContain('newer messages were dropped');
+    expect(cursor).toContain('paging forward');
+    // The tail wording points at earlier messages; on a cursor read that is backwards.
+    expect(cursor).not.toContain('earlier in');
+    expect(tail).toContain('older messages were dropped');
+  });
 });
 
 describe('stripToolResults', () => {

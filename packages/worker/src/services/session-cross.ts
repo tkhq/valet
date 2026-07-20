@@ -81,8 +81,8 @@ export function truncateOversizedParts(parts: unknown): unknown {
  * tail read, the oldest for forward paging from a cursor — and messages past the budget
  * are dropped. The surviving messages keep their chronological order. One message that
  * exceeds the budget on its own is still returned rather than the page coming back
- * empty, so the ceiling is a bound on accumulation, not a hard guarantee for a single
- * pathological message.
+ * empty, so this is a bound on accumulation only; boundMessagesForRelay shrinks such a
+ * message beforehand so the page it hands back is under the ceiling either way.
  */
 export function applyPagePayloadBudget<T>(
   messages: T[],
@@ -100,6 +100,85 @@ export function applyPagePayloadBudget<T>(
   }
   if (dropFrom === 'start') kept.reverse();
   return { messages: kept, dropped: messages.length - kept.length };
+}
+
+/** Serialized byte length of a value, measured the way the socket will send it. */
+function serializedBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value) ?? '').length;
+}
+
+/**
+ * Bound one message that is still over the page ceiling after its fields were capped.
+ *
+ * The per-field cap bounds a part and the page budget bounds an accumulation, but neither
+ * bounds a single turn: message-store appends a part per tool call, so a turn with dozens
+ * of calls carries dozens of capped results and clears the ceiling on its own — and the
+ * page budget deliberately keeps the first message whatever its size, so that turn would
+ * be emitted as a known-oversize frame. Parts are kept from the front until the ceiling is
+ * reached and the rest are replaced by a marker naming how many went, so the message is
+ * still recognisable rather than absent. If the message is over the ceiling with no parts
+ * to shed, its `content` is capped too.
+ */
+function boundOversizedMessage<T extends { parts?: unknown }>(message: T): T {
+  if (serializedBytes(message) <= MAX_PAGE_PAYLOAD_BYTES) return message;
+  const next = { ...(message as Record<string, unknown>) };
+
+  if (Array.isArray(next.parts)) {
+    const parts = next.parts as unknown[];
+    const kept: unknown[] = [];
+    // Leave room for the marker part and the commas the array will add around it.
+    let total = serializedBytes({ ...next, parts: [] }) + 256;
+    for (const part of parts) {
+      const size = serializedBytes(part) + 1;
+      if (total + size > MAX_PAGE_PAYLOAD_BYTES) break;
+      total += size;
+      kept.push(part);
+    }
+    const droppedParts = parts.length - kept.length;
+    if (droppedParts > 0) {
+      kept.push({ type: 'text', text: `[${droppedParts} parts elided — message exceeded the relay payload limit]` });
+    }
+    next.parts = kept;
+  } else if (next.parts !== null && next.parts !== undefined) {
+    next.parts = { type: 'text', text: '[part elided — message exceeded the relay payload limit]' };
+  }
+
+  if (serializedBytes(next) > MAX_PAGE_PAYLOAD_BYTES && typeof next.content === 'string') {
+    const content = next.content;
+    if (content.length > MAX_TOOL_RESULT_CHARS) {
+      const dropped = content.length - MAX_TOOL_RESULT_CHARS;
+      next.content = `${content.slice(0, MAX_TOOL_RESULT_CHARS)}… [truncated ${dropped} chars]`;
+    }
+  }
+
+  return next as T;
+}
+
+/**
+ * Shape a page of messages so it fits in one Runner↔DO frame: cap oversized fields on each
+ * part, bound any single message that still clears the ceiling, then trim the page as a
+ * whole from whichever end the reader cares least about.
+ *
+ * This bound exists for payloads crossing the runner link and nowhere else. Every hop of
+ * that link is a transient read that a sandbox prints and discards, so losing the tail of a
+ * screenshot there costs nothing. A payload that gets persisted or re-broadcast — a
+ * forward, a workflow node, the raw DO reader — must never come through here: capping what
+ * is about to be written stores a truncated prefix of a screenshot in place of the image.
+ * Route every runner-bound read through this one helper so no read path can be shaped
+ * differently, or forgotten.
+ */
+export function boundMessagesForRelay<T extends { parts?: unknown }>(
+  messages: T[],
+  dropFrom: 'start' | 'end',
+): { messages: T[]; dropped: number } {
+  const shaped = messages.map((message) => {
+    const capped =
+      message.parts === undefined
+        ? message
+        : ({ ...message, parts: truncateOversizedParts(message.parts) } as T);
+    return boundOversizedMessage(capped);
+  });
+  return applyPagePayloadBudget(shaped, dropFrom);
 }
 
 /**
@@ -454,13 +533,9 @@ export async function getSessionMessages(
     : fetched;
 
   // This page is relayed to a sandbox over the Runner↔DO socket and then dropped, so it
-  // is the one read that may shape what it returns. Cap each part, then trim the page as
-  // a whole; a size trim overrides the window reason because it changes the advice the
-  // caller needs — a bigger window cannot undo a size trim.
-  const capped = page.map((m) =>
-    m.parts === undefined ? m : { ...m, parts: truncateOversizedParts(m.parts) },
-  );
-  const budgeted = applyPagePayloadBudget(capped, tail ? 'start' : 'end');
+  // goes through the relay bound. A size trim overrides the window reason because it
+  // changes the advice the caller needs — a bigger window cannot undo a size trim.
+  const budgeted = boundMessagesForRelay(page, tail ? 'start' : 'end');
   if (budgeted.dropped > 0) {
     hasMore = true;
     moreReason = 'size';
@@ -602,7 +677,12 @@ export async function getSessionStatus(
   // Fetch recent messages from the target DO's local SQLite (not D1). The caller is
   // judging whether the session is done, so the window has to come from the end of the
   // conversation — the opening ten messages of a long session say nothing about that.
-  const recentMessages = await fetchMessagesFromDO(env, targetSessionId, 10, undefined, true);
+  // This result is relayed over the same Runner↔DO socket as a message read and printed
+  // by the sandbox tool, so it takes the same bound: ten messages ending in a screenshot
+  // would otherwise be a megabyte of base64 and the frame would fail to send, turning a
+  // routine "is the child done?" poll into an error.
+  const fetched = await fetchMessagesFromDO(env, targetSessionId, 10, undefined, true);
+  const recentMessages = boundMessagesForRelay(fetched, 'start').messages;
 
   // Fetch live runner/sandbox status from target DO
   let liveStatus: {

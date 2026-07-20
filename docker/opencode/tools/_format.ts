@@ -20,16 +20,30 @@ export function formatOutput(data: unknown): string {
  * round-trip, so the two cases get different wording.
  *
  * A page can also be cut short because it grew past the payload ceiling rather than past
- * the requested window. Raising the limit then changes nothing — the same newest messages
- * come back and the same older ones are dropped again — so that case tells the reader to
- * move the window with `after` instead.
+ * the requested window. Raising the limit then changes nothing — the same page comes back
+ * and the same messages are dropped again — so that case tells the reader to move the
+ * window instead. Which way to move it depends on the read: a size trim on a default read
+ * sheds the OLDEST messages, so the dropped stretch lies behind the page, while a size trim
+ * on a cursor read sheds the NEWEST, so the dropped stretch lies ahead and the reader keeps
+ * paging forward. Sending a cursor read backwards would walk it over messages it has
+ * already seen while the gap stays where it was.
  */
-export function paginationHint(shown: number, mode: "recent" | "after" | "size"): string {
+export function paginationHint(
+  shown: number,
+  mode: "recent" | "after" | "size" | "size-after",
+): string {
   if (mode === "size") {
     return (
       `[${shown} messages shown — the page hit its size limit, so older messages were dropped. ` +
       `A higher 'limit' returns the same page; use 'after' with a timestamp from earlier in ` +
       `the conversation to read the dropped stretch in its own, smaller window.]`
+    )
+  }
+  if (mode === "size-after") {
+    return (
+      `[${shown} messages shown from the cursor — the page hit its size limit, so newer ` +
+      `messages were dropped. A higher 'limit' returns the same page; keep paging forward ` +
+      `with 'after' set to the createdAt of the last message above.]`
     )
   }
   if (mode === "after") {
