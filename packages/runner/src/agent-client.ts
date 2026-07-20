@@ -458,7 +458,7 @@ export class AgentClient {
       opencodeSessionId?: string;
       threadId?: string;
       createdAt: string;
-    }> }> {
+    }>; hasMore?: boolean }> {
     const requestId = crypto.randomUUID();
     return this.createPendingRequest(requestId, MESSAGE_OP_TIMEOUT_MS, () => {
       this.send({ type: "session-messages", requestId, targetSessionId, limit, after });
@@ -934,7 +934,7 @@ export class AgentClient {
           if (msg.error) {
             this.rejectPendingRequest(msg.requestId, msg.error);
           } else {
-            this.resolvePendingRequest(msg.requestId, { messages: msg.messages ?? [] });
+            this.resolvePendingRequest(msg.requestId, { messages: msg.messages ?? [], hasMore: msg.hasMore });
           }
           break;
 

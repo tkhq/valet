@@ -1,14 +1,13 @@
 import { tool } from "@opencode-ai/plugin"
-import { formatOutput, stripToolResults } from "./_format"
-
-const DEFAULT_LIMIT = 50
+import { formatOutput, paginationHint, stripToolResults } from "./_format"
 
 export default tool({
   description:
-    "Read messages from another agent session's conversation. By default returns the most recent messages (newest first, in chronological order). " +
+    "Read messages from another agent session's conversation. By default returns the most recent window of the conversation, oldest first, so the session's latest message is the last one shown. " +
     "Use this to check on a child session's progress, read its results, or monitor what it's working on. " +
     "Returns the child's assistant text plus tool names/args; full tool-call results are omitted to keep the output focused. " +
-    "Pass 'after' to paginate forward from a specific timestamp. Only works with sessions belonging to the same user.",
+    "Pass 'after' to page forward from a timestamp instead, which returns the window that starts just after that cursor. " +
+    "Only works with sessions belonging to the same user.",
   args: {
     session_id: tool.schema
       .string()
@@ -16,7 +15,7 @@ export default tool({
     limit: tool.schema
       .number()
       .optional()
-      .describe("Maximum number of messages to return (default 50)"),
+      .describe("Size of the window to return (default 50)"),
     after: tool.schema
       .string()
       .optional()
@@ -46,19 +45,10 @@ export default tool({
         return "No messages found in this session."
       }
 
-      const effectiveLimit = args.limit ?? DEFAULT_LIMIT
-      const hasMore = data.hasMore ?? data.messages.length >= effectiveLimit
       const output = formatOutput(stripToolResults(data.messages))
+      if (!data.hasMore) return output
 
-      if (hasMore) {
-        return (
-          `${output}\n\n` +
-          `[${data.messages.length} messages shown — older messages exist. ` +
-          `Read again with a higher 'limit' or use 'after' to page forward if you need more.]`
-        )
-      }
-
-      return output
+      return `${output}\n\n${paginationHint(data.messages.length, args.after ? "after" : "recent")}`
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return `Failed to read messages: ${msg}`

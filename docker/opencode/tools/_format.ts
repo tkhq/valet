@@ -10,6 +10,29 @@ export function formatOutput(data: unknown): string {
 }
 
 /**
+ * Build the note appended to a truncated page of session messages.
+ *
+ * Which messages are hidden depends on how the page was taken. A default read returns
+ * the newest window, so what is missing sits EARLIER in the conversation and is reached
+ * by asking for a larger window. A read that passed an `after` cursor returns the window
+ * starting at that cursor, so what is missing is NEWER and is reached by paging forward
+ * from the last message shown. Telling the reader to look the wrong way costs it a whole
+ * round-trip, so the two cases get different wording.
+ */
+export function paginationHint(shown: number, mode: "recent" | "after"): string {
+  if (mode === "after") {
+    return (
+      `[${shown} messages shown from the cursor — newer messages exist. ` +
+      `Call again with 'after' set to the createdAt of the last message above to keep paging forward.]`
+    )
+  }
+  return (
+    `[${shown} most recent messages shown — earlier messages exist. ` +
+    `Call again with a higher 'limit' if you need more of the conversation history.]`
+  )
+}
+
+/**
  * Drop tool-call `result` payloads from a list of messages before encoding.
  *
  * When one agent reads another session's messages it needs the child's assistant

@@ -566,7 +566,7 @@ export interface GatewayCallbacks {
   onTerminateChild?: (childSessionId: string) => Promise<{ success: boolean }>;
   onSelfTerminate?: () => void;
   onSendMessage?: (targetSessionId: string, content: string, interrupt: boolean) => Promise<void>;
-  onReadMessages?: (targetSessionId: string, limit?: number, after?: string) => Promise<MessageEntry[]>;
+  onReadMessages?: (targetSessionId: string, limit?: number, after?: string) => Promise<{ messages: MessageEntry[]; hasMore?: boolean }>;
   onReportGitState?: (params: GitStateParams) => void;
   onMemRead?: (path: string) => Promise<{
     file?: unknown;
@@ -821,8 +821,8 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
       }
       const limit = c.req.query("limit") ? parseInt(c.req.query("limit")!, 10) : undefined;
       const after = c.req.query("after") || undefined;
-      const messages = await callbacks.onReadMessages(sessionId, limit, after);
-      return c.json({ messages });
+      const result = await callbacks.onReadMessages(sessionId, limit, after);
+      return c.json({ messages: result.messages, hasMore: result.hasMore });
     } catch (err) {
       console.error("[Gateway] Read messages error:", err);
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);

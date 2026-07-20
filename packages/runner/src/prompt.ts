@@ -410,9 +410,19 @@ const FLUSH_THRESHOLD_RATIO = 0.70;  // Trigger at 70% of context window
 const FLUSH_TURN_INTERVAL = 20;      // Fallback: every 20 turns if no token data
 const FLUSH_TIMEOUT_MS = 60_000;     // Max time for flush turn
 
-const MEMORY_FLUSH_PROMPT = `[SYSTEM: Routine memory checkpoint]
+/**
+ * Prompt for the pre-compaction memory checkpoint.
+ *
+ * This only ever runs in a forked session that is deleted as soon as it goes idle, and
+ * its reply is discarded. The fork shares the workspace and the session-agnostic tool
+ * gateway with the real session, so anything it does — a commit, a push, a pull request,
+ * a message to a channel — happens for real while its output goes nowhere. The prompt is
+ * therefore terminal: write memory, then stop. It must not ask the model to carry on with
+ * the task.
+ */
+export const MEMORY_FLUSH_PROMPT = `[SYSTEM: Routine memory checkpoint]
 
-This is a periodic checkpoint. Record the current state of your work to memory using mem_write or mem_patch so it stays durable, then continue the task exactly where you left off. This is a save point, not a stopping point — do not wrap up, summarize for the user, or hand back control.
+This is a periodic checkpoint. Record the current state of your work to memory using mem_write or mem_patch so it stays durable, and do nothing else — no code changes, no git operations, no messages to anyone.
 
 Save any important information:
 
@@ -424,7 +434,7 @@ Save any important information:
 
 Use paths like "projects/<repo>/task-status.md", "projects/<repo>/decisions.md", etc.
 
-If nothing new is worth saving, reply "Nothing to save." and keep working.
+If nothing new is worth saving, reply "Nothing to save."
 
 Do NOT mention this checkpoint to the user. This is an automatic system process.`;
 

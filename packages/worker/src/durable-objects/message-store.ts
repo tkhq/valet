@@ -501,8 +501,17 @@ export class MessageStore {
     return this.rowToMessageRow(rows[0]);
   }
 
-  /** Read messages, ordered by created_at ASC, seq ASC. Supports optional limit and cursor. */
-  getMessages(opts?: { limit?: number; afterId?: string; afterCreatedAt?: number; threadId?: string }): MessageRow[] {
+  /**
+   * Read messages in chronological order (created_at ASC, seq ASC), with an optional
+   * limit, cursor and thread filter.
+   *
+   * With `tail`, the limit selects the LAST n matching rows instead of the first n —
+   * the rows are read in descending order and reversed, so the caller still receives
+   * them oldest-first. A reader that wants the end of a conversation (a parent session
+   * checking a child's result) needs the newest window, which a plain forward limit
+   * cannot reach. `tail` has no effect without a limit, since the whole set is returned.
+   */
+  getMessages(opts?: { limit?: number; afterId?: string; afterCreatedAt?: number; threadId?: string; tail?: boolean }): MessageRow[] {
     let query = `SELECT ${MESSAGE_COLUMNS} FROM messages`;
     const params: (string | number)[] = [];
     const conditions: string[] = [];
@@ -524,7 +533,8 @@ export class MessageStore {
       query += ' WHERE ' + conditions.join(' AND ');
     }
 
-    query += ' ORDER BY created_at ASC, seq ASC';
+    const tail = opts?.tail === true && !!opts?.limit;
+    query += tail ? ' ORDER BY created_at DESC, seq DESC' : ' ORDER BY created_at ASC, seq ASC';
 
     if (opts?.limit) {
       query += ' LIMIT ?';
@@ -532,6 +542,7 @@ export class MessageStore {
     }
 
     const rows = this.sql.exec<MessageSqlRow>(query, ...params).toArray();
+    if (tail) rows.reverse();
     return rows.map((r) => this.rowToMessageRow(r));
   }
 

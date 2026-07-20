@@ -128,6 +128,8 @@ export type DOToRunnerMessage =
         threadId?: string;
         createdAt: string;
       }>;
+      /** True when the session holds messages outside the returned window. */
+      hasMore?: boolean;
       error?: string;
     }
   | {

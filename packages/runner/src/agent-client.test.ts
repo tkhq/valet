@@ -119,3 +119,25 @@ describe("resolvePromptAttachmentReferences", () => {
     expect(new URL(attachments?.[0]?.url ?? "").searchParams.get("reason")).toBe("404 Not Found");
   });
 });
+
+describe("session-messages hasMore relay", () => {
+  // These modules import Bun APIs and cannot be loaded under the Node test runner, so
+  // the hop-by-hop plumbing is asserted against their source — the same approach the
+  // gateway idle-timeout contract above uses.
+  it("resolves the pending read with the flag the DO sent", () => {
+    const clientSource = readFileSync(new URL("./agent-client.ts", import.meta.url), "utf8");
+    expect(clientSource).toContain(
+      'this.resolvePendingRequest(msg.requestId, { messages: msg.messages ?? [], hasMore: msg.hasMore });',
+    );
+  });
+
+  it("returns the flag from the gateway route the sandbox tool reads", () => {
+    const gatewaySource = readFileSync(new URL("./gateway.ts", import.meta.url), "utf8");
+    expect(gatewaySource).toContain("c.json({ messages: result.messages, hasMore: result.hasMore })");
+  });
+
+  it("carries the flag across the runner entrypoint", () => {
+    const binSource = readFileSync(new URL("./bin.ts", import.meta.url), "utf8");
+    expect(binSource).toContain("return { messages: result.messages, hasMore: result.hasMore };");
+  });
+});

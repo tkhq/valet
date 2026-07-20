@@ -23,27 +23,49 @@ vi.mock('./credentials.js', () => ({
   getCredential: getCredentialMock,
 }));
 
+import type { Env } from '../env.js';
 import {
   DEFAULT_MESSAGE_LIMIT,
+  MAX_PAGE_PAYLOAD_BYTES,
   MAX_TOOL_RESULT_CHARS,
+  applyPagePayloadBudget,
   forwardMessages,
   getSessionMessages,
   terminateChild,
   truncateOversizedParts,
 } from './session-cross.js';
 
-function messagesResponseEnv(messages: unknown[], captureUrl?: (url: string) => void) {
+/**
+ * Stand-in DO binding that answers /messages with a fixed conversation, honouring the
+ * limit and tail params the way the real endpoint does so page-window behaviour is
+ * exercised rather than assumed.
+ */
+function messagesResponseEnv(messages: unknown[], captureUrl?: (url: string) => void): Env {
   return {
     SESSIONS: {
       idFromName: vi.fn((name: string) => `do:${name}`),
       get: vi.fn(() => ({
         fetch: vi.fn((req: Request) => {
           captureUrl?.(req.url);
-          return Promise.resolve(new Response(JSON.stringify({ messages })));
+          const params = new URL(req.url).searchParams;
+          const limit = Number(params.get('limit') ?? messages.length);
+          const page = params.get('tail') === '1'
+            ? messages.slice(Math.max(0, messages.length - limit))
+            : messages.slice(0, limit);
+          return Promise.resolve(new Response(JSON.stringify({ messages: page })));
         }),
       })),
     },
-  } as any;
+  } as unknown as Env;
+}
+
+function conversation(count: number): Array<Record<string, unknown>> {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `m-${i}`,
+    role: i === count - 1 ? 'assistant' : 'user',
+    content: i === count - 1 ? 'FINAL ANSWER' : `msg ${i}`,
+    createdAt: new Date(Date.UTC(2026, 3, 6, 12, 0, i)).toISOString(),
+  }));
 }
 
 describe('session-cross message access', () => {
@@ -157,7 +179,7 @@ describe('session-cross message access', () => {
   });
 });
 
-describe('getSessionMessages default limit and hasMore hint', () => {
+describe('getSessionMessages window selection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getSessionMock.mockResolvedValue({
@@ -168,7 +190,20 @@ describe('getSessionMessages default limit and hasMore hint', () => {
     });
   });
 
-  it('requests the DO with the default limit of 50 when none is given', async () => {
+  it('returns the last page of a long conversation, in chronological order', async () => {
+    const env = messagesResponseEnv(conversation(120));
+
+    const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
+
+    expect(result.messages).toHaveLength(DEFAULT_MESSAGE_LIMIT);
+    expect(result.messages![0].id).toBe('m-70');
+    expect(result.messages!.at(-1)!.id).toBe('m-119');
+    // The whole point: the child's final message is reachable in a single read.
+    expect(result.messages!.at(-1)!.content).toBe('FINAL ANSWER');
+    expect(result.hasMore).toBe(true);
+  });
+
+  it('asks the DO for the tail window with one extra row when no cursor is given', async () => {
     let requestedUrl = '';
     const env = messagesResponseEnv([], (url) => {
       requestedUrl = url;
@@ -176,32 +211,102 @@ describe('getSessionMessages default limit and hasMore hint', () => {
 
     await getSessionMessages(env, {} as any, 'user-1', 'child-1');
 
-    expect(new URL(requestedUrl).searchParams.get('limit')).toBe(String(DEFAULT_MESSAGE_LIMIT));
+    const params = new URL(requestedUrl).searchParams;
+    expect(params.get('limit')).toBe(String(DEFAULT_MESSAGE_LIMIT + 1));
+    expect(params.get('tail')).toBe('1');
     expect(DEFAULT_MESSAGE_LIMIT).toBe(50);
   });
 
-  it('flags hasMore when the returned page fills the limit', async () => {
-    const full = Array.from({ length: DEFAULT_MESSAGE_LIMIT }, (_, i) => ({
-      id: `m-${i}`,
-      role: 'assistant',
-      content: `msg ${i}`,
-      createdAt: '2026-04-06T12:00:00.000Z',
-    }));
-    const env = messagesResponseEnv(full);
+  it('does not flag hasMore when the conversation exactly fills the page', async () => {
+    const env = messagesResponseEnv(conversation(DEFAULT_MESSAGE_LIMIT));
 
     const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
 
-    expect(result.hasMore).toBe(true);
+    expect(result.messages).toHaveLength(DEFAULT_MESSAGE_LIMIT);
+    expect(result.hasMore).toBe(false);
   });
 
   it('does not flag hasMore for a partial page', async () => {
-    const env = messagesResponseEnv([
-      { id: 'm-1', role: 'assistant', content: 'only one', createdAt: '2026-04-06T12:00:00.000Z' },
-    ]);
+    const env = messagesResponseEnv(conversation(1));
 
     const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
 
     expect(result.hasMore).toBe(false);
+  });
+
+  it('pages forward from the cursor instead of tailing when after is given', async () => {
+    let requestedUrl = '';
+    const env = messagesResponseEnv(conversation(120), (url) => {
+      requestedUrl = url;
+    });
+
+    const result = await getSessionMessages(
+      env,
+      {} as any,
+      'user-1',
+      'child-1',
+      10,
+      '2026-04-06T12:00:00.000Z',
+    );
+
+    const params = new URL(requestedUrl).searchParams;
+    expect(params.get('tail')).toBeNull();
+    expect(params.get('after')).toBe('2026-04-06T12:00:00.000Z');
+    expect(params.get('limit')).toBe('11');
+    // Forward paging keeps taking the window from the front of what the DO returned.
+    expect(result.messages).toHaveLength(10);
+    expect(result.messages![0].id).toBe('m-0');
+    expect(result.messages!.at(-1)!.id).toBe('m-9');
+    expect(result.hasMore).toBe(true);
+  });
+
+  it('trims a page that would exceed the aggregate payload budget and flags hasMore', async () => {
+    const bulky = Array.from({ length: 20 }, (_, i) => ({
+      id: `m-${i}`,
+      role: 'assistant',
+      content: 'q'.repeat(60_000),
+      createdAt: new Date(Date.UTC(2026, 3, 6, 12, 0, i)).toISOString(),
+    }));
+    const env = messagesResponseEnv(bulky);
+
+    const result = await getSessionMessages(env, {} as any, 'user-1', 'child-1');
+
+    const bytes = new TextEncoder().encode(JSON.stringify(result.messages)).length;
+    expect(bytes).toBeLessThanOrEqual(MAX_PAGE_PAYLOAD_BYTES);
+    expect(result.messages!.length).toBeLessThan(bulky.length);
+    // Trimming drops the oldest messages, so the newest survive.
+    expect(result.messages!.at(-1)!.id).toBe('m-19');
+    expect(result.hasMore).toBe(true);
+  });
+});
+
+describe('applyPagePayloadBudget', () => {
+  const message = (id: string, size: number) => ({ id, content: 'x'.repeat(size) });
+
+  it('keeps a page that fits untouched', () => {
+    const page = [message('a', 10), message('b', 10)];
+    expect(applyPagePayloadBudget(page, 'start')).toEqual({ messages: page, dropped: 0 });
+  });
+
+  it('drops the oldest messages first for a tail window', () => {
+    const page = [message('a', 500_000), message('b', 500_000)];
+    const { messages, dropped } = applyPagePayloadBudget(page, 'start');
+    expect(messages.map((m) => m.id)).toEqual(['b']);
+    expect(dropped).toBe(1);
+  });
+
+  it('drops the newest messages first when paging forward from a cursor', () => {
+    const page = [message('a', 500_000), message('b', 500_000)];
+    const { messages, dropped } = applyPagePayloadBudget(page, 'end');
+    expect(messages.map((m) => m.id)).toEqual(['a']);
+    expect(dropped).toBe(1);
+  });
+
+  it('returns a single oversized message rather than an empty page', () => {
+    const page = [message('a', MAX_PAGE_PAYLOAD_BYTES + 1_000)];
+    const { messages, dropped } = applyPagePayloadBudget(page, 'start');
+    expect(messages.map((m) => m.id)).toEqual(['a']);
+    expect(dropped).toBe(0);
   });
 });
 
@@ -243,10 +348,40 @@ describe('truncateOversizedParts', () => {
     expect(capped[0].result).toContain('[truncated');
   });
 
-  it('preserves assistant text parts and non-array inputs', () => {
+  it('preserves assistant text parts and empty inputs', () => {
     expect(truncateOversizedParts(undefined)).toBeUndefined();
+    expect(truncateOversizedParts(null)).toBeNull();
     const textOnly = [{ type: 'text', text: 'the final answer' }];
     expect(truncateOversizedParts(textOnly)).toBe(textOnly);
+  });
+
+  it('caps an image message whose parts are a single object rather than an array', () => {
+    const parts = {
+      type: 'image',
+      mimeType: 'image/png',
+      data: 'A'.repeat(MAX_TOOL_RESULT_CHARS + 2_000),
+    };
+
+    const capped = truncateOversizedParts(parts) as Record<string, string>;
+
+    expect(Array.isArray(capped)).toBe(false);
+    expect(capped.type).toBe('image');
+    expect(capped.mimeType).toBe('image/png');
+    expect(capped.data).toContain('[truncated 2000 chars]');
+    expect(capped.data.length).toBeLessThan(parts.data.length);
+  });
+
+  it('leaves a small non-array part untouched', () => {
+    const parts = { type: 'image', mimeType: 'image/png', data: 'AAAA' };
+    expect(truncateOversizedParts(parts)).toBe(parts);
+  });
+
+  it('caps an oversized text part, not just tool results', () => {
+    const parts = [{ type: 'text', text: 'T'.repeat(MAX_TOOL_RESULT_CHARS + 5) }];
+
+    const capped = truncateOversizedParts(parts) as Array<Record<string, string>>;
+
+    expect(capped[0].text).toContain('[truncated 5 chars]');
   });
 });
 

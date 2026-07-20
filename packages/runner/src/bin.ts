@@ -215,7 +215,7 @@ async function main() {
     },
     onReadMessages: async (targetSessionId, limit, after) => {
       const result = await agentClient.requestReadMessages(targetSessionId, limit, after);
-      return result.messages;
+      return { messages: result.messages, hasMore: result.hasMore };
     },
     onReportGitState: (params) => {
       agentClient.sendGitState(params);

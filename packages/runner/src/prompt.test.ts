@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentClient } from "./agent-client.js";
-import { ChannelSession, PromptHandler } from "./prompt.js";
+import { ChannelSession, MEMORY_FLUSH_PROMPT, PromptHandler } from "./prompt.js";
 
 type FetchCall = {
   url: string;
@@ -1359,5 +1359,29 @@ describe("PromptHandler text file extraction", () => {
     expect(readFileSync(pdfPath!, "utf8")).toContain("%PDF-1.4");
     const fileParts = body.parts.filter((p) => p.type === "file");
     expect(fileParts).toHaveLength(0);
+  });
+});
+
+describe("MEMORY_FLUSH_PROMPT", () => {
+  it("asks for a memory write and nothing more", () => {
+    expect(MEMORY_FLUSH_PROMPT).toContain("mem_write");
+    expect(MEMORY_FLUSH_PROMPT).toContain('reply "Nothing to save."');
+  });
+
+  it("carries no instruction to continue the task", () => {
+    // The flush runs in a fork that is deleted as soon as it goes idle, but the fork
+    // shares the workspace and the tool gateway — telling it to carry on would let a
+    // discarded turn commit, push, or message a channel for real.
+    const continuationLanguage = [
+      "keep working",
+      "continue the task",
+      "where you left off",
+      "not a stopping point",
+      "do not wrap up",
+      "hand back control",
+    ];
+    for (const phrase of continuationLanguage) {
+      expect(MEMORY_FLUSH_PROMPT.toLowerCase()).not.toContain(phrase);
+    }
   });
 });

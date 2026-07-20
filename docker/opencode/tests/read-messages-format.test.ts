@@ -4,7 +4,25 @@ import { describe, expect, it, vi } from 'vitest';
 // stub it here to exercise the pure stripToolResults logic without the package.
 vi.mock('@toon-format/toon', () => ({ encode: (data: unknown) => JSON.stringify(data) }));
 
-import { stripToolResults } from '../tools/_format';
+import { paginationHint, stripToolResults } from '../tools/_format';
+
+describe('paginationHint', () => {
+  it('points backwards for a default read, where the hidden messages are earlier', () => {
+    const hint = paginationHint(50, 'recent');
+    expect(hint).toContain('most recent');
+    expect(hint).toContain('earlier messages exist');
+    expect(hint).toContain("higher 'limit'");
+    expect(hint).not.toContain('newer messages exist');
+  });
+
+  it('points forwards for a cursor read, where the hidden messages are newer', () => {
+    const hint = paginationHint(50, 'after');
+    expect(hint).toContain('newer messages exist');
+    expect(hint).toContain('paging forward');
+    expect(hint).not.toContain('older messages exist');
+    expect(hint).not.toContain('earlier messages exist');
+  });
+});
 
 describe('stripToolResults', () => {
   it('removes the result payload from tool-call parts but keeps name/args/status', () => {

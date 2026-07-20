@@ -3603,6 +3603,7 @@ export class SessionAgentDO {
               type: 'session-messages-result',
               requestId,
               messages: result.messages!,
+              hasMore: result.hasMore,
             });
           }
         } catch (err) {
@@ -5397,12 +5398,15 @@ export class SessionAgentDO {
   /**
    * HTTP endpoint: returns messages from this DO's local SQLite.
    * Used by other DOs for cross-session message reads.
-   * Query params: limit (default 20), after (ISO timestamp cursor)
+   * Query params: limit (default 5000), after (ISO timestamp cursor), threadId,
+   * and tail=1 to take the limit from the end of the conversation rather than the
+   * start. Messages always come back oldest-first.
    */
   private handleMessagesEndpoint(url: URL): Response {
     const limit = parseInt(url.searchParams.get('limit') || '5000', 10);
     const after = url.searchParams.get('after');
     const threadId = url.searchParams.get('threadId');
+    const tail = url.searchParams.get('tail') === '1';
     const sessionId = this.sessionState.sessionId;
 
     let afterCreatedAt: number | undefined;
@@ -5421,6 +5425,7 @@ export class SessionAgentDO {
       limit,
       ...(afterCreatedAt !== undefined ? { afterCreatedAt } : {}),
       ...(threadId ? { threadId } : {}),
+      ...(tail ? { tail: true } : {}),
     });
 
     const messages = rows.map((r) => ({

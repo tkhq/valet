@@ -3678,3 +3678,63 @@ describe('SessionAgentDO', () => {
     });
   });
 });
+
+describe('SessionAgentDO session-messages relay', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sends the hasMore flag alongside the messages so the sandbox tool can see it', async () => {
+    const { agent } = await createTestAgent();
+    const testDb = createTestDb();
+    const appDb = testDb.db;
+    appDb.insert(users).values({ id: 'user-1', email: 'user-1@example.com' }).run();
+    appDb.insert(sessions).values({
+      id: 'child-1',
+      userId: 'user-1',
+      workspace: '/tmp/session-agent-messages',
+      status: 'running',
+    }).run();
+    Object.defineProperty(agent, 'appDb', { value: appDb });
+
+    const transcript = Array.from({ length: 60 }, (_, i) => ({
+      id: `m-${i}`,
+      role: i === 59 ? 'assistant' : 'user',
+      content: i === 59 ? 'FINAL ANSWER' : `msg ${i}`,
+      createdAt: new Date(Date.UTC(2026, 3, 6, 12, 0, i)).toISOString(),
+    }));
+    (agent as any).env = {
+      ...(agent as any).env,
+      SESSIONS: {
+        idFromName: (name: string) => `do:${name}`,
+        get: () => ({
+          fetch: (req: Request) => {
+            const params = new URL(req.url).searchParams;
+            const limit = Number(params.get('limit') ?? transcript.length);
+            const page = params.get('tail') === '1'
+              ? transcript.slice(Math.max(0, transcript.length - limit))
+              : transcript.slice(0, limit);
+            return Promise.resolve(new Response(JSON.stringify({ messages: page })));
+          },
+        }),
+      },
+    };
+
+    const runnerSendMock = vi.fn().mockReturnValue(true);
+    (agent as any).runnerLink.send = runnerSendMock;
+
+    await (agent as any).runnerHandlers['session-messages']({
+      type: 'session-messages',
+      requestId: 'req-messages',
+      targetSessionId: 'child-1',
+    });
+
+    const sent = runnerSendMock.mock.calls
+      .map((c: Array<Record<string, unknown>>) => c[0])
+      .find((m) => m.type === 'session-messages-result');
+    expect(sent).toBeDefined();
+    expect(sent!.hasMore).toBe(true);
+    const messages = sent!.messages as Array<{ content: string }>;
+    expect(messages.at(-1)!.content).toBe('FINAL ANSWER');
+  });
+});

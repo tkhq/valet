@@ -251,11 +251,12 @@ function createStatefulMockSql(opts?: {
       // Handle SELECT for getMessages (multi-row queries with ORDER BY)
       if (query.startsWith('SELECT') && query.includes('FROM messages') && query.includes('ORDER BY')) {
         let result = Array.from(rows.values());
-        // Simple ordering by created_at, seq
+        // Simple ordering by created_at, seq — descending when the query tails.
+        const descending = query.includes('ORDER BY created_at DESC');
         result.sort((a, b) => {
           const caDiff = (a.created_at as number) - (b.created_at as number);
-          if (caDiff !== 0) return caDiff;
-          return (a.seq as number) - (b.seq as number);
+          const cmp = caDiff !== 0 ? caDiff : (a.seq as number) - (b.seq as number);
+          return descending ? -cmp : cmp;
         });
 
         // Handle seq > ? filter for flushToD1
@@ -1155,6 +1156,55 @@ describe('MessageStore', () => {
       expect(msgs).toHaveLength(2);
       expect(msgs[0].id).toBe('msg-1');
       expect(msgs[1].id).toBe('msg-3');
+    });
+
+    it('getMessages with tail takes the limit from the end, oldest first', () => {
+      const sql = createStatefulMockSql();
+      const store = new MessageStore(sql);
+
+      store.writeMessage({ id: 'msg-1', role: 'user', content: 'First' });
+      store.writeMessage({ id: 'msg-2', role: 'user', content: 'Second' });
+      store.writeMessage({ id: 'msg-3', role: 'assistant', content: 'Final answer' });
+
+      sql.rows.get('msg-1')!.created_at = 1000;
+      sql.rows.get('msg-2')!.created_at = 2000;
+      sql.rows.get('msg-3')!.created_at = 3000;
+
+      const msgs = store.getMessages({ limit: 2, tail: true });
+      expect(msgs.map((m) => m.id)).toEqual(['msg-2', 'msg-3']);
+      expect(msgs[1].content).toBe('Final answer');
+    });
+
+    it('getMessages with tail and a threadId filter tails within the thread', () => {
+      const sql = createStatefulMockSql();
+      const store = new MessageStore(sql);
+
+      store.writeMessage({ id: 'msg-1', role: 'user', content: 'A1', threadId: 'thread-a' });
+      store.writeMessage({ id: 'msg-2', role: 'user', content: 'B1', threadId: 'thread-b' });
+      store.writeMessage({ id: 'msg-3', role: 'user', content: 'A2', threadId: 'thread-a' });
+      store.writeMessage({ id: 'msg-4', role: 'user', content: 'A3', threadId: 'thread-a' });
+
+      sql.rows.get('msg-1')!.created_at = 1000;
+      sql.rows.get('msg-2')!.created_at = 2000;
+      sql.rows.get('msg-3')!.created_at = 3000;
+      sql.rows.get('msg-4')!.created_at = 4000;
+
+      const msgs = store.getMessages({ threadId: 'thread-a', limit: 2, tail: true });
+      expect(msgs.map((m) => m.id)).toEqual(['msg-3', 'msg-4']);
+    });
+
+    it('getMessages with tail but no limit still returns everything chronologically', () => {
+      const sql = createStatefulMockSql();
+      const store = new MessageStore(sql);
+
+      store.writeMessage({ id: 'msg-1', role: 'user', content: 'First' });
+      store.writeMessage({ id: 'msg-2', role: 'user', content: 'Second' });
+
+      sql.rows.get('msg-1')!.created_at = 1000;
+      sql.rows.get('msg-2')!.created_at = 2000;
+
+      const msgs = store.getMessages({ tail: true });
+      expect(msgs.map((m) => m.id)).toEqual(['msg-1', 'msg-2']);
     });
   });
 

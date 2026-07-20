@@ -19,35 +19,82 @@ import { getCredential } from './credentials.js';
 export const DEFAULT_MESSAGE_LIMIT = 50;
 
 /**
- * Maximum size (in characters) of a single tool-call `result` payload retained when
- * serializing cross-session messages. A large tool result (e.g. a megabyte calendar
- * API dump) is capped so it cannot blow the Runner↔DO WebSocket 1MB frame limit or
- * stall the read_messages round-trip.
+ * Maximum size (in characters) of any single field on a message part. A tool result
+ * holding a megabyte API dump, or the base64 `data` of an image part, is capped here so
+ * one part cannot on its own approach the Runner↔DO WebSocket 1MB frame limit.
  */
 export const MAX_TOOL_RESULT_CHARS = 50_000;
 
 /**
- * Defensively cap oversized tool-call `result` fields on a message's parts. Non-tool
- * parts and small results are returned untouched; an oversized result is truncated and
- * annotated with a short marker noting how many characters were dropped.
+ * Aggregate serialized-byte ceiling for one page of cross-session messages, held below
+ * the 1MB WebSocket frame limit so the page still fits after the envelope around it.
+ */
+export const MAX_PAGE_PAYLOAD_BYTES = 768 * 1024;
+
+/**
+ * Cap oversized fields on a message's parts. Parts are usually an array, but an image
+ * message stores a single part object, so a non-array part is normalized into a
+ * one-element list before mapping and unwrapped again on the way out. Every field is
+ * measured as it will be serialized — a string directly, anything else through
+ * JSON.stringify — and one longer than MAX_TOOL_RESULT_CHARS is replaced by its
+ * truncated prefix plus a marker naming how many characters were dropped. Parts that
+ * need no capping are returned by identity, so the common case allocates nothing.
  */
 export function truncateOversizedParts(parts: unknown): unknown {
-  if (!Array.isArray(parts)) return parts;
+  if (parts === null || parts === undefined) return parts;
+  const list = Array.isArray(parts) ? parts : [parts];
   let mutated = false;
-  const capped = parts.map((part) => {
+  const capped = list.map((part) => {
     if (!part || typeof part !== 'object') return part;
     const p = part as Record<string, unknown>;
-    if (p.type !== 'tool-call' || p.result === undefined) return part;
-    const serialized = typeof p.result === 'string' ? p.result : JSON.stringify(p.result);
-    if (!serialized || serialized.length <= MAX_TOOL_RESULT_CHARS) return part;
+    let next: Record<string, unknown> | undefined;
+    for (const [key, value] of Object.entries(p)) {
+      if (value === null || value === undefined) continue;
+      const serialized =
+        typeof value === 'string'
+          ? value
+          : typeof value === 'object'
+            ? JSON.stringify(value)
+            : undefined;
+      if (!serialized || serialized.length <= MAX_TOOL_RESULT_CHARS) continue;
+      next = next ?? { ...p };
+      const dropped = serialized.length - MAX_TOOL_RESULT_CHARS;
+      next[key] = `${serialized.slice(0, MAX_TOOL_RESULT_CHARS)}… [truncated ${dropped} chars]`;
+    }
+    if (!next) return part;
     mutated = true;
-    const dropped = serialized.length - MAX_TOOL_RESULT_CHARS;
-    return {
-      ...p,
-      result: `${serialized.slice(0, MAX_TOOL_RESULT_CHARS)}… [truncated ${dropped} chars]`,
-    };
+    return next;
   });
-  return mutated ? capped : parts;
+  if (!mutated) return parts;
+  return Array.isArray(parts) ? capped : capped[0];
+}
+
+/**
+ * Trim a page of messages so its serialized size stays under MAX_PAGE_PAYLOAD_BYTES.
+ * Per-part capping bounds one part but says nothing about a page of fifty messages, so
+ * the page is walked from the end the reader cares about — the newest messages for a
+ * tail read, the oldest for forward paging from a cursor — and messages past the budget
+ * are dropped. The surviving messages keep their chronological order. One message that
+ * exceeds the budget on its own is still returned rather than the page coming back
+ * empty, so the ceiling is a bound on accumulation, not a hard guarantee for a single
+ * pathological message.
+ */
+export function applyPagePayloadBudget<T>(
+  messages: T[],
+  dropFrom: 'start' | 'end',
+): { messages: T[]; dropped: number } {
+  const encoder = new TextEncoder();
+  const walkOrder = dropFrom === 'start' ? [...messages].reverse() : messages;
+  const kept: T[] = [];
+  let total = 0;
+  for (const message of walkOrder) {
+    const size = encoder.encode(JSON.stringify(message) ?? '').length;
+    if (kept.length > 0 && total + size > MAX_PAGE_PAYLOAD_BYTES) break;
+    total += size;
+    kept.push(message);
+  }
+  if (dropFrom === 'start') kept.reverse();
+  return { messages: kept, dropped: messages.length - kept.length };
 }
 
 /** Fetch messages from another session's DO via internal HTTP endpoint. */
@@ -56,6 +103,7 @@ export async function fetchMessagesFromDO(
   targetSessionId: string,
   limit: number,
   after?: string,
+  tail?: boolean,
 ): Promise<Array<{
   id?: string;
   sessionId?: string;
@@ -77,6 +125,7 @@ export async function fetchMessagesFromDO(
 
   const params = new URLSearchParams({ limit: String(limit) });
   if (after) params.set('after', after);
+  if (tail) params.set('tail', '1');
 
   const res = await targetDO.fetch(new Request(`http://do/messages?${params}`));
   if (!res.ok) {
@@ -370,14 +419,26 @@ export async function getSessionMessages(
     return { error: 'Session not found or access denied' };
   }
 
-  // Fetch messages from the target DO's local SQLite (not D1)
+  // Fetch messages from the target DO's local SQLite (not D1). Without a cursor the
+  // caller wants the end of the conversation — a child's final assistant text sits
+  // behind however many tool-call messages the child produced, so a window taken from
+  // the start of the conversation would never reach it. With a cursor the caller is
+  // paging forward and the window stays where the cursor points.
   const effectiveLimit = limit || DEFAULT_MESSAGE_LIMIT;
-  const messages = await fetchMessagesFromDO(env, targetSessionId, effectiveLimit, after);
-  // A full page implies the window was capped and older messages remain. This is a
-  // hint for the caller to paginate — the child's final assistant text can sit behind
-  // many tool-call messages, so a too-small page hides the result the orchestrator needs.
-  const hasMore = messages.length >= effectiveLimit;
-  return { messages, hasMore };
+  const tail = !after;
+  // Over-fetch by one so a page that exactly fills the limit is not mistaken for a
+  // truncated one; the probe row is dropped from whichever end the window grew towards.
+  const fetched = await fetchMessagesFromDO(env, targetSessionId, effectiveLimit + 1, after, tail);
+  let hasMore = fetched.length > effectiveLimit;
+  const page = hasMore
+    ? tail
+      ? fetched.slice(fetched.length - effectiveLimit)
+      : fetched.slice(0, effectiveLimit)
+    : fetched;
+
+  const budgeted = applyPagePayloadBudget(page, tail ? 'start' : 'end');
+  if (budgeted.dropped > 0) hasMore = true;
+  return { messages: budgeted.messages, hasMore };
 }
 
 // ─── forwardMessages ─────────────────────────────────────────────────────────
