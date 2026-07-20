@@ -42,6 +42,7 @@ const eventDateTimeSchema = z
   });
 
 const eventTypeSchema = z.enum([
+  'birthday',
   'default',
   'focusTime',
   'outOfOffice',
@@ -91,7 +92,7 @@ const calendarEventListItemSchema = {
     recurringEventId: { type: ['string', 'null'], description: 'Set on instances of a recurring series' },
     eventType: {
       type: ['string', 'null'],
-      description: 'default | focusTime | outOfOffice | workingLocation | fromGmail',
+      description: 'birthday | default | focusTime | outOfOffice | workingLocation | fromGmail',
     },
     colorId: { type: ['string', 'null'], description: 'Google event color ID "1"-"11"' },
   },
@@ -103,7 +104,7 @@ const listEvents: ActionDefinition = {
   id: 'calendar.list_events',
   name: 'List Events',
   description:
-    "Lists or searches Google Calendar events. Defaults to the user's primary calendar starting now. Use timeMin/timeMax (RFC3339 timestamps) to bound the window, q for free-text search, eventTypes to restrict to specific event types (default, focusTime, outOfOffice, workingLocation, fromGmail), and maxResults to cap the count. Returns event IDs needed for updateEvent and deleteEvent, along with each event's eventType and colorId.",
+    "Lists or searches Google Calendar events. Defaults to the user's primary calendar starting now. Use timeMin/timeMax (RFC3339 timestamps) to bound the window, q for free-text search, eventTypes to restrict to specific event types (birthday, default, focusTime, outOfOffice, workingLocation, fromGmail), and maxResults to cap the count. Returns event IDs needed for updateEvent and deleteEvent, along with each event's eventType and colorId.",
   riskLevel: 'low',
   params: z.object({
     calendarId: z
@@ -126,7 +127,7 @@ const listEvents: ActionDefinition = {
       .array(eventTypeSchema)
       .optional()
       .describe(
-        'Restrict results to these event types. Each value is one of default, focusTime, outOfOffice, workingLocation, fromGmail. Omit to return all types.',
+        'Restrict results to these event types. Each value is one of birthday, default, focusTime, outOfOffice, workingLocation, fromGmail. Omit to return all types.',
       ),
     maxResults: z
       .number()
@@ -158,7 +159,7 @@ const createEvent: ActionDefinition = {
   id: 'calendar.create_event',
   name: 'Create Event',
   description:
-    'Creates a new event on a Google Calendar. Supports timed events (start/end with dateTime) and all-day events (start/end with date). Set sendUpdates to email invitations to attendees. Optionally set eventType (default, focusTime, outOfOffice, workingLocation, fromGmail) and colorId (Google event color "1"-"11").',
+    'Creates a new event on a Google Calendar. Supports timed events (start/end with dateTime) and all-day events (start/end with date). Set sendUpdates to email invitations to attendees. Optionally set eventType (birthday, default, focusTime, outOfOffice, workingLocation, fromGmail) and colorId (Google event color "1"-"11"). eventType is fixed at creation and cannot be changed later.',
   riskLevel: 'medium',
   params: z.object({
     calendarId: z
@@ -185,7 +186,7 @@ const createEvent: ActionDefinition = {
     eventType: eventTypeSchema
       .optional()
       .describe(
-        'Event type: default, focusTime, outOfOffice, workingLocation, or fromGmail. Some types require additional fields enforced by Google.',
+        'Event type: birthday, default, focusTime, outOfOffice, workingLocation, or fromGmail. Some types require additional fields enforced by Google. It cannot be changed after the event is created.',
       ),
     colorId: z
       .string()
@@ -215,7 +216,7 @@ const createEvent: ActionDefinition = {
       hangoutLink: { type: ['string', 'null'], description: 'Set when conferenceData was requested' },
       eventType: {
         type: ['string', 'null'],
-        description: 'default | focusTime | outOfOffice | workingLocation | fromGmail',
+        description: 'birthday | default | focusTime | outOfOffice | workingLocation | fromGmail',
       },
       colorId: { type: ['string', 'null'], description: 'Google event color ID "1"-"11"' },
       attendees: { type: 'number', description: 'Count of attendees invited' },
@@ -224,11 +225,13 @@ const createEvent: ActionDefinition = {
   },
 };
 
+// The Calendar API treats eventType as immutable once an event exists, so this
+// action deliberately does not expose it — patching it is rejected or ignored.
 const updateEvent: ActionDefinition = {
   id: 'calendar.update_event',
   name: 'Update Event',
   description:
-    'Updates an existing Google Calendar event with PATCH semantics — only the fields you provide are changed; everything else stays the same. Common uses: reschedule (set start+end), retitle (set summary), add/remove attendees (set attendees array which fully replaces), recolor (set colorId), or change eventType.',
+    "Updates an existing Google Calendar event with PATCH semantics — only the fields you provide are changed; everything else stays the same. Common uses: reschedule (set start+end), retitle (set summary), add/remove attendees (set attendees array which fully replaces), or recolor (set colorId). An event's eventType is fixed when it is created and cannot be updated.",
   riskLevel: 'medium',
   params: z.object({
     calendarId: z
@@ -251,11 +254,6 @@ const updateEvent: ActionDefinition = {
       )
       .optional()
       .describe('Replaces the entire attendee list. To add one, fetch the event first.'),
-    eventType: eventTypeSchema
-      .optional()
-      .describe(
-        'New event type: default, focusTime, outOfOffice, workingLocation, or fromGmail. Some types require additional fields enforced by Google.',
-      ),
     colorId: z
       .string()
       .optional()
@@ -276,7 +274,7 @@ const updateEvent: ActionDefinition = {
       htmlLink: { type: 'string' },
       eventType: {
         type: ['string', 'null'],
-        description: 'default | focusTime | outOfOffice | workingLocation | fromGmail',
+        description: 'birthday | default | focusTime | outOfOffice | workingLocation | fromGmail',
       },
       colorId: { type: ['string', 'null'], description: 'Google event color ID "1"-"11"' },
       updated: { type: 'string', description: 'RFC3339 last-modified timestamp' },
@@ -521,14 +519,13 @@ async function executeAction(
         if (p.start !== undefined) requestBody.start = p.start;
         if (p.end !== undefined) requestBody.end = p.end;
         if (p.attendees !== undefined) requestBody.attendees = p.attendees;
-        if (p.eventType !== undefined) requestBody.eventType = p.eventType;
         if (p.colorId !== undefined) requestBody.colorId = p.colorId;
 
         if (Object.keys(requestBody).length === 0) {
           return {
             success: false,
             error:
-              'No fields provided to update. Pass at least one of summary, description, location, start, end, attendees, eventType, or colorId.',
+              'No fields provided to update. Pass at least one of summary, description, location, start, end, attendees, or colorId.',
           };
         }
 

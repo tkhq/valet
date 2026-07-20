@@ -63,6 +63,27 @@ describe('calendar.create_event eventType/colorId', () => {
     expect(data.colorId).toBe('5');
   });
 
+  it('accepts the birthday event type and sends it in the insert body', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonOk({ id: 'evt-3', summary: 'Ada birthday', eventType: 'birthday' }),
+    );
+
+    const result = await googleCalendarActions.execute(
+      'calendar.create_event',
+      {
+        summary: 'Ada birthday',
+        start: { date: '2026-04-15' },
+        end: { date: '2026-04-16' },
+        eventType: 'birthday',
+      },
+      ctx(),
+    );
+
+    expect(result.success).toBe(true);
+    const { body } = lastCall();
+    expect(body.eventType).toBe('birthday');
+  });
+
   it('omits eventType and colorId from the insert body when not provided', async () => {
     fetchMock.mockResolvedValueOnce(jsonOk({ id: 'evt-2', summary: 'Sync' }));
 
@@ -88,9 +109,30 @@ describe('calendar.create_event eventType/colorId', () => {
 });
 
 describe('calendar.update_event eventType/colorId', () => {
-  it('passes eventType and colorId into the patch body when provided', async () => {
+  it('passes colorId into the patch body when provided', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonOk({ id: 'evt-1', summary: 'Deep work', eventType: 'outOfOffice', colorId: '11' }),
+    );
+
+    const result = await googleCalendarActions.execute(
+      'calendar.update_event',
+      { eventId: 'evt-1', colorId: '11' },
+      ctx(),
+    );
+
+    expect(result.success).toBe(true);
+    const { body } = lastCall();
+    expect(body.colorId).toBe('11');
+    const data = result.data as { eventType: unknown; colorId: unknown };
+    expect(data.eventType).toBe('outOfOffice');
+    expect(data.colorId).toBe('11');
+  });
+
+  // eventType cannot be modified after an event is created, so the action no
+  // longer accepts it: the parameter is dropped rather than patched.
+  it('does not accept eventType, while colorId still reaches the patch body', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonOk({ id: 'evt-1', summary: 'Deep work', eventType: 'focusTime', colorId: '11' }),
     );
 
     const result = await googleCalendarActions.execute(
@@ -101,11 +143,8 @@ describe('calendar.update_event eventType/colorId', () => {
 
     expect(result.success).toBe(true);
     const { body } = lastCall();
-    expect(body.eventType).toBe('outOfOffice');
+    expect(body).not.toHaveProperty('eventType');
     expect(body.colorId).toBe('11');
-    const data = result.data as { eventType: unknown; colorId: unknown };
-    expect(data.eventType).toBe('outOfOffice');
-    expect(data.colorId).toBe('11');
   });
 
   it('omits eventType and colorId from the patch body when not provided', async () => {
@@ -155,6 +194,22 @@ describe('calendar.list_events eventTypes filter', () => {
     const data = result.data as { events: Array<{ eventType: unknown; colorId: unknown }> };
     expect(data.events[0].eventType).toBe('focusTime');
     expect(data.events[0].colorId).toBe('5');
+  });
+
+  it('accepts birthday as a filter value and forwards it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonOk({ items: [{ id: 'evt-4', summary: 'Ada birthday', eventType: 'birthday' }] }),
+    );
+
+    const result = await googleCalendarActions.execute(
+      'calendar.list_events',
+      { eventTypes: ['birthday'] },
+      ctx(),
+    );
+
+    expect(result.success).toBe(true);
+    const { url } = lastCall();
+    expect(new URL(url).searchParams.getAll('eventTypes')).toEqual(['birthday']);
   });
 
   it('does not send an eventTypes query parameter when the filter is omitted', async () => {
