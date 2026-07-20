@@ -652,6 +652,15 @@ function simplifyFormat(fmt: Record<string, unknown> | null | undefined): Record
   return Object.keys(result).length > 0 ? result : null;
 }
 
+/**
+ * True when a 2D value grid contains no cells at all — `[]`, `[[]]`, or a set
+ * of rows that are all empty. Such a payload would overwrite a range with
+ * nothing, so writes reject it rather than silently blanking the range.
+ */
+function isEmptyGrid(data: unknown[][]): boolean {
+  return data.length === 0 || data.every((row) => row.length === 0);
+}
+
 // ─── Action Execution ──────────────────────────────────────────────────────
 
 async function executeAction(
@@ -674,6 +683,18 @@ async function executeAction(
 
       case 'sheets.write_spreadsheet': {
         const p = writeSpreadsheet.params.parse(params);
+        // Reject a degenerate payload (no cells at all). A truncated inline
+        // dataset can collapse to [] or [[]]; writing it would silently blank
+        // the range instead of surfacing the truncation as a failure.
+        if (isEmptyGrid(p.data)) {
+          return {
+            success: false,
+            error:
+              'write_spreadsheet received an empty data payload (no cells to write). ' +
+              'Refusing to write nothing, which would blank the target range. ' +
+              'If the dataset was truncated, write it in smaller chunks and retry.',
+          };
+        }
         const data = await writeRange(
           token,
           p.spreadsheetId,

@@ -1890,9 +1890,16 @@ async function executeAction(
         };
         const docId = normalizeDocumentId(p.documentId);
 
-        const fields = p.includeContent
-          ? 'title,tabs'
-          : 'title,tabs(tabProperties,childTabs)';
+        // Enumerate only tab structure (and body content when a character
+        // count is requested). A bare `tabs`/`childTabs` mask pulls the full
+        // Tab resource, whose comment-bearing fields make the Docs API reject
+        // the request with "Field mask cannot retrieve comment-specific fields
+        // when include_comments is false".
+        const perTab = p.includeContent
+          ? 'tabProperties,documentTab(body(content))'
+          : 'tabProperties';
+        const tabFields = `${perTab},childTabs(${perTab},childTabs(${perTab},childTabs(${perTab})))`;
+        const fields = `title,tabs(${tabFields})`;
         const fetchResult = await fetchDocument(token, docId, {
           includeTabsContent: true,
           fields,
