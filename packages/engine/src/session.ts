@@ -2,7 +2,8 @@ import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
-import { StaleAttemptError } from "./errors.js";
+import { NoCredentialsError, StaleAttemptError } from "./errors.js";
+import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
   CreateSessionOptions,
@@ -590,9 +591,18 @@ export class Session {
     const before = this.options.model.id;
     // With a host resolver present, validate through it (null → same "unknown
     // model id" surface as the internal resolver's undefined). Absent → today's
-    // internal `resolveModelId` path, unchanged.
+    // internal `resolveModelId` path, unchanged. NoCredentialsError means the
+    // spec IS valid (the model resolved) but no key exists yet — accept it via
+    // the attached model: a user must be able to select a model before
+    // configuring its key.
     const resolver = this.options.resolveModel;
-    const next = resolver ? (await resolver(modelId))?.model : resolveSessionModel(modelId);
+    let next: Model<any> | undefined;
+    try {
+      next = resolver ? (await resolver(modelId))?.model : resolveSessionModel(modelId);
+    } catch (err) {
+      if (!(err instanceof NoCredentialsError) || !err.model) throw err;
+      next = err.model;
+    }
     if (!next) throw new Error(`unknown model id: ${modelId}`);
     this.options.model = next;
     await this.providers.store.saveSession(await this.toData());

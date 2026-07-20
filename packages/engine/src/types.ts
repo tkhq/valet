@@ -1123,6 +1123,14 @@ export interface CreateSessionOptions {
    *    takes effect on the next turn;
    *  - the Agent's `getApiKey` returns that per-turn key so pi-agent-core
    *    stamps `StreamOptions.apiKey` (an `undefined` key preserves env fallback).
+   *
+   * Credential contract: the resolver throws `NoCredentialsError` when the
+   * spec resolves to a REAL model but no API key is available anywhere (org
+   * key absent AND env fallback absent). The engine detects this at turn
+   * start, before any side-effecting work, and releases the claim back to
+   * `queued` for a bounded number of attempts. `{ model, apiKey: undefined }`
+   * remains legal and means "engine/pi-ai env fallback will work" — the
+   * engine infers nothing from an undefined key.
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   /**

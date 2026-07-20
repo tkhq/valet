@@ -8,6 +8,7 @@ import {
   Engine,
   orchestratorSessionId,
   parseOrchestratorSessionId,
+  NoCredentialsError,
   type BlobStore,
   type ChildSpawner,
   type CredentialStore,
@@ -1055,7 +1056,17 @@ export class EngineHost {
    * session never silently boots on the wrong model.
    */
   private async resolveModelObject(orgId: string, spec: string): Promise<Model<any>> {
-    const resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+    // Session builds only need the model OBJECT; NoCredentialsError means the
+    // spec is valid but no key exists yet — accept via the attached model so
+    // a keyless org can still open sessions (turns get the engine's bounded
+    // credential-release path instead of a failed build).
+    let resolved: ResolvedModel | null;
+    try {
+      resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+    } catch (err) {
+      if (err instanceof NoCredentialsError && err.model) return err.model;
+      throw err;
+    }
     if (!resolved) {
       throw new Error(`EngineHost: unknown model "${spec}" — not in the org catalog or pi-ai registry`);
     }

@@ -22,6 +22,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, type LlmProviderModel } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
 import { setOrgModelPreferences } from "../services/org.js";
+import { NoCredentialsError } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 
@@ -104,6 +105,31 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
     });
   });
 
+  describe("no key ANYWHERE → NoCredentialsError with the resolved model attached", () => {
+    it("known kind with a row, no org key, no env key", async () => {
+      // vitest.setup.ts scrubbed the provider env vars; no key is saved.
+      await createLlmProvider(db, { orgId, kind: "openai", name: "OpenAI" });
+      const err = await resolveModelSpec(db, credentials, orgId, `openai/${OPENAI_MODEL}`).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(NoCredentialsError);
+      const cred = err as NoCredentialsError;
+      expect(cred.message).toMatch(/no usable API key for model "openai\/gpt-4\.1"/);
+      // The model resolved fine — setModel-style validation accepts it.
+      expect(cred.model?.id).toBe(`openai/${OPENAI_MODEL}`);
+    });
+
+    it("zero-config known namespace with no env key", async () => {
+      const err = await resolveModelSpec(db, credentials, orgId, ANTHROPIC_MODEL).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(NoCredentialsError);
+      expect((err as NoCredentialsError).model?.id).toBe(ANTHROPIC_MODEL);
+    });
+  });
+
   describe("custom (openai_compatible) provider", () => {
     async function makeCustom(
       models: LlmProviderModel[] = [{ id: "qwen-coder", name: "Qwen Coder", contextWindow: 32_000, pricing: { input: 1, output: 2 } }],
@@ -144,13 +170,17 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(resolved?.model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     });
 
-    it("NO env fallback: missing org key throws 'provider {name} has no API key'", async () => {
+    it("NO env fallback: missing org key throws NoCredentialsError 'provider {name} has no API key'", async () => {
       // Even a matching env var must not rescue a custom provider.
       vi.stubEnv("OPENAI_API_KEY", "env-openai");
       const row = await makeCustom();
-      await expect(resolveModelSpec(db, credentials, orgId, `${row.id}/qwen-coder`)).rejects.toThrow(
-        /provider Together has no API key/,
+      const err = await resolveModelSpec(db, credentials, orgId, `${row.id}/qwen-coder`).then(
+        () => undefined,
+        (e: unknown) => e,
       );
+      expect(err).toBeInstanceOf(NoCredentialsError);
+      expect((err as NoCredentialsError).message).toMatch(/provider Together has no API key/);
+      expect((err as NoCredentialsError).model?.id).toBe(`${row.id}/qwen-coder`);
     });
 
     it("model not on the provider's list throws (inactive model)", async () => {

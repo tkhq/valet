@@ -2,6 +2,7 @@
  * Engine-level errors. Provider/adapter implementations throw these so
  * callers can branch on `instanceof` checks without sniffing message text.
  */
+import type { Model } from "@mariozechner/pi-ai";
 
 export class NotFoundError extends Error {
   constructor(
@@ -37,6 +38,27 @@ export class StaleAttemptError extends Error {
       `stale attempt for queue item ${itemId}: attempt ${staleAttemptId} is no longer current (current: ${currentAttemptId ?? "none"})`,
     );
     this.name = "StaleAttemptError";
+  }
+}
+
+/**
+ * Thrown by a host `resolveModel` implementation when a spec resolves to a
+ * REAL model but no API key is available anywhere (org key absent AND env
+ * fallback absent). The engine checks for it at turn start, BEFORE any
+ * side-effecting work (user-entry append, LLM call), and releases the claim
+ * back to `queued` for a bounded number of attempts rather than burning the
+ * submission `failed`. `model` carries the successfully resolved model so
+ * spec-validation callers (`Session.setModel` / `Thread.setModel`) can still
+ * accept the spec — a user must be able to select a model before configuring
+ * its key.
+ */
+export class NoCredentialsError extends Error {
+  constructor(
+    message: string,
+    public readonly model?: Model<any>,
+  ) {
+    super(message);
+    this.name = "NoCredentialsError";
   }
 }
 

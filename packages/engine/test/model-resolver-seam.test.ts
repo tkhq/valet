@@ -22,6 +22,7 @@ import {
   Engine,
   InMemoryEventStream,
   InMemorySessionStore,
+  NoCredentialsError,
   VirtualSandboxProvider,
   type BusEvent,
   type ResolvedModel,
@@ -201,16 +202,13 @@ describe("host model resolver seam", () => {
     expect(okThread.toModel).toBe("prov_x/m1");
   });
 
-  it("credential-less turns release back to queued, then settle `failed` with a visible error at the cap (no forever-spin / entry leak)", async () => {
+  it("credential-less turns (resolver throws NoCredentialsError) release back to queued, then settle `failed` with the HOST's message at the cap — zero entries appended", async () => {
     const faux = makeFaux("seam-nocreds");
     const model = faux.getModel();
-    // Every turn ends in an agent error (a keyless provider surfaces as
-    // stopReason:"error"); the resolver yields NO apiKey, so each run is
-    // credential-less and hits the release path.
-    faux.setResponses(
-      Array.from({ length: 8 }, () => fauxAssistantMessage("boom", { stopReason: "error" })),
-    );
+    // The turn is detected as credential-less BEFORE any LLM call, so no faux
+    // response is ever consumed — none are configured.
 
+    const hostMessage = 'no usable API key for model "seam-nocreds-model" — configure an org LLM key';
     const { engine, store } = makeEngine();
     const session = await engine.createSession({
       userId: "u1",
@@ -218,7 +216,9 @@ describe("host model resolver seam", () => {
       workspace: "/",
       sandbox: {},
       model,
-      resolveModel: async (): Promise<ResolvedModel | null> => ({ model, apiKey: undefined }),
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        throw new NoCredentialsError(hostMessage, model);
+      },
     });
     const thread = session.thread();
 
@@ -233,14 +233,195 @@ describe("host model resolver seam", () => {
     const item = await store.getQueueItem(session.id, r.queueItemId);
     expect(item?.status).toBe("settled");
     expect(item?.outcome?.outcome).toBe("failed");
-    expect(item?.outcome?.error).toMatch(/no usable API key/i);
-    // The release cap bounds retries, so it settles at attemptCount === 3.
+    // The settled error is the HOST's own message — never a fabricated one.
+    expect(item?.outcome?.error).toBe(hostMessage);
+    // 2 releases + 1 terminal attempt (MAX_CREDENTIAL_ATTEMPTS = 3).
     expect(item?.attemptCount).toBe(3);
 
-    // Bounded error-entry growth: at most one assistant entry per claim cycle,
-    // capped by MAX_CREDENTIAL_RELEASES (3) — not an unbounded leak.
+    // Pre-run detection: a turn that never ran appends NOTHING — no duplicate
+    // user entries, no assistant error entries, across all attempts.
     const entries = await store.getEntries(session.id, thread.id);
-    const assistantEntries = entries.filter((e) => e.type === "message" && e.role === "assistant");
-    expect(assistantEntries.length).toBeLessThanOrEqual(3);
+    expect(entries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(0);
+    expect(entries.filter((e) => e.type === "message" && e.role === "assistant")).toHaveLength(0);
+  });
+
+  it("a key appearing mid-retry recovers: exactly ONE user entry and ZERO assistant error entries across all attempts", async () => {
+    const faux = makeFaux("seam-recover");
+    const model = faux.getModel();
+    faux.setResponses([fauxAssistantMessage("ok")]);
+
+    let calls = 0;
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        calls += 1;
+        if (calls <= 2) throw new NoCredentialsError("no key yet", model);
+        return { model, apiKey: "fresh-key" };
+      },
+    });
+    const thread = session.thread();
+
+    const r = await session.prompt("go");
+    for (let i = 0; i < 8; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, r.queueItemId))?.status === "settled") break;
+    }
+
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome?.outcome).toBe("completed");
+
+    // The duplicate-entry residual is fixed: the two keyless attempts appended
+    // nothing; only the successful run appended the user entry (once) and its
+    // normal assistant message.
+    const entries = await store.getEntries(session.id, thread.id);
+    expect(entries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(1);
+    const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
+    expect(assistants).toHaveLength(1);
+  });
+
+  it("a real (non-credential) turn error on a resolver session settles `failed` on the FIRST attempt with the real error", async () => {
+    const faux = makeFaux("seam-realerr");
+    const model = faux.getModel();
+    faux.setResponses([fauxAssistantMessage("boom", { stopReason: "error" })]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      // Resolver succeeds WITH a key — the error comes from the provider.
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model, apiKey: "real-key" }),
+    });
+    const thread = session.thread();
+
+    const r = await session.prompt("go");
+    for (let i = 0; i < 4; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, r.queueItemId))?.status === "settled") break;
+    }
+
+    // Never misclassified as credential-less: no release cycles, one attempt,
+    // settled `failed` with the provider's own error surface.
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.attemptCount).toBe(1);
+  });
+
+  it("a steer superseding a keyless running item settles it `superseded` — never orphaned back to queued", async () => {
+    const faux = makeFaux("seam-supersede");
+    const model = faux.getModel();
+
+    // First resolution parks until the steer has landed, then reports
+    // keylessness — modelling "supersede arrives while the claim is live".
+    let releaseFirst: (() => void) | undefined;
+    const firstParked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        calls += 1;
+        if (calls === 1) await firstParked;
+        throw new NoCredentialsError("no key", model);
+      },
+    });
+    const thread = session.thread();
+
+    const r1 = await session.prompt("one");
+    // Wait until the first item's claim is live (resolver parked inside it).
+    await waitFor(() => calls === 1);
+
+    // Steer: supersedes the running item durably, then unpark the resolver.
+    const r2 = await thread.submitPrompt("two", { queueMode: "steer" });
+    releaseFirst?.();
+
+    for (let i = 0; i < 4; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, r1.queueItemId))?.status === "settled") break;
+    }
+
+    const one = await store.getQueueItem(session.id, r1.queueItemId);
+    expect(one?.status).toBe("settled");
+    expect(one?.outcome?.outcome).toBe("superseded");
+
+    // The steer item is still live (queued/running — itself keyless), not lost.
+    const two = await store.getQueueItem(session.id, r2.queueItemId);
+    expect(two?.status).not.toBe("settled");
+  });
+
+  it("a lease recycle (store attemptCount bump) does not burn the credential budget", async () => {
+    const faux = makeFaux("seam-lease");
+    const model = faux.getModel();
+
+    const hostMessage = "no key anywhere";
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        throw new NoCredentialsError(hostMessage, model);
+      },
+    });
+    const thread = session.thread();
+
+    // Admit directly at the store (no kick yet), then burn TWO store-level
+    // attempts the way lease-expiry reconciliation would — claim + release —
+    // before the thread ever sees the item.
+    const itemId = "q-lease-recycle";
+    await store.admitSubmission(session.id, thread.id, {
+      id: itemId,
+      threadId: thread.id,
+      content: "hello",
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: Date.now() + 3_600_000,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    for (const att of ["att-pre-1", "att-pre-2"]) {
+      await store.claimSubmission({
+        sessionId: session.id,
+        threadId: thread.id,
+        itemId,
+        attemptId: att,
+        ownerId: "sweeper",
+      });
+      await store.insertAttemptMarker(itemId, att);
+      await store.releaseSubmission(session.id, thread.id, itemId, { itemId, attemptId: att });
+    }
+    expect((await store.getQueueItem(session.id, itemId))?.attemptCount).toBe(2);
+
+    // The thread's credential budget is its own (Thread-local map, keyed by
+    // itemId) — the pre-burned store attempts must not count against it, so
+    // the item still gets the full MAX_CREDENTIAL_ATTEMPTS (3) credential
+    // attempts: settled on store attempt 2 + 3 = 5, not at 3.
+    for (let i = 0; i < 8; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, itemId))?.status === "settled") break;
+    }
+    const item = await store.getQueueItem(session.id, itemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toBe(hostMessage);
+    expect(item?.attemptCount).toBe(5);
   });
 });
