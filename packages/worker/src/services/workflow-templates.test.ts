@@ -101,9 +101,19 @@ describe('workflow templates', () => {
     // References upstream output as `.data` (not the stale `.output`).
     expect(byId.review.prompt).toContain('{{ nodes.fetch_pr.data }}');
 
-    // Post via create_comment, which takes issueNumber (not pullNumber).
-    expect(byId.post.action).toBe('github.create_comment');
-    expect(byId.post.params.issueNumber).toBe('{{ trigger.data.pullNumber }}');
+    // An empty or whitespace-only write-up must not reach create_review, whose
+    // schema requires a non-empty body when event is COMMENT.
+    expect(byId.has_review.type).toBe('if');
+    expect(byId.has_review.conditions).toEqual([
+      { left: 'nodes.review.data.response', dataType: 'string', operation: 'matchesRegex', right: '\\S' },
+    ]);
+
+    // Post a real pull-request review, not an issue comment: create_review
+    // takes pullNumber and an explicit event, and never issueNumber.
+    expect(byId.post.action).toBe('github.create_review');
+    expect(byId.post.params.pullNumber).toBe('{{ trigger.data.pullNumber }}');
+    expect(byId.post.params.issueNumber).toBeUndefined();
+    expect(byId.post.params.event).toBe('COMMENT');
     // Schema-less LLM output is wrapped as { response }, so the body reads `.response`.
     expect(byId.post.params.body).toBe('{{ nodes.review.data.response }}');
 
@@ -111,7 +121,8 @@ describe('workflow templates', () => {
       { from: 'trigger', to: 'gate' },
       { from: 'gate', to: 'fetch_pr', fromOutput: 'true' },
       { from: 'fetch_pr', to: 'review' },
-      { from: 'review', to: 'post' },
+      { from: 'review', to: 'has_review' },
+      { from: 'has_review', to: 'post', fromOutput: 'true' },
     ]);
   });
 

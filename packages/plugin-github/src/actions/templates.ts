@@ -14,7 +14,7 @@ const DEFAULT_REVIEW_MODEL = 'anthropic:claude-sonnet-4-6';
 /**
  * Flagship template: review a pull request.
  *   trigger -> gate (if) -> github.inspect_pull_request (with diff)
- *           -> llm review -> github.create_comment
+ *           -> llm review -> has_review (if) -> github.create_review
  *
  * Repo-scoped: point the webhook at a repository once and it reviews every PR
  * there. The `gate` if-node only lets through the events that actually mean
@@ -25,16 +25,16 @@ const DEFAULT_REVIEW_MODEL = 'anthropic:claude-sonnet-4-6';
  */
 const codeReviewTemplate: WorkflowTemplate = {
   id: 'code-review',
-  name: 'Review pull requests and post a comment',
+  name: 'Review pull requests',
   description:
-    'Point this at a repo and Claude reviews every new or updated pull request — checking the diff against the codebase conventions and whether the change does what it says — then posts an actionable review comment back on the PR.',
+    'Point this at a repo and Claude reviews every new or updated pull request — checking the diff against the codebase conventions and whether the change does what it says — then submits an actionable review on the PR.',
   category: 'Developer',
   icon: '🔍',
   apps: ['github', 'claude', 'github'],
   steps: [
     'A pull request is opened or updated on the repo',
     'Claude reviews the diff — intent vs. changeset, conventions, correctness',
-    'Post the review as a comment on the pull request',
+    'Submit the write-up as a review on the pull request',
   ],
   // The "test it now" form is a connected-repo + open-PR picker, not free-text.
   runForm: 'github-pr',
@@ -117,11 +117,22 @@ const codeReviewTemplate: WorkflowTemplate = {
         maxOutputTokens: 2000,
       },
       {
+        // create_review rejects an empty body when event is COMMENT, so an
+        // empty or whitespace-only model response must not reach it. `\S`
+        // ("at least one non-whitespace character") mirrors the action's own
+        // `body.trim()` check, which a plain isNotEmpty would not.
+        id: 'has_review',
+        type: 'if',
+        conditions: [
+          { left: 'nodes.review.data.response', dataType: 'string', operation: 'matchesRegex', right: '\\S' },
+        ],
+      },
+      {
         id: 'post',
         type: 'tool',
         service: 'github',
-        action: 'github.create_comment',
-        summary: 'Post the review as a PR comment',
+        action: 'github.create_review',
+        summary: 'Submit the write-up as a PR review',
         onPolicyDeny: 'fail',
         // Post as the org's GitHub App bot (when installed + app access is on),
         // not the workflow owner's identity — 'app' never falls back to a
@@ -130,11 +141,13 @@ const codeReviewTemplate: WorkflowTemplate = {
         params: {
           owner: '{{ trigger.data.owner }}',
           repo: '{{ trigger.data.repo }}',
-          // create_comment posts via /issues/{n}/comments — pass the PR number as issueNumber.
-          issueNumber: '{{ trigger.data.pullNumber }}',
+          pullNumber: '{{ trigger.data.pullNumber }}',
+          // COMMENT leaves the write-up as a review without approving or
+          // blocking the PR — the review is advisory, a human still decides.
+          event: 'COMMENT',
           // A schema-less LLM node wraps its text as { response: <text> }, so the
           // review string lives at `.data.response` — referencing `.data` alone
-          // would hand create_comment an object and fail its `body: z.string()`.
+          // would hand create_review an object and fail its `body: z.string()`.
           body: '{{ nodes.review.data.response }}',
         },
       },
@@ -144,7 +157,9 @@ const codeReviewTemplate: WorkflowTemplate = {
       // Only the gate's `true` branch runs the review; non-code events end here.
       { from: 'gate', to: 'fetch_pr', fromOutput: 'true' },
       { from: 'fetch_pr', to: 'review' },
-      { from: 'review', to: 'post' },
+      { from: 'review', to: 'has_review' },
+      // An empty write-up posts nothing rather than failing the review call.
+      { from: 'has_review', to: 'post', fromOutput: 'true' },
     ],
   },
   trigger: {
