@@ -91,7 +91,12 @@ export function LoginPage() {
                 type="button"
                 variant="secondary"
                 className="w-full"
-                onClick={() => authClient.signIn.social({ provider })}
+                onClick={() =>
+                  authClient.signIn.social({
+                    provider,
+                    callbackURL: `${window.location.origin}/`,
+                  })
+                }
               >
                 {SOCIAL_LABEL[provider]}
               </Button>
@@ -101,7 +106,15 @@ export function LoginPage() {
                 type="button"
                 variant="secondary"
                 className="w-full"
-                onClick={() => authClient.signIn.sso({ providerId: "oidc", callbackURL: "/" })}
+                onClick={() =>
+                  // Origin-absolute: a relative callbackURL resolves against
+                  // BETTER_AUTH_URL (the api origin), which in dev is :8788,
+                  // not the vite server the user is on.
+                  authClient.signIn.sso({
+                    providerId: "oidc",
+                    callbackURL: `${window.location.origin}/`,
+                  })
+                }
               >
                 Continue with {sso.name}
               </Button>
