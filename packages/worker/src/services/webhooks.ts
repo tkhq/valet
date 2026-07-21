@@ -10,6 +10,7 @@ import { constantTimeEqual } from '../lib/crypto.js';
 import { WEBHOOK_RATE_LIMIT_DEFAULT, bumpWebhookRateCount } from '../lib/db.js';
 import { getServiceConfig } from '../lib/db/service-configs.js';
 import { getGitHubMetadata } from './github-config.js';
+import { getPublishedDefinition } from './workflow-versions.js';
 
 // Row shape shared by the id-based lookup (getWebhookTriggerById, used
 // by /api/triggers/:id/webhook with token auth) and the path-based
@@ -297,6 +298,29 @@ export async function dispatchWebhookForTrigger(
     github?: { codeReview?: boolean; owner?: string; repo?: string };
   };
   const pin = triggerConfig.github;
+  const pinIsComplete = Boolean(pin?.codeReview && pin.owner && pin.repo);
+
+  // An absent or half-written pin must not read as "unpinned, therefore
+  // unrestricted". A workflow that can post as the org's App is armed for one
+  // repository or for none at all, so a delivery to such a workflow without a
+  // usable pin is refused outright rather than let through to whatever
+  // repository the payload happens to name.
+  if (!pinIsComplete && (pin !== undefined || deliveryLooksLikeGithubEvent(cleanHeaders, parsedBody))) {
+    if (await workflowCanActAsGithubApp(appDb, trigger.workflow_id)) {
+      return {
+        result: {
+          received: true,
+          queued: false,
+          error: 'repo_not_allowed',
+          reason: 'repo_not_allowed',
+          message:
+            'This trigger runs a workflow that posts as the GitHub App but is not pinned to a repository. Re-install it from the template to arm it for one repo.',
+        },
+        statusCode: 403,
+      };
+    }
+  }
+
   if (pin?.codeReview && pin.owner && pin.repo) {
     const gate = await gateCodeReviewDelivery(env, appDb, {
       event: headers['x-github-event'] ?? 'pull_request',
@@ -431,6 +455,41 @@ export async function dispatchWebhookForTrigger(
     },
     statusCode: 200,
   };
+}
+
+// ─── Repo-pin integrity ─────────────────────────────────────────────────────
+
+/**
+ * Whether this delivery is shaped like a GitHub repository event. Used only to
+ * decide whether an unpinned trigger is worth inspecting further, so it looks
+ * at the payload as well as the header — an attacker probing an unpinned
+ * trigger would simply omit `X-GitHub-Event`.
+ */
+function deliveryLooksLikeGithubEvent(
+  headers: Record<string, string>,
+  parsedBody: unknown,
+): boolean {
+  if (headers['x-github-event']) return true;
+  if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) return false;
+  const body = parsedBody as Record<string, unknown>;
+  if (!body.repository) return false;
+  return Boolean(body.pull_request || body.issue);
+}
+
+/**
+ * Whether the workflow behind a trigger contains any node that acts as the
+ * org's GitHub App (`credential: 'app'`).
+ *
+ * This is read from the PUBLISHED definition rather than the trigger config on
+ * purpose: the config is what an attacker edits, so it cannot also be the thing
+ * that decides whether the config needed a pin.
+ */
+async function workflowCanActAsGithubApp(appDb: AppDb, workflowId: string): Promise<boolean> {
+  const definition = await getPublishedDefinition(appDb, workflowId).catch(() => null);
+  if (!definition) return false;
+  return definition.nodes.some(
+    (n) => (n as { credential?: string }).credential === 'app',
+  );
 }
 
 // ─── Pull Request Webhook Handler ───────────────────────────────────────────
@@ -590,12 +649,17 @@ export function decideReview(
     const pr = payload.pull_request as {
       number?: number;
       draft?: boolean;
+      user?: { type?: string };
       head?: { repo?: { full_name?: string | null } | null };
       author_association?: string;
     } | undefined;
     if (!pr?.number) return null;
     // Never review a draft PR.
     if (pr.draft === true) return null;
+    // Loop guard, the same one the issue_comment branch applies: a PR opened by
+    // a bot — including this App itself — must not summon a review, or the App
+    // can trigger its own paid run.
+    if (pr.user?.type === 'Bot') return null;
     // Never review on behalf of an outsider: a fork PR from someone with no
     // standing in the repo would otherwise buy an LLM run and an App-authored
     // review from anyone on GitHub.

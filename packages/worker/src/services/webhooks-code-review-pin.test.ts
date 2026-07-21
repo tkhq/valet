@@ -43,6 +43,11 @@ vi.mock('./executions.js', () => ({
 
 vi.mock('../lib/drizzle.js', () => ({ getDb: () => ({} as unknown) }));
 
+// Whether the workflow behind a trigger can post as the App is read from its
+// published definition — a drizzle read the shim can't serve.
+const { getPublishedDefinitionMock } = vi.hoisted(() => ({ getPublishedDefinitionMock: vi.fn() }));
+vi.mock('./workflow-versions.js', () => ({ getPublishedDefinition: getPublishedDefinitionMock }));
+
 import { dispatchWebhookForTrigger, type TriggerWebhookRow } from './webhooks.js';
 import type { DispatchWorkflowInput } from './workflow-dispatch.js';
 import type { Env } from '../env.js';
@@ -112,6 +117,7 @@ beforeEach(() => {
   getGitHubMetadataMock.mockResolvedValue({});
   getUserByIdMock.mockResolvedValue({ id: 'u1', codeReviewEnabled: true, codeReviewMentionOnly: false });
   checkIdempotencyKeyMock.mockResolvedValue(null);
+  getPublishedDefinitionMock.mockResolvedValue(null);
 });
 
 describe('repo-pinned code-review webhook delivery', () => {
@@ -180,5 +186,85 @@ describe('repo-pinned code-review webhook delivery', () => {
     expect(statusCode).toBe(200);
     const arg = dispatchMock.mock.calls[0][1] as DispatchWorkflowInput;
     expect(arg.trigger.data).toEqual({ owner: 'tkhq', repo: 'valet', pullNumber: 74 });
+  });
+});
+
+describe('an unpinned trigger in front of an App-posting workflow', () => {
+  // The pin is the whole repo scope. If it is ever missing — a hand-edited
+  // config, a client that rebuilds the config without it — the delivery must
+  // not fall through to "unpinned, therefore any repository".
+
+  const APP_WORKFLOW = {
+    version: 'dag/v1',
+    nodes: [
+      { id: 'trigger', type: 'trigger' },
+      { id: 'post', type: 'tool', service: 'github', action: 'github.create_review', credential: 'app' },
+    ],
+    edges: [{ from: 'trigger', to: 'post' }],
+  };
+
+  function unpinnedTrigger(): TriggerWebhookRow {
+    const base = pinnedTrigger();
+    return {
+      ...base,
+      config: JSON.stringify({ type: 'webhook', path: 'code-review-abcd1234', method: 'POST' }),
+    };
+  }
+
+  function deliverUnpinned(payload: unknown) {
+    return dispatchWebhookForTrigger(
+      env, unpinnedTrigger(), 'code-review-abcd1234', 'POST',
+      JSON.stringify(payload), { 'x-github-event': 'pull_request' }, {}, '',
+    );
+  }
+
+  it('is refused rather than allowed through unscoped', async () => {
+    getPublishedDefinitionMock.mockResolvedValue(APP_WORKFLOW);
+
+    const { statusCode, result } = await deliverUnpinned(prPayload({ owner: 'victim-org', repo: 'secret' }));
+
+    expect(statusCode).toBe(403);
+    expect(result.reason).toBe('repo_not_allowed');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('is refused even for the repo it was originally armed for — the scope is gone, not narrowed', async () => {
+    getPublishedDefinitionMock.mockResolvedValue(APP_WORKFLOW);
+
+    const { statusCode } = await deliverUnpinned(prPayload());
+
+    expect(statusCode).toBe(403);
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('is refused when the pin is present but incomplete', async () => {
+    getPublishedDefinitionMock.mockResolvedValue(APP_WORKFLOW);
+    const trigger = {
+      ...pinnedTrigger(),
+      config: JSON.stringify({
+        type: 'webhook', path: 'code-review-abcd1234', github: { codeReview: true, owner: 'tkhq' },
+      }),
+    };
+
+    const { statusCode } = await dispatchWebhookForTrigger(
+      env, trigger, 'code-review-abcd1234', 'POST',
+      JSON.stringify(prPayload()), { 'x-github-event': 'pull_request' }, {}, '',
+    );
+
+    expect(statusCode).toBe(403);
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves an ordinary webhook workflow alone — nothing here posts as the App', async () => {
+    getPublishedDefinitionMock.mockResolvedValue({
+      version: 'dag/v1',
+      nodes: [{ id: 'trigger', type: 'trigger' }, { id: 'notify', type: 'tool', service: 'slack', action: 'slack.send_message' }],
+      edges: [{ from: 'trigger', to: 'notify' }],
+    });
+
+    const { statusCode } = await deliverUnpinned(prPayload());
+
+    expect(statusCode).toBe(200);
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
   });
 });

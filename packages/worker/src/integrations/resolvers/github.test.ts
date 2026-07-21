@@ -20,6 +20,13 @@ vi.mock('../../lib/db/service-configs.js', () => ({
   getServiceMetadata: vi.fn(),
 }));
 
+// The mint-boundary authority check. Its own behaviour is covered in
+// github-repo-authority.test.ts; here it stands in for "the execution identity
+// may / may not have the App act on this repo".
+vi.mock('../../services/github-repo-authority.js', () => ({
+  assertExecutionCanUseAppForRepo: vi.fn(),
+}));
+
 // Mock getDb to return whatever db we hand it via env.DB
 vi.mock('../../lib/drizzle.js', () => ({
   getDb: vi.fn((binding: unknown) => binding),
@@ -30,6 +37,7 @@ vi.mock('../../lib/drizzle.js', () => ({
 const { getCredential } = await import('../../services/credentials.js');
 const { loadGitHubApp, getOrMintInstallationToken } = await import('../../services/github-app.js');
 const { getServiceMetadata } = await import('../../lib/db/service-configs.js');
+const { assertExecutionCanUseAppForRepo } = await import('../../services/github-repo-authority.js');
 const { githubCredentialResolver } = await import('./github.js');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -47,6 +55,7 @@ describe('githubCredentialResolver', () => {
     const testDb = createTestDb();
     db = testDb.db;
     vi.clearAllMocks();
+    (assertExecutionCanUseAppForRepo as Mock).mockResolvedValue({ ok: true });
   });
 
   function seedUser(opts?: { name?: string; email?: string }) {
@@ -201,7 +210,7 @@ describe('githubCredentialResolver', () => {
     (getOrMintInstallationToken as Mock).mockResolvedValueOnce({ token: 'ghs_bot_token', expiresAt: Date.now() + 3600_000 });
 
     const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
-      params: { owner: 'my-org' }, credentialMode: 'app',
+      params: { owner: 'my-org', repo: 'valet' }, credentialMode: 'app',
     });
 
     expect(result.ok).toBe(true);
@@ -220,7 +229,7 @@ describe('githubCredentialResolver', () => {
     (getServiceMetadata as Mock).mockResolvedValueOnce({ allowAnonymousGitHubAccess: true });
 
     const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
-      params: {}, credentialMode: 'app',
+      params: { owner: 'my-org', repo: 'valet' }, credentialMode: 'app',
     });
 
     expect(result.ok).toBe(false);
@@ -244,7 +253,7 @@ describe('githubCredentialResolver', () => {
     (getOrMintInstallationToken as Mock).mockRejectedValueOnce(new Error('A JSON web token could not be decoded'));
 
     const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
-      params: { owner: 'my-org' }, credentialMode: 'app',
+      params: { owner: 'my-org', repo: 'valet' }, credentialMode: 'app',
     });
 
     expect(result.ok).toBe(false);
@@ -252,6 +261,63 @@ describe('githubCredentialResolver', () => {
       expect(result.error.message).toMatch(/JSON web token could not be decoded/i);
     }
     expect(getCredential as Mock).not.toHaveBeenCalled();
+  });
+
+  // ── 3c. The mint boundary ──────────────────────────────────────────────
+  //
+  // `credential: 'app'` is settable on any tool node in any user-authored
+  // workflow — no trigger, no route, nothing else in the path. So this is the
+  // control that has to make the installation token unreachable for a
+  // repository the execution identity cannot speak for.
+
+  it('refuses to mint the App token for a repo the execution identity cannot administer', async () => {
+    seedUser();
+    (assertExecutionCanUseAppForRepo as Mock).mockResolvedValue({
+      ok: false,
+      message: 'You do not have access to "victim/private" (GitHub returned 404).',
+    });
+    // Everything else is in place: anonymous access on, App installed on the
+    // owner, mint would succeed. Only authority is missing.
+    (getServiceMetadata as Mock).mockResolvedValue({ allowAnonymousGitHubAccess: true });
+    await upsertGithubInstallation(db as any, {
+      githubInstallationId: '42', accountLogin: 'victim', accountId: 'acct-1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+    (loadGitHubApp as Mock).mockResolvedValue({ appId: '99' });
+    (getOrMintInstallationToken as Mock).mockResolvedValue({ token: 'ghs_bot_token', expiresAt: Date.now() + 3600_000 });
+
+    const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
+      params: { owner: 'victim', repo: 'private' }, credentialMode: 'app',
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toMatch(/do not have access/i);
+    // The point of the test: no token was minted, so there is nothing to leak.
+    expect(getOrMintInstallationToken).not.toHaveBeenCalled();
+    expect(assertExecutionCanUseAppForRepo).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), USER_ID, 'victim', 'private',
+    );
+  });
+
+  it('refuses to mint the App token when the action names no repository to scope it to', async () => {
+    seedUser();
+    (getServiceMetadata as Mock).mockResolvedValue({ allowAnonymousGitHubAccess: true });
+    await upsertGithubInstallation(db as any, {
+      githubInstallationId: '42', accountLogin: 'my-org', accountId: 'acct-1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+    (loadGitHubApp as Mock).mockResolvedValue({ appId: '99' });
+    (getOrMintInstallationToken as Mock).mockResolvedValue({ token: 'ghs_bot_token', expiresAt: Date.now() + 3600_000 });
+
+    const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, {
+      params: { owner: 'my-org' }, credentialMode: 'app',
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toMatch(/scoped to a single repository/i);
+    expect(getOrMintInstallationToken).not.toHaveBeenCalled();
+    // An unscoped request is refused outright — it never reaches the check.
+    expect(assertExecutionCanUseAppForRepo).not.toHaveBeenCalled();
   });
 
   // ── 4. Owner specified, NO matching installation (strict) ──────────────

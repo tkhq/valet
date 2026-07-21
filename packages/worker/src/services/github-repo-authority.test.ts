@@ -8,7 +8,11 @@ vi.mock('../lib/db/github-installations.js', () => ({
   getGithubInstallationByLogin: getInstallationMock,
 }));
 
-import { assertCallerCanAdministerRepo } from './github-repo-authority.js';
+import {
+  assertCallerCanAdministerRepo,
+  assertExecutionCanUseAppForRepo,
+  __resetRepoAuthorityCache,
+} from './github-repo-authority.js';
 import type { AppDb } from '../lib/drizzle.js';
 import type { Env } from '../env.js';
 
@@ -25,6 +29,7 @@ function stubRepoResponse(body: unknown, status = 200) {
 }
 
 beforeEach(() => {
+  __resetRepoAuthorityCache();
   vi.unstubAllGlobals();
   getCredentialMock.mockReset();
   getInstallationMock.mockReset();
@@ -91,5 +96,55 @@ describe('assertCallerCanAdministerRepo', () => {
   it('rejects when GitHub is unreachable rather than assuming access', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
     await expect(assertCallerCanAdministerRepo(db, env, 'u1', 'tkhq', 'valet')).rejects.toThrow(/GitHub unreachable/i);
+  });
+});
+
+describe('assertExecutionCanUseAppForRepo (mint boundary)', () => {
+  it('allows an identity with push access', async () => {
+    stubRepoResponse({ permissions: { push: true } });
+    await expect(assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet')).resolves.toEqual({ ok: true });
+  });
+
+  it('denies without throwing, so the resolver can report a credential failure', async () => {
+    stubRepoResponse({ message: 'Not Found' }, 404);
+    const verdict = await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'secret');
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.message).toMatch(/do not have access/i);
+  });
+
+  it('denies when the identity has no linked GitHub account of its own', async () => {
+    getCredentialMock.mockResolvedValue({ ok: false, error: { service: 'github', reason: 'not_found', message: 'none' } });
+    stubRepoResponse({ permissions: { admin: true } });
+    const verdict = await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet');
+    expect(verdict.ok).toBe(false);
+  });
+
+  it('reuses a decided verdict, so a workflow of many nodes costs one GitHub call', async () => {
+    const fetchMock = stubRepoResponse({ permissions: { push: true } });
+    await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet');
+    await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet');
+    await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keys the cache by identity and repo — a grant for one repo is not a grant for another', async () => {
+    stubRepoResponse({ permissions: { push: true } });
+    await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet');
+
+    stubRepoResponse({ message: 'Not Found' }, 404);
+    const other = await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'secret');
+    const otherUser = await assertExecutionCanUseAppForRepo(db, env, 'u2', 'tkhq', 'valet');
+    expect(other.ok).toBe(false);
+    expect(otherUser.ok).toBe(false);
+  });
+
+  it('does not cache an unreachable-GitHub failure', async () => {
+    const failing = vi.fn(async () => { throw new Error('network down'); });
+    vi.stubGlobal('fetch', failing);
+    const first = await assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet');
+    expect(first.ok).toBe(false);
+
+    stubRepoResponse({ permissions: { push: true } });
+    await expect(assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet')).resolves.toEqual({ ok: true });
   });
 });

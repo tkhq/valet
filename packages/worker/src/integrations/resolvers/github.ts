@@ -8,6 +8,7 @@ import {
   listGithubInstallationsByAccountType,
 } from '../../lib/db/github-installations.js';
 import { loadGitHubApp, getOrMintInstallationToken } from '../../services/github-app.js';
+import { assertExecutionCanUseAppForRepo } from '../../services/github-repo-authority.js';
 import { users } from '../../lib/schema/users.js';
 import type { Env } from '../../env.js';
 import type { CredentialResolver } from '../registry.js';
@@ -21,8 +22,15 @@ import type { GithubInstallation } from '../../lib/schema/github-installations.j
  * credentialMode='app' → App-installation (bot) token ONLY; never falls back to
  *   the caller's personal token (an automation posting "as the bot" must not
  *   silently post as a person). Fails with an actionable message if unavailable.
+ *   This branch is the mint boundary for the App privilege, so it first proves
+ *   the identity the execution runs as holds push/admin on the owner/repo the
+ *   action names — see assertExecutionCanUseAppForRepo. Anything reachable from
+ *   a user-authored workflow node passes through here.
  * default → the user's linked OAuth token, falling back to an org App install
- *   (Organization preferred) when anonymous access is enabled.
+ *   (Organization preferred) when anonymous access is enabled. That fallback is
+ *   reached only by a user with no linked GitHub identity at all — there is no
+ *   personal token to check repo authority against — so it stays gated by the
+ *   admin-set allowAnonymousGitHubAccess flag rather than by repo authority.
  *
  * App-install paths mint a bot token via getOrMintInstallationToken (D1-cached)
  * and attach user attribution (name + email from the users table). See the
@@ -37,6 +45,7 @@ export const githubCredentialResolver: CredentialResolver = async (
   const { forceRefresh, params, credentialMode } = context;
   const db = getDb(env.DB);
   const owner = params?.owner as string | undefined;
+  const repo = params?.repo as string | undefined;
 
   // The user's own linked OAuth token.
   const tryUser = () => getCredential(env, 'user', userId, service, { forceRefresh });
@@ -97,6 +106,35 @@ export const githubCredentialResolver: CredentialResolver = async (
   // Default mode → the owner's token, falling back to the org install (the
   // pre-existing "anonymous" chain).
   if (credentialMode === 'app') {
+    // THE MINT BOUNDARY. Any tool node in any user-authored workflow can ask
+    // for `credential: 'app'` — no trigger, no route, nothing else in the
+    // path. So this is where the installation token has to be scoped to a
+    // repository the execution's identity may actually speak for; a check on
+    // the arming routes alone is bypassable by writing a workflow instead.
+    //
+    // Repo-scoped by construction: an App credential with no repository to
+    // scope it to would be an org-wide token, which is the thing being
+    // prevented, so a request that names no repo is refused rather than
+    // granted the broader credential.
+    if (!owner || !repo) {
+      return {
+        ok: false as const,
+        error: {
+          service,
+          reason: 'not_found' as const,
+          message:
+            'GitHub App credentials are scoped to a single repository; this action did not specify owner and repo, so no App token can be issued for it.',
+        },
+      };
+    }
+    const authority = await assertExecutionCanUseAppForRepo(db, env, userId, owner, repo);
+    if (!authority.ok) {
+      return {
+        ok: false as const,
+        error: { service, reason: 'not_found' as const, message: authority.message },
+      };
+    }
+
     const appResult = await tryApp();
     if (appResult.ok) return appResult;
     return {

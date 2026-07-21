@@ -46,7 +46,7 @@ const REPO = { name: 'valet', owner: { login: 'tkhq' } };
  */
 function prEvent(
   action: string,
-  opts: { number?: number; draft?: boolean; fork?: boolean; association?: string } = {},
+  opts: { number?: number; draft?: boolean; fork?: boolean; association?: string; botAuthor?: boolean } = {},
 ) {
   return {
     action,
@@ -54,6 +54,7 @@ function prEvent(
     pull_request: {
       number: opts.number ?? 75,
       draft: opts.draft ?? false,
+      user: { type: opts.botAuthor ? 'Bot' : 'User' },
       head: { repo: { full_name: opts.fork ? 'stranger/valet' : 'tkhq/valet' } },
       author_association: opts.association ?? 'MEMBER',
     },
@@ -119,6 +120,13 @@ describe('decideReview — Greptile-style review policy', () => {
 
   it('ignores a mention on a plain issue (not a PR)', () => {
     expect(decideReview('issue_comment', commentEvent('@valet-turnkey', { onPr: false }), SLUG)).toBeNull();
+  });
+
+  it('ignores a bot-authored pull request (loop guard)', () => {
+    // Symmetric with the issue_comment guard below: without it the App can open
+    // a PR and then review its own PR.
+    expect(decideReview('pull_request', prEvent('opened', { botAuthor: true }), SLUG)).toBeNull();
+    expect(decideReview('pull_request', prEvent('reopened', { botAuthor: true }), SLUG)).toBeNull();
   });
 
   it('ignores a bot-authored comment (loop guard)', () => {

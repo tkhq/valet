@@ -15,6 +15,12 @@ export type TriggerConfig =
       // Per-trigger rate limit override (requests per 60s window).
       // Defaults to WEBHOOK_RATE_LIMIT_DEFAULT when unset.
       rateLimit?: number;
+      // Repository pin written when a repo-scoped template (code review) is
+      // installed. The delivery path refuses a payload naming any other
+      // repository, so this is a security control, not decoration: it is a
+      // declared part of the config precisely so ordinary edits round-trip it
+      // instead of silently dropping it.
+      github?: { codeReview: true; owner: string; repo: string };
     }
   | {
       type: 'schedule';
