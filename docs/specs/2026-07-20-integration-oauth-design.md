@@ -1,0 +1,164 @@
+# Integration OAuth Connect Flow (v2)
+
+Date: 2026-07-20
+Status: approved design
+Depends on: plugin-system-v2 (`2026-07-13-plugin-system-v2-design.md`, shipped), auth-v2 (`2026-07-14-auth-v2-design.md`, shipped), GitHub repo integration (`2026-07-16-github-repo-integration-design.md`, shipped — pattern precedent)
+
+## Problem
+
+v2 has the full credential substrate — manifest `CredentialDeclaration`s, the encrypted `PgCredentialStore`, `/api/credentials` CRUD, runtime resolution in both live turns and workflow dispatch — but every service except GitHub is **paste-a-token only**. Most of the fleet's services don't even hand users a token to paste: Linear, Notion, Sentry, Stripe, Cloudflare, and Figma expose MCP OAuth servers, and Google's APIs require a real OAuth consent flow. The v1 worker had a comprehensive OAuth layer (`packages/worker/src/routes/integrations.ts`); v2 needs its equivalent.
+
+## Decision summary
+
+Server-side OAuth flow modeled on v2's existing GitHub connect flow (`routes/github-connect.ts`), not v1's SPA-driven flow. HMAC-signed stateless `state` (reusing `lib/oauth-state.ts`), server-side code exchange, tokens written straight into `PgCredentialStore` — secrets never transit the browser. Two provider branches, mirroring v1:
+
+- **MCP dynamic registration** (RFC 8414 discovery + RFC 7591 registration + PKCE public client) for MCP-speaking services, reusing `@valet/sdk`'s `oauth.ts` helpers wholesale.
+- **Confidential client from env vars** for services that need a pre-registered OAuth app (Google: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`).
+
+GitHub keeps its dedicated App-mediated flow; it does not move onto this surface.
+
+## What this spec does NOT cover
+
+- GitHub connect/App setup (owned by `2026-07-16-github-repo-integration-design.md`).
+- Login/social OAuth and SSO (owned by auth-v2).
+- Org-scoped OAuth credentials — this phase connects `user`-owned credentials only; org-shared credentials stay manual-entry (`PUT /api/credentials/:service` with `scope: "org"`).
+- The login-token→credential capture hook from auth-v2 (separate, already specced there).
+
+## Manifest contract: `CredentialDeclaration.oauth`
+
+`packages/engine/src/valet-plugin.ts` gains one optional field on `CredentialDeclaration`:
+
+```ts
+export type OAuthDeclaration =
+  | { mode: "mcp"; serverUrl: string }
+  | {
+      mode: "authorization_code";
+      authorizationUrl: string;
+      tokenUrl: string;
+      clientIdEnv: string;
+      clientSecretEnv: string;
+      /** Extra authorize-URL params, e.g. Google's access_type=offline&prompt=consent. */
+      extraAuthParams?: Record<string, string>;
+    };
+
+export interface CredentialDeclaration {
+  // ...existing fields...
+  /** How the connect UI obtains this credential via OAuth. Absent = manual token entry only. */
+  oauth?: OAuthDeclaration;
+}
+```
+
+Structural validation in `validateValetPlugin` extends accordingly (mode discriminant, required URLs/env names per mode). `oauth` is only meaningful on `type: "oauth2"` declarations — validation rejects it elsewhere.
+
+Plugin manifest updates in this change:
+
+| Plugin | `oauth` |
+|---|---|
+| linear, notion, sentry, stripe, cloudflare, figma | `{ mode: "mcp", serverUrl: "<same mcpUrl the plugin's mcpActionPlugin uses>" }` |
+| gmail, google-calendar, google-drive, google-sheets | `{ mode: "authorization_code", authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth", tokenUrl: "https://oauth2.googleapis.com/token", clientIdEnv: "GOOGLE_CLIENT_ID", clientSecretEnv: "GOOGLE_CLIENT_SECRET", extraAuthParams: { access_type: "offline", prompt: "consent" } }` |
+| github | unchanged (dedicated App flow) |
+| slack, telegram (bot_token), typefully (api_key), deepwiki (no creds) | unchanged — manual entry |
+
+The `serverUrl` is declared on the credential rather than derived from the plugin's `ActionPlugin` internals: the connect layer stays manifest-driven and doesn't reach into action-source implementation details. The duplication with `mcpUrl` is one string per plugin, adjacent in the same file.
+
+## API surface (`routes/credentials.ts` additions)
+
+### `GET /api/credentials/:service/connect`
+
+Authenticated. Finds the service's `CredentialDeclaration` across loaded plugin manifests; 404 if no oauth-capable declaration.
+
+- **mcp mode**: `ensureMcpOAuthClient(service, serverUrl)` (below), `generatePkceChallenge()`, then 302 to `buildAuthorizationUrl({...})` with the declaration's scopes.
+- **authorization_code mode**: resolve `process.env[clientIdEnv]`/`[clientSecretEnv]`; 503 `{ error: "oauth not configured", missing: [...] }` if absent. Build authorize URL with `client_id`, `redirect_uri`, `response_type=code`, `scope`, `state`, plus `extraAuthParams`.
+
+`state` is HMAC-signed via `lib/oauth-state.ts` (same key derivation as every other flow), payload `{ u: userId, s: service, v?: codeVerifier, exp }` with the standard 15-minute TTL. The PKCE verifier rides inside the signed state — fully stateless between start and callback, nothing persisted. (The verifier is not secret from the user it belongs to; the HMAC prevents tampering and the code exchange happens server-side.)
+
+Redirect URI is a single shared callback for all services: `${baseUrl}/api/credentials/oauth/callback`, where `baseUrl` is the same origin resolution the GitHub flows use (`BETTER_AUTH_URL` / `VALET_PUBLIC_URL` fallback chain — reuse the existing helper).
+
+### `GET /api/credentials/oauth/callback`
+
+Mounted behind the normal `/api/*` auth gate, same as the GitHub connect callback: the user just came from an in-app click, so their session cookie is present. Verifies signed state (signature, `exp`, and `u` === session user — a mismatch redirects with an error rather than writing another user's credential).
+
+- Provider `error` query param (user denied consent, etc.) → redirect to `/integrations?error=<code>`.
+- **mcp mode**: load registered client, `exchangeCodePkce({ tokenEndpoint, clientId, code, redirectUri, codeVerifier })`.
+- **authorization_code mode**: form-POST `tokenUrl` with `grant_type=authorization_code`, `client_id`, `client_secret`, `code`, `redirect_uri`.
+
+On success, persist directly (no browser round-trip):
+
+```ts
+credentials.set({ type: "user", id: userId }, service, {
+  type: "oauth2",
+  accessToken, refreshToken,          // refreshToken when present
+  expiresAt: now + expires_in * 1000, // when present
+  scopes, metadata: { connectedVia: "oauth" },
+});
+```
+
+Then 302 to `/integrations?connected=<service>` (relative redirect — same-origin serving in prod; in dev the api serves no SPA, so the redirect target uses the web origin the same way `github-connect.ts` resolves it today — follow that file's precedent exactly).
+
+Failure at any step logs the upstream error server-side and redirects to `/integrations?error=oauth_failed` — provider error bodies are never surfaced raw to the browser.
+
+### `/api/plugins` (existing route, small addition)
+
+Each credential entry in the response gains `connect: "oauth" | "manual"` so the web UI knows which affordance to render. Derived purely from `declaration.oauth` presence (for authorization_code mode, also env-var presence — a Google plugin with unset `GOOGLE_CLIENT_ID` reports `"manual"` so the UI doesn't render a Connect button that 503s).
+
+## Registered-client storage: `mcp_oauth_clients`
+
+New app table (pre-1.0: edit `packages/api/migrations/pg/0000_app.sql` in place + add Drizzle schema; local `rm -rf ~/.valet/pg` required after):
+
+```sql
+CREATE TABLE mcp_oauth_clients (
+  service TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  client_secret_enc TEXT,           -- almost always NULL (public clients)
+  authorization_endpoint TEXT NOT NULL,
+  token_endpoint TEXT NOT NULL,
+  registration_endpoint TEXT,
+  metadata JSONB,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+```
+
+One row per service, shared across all users (as in v1's D1 table). `ensureMcpOAuthClient` reads the row; on miss, runs `discoverAuthServer(serverUrl)` → `registerClient(registration_endpoint, { clientName: "Valet", redirectUris: [callbackUrl] })` → `INSERT ... ON CONFLICT (service) DO NOTHING` then re-reads (concurrent starts converge on one client). Discovery without a `registration_endpoint` is a hard error surfaced as `?error=oauth_failed`. Rows are never deleted on disconnect — client registration is reusable. If the deployment's public URL changes, the registered redirect URI goes stale; recovery is deleting the row (documented, not automated — same posture as v1).
+
+## Token refresh
+
+A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the `PgCredentialStore` instance built in `providers/node.ts`, so every consumer (session `credentialProvider`, workflow `action-invoker`, channel host) gets refresh for free:
+
+- On `get()`: if the stored credential is `oauth2`, has a `refreshToken`, and `expiresAt` is present and within a 60-second buffer → refresh, persist the new tokens (preserving the old `refreshToken` if the response omits one), return the fresh credential.
+- Refresh dispatch mirrors the connect branches, resolved from the same manifest declarations: **mcp** → `refreshTokenPkce({ tokenEndpoint, clientId, refreshToken })` using the stored registered client; **authorization_code** → form-POST `tokenUrl` with `grant_type=refresh_token` + env client id/secret.
+- On refresh failure: stamp `metadata.refreshFailedAt` (the field the credential-summary health surface already whitelists) and return the stored (likely expired) credential — the action fails with the provider's own 401 and the UI shows the unhealthy badge. No credential deletion (v1 deleted on GitHub refresh failure; GitHub keeps that behavior in its own service, untouched).
+- `github` service is excluded from the decorator (its refresh lives in `services/github-tokens.ts`).
+- No proactive cron sweep this phase (v1 had one); lazy refresh covers actual use. Sweep is a follow-up if idle-credential freshness ever matters.
+
+## Web UI (`packages/web`)
+
+- `integration-row.tsx`: when the plugin's credential reports `connect: "oauth"`, render a primary **Connect** button — a plain anchor to `/api/credentials/:service/connect` (full-page navigation; the flow ends back on `/integrations`). Manual token entry remains available behind a secondary "enter token manually" toggle.
+- `integrations.tsx`: read `?connected=` / `?error=` search params on mount, surface a success/error toast, and strip the params from the URL.
+- Disconnect is unchanged (`DELETE /api/credentials/:service`).
+
+## Error handling summary
+
+| Failure | Behavior |
+|---|---|
+| Unknown/non-oauth service on `/connect` | 404 JSON |
+| Env client vars missing (authorization_code) | 503 JSON on `/connect`; `/api/plugins` already reported `"manual"` so UI shouldn't hit this |
+| MCP discovery/registration failure | redirect `/integrations?error=oauth_failed`, server log |
+| State invalid/expired/user mismatch | redirect `/integrations?error=oauth_state` |
+| Provider consent denied | redirect `/integrations?error=<provider code>` |
+| Token exchange failure | redirect `/integrations?error=oauth_failed`, server log |
+| Refresh failure at use time | stored credential returned; `metadata.refreshFailedAt` stamped |
+
+## Testing
+
+- **Engine**: `validateValetPlugin` accepts/rejects the new `oauth` shapes (mode discriminant, oauth2-only).
+- **API unit/integration** (vitest, in-process Hono): a fake OAuth+MCP server fixture (serves `.well-known/oauth-authorization-server`, registration, authorize is not hit — we assert the 302 Location instead, token endpoint validates PKCE/client_secret). Covers: connect 302 URL shape for both modes, state round-trip, callback persistence into the credential store, user-mismatch rejection, denied-consent redirect, `ensureMcpOAuthClient` idempotency under concurrent calls, refresh-on-get including refresh-failure stamping.
+- **Web**: `-integrations.test.tsx` — Connect button rendered iff `connect: "oauth"`, manual fallback toggle, toast on `?connected=`.
+- **Live pass** (human-in-the-loop, before merge): connect a real MCP service (Linear or Notion) end-to-end in the browser against `make dev-local`, verify the action actually runs with the stored token.
+
+## Out of scope / follow-ups
+
+- Proactive refresh cron sweep.
+- Org-owned OAuth connects.
+- Per-org OAuth client configuration UI (env-only for confidential clients this phase).
+- Slack OAuth (v2 bot-token entry stands until the Slack channel work lands).
