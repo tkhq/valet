@@ -22,7 +22,9 @@ import {
   oauthConsent,
 } from "../schema/index.js";
 import type { AuthConfig } from "./config.js";
+import type { OrgRole } from "./permissions.js";
 import type { buildAuthHooks } from "./provisioning.js";
+import { decodeJwtClaims, extractMappedRole, syncSsoOrgRole } from "./sso-role-sync.js";
 
 export interface BuildAuthOpts {
   db: AppDb;
@@ -150,6 +152,37 @@ export interface ValetAuth {
 }
 
 /**
+ * Builds the sso plugin's `provisionUser` callback, closing over the
+ * already-narrowed `roleMap`/`roleClaim` so the callback body itself needs
+ * no further `cfg.oidc` narrowing (or `?? []`-style masking of the "unset"
+ * case, which can't happen here — the caller only invokes this when
+ * `cfg.oidc.roleMap` is set).
+ *
+ * Parameter type is a minimal local shape, not `@better-auth/sso`'s
+ * `provisionUser` data type: `userInfo`/`token` are `Record<string, any>` /
+ * loosely-typed upstream (see `SSOOptions["provisionUser"]` in
+ * `@better-auth/sso`'s dist types), so a structural subset here both avoids
+ * `any` leaking into our code and still satisfies the plugin's contravariant
+ * parameter position.
+ */
+function buildProvisionUser(db: AppDb, roleMap: { claimValue: string; role: OrgRole }[], roleClaim: string) {
+  return async (data: {
+    user: { id: string };
+    userInfo: Record<string, unknown>;
+    token?: { idToken?: string };
+  }): Promise<void> => {
+    const idToken = data.token?.idToken;
+    const role = extractMappedRole({
+      roleMap,
+      roleClaim,
+      userInfo: data.userInfo,
+      idTokenClaims: idToken ? (decodeJwtClaims(idToken) ?? undefined) : undefined,
+    });
+    await syncSsoOrgRole(db, data.user.id, role);
+  };
+}
+
+/**
  * `oidcConfig.pkce`/`discoveryEndpoint` are required by `@better-auth/sso`'s
  * `OIDCConfig` type (unlike the DB-registered-provider API path, which
  * defaults them at runtime) — computed here from `issuer` per the standard
@@ -221,6 +254,12 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
                   },
                 },
               ],
+              ...(cfg.oidc.roleMap
+                ? {
+                    provisionUser: buildProvisionUser(db, cfg.oidc.roleMap, cfg.oidc.roleClaim),
+                    provisionUserOnEveryLogin: true,
+                  }
+                : {}),
             }
           : {}),
       }),
