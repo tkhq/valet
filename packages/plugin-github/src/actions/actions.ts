@@ -129,6 +129,20 @@ const githubCommentSchema = {
   additionalProperties: true,
 } satisfies Record<string, unknown>;
 
+const githubReviewSchema = {
+  type: 'object',
+  properties: {
+    id: { type: 'number' },
+    state: { type: 'string' },
+    body: { type: ['string', 'null'] },
+    html_url: { type: 'string' },
+    user: { type: ['object', 'null'], additionalProperties: true },
+    commit_id: { type: ['string', 'null'] },
+    submitted_at: { type: ['string', 'null'] },
+  },
+  additionalProperties: true,
+} satisfies Record<string, unknown>;
+
 const githubIssueMutationSchema = {
   type: 'object',
   properties: {
@@ -517,6 +531,66 @@ const createComment: ActionDefinition = {
     body: z.string(),
   }),
   outputSchema: githubCommentSchema,
+};
+
+/** Shape of one inline comment after params parsing, mirrored from the schema below. */
+interface ReviewCommentInput {
+  path: string;
+  body: string;
+  line?: number;
+  side?: 'LEFT' | 'RIGHT';
+  startLine?: number;
+  startSide?: 'LEFT' | 'RIGHT';
+  position?: number;
+}
+
+const createReview: ActionDefinition = {
+  id: 'github.create_review',
+  name: 'Create Review',
+  description:
+    'Submit a review on a pull request, optionally with inline comments anchored to lines in the diff',
+  riskLevel: 'medium',
+  params: z
+    .object({
+      owner: z.string().describe('Repository owner'),
+      repo: z.string().describe('Repository name'),
+      pullNumber: z.number().int().describe('Pull request number'),
+      body: z
+        .string()
+        .optional()
+        .describe('Review summary (markdown). Required when event is COMMENT or REQUEST_CHANGES'),
+      event: z
+        .enum(['APPROVE', 'REQUEST_CHANGES', 'COMMENT'])
+        .optional()
+        .describe('Review action. Omit to leave the review pending'),
+      commitId: z
+        .string()
+        .optional()
+        .describe('SHA the review applies to (defaults to the most recent commit)'),
+      comments: z
+        .array(
+          z.object({
+            path: z.string().describe('File path relative to the repository root'),
+            body: z.string().describe('Comment text'),
+            line: z.number().int().optional().describe('Line in the diff the comment applies to'),
+            side: z.enum(['LEFT', 'RIGHT']).optional().describe('Diff side for `line`'),
+            startLine: z.number().int().optional().describe('First line of a multi-line comment'),
+            startSide: z.enum(['LEFT', 'RIGHT']).optional().describe('Diff side for `startLine`'),
+            position: z
+              .number()
+              .int()
+              .optional()
+              .describe('Legacy offset from the first @@ hunk header'),
+          }),
+        )
+        .optional()
+        .describe('Inline comments to attach to the review'),
+    })
+    .refine((p) => !(p.event === 'COMMENT' || p.event === 'REQUEST_CHANGES') || !!p.body?.trim(), {
+      message: 'body is required when event is COMMENT or REQUEST_CHANGES',
+      path: ['body'],
+    }),
+  outputSchema: githubReviewSchema,
 };
 
 const listPullRequests: ActionDefinition = {
@@ -952,6 +1026,7 @@ const allActions: ActionDefinition[] = [
   updateIssue,
   getPullRequest,
   createComment,
+  createReview,
   listPullRequests,
   inspectPullRequest,
   updatePullRequest,
@@ -990,6 +1065,7 @@ const PERMISSION_HINTS: Record<string, string> = {
   'github.create_issue': 'issues:write',
   'github.update_issue': 'issues:write',
   'github.create_comment': 'issues:write',
+  'github.create_review': 'pull_requests:write',
   'github.create_pull_request': 'pull_requests:write',
   'github.update_pull_request': 'pull_requests:write',
   'github.merge_pull_request': 'pull_requests:write + contents:write',
@@ -1104,6 +1180,32 @@ async function executeAction(
           return { success: true, data };
         } catch (err: any) {
           return handleOctokitError(err, actionId, 'Create comment');
+        }
+      }
+
+      case 'github.create_review': {
+        const p = createReview.params.parse(params);
+        try {
+          const { data } = await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
+            owner: p.owner,
+            repo: p.repo,
+            pull_number: p.pullNumber,
+            body: p.body,
+            event: p.event,
+            commit_id: p.commitId,
+            comments: p.comments?.map((c: ReviewCommentInput) => ({
+              path: c.path,
+              body: c.body,
+              line: c.line,
+              side: c.side,
+              start_line: c.startLine,
+              start_side: c.startSide,
+              position: c.position,
+            })),
+          });
+          return { success: true, data };
+        } catch (err: any) {
+          return handleOctokitError(err, actionId, 'Create review');
         }
       }
 
