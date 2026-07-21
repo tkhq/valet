@@ -12,9 +12,10 @@ import { orgMembers, users } from "../schema/index.js";
 import { ensureOrg } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
+import type { OrgRole } from "./permissions.js";
 
 export type Admission =
-  | { allowed: true; role: "admin" | "member"; inviteId?: string }
+  | { allowed: true; role: "admin" | "member"; orgRole: OrgRole; inviteId?: string }
   | { allowed: false };
 
 async function countUsers(db: AppQueryable): Promise<number> {
@@ -42,22 +43,27 @@ export async function evaluateAdmission(
   inviteCode?: string,
 ): Promise<Admission> {
   if ((await countUsers(db)) === 0) {
-    return { allowed: true, role: "admin" };
+    return { allowed: true, role: "admin", orgRole: "admin" };
   }
 
   const domain = domainOf(email);
   if (domain && cfg.allowedEmailDomains.includes(domain)) {
-    return { allowed: true, role: "member" };
+    return { allowed: true, role: "member", orgRole: "member" };
   }
 
   const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
   if (invite) {
     // `invite.role` (`InviteRole`) has an "operator" tier for org-membership
-    // purposes (routes/org-invites.ts), but this admission rule only stamps
-    // the GLOBAL `users.role` flag (admin/member) — an operator-role invite
-    // grants plain member-level signup here; an org admin promotes the new
-    // member to operator afterward via `PATCH /api/org/members/:userId`.
-    return { allowed: true, role: invite.role === "admin" ? "admin" : "member", inviteId: invite.id };
+    // purposes (routes/org-invites.ts), but the GLOBAL `users.role` flag
+    // stamped here stays binary (admin/member) — an operator-role invite
+    // grants plain member-level `users.role`. The full invite role rides
+    // along as `orgRole` for `org_members.role` (see userCreateAfter).
+    return {
+      allowed: true,
+      role: invite.role === "admin" ? "admin" : "member",
+      orgRole: invite.role,
+      inviteId: invite.id,
+    };
   }
 
   return { allowed: false };
@@ -186,7 +192,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     pendingAdmissions.delete(key);
 
     const org = await ensureOrg(db);
-    const role: "admin" | "member" = user.role === "admin" ? "admin" : "member";
+    const role: OrgRole = admission?.allowed ? admission.orgRole : user.role === "admin" ? "admin" : "member";
     await db.insert(orgMembers).values({ orgId: org.id, userId: user.id, role, createdAt: Date.now() });
 
     if (admission?.allowed && admission.inviteId) {

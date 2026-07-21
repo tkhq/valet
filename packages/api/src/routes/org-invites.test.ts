@@ -47,6 +47,19 @@ describe("POST /api/org/invites", () => {
     expect(typeof body.id).toBe("string");
   });
 
+  it("creates an operator-role invite as admin", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/org/invites`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ email: "op@example.com", role: "operator" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as CreateInviteResponse;
+    expect(body.role).toBe("operator");
+  });
+
   it("401s without auth configured", async () => {
     api = await bootTestApi();
     const prev = process.env.VALET_LOCAL_AUTH;

@@ -92,8 +92,8 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
 /**
  * Gates the four mutation routes (delete team, add/set-role/remove member):
  * the caller must be a team admin of `teamId`, or hold the org-level
- * `members:manage` permission (RBAC design — admins and operators today;
- * not the global `users.role` operator flag). The org-permission override is
+ * `members:manage` permission (RBAC design — org admins only today; not
+ * the global `users.role` operator flag). The org-permission override is
  * a deliberate recovery path (e.g. the team's last admin left the org) —
  * not a general-purpose bypass, so keep it narrow and don't extend it to
  * plain org membership.
