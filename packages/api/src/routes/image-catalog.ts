@@ -1,10 +1,9 @@
 /**
- * `/api/org/image-catalog` — org-admin CRUD for the admin-registered base
- * images a prebuild config can pin to (sandbox images v2 plan, Task 3).
- * Same DB-backed `requireOrgAdmin` gate (`routes/_org-admin.ts`) as
- * `llm-providers`/`org-invites` — every route below 403s
- * `{ error: "org admin required" }` for non-admins. Rows are always scoped
- * to the caller's own org.
+ * `/api/org/image-catalog` — CRUD for the admin-registered base images a
+ * prebuild config can pin to (sandbox images v2 plan, Task 3). Gated on the
+ * `infra:manage` permission (RBAC design, `routes/_org-admin.ts`'s
+ * `requirePermission`) — every route below 403s `{ error: "forbidden" }`
+ * for callers without it. Rows are always scoped to the caller's own org.
  *
  * `ref` is validated non-empty only — this route does not attempt to
  * verify the ref resolves to a pullable image (no registry credentials are
@@ -26,7 +25,7 @@ import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
-import { requireOrgAdmin } from "./_org-admin.js";
+import { requirePermission } from "./_org-admin.js";
 import { imageCatalog } from "../schema/index.js";
 
 export const imageCatalogRouter = new Hono<AppEnv>();
@@ -40,7 +39,7 @@ function newImageCatalogId(): string {
 }
 
 imageCatalogRouter.get("/", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
   const { db } = c.var.providers;
   const rows = await db.select().from(imageCatalog).where(eq(imageCatalog.orgId, c.var.user.orgId));
@@ -48,7 +47,7 @@ imageCatalogRouter.get("/", async (c) => {
 });
 
 imageCatalogRouter.post("/", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const body: unknown = await c.req.json().catch(() => null);
@@ -79,7 +78,7 @@ imageCatalogRouter.post("/", async (c) => {
 });
 
 imageCatalogRouter.delete("/:id", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const { db } = c.var.providers;

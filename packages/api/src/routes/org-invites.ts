@@ -3,15 +3,11 @@
  * design, same gating pattern as `routes/org.ts`). No route here ever
  * returns a plaintext code except the `POST` response, exactly once.
  */
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
-import {
-  createInvite,
-  listPendingInvites,
-  revokeInvite,
-  type InviteRole,
-} from "../auth/invites.js";
-import { isOrgAdmin } from "../services/org.js";
+import { createInvite, listPendingInvites, revokeInvite } from "../auth/invites.js";
+import { isOrgRole } from "../auth/permissions.js";
+import { requirePermission } from "./_org-admin.js";
 import type {
   CreateInviteRequest,
   CreateInviteResponse,
@@ -21,22 +17,8 @@ import type {
 
 export const orgInvitesRouter = new Hono<AppEnv>();
 
-function isInviteRole(v: unknown): v is InviteRole {
-  return v === "admin" || v === "member";
-}
-
-/** Org-admin gate applied to every route below. */
-async function requireOrgAdmin(c: Context<AppEnv>) {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
-    return c.json({ error: "org admin required" }, 403);
-  }
-  return undefined;
-}
-
 orgInvitesRouter.post("/", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("members:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -48,8 +30,8 @@ orgInvitesRouter.post("/", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (!isInviteRole(body.role)) {
-    return c.json({ error: "role must be 'admin' or 'member'" }, 400);
+  if (!isOrgRole(body.role)) {
+    return c.json({ error: "role must be 'admin', 'operator' or 'member'" }, 400);
   }
   if (body.email !== undefined && typeof body.email !== "string") {
     return c.json({ error: "email must be a string" }, 400);
@@ -72,7 +54,7 @@ orgInvitesRouter.post("/", async (c) => {
 });
 
 orgInvitesRouter.get("/", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("members:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -81,7 +63,7 @@ orgInvitesRouter.get("/", async (c) => {
 });
 
 orgInvitesRouter.delete("/:id", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("members:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;

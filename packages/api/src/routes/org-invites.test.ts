@@ -27,7 +27,7 @@ describe("POST /api/org/invites", () => {
     });
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("org admin required");
+    expect(body.error).toBe("forbidden");
   });
 
   it("creates an invite as admin, returns the code once", async () => {

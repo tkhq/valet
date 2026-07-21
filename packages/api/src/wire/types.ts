@@ -866,7 +866,7 @@ export interface MeResponse {
   avatarUrl: string | null;
   role: "admin" | "member";
   orgId: string;
-  orgRole: "admin" | "member";
+  orgRole: "admin" | "operator" | "member";
   defaultModel: string | null;
 }
 
@@ -911,12 +911,19 @@ export interface OrgFeaturesWire {
   organizations: boolean;
 }
 
+/** Self-contained wire union — matches this file's convention of not
+ * importing `auth/permissions.ts`'s `Permission` type. Kept in sync by hand;
+ * `auth/permissions.ts`'s BINDING comment is the source of truth for the
+ * vocabulary itself. */
+export type OrgPermissionWire = "org:manage" | "members:manage" | "providers:manage" | "infra:manage" | "credentials:org";
+
 export interface OrgResponse {
   id: string;
   name: string;
   createdAt: number;
   features: OrgFeaturesWire;
-  callerRole: "admin" | "member";
+  callerRole: "admin" | "operator" | "member";
+  permissions: OrgPermissionWire[];
 }
 
 /** Whitelisted fields only — unknown top-level keys 400. */
@@ -932,7 +939,7 @@ export interface OrgMemberWire {
   email: string;
   name: string;
   avatarUrl: string | null;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   joinedAt: number;
 }
 
@@ -941,7 +948,7 @@ export interface OrgMembersResponse {
 }
 
 export interface PatchOrgMemberRequest {
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
 }
 
 export interface PatchOrgMemberResponse {
@@ -955,21 +962,21 @@ export interface PatchOrgMemberResponse {
 
 export interface CreateInviteRequest {
   email?: string;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
 }
 
 export interface CreateInviteResponse {
   id: string;
   code: string;
   email: string | null;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   expiresAt: number;
 }
 
 export interface InviteWire {
   id: string;
   email: string | null;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   createdBy: string;
   createdAt: number;
   expiresAt: number;

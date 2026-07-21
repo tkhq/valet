@@ -52,7 +52,12 @@ export async function evaluateAdmission(
 
   const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
   if (invite) {
-    return { allowed: true, role: invite.role, inviteId: invite.id };
+    // `invite.role` (`InviteRole`) has an "operator" tier for org-membership
+    // purposes (routes/org-invites.ts), but this admission rule only stamps
+    // the GLOBAL `users.role` flag (admin/member) — an operator-role invite
+    // grants plain member-level signup here; an org admin promotes the new
+    // member to operator afterward via `PATCH /api/org/members/:userId`.
+    return { allowed: true, role: invite.role === "admin" ? "admin" : "member", inviteId: invite.id };
   }
 
   return { allowed: false };

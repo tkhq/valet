@@ -41,7 +41,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
-import { requireOrgAdmin } from "./_org-admin.js";
+import { requirePermission } from "./_org-admin.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState as verifySignedState, STATE_TTL_MS } from "../lib/oauth-state.js";
@@ -171,14 +171,14 @@ function parseManifestConversion(payload: unknown): GithubAppConfig | null {
 // ── Admin routes ───────────────────────────────────────────────────────
 
 githubAppRouter.get("/", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
   const body = await buildGetResponse(buildAppDeps(c), c.var.user.orgId);
   return c.json(body);
 });
 
 githubAppRouter.post("/manifest", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const orgId = c.var.user.orgId;
@@ -294,7 +294,7 @@ githubAppRouter.get("/setup", async (c) => {
 });
 
 githubAppRouter.post("/refresh", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const orgId = c.var.user.orgId;
@@ -309,7 +309,7 @@ githubAppRouter.post("/refresh", async (c) => {
 });
 
 githubAppRouter.delete("/", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const orgId = c.var.user.orgId;

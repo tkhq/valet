@@ -16,9 +16,9 @@ import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
+import { requirePermission } from "./_org-admin.js";
 import {
   getOrgFeatures,
-  isOrgAdmin,
   isOrgRole,
   listOrgMembers,
   renameOrg,
@@ -39,28 +39,24 @@ export const orgRouter = new Hono<AppEnv>();
 
 const GATE_OFF_ERROR = { error: "organizations not enabled" } as const;
 
-// widened in gate-migration task: `OrgRole` now has an "operator" tier but
-// the wire types haven't been widened yet — narrow at the mapping boundary.
-function toWireOrgRole(role: OrgRole): "admin" | "member" {
-  return role === "admin" ? "admin" : "member";
-}
-
-async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): Promise<OrgResponse | undefined> {
+async function loadOrgResponse(
+  db: AppDb,
+  orgId: string,
+  callerRole: OrgRole,
+  permissions: ReadonlySet<OrgResponse["permissions"][number]>,
+): Promise<OrgResponse | undefined> {
   const rows = await db.select().from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
   const features = await getOrgFeatures(db, orgId);
-  return { id: row.id, name: row.name, createdAt: row.createdAt, features, callerRole: toWireOrgRole(callerRole) };
-}
-
-/** Org-admin gate applied to every route below GET /api/org. */
-async function requireOrgAdmin(c: Context<AppEnv>) {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
-    return c.json({ error: "org admin required" }, 403);
-  }
-  return undefined;
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.createdAt,
+    features,
+    callerRole,
+    permissions: [...permissions],
+  };
 }
 
 // ── GET /api/org — any org member ────────────────────────────────────────
@@ -68,8 +64,7 @@ async function requireOrgAdmin(c: Context<AppEnv>) {
 orgRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-  const body = await loadOrgResponse(db, user.orgId, admin ? "admin" : "member");
+  const body = await loadOrgResponse(db, user.orgId, user.orgRole, user.permissions);
   if (!body) return c.json({ error: "org not found" }, 404);
   return c.json(body);
 });
@@ -77,7 +72,7 @@ orgRouter.get("/", async (c) => {
 // ── PATCH /api/org — org admin only, always reachable ───────────────────
 
 orgRouter.patch("/", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("org:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -126,15 +121,15 @@ orgRouter.patch("/", async (c) => {
     await setOrgFeatures(db, user.orgId, update);
   }
 
-  const body = await loadOrgResponse(db, user.orgId, "admin");
+  const body = await loadOrgResponse(db, user.orgId, user.orgRole, user.permissions);
   if (!body) return c.json({ error: "org not found" }, 404);
   const resp: PatchOrgResponse = body;
   return c.json(resp);
 });
 
-// ── Members: gate = org admin AND organizations feature on ──────────────
+// ── Members: gate = members:manage permission AND organizations feature on ──
 
-async function requireOrgAdminAndGate(c: Context<AppEnv>) {
+async function requireMembersManageAndGate(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const user = c.var.user;
 
@@ -142,25 +137,24 @@ async function requireOrgAdminAndGate(c: Context<AppEnv>) {
   if (!features.organizations) {
     return c.json(GATE_OFF_ERROR, 404);
   }
-  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
-    return c.json({ error: "org admin required" }, 403);
-  }
+  const forbidden = requirePermission("members:manage")(c);
+  if (forbidden) return forbidden;
   return undefined;
 }
 
 orgRouter.get("/members", async (c) => {
-  const forbidden = await requireOrgAdminAndGate(c);
+  const forbidden = await requireMembersManageAndGate(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
   const user = c.var.user;
   const members = await listOrgMembers(db, user.orgId);
-  const body: OrgMembersResponse = { members: members.map((m) => ({ ...m, role: toWireOrgRole(m.role) })) };
+  const body: OrgMembersResponse = { members };
   return c.json(body);
 });
 
 orgRouter.patch("/members/:userId", async (c) => {
-  const forbidden = await requireOrgAdminAndGate(c);
+  const forbidden = await requireMembersManageAndGate(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -174,7 +168,7 @@ orgRouter.patch("/members/:userId", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
   if (!isOrgRole(body.role)) {
-    return c.json({ error: "role must be 'admin' or 'member'" }, 400);
+    return c.json({ error: "role must be 'admin', 'operator' or 'member'" }, 400);
   }
 
   const result = await setOrgMemberRole(db, user.orgId, targetUserId, body.role);

@@ -76,12 +76,18 @@ export function MembersTable({ members }: { members: OrgMemberWire[] }) {
   );
 }
 
+function roleLabel(role: "admin" | "operator" | "member"): string {
+  if (role === "admin") return "Admin";
+  if (role === "operator") return "Operator";
+  return "Member";
+}
+
 function RoleControl({
   role,
   disabled,
   onSelect,
 }: {
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   disabled: boolean;
   onSelect: (role: "admin" | "member") => void;
 }) {
@@ -94,7 +100,7 @@ function RoleControl({
       className="gap-1.5"
     >
       <Badge variant={role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
-        {role === "admin" ? "Admin" : "Member"}
+        {roleLabel(role)}
       </Badge>
       <ChevronDown className="h-3.5 w-3.5" aria-hidden />
     </Button>

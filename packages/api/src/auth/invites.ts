@@ -12,7 +12,7 @@ import { invites } from "../schema/index.js";
 
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-export type InviteRole = "admin" | "member";
+export type InviteRole = "admin" | "operator" | "member";
 
 export interface InviteRecord {
   id: string;

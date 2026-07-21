@@ -8,11 +8,15 @@
  * scope — same `CredentialOwner` shape `plugins/action-invoker.ts` and the
  * engine's `Session.credentialProvider` read at call time. `PUT`'s optional
  * `scope: "org"` body field (and `GET`/`DELETE`'s `?scope=org` query param)
- * maps the owner to `{type:"org", id:user.orgId}` instead — org admins only
- * (403 `"org admin required"` otherwise, matching `routes/org.ts`'s copy).
- * This is how an org admin pastes a shared credential (e.g. a Telegram bot
- * token `ChannelHost` resolves at `{type:"org",id}`) rather than a personal
- * one.
+ * maps the owner to `{type:"org", id:user.orgId}` instead — gated on the
+ * `credentials:org` permission (RBAC design; `can(user, "credentials:org")`,
+ * NOT `user.role`/`users.role`, which is the global operator flag and
+ * diverges from `org_members.role` — that divergence was a real bug: an org
+ * member who happens to be a global operator, or vice versa, must be gated
+ * by their ORG role here) (403 `"org admin required"` otherwise, matching
+ * `routes/org.ts`'s copy). This is how an org admin/operator pastes a shared
+ * credential (e.g. a Telegram bot token `ChannelHost` resolves at
+ * `{type:"org",id}`) rather than a personal one.
  *
  * `GET` never returns secret material — only `type`/`scopes`/`connectedAt`
  * plus a health-relevant whitelist (`expiresAt`, `metadata.login`,
@@ -39,6 +43,7 @@
 import { Hono } from "hono";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import { can } from "../auth/permissions.js";
 import type {
   CredentialSummary,
   DeleteCredentialResponse,
@@ -65,7 +70,7 @@ credentialsRouter.get("/", async (c) => {
   const { engineCredentials } = c.var.providers;
   const user = c.var.user;
   const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
+  if (scope === "org" && !can(user, "credentials:org")) {
     return c.json(ORG_ADMIN_REQUIRED, 403);
   }
   const owner = ownerFor(user, scope);
@@ -111,7 +116,7 @@ credentialsRouter.put("/:service", async (c) => {
   }
 
   const scope = body.scope === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
+  if (scope === "org" && !can(user, "credentials:org")) {
     return c.json(ORG_ADMIN_REQUIRED, 403);
   }
   const owner = ownerFor(user, scope);
@@ -150,7 +155,7 @@ credentialsRouter.delete("/:service", async (c) => {
   const { engineCredentials } = c.var.providers;
   const user = c.var.user;
   const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
+  if (scope === "org" && !can(user, "credentials:org")) {
     return c.json(ORG_ADMIN_REQUIRED, 403);
   }
   const owner = ownerFor(user, scope);

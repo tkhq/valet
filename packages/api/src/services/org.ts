@@ -1,9 +1,9 @@
 /**
  * Org service — org membership, feature gate, and org-scoped settings
  * (split-settings design). `org_members.role` is the real authz source for
- * "is this user an admin of this org"; `users.role` remains the global
- * *operator* gate for `/api/admin` only (see `requireOrgAdmin`'s doc
- * comment on the routes that use it).
+ * org surfaces (three tiers: admin/operator/member — see
+ * `auth/permissions.ts`'s RBAC vocabulary); `users.role` remains the global
+ * *operator* gate for `/api/admin` only.
  */
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";

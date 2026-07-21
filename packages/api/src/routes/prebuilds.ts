@@ -1,9 +1,8 @@
 /**
- * `/api/org/prebuilds` — org-admin CRUD for prebuild configs + build
- * lifecycle (sandbox images v2 plan, Task 3). Same DB-backed
- * `requireOrgAdmin` gate as `routes/image-catalog.ts`. Rows are always
- * scoped to the caller's own org; a config belonging to another org 404s
- * exactly like a nonexistent id.
+ * `/api/org/prebuilds` — CRUD for prebuild configs + build lifecycle
+ * (sandbox images v2 plan, Task 3). Same `infra:manage` permission gate as
+ * `routes/image-catalog.ts`. Rows are always scoped to the caller's own
+ * org; a config belonging to another org 404s exactly like a nonexistent id.
  *
  * `POST /configs/:id/rebuild` and the poll/scheduler loop (wired from
  * `main.ts`) both delegate to `prebuilds/service.ts`'s `PrebuildService` —
@@ -20,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppEnv } from "../env.js";
-import { requireOrgAdmin } from "./_org-admin.js";
+import { requirePermission } from "./_org-admin.js";
 import { prebuildConfigs, prebuilds, type PrebuildConfigRow } from "../schema/index.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../prebuilds/service.js";
@@ -49,14 +48,14 @@ async function getOwnedConfig(
 }
 
 prebuildsRouter.get("/meta", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
   const { prebuildService } = c.var.providers;
   return c.json({ builder: prebuildService.builderBackend });
 });
 
 prebuildsRouter.get("/configs", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
   const { db } = c.var.providers;
   const rows = await db.select().from(prebuildConfigs).where(eq(prebuildConfigs.orgId, c.var.user.orgId));
@@ -64,7 +63,7 @@ prebuildsRouter.get("/configs", async (c) => {
 });
 
 prebuildsRouter.post("/configs", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const body: unknown = await c.req.json().catch(() => null);
@@ -108,7 +107,7 @@ prebuildsRouter.post("/configs", async (c) => {
 });
 
 prebuildsRouter.patch("/configs/:id", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const { db } = c.var.providers;
@@ -151,7 +150,7 @@ prebuildsRouter.patch("/configs/:id", async (c) => {
 });
 
 prebuildsRouter.delete("/configs/:id", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const { db } = c.var.providers;
@@ -164,7 +163,7 @@ prebuildsRouter.delete("/configs/:id", async (c) => {
 });
 
 prebuildsRouter.post("/configs/:id/rebuild", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const { db, prebuildService } = c.var.providers;
@@ -190,7 +189,7 @@ prebuildsRouter.post("/configs/:id/rebuild", async (c) => {
 });
 
 prebuildsRouter.get("/configs/:id/builds", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const { db } = c.var.providers;
