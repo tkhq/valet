@@ -7,6 +7,7 @@
 
 .PHONY: help install setup clean \
         dev dev-worker dev-opencode dev-client dev-all \
+        dev-api-node dev-web dev-local dev-keycloak dev-keycloak-down dogfood-api \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
         test test-unit test-integration test-e2e test-pg \
@@ -121,6 +122,28 @@ dev-web: ## Start the new web client (@valet/web) on :5173
 dev-local: ## Start API + web together (greenfield agent-loop stack)
 	@echo "$(GREEN)Starting greenfield API + web. Open http://localhost:5173$(NC)"
 	@make -j2 dev-api-node dev-web
+
+dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO path
+	@echo "$(GREEN)Starting Keycloak on http://localhost:8081 (admin/admin)$(NC)"
+	$(DOCKER_COMPOSE) --profile keycloak up -d keycloak
+	@echo "Waiting for the valet realm to come up..."
+	@i=0; until curl -sf http://localhost:8081/realms/valet/.well-known/openid-configuration >/dev/null 2>&1; do \
+		i=$$((i+1)); \
+		if [ $$i -ge 60 ]; then echo "$(RED)Keycloak didn't come up after 120s — check '$(DOCKER_COMPOSE) logs keycloak'$(NC)"; exit 1; fi; \
+		sleep 2; \
+	done
+	@echo "$(GREEN)Keycloak ready.$(NC) Add to .env, then run 'make dev-local':"
+	@echo "  BETTER_AUTH_SECRET=dev-only-secret-change-me"
+	@echo "  AUTH_OIDC_ISSUER=http://localhost:8081/realms/valet"
+	@echo "  AUTH_OIDC_CLIENT_ID=valet"
+	@echo "  AUTH_OIDC_CLIENT_SECRET=valet-dev-secret"
+	@echo "  AUTH_OIDC_DOMAIN=valet.test"
+	@echo "  AUTH_OIDC_NAME=Keycloak"
+	@echo "  AUTH_TRUSTED_ORIGINS=http://localhost:8081  # sso plugin trusts the issuer's discovery URL"
+	@echo "Test users: alice@valet.test / bob@valet.test, password 'password'"
+
+dev-keycloak-down: ## Stop the local Keycloak container
+	$(DOCKER_COMPOSE) --profile keycloak down keycloak
 
 dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
