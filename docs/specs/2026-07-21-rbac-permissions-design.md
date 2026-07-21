@@ -1,7 +1,7 @@
 # Role-Based Access: Fixed Roles + Permissions Layer (v2)
 
 Date: 2026-07-21
-Status: approved design
+Status: implemented (this branch)
 Depends on: auth-v2 (`2026-07-14-auth-v2-design.md`, shipped), split settings (`2026-07-14-split-settings-design.md`, shipped), integration OAuth (`2026-07-20-integration-oauth-design.md`, shipped)
 
 ## Problem
@@ -147,6 +147,13 @@ When teams start owning resources (team orchestrators, shared workflows, team cr
 - Role-map sync: SSO login with mapped claim promotes/demotes `org_members.role`; unmapped claim → member; map unset → untouched.
 - Web: rail/table rendering per permission set.
 - Live pass (human-in-the-loop): Keycloak — grant alice `valet-admin`, bob `valet-operator`; verify bob sees Providers/Images but not Members, and a Keycloak role change flips access on re-login.
+
+## Deviations / implementation notes
+
+- **Operator invites redeem correctly**: `Admission` carries the full `OrgRole` for the org-membership insert while the value stamped into `users.role` stays binary — an operator invite yields `users.role = "member"` + `org_members.role = "operator"`.
+- **SSO last-admin safety valve** (also noted in the IdP section): `syncSsoOrgRole` refuses, transactionally and with a loud log, an IdP demotion that would leave the org with zero admins; corrected claims on a later login proceed normally. Sync failures are caught and logged in the `provisionUser` wrapper — a transient DB error degrades to a stale role rather than a failed login.
+- **`GET /api/teams` still uses `isOrgAdmin`** for its org-admin recovery read (behavior-identical today; team-resource pass owns the full teams migration).
+- The invite dialog and members role picker both offer the three roles; invite badges render operator.
 
 ## Out of scope / follow-ups
 
