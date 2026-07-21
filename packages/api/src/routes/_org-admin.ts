@@ -10,6 +10,7 @@
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin } from "../services/org.js";
+import { can, type Permission } from "../auth/permissions.js";
 
 /** Returns a 403 `Response` when the caller isn't an admin of their own
  * org; `undefined` otherwise. Callers do:
@@ -21,4 +22,16 @@ export async function requireOrgAdmin(c: Context<AppEnv>) {
     return c.json({ error: "org admin required" }, 403);
   }
   return undefined;
+}
+
+/** 403 gate on the caller's permission set (RBAC design). Usage:
+ * `const gate = requirePermission("providers:manage")(c); if (gate) return gate;`
+ * Synchronous — permissions were resolved by the auth middleware. */
+export function requirePermission(permission: Permission) {
+  return (c: Context<AppEnv>): Response | undefined => {
+    if (!can(c.var.user, permission)) {
+      return c.json({ error: "forbidden" }, 403);
+    }
+    return undefined;
+  };
 }

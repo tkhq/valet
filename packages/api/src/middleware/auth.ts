@@ -1,19 +1,24 @@
 import type { Context, MiddlewareHandler } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
-import { users } from "../schema/index.js";
+import { orgMembers, users } from "../schema/index.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
+import { isOrgRole, permissionsForOrgRole, type OrgRole, type Permission } from "../auth/permissions.js";
 
 export interface AuthUser {
   id: string;
   email: string;
   name?: string;
+  /** Global operator flag (users.role) — gates /api/admin only. */
   role: "admin" | "member";
+  /** Org role from org_members.role — the authorization source for org surfaces. */
+  orgRole: OrgRole;
+  permissions: ReadonlySet<Permission>;
   orgId: string;
 }
 
@@ -33,6 +38,19 @@ const SANDBOX_ALLOWED_PATH_PREFIXES = ["/api/memory", "/api/sandbox"];
  * outside `AuthUser["role"]`'s type. */
 function normalizeRole(role: string): "admin" | "member" {
   return role === "admin" ? "admin" : "member";
+}
+
+/** Org role from org_members.role — "member" when no membership row exists
+ * (defensive: a session for a user whose membership was removed must not
+ * gain permissions). */
+export async function resolveOrgRole(db: AppDb, orgId: string, userId: string): Promise<OrgRole> {
+  const rows = await db
+    .select({ role: orgMembers.role })
+    .from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
+    .limit(1);
+  const role = rows[0]?.role;
+  return isOrgRole(role) ? role : "member";
 }
 
 /**
@@ -135,12 +153,16 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         sessionResult = null;
       }
       if (sessionResult) {
+        const orgId = await resolveOrgId(db);
+        const orgRole = await resolveOrgRole(db, orgId, sessionResult.user.id);
         c.set("user", {
           id: sessionResult.user.id,
           email: sessionResult.user.email,
           name: sessionResult.user.name,
           role: normalizeRole(sessionResult.user.role),
-          orgId: await resolveOrgId(db),
+          orgRole,
+          permissions: permissionsForOrgRole(orgRole),
+          orgId,
         } satisfies AuthUser);
         await next();
         return;
@@ -165,12 +187,16 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         if (!row) {
           return c.json({ error: "invalid api key" }, 401);
         }
+        const orgId = await resolveOrgId(db);
+        const orgRole = await resolveOrgRole(db, orgId, row.id);
         c.set("user", {
           id: row.id,
           email: row.email,
           name: row.name ?? undefined,
           role: row.role,
-          orgId: await resolveOrgId(db),
+          orgRole,
+          permissions: permissionsForOrgRole(orgRole),
+          orgId,
         } satisfies AuthUser);
         await next();
         return;
@@ -184,11 +210,14 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         const testRows = await db.select().from(users).where(eq(users.id, testUserId)).limit(1);
         const row = testRows[0];
         if (row) {
+          const orgRole = await resolveOrgRole(db, LOCAL_ORG.id, row.id);
           c.set("user", {
             id: row.id,
             email: row.email,
             name: row.name ?? undefined,
             role: row.role,
+            orgRole,
+            permissions: permissionsForOrgRole(orgRole),
             orgId: LOCAL_ORG.id,
           } satisfies AuthUser);
           await next();
@@ -196,11 +225,14 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         }
       }
 
+      // Stub identity keeps full org access in dev (per RBAC design).
       c.set("user", {
         id: LOCAL_USER.id,
         email: LOCAL_USER.email,
         name: LOCAL_USER.name,
         role: LOCAL_USER.role,
+        orgRole: "admin",
+        permissions: permissionsForOrgRole("admin"),
         orgId: LOCAL_ORG.id,
       } satisfies AuthUser);
       await next();
