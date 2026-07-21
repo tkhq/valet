@@ -597,6 +597,7 @@ export class InMemorySessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     fence: WriteFence,
+    credential?: { attempts: number; lastReleaseAt: number },
   ): Promise<boolean> {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);
@@ -610,6 +611,11 @@ export class InMemorySessionStore implements SessionStore {
     item.attemptId = undefined;
     item.ownerId = undefined;
     item.leaseExpiresAt = undefined;
+    if (credential) {
+      // Durable credential budget: written only when the CAS matched.
+      item.credentialAttempts = credential.attempts;
+      item.lastCredentialReleaseAt = credential.lastReleaseAt;
+    }
     item.updatedAt = Date.now();
     this.attemptMarkers.delete(`${itemId}:${fence.attemptId}`);
     return true;

@@ -943,10 +943,14 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(claimed?.status).toBe("running");
       await store.insertAttemptMarker(item.id, "att-1");
 
-      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
-        itemId: item.id,
-        attemptId: "att-1",
-      });
+      const releasedAt = Date.now();
+      const released = await store.releaseSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        item.id,
+        { itemId: item.id, attemptId: "att-1" },
+        { attempts: 1, lastReleaseAt: releasedAt },
+      );
       expect(released).toBe(true);
 
       const loaded = await store.getQueueItem(SESSION_ID, item.id);
@@ -956,6 +960,11 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded?.leaseExpiresAt).toBeUndefined();
       // attemptCount is retained (bounds retries); the marker is gone.
       expect(loaded?.attemptCount).toBe(1);
+      // The DURABLE credential budget landed atomically with the release —
+      // it must survive restart (a crash-looping keyless session stays
+      // boundedly failing, never an infinite queued→running→queued cycle).
+      expect(loaded?.credentialAttempts).toBe(1);
+      expect(loaded?.lastCredentialReleaseAt).toBe(releasedAt);
       expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
 
       // Re-claimable after release.
@@ -1037,18 +1046,24 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       });
       expect(supersededItemIds).toContain(item.id);
 
-      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
-        itemId: item.id,
-        attemptId: "att-1",
-      });
+      const released = await store.releaseSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        item.id,
+        { itemId: item.id, attemptId: "att-1" },
+        { attempts: 5, lastReleaseAt: Date.now() },
+      );
       expect(released).toBe(false);
 
       // Full no-op: still running under the same attempt, supersession stamp
-      // intact, marker untouched — the caller must settle it `superseded`.
+      // intact, marker untouched, credential counters NOT written (they ride
+      // the CAS — a refused release must not leak a partial counter write).
       const loaded = await store.getQueueItem(SESSION_ID, item.id);
       expect(loaded?.status).toBe("running");
       expect(loaded?.attemptId).toBe("att-1");
       expect(loaded?.supersededByItemId).toBe(steer.id);
+      expect(loaded?.credentialAttempts ?? 0).toBe(0);
+      expect(loaded?.lastCredentialReleaseAt).toBeUndefined();
       expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
     });
 

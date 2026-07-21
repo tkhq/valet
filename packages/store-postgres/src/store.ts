@@ -65,6 +65,10 @@ function queueItemRowToItem(row: QueueItemRow): QueueItem {
     attemptId: row.attemptId ?? undefined,
     attemptCount: row.attemptCount,
     maxAttempts: row.maxAttempts,
+    // Absent ≡ 0 per the QueueItem contract: map the column default back to
+    // "absent" so round-trips match the in-memory backend exactly.
+    credentialAttempts: row.credentialAttempts === 0 ? undefined : row.credentialAttempts,
+    lastCredentialReleaseAt: row.lastCredentialReleaseAt ?? undefined,
     timeoutAt: row.timeoutAt,
     abortRequestedAt: row.abortRequestedAt ?? undefined,
     ownerId: row.ownerId ?? undefined,
@@ -98,6 +102,8 @@ function queueItemInsertParams(sessionId: string, threadId: string, item: QueueI
     item.attemptId ?? null,
     item.attemptCount,
     item.maxAttempts,
+    item.credentialAttempts ?? 0,
+    item.lastCredentialReleaseAt ?? null,
     item.timeoutAt,
     item.abortRequestedAt ?? null,
     item.ownerId ?? null,
@@ -112,11 +118,12 @@ const INSERT_QUEUE_ITEM_SQL = `
     id, session_id, thread_id, dispatch_id, status, outcome, error,
     superseded_by_item_id, merged_into_item_id, content, author, channel,
     reply_target, model, role, metadata, attempt_id, attempt_count,
-    max_attempts, timeout_at, abort_requested_at, owner_id, lease_expires_at,
+    max_attempts, credential_attempts, last_credential_release_at,
+    timeout_at, abort_requested_at, owner_id, lease_expires_at,
     created_at, updated_at
   ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-    $17, $18, $19, $20, $21, $22, $23, $24, $25
+    $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
   )
 `;
 
@@ -1036,6 +1043,7 @@ export class PgSessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     fence: WriteFence,
+    credential?: { attempts: number; lastReleaseAt: number },
   ): Promise<boolean> {
     // CAS release + marker delete must be atomic: a crash between the two
     // would leave a queued item with a live-looking attempt marker (InMemory
@@ -1049,13 +1057,32 @@ export class PgSessionStore implements SessionStore {
     // callback on serialization failures (40P01), and a mutated outer
     // variable would leak a stale first-try value across the retry.
     return this.db.transaction(async (tx) => {
-      const result = await tx.query(
-        `UPDATE engine_queue_items
-         SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL, updated_at = $1
-         WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5
-           AND superseded_by_item_id IS NULL`,
-        [Date.now(), itemId, sessionId, threadId, fence.attemptId],
-      );
+      // The durable credential budget rides the same CAS UPDATE: counters
+      // land iff the release lands (no partial write on a refused CAS).
+      const result = credential
+        ? await tx.query(
+            `UPDATE engine_queue_items
+             SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL,
+                 credential_attempts = $6, last_credential_release_at = $7, updated_at = $1
+             WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5
+               AND superseded_by_item_id IS NULL`,
+            [
+              Date.now(),
+              itemId,
+              sessionId,
+              threadId,
+              fence.attemptId,
+              credential.attempts,
+              credential.lastReleaseAt,
+            ],
+          )
+        : await tx.query(
+            `UPDATE engine_queue_items
+             SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL, updated_at = $1
+             WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5
+               AND superseded_by_item_id IS NULL`,
+            [Date.now(), itemId, sessionId, threadId, fence.attemptId],
+          );
       if (result.rowCount === 0) return false;
       await tx.query("DELETE FROM engine_attempt_markers WHERE item_id = $1 AND attempt_id = $2", [
         itemId,

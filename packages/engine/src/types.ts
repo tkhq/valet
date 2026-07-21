@@ -137,6 +137,19 @@ export interface QueueItem {
   attemptId?: string;
   attemptCount: number; // starts 0; claim/replace set+increment
   maxAttempts: number; // default 10
+  /**
+   * DURABLE credential-release budget: counted keyless release cycles
+   * (bounded by the engine's MAX_CREDENTIAL_ATTEMPTS). Written by
+   * `releaseSubmission` when the caller passes counters; survives restart so
+   * a keyless session in a crash-loop still fails boundedly instead of
+   * cycling queued→running→queued forever. Absent ≡ 0.
+   */
+  credentialAttempts?: number;
+  /**
+   * Time (ms) of the last COUNTED credential-release cycle — releases within
+   * the backoff window of it coalesce into the same cycle (no increment).
+   */
+  lastCredentialReleaseAt?: number;
   timeoutAt: number; // default createdAt + 3_600_000
   abortRequestedAt?: number;
   ownerId?: string;
@@ -1026,12 +1039,20 @@ export interface SessionStore {
    * and by unsettledHead, so nothing would ever settle it). Returns whether
    * the CAS matched (true = released + marker deleted; false = full no-op,
    * no state change, no markers touched).
+   *
+   * `credential`, when present, atomically persists the durable
+   * credential-release budget (`credentialAttempts` +
+   * `lastCredentialReleaseAt`) in the same CAS transaction — the engine
+   * computes the counters and the store writes them only when the CAS
+   * matches. Omitted (e.g. a reconciliation re-queue that is not a
+   * credential cycle) the columns are left untouched.
    */
   releaseSubmission(
     sessionId: string,
     threadId: string,
     itemId: string,
     fence: WriteFence,
+    credential?: { attempts: number; lastReleaseAt: number },
   ): Promise<boolean>;
   /** Fenced: running↔blocked_on_decision_gate transitions for the claimed turn. */
   setSubmissionBlocked(

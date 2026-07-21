@@ -89,6 +89,8 @@ CREATE TABLE "engine_queue_items" (
 	"attempt_id" text,
 	"attempt_count" integer NOT NULL,
 	"max_attempts" integer NOT NULL,
+	"credential_attempts" integer NOT NULL DEFAULT 0,
+	"last_credential_release_at" bigint,
 	"timeout_at" bigint NOT NULL,
 	"abort_requested_at" bigint,
 	"owner_id" text,
