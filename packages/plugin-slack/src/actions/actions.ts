@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { ActionDefinition, ActionSource, ActionContext, ActionResult } from '@valet/sdk';
 import { slackFetch, slackGet } from './api.js';
 import { checkPrivateChannelAccess } from './channel-access.js';
-import { buildContentBlocks, SLACK_TEXT_LIMIT } from '../message-chunking.js';
+import { buildContentBlocks, SLACK_MAX_BLOCKS, SLACK_TEXT_LIMIT } from '../message-chunking.js';
 
 /** Build a descriptive error from a Slack API response. */
 async function slackError(res: Response, data?: { ok: boolean; error?: string }): Promise<ActionResult> {
@@ -134,6 +134,25 @@ const slackPostMessageOutputSchema = {
     ok: { type: 'boolean', description: 'Always true on success' },
     ts: { type: 'string', description: 'Message timestamp — use as thread_ts to reply' },
     channel: { type: 'string', description: 'Channel ID the message was delivered to' },
+  },
+} satisfies Record<string, unknown>;
+
+const slackUpdateMessageOutputSchema = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean', description: 'Always true on success' },
+    ts: { type: 'string', description: 'Timestamp of the edited message (unchanged by the edit)' },
+    channel: { type: 'string', description: 'Channel ID the message lives in' },
+    text: { type: 'string', description: 'The new message text as stored by Slack' },
+  },
+} satisfies Record<string, unknown>;
+
+const slackDeleteMessageOutputSchema = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean', description: 'Always true on success' },
+    ts: { type: 'string', description: 'Timestamp of the deleted message' },
+    channel: { type: 'string', description: 'Channel ID the message was deleted from' },
   },
 } satisfies Record<string, unknown>;
 
@@ -502,10 +521,37 @@ const sendMessage: ActionDefinition = {
   outputSchema: slackPostMessageOutputSchema,
 };
 
+const updateMessage: ActionDefinition = {
+  id: 'slack.update_message',
+  name: 'Update Message',
+  description: 'Edit a message the bot previously posted. Only works on the bot\'s own messages — Slack rejects bot edits to anyone else\'s. Use the channel and ts returned by send_message / dm_owner / dm_user. The new text fully replaces the previous content.',
+  riskLevel: 'medium',
+  params: z.object({
+    channel: z.string().describe('Channel ID (C..., or D... for DMs) returned when the message was sent. Channel names are not accepted — use the ID from the send result.'),
+    ts: z.string().describe('Timestamp (ts) of the message to edit, as returned by send_message/dm_owner/dm_user (e.g. "1780887543.189519")'),
+    text: z.string().describe('New message body — fully replaces the previous content. Supports Slack mrkdwn formatting (bold: *text*, italic: _text_, code: `code`, links: <url|label>).'),
+  }),
+  outputSchema: slackUpdateMessageOutputSchema,
+};
+
+const deleteMessage: ActionDefinition = {
+  id: 'slack.delete_message',
+  name: 'Delete Message',
+  description: 'Delete a message the bot previously posted. Only works on the bot\'s own messages — Slack rejects bot deletes of anyone else\'s. Irreversible: prefer update_message when the content just needs correcting.',
+  riskLevel: 'high',
+  params: z.object({
+    channel: z.string().describe('Channel ID (C..., or D... for DMs) the message was posted to'),
+    ts: z.string().describe('Timestamp (ts) of the message to delete, as returned by send_message/dm_owner/dm_user'),
+  }),
+  outputSchema: slackDeleteMessageOutputSchema,
+};
+
 const allActions: ActionDefinition[] = [
   dmOwner,
   dmUser,
   sendMessage,
+  updateMessage,
+  deleteMessage,
   addReaction,
   listChannels,
   readHistory,
@@ -724,7 +770,13 @@ function slimChannel(ch: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function slimMessage(msg: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Reduce a Slack message payload to the fields the agent actually needs
+ * (skips deleted file tombstones, folds reactions to name+count, drops
+ * unstable per-response fields). Exported so plugin-slack-user can reuse
+ * the same shape — see packages/plugin-slack-user/src/actions/actions.ts.
+ */
+export function slimMessage(msg: Record<string, unknown>): Record<string, unknown> {
   const reply_count = typeof msg.reply_count === 'number' ? msg.reply_count : undefined;
 
   // Extract file metadata (skip deleted/tombstone files)
@@ -902,9 +954,12 @@ async function executeAction(
         const body: Record<string, unknown> = { channel: channelId, text: p.text };
         if (p.thread_ts) body.thread_ts = p.thread_ts;
 
+        let userBlocks: Record<string, unknown>[] | undefined;
         if (p.blocks) {
           try {
-            body.blocks = JSON.parse(p.blocks);
+            const parsed = JSON.parse(p.blocks);
+            if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array' };
+            userBlocks = parsed as Record<string, unknown>[];
           } catch {
             return { success: false, error: 'blocks must be valid JSON' };
           }
@@ -916,15 +971,88 @@ async function executeAction(
         if (ctx.callerIdentity?.name) body.username = ctx.callerIdentity.name;
         if (ctx.callerIdentity?.avatar) body.icon_url = ctx.callerIdentity.avatar;
 
-        if (!p.blocks && p.text.length > SLACK_TEXT_LIMIT) {
-          body.blocks = buildContentBlocks(p.text, p.text);
-          body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+        // Attribute non-DM posts to the session owner (mirrors the channel
+        // transport's attribution context block on agent-authored replies).
+        const ownerSlackId = ctx.credentials.owner_slack_user_id;
+        const hasAttribution = Boolean(ownerSlackId) && !channelId.startsWith('D');
+        const needsLongBlocks = !userBlocks && p.text.length > SLACK_TEXT_LIMIT;
+
+        if (hasAttribution || needsLongBlocks) {
+          const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
+          const contentBlocks = userBlocks
+            ? userBlocks.slice(0, blockBudget)
+            : buildContentBlocks(p.text, p.text, blockBudget);
+          if (hasAttribution) {
+            contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
+          }
+          body.blocks = contentBlocks;
+          if (needsLongBlocks) {
+            body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+          }
+        } else if (userBlocks) {
+          body.blocks = userBlocks;
         }
 
         const res = await slackFetch('chat.postMessage', token, body);
         if (!res.ok) return slackError(res);
         const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
         if (!data.ok) return slackError(res, data);
+
+        return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
+      }
+
+      case 'slack.update_message': {
+        const p = updateMessage.params.parse(params);
+        const denied = await guardPrivateChannel(token, p.channel, ctx);
+        if (denied) return denied;
+
+        // chat.update re-parses the message on every edit and its parse default is
+        // 'client' (unlike chat.postMessage's 'none'), which breaks <url|label>
+        // markup — pin 'none' so edits keep the semantics the message was posted with.
+        const body: Record<string, unknown> = { channel: p.channel, ts: p.ts, text: p.text, parse: 'none' };
+        // Sending text without blocks already removes a message's existing blocks;
+        // the explicit [] is the docs-blessed clear, kept so the intent (short text
+        // replaces any previously chunked block content) survives refactors.
+        if (p.text.length > SLACK_TEXT_LIMIT) {
+          body.blocks = buildContentBlocks(p.text, p.text);
+          body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+        } else {
+          body.blocks = [];
+        }
+
+        const res = await slackFetch('chat.update', token, body);
+        if (!res.ok) return slackError(res);
+        const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
+        if (!data.ok) {
+          if (data.error === 'cant_update_message') {
+            return { success: false, error: 'Slack rejected the edit (cant_update_message): the bot can only edit its own messages. Check that ts belongs to a message the bot sent.' };
+          }
+          if (data.error === 'message_not_found') {
+            return { success: false, error: 'Message not found — check the channel and ts (the message may have been deleted).' };
+          }
+          return slackError(res, data);
+        }
+
+        return { success: true, data: { ok: true, ts: data.ts, channel: data.channel, text: data.text } };
+      }
+
+      case 'slack.delete_message': {
+        const p = deleteMessage.params.parse(params);
+        const denied = await guardPrivateChannel(token, p.channel, ctx);
+        if (denied) return denied;
+
+        const res = await slackFetch('chat.delete', token, { channel: p.channel, ts: p.ts });
+        if (!res.ok) return slackError(res);
+        const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
+        if (!data.ok) {
+          if (data.error === 'cant_delete_message') {
+            return { success: false, error: 'Slack rejected the delete (cant_delete_message): the bot can only delete its own messages.' };
+          }
+          if (data.error === 'message_not_found') {
+            return { success: false, error: 'Message not found — check the channel and ts (it may already be deleted).' };
+          }
+          return slackError(res, data);
+        }
 
         return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
       }

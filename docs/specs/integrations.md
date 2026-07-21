@@ -239,6 +239,102 @@ Token retrieval: decrypts from `oauth_tokens` table using `ENCRYPTION_KEY`.
 
 **Signature verification caveat:** Signature is computed over `JSON.stringify(payload)` (re-serialized), not the original raw body.
 
+## Slack (personal) — per-user OAuth
+
+A per-user Slack integration, distinct from the org bot install. Uses a
+Slack user token (`xoxp`) so the agent can act **as the user**: read their
+DMs and private-channel history, post as them, update their profile /
+status. Package: `packages/plugin-slack-user`.
+
+### Shared Slack app, distinct plugin
+
+Both the org bot (`plugin-slack`) and personal-OAuth (`plugin-slack-user`)
+use the same Slack app credentials (`SLACK_CLIENT_ID` /
+`SLACK_CLIENT_SECRET`). The app manifest declares both bot scopes and user
+scopes. Tradeoff: an admin reinstalling the app sees all declared scopes
+in the approval prompt, including the user scopes personal Slack needs.
+This is preferred over managing two separate Slack apps + two sets of env
+vars per deploy.
+
+The plugins are separately toggleable in admin plugin settings — disabling
+`slack` does NOT disable `slack-user`, and vice versa.
+
+### Routes
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/me/slack-user` | Status (oauthAvailable, connected, teamId, slackUserId) |
+| `POST` | `/api/me/slack-user/oauth/start` | Mint the Slack authorize URL with a signed state bound to the user |
+| `GET` | `/auth/slack-user/callback` | Slack redirects here after consent; exchanges the code and issues an encrypted claim blob (public, no auth middleware) |
+| `POST` | `/api/me/slack-user/oauth/claim` | Redeem the claim blob — the authenticated bind step |
+| `DELETE` | `/api/me/slack-user/oauth` | Disconnect (revoke credential + delete integration) |
+
+The callback lives at `/auth/slack-user/callback` — outside `/api/*` so it
+bypasses the shared bearer-auth middleware (Slack redirects the browser
+with no `Authorization` header). Sibling pattern of `/auth/github`.
+**Mount order matters**: it must be registered before the generic `/auth`
+router, whose `GET /:provider/callback` would otherwise shadow it (Hono
+dispatches in registration order).
+
+### Claim-based finalization (CSRF defense)
+
+The callback would be trivially CSRF'able if it bound the credential from
+the signed `state` alone: an attacker could mint a state for their own
+`userId` and deliver the resulting consent link to a victim — the
+victim's `xoxp` token would then land under the attacker's account.
+
+Defense: the callback persists **nothing**. It exchanges the code,
+validates scopes, then encrypts the exchange result (userId, xoxp token,
+metadata, 5-minute expiry) into an AES-GCM claim blob under the worker
+`ENCRYPTION_KEY` and redirects to
+`/integrations?slack_user=claim&claim=<blob>`. The frontend redeems the
+blob via the authenticated `POST /api/me/slack-user/oauth/claim`, which
+requires `claim.userId === authenticated user` before storing anything.
+That single check is the whole defense: no matter whose browser ran the
+consent flow or who obtains the blob (delivered link, URL leak, replay),
+the credential can only ever be bound by the user the flow was started
+for, over their own authenticated channel. A browser-bound cookie is
+unnecessary — which also sidesteps the cross-origin `Set-Cookie` drop
+that broke the earlier cookie-based design (frontend and worker run on
+different origins; browsers discard cookies set on cross-site fetch
+responses).
+
+Error codes surface as `?slack_user=error&reason=…` from the callback and
+as `{ error, code }` JSON from the claim endpoint; the frontend maps both
+through one label table (`user_mismatch`, `invalid_claim`,
+`claim_expired`, `already_linked`, `missing_scopes`, …).
+
+### Token exchange + storage
+
+- `slackUserProvider.getOAuthUrl` mints the authorize URL (scope=empty,
+  user_scope=SLACK_USER_SCOPES joined) from `/oauth/start`.
+- `slackUserProvider.exchangeOAuthCode` calls `oauth.v2.access` and
+  returns `{ access_token, scope, slack_user_id, team_id, team_name }`.
+- The callback validates every requested scope was granted (surfacing
+  `missing_scopes` on partial approval); the claim endpoint checks for cross-user collisions
+  via `json_extract(metadata, '$.slack_user_id')` (returns
+  `already_linked` if a different user is already linked to that Slack
+  identity), then `storeCredential` + `ensureIntegration` (atomic
+  upsert on `(userId, service, scope)` — safe against concurrent
+  callbacks).
+
+### Revocation lifecycle
+
+Slack marks the token invalid on `token_revoked`, `invalid_auth`,
+`account_inactive`, `not_authed`. The plugin returns
+`ActionResult.revokeCredential = true` on any of these; the executor
+(`services/session-tools.executeAction`) then clears the credential row
+and marks the integration status `error` with a "reconnect" message so
+`GET /api/me/slack-user` reports `connected: false` on the next poll.
+
+### Risk levels
+
+Message-reading tools (`search_messages`, `read_history`, `read_thread`)
+are `medium` (require_approval) — the owner's private DMs are readable
+by anything driving the agent (prompt injection, another participant,
+workflow nodes) otherwise. `list_channels` is `low` (metadata-only).
+All write / act-as tools are `high`.
+
 ## Telegram Bot
 
 ### Setup Flow

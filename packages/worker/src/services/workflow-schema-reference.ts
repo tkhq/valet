@@ -46,6 +46,14 @@ export function getWorkflowSchemaReference() {
       ifBranches: ['true', 'false'],
       note: 'Edges connect top-level node IDs only. Edges from if nodes must set fromOutput to "true" or "false".',
     },
+    // Every medium/high-risk tool node raises a human approval gate
+    // before it executes. Not obvious to authors — flag it inline so
+    // scale planning happens before build time.
+    approvals: {
+      rule: 'Every tool node with riskLevel medium or high raises ONE human approval per invocation. For a foreach whose body is a tool node, the first iteration prompts; the run detail UI then offers "Approve remaining rows" to batch-clear the rest of the loop.',
+      lowRiskAutoRuns: 'Tool nodes with riskLevel `low` (queries, reads, list operations) do NOT gate — they execute directly.',
+      unattended: 'Scheduled/unattended runs stall on any pending approval. Prefer low-risk read tools inside foreach bodies when the workflow is intended to run unattended.',
+    },
     conditionOperations: {
       string: allowedIfOperations('string'),
       number: allowedIfOperations('number'),
@@ -102,14 +110,38 @@ export function getWorkflowSchemaReference() {
       {
         type: 'tool',
         required: ['id', 'type', 'service', 'action', 'params'],
-        optional: ['summary', 'onPolicyDeny', 'retries'],
-        description: 'Call a remote integration action.',
+        optional: ['summary', 'onPolicyDeny', 'retries', 'outputSchema'],
+        description: 'Call a remote integration action. Optionally declare `outputSchema` when the action returns a shape the tool package can\'t know statically (arbitrary-query tools like SOQL, raw SQL, HTTP fetch) — the per-node schema then feeds foreach typed-array derivation without needing an intermediate `set`/`llm` reshape node.',
+        outputSchemaExample: {
+          purpose: 'Make `{{nodes.query.data.records}}` a legal `foreach.items` source when the tool package doesn\'t register a static output schema.',
+          shape: '{ type: "object", properties: { records: { type: "array", items: { type: "object" } }, totalSize: { type: "number" } }, required: ["records"] }',
+        },
+        actionIdFormat: {
+          rule: 'Use the actionId exactly as it appears after the first colon in the tool id returned by `list_tools`. Do not strip prefixes, do not guess.',
+          examples: {
+            'salesforce-read-only:salesforce-read-only.soqlQuery': {
+              service: 'salesforce-read-only',
+              action: 'salesforce-read-only.soqlQuery',
+              note: 'Salesforce MCP actions are service-prefixed — the prefix is part of the action id.',
+            },
+            'google_workspace:sheets.write_spreadsheet': {
+              service: 'google_workspace',
+              action: 'sheets.write_spreadsheet',
+              note: 'Google Workspace actions are NOT service-prefixed.',
+            },
+          },
+          verify: 'workflows.save_draft (with validate=true) and workflows.validate check both. `unknown_tool_action` (typo on a KNOWN service) is a hard error with a nearest-match suggestion — a clean save proves the action id resolves. `unknown_tool_service` is a WARNING, not a hard block, because the catalog may not see per-user custom MCP connectors; check the warnings list to catch it.',
+        },
       },
       {
         type: 'set',
         required: ['id', 'type', 'values'],
-        optional: [],
-        description: 'Write structured values to nodes.<id>.data.',
+        optional: ['outputSchema'],
+        description: 'Write structured values to nodes.<id>.data. Optionally declare an outputSchema so array-typed fields inside `values` (including template-reference fields) count as valid foreach sources — the deterministic alternative to using an LLM node just to `.map()` an upstream result.',
+        outputSchemaExample: {
+          purpose: 'Make {{nodes.extract.data.records}} a legal `foreach.items` source when `values.records` is a template reference (not a literal array).',
+          shape: '{ type: "object", properties: { records: { type: "array", items: { type: "object" } } }, required: ["records"] }',
+        },
       },
       {
         type: 'if',
@@ -138,6 +170,32 @@ export function getWorkflowSchemaReference() {
           bodyTypes: FOREACH_BODY_NODE_TYPES,
           bodyNote: 'Nested if, wait, approval, trigger, and foreach nodes are not supported in foreach body.',
         },
+        // `items` must be a "provably-typed array" — the source node's
+        // shape must declare or produce an array at the referenced
+        // path. This is the single most common friction point when
+        // authoring data-processing workflows; the table below is the
+        // full valid-source enumeration.
+        itemsSources: {
+          rule: 'The referenced path must be provably an array; templates that could resolve to any shape are rejected with `foreach_items_untyped_array_output`.',
+          patterns: [
+            { source: 'trigger', template: '{{trigger.data.<field>}}', precondition: 'trigger.dataSchema.<field>.type === "array"' },
+            { source: 'llm', template: '{{nodes.<id>.data.<field>}} or {{nodes.<id>.data}} if root is array', precondition: 'outputSchema declares field/root as {"type":"array"}' },
+            { source: 'set', template: '{{nodes.<id>.data.<field>}}', precondition: 'Either `values` has a literal array at that path, OR `outputSchema` declares that field as {"type":"array"} (the deterministic-reshape path — pair with a template reference under `values`)' },
+            { source: 'tool', template: '{{nodes.<id>.data.<field>}}', precondition: 'Either a service-level toolOutputSchema is registered for this service:action declaring the field as array, OR the tool node itself carries `outputSchema` describing the shape (the arbitrary-query path — SOQL/SQL/HTTP fetch). Per-node schema beats registered.' },
+            { source: 'orchestrator/session', template: '{{nodes.<id>.data.output.<field>}}', precondition: 'wait.mode === "until_idle" AND outputSchema declares field as array. Note the `.data.output.<field>` nesting — llm/tool go direct at `.data.<field>`.' },
+            { source: 'orchestrator/session', template: '{{nodes.<id>.data.transcript}}', precondition: 'resultMode === "transcript"' },
+            { source: 'foreach', template: '{{nodes.<id>.data.items}}', precondition: 'Always valid (nested-foreach chaining).' },
+            { source: 'project', template: '{{nodes.<id>.data}}', precondition: 'Always valid — a project node\'s output IS the 2D array. Use `.data` at the root, NOT `.data.<field>`.' },
+          ],
+        },
+        // Downstream nodes reading a foreach's output must know the
+        // wrapper shape. This is not obvious — I had to read a trace
+        // to discover the .data nesting on each item.
+        resultShape: {
+          shape: '{{nodes.<foreach-id>.data}} = { items: Array<{ status: "completed"|"skipped"|"failed", data: <body node output> }>, count, inputCount, completedCount, skippedCount, failedCount, truncatedCount }',
+          itemAccess: 'Inside a downstream foreach iterating over the previous loop\'s output, each `item` has the wrapper shape too — reference `item.data.<field>` (NOT `item.<field>`).',
+          example: 'foreach `write_loop` over {{nodes.tier_loop.data.items}} → body params reference `{{item.data.tier}}`, `{{item.data.accountName}}`, etc.',
+        },
       },
       {
         type: 'orchestrator',
@@ -156,6 +214,25 @@ export function getWorkflowSchemaReference() {
         required: ['id', 'type'],
         optional: ['outcome', 'output', 'message'],
         description: 'End a branch with optional output.',
+      },
+      {
+        type: 'project',
+        required: ['id', 'type', 'source', 'columns'],
+        optional: ['includeHeader'],
+        description: 'Deterministic array-of-records → 2D array reshape. Reads `source` (must resolve to an array), then for each element emits an array of cells by resolving each column\'s dotted `path`. Emits `Array<Array<unknown>>` at `nodes.<id>.data`, ready to feed Sheets `write_spreadsheet` / `append_rows` directly. Pure; no LLM cost. Replaces the LLM-as-formatter anti-pattern for query-result → spreadsheet flows.',
+        columnShape: '{ header: string, path: string, default?: unknown }',
+        example: {
+          id: 'rows',
+          type: 'project',
+          source: '{{nodes.query.data.records}}',
+          includeHeader: true,
+          columns: [
+            { header: 'Account', path: 'Account.Name' },
+            { header: 'Funding', path: 'Account.Funding_Raised__c', default: 0 },
+            { header: 'Owner', path: 'Owner.Name' },
+          ],
+        },
+        foreachSource: 'A project node\'s output IS the array — use `{{nodes.<id>.data}}` (not `.data.<field>`) as the foreach source.',
       },
     ],
   };

@@ -163,9 +163,9 @@ adminGitHubRouter.post('/app/manifest', async (c) => {
     name: `Valet (${orgName})`,
     url: frontendUrl,
     hook_attributes: {
-      // Must match where webhooksRouter is mounted (app.route('/webhooks', …)),
-      // which sits BEFORE the /api/* auth middleware. Pointing at /api/webhooks
-      // would 401 every delivery (the auth middleware has no webhook exclusion).
+      // Must NOT be under /api/* — that prefix is behind authMiddleware, so
+      // GitHub's unauthenticated deliveries would 401. The webhook router is
+      // mounted at the top-level /webhooks (see index.ts).
       url: `${workerUrl}/webhooks/github`,
       active: true,
     },

@@ -12,6 +12,7 @@ export const orchestratorIdentities = sqliteTable('orchestrator_identities', {
   avatar: text(),
   customInstructions: text(),
   personaId: text(),
+  linksIndexedAt: text('links_indexed_at'),
   createdAt: text().notNull().default(sql`(datetime('now'))`),
   updatedAt: text().notNull().default(sql`(datetime('now'))`),
 }, (table) => [

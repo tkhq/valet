@@ -13,6 +13,7 @@ import { sessionsRouter } from './routes/sessions.js';
 import { integrationsRouter } from './routes/integrations.js';
 import { filesRouter } from './routes/files.js';
 import { webhooksRouter } from './routes/webhooks.js';
+import { runDeepHealthProbe } from './routes/health.js';
 import { agentRouter } from './routes/agent.js';
 import { authRouter } from './routes/auth.js';
 import { oauthRouter } from './routes/oauth.js';
@@ -37,6 +38,7 @@ import { notificationQueueRouter } from './routes/mailbox.js';
 import { channelsRouter } from './routes/channels.js';
 import { telegramApiRouter } from './routes/telegram.js';
 import { slackAdminRouter, slackUserRouter } from './routes/slack.js';
+import { slackUserOAuthRouter, slackUserCallbackRouter } from './routes/slack-user.js';
 import { adminGitHubRouter, githubAppSetupCallbackRouter } from './routes/admin-github.js';
 import { slackEventsRouter } from './routes/slack-events.js';
 import { channelWebhooksRouter } from './routes/channel-webhooks.js';
@@ -66,6 +68,10 @@ import {
   markSessionsArchived,
   getTrackedGitHubResources,
   pruneEmptyJournals,
+  sweepExpiredMemories,
+  recordSweepSuccess,
+  recordSweepError,
+  deleteWebhookDeliveriesOlderThan,
 } from './lib/db.js';
 import { getCredential } from './services/credentials.js';
 import { getDb } from './lib/drizzle.js';
@@ -167,12 +173,30 @@ app.get('/health', (c) => {
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Deep health probe: exercises the critical dependencies (D1, R2, EventBus DO)
+// so an external canary can distinguish "worker up" from "worker up but a
+// backing store is unreachable". Unauthenticated like /health, and exposes
+// nothing beyond a per-check ok flag + latency. 503 if any check fails.
+app.get('/health/deep', async (c) => {
+  const result = await runDeepHealthProbe(c.env);
+  return c.json(result, result.status === 'ok' ? 200 : 503);
+});
+
 // Webhook routes (authenticated via webhook signatures)
 app.route('/webhooks', webhooksRouter);
 
 // Unified GitHub auth router (login + link via GitHub App OAuth)
 // Must be mounted before both the legacy callback router and the generic /auth router
 app.route('/auth/github', githubAuthRouter);
+
+// Slack (personal) OAuth callback (unauthenticated — Slack redirects the
+// browser here with no Authorization header; identity comes from the signed
+// state, and the final credential bind happens on the authenticated
+// /api/me/slack-user/oauth/claim call). MUST be mounted before the generic
+// /auth router: oauthRouter registers GET /:provider/callback, and Hono
+// dispatches in registration order, so mounting after would shadow
+// /auth/slack-user/callback with the login-OAuth handler.
+app.route('/auth/slack-user', slackUserCallbackRouter);
 
 // OAuth routes (no auth required — handles login flow)
 app.route('/auth', oauthRouter);
@@ -234,6 +258,7 @@ app.route('/api/admin/disabled-actions', disabledActionsRouter);
 app.route('/api/admin/default-skills', orgDefaultSkillsRouter);
 app.route('/api/action-invocations', actionInvocationsRouter);
 app.route('/api/me/slack', slackUserRouter);
+app.route('/api/me/slack-user', slackUserOAuthRouter);
 app.route('/api/me/github', githubMeRouter);
 app.route('/api/invites', invitesApiRouter);
 app.route('/api/usage', usageRouter);
@@ -251,84 +276,135 @@ app.notFound((c) => {
   return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
 });
 
+// Pull an item count out of a sweep's return value when it reports one under a
+// recognised key. Sweeps report their processed-row count inconsistently
+// ({swept}/{retried}/{deleted}/{count}); anything else (void, {refreshed,failed},
+// {executions,...}) leaves the heartbeat's last_items null.
+function sweepItemCount(result: unknown): number | null {
+  if (typeof result !== 'object' || result === null) return null;
+  const r = result as Record<string, unknown>;
+  for (const key of ['swept', 'retried', 'deleted', 'count'] as const) {
+    if (typeof r[key] === 'number') return r[key];
+  }
+  return null;
+}
+
+/**
+ * Run one scheduled-handler sweep with timing + heartbeat recording.
+ *
+ * Times fn(), writes a cron_heartbeats row (success or error), and — critically
+ * — never lets a sweep failure OR a heartbeat-recording failure escape into the
+ * scheduled handler. Every sweep is independently isolated exactly as the old
+ * per-sweep try/catch blocks were; the heartbeat write is additionally wrapped
+ * so a broken cron_heartbeats table can't take down the whole handler.
+ */
+async function runSweep(
+  env: Env,
+  jobName: string,
+  fn: () => Promise<unknown>,
+): Promise<void> {
+  const start = Date.now();
+  try {
+    const result = await fn();
+    const durationMs = Date.now() - start;
+    try {
+      await recordSweepSuccess(env.DB, jobName, { durationMs, items: sweepItemCount(result) });
+    } catch (recordError) {
+      console.error(`[heartbeat] failed to record success for ${jobName}:`, recordError);
+    }
+  } catch (error) {
+    const durationMs = Date.now() - start;
+    console.error(`[sweep:${jobName}] error:`, error);
+    try {
+      await recordSweepError(env.DB, jobName, {
+        durationMs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } catch (recordError) {
+      console.error(`[heartbeat] failed to record error for ${jobName}:`, recordError);
+    }
+  }
+}
+
 // Scheduled handler for cron triggers
 const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) => {
   log.info('scheduled handler running', { cron: event.cron });
 
-  try {
-    await dispatchScheduledWorkflows(event, env);
-  } catch (error) {
-    console.error('Scheduled workflow dispatch error:', error);
-  }
+  await runSweep(env, 'workflow_dispatch', () => dispatchScheduledWorkflows(event, env));
 
   // Sweep workflow executions stuck in `cancelling` longer than 5min
   // (cleanup helper failed mid-step; rerun idempotently).
-  try {
+  await runSweep(env, 'cancel_cleanup', async () => {
     const { sweepStuckCancellations } = await import('./workflows/cancel-cleanup.js');
-    const { swept } = await sweepStuckCancellations(env);
-    if (swept > 0) console.log(`[cancel-cleanup] swept ${swept} stuck cancelling rows`);
-  } catch (error) {
-    console.error('Workflow cancellation sweep error:', error);
-  }
+    const result = await sweepStuckCancellations(env);
+    if (result.swept > 0) console.log(`[cancel-cleanup] swept ${result.swept} stuck cancelling rows`);
+    return result;
+  });
 
   // Retry workflow-owned session termination for executions that reached
   // completed/failed/cancelled but whose immediate cleanup was incomplete.
-  try {
+  await runSweep(env, 'spawned_session_cleanup', async () => {
     const { sweepTerminalSpawnedSessions } = await import('./workflows/spawned-session-cleanup.js');
-    const { executions, attempted, terminated, failed } = await sweepTerminalSpawnedSessions(env);
-    if (executions > 0) {
-      console.log(`[spawned-session-cleanup] swept ${executions} terminal executions; terminated ${terminated}/${attempted}; failed=${failed.length}`);
+    const result = await sweepTerminalSpawnedSessions(env);
+    if (result.executions > 0) {
+      console.log(`[spawned-session-cleanup] swept ${result.executions} terminal executions; terminated ${result.terminated}/${result.attempted}; failed=${result.failed.length}`);
     }
-  } catch (error) {
-    console.error('Workflow spawned-session cleanup sweep error:', error);
-  }
+    return result;
+  });
 
   // Retry sendEvent for approvals that resolved in D1 but whose
   // workflow_executions row is still parked in waiting_approval — the
   // resolve API committed the row but sendEvent failed.
-  try {
+  await runSweep(env, 'approval_resume', async () => {
     const { sweepStuckApprovals } = await import('./workflows/cancel-cleanup.js');
-    const { retried } = await sweepStuckApprovals(env);
-    if (retried > 0) console.log(`[approval-resume-sweep] retried ${retried} stuck approvals`);
-  } catch (error) {
-    console.error('Approval resume sweep error:', error);
-  }
+    const result = await sweepStuckApprovals(env);
+    if (result.retried > 0) console.log(`[approval-resume-sweep] retried ${result.retried} stuck approvals`);
+    return result;
+  });
 
-  try {
-    await reconcileGitHubResources(env);
-  } catch (error) {
-    console.error('GitHub reconciliation error:', error);
-  }
+  await runSweep(env, 'github_reconcile', () => reconcileGitHubResources(env));
 
   // Nightly: archive terminated sessions older than 7 days + prune empty journals
   if (event.cron === '0 3 * * *') {
-    try {
-      await archiveTerminatedSessions(env);
-    } catch (error) {
-      console.error('Session archive error:', error);
-    }
+    await runSweep(env, 'nightly_session_archive', () => archiveTerminatedSessions(env));
 
-    try {
+    await runSweep(env, 'nightly_trace_retention', async () => {
       const { sweepExpiredTraceRows, sweepExpiredSpawnedSessions } = await import('./workflows/trace-writer.js');
       const { deleted } = await sweepExpiredTraceRows(env);
       if (deleted > 0) console.log(`[trace-retention] deleted ${deleted} expired trace rows`);
       const { deleted: spawnedDeleted } = await sweepExpiredSpawnedSessions(env);
       if (spawnedDeleted > 0) console.log(`[trace-retention] deleted ${spawnedDeleted} expired spawned-session rows`);
-    } catch (error) {
-      console.error('Trace retention sweep error:', error);
-    }
+      // Combined count across both retention deletes.
+      return { deleted: deleted + spawnedDeleted };
+    });
 
-    try {
-      const pruned = await pruneEmptyJournals(env.DB);
+    await runSweep(env, 'nightly_journal_prune', async () => {
+      // pruneEmptyJournals is now per-user scoped; sweep every user that has
+      // journal files rather than the old single unscoped query.
+      const userRows = await env.DB
+        .prepare("SELECT DISTINCT user_id FROM orchestrator_memory_files WHERE path LIKE 'journal/%.md'")
+        .all<{ user_id: string }>();
+      let pruned = 0;
+      for (const { user_id } of userRows.results ?? []) {
+        pruned += await pruneEmptyJournals(env.DB, { userId: user_id });
+      }
       if (pruned > 0) {
         console.log(`Pruned ${pruned} empty journal stubs`);
       }
-    } catch (error) {
-      console.error('Journal prune error:', error);
-    }
+      return { count: pruned };
+    });
+
+    // Expiry sweep: delete expired memory files + their FTS/link rows.
+    await runSweep(env, 'nightly_memory_expiry', async () => {
+      const swept = await sweepExpiredMemories(env.DB);
+      if (swept > 0) {
+        console.log(`Swept ${swept} expired memory files`);
+      }
+      return { swept };
+    });
 
     // Delete analytics events older than 90 days (batched to avoid D1 timeout)
-    try {
+    await runSweep(env, 'nightly_analytics_retention', async () => {
       const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
       let totalDeleted = 0;
       let deleted: number;
@@ -342,12 +418,21 @@ const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) 
       if (totalDeleted > 0) {
         console.log(`Analytics retention: deleted ${totalDeleted} events older than 90 days`);
       }
-    } catch (error) {
-      console.error('Analytics retention error:', error);
-    }
+      return { deleted: totalDeleted };
+    });
+
+    // Prune webhook delivery telemetry older than 30 days (batched to avoid D1 timeout)
+    await runSweep(env, 'nightly_webhook_retention', async () => {
+      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const deleted = await deleteWebhookDeliveriesOlderThan(env.DB, cutoff);
+      if (deleted > 0) {
+        console.log(`Webhook delivery retention: deleted ${deleted} rows older than 30 days`);
+      }
+      return { deleted };
+    });
 
     // Prune schedule tick dedup rows older than 7 days (only needed for ~4h catch-up window, batched to avoid D1 timeout)
-    try {
+    await runSweep(env, 'nightly_schedule_tick_retention', async () => {
       const tickCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
       let totalTicksDeleted = 0;
       let ticksDeleted: number;
@@ -361,29 +446,23 @@ const scheduled: ExportedHandlerScheduledHandler<Env> = async (event, env, ctx) 
       if (totalTicksDeleted > 0) {
         console.log(`Schedule tick retention: deleted ${totalTicksDeleted} rows older than 7 days`);
       }
-    } catch (error) {
-      console.error('Schedule tick retention error:', error);
-    }
+      return { deleted: totalTicksDeleted };
+    });
   }
 
   // Reconcile orchestrator state (replaces autoRestartDeadOrchestrators)
-  try {
-    await reconcileOrchestrators(env);
-  } catch (error) {
-    console.error('[OrchestratorReconcile] Reconciliation error:', error);
-  }
+  await runSweep(env, 'orchestrator_reconcile', () => reconcileOrchestrators(env));
 
   // Proactively refresh OAuth credentials expiring within 15 minutes (runs every 5 min)
   if (new Date().getMinutes() % 5 === 0) {
-    try {
+    await runSweep(env, 'credential_refresh', async () => {
       const { refreshExpiringCredentials } = await import('./services/credentials.js');
       const result = await refreshExpiringCredentials(env);
       if (result.refreshed > 0 || result.failed > 0) {
         console.log(`Credential refresh sweep: ${result.refreshed} refreshed, ${result.failed} failed`);
       }
-    } catch (error) {
-      console.error('Credential refresh sweep error:', error);
-    }
+      return result;
+    });
   }
 };
 

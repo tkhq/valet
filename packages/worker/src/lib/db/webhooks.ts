@@ -60,8 +60,17 @@ export async function findSessionsByPR(
   repoFullName: string,
   prNumber: number
 ) {
+  // pr_number and source_pr_number are distinct relationships: pr_number is a
+  // PR the session produced, source_pr_number is a PR the session was spawned
+  // FROM. Callers need both to avoid stamping authorship onto source-only
+  // matches.
   const rows = await db
-    .select({ session_id: sessionGitState.sessionId })
+    .select({
+      session_id: sessionGitState.sessionId,
+      pr_number: sessionGitState.prNumber,
+      source_pr_number: sessionGitState.sourcePrNumber,
+      pr_created_at: sessionGitState.prCreatedAt,
+    })
     .from(sessionGitState)
     .where(
       and(
@@ -81,6 +90,7 @@ export async function findSessionsByRepoBranch(
     .select({
       session_id: sessionGitState.sessionId,
       commit_count: sessionGitState.commitCount,
+      pr_number: sessionGitState.prNumber,
     })
     .from(sessionGitState)
     .where(

@@ -116,6 +116,45 @@ describe('createExecution', () => {
     expect(row?.mode).toBe('production');
   });
 
+  it('stamps the active span traceparent into the CF Workflow params, and omits it with no active span', async () => {
+    const { context: otelContext, trace: otelTrace } = await import('@opentelemetry/api');
+    const { AsyncLocalStorageContextManager } = await import('@opentelemetry/context-async-hooks');
+    const { BasicTracerProvider } = await import('@opentelemetry/sdk-trace-base');
+
+    makeWorkflow('wf1', dagWithSet());
+    const env = makeEnv();
+
+    // No active span → the key must be absent, not undefined-valued.
+    const cold = await createExecution(env, {
+      workflowId: 'wf1',
+      user: { id: 'u1' },
+      trigger: { type: 'manual', timestamp: 't', data: {}, metadata: {} },
+    });
+    const coldParams = createdInstances.find((i) => i.id === cold.executionId)!.params as Record<string, unknown>;
+    expect('traceparent' in coldParams).toBe(false);
+
+    const manager = new AsyncLocalStorageContextManager().enable();
+    otelContext.setGlobalContextManager(manager);
+    try {
+      const provider = new BasicTracerProvider();
+      const tracer = provider.getTracer('test');
+      await tracer.startActiveSpan('dispatch', async (span) => {
+        const hot = await createExecution(env, {
+          workflowId: 'wf1',
+          user: { id: 'u1' },
+          trigger: { type: 'manual', timestamp: 't', data: {}, metadata: {} },
+        });
+        const params = createdInstances.find((i) => i.id === hot.executionId)!.params as Record<string, unknown>;
+        const sc = span.spanContext();
+        expect(params['traceparent']).toBe(`00-${sc.traceId}-${sc.spanId}-01`);
+        span.end();
+      });
+      await provider.shutdown();
+    } finally {
+      otelContext.disable();
+    }
+  });
+
   it('rejects when the workflow is not owned by the caller', async () => {
     makeWorkflow('wf1', dagWithSet());
     const env = makeEnv();

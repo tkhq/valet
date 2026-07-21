@@ -1,4 +1,4 @@
-import { type SessionThread, TERMINAL_SESSION_STATUSES } from '@valet/shared';
+import { type SessionThread, type OrchestratorIdentity, TERMINAL_SESSION_STATUSES } from '@valet/shared';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
 import type { ThreadOriginInput } from '../lib/db/threads.js';
@@ -9,6 +9,7 @@ import { buildOrchestratorPersonaFiles } from '../lib/orchestrator-persona.js';
 import { findPersonaByName, upsertPersonaByName, upsertPersonaFile } from '../lib/db/personas.js';
 import { generateRunnerToken, assembleProviderEnv, assembleCredentialEnv } from '../lib/env-assembly.js';
 import { ensureTodayJournal } from '../lib/db/memory-files.js';
+import { ensureLinksIndexed } from '../lib/db/memory-link-backfill.js';
 import { loadMemorySnapshot, formatMemorySnapshot } from '../lib/memory-snapshot.js';
 import { deriveSandboxJwtSecret } from '../lib/jwt.js';
 
@@ -53,7 +54,7 @@ export async function restartOrchestratorSession(
   env: Env,
   userId: string,
   userEmail: string,
-  identity: { id: string; name: string; handle: string; customInstructions?: string | null; personaId?: string | null },
+  identity: OrchestratorIdentity,
   requestUrl?: string
 ): Promise<{ sessionId: string }> {
   const appDb = getDb(env.DB);
@@ -100,10 +101,13 @@ export async function restartOrchestratorSession(
     identity = { ...identity, personaId };
   }
 
-  const personaFiles = buildOrchestratorPersonaFiles(identity as any);
+  const personaFiles = buildOrchestratorPersonaFiles(identity);
 
-  // Ensure today's journal exists and load memory snapshot
-  await ensureTodayJournal(env.DB, userId);
+  // Ensure today's journal exists and load memory snapshot. Eagerly backfill the
+  // link index once per user (post-deploy) so link-consuming paths never race an
+  // empty table; idempotent and cheap (one indexed read) on every later start.
+  await ensureLinksIndexed(env.DB, { userId });
+  await ensureTodayJournal(env.DB, { userId });
   const snapshot = await loadMemorySnapshot(env.DB, userId);
   if (snapshot.files.length > 0) {
     personaFiles.push({

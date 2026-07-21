@@ -30,6 +30,21 @@ export interface IntegrationConfig {
   filters?: Record<string, unknown>;
 }
 
+/**
+ * Response shape for `GET /api/me/slack-user`. Reports whether the worker
+ * has the Slack app credentials configured, whether the current user has
+ * linked their personal Slack account, and (when linked) the Slack team +
+ * user id captured at OAuth time.
+ */
+export interface SlackUserOAuthStatus {
+  /** SLACK_CLIENT_ID + SLACK_CLIENT_SECRET are set on the worker. */
+  oauthAvailable: boolean;
+  connected: boolean;
+  slackUserId: string | null;
+  teamId: string | null;
+  teamName: string | null;
+}
+
 // EventBus types
 export type EventBusEventType =
   | 'session.update'
@@ -834,6 +849,15 @@ export interface MemoryFile {
   path: string;
   content: string;
   title: string;
+  type: string;
+  description: string;
+  tags: string[];
+  resource: string;
+  extras: Record<string, string>;
+  sensitivity: 'private' | 'shareable';
+  origin: '' | 'user-stated' | 'inferred' | 'imported';
+  sourceSessionId: string;
+  expires: string | null;
   relevance: number;
   pinned: boolean;
   version: number;
@@ -847,6 +871,51 @@ export interface MemoryFileListing {
   size: number;
   updatedAt: string;
   pinned: boolean;
+  type: string;
+  description: string;
+  tags: string[];
+  resource: string;
+  sensitivity: 'private' | 'shareable';
+  expires: string | null;
+}
+
+export interface MemoryLink {
+  fromPath: string;
+  toPath: string;
+  context: string;
+}
+
+/** One ring of link neighbors returned by `GET /me/memory/links`. */
+export interface MemoryLinkNeighbor {
+  path: string;
+  title: string;
+  type: string;
+  description: string;
+  context?: string;
+  phantom: boolean;
+  relation: 'out' | 'in' | 'session';
+}
+
+export interface MemoryGraphNode {
+  id: string;
+  kind: 'concept' | 'resource' | 'phantom' | 'session' | 'tag';
+  path?: string;
+  title?: string;
+  type?: string;
+  topDir?: string;
+  label?: string;
+}
+
+export interface MemoryGraphEdge {
+  from: string;
+  to: string;
+  kind: 'link' | 'session' | 'resource' | 'containment';
+  context?: string;
+}
+
+export interface MemoryGraph {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
 }
 
 export type PatchOperation =
@@ -862,33 +931,57 @@ export interface PatchResult {
   version: number;
   applied: number;
   skipped: string[];
+  warnings: string[];
 }
 
 export interface MemoryFileSearchResult {
-  path: string;
-  snippet: string;
-  relevance: number;
+  path: string; snippet: string; relevance: number;
+  title: string; type: string; description: string; tags: string[];
+  resource: string; inboundLinks: number; expired: boolean;
 }
 
-/** A single memory file inside a portable export bundle. */
-export interface MemoryExportFile {
-  path: string;
+export interface MemorySearchOptions { pathPrefix?: string; resource?: string; includeExpired?: boolean; limit?: number }
+
+/** One entry in an OKF export manifest: the rendered document plus sync state. */
+export interface MemoryExportEntry {
+  /** Full rendered OKF document (frontmatter projection + body). */
   content: string;
-  pinned: boolean;
-  updatedAt: string;
+  /** SHA-256 hex of `content` — the sync change-detection primitive. */
+  hash: string;
+  /**
+   * Instance-local state that never appears in frontmatter (the manifest
+   * sidecar). Omitted for shareable exports and for generated index files.
+   */
+  valetState?: { pinned: boolean; relevance: number; version: number; sourceSessionId: string };
 }
 
 /**
- * Portable snapshot of a user's orchestrator memory. Produced by
- * `GET /api/me/memory/export` and consumed by `POST /api/me/memory/import`,
- * letting users move memory between environments (e.g. dev → prod).
+ * Portable OKF bundle of a user's orchestrator memory. Produced by
+ * `GET /api/me/memory/export` and consumed by `POST /api/me/memory/import`.
+ * Deterministic: export → import (trusted) → export yields an identical manifest.
  */
-export interface MemoryExportBundle {
-  /** Bundle format version. Bump on breaking shape changes. */
-  version: 1;
-  exportedAt: string;
-  count: number;
-  files: MemoryExportFile[];
+export interface MemoryExportManifest {
+  okfVersion: '0.1';
+  include: 'all' | 'shareable';
+  /** path → entry, keys sorted; includes generated `index.md` per directory. */
+  files: Record<string, MemoryExportEntry>;
+  /** Shareable files whose bodies link to private paths (residual leak flags). */
+  leakFlags: string[];
+}
+
+/** Outcome of a mem_move operation. */
+export interface MemoryMoveResult {
+  from: string;
+  to: string;
+  pinnedBefore: boolean;
+  pinnedAfter: boolean;
+  /** The file's current type (carried through the move unchanged). */
+  type: string;
+  /** Directory-default type for the destination (hints at reclassify when it differs from type). */
+  typeDefaultForDest: string;
+  referencersUpdated: number;
+  /** Paths of referencing files that lost the RMW version-guard race and were skipped. */
+  referencersSkipped: string[];
 }
 
 /** Outcome of importing a memory bundle. */
@@ -901,6 +994,12 @@ export interface MemoryImportResult {
    * file count past the cap (e.g. merging into an already-large account).
    */
   pruned: number;
+  /** normalized original path → final stored path, for every remap (lib/, log.md, depth). */
+  renamed: Record<string, string>;
+  /** Unknown `valet.*` sub-keys dropped by the disposition policy (deduped). */
+  droppedValetKeys: string[];
+  /** `okf_version` read from the bundle's root index, when present. */
+  okfVersion: string | null;
 }
 
 export interface OrchestratorInfo {
@@ -1278,6 +1377,89 @@ export interface AnalyticsEventsResponse {
   }>;
   total: number;
   period: number;
+}
+
+/**
+ * One window of outcome/value metrics for the admin "Value" tab. The route
+ * returns the trailing window plus the equal-length window before it so the
+ * client can render deltas. All rates are 0–1 fractions; null means the
+ * denominator was empty for the window.
+ */
+export interface ValueMetricsWindow {
+  // Cost per resolved task
+  totalCost: number | null;
+  resolvedWorkflowRuns: number;
+  resolvedSessions: number;
+  resolvedTasks: number;
+  costPerResolvedTask: number | null;
+  // Accepted output (proxy: explicit approval decisions)
+  approvalsAccepted: number;
+  approvalsDenied: number;
+  approvalsExpired: number;
+  acceptedOutputRate: number | null;
+  // Session errors (recomputed live from current session status; the
+  // agent-mailbox escalation signal was retired with the mailbox)
+  erroredSessions: number;
+  endedSessions: number;
+  failedWorkflowRuns: number;
+  terminalWorkflowRuns: number;
+  sessionErrorRate: number | null;
+  // Cycle time (proxy: absolute time-to-resolution, no pre-Valet baseline)
+  medianSessionMinutes: number | null;
+  medianWorkflowMinutes: number | null;
+  // Review burden (proxy: agent-authored PR outcomes)
+  prsOpened: number;
+  prsMerged: number;
+  prsClosedUnmerged: number;
+  prsStillOpen: number;
+  prMergeRate: number | null;
+  medianHoursToMerge: number | null;
+  // Model-routing efficiency. Unknown-tier tokens are excluded from the
+  // share so unclassified model names cannot inflate it.
+  unknownTokens: number;
+  nonFrontierTokenShare: number | null;
+  sessionsWithModelUsage: number;
+  frontierFreeSessionShare: number | null;
+  // What ended sessions were started from (session_git_state.source_type;
+  // 'none' = no git context)
+  sessionSources: Array<{
+    sourceType: string;
+    sessions: number;
+  }>;
+}
+
+export interface AnalyticsValueResponse {
+  current: ValueMetricsWindow;
+  previous: ValueMetricsWindow;
+  period: number;
+}
+
+/**
+ * Application-state health for the admin dashboard: the last outcome of every
+ * scheduled sweep (from cron_heartbeats) plus a 24h webhook-delivery rollup.
+ * `stale` is derived server-side — a job is stale when it hasn't succeeded in
+ * more than 3x its expected interval; jobs with no known interval are never
+ * flagged stale.
+ */
+export interface AnalyticsHealthResponse {
+  jobs: Array<{
+    jobName: string;
+    lastSuccessAt: string | null;
+    lastErrorAt: string | null;
+    lastError: string | null;
+    lastDurationMs: number | null;
+    lastItems: number | null;
+    stale: boolean;
+  }>;
+  webhooks: Array<{
+    provider: string;
+    received: number;
+    invalidSignature: number;
+    processed: number;
+    failed: number;
+    total: number;
+    lastCreatedAt: string | null;
+  }>;
 }
 
 // Plugin types

@@ -4,6 +4,7 @@ import * as webhookService from '../services/webhooks.js';
 import { getDb } from '../lib/drizzle.js';
 import { loadGitHubApp } from '../services/github-app.js';
 import { handleInstallationWebhook } from '../services/github-installations.js';
+import { recordWebhookDeliveryFireAndForget as recordDelivery } from '../lib/webhook-delivery.js';
 
 export const webhooksRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -38,19 +39,37 @@ webhooksRouter.all('/*', async (c, next) => {
   // Strip the leading '?' so the service hashes only the pair list.
   const rawQuery = url.search.startsWith('?') ? url.search.slice(1) : url.search;
 
-  const result = await webhookService.handleGenericWebhook(
-    c.env,
-    webhookPath,
-    c.req.method,
-    rawBody,
-    headers,
-    query,
-    rawQuery,
-  );
+  let result: Awaited<ReturnType<typeof webhookService.handleGenericWebhook>>;
+  try {
+    result = await webhookService.handleGenericWebhook(
+      c.env,
+      webhookPath,
+      c.req.method,
+      rawBody,
+      headers,
+      query,
+      rawQuery,
+    );
+  } catch (error) {
+    recordDelivery(c, {
+      provider: 'generic',
+      eventType: webhookPath.split('/')[0] || null,
+      outcome: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 
   if (!result) {
     return next();
   }
+
+  // A matched trigger fired an execution — that's an acted-on delivery.
+  recordDelivery(c, {
+    provider: 'generic',
+    eventType: webhookPath.split('/')[0] || null,
+    outcome: 'processed',
+  });
 
   return c.json(result.result, result.statusCode as any);
 });
@@ -78,6 +97,7 @@ webhooksRouter.post('/github', async (c) => {
 
   const isValid = await app.webhooks.verify(rawBody, signature);
   if (!isValid) {
+    recordDelivery(c, { provider: 'github', eventType: event, outcome: 'invalid_signature' });
     return c.json({ error: 'Invalid signature' }, 401);
   }
 
@@ -85,11 +105,18 @@ webhooksRouter.post('/github', async (c) => {
 
   console.log(`[github webhook] ${event}.${payload.action ?? ''} (${deliveryId})`);
 
+  // Track the delivery outcome: a matched handler that ran → 'processed';
+  // a handler that threw → 'failed'; an event we don't act on → 'received'.
+  let acted = false;
+  let handlerError: unknown;
+
   // Installation lifecycle events — sync to github_installations table
   if (event === 'installation' && ['created', 'deleted', 'suspend', 'unsuspend'].includes(payload.action)) {
     try {
       await handleInstallationWebhook(getDb(c.env.DB), payload);
+      acted = true;
     } catch (error) {
+      handlerError = error;
       console.error('[github webhook] installation handler error:', error);
     }
   }
@@ -98,7 +125,9 @@ webhooksRouter.post('/github', async (c) => {
   if (event === 'pull_request') {
     try {
       await webhookService.handlePullRequestWebhook(c.env, payload);
+      acted = true;
     } catch (error) {
+      handlerError = error;
       console.error('[github webhook] pull_request handler error:', error);
     }
     // Fan the event out to any github-app triggers scoped to this repo (the
@@ -123,7 +152,9 @@ webhooksRouter.post('/github', async (c) => {
   if (event === 'push') {
     try {
       await webhookService.handlePushWebhook(c.env, payload);
+      acted = true;
     } catch (error) {
+      handlerError = error;
       console.error('[github webhook] push handler error:', error);
     }
   }
@@ -133,6 +164,13 @@ webhooksRouter.post('/github', async (c) => {
   if (!handled.has(event)) {
     console.log(`[github webhook] unhandled event: ${event}.${payload.action ?? ''}`);
   }
+
+  recordDelivery(c, {
+    provider: 'github',
+    eventType: event,
+    outcome: handlerError ? 'failed' : acted ? 'processed' : 'received',
+    error: handlerError ? (handlerError instanceof Error ? handlerError.message : String(handlerError)) : null,
+  });
 
   // Always return 200 — failing to ACK causes GitHub to retry and amplify errors
   return c.json({ received: true, event, deliveryId });

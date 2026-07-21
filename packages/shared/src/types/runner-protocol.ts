@@ -8,6 +8,21 @@
 
 import type { AvailableModels, DiffFile } from './index.js';
 
+/**
+ * Metadata a mem-write may set. Mirrors `MemoryWriteMeta` in
+ * `packages/worker/src/lib/db/memory-files.ts` — duplicated here because
+ * `packages/shared` cannot depend on `packages/worker`. Keep in sync.
+ */
+export interface MemoryWriteMeta {
+  type?: string;
+  description?: string;
+  tags?: string[];
+  resource?: string;
+  sensitivity?: 'private' | 'shareable';
+  origin?: string;
+  expires?: string; // '' clears; ISO or D1 form sets
+}
+
 // ─── Supporting Types ──────────────────────────────────────────────────────────
 
 /** File attachment metadata for prompt messages */
@@ -68,6 +83,10 @@ export type DOToRunnerMessage =
       channelType?: string;
       channelId?: string;
       threadId?: string;
+      /** W3C traceparent of the originating turn's Worker/DO span, injected at dispatch so the
+       *  runner can emit child spans on the same trace and the DO can parent the runner's reply
+       *  spans to it (see SessionAgentDO.sendPrompt / resolveTurnParent). */
+      traceparent?: string;
       /** Original channel info before thread normalization (e.g., slack:D123:threadTs).
        *  Used by the Runner for the [via ...] attribution prefix so the agent knows
        *  which external channel to reply to even when channelType is 'thread'. */
@@ -132,11 +151,24 @@ export type DOToRunnerMessage =
   | { type: 'list-pull-requests-result'; requestId: string; pulls?: unknown[]; error?: string }
   | { type: 'inspect-pull-request-result'; requestId: string; data?: unknown; error?: string }
   | { type: 'terminate-child-result'; requestId: string; success?: boolean; error?: string }
-  | { type: 'mem-read-result'; requestId: string; file?: unknown; files?: unknown[]; error?: string }
-  | { type: 'mem-write-result'; requestId: string; file?: unknown; error?: string }
+  | {
+      type: 'mem-read-result';
+      requestId: string;
+      file?: unknown;
+      files?: unknown[];
+      document?: string;
+      backlinks?: unknown[];
+      notices?: string[];
+      listing?: unknown[];
+      index?: string;
+      error?: string;
+    }
+  | { type: 'mem-write-result'; requestId: string; file?: unknown; warnings?: string[]; error?: string }
+  | { type: 'mem-move-result'; requestId: string; result?: unknown; error?: string }
+  | { type: 'mem-links-result'; requestId: string; neighbors?: unknown[][]; truncated?: boolean; error?: string }
   | { type: 'mem-patch-result'; requestId: string; result?: unknown; error?: string }
-  | { type: 'mem-rm-result'; requestId: string; deleted?: number; error?: string }
-  | { type: 'mem-search-result'; requestId: string; results?: unknown[]; error?: string }
+  | { type: 'mem-rm-result'; requestId: string; deleted?: number; inboundWarning?: string | null; error?: string }
+  | { type: 'mem-search-result'; requestId: string; results?: unknown[]; suppressedExpired?: number; error?: string }
   | { type: 'list-personas-result'; requestId: string; personas?: unknown[]; error?: string }
   | { type: 'list-channels-result'; requestId: string; channels?: unknown[]; error?: string }
   | { type: 'get-session-status-result'; requestId: string; sessionStatus?: unknown; error?: string }
@@ -362,8 +394,26 @@ export type RunnerToDOMessage =
       message?: string;
     }
   | { type: 'mem-read'; requestId: string; path?: string }
-  | { type: 'mem-write'; requestId: string; path: string; content: string }
-  | { type: 'mem-patch'; requestId: string; path: string; operations: unknown[] }
+  | {
+      type: 'mem-write';
+      requestId: string;
+      path: string;
+      // Optional: old runners omit these; create requires content, but
+      // metadata-only updates against an existing path may omit it.
+      content?: string;
+      meta?: MemoryWriteMeta;
+      threadId?: string;
+    }
+  | { type: 'mem-move'; requestId: string; from: string; to: string; threadId?: string }
+  | {
+      type: 'mem-links';
+      requestId: string;
+      path: string;
+      direction?: 'out' | 'in' | 'both';
+      depth?: 1 | 2 | 3;
+      includeJournal?: boolean;
+    }
+  | { type: 'mem-patch'; requestId: string; path: string; operations: unknown[]; threadId?: string }
   | { type: 'mem-rm'; requestId: string; path: string }
   | {
       type: 'mem-search';
@@ -371,6 +421,7 @@ export type RunnerToDOMessage =
       query: string;
       path?: string;
       limit?: number;
+      includeExpired?: boolean;
     }
   | { type: 'list-personas'; requestId: string }
   | { type: 'list-channels'; requestId: string }

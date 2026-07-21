@@ -13,7 +13,7 @@ import type { Env } from '../env.js';
  * drops every span, so nothing is recorded or exported and no network call is made.
  */
 
-type TracingEnv = Pick<Env, 'OTEL_EXPORTER_OTLP_ENDPOINT' | 'OTEL_EXPORTER_OTLP_HEADERS'>;
+export type TracingEnv = Pick<Env, 'OTEL_EXPORTER_OTLP_ENDPOINT' | 'OTEL_EXPORTER_OTLP_HEADERS'>;
 
 const DEFAULT_OTLP_BASE = 'http://localhost:4318';
 

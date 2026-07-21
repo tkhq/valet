@@ -1,0 +1,68 @@
+---
+title: Channel Integrations
+description: How Slack and Telegram let you invoke Valet from beyond the web app — and how they're different from Action Integrations.
+---
+
+Valet has **Action Integrations** and **Channel Integrations**. The integrations we largely talk about are Action Integrations, which are modeled more or less as basic API calls and data fetching. Channel Integrations behave slightly differently. There are only two — **Slack** and **Telegram**. These create a bi-directional channel between the Valet Orchestrator and the destination chat app, and allow for invocation of the Orchestrator from beyond the Valet UI.
+
+In plainer terms: an Action Integration lets Valet *do things in* another system. A Channel Integration lets you *talk to Valet from* another system, and Valet talks back to you in the same place.
+
+## Action Integrations vs Channel Integrations
+
+| | Action Integration | Channel Integration |
+| --- | --- | --- |
+| What it does | Valet calls the tool on your behalf. | You (and Valet) send messages back and forth over the tool. |
+| How you use it | Ask Valet to do something — "create a Linear issue", "search Gmail", "post the status update in #proj-valet". | Message Valet directly from Slack or Telegram. Get replies where you sent the message. |
+| Shape | Request → response. Data comes back into the session. | Ongoing conversation. Messages flow both ways. |
+| How many | 18 today: GitHub, Gmail, Google Calendar, Google Workspace, Linear, Notion, Slack, Sentry, Stripe, Cloudflare, and more. See [Integrations overview](/product/integrations/overview). | 2 today: Slack and Telegram. |
+| Where you set it up | **Integrations** in the sidebar. | **Integrations** in the sidebar (Slack), or [Telegram setup](/product/telegram-setup) (Telegram). |
+
+## What Channel Integrations unlock
+
+A Channel Integration means you don't need the Valet web app open to work with your orchestrator. You can:
+
+- Message Valet from Slack or Telegram and it responds in the same place.
+- Kick off sessions from a phone.
+- Receive approval prompts, status updates, and results wherever the work belongs.
+- Have Valet post replies into the channel or thread where you asked the question, rather than in a separate UI.
+
+Because the transport is bi-directional, follow-ups threaded on the same conversation route back to the same session. Slack threads stick to their bound session; Telegram DMs stick to your personal orchestrator.
+
+## Slack
+
+Slack is an unusual case — it's **both** an Action Integration and a Channel Integration.
+
+- **As an Action Integration**, Slack gives your orchestrator tool actions like `slack.send_message`, `slack.read_history`, `slack.list_channels`, `slack.dm_user`, and 15 others. Valet can post to channels, read message history, and manage user groups programmatically. See the full list on the [Slack integration page](/product/integrations/slack).
+- **As a Channel Integration**, Slack is where you (and your teammates) can talk to Valet directly. DM Valet in Slack, or mention it in a channel — the message routes to your orchestrator (or the session bound to that thread), and Valet replies in the same place.
+
+That's why the same connection lets you say both:
+
+- "Valet, post the deployment summary in #proj-eng" (Action)
+- "@Valet what's the status of PR-42?" from a Slack thread (Channel)
+
+Both use the same Slack app connection. Which one runs depends on where the request originated, not on how you phrased it.
+
+## Telegram
+
+Telegram is **channel-only**. There is no meaningful Telegram action catalog — you connect Telegram to give yourself a personal mobile channel for talking to your orchestrator.
+
+Each person connects their own Telegram bot through BotFather, so messages route directly to their orchestrator. Nothing is shared with the rest of the team. Approval prompts arrive as inline buttons; you can send text, photos, voice notes, audio, and files. See [Telegram setup](/product/telegram-setup) for the connection walkthrough.
+
+## Which one am I using?
+
+Most of the time you don't need to think about it. If you asked Valet to *do something in another system*, that's an Action Integration. If you *sent Valet a message from another app*, that's a Channel Integration.
+
+The distinction matters most when:
+
+- You're an admin deciding what to enable. Channel Integrations control *where Valet can be reached from*; Action Integrations control *what Valet can act on*.
+- You're setting up approvals. Approval prompts get delivered through your Channel Integrations. If nothing's connected, approvals only appear in the web app.
+- You're writing a workflow. Actions inside a workflow use Action Integrations. If the workflow should notify you when it's done, that notification goes through a Channel Integration.
+
+## See also
+
+- [Integrations overview](/product/integrations/overview) — the full connected-tool catalog.
+- [Channels](/product/channels) — the broader story of where you can talk to Valet.
+- [Slack integration](/product/integrations/slack) — Slack's action catalog.
+- [Telegram setup](/product/telegram-setup) — connecting your personal Telegram bot.
+- [Approvals](/product/approvals) — where approval prompts appear and how to respond.
+- Engineers: [Integration System](/engineering/integration-system) for how this is built.

@@ -47,6 +47,21 @@ export interface ModelPricing {
 }
 
 /**
+ * Compute cost in dollars for a given token count using the pricing map.
+ * Returns null if no pricing data is available for the model.
+ */
+export function computeCost(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  pricingMap: Map<string, ModelPricing>,
+): number | null {
+  const pricing = pricingMap.get(model);
+  if (!pricing) return null;
+  return (inputTokens * pricing.inputCostPerMillion + outputTokens * pricing.outputCostPerMillion) / 1_000_000;
+}
+
+/**
  * Get model pricing from cached catalog data.
  * Returns a Map keyed by "provider/modelId" with cost per million tokens.
  * Fetches from models.dev on cache miss to ensure pricing is available.

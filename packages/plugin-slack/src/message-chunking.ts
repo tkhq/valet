@@ -56,6 +56,89 @@ export function splitText(text: string, maxLen: number): string[] {
   return chunks;
 }
 
+/** A line is a table delimiter if it holds only pipes, colons, dashes and spaces. */
+function isTableDelimiterRow(line: string): boolean {
+  const trimmed = line.trim();
+  return /^[|\s:-]+$/.test(trimmed) && trimmed.includes('-') && trimmed.includes('|');
+}
+
+/**
+ * Flag every line belonging to a GFM table. A table is a delimiter row, the
+ * header line directly above it, and the body rows below it that still carry a
+ * pipe. Tables encode their own line structure, so they must not receive break
+ * markers.
+ */
+function markTableLines(lines: string[]): boolean[] {
+  const inTable = new Array<boolean>(lines.length).fill(false);
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!isTableDelimiterRow(lines[i])) continue;
+    if (i === 0 || !lines[i - 1].includes('|')) continue;
+
+    inTable[i - 1] = true;
+    inTable[i] = true;
+    for (let j = i + 1; j < lines.length && lines[j].trim() !== '' && lines[j].includes('|'); j++) {
+      inTable[j] = true;
+    }
+  }
+
+  return inTable;
+}
+
+/**
+ * Slack's `markdown` block is CommonMark, where a single newline is a SOFT break
+ * that renders as a space — so a long message written with one newline between
+ * lines arrives as a single run-on paragraph. Appending two trailing spaces turns
+ * each soft break into a CommonMark HARD break, restoring the line structure the
+ * author wrote.
+ *
+ * Left untouched: blank lines and the lines before them (a real paragraph break
+ * already renders correctly), fenced code blocks and tables (both carry their own
+ * line semantics, and the markdown block exists to render them natively), and
+ * lines that already end in an explicit hard break.
+ */
+export function normalizeSoftBreaks(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const inTable = markTableLines(lines);
+  // Track the fence marker (character and run length) that opened the current
+  // code block, or null when outside a fence. CommonMark closes a fence only on
+  // a line using the same character, at least as long as the opener, with no
+  // trailing content — so a ``` block is not closed by a ~~~ (or shorter) line.
+  let openFence: { char: string; length: number } | null = null;
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i];
+
+    const fence = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1];
+      if (openFence === null) {
+        openFence = { char: marker[0], length: marker.length };
+        continue;
+      }
+      if (
+        marker[0] === openFence.char &&
+        marker.length >= openFence.length &&
+        /^\s*(`{3,}|~{3,})\s*$/.test(line)
+      ) {
+        openFence = null;
+        continue;
+      }
+    }
+    if (openFence !== null || inTable[i] || inTable[i + 1]) continue;
+
+    // A blank line on either side already ends the block: nothing to hold together.
+    if (line.trim() === '' || lines[i + 1].trim() === '') continue;
+
+    // Already an explicit hard break (trailing double space or backslash).
+    if (/( {2}|\\)$/.test(line)) continue;
+
+    lines[i] = `${line}  `;
+  }
+
+  return lines.join('\n');
+}
+
 /**
  * Build content blocks for a message. Prefers a single `markdown` block (which
  * renders tables, headers, code blocks natively). Falls back to `section` blocks
@@ -70,8 +153,10 @@ export function buildContentBlocks(
   mrkdwnText: string,
   maxBlocks: number = SLACK_MAX_BLOCKS,
 ): Record<string, unknown>[] {
-  if (text.length <= SLACK_MARKDOWN_LIMIT) {
-    return [{ type: 'markdown', text }];
+  // Measure the limit against the text we actually send: break markers add length.
+  const normalized = normalizeSoftBreaks(text);
+  if (normalized.length <= SLACK_MARKDOWN_LIMIT) {
+    return [{ type: 'markdown', text: normalized }];
   }
 
   // Fallback: split mrkdwn-formatted text into section blocks

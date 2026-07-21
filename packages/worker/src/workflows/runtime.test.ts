@@ -346,6 +346,48 @@ describe('runDag — set → stop end-to-end', () => {
     expect(rows.some((r) => r.nodeId === 'oops' && r.status === 'failed')).toBe(true);
   });
 
+  it('wraps non-step-driven node executors in a NO_RETRY step.do', async () => {
+    // Pure/deterministic executors (set/if/stop/project + llm) throw the
+    // same error on every retry. Under CF Workflows' default policy this
+    // means ~5 min of exponential backoff before the `failed` trace is
+    // written — from the outside it looks like a hang. Every non-step-
+    // driven executor must be wrapped with `retries: { limit: 1, delay:
+    // '1 second' }` so the failure surfaces immediately.
+    const def: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 'proj', type: 'project', source: '{{trigger.data.notArray}}', columns: [{ header: 'x', path: 'x' }] },
+        { id: 'done', type: 'stop' },
+      ],
+      edges: [{ from: 'proj', to: 'done' }],
+    };
+
+    const nodeStepConfigs: Array<{ name: string; config: unknown }> = [];
+    const step: WorkflowStep = {
+      async do<T>(name: string, configOrFn: WorkflowStepConfig | (() => Promise<T>), maybeFn?: () => Promise<T>): Promise<T> {
+        if (name === 'node:proj') {
+          nodeStepConfigs.push({ name, config: typeof configOrFn === 'function' ? undefined : configOrFn });
+        }
+        const fn = typeof configOrFn === 'function' ? configOrFn : maybeFn!;
+        return fn();
+      },
+      async sleep() { /* noop */ },
+      async sleepUntil() { /* noop */ },
+      async waitForEvent() { throw new Error('waitForEvent not used'); },
+    } as unknown as WorkflowStep;
+
+    const { writer } = makeTraceWriter();
+    await runDag(
+      stubEnv,
+      makeParams(def, { trigger: { type: 'manual', timestamp: '2026-06-12T00:00:00.000Z', data: { notArray: 'oops' }, metadata: {} } }),
+      step,
+      writer,
+    );
+
+    expect(nodeStepConfigs).toHaveLength(1);
+    expect(nodeStepConfigs[0]?.config).toMatchObject({ retries: { limit: 1, delay: '1 second' } });
+  });
+
   it('skips nodes whose inbound edges are all unsatisfied (if-routed branch)', async () => {
     const def: WorkflowDefinition = {
       version: 'dag/v1',

@@ -4,7 +4,8 @@ import { slackActions } from './actions.js';
 
 export { slackProvider } from './provider.js';
 export { slackActions } from './actions.js';
-export { slackFetch } from './api.js';
+export { slackFetch, slackGet } from './api.js';
+export { slimMessage } from './actions.js';
 export { checkPrivateChannelAccess } from './channel-access.js';
 
 const slackPackage: IntegrationPackage = {

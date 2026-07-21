@@ -973,6 +973,17 @@ export class PromptHandler {
   }
 
   /**
+   * Exposes the active prompt's OpenCode thread id — the provenance unit for
+   * memory writes (design spec, "Provenance Capture"). Same sourcing as
+   * `getActiveMessageId()`: reads `currentPromptChannel`, set while a prompt
+   * is in flight. Returns undefined between prompts (mem-* tools called
+   * outside a prompt write `sourceSessionId: ''`, matching HTTP writes).
+   */
+  getActiveThreadId(): string | undefined {
+    return this.currentPromptChannel?.currentThreadId ?? undefined;
+  }
+
+  /**
    * Store images returned by an action so the current turn can be aborted
    * and re-sent with the images as vision attachments.
    */

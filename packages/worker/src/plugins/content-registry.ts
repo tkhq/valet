@@ -1481,8 +1481,92 @@ sheets.protect_range({
     version: "0.0.1",
     description: "Memory compaction plugin for OpenCode",
     icon: "🧠",
-    capabilities: ["tools"],
+    capabilities: ["skills","tools"],
     artifacts: [
+      { type: "skill", filename: "memory.md", content: `---
+name: memory
+description: Playbooks and hard-won patterns for working on the memory store itself — curation sessions, reorganization, dedup/merge, journal distillation, cap pressure, and link-graph hygiene using the mem_* tools.
+---
+
+# Memory Curation & Maintenance
+
+Load this skill when the task is *about the memory store itself*: cleaning it up, reorganizing files, merging duplicates, enriching metadata, distilling journals, or repairing the link graph. Day-to-day remembering doesn't need this — the \`mem_*\` tool descriptions and your persona rules cover that.
+
+## Mental model (30 seconds)
+
+- Memory is a bundle of typed markdown concepts. Metadata (type, tags, description, resource, sensitivity, origin, expires) lives in columns; the frontmatter you see on \`mem_read\` is a **projection** — edit metadata via \`mem_write\` params, never by patching YAML text.
+- A link graph is extracted from markdown links in bodies on every write. Backlinks, graph views, prune keep-signals, and \`mem_links\` all derive from it.
+- **Cap: 200 files** (pinned exempt). Prune evicts expired-first, then low relevance / low inbound-link count. Reads and searches never mutate or evict anything.
+- The journal is the chronological spine: entries link the files they touched, so \`mem_links\` from a journal day reconstructs what happened.
+
+## Gotchas (learned the hard way — trust these)
+
+1. **\`mem_move\` does NOT reclassify \`type\`.** Moving \`projects/x/note.md\` → \`workflows/note.md\` keeps \`type: project-note\`. Follow every cross-directory move with \`mem_write(path, type: ...)\` to reclassify. The move response reminds you (\`"type remains '…'"\`).
+2. **\`mem_move\` rewrites inbound links for you** and reports \`"N referencing files updated"\` — never hand-edit referencing files after a move. If the response says some referencers were skipped (concurrent-edit guard), fix only those.
+3. **Fenced blocks are not the file.** \`# Linked from\` backlinks, \`⚠ expired\` notices, and directory stats trailers arrive inside \`<!-- valet:… -->\` fences appended to reads. They're stripped on write and \`mem_patch\` refuses to target them. Never copy them into content.
+4. **Metadata is sticky.** On update, an omitted param means *unchanged* — a body-only write can't downgrade \`origin: user-stated\`. Clearing is explicit: pass \`""\` for \`description\`/\`resource\`/\`expires\`.
+5. **Expired files vanish from search by default.** If something seems forgotten, retry \`mem_search\` with \`include_expired: true\` before concluding it's gone. Expiry never deletes at read time — eviction happens only in write-path prune/sweep.
+6. **Same-\`resource\` warning means merge, not fork.** When \`mem_write\` warns another file covers the resource, move the new knowledge into that file and \`mem_rm\` yours.
+7. **File size is capped** on every channel, including patch growth. When a file approaches the cap, split it into a hub + spokes rather than truncating.
+
+## Playbook: full curation session
+
+The proven phase order (survey → enrich → link → reorganize → verify); do phases in passes over the whole store, not file-by-file:
+
+1. **Survey** — \`mem_read\` each directory. The fenced stats trailer gives \`updated · size · pinned\` per entry: your staleness/cap-pressure triage list. Count files vs the 200 cap.
+2. **Enrich** — fill missing \`type\`, \`tags\`, \`description\`, \`resource\`, \`sensitivity\` via metadata-only \`mem_write\` (omit \`content\`). Define a small consistent tag vocabulary first (~15–20 tags) and reuse it; the tools hint on near-duplicate tags only once, so decide deliberately.
+3. **Cross-link** — add \`## Related\` sections linking cluster members (a project's files to each other, workflows to the projects that use them). Meaning lives in the surrounding prose, so say *why* it's related.
+4. **People hubs** — one \`people/<name>.md\` per person (\`type: person\`, \`resource:\` their email/handle), then patch mentions elsewhere to link the hub.
+5. **Reorganize** — see the reorganization playbook below.
+6. **Ephemera** — anything time-bound gets \`expires\` (test canaries, temporary windows, event notes). Deliberate expiry beats letting the cap choose for you.
+7. **Verify** — \`mem_links\` on the hubs you touched (expect the new edges), re-read one enriched file (frontmatter + backlinks look right).
+
+Close by appending a journal entry describing what you did, **linking every touched file** — that's what makes the session reconstructable later.
+
+## Playbook: reorganization
+
+1. Before moving anything, \`mem_links(path, direction: in)\` — know who points at the file.
+2. \`mem_move(from, to)\` — one file at a time; read each response (referencers updated, pin transitions, retained type).
+3. Reclassify: \`mem_write(to, type: <new dir's type>)\` for cross-directory moves (gotcha #1).
+4. Spot-check one referencing file to confirm the rewritten link resolves.
+5. Journal the mapping (\`old → new\`) so future-you can follow stale references.
+
+Never reorganize with write+rm — you'd orphan every inbound link and lose provenance/version history.
+
+## Playbook: dedup / merge
+
+1. Find candidates: \`mem_search\` by topic AND by \`resource\` filter (resource is the identity primitive — two files about one repo/doc is the classic dup).
+2. Pick the canonical file: more inbound links wins; otherwise the better-located path.
+3. Move unique content into the canonical file (\`mem_patch\` append under a section), merging Citations.
+4. \`mem_rm\` the duplicate. It warns about inbound links — patch those referencers to point at the canonical file first, or accept the phantoms knowingly.
+
+## Playbook: journal distillation
+
+Journals are unpinned and prune naturally — that's by design, but durable knowledge must escape before it ages out:
+
+1. Scan journals older than ~2 weeks for facts that are still true (decisions, preferences, gotchas, project state).
+2. Promote each into the right home (\`projects/\`, \`preferences/\`, \`workflows/\`, \`notes/\`) — update existing files over creating new ones.
+3. Link back to the source journal date in the promoted file (provenance), and let the journal die on schedule.
+
+## Cap pressure & prune hygiene
+
+- At >~180 files, run a triage pass: expire ephemera, merge duplicates, distill-and-drop old journals.
+- Keep-signals the pruner respects: **pinned** (exempt entirely), **inbound links**, recency/relevance. A well-linked hub survives; an orphaned note doesn't. If something must survive unpinned, link it from a hub.
+- Pinning is precious: \`preferences/\` auto-pins and auto-loads into every session — keep those files short and high-signal, since they cost context every single session.
+
+## Link-graph hygiene
+
+- **Phantom nodes** (links to files that don't exist) are either TODO stubs — create the file — or typos — fix the link. A curation pass should end with phantoms you can name and justify.
+- Use \`mem_links(path, depth: 2)\` to orient on a topic before working on it; depth-1 \`context\` lines tell you why each edge exists.
+- Session-sibling edges (memories written in the same conversation) are derived automatically — you don't create them, but they're a good dedup lead: siblings often overlap.
+
+## Style wisdom
+
+- **One concept per file**, hub-and-spoke over mega-files. Small files link better, search better, and survive the size cap.
+- **Update over create.** Every near-duplicate file costs a cap slot and splits the link graph.
+- **Titles and descriptions do real work** — search reranking sees them. A description should say what the file *answers*, not restate the title.
+- **Don't churn.** Every write bumps version and hash. Batch metadata fixes into one \`mem_write\` per file, and skip writes that change nothing.
+`, sortOrder: 0 },
       { type: "tool", filename: "memory-compaction.ts", content: `export default async () => {
   return {
     "experimental.session.compacting": async (_input: unknown, output: { context: string[] }) => {
@@ -1511,8 +1595,10 @@ Anything not captured here is permanently lost after compaction.
 
 ## Resume Instructions
 When you resume after this compaction, your FIRST action must be:
-1. Call mem_patch to write a journal entry summarizing the above:
-   mem_patch("journal/YYYY-MM-DD.md", [{ op: "append", content: "\\\\n\\\\n## [time] — Resumed after compaction\\\\n[paste Active Work + Artifacts here]" }])
+1. Call mem_patch to write a journal entry summarizing the above, linking every file touched
+   (created, updated, or discovered) this session — the journal is the memory graph's
+   chronological spine, so links here matter as much as the summary:
+   mem_patch("journal/YYYY-MM-DD.md", [{ op: "append", content: "\\\\n\\\\n## [time] — Resumed after compaction\\\\n[paste Active Work + Artifacts here]\\\\n- **Touched:** [links to files updated this session, e.g. [notes](/projects/x/notes.md)]" }])
 2. Check on any child sessions that were running (use get_session_status)
 3. Then continue whatever was in progress
 
@@ -1824,6 +1910,77 @@ Large channels require paging via \`cursor\` / \`next_cursor\`. Prefer narrowing
     ],
   },
   {
+    name: "slack-user",
+    version: "0.0.1",
+    description: "Slack (personal) — per-user OAuth client acting AS the user (search, read, set status, post on behalf of). Separate from the org Slack bot integration.",
+    icon: "👤",
+    capabilities: ["actions","skills"],
+    artifacts: [
+      { type: "skill", filename: "slack-user.md", content: `# Slack (personal) — acting AS the user
+
+This integration is **separate** from the org \`slack\` (bot) integration. It uses
+a per-user OAuth (\`xoxp\`) token and exposes actions under the \`slack_user.*\`
+namespace.
+
+## When to use slack_user vs. slack
+
+| Need                                              | Use         |
+| ------------------------------------------------- | ----------- |
+| Bot replies, channel binding, inbound routing     | \`slack.*\`   |
+| Search the user's messages across their workspace | \`slack_user.search_messages\` |
+| Read a private channel/DM the bot is NOT in       | \`slack_user.read_history\` / \`read_thread\` |
+| Set the user's status, snooze DND                 | \`slack_user.set_status\` / \`set_dnd\` |
+| Post on behalf of the user (delegated)            | \`slack_user.post_message\` / \`send_dm\` |
+| Agent's own outbound communication                | \`slack.send_message\` / \`slack.dm_owner\` (NOT \`slack_user.*\`) |
+
+\`slack_user\` actions ONLY run if the user has connected Slack (personal) at
+\`/integrations\`. If not connected, you'll receive:
+\`Connect Slack (personal) at /integrations.\`
+
+## Search
+
+\`slack_user.search_messages\` is the headline search action. It uses
+\`search.messages\` with the user's xoxp token, so results include private
+channels and DMs they can see. Operators work as in the Slack UI
+(\`in:#channel\`, \`from:@user\`, \`before:\`, \`after:\`, \`has:link\`).
+
+\`\`\`text
+slack_user.search_messages { query: "in:#proj-valet from:@conner deploy", count: 50 }
+\`\`\`
+
+Slim result shape: \`{ channel, channel_name, user, ts, text, permalink, thread_ts?, score? }\`
+plus \`next_cursor\` for pagination.
+
+## Read
+
+\`slack_user.read_history\`, \`slack_user.read_thread\`, and
+\`slack_user.list_channels\` mirror the bot equivalents but operate on the user's
+full visible surface (public + private channels, DMs, group DMs).
+
+## Write / act-as
+
+\`set_status\`, \`set_dnd\`, \`end_dnd\`, \`send_dm\`, \`post_message\`, \`add_reaction\`,
+\`upload_file\`, \`add_pin\`, \`add_bookmark\`, \`add_reminder\` all act AS the user
+(write to their profile, post under their identity, etc.). They are marked
+\`riskLevel: 'high'\`, which means existing org / per-user / per-session
+action-policy overrides gate them — by default these will require approval
+or be denied unless explicitly allowed for the session.
+
+Default rules:
+- Only call write/act-as actions when the user explicitly delegated the task.
+- The agent's OWN routine outbound (DMs to the owner, channel updates) should
+  continue to use the bot \`slack.*\` actions, not \`slack_user.*\`.
+
+## Revocation
+
+If the user revokes the app in Slack, calls will fail with
+\`token_revoked\` / \`invalid_auth\`. The stored credential is cleared and you'll
+get a structured \`Slack (personal) token is no longer valid. Reconnect at
+/integrations.\` Tell the user to reconnect.
+`, sortOrder: 0 },
+    ],
+  },
+  {
     name: "socket",
     version: "0.0.1",
     description: "Socket.dev supply chain security — scan packages for vulnerabilities, malware, and risks",
@@ -1874,6 +2031,196 @@ Large channels require paging via \`cursor\` / \`next_cursor\`. Prefer narrowing
     icon: "🔄",
     capabilities: ["skills"],
     artifacts: [
+      { type: "skill", filename: "data-processing-workflow.md", content: `---
+name: data-processing-workflow
+description: Playbook for authoring data-processing workflows in dag/v1 — query an external system, transform rows per item, write results to a spreadsheet/doc. Covers the action-id gotcha, the foreach typed-array constraint, and the deterministic reshape pattern.
+---
+
+# Data-processing workflow playbook
+
+This skill is the shortest path from "I have a data source and I want to process each row and write results somewhere" to a validated, runnable workflow. It codifies the lessons from every friction point we've hit building this shape in \`dag/v1\`. If you're building a **query → transform → write** workflow, read this first.
+
+## The canonical DAG
+
+\`\`\`text
+trigger → query(tool) → extract(set or llm) → tier_loop(foreach + llm|tool)
+                                                 ↓
+                                              create_sheet(tool)
+                                                 ↓
+                                              headers(tool)
+                                                 ↓
+                                              write_loop(foreach + tool)
+\`\`\`
+
+Six nodes plus the trigger. Every node has one job. The two foreach loops are the load-bearing pieces: one to process each row, one to write each row.
+
+## Node-by-node
+
+### 1. \`trigger\`
+
+Manual/webhook entry. Declare a \`dataSchema\` so \`test_run\` gives you a one-click prefilled form and the workflow is documented at the top.
+
+### 2. \`query\` — a \`tool\` node
+
+Pull the source data. Salesforce SOQL, Google Sheets read, GitHub search, Linear list_issues — anything that returns an array of records.
+
+**The action-id gotcha (this bites everyone once):** the \`action\` field on a tool node is the id **exactly as it appears after the first colon in the tool id from \`list_tools\`**, not a shortened form. Two conventions coexist:
+
+- Some services prefix action ids with the service name: \`salesforce-read-only:salesforce-read-only.soqlQuery\` → \`action: "salesforce-read-only.soqlQuery"\`.
+- Others don't: \`google_workspace:sheets.write_spreadsheet\` → \`action: "sheets.write_spreadsheet"\`.
+
+**Never guess or strip prefixes.** Run \`list_tools service="<name>"\`, copy the actionId from the tool id verbatim. \`workflows.save_draft(validate=true)\` and \`workflows.validate\` hard-error on unknown ids with a nearest-match suggestion, so a clean save proves the ids resolve.
+
+### 3. \`extract\` — a \`set\` node with \`outputSchema\` (preferred) or \`llm\` node (fallback)
+
+For **records → 2D array** reshapes (query result → spreadsheet rows), see also the \`project\` node below — it's a first-class deterministic transform that skips the LLM entirely.
+
+
+The source tool returns nested objects (\`records[].Account.Name\`). Downstream \`foreach\` and Sheets writes want a flat array. This is where you reshape.
+
+**Preferred: \`set\` with \`outputSchema\`.** Deterministic, free, no LLM cost. Available since the DX changelist landed:
+
+\`\`\`json
+{
+  "id": "extract",
+  "type": "set",
+  "values": { "records": "{{nodes.query.data.records}}" },
+  "outputSchema": {
+    "type": "object",
+    "properties": { "records": { "type": "array", "items": { "type": "object" } } },
+    "required": ["records"]
+  }
+}
+\`\`\`
+
+The \`outputSchema\` tells the validator that \`nodes.extract.data.records\` is an array, so the downstream \`foreach\` accepts it. The runtime just emits whatever \`values\` renders to.
+
+**Fallback: \`llm\` node** when you need to flatten nested paths (\`Account.Name\` → \`accountName\`) at the same time. Use only when actually needed — it's ~1s per call and costs tokens for plumbing.
+
+**\`project\` — the deterministic query-result → spreadsheet-rows primitive.** When your end state is a 2D array (Sheets \`write_spreadsheet\` / \`append_rows\`), skip the extract-then-format two-step and use a single \`project\` node:
+
+\`\`\`json
+{
+  "id": "rows",
+  "type": "project",
+  "source": "{{nodes.query.data.records}}",
+  "columns": [
+    { "header": "Account", "path": "Account.Name" },
+    { "header": "Website", "path": "Account.Website" },
+    { "header": "Funding", "path": "Account.Funding_Raised__c", "default": 0 }
+  ]
+}
+\`\`\`
+
+Output at \`{{nodes.rows.data}}\` is \`Array<Array<unknown>>\` — feed it straight into \`sheets.write_spreadsheet\` \`data\`. Pure, no LLM tokens, no truncation risk, and its output IS a typed array so it's a valid \`foreach.items\` source. This is the primary answer to "how do I get 1,657 records into a sheet without an LLM in the loop." Set \`includeHeader: false\` when appending to a sheet that already has headers.
+
+### 4. \`tier_loop\` — a \`foreach\` with an \`llm\` body
+
+Per-item processing. The LLM sees one record at a time, so it can apply real judgment (catch bad data, semantic classification) instead of mechanical rules. Downside: N LLM calls, ~1s each. For thousands of items, budget accordingly or move deterministic parts into the \`extract\` step.
+
+\`\`\`json
+{
+  "id": "tier_loop",
+  "type": "foreach",
+  "items": "{{nodes.extract.data.records}}",
+  "itemAlias": "item",
+  "concurrency": 5,
+  "body": {
+    "id": "tier_one",
+    "type": "llm",
+    "model": "anthropic:claude-sonnet-4-5",
+    "maxOutputTokens": 500,
+    "system": "…",
+    "prompt": "Classify: {{item.accountName}} …",
+    "outputSchema": { "type": "object", "properties": { "tier": { "type": "string", "enum": [...] }, /* echo fields */ }, "required": [...] }
+  }
+}
+\`\`\`
+
+**Have the body echo every field it needs downstream.** The foreach output shape is \`{{nodes.tier_loop.data.items}}\` where each item is \`{status, data: <body output>}\` — so downstream code references \`{{item.data.tier}}\`, \`{{item.data.accountName}}\`, etc. (note the \`.data\` nesting). This is not obvious until you inspect a trace.
+
+### 5. \`create_sheet\` — a \`tool\` node
+
+\`google_workspace:sheets.create_spreadsheet\` with the tabs you want. The result is \`{{nodes.create_sheet.data.spreadsheetId}}\`.
+
+### 6. \`headers\` — a \`tool\` node
+
+Write header rows to all tabs in one call via \`sheets.batch_write\`. One approval gate for all three tabs.
+
+### 7. \`write_loop\` — a \`foreach\` with a \`tool\` body
+
+Append each processed row to its tab. The key trick: use a **templated range** so the target tab depends on the item's tier:
+
+\`\`\`json
+{
+  "id": "write_loop",
+  "type": "foreach",
+  "items": "{{nodes.tier_loop.data.items}}",
+  "itemAlias": "row",
+  "concurrency": 1,
+  "body": {
+    "id": "append_row",
+    "type": "tool",
+    "service": "google_workspace",
+    "action": "sheets.append_rows",
+    "params": {
+      "spreadsheetId": "{{nodes.create_sheet.data.spreadsheetId}}",
+      "range": "'{{row.data.tier}}'!A1",
+      "valueInputOption": "RAW",
+      "data": [[
+        "{{row.data.accountName}}",
+        "{{row.data.website}}",
+        "…"
+      ]]
+    }
+  }
+}
+\`\`\`
+
+**Note \`concurrency: 1\`** — Sheets rejects concurrent writes to the same document.
+
+## Rules that trip up first-time authors
+
+### Foreach \`items\` must be a provably-typed array
+
+The validator rejects \`{{...}}\` expressions whose type it can't statically verify with \`foreach_items_untyped_array_output\`. Valid sources:
+
+| Source node | Template | Precondition |
+|---|---|---|
+| \`trigger\` | \`{{trigger.data.<f>}}\` | dataSchema declares \`<f>\` as \`type: "array"\` |
+| \`llm\` | \`{{nodes.<id>.data.<f>}}\` | outputSchema declares \`<f>\` as \`type: "array"\` |
+| \`set\` | \`{{nodes.<id>.data.<f>}}\` | literal array under \`values.<f>\` OR \`outputSchema.<f>: {type:"array"}\` |
+| \`tool\` | \`{{nodes.<id>.data.<f>}}\` | registered \`toolOutputSchema\` declares \`<f>\` as array (validation skipped otherwise) |
+| \`orchestrator\` / \`session\` | \`{{nodes.<id>.data.output.<f>}}\` | \`wait.mode === "until_idle"\` AND outputSchema array field |
+| \`orchestrator\` / \`session\` | \`{{nodes.<id>.data.transcript}}\` | \`resultMode === "transcript"\` |
+| \`foreach\` | \`{{nodes.<id>.data.items}}\` | always (nested-foreach chaining) |
+
+**Session/orchestrator require \`.data.output.<field>\`** — llm/tool/set go direct at \`.data.<field>\`.
+
+### Foreach body allows exactly one node
+
+Types: \`llm\`, \`tool\`, \`set\`, \`stop\`, \`orchestrator\`, \`session\`, \`project\`. **No** nested \`if\`, \`wait\`, \`approval\`, \`trigger\`, or \`foreach\`. If you need "classify then write" per item, use two sequential foreach nodes (tier_loop → write_loop as above), not one loop with two bodies.
+
+### Approvals
+
+Every \`tool\` node with \`riskLevel: medium\` or \`high\` raises one approval per invocation. In a foreach, the first iteration prompts, then the UI offers **"Approve remaining rows"** to batch-clear the loop. Low-risk tools (reads, queries) don't gate.
+
+**For unattended/scheduled runs, prefer low-risk tools inside foreach bodies.** Otherwise the run stalls indefinitely on the first approval prompt.
+
+## Scaling & cost
+
+- **Per-item LLM tiering** is powerful but ~1s+/iteration and costs tokens. For 1,000+ rows, consider whether the tiering can be a deterministic rule in the SOQL/query layer instead — reserve the LLM for the ~10% of items that actually need semantic judgment.
+- **Truncation risk:** never emit "all rows" from a single LLM node. Either use the deterministic \`set\` reshape (preferred) or fan out via foreach and let each iteration emit one row's worth.
+- **Approval fatigue:** if the workflow has N medium-risk tool calls that always run together, wrap them in a single foreach so "Approve remaining rows" applies. Or accept the extra clicks — batching approvals doesn't change the underlying gates.
+
+## Verifying before you scale
+
+1. \`workflows.save_draft\` with \`validate: true\` — confirm zero errors AND zero warnings. This catches unknown action ids, untyped-foreach sources, and template refs to nonexistent paths.
+2. Cap the query \`LIMIT\` to 25 and \`workflows.test_run\`. Poll \`workflows.get_execution\` every 15s. Confirm every node reaches \`completed\`, no \`failed\` iterations, and the final sheet/doc looks right.
+3. Only then bump the LIMIT to the full scale.
+
+If the query node hangs in \`running\` for >60s, check \`get_execution\` — a preflight-retry loop on a bad action id looks the same as slow work, but you'll see the retry attempts in the CF Workflow instance detail.
+`, sortOrder: 0 },
       { type: "skill", filename: "workflows.md", content: `---
 name: workflows
 description: Guidance for understanding Valet workflows, including the worker-backed workflow tools available through list_tools/call_tool.
@@ -2063,7 +2410,66 @@ Use the operation names returned by \`workflows.schema\`. Common string operatio
 
 Foreach \`body\` may be \`llm\`, \`tool\`, \`set\`, \`stop\`, \`orchestrator\`, or \`session\`. Nested \`if\`, \`wait\`, \`approval\`, \`trigger\`, and \`foreach\` nodes are not supported inside a foreach body.
 
-Foreach \`items\` must be a single template that resolves to a typed array output. For session and orchestrator nodes, structured fields declared by \`outputSchema\` are nested under \`data.output\`, so an array field named \`companies\` is referenced as \`{{nodes.scrape_yc.data.output.companies}}\`, not \`{{nodes.scrape_yc.data.companies}}\`.
+Foreach \`items\` must be a single template that resolves to a *typed* array — the validator has to be able to prove the referenced path is an array. Where the typing comes from depends on the source node:
+
+- **Trigger source** — \`{{trigger.data.<field>}}\`. Declare \`<field>\` in \`trigger.dataSchema\` with \`type: 'array'\`.
+  \`\`\`json
+  { "id": "trigger", "type": "trigger", "dataSchema": { "items": { "type": "array" } } }
+  \`\`\`
+- **LLM source** — \`{{nodes.<id>.data.<field>}}\`. Declare \`<field>\` as an array in the llm node's \`outputSchema\` (the schema lives directly on \`data\`, not under \`data.output\`).
+  \`\`\`json
+  { "id": "classify", "type": "llm", "prompt": "...", "outputSchema": { "type": "object", "properties": { "items": { "type": "array" } } } }
+  \`\`\`
+- **Tool source** — \`{{nodes.<id>.data.<field>}}\`. Whether foreach can statically validate depends on the tool action's registered output schema. If the action declares \`<field>\` as an array, this works; if the action has no registered output schema, static foreach validation is skipped — but the tool must still return an array at runtime, or the workflow will fail.
+- **Session / orchestrator source** — \`{{nodes.<id>.data.output.<field>}}\`. Note the \`.output.\` prefix — session and orchestrator structured outputs are nested there so lifecycle fields (\`sessionId\`, \`threadId\`, \`finalStatus\`, \`response\`, etc.) can't be overwritten by agent output. Declare \`<field>\` as an array in \`outputSchema\` *and* set \`wait.mode: 'until_idle'\`.
+- **Session / orchestrator transcript source** — \`{{nodes.<id>.data.transcript}}\`. When a session or orchestrator node is configured with \`resultMode: 'transcript'\` and \`wait.mode: 'until_idle'\`, the full transcript array is exposed as a valid foreach source. Example: \`{ "id": "agent", "type": "orchestrator", "prompt": "...", "resultMode": "transcript", "wait": { "mode": "until_idle" } }\` → iterate with \`"items": "{{nodes.agent.data.transcript}}"\`.
+- **Nested foreach** — \`{{nodes.<id>.data.items}}\` chains one foreach off another's item stream.
+
+Concrete LLM → foreach fan-out (asking an LLM to produce a list and then processing each item):
+
+\`\`\`json
+{
+  "version": "dag/v1",
+  "nodes": [
+    { "id": "trigger", "type": "trigger" },
+    {
+      "id": "classify",
+      "type": "llm",
+      "prompt": "Return JSON with an items array of {label, priority} objects for: {{trigger.data.text}}",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": { "type": "string" },
+                "priority": { "type": "string" }
+              },
+              "required": ["label", "priority"]
+            }
+          }
+        },
+        "required": ["items"]
+      }
+    },
+    {
+      "id": "process",
+      "type": "foreach",
+      "items": "{{nodes.classify.data.items}}",
+      "itemAlias": "item",
+      "body": { "id": "shape", "type": "set", "values": { "label": "{{item.label}}" } }
+    },
+    { "id": "done", "type": "stop", "outcome": "success" }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "classify" },
+    { "from": "classify", "to": "process" },
+    { "from": "process", "to": "done" }
+  ]
+}
+\`\`\`
 
 \`maxItems\` is an optional truncation limit. If omitted, the foreach node processes up to 100 items by default. If the input array has more items than \`maxItems\`, the foreach node processes the first \`maxItems\` items and returns \`inputCount\` plus \`truncatedCount\` in its output envelope. It does not fail just because more items were available. Explicit \`maxItems\` may be set up to the default workflow policy ceiling of 5000 iterations.
 
@@ -2201,7 +2607,7 @@ Workflows use a draft → publish lifecycle:
 - Approval nodes (and tool nodes with \`require_approval\` policy) park the execution on \`step.waitForEvent\`. Resolve in the web UI under the execution detail; the API path \`POST /api/executions/:id/approvals/:approvalId/approve\` (or \`/deny\`) is what the UI calls.
 
 See \`docs/specs/workflows.md\` for the full data model, state machine, validator rules, and runtime semantics.
-`, sortOrder: 0 },
+`, sortOrder: 1 },
     ],
   },
 ];

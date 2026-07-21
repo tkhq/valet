@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
+import type { D1Database } from '@cloudflare/workers-types';
 import type { Env, Variables } from '../env.js';
-import type { AnalyticsPerformanceResponse, AnalyticsEventsResponse } from '@valet/shared';
+import type { AnalyticsPerformanceResponse, AnalyticsEventsResponse, AnalyticsValueResponse, AnalyticsHealthResponse, ValueMetricsWindow } from '@valet/shared';
 import {
   getPercentiles,
   getPerfTrend,
@@ -9,7 +10,22 @@ import {
   getSlowPaths,
   getThroughputStats,
   getEventFeed,
+  getUsageByModel,
 } from '../lib/db/analytics.js';
+import { getCronHeartbeats, getWebhookDeliveryStats } from '../lib/db/observability.js';
+import {
+  getWorkflowResolutionStats,
+  getSessionResolutionStats,
+  getApprovalDecisionStats,
+  getAgentPrStats,
+  getSessionModelPairs,
+  getSandboxSecondsInWindow,
+  getSessionSourceStats,
+} from '../lib/db/value-metrics.js';
+import { classifyModelTier, safeRate, computeWindowBounds } from '../lib/value-metrics.js';
+import { getModelPricing, computeCost, type ModelPricing } from '../services/model-catalog.js';
+import { computeSandboxCost } from '../services/sandbox-pricing.js';
+import { getDb } from '../lib/drizzle.js';
 
 export const analyticsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -104,6 +120,214 @@ analyticsRouter.get('/events', async (c) => {
     events: parsed,
     total,
     period: periodHours,
+  };
+
+  return c.json(response);
+});
+
+async function computeValueWindow(
+  db: D1Database,
+  pricingMap: Map<string, ModelPricing>,
+  startIso: string,
+  endIso: string,
+): Promise<ValueMetricsWindow> {
+  const [workflows, sessions, approvals, prs, modelRows, sessionModels, sandboxSeconds, sessionSources] = await Promise.all([
+    getWorkflowResolutionStats(db, startIso, endIso),
+    getSessionResolutionStats(db, startIso, endIso),
+    getApprovalDecisionStats(db, startIso, endIso),
+    getAgentPrStats(db, startIso, endIso),
+    getUsageByModel(db, startIso, endIso),
+    getSessionModelPairs(db, startIso, endIso),
+    getSandboxSecondsInWindow(db, startIso, endIso),
+    getSessionSourceStats(db, startIso, endIso),
+  ]);
+
+  // LLM cost mirrors /api/usage/stats: models without pricing contribute
+  // nothing and leave llmCost null only when NO model has pricing.
+  let llmCost: number | null = null;
+  let frontierTokens = 0;
+  let nonFrontierTokens = 0;
+  let unknownTokens = 0;
+  for (const row of modelRows) {
+    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    if (cost !== null) llmCost = (llmCost ?? 0) + cost;
+    const tokens = row.inputTokens + row.outputTokens;
+    const tier = classifyModelTier(row.model);
+    if (tier === 'frontier') frontierTokens += tokens;
+    else if (tier === 'unknown') unknownTokens += tokens;
+    else nonFrontierTokens += tokens;
+  }
+
+  const sandboxCost = computeSandboxCost(sandboxSeconds);
+  const totalCost = llmCost !== null ? llmCost + sandboxCost : sandboxCost > 0 ? sandboxCost : null;
+
+  const resolvedTasks = workflows.completed + sessions.resolved;
+  const decisions = approvals.accepted + approvals.denied;
+
+  const sessionsWithModels = new Set<string>();
+  const frontierSessions = new Set<string>();
+  for (const pair of sessionModels) {
+    sessionsWithModels.add(pair.sessionId);
+    if (classifyModelTier(pair.model) === 'frontier') frontierSessions.add(pair.sessionId);
+  }
+
+  return {
+    totalCost,
+    resolvedWorkflowRuns: workflows.completed,
+    resolvedSessions: sessions.resolved,
+    resolvedTasks,
+    costPerResolvedTask: totalCost !== null && resolvedTasks > 0 ? totalCost / resolvedTasks : null,
+    approvalsAccepted: approvals.accepted,
+    approvalsDenied: approvals.denied,
+    approvalsExpired: approvals.expired,
+    acceptedOutputRate: safeRate(approvals.accepted, decisions),
+    erroredSessions: sessions.errored,
+    endedSessions: sessions.ended,
+    failedWorkflowRuns: workflows.failed,
+    terminalWorkflowRuns: workflows.terminal,
+    sessionErrorRate: safeRate(sessions.errored, sessions.ended),
+    medianSessionMinutes: sessions.medianResolvedMinutes,
+    medianWorkflowMinutes: workflows.medianCompletedMinutes,
+    prsOpened: prs.opened,
+    prsMerged: prs.merged,
+    prsClosedUnmerged: prs.closedUnmerged,
+    prsStillOpen: prs.stillOpen,
+    prMergeRate: safeRate(prs.merged, prs.merged + prs.closedUnmerged),
+    medianHoursToMerge: prs.medianHoursToMerge,
+    unknownTokens,
+    nonFrontierTokenShare: safeRate(nonFrontierTokens, frontierTokens + nonFrontierTokens),
+    sessionsWithModelUsage: sessionsWithModels.size,
+    frontierFreeSessionShare: safeRate(sessionsWithModels.size - frontierSessions.size, sessionsWithModels.size),
+    sessionSources,
+  };
+}
+
+// GET /api/analytics/value?period=720
+analyticsRouter.get('/value', async (c) => {
+  const user = c.get('user');
+  if (!user || user.role !== 'admin') {
+    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
+  }
+
+  const rawPeriod = parseInt(c.req.query('period') || '720', 10);
+  const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
+  const windows = computeWindowBounds(new Date(), periodHours);
+
+  const db = c.env.DB;
+  const pricingMap = await getModelPricing(getDb(db), c.env);
+
+  const [current, previous] = await Promise.all([
+    computeValueWindow(db, pricingMap, windows.currentStart, windows.currentEnd),
+    computeValueWindow(db, pricingMap, windows.previousStart, windows.previousEnd),
+  ]);
+
+  const response: AnalyticsValueResponse = {
+    current,
+    previous,
+    period: periodHours,
+  };
+
+  return c.json(response);
+});
+
+// How often each scheduled sweep is expected to run, keyed by the job_name the
+// runSweep wrapper records (see index.ts). A job is flagged stale when it hasn't
+// succeeded in more than 3x its interval. Jobs absent from this map (e.g. a
+// renamed sweep, or a heartbeat row from an old deploy) are never flagged.
+// Base cron is "* * * * *" (minutely) + "0 3 * * *" (nightly); credential_refresh
+// self-gates to every 5th minute.
+const EXPECTED_INTERVAL_MS: Record<string, number> = {
+  workflow_dispatch: 60_000,
+  cancel_cleanup: 60_000,
+  spawned_session_cleanup: 60_000,
+  approval_resume: 60_000,
+  github_reconcile: 60_000,
+  orchestrator_reconcile: 60_000,
+  credential_refresh: 300_000,
+  nightly_session_archive: 86_400_000,
+  nightly_trace_retention: 86_400_000,
+  nightly_journal_prune: 86_400_000,
+  nightly_memory_expiry: 86_400_000,
+  nightly_analytics_retention: 86_400_000,
+  nightly_webhook_retention: 86_400_000,
+  nightly_schedule_tick_retention: 86_400_000,
+};
+
+/**
+ * A job is stale when its last success is older than 3x its expected interval.
+ * A job with no known interval, or that has never succeeded, is not stale — the
+ * dashboard surfaces "never ran" separately via lastSuccessAt=null.
+ *
+ * cron_heartbeats writes SQLite datetime('now') strings ("YYYY-MM-DD HH:MM:SS",
+ * UTC, no zone). Date.parse reads the space form as LOCAL time, so normalise it
+ * to ISO-UTC first; ISO strings (Drizzle-written rows) already carry a zone.
+ */
+export function isJobStale(jobName: string, lastSuccessAt: string | null, now: number): boolean {
+  const interval = EXPECTED_INTERVAL_MS[jobName];
+  if (interval === undefined || lastSuccessAt === null) return false;
+  const iso = lastSuccessAt.includes('T') ? lastSuccessAt : `${lastSuccessAt.replace(' ', 'T')}Z`;
+  const last = Date.parse(iso);
+  if (Number.isNaN(last)) return false;
+  return now - last > interval * 3;
+}
+
+// GET /api/analytics/health — cron heartbeat + webhook delivery health
+analyticsRouter.get('/health', async (c) => {
+  const user = c.get('user');
+  if (!user || user.role !== 'admin') {
+    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
+  }
+
+  const db = c.env.DB;
+  // cron_heartbeats stores UTC datetime('now') strings ("YYYY-MM-DD HH:MM:SS"),
+  // which Date.parse reads as UTC; compare against Date.now() (also UTC epoch).
+  const now = Date.now();
+  const since24h = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+
+  const [heartbeats, webhookStats] = await Promise.all([
+    getCronHeartbeats(db),
+    getWebhookDeliveryStats(db, since24h),
+  ]);
+
+  const jobs = heartbeats.map((h) => ({
+    jobName: h.jobName,
+    lastSuccessAt: h.lastSuccessAt,
+    lastErrorAt: h.lastErrorAt,
+    lastError: h.lastError,
+    lastDurationMs: h.lastDurationMs,
+    lastItems: h.lastItems,
+    stale: isJobStale(h.jobName, h.lastSuccessAt, now),
+  }));
+
+  // Roll the per-(provider, outcome) rows up into one entry per provider.
+  const byProvider = new Map<string, AnalyticsHealthResponse['webhooks'][number]>();
+  for (const row of webhookStats) {
+    let entry = byProvider.get(row.provider);
+    if (!entry) {
+      entry = {
+        provider: row.provider,
+        received: 0,
+        invalidSignature: 0,
+        processed: 0,
+        failed: 0,
+        total: 0,
+        lastCreatedAt: null,
+      };
+      byProvider.set(row.provider, entry);
+    }
+    if (row.outcome === 'received') entry.received += row.count;
+    else if (row.outcome === 'invalid_signature') entry.invalidSignature += row.count;
+    else if (row.outcome === 'processed') entry.processed += row.count;
+    else if (row.outcome === 'failed') entry.failed += row.count;
+    entry.total += row.count;
+    if (entry.lastCreatedAt === null || row.lastCreatedAt > entry.lastCreatedAt) {
+      entry.lastCreatedAt = row.lastCreatedAt;
+    }
+  }
+
+  const response: AnalyticsHealthResponse = {
+    jobs,
+    webhooks: Array.from(byProvider.values()),
   };
 
   return c.json(response);

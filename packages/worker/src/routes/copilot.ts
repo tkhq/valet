@@ -14,6 +14,7 @@ import { validateDefinition, validateAgainstEnvironment } from '../lib/workflow-
 import { applyOpsLenient } from '../services/workflow-ops.js';
 import { getWorkflowSchemaReference } from '../services/workflow-schema-reference.js';
 import { resolveAvailableModels } from '../services/model-catalog.js';
+import { buildActionCatalog, getActionCatalogEntry } from '../services/action-catalog.js';
 import {
   createCopilotThread,
   getCopilotThread,
@@ -249,6 +250,33 @@ copilotRouter.post('/chat', zValidator('json', chatBodySchema), async (c) => {
           p.models.map((m) => ({ id: m.id, provider: p.provider, name: m.name })),
         ),
       }),
+    }),
+    getActionSchema: tool({
+      description: [
+        'Look up integration actions the workflow engine can invoke from a `tool` node.',
+        'Wraps the same catalog the policy editor uses, so what you see here is',
+        'exactly the set of actions available at runtime.',
+        '',
+        'Params:',
+        '  • service   — required, e.g. `linear`, `slack`, `github`.',
+        '  • actionId  — optional. When set, returns a single ActionCatalogEntry',
+        '    ({ id, name, description, riskLevel, inputSchema, outputSchema })',
+        '    for that action, or `null` if the id does not exist under the service.',
+        '    When omitted, returns an array of every action for that service.',
+        '',
+        'Call this BEFORE authoring a `tool` node whose action id or params you',
+        'are not certain about — the input/output schemas here are authoritative.',
+      ].join('\n'),
+      inputSchema: z.object({
+        service: z.string().min(1).describe('Integration service slug (e.g. `linear`, `slack`).'),
+        actionId: z.string().min(1).optional().describe('Optional. Fully-qualified action id (e.g. `linear.create_issue`). Omit to list all actions for the service.'),
+      }),
+      execute: async ({ service, actionId }: { service: string; actionId?: string }) => {
+        if (actionId) {
+          return getActionCatalogEntry(validationEnv, db, service, actionId);
+        }
+        return buildActionCatalog(validationEnv, db, service);
+      },
     }),
   };
 

@@ -1,6 +1,52 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
-import type { OrchestratorIdentity, MemoryFile, MemoryFileListing, MemoryFileSearchResult, MemoryExportBundle, MemoryImportResult, AgentSession, MailboxMessage, UserNotificationPreference, UserIdentityLink, UserTelegramConfig } from './types';
+import type {
+  OrchestratorIdentity,
+  MemoryFile,
+  MemoryFileListing,
+  MemoryFileSearchResult,
+  MemoryExportManifest,
+  MemoryImportResult,
+  MemoryMoveResult,
+  MemoryLinkNeighbor,
+  MemoryGraph,
+  AgentSession,
+  MailboxMessage,
+  UserNotificationPreference,
+  UserIdentityLink,
+  UserTelegramConfig,
+} from './types';
+
+/** `GET /me/memory?path=<dir>` response — directory-listing mode. */
+export interface MemoryDirEnvelope {
+  listing: MemoryFileListing[];
+  index: string;
+}
+
+/** `GET /me/memory?path=<file>` response — single-file mode. */
+export interface MemoryFileEnvelope {
+  file: MemoryFile | null;
+  document: string;
+  backlinks: MemoryLinkNeighbor[];
+  notices: string[];
+  /**
+   * `file.sourceSessionId` resolved to the owning Valet session + thread row
+   * (the OpenCode thread id itself is not a navigable session URL). Null when
+   * unresolvable (thread pruned, imported file, old worker).
+   */
+  sourceThread?: { sessionId: string; threadId: string } | null;
+}
+
+/** `GET /me/memory/links` response. */
+export interface MemoryLinksResponse {
+  neighbors: MemoryLinkNeighbor[][];
+  truncated: boolean;
+}
+
+/** `GET /me/memory/graph` response. */
+export interface MemoryGraphResponse extends MemoryGraph {
+  truncated: boolean;
+}
 
 export const orchestratorKeys = {
   all: ['orchestrator'] as const,
@@ -155,25 +201,21 @@ export function useMemoryFiles(path?: string) {
       const params = new URLSearchParams();
       if (path) params.set('path', path);
       const qs = params.toString();
-      return api.get<{ files: MemoryFileListing[] }>(
-        `/me/memory${qs ? `?${qs}` : ''}`
-      );
+      return api.get<MemoryDirEnvelope>(`/me/memory${qs ? `?${qs}` : ''}`);
     },
-    select: (data) => data.files,
+    select: (data) => data.listing,
     staleTime: 30_000,
   });
 }
 
+/** Fetches the full metadata envelope for a single memory file (file, rendered document, backlinks, notices). */
 export function useMemoryFile(path: string) {
   return useQuery({
     queryKey: orchestratorKeys.memoryFile(path),
     queryFn: () => {
       const params = new URLSearchParams({ path });
-      return api.get<{ file: MemoryFile | null }>(
-        `/me/memory?${params.toString()}`
-      );
+      return api.get<MemoryFileEnvelope>(`/me/memory?${params.toString()}`);
     },
-    select: (data) => data.file,
     enabled: !!path && !path.endsWith('/'),
     staleTime: 30_000,
   });
@@ -188,6 +230,9 @@ export function useWriteMemoryFile() {
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: [...orchestratorKeys.all, 'memory-files'],
+      });
+      queryClient.invalidateQueries({
+        queryKey: [...orchestratorKeys.all, 'memory-file'],
       });
     },
   });
@@ -218,29 +263,90 @@ export function useDeleteMemoryFile() {
       queryClient.invalidateQueries({
         queryKey: [...orchestratorKeys.all, 'memory-files'],
       });
+      queryClient.invalidateQueries({
+        queryKey: [...orchestratorKeys.all, 'memory-file'],
+      });
     },
   });
 }
 
-/** Fetches a portable bundle of all memory files (for download/backup). */
+/** Fetches the OKF export manifest of all memory files (for download/backup). `include` defaults to `'all'`. */
 export function useExportMemory() {
   return useMutation({
-    mutationFn: () => api.get<MemoryExportBundle>('/me/memory/export'),
+    mutationFn: (include: 'all' | 'shareable' = 'all') =>
+      api.get<MemoryExportManifest>(`/me/memory/export?include=${include}`),
   });
 }
 
-/** Writes a batch of memory files (merge semantics — same-path files overwritten). */
+/**
+ * Writes a batch of memory files (merge semantics — same-path files overwritten).
+ * `trusted: true` asserts the bundle came from this same Valet instance (e.g. a
+ * prior export of this account), preserving sensitivity/pinned/version state
+ * instead of downgrading everything to private "foreign import" semantics.
+ */
 export function useImportMemory() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (files: { path: string; content: string }[]) =>
-      api.post<MemoryImportResult>('/me/memory/import', { files }),
+    mutationFn: (data: { files: { path: string; content: string }[]; trusted?: boolean }) =>
+      api.post<MemoryImportResult>('/me/memory/import', data),
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: [...orchestratorKeys.all, 'memory-files'],
       });
+      queryClient.invalidateQueries({
+        queryKey: [...orchestratorKeys.all, 'memory-file'],
+      });
     },
+  });
+}
+
+/** Moves/renames a memory file, updating inbound references. */
+export function useMoveMemoryFile() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: { from: string; to: string }) =>
+      api.post<MemoryMoveResult>('/me/memory/move', data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: [...orchestratorKeys.all, 'memory-files'],
+      });
+      queryClient.invalidateQueries({
+        queryKey: [...orchestratorKeys.all, 'memory-file'],
+      });
+    },
+  });
+}
+
+/** Fetches inbound/outbound link neighbors for a memory file (used for backlink/phantom indicators). */
+export function useMemoryLinks(path: string, opts?: { direction?: 'out' | 'in' | 'both'; depth?: 1 | 2 | 3; includeJournal?: boolean }) {
+  return useQuery({
+    queryKey: [...orchestratorKeys.all, 'memory-links', path, opts] as const,
+    queryFn: () => {
+      const params = new URLSearchParams({ path });
+      if (opts?.direction) params.set('direction', opts.direction);
+      if (opts?.depth) params.set('depth', String(opts.depth));
+      if (opts?.includeJournal) params.set('includeJournal', 'true');
+      return api.get<MemoryLinksResponse>(`/me/memory/links?${params.toString()}`);
+    },
+    enabled: !!path,
+    staleTime: 30_000,
+  });
+}
+
+/** Fetches the full memory graph (nodes + edges) for graph visualization. */
+export function useMemoryGraph(opts?: { tags?: boolean; containment?: boolean }) {
+  return useQuery({
+    queryKey: [...orchestratorKeys.all, 'memory-graph', opts] as const,
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (opts?.tags) params.set('tags', 'true');
+      if (opts?.containment) params.set('containment', 'true');
+      const qs = params.toString();
+      return api.get<MemoryGraphResponse>(`/me/memory/graph${qs ? `?${qs}` : ''}`);
+    },
+    staleTime: 30_000,
   });
 }
 

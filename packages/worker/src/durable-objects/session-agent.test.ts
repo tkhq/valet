@@ -1001,6 +1001,65 @@ describe('SessionAgentDO', () => {
     }
   });
 
+  it('emits turn_error analytics when a turn finalizes with reason=error', async () => {
+    // The V2 sync-prompt path reports turn failures exclusively via
+    // message.finalize(reason: 'error') — if this emit regresses, the
+    // Performance tab error rate goes blind (turn_error stopped flowing
+    // entirely when the runner moved off the legacy 'error' message).
+    const { agent } = await createTestAgent();
+
+    await (agent as any).runnerHandlers['message.create']({
+      type: 'message.create',
+      turnId: 'turn-err',
+      channelType: 'web',
+      channelId: 'default',
+    });
+    await (agent as any).runnerHandlers['message.finalize']({
+      type: 'message.finalize',
+      turnId: 'turn-err',
+      reason: 'error',
+      error: 'Model exploded mid-turn',
+    });
+
+    const emitEvent = (agent as any).emitEvent as ReturnType<typeof vi.fn>;
+    expect(emitEvent).toHaveBeenCalledWith('turn_error', expect.objectContaining({
+      turnId: 'turn-err',
+      errorCode: 'agent_error',
+      channel: 'web',
+      properties: { message: 'Model exploded mid-turn' },
+    }));
+    const emitAuditEvent = (agent as any).emitAuditEvent as ReturnType<typeof vi.fn>;
+    expect(emitAuditEvent).toHaveBeenCalledWith('agent.error', 'Model exploded mid-turn');
+  });
+
+  it('does not emit turn_error when a turn finalizes normally or canceled', async () => {
+    const { agent } = await createTestAgent();
+
+    await (agent as any).runnerHandlers['message.create']({
+      type: 'message.create',
+      turnId: 'turn-ok',
+    });
+    await (agent as any).runnerHandlers['message.finalize']({
+      type: 'message.finalize',
+      turnId: 'turn-ok',
+      reason: 'end_turn',
+      finalText: 'done',
+    });
+    await (agent as any).runnerHandlers['message.create']({
+      type: 'message.create',
+      turnId: 'turn-cancel',
+    });
+    await (agent as any).runnerHandlers['message.finalize']({
+      type: 'message.finalize',
+      turnId: 'turn-cancel',
+      reason: 'canceled',
+    });
+
+    const emitEvent = (agent as any).emitEvent as ReturnType<typeof vi.fn>;
+    const turnErrorCalls = emitEvent.mock.calls.filter(([eventType]) => eventType === 'turn_error');
+    expect(turnErrorCalls).toHaveLength(0);
+  });
+
   it('does not mirror text channel replies into the web UI', async () => {
     const { agent, broadcasts } = await createTestAgent();
     const runnerSend = vi.fn();
@@ -1090,6 +1149,41 @@ describe('SessionAgentDO', () => {
     });
     // The web turn must NOT have the Telegram threadId
     expect((created?.data as Record<string, unknown> | undefined)?.threadId).toBeUndefined();
+  });
+
+  it('broadcasts idle status with the completed thread id after handlePromptComplete', async () => {
+    // Regression test for the "Writing" indicator sticking on a thread after
+    // the prompt has already completed. The bug was a read-after-delete in
+    // handlePromptComplete: markCompletedById dropped the prompt_queue row,
+    // then a follow-up getChannelForMessage lookup returned nothing and the
+    // idle-status broadcast fired with threadId=undefined. Clients treat an
+    // unscoped completion as session-wide only and leave the per-thread
+    // status latched on 'streaming', so <ThinkingIndicator> keeps showing
+    // "Writing" forever. The fix resolves the threadId BEFORE the delete
+    // (via the already-hoisted `followupChannel`) so the status broadcast
+    // carries the correct threadId.
+    const { agent, broadcasts } = await createTestAgent();
+
+    (agent as any).promptQueue.runnerBusy = true;
+    (agent as any).promptQueue.enqueue({
+      id: 'web-turn-thread-1',
+      content: 'threaded web prompt',
+      status: 'processing',
+      channelType: 'thread',
+      channelId: 'thread-web-1',
+      channelKey: 'thread:thread-web-1',
+      threadId: 'thread-web-1',
+    });
+
+    await (agent as any).handlePromptComplete('web-turn-thread-1');
+
+    const idleStatus = broadcasts.find((message) => {
+      const data = message.data as Record<string, unknown> | undefined;
+      return message.type === 'status' && data?.runnerBusy === false;
+    });
+    expect(idleStatus).toBeTruthy();
+    expect((idleStatus?.data as Record<string, unknown> | undefined)?.threadId).toBe('thread-web-1');
+    expect((idleStatus?.data as Record<string, unknown> | undefined)?.messageId).toBe('web-turn-thread-1');
   });
 
   it('preserves original array parts when building forwarded message parts', () => {

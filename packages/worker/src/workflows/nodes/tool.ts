@@ -27,7 +27,9 @@ import { qualifyActionId } from '../../lib/action-id.js';
 import { loadCustomMcpConnectorContext } from '../../services/custom-mcp-connectors.js';
 import { getDb } from '../../lib/drizzle.js';
 import { invokeWorkflowAction, markExecuted, markFailed } from '../../services/actions.js';
+import { buildActionCredentials } from '../../services/credentials.js';
 import { updateInvocationStatus } from '../../lib/db/actions.js';
+import { getUserIdentityLinks } from '../../lib/db/channels.js';
 import { waitForApprovalEvent } from '../approvals.js';
 import { setExecutionStatus } from '../execution-status.js';
 import { CancelledError, iterationSuffix, NO_RETRY } from '../types.js';
@@ -55,10 +57,17 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   // wake and a retry of any single step does not re-fire side effects
   // already committed by an earlier step.
 
+  // Render params before preflight because some credential resolvers use
+  // action parameters to select the credential source.
+  const renderedParams = renderJsonTemplates(node.params, ctx) as Record<string, unknown>;
+
   // 1. Preflight reads (disabled-action + action definition) — cached
   // so a replay returns the same risk level and disabled state without
-  // re-reading D1 or re-listing integration actions.
-  const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, async () => {
+  // re-reading D1 or re-listing integration actions. NO_RETRY: every
+  // throw here is deterministic (action disabled, no package, action
+  // not found, no credentials); CF's default 5x backoff would silently
+  // stall the node for minutes before writing `failed`.
+  const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, { retries: { ...NO_RETRY } }, async () => {
     if (await isActionDisabled(db, node.service, node.action)) {
       const actionLabel = qualifyActionId(node.service, node.action);
       throw new Error(`tool node "${node.id}": action "${actionLabel}" is disabled`);
@@ -68,9 +77,43 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     if (!source) {
       throw new Error(`tool node "${node.id}": no integration package for service "${node.service}"`);
     }
-    const defs = await source.listActions();
+    const provider = integrationRegistry.getProvider(node.service, customCtx);
+    let credentials: { access_token: string } | undefined;
+    // MCP servers advertise actions dynamically and credential-gated servers
+    // return no definitions unless the owner's token is supplied. Static
+    // integration packages ignore this context, so avoid an unnecessary
+    // credential lookup for them.
+    if (provider?.mcpServerUrl && providerRequiresUserCredential(provider)) {
+      const credentialResult = await integrationRegistry.resolveCredentials(node.service, env, runParams.userId, {
+        params: renderedParams,
+        forceRefresh: false,
+      });
+      if (!credentialResult.ok) {
+        throw new Error(`tool node "${node.id}": no credentials for ${node.service}: ${credentialResult.error.message}`);
+      }
+      credentials = { access_token: credentialResult.credential.accessToken };
+    }
+    let listError: string | null = null;
+    const defs = await source.listActions({
+      ...(credentials ? { credentials } : {}),
+      onListError: (err) => { listError = err; },
+    });
     const def = defs.find((a) => a.id === node.action);
     if (!def) {
+      // Distinguish "action truly doesn't exist" from "listActions
+      // failed transiently" (expired OAuth token, network hiccup, MCP
+      // server down). McpActionSource swallows listTools errors and
+      // returns an empty array; the per-call onListError sink above
+      // captures the underlying error. Without this branch, an OAuth
+      // refresh failure surfaced as "action not found" — misleading,
+      // because save-time validation had passed (it reads
+      // mcp_tool_cache, not a live listTools call) and the author
+      // knows the id is right.
+      if (listError) {
+        throw new Error(
+          `tool node "${node.id}": listing actions for "${node.service}" failed — the action id is correct in the tool catalog, but the live MCP server call returned no results. Underlying error: ${listError}. This usually means the ${node.service} credential expired or the MCP server is unreachable; re-connect the integration in the UI to refresh the token.`,
+        );
+      }
       throw new Error(`tool node "${node.id}": action "${node.action}" not found in ${node.service} package`);
     }
     return JSON.stringify({ riskLevel: def.riskLevel ?? 'medium' });
@@ -87,10 +130,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     throw new Error(`tool node "${node.id}": no integration package for service "${node.service}"`);
   }
 
-  // 2. Render params (deterministic from trigger + state.nodes).
-  const renderedParams = renderJsonTemplates(node.params, ctx) as Record<string, unknown>;
-
-  // 3. Invocation row + policy resolution. Cached because creating /
+  // 2. Invocation row + policy resolution. Cached because creating /
   // resolving the row is the contract that prevents re-firing the
   // action on replay.
   const invocationId = aliasedInvocationId(runParams.executionId, node.id, args.aliases);
@@ -113,7 +153,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   });
   const invocation = JSON.parse(invocationJson) as { outcome: 'allowed' | 'denied' | 'pending_approval' };
 
-  // 4. Handle policy outcome.
+  // 3. Handle policy outcome.
   if (invocation.outcome === 'denied') {
     if (node.onPolicyDeny === 'skip') {
       return { denied: true, reason: 'policy_denied' } satisfies ToolDeniedOutput;
@@ -225,7 +265,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     });
   }
 
-  // 5. Resolve credentials inside step.do — the credential fetch
+  // 4. Resolve credentials inside step.do — the credential fetch
   // touches D1 + external token refresh; we want the resolved tuple
   // cached so a retry doesn't re-issue a refresh token call.
   const provider = integrationRegistry.getProvider(node.service, customContext);
@@ -247,8 +287,20 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
         await updateInvocationStatus(db, invocationId, { status: 'failed', expectedStatus: invocation.outcome === 'allowed' ? 'pending' : 'approved' });
         throw new Error(`tool node "${node.id}": no credentials for ${node.service}: ${credResult.error.message}`);
       }
+      const built = buildActionCredentials(credResult);
+      // Service-specific extras. Mirrors session-tools' inject step so
+      // workflow-invoked Slack actions (dm_owner, guardPrivateChannel)
+      // that read ctx.credentials.owner_slack_user_id get the same
+      // value as when the orchestrator invokes them directly. Without
+      // this dm_owner fails "Owner has not linked their Slack identity"
+      // even for users who have.
+      if (node.service === 'slack') {
+        const identityLinks = await getUserIdentityLinks(db, runParams.userId);
+        const slackLink = identityLinks.find((l) => l.provider === 'slack');
+        if (slackLink) built.owner_slack_user_id = slackLink.externalId;
+      }
       return JSON.stringify({
-        credentials: buildCredentials(credResult),
+        credentials: built,
         attribution: credResult.credential.attribution,
       });
     });
@@ -301,7 +353,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       }
       return JSON.stringify({
         ok: true,
-        credentials: buildCredentials(refreshed),
+        credentials: buildActionCredentials(refreshed),
         attribution: refreshed.credential.attribution,
       });
     });
@@ -366,30 +418,4 @@ function isAuthFailure(result: ActionResult): boolean {
   return !result.success &&
     typeof result.error === 'string' &&
     /\b(401|unauthorized|invalid.credentials|token.*expired|token.*revoked)\b/i.test(result.error);
-}
-
-interface CredentialOk {
-  ok: true;
-  credential: {
-    accessToken?: string;
-    refreshToken?: string;
-    customFields?: Record<string, string>;
-    attribution?: { name: string; email: string };
-  };
-}
-
-function buildCredentials(result: CredentialOk): Record<string, string> {
-  const out: Record<string, string> = {};
-  const cred = result.credential;
-  if (cred.accessToken) out.access_token = cred.accessToken;
-  if (cred.refreshToken) out.refresh_token = cred.refreshToken;
-  if (cred.customFields) Object.assign(out, cred.customFields);
-  return out;
-}
-
-function coerceString(v: unknown): string {
-  if (typeof v === 'string') return v;
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
 }

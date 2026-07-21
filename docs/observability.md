@@ -34,6 +34,11 @@ call**, so DO calls stay correlated even though the DOs run uninstrumented. On t
   in `index.ts`), so OAuth codes / tokens in URLs (e.g. `?code=...`) are never exported.
   This is source-side defense-in-depth; the Collector gateway (below) is still the place
   for full redaction.
+- **The Workflow interpreter emits its own trace per run.** It runs as a Cloudflare
+  Workflow (not the auto-instrumented Worker), so `lib/workflow-tracing.ts` reconstructs a
+  `workflow.run` span tree from replay-stable node timestamps and flushes it in a final
+  `step.do`, parented into the dispatching request's trace via a propagated `traceparent`.
+  See [`docs/specs/workflows.md`](specs/workflows.md#trace-emission).
 
 Tracing is a **no-op when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset** — the head sampler
 drops every span, so nothing is recorded or exported and no network call is made. It
@@ -69,6 +74,25 @@ Open Grafana at <http://localhost:3000> (admin/admin) → **Explore** → **Temp
 Or run **`make otel-e2e`** for an automated smoke (no Grafana needed): it boots the
 worker against a throwaway local collector and asserts spans export, query-string
 secrets are redacted, and disabling the endpoint is a true no-op.
+
+## App-state signals (no external backend required)
+
+These read straight from D1 and work today, independent of the trace pipeline:
+
+- **`GET /health`** — static liveness (`{status:'ok'}`), unauthenticated.
+- **`GET /health/deep`** — probes D1, R2, and the EventBus DO (each time-boxed to
+  2s); returns `{status, checks:{d1,r2,eventbus:{ok,ms}}}` with HTTP 503 if any
+  dependency is down. Unauthenticated, safe for an external canary — exposes only
+  per-check ok/latency. Point an uptime monitor here, not at `/health`.
+- **`GET /api/analytics/health`** (admin) — cron heartbeats and webhook delivery
+  health. Every scheduled sweep runs through a `runSweep` wrapper that upserts a
+  `cron_heartbeats` row (last success/error, duration, item count); a job is
+  flagged `stale` when its last success is older than 3× its expected interval, so
+  a silently-dead sweep (credential refresh, PR reconciler, retention…) becomes
+  visible instead of rotting. The same endpoint returns per-provider
+  `webhook_deliveries` counts (received / invalid_signature / processed / failed)
+  from the last 24h — recorded fire-and-forget at each inbound webhook route so
+  telemetry can never break a delivery ACK. Rows are pruned after 30 days.
 
 ## Production
 

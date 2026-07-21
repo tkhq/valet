@@ -17,7 +17,7 @@ import type { AppDb } from '../lib/drizzle.js';
 import { workflows } from '../lib/schema/workflows.js';
 import { workflowDefinitionVersions } from '../lib/schema/workflow-definition-versions.js';
 import type { AvailableModels, WorkflowDefinition, WorkflowValidationError } from '@valet/shared';
-import { validateDefinition, validateAgainstEnvironment, validateAgainstAvailableModels } from '../lib/workflow-dag/validator.js';
+import { validateDefinitionWithContext, validateAgainstEnvironment, validateAgainstAvailableModels, isValidationWarning } from '../lib/workflow-dag/validator.js';
 import type { Env } from '../env.js';
 import { sha256Hex } from '../lib/hash.js';
 
@@ -133,7 +133,31 @@ export async function saveDraft(
 export async function publishDraft(
   db: AppDb,
   workflowId: string,
-  opts: { userId: string; publishNote?: string; ui?: string | null; env?: Env; availableModels?: AvailableModels },
+  opts: {
+    userId: string;
+    publishNote?: string;
+    ui?: string | null;
+    env?: Env;
+    availableModels?: AvailableModels;
+    /**
+     * Optional service→actionId catalog. When supplied, publish also
+     * hard-rejects `unknown_tool_action` (a typoed action on a known
+     * service) at publish time — so a definition can't slip past the
+     * save/validate gates via manual edit and end up executing with
+     * a bad tool id. Unknown services stay a warning (see
+     * isValidationWarning) because the catalog may not see per-user
+     * custom MCP connectors.
+     */
+    knownToolActions?: Map<string, Set<string>>;
+    /**
+     * Optional tool output schemas (service:actionId → JSON-schema).
+     * Feeds the validator's typed-array derivation for foreach
+     * sources. Populated by `buildValidatorToolContext` from both the
+     * static registry (`REGISTERED_TOOL_OUTPUT_SCHEMAS`) and any
+     * catalog-declared schemas.
+     */
+    toolOutputSchemas?: Record<string, Record<string, unknown>>;
+  },
 ): Promise<{ version: PublishedVersion }> {
   const row = await db.select({
     draftDefinition: workflows.draftDefinition,
@@ -153,8 +177,14 @@ export async function publishDraft(
   }
 
   // validateDefinition is total (returns malformed_definition on bad
-  // shapes); no try/catch wrapper needed.
-  const errors = validateDefinition(def).filter((e) => e.code !== 'llm_maxoutput_warning');
+  // shapes); no try/catch wrapper needed. When the caller supplies a
+  // tool catalog, feed it through so `unknown_tool_action` (typo on a
+  // known service) hard-blocks publish — matching the save/validate
+  // gates that already check this.
+  const errors = validateDefinitionWithContext(def, {
+    ...(opts.knownToolActions ? { knownToolActions: opts.knownToolActions } : {}),
+    ...(opts.toolOutputSchemas ? { toolOutputSchemas: opts.toolOutputSchemas } : {}),
+  }).filter((e) => !isValidationWarning(e));
   if (errors.length > 0) {
     throw new WorkflowVersionError('invalid_definition', 'draft failed validation', errors);
   }

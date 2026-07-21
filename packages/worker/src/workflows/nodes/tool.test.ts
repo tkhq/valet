@@ -43,6 +43,11 @@ vi.mock('../../lib/db/actions.js', () => ({
   updateInvocationStatus: (...args: unknown[]) => updateInvocationStatusMock(...args),
 }));
 
+const getUserIdentityLinksMock = vi.fn();
+vi.mock('../../lib/db/channels.js', () => ({
+  getUserIdentityLinks: (...args: unknown[]) => getUserIdentityLinksMock(...args),
+}));
+
 vi.mock('../approvals.js', () => ({
   waitForApprovalEvent: (...args: unknown[]) => waitForApprovalEventMock(...args),
 }));
@@ -100,6 +105,8 @@ beforeEach(() => {
   waitForApprovalEventMock.mockReset();
   markExecutedMock.mockReset();
   markFailedMock.mockReset();
+  getUserIdentityLinksMock.mockReset();
+  getUserIdentityLinksMock.mockResolvedValue([]);
   isActionDisabledMock.mockResolvedValue(false);
   loadCustomMcpConnectorContextMock.mockResolvedValue({ connectors: new Map() });
   listActionsMock.mockResolvedValue([{ id: 'slack.send_message', riskLevel: 'low' }, { id: 'slack.test', riskLevel: 'low' }, { id: 'gmail.send', riskLevel: 'medium' }, { id: 'sheets.clear_range', riskLevel: 'medium' }, { id: 'unknown.x', riskLevel: 'low' }, { id: 'unknown.y', riskLevel: 'low' }]);
@@ -144,6 +151,20 @@ describe('executeTool', () => {
     listActionsMock.mockResolvedValue([{ id: 'something_else', riskLevel: 'low' }]);
     const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
     await expect(executeTool(args(node))).rejects.toThrow(/not found in slack package/);
+  });
+
+  it('surfaces a credential/network error when listActions failed transiently', async () => {
+    // McpActionSource swallows listTools errors and returns []; when the
+    // action is truly cached but the live list call failed (expired OAuth,
+    // MCP server down), the preflight should name credentials as the
+    // likely cause instead of the misleading "action not found." The
+    // failure is reported through the per-call onListError sink.
+    listActionsMock.mockImplementation(async (ctx?: { onListError?: (err: string) => void }) => {
+      ctx?.onListError?.('401 Unauthorized from https://mcp.example.test');
+      return [];
+    });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
+    await expect(executeTool(args(node))).rejects.toThrow(/listing actions for "slack" failed.*401 Unauthorized.*re-connect the integration/i);
   });
 
   it('fails when the action-policy resolves to denied', async () => {
@@ -194,7 +215,7 @@ describe('executeTool', () => {
     getProviderMock.mockReturnValue({ authType: 'oauth2' });
     resolveCredentialsMock.mockResolvedValue({
       ok: true,
-      credential: { accessToken: 'tok-1', customFields: { workspace_id: 'W1' } },
+      credential: { accessToken: 'tok-1', credentialType: 'oauth2' },
     });
     executeMock.mockResolvedValue({ success: true, data: null });
     const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
@@ -202,7 +223,68 @@ describe('executeTool', () => {
     expect(executeMock).toHaveBeenCalledWith(
       'slack.send_message',
       {},
-      expect.objectContaining({ credentials: { access_token: 'tok-1', workspace_id: 'W1' } }),
+      expect.objectContaining({ credentials: { access_token: 'tok-1', _credential_type: 'oauth2' } }),
+    );
+  });
+
+  it('uses user credentials to discover credential-gated actions during preflight', async () => {
+    getProviderMock.mockReturnValue({ authType: 'oauth2', mcpServerUrl: 'https://mcp.example.test' });
+    resolveCredentialsMock.mockResolvedValue({
+      ok: true,
+      credential: { accessToken: 'tok-1', credentialType: 'oauth2' },
+    });
+    executeMock.mockResolvedValue({ success: true, data: null });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'custom_mcp', action: 'custom_mcp.search', params: {} };
+    listActionsMock.mockResolvedValue([{ id: 'custom_mcp.search', riskLevel: 'low' }]);
+
+    await executeTool(args(node));
+
+    expect(listActionsMock).toHaveBeenCalledWith(expect.objectContaining({
+      credentials: { access_token: 'tok-1' },
+    }));
+  });
+
+  it('injects owner_slack_user_id from identity links for slack service', async () => {
+    // slack.dm_owner and the private-channel guard both read
+    // ctx.credentials.owner_slack_user_id. The session-tools path injects
+    // it after resolving the bot token; the workflow path must too, else
+    // dm_owner from a workflow always fails "Owner has not linked their
+    // Slack identity" even when the user has.
+    getProviderMock.mockReturnValue({ authType: 'bot_token' });
+    resolveCredentialsMock.mockResolvedValue({
+      ok: true,
+      credential: { accessToken: 'xoxb-tok', credentialType: 'bot_token' },
+    });
+    getUserIdentityLinksMock.mockResolvedValue([{ provider: 'slack', externalId: 'U12345' }]);
+    executeMock.mockResolvedValue({ success: true, data: null });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
+    await executeTool(args(node));
+    expect(executeMock).toHaveBeenCalledWith(
+      'slack.send_message',
+      {},
+      expect.objectContaining({
+        credentials: expect.objectContaining({ bot_token: 'xoxb-tok', owner_slack_user_id: 'U12345' }),
+      }),
+    );
+  });
+
+  it('maps bot_token credentials to credentials.bot_token (not access_token)', async () => {
+    // Slack-style providers (authType='bot_token') expect the action to
+    // receive `credentials.bot_token`. If the resolver-to-action bridge
+    // put the token under `access_token`, the action would fail with
+    // "Missing bot_token". Regression test for that exact bug.
+    getProviderMock.mockReturnValue({ authType: 'bot_token' });
+    resolveCredentialsMock.mockResolvedValue({
+      ok: true,
+      credential: { accessToken: 'xoxb-slack-token', credentialType: 'bot_token' },
+    });
+    executeMock.mockResolvedValue({ success: true, data: null });
+    const node: ToolNode = { id: 't', type: 'tool', service: 'slack', action: 'slack.send_message', params: {} };
+    await executeTool(args(node));
+    expect(executeMock).toHaveBeenCalledWith(
+      'slack.send_message',
+      {},
+      expect.objectContaining({ credentials: { bot_token: 'xoxb-slack-token', _credential_type: 'bot_token' } }),
     );
   });
 

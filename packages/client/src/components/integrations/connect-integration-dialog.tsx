@@ -184,8 +184,13 @@ function buildTokenServices(disabledServices: Set<string>): ResolvedService[] {
 }
 
 // Services that are pre-configured at the org level and should not appear
-// in the user-facing "Connect Integration" dialog.
-const PRE_CONFIGURED_SERVICES = new Set(['deepwiki', 'github', 'slack']);
+// in the generic user-facing "Connect Integration" dialog. `slack-user`
+// (personal Slack OAuth) has its OWN dedicated card + start flow with
+// bespoke `missing_scopes` / `already_linked` guards; routing it through
+// this generic dialog would either dead-end at Slack (redirect_uri not
+// registered for the generic /oauth path) or, if registered, would
+// bypass those guards.
+const PRE_CONFIGURED_SERVICES = new Set(['deepwiki', 'github', 'slack', 'slack-user']);
 
 // ─── Component ─────────────────────────────────────────────────────────────
 

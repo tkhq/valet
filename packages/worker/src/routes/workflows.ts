@@ -369,11 +369,20 @@ workflowsRouter.put('/:id/draft', zValidator('json', draftPutSchema), async (c) 
   const { id } = await assertWorkflowAccess(c.get('db'), user, idOrSlug, 'editor');
   const { saveDraft, WorkflowVersionError } = await import('../services/workflow-versions.js');
   const { isWorkflowDefinition } = await import('../lib/workflow-dag/schema.js');
-  const { validateDefinition, validateAgainstAvailableModels, groupWorkflowValidationResults } = await import('../lib/workflow-dag/validator.js');
+  const { validateDefinition, validateDefinitionWithContext, validateAgainstAvailableModels, groupWorkflowValidationResults, isValidationWarning } = await import('../lib/workflow-dag/validator.js');
   if (!isWorkflowDefinition(body.draft)) {
     return c.json({ error: 'invalid_draft', errors: validateDefinition(body.draft) }, 400);
   }
-  const structuralErrors = validateDefinition(body.draft).filter((issue) => issue.code !== 'llm_maxoutput_warning');
+  // Build the tool-action catalog once per request so the validator
+  // can catch `unknown_tool_service` / `unknown_tool_action` at save
+  // time — the fix for the "silent pending + preflight-retry burn"
+  // failure mode where an action-id typo only surfaces mid-execution.
+  // Also seeds toolOutputSchemas so `{{nodes.<id>.data.<field>}}`
+  // resolves as a typed-array foreach source for known fixed-shape
+  // tools without needing a per-node `outputSchema` on every node.
+  const { buildValidatorToolContext } = await import('../services/action-catalog.js');
+  const { knownToolActions, toolOutputSchemas } = await buildValidatorToolContext(c.env, c.get('db'));
+  const structuralErrors = validateDefinitionWithContext(body.draft, { knownToolActions, toolOutputSchemas }).filter((issue) => !isValidationWarning(issue));
   if (structuralErrors.length > 0) {
     return c.json({ error: 'invalid_draft', ...groupWorkflowValidationResults(structuralErrors) }, 400);
   }
@@ -411,7 +420,7 @@ workflowsRouter.post('/:id/validate', async (c) => {
   const { assertWorkflowAccess } = await import('../lib/workflow-access.js');
   const { id } = await assertWorkflowAccess(c.get('db'), user, idOrSlug, 'viewer');
   const { getDraft, WorkflowVersionError } = await import('../services/workflow-versions.js');
-  const { validateDefinition, validateAgainstEnvironment, groupWorkflowValidationResults } = await import('../lib/workflow-dag/validator.js');
+  const { validateDefinitionWithContext, validateAgainstEnvironment, groupWorkflowValidationResults } = await import('../lib/workflow-dag/validator.js');
   let result;
   try {
     result = await getDraft(c.get('db'), id);
@@ -424,8 +433,13 @@ workflowsRouter.post('/:id/validate', async (c) => {
   if (!result.draft) {
     return c.json({ errors: [{ scope: 'workflow', code: 'no_draft', path: '/', message: 'no draft to validate' }], warnings: [] });
   }
-  // Both validators are total — no try/catch needed.
-  const structuralErrors = validateDefinition(result.draft);
+  // Both validators are total — no try/catch needed. Build the tool
+  // catalog so the validator can hard-error on unknown `service:action`
+  // combinations (see the save_draft handler above for the failure
+  // mode this catches).
+  const { buildValidatorToolContext } = await import('../services/action-catalog.js');
+  const { knownToolActions, toolOutputSchemas } = await buildValidatorToolContext(c.env, c.get('db'));
+  const structuralErrors = validateDefinitionWithContext(result.draft, { knownToolActions, toolOutputSchemas });
   const { assembleLlmProviderEnv } = await import('../lib/llm/provider-env.js');
   const { resolveAvailableModels } = await import('../services/model-catalog.js');
   const providerEnv = await assembleLlmProviderEnv(c.get('db'), c.env);
@@ -447,11 +461,19 @@ workflowsRouter.post('/:id/publish', zValidator('json', publishSchema), async (c
   const providerEnv = await assembleLlmProviderEnv(c.get('db'), c.env);
   const validationEnv = { ...c.env, ...providerEnv } as Env;
   const availableModels = await resolveAvailableModels(c.get('db'), validationEnv);
+  // Build the same tool catalog save_draft/validate use so publish
+  // catches `unknown_tool_action` too — otherwise a definition edited
+  // outside the copilot could slip past into an executable version
+  // with a bad tool id.
+  const { buildValidatorToolContext } = await import('../services/action-catalog.js');
+  const { knownToolActions, toolOutputSchemas } = await buildValidatorToolContext(c.env, c.get('db'));
   try {
     const result = await publishDraft(c.get('db'), id, {
       userId: user.id,
       env: validationEnv,
       availableModels,
+      knownToolActions,
+      toolOutputSchemas,
       ...(body.publishNote ? { publishNote: body.publishNote } : {}),
     });
     return c.json(result);

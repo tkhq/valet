@@ -129,28 +129,42 @@ export async function deleteIntegration(db: AppDb, id: string): Promise<void> {
 
 /**
  * Ensure an integration record exists and is active for a user+service.
- * Used during OAuth login to auto-provision integrations (e.g. GitHub on login).
+ * Used during OAuth login to auto-provision integrations (e.g. GitHub on
+ * login, Slack personal OAuth callback). Atomic upsert on
+ * `(userId, service, scope)` — safe against concurrent callbacks.
+ *
+ * Pass `entities` to record the granted OAuth scopes on the integration
+ * row (shown as a permissions summary in the integrations UI). Omitted →
+ * config.entities is set to `[]` on create, unchanged on update.
  */
 export async function ensureIntegration(
   db: AppDb,
   userId: string,
   service: string,
   scope: 'user' | 'org' = 'user',
+  opts?: { entities?: string[] },
 ): Promise<void> {
+  const config = { entities: opts?.entities ?? [] } as unknown as Integration['config'];
+  const updateSet: Record<string, unknown> = {
+    status: 'active',
+    errorMessage: null,
+    updatedAt: sql`datetime('now')`,
+  };
+  // Surgically update only the `entities` key so other config keys (e.g.
+  // `filters`) written by other flows survive a reconnect.
+  if (opts?.entities) {
+    updateSet.config = sql`json_set(coalesce(${integrations.config}, '{}'), '$.entities', json(${JSON.stringify(opts.entities)}))`;
+  }
   await db.insert(integrations).values({
     id: crypto.randomUUID(),
     userId,
     service,
-    config: { entities: [] } as unknown as Integration['config'],
+    config,
     status: 'active',
     scope,
   }).onConflictDoUpdate({
     target: [integrations.userId, integrations.service, integrations.scope],
-    set: {
-      status: 'active',
-      errorMessage: null,
-      updatedAt: sql`datetime('now')`,
-    },
+    set: updateSet,
   });
 }
 

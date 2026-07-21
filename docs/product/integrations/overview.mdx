@@ -3,9 +3,18 @@ title: Integrations
 description: Reference for every external integration shipped with Valet, including auth type, actions, and triggers.
 ---
 
-Valet ships first-class integrations as plugins under `packages/plugin-*`. Each plugin contributes one or more actions an agent can call, an optional trigger source for inbound events, and a provider definition that controls how credentials are stored.
+Valet has two kinds of integration: **Action Integrations** and **Channel Integrations**.
 
-Two integration shapes are in use today:
+- **Action Integrations** are the ones this page covers — the tools your orchestrator can *call* on your behalf. Every entry in the catalog below is an Action Integration.
+- **Channel Integrations** are Slack and Telegram — bi-directional channels that let you *talk to* Valet from those apps, with Valet replying in the same place. See [Channel Integrations](/product/integrations/channel-integrations) for the full story.
+
+Some plugins are both. Slack is the key example: it's an Action Integration (with actions like `slack.send_message` and `slack.read_history`) **and** a Channel Integration (you can DM Valet in Slack and it'll answer you there). The same connection powers both. Telegram is channel-only.
+
+## Action Integrations
+
+Valet ships first-class integrations as plugins under `packages/plugin-*`. Each Action Integration contributes one or more actions an agent can call, an optional trigger source for inbound events, and a provider definition that controls how credentials are stored.
+
+Two action-shape flavors are in use today:
 
 - **Inline action plugins** — actions are defined in Valet's own source with explicit names, parameters, and risk levels. The pages below list every action and its params.
 - **MCP-proxied plugins** — actions are forwarded to a remote [Model Context Protocol](https://modelcontextprotocol.io) server. The plugin owns auth and the default risk level; the upstream MCP server owns the live action catalog. Agents can enumerate the live actions with `list_tools`.
@@ -19,7 +28,7 @@ All actions, regardless of shape, are subject to the same [approvals](/product/a
 | [Cloudflare](/product/integrations/cloudflare) | Manage Cloudflare zones, DNS records, Workers, and Pages from a Valet session. | MCP-proxied | — | — |
 | [DeepWiki](/product/integrations/deepwiki) | Read repository-level documentation and knowledge bases hosted on DeepWiki. | MCP-proxied | — | — |
 | [Figma](/product/integrations/figma) | Pull Figma files, projects, and component metadata for design context. | MCP-proxied | — | — |
-| [GitHub](/product/integrations/github) | Manage repositories, branches, pull requests, issues, comments, checks, and webhooks. | Inline actions | 29 | 12 event types |
+| [GitHub](/product/integrations/github) | Manage repositories, branches, pull requests, issues, comments, checks, and Dependabot alerts. | Inline actions | 31 | 12 event types |
 | [Gmail](/product/integrations/gmail) | Read, search, send, and manage Gmail messages, threads, labels, and drafts. | Inline actions | 13 | — |
 | [Google Calendar](/product/integrations/google-calendar) | Read and write Google Calendar events across the user's calendars. | Inline actions | 5 | — |
 | [Google Workspace](/product/integrations/google-workspace) | Browse, read, create, and modify Drive files, Docs, and Sheets, gated by Drive labels. | Inline actions | 78 | — |
@@ -29,15 +38,27 @@ All actions, regardless of shape, are subject to the same [approvals](/product/a
 | [Notion](/product/integrations/notion) | Read and modify Notion pages, databases, and blocks. | MCP-proxied | — | — |
 | [Pylon](/product/integrations/pylon) | Read and manage Pylon customer support issues, accounts, and contacts. | MCP-proxied | — | — |
 | [Sentry](/product/integrations/sentry) | Read Sentry issues, projects, and events for error tracking workflows. | MCP-proxied | — | — |
-| [Slack](/product/integrations/slack) | Read channels, post messages, look up users, and route Slack-channel conversations. | Inline actions | 11 | — |
+| [Slack](/product/integrations/slack) | Read channels, post messages, look up users, and route Slack-channel conversations. Also a [Channel Integration](/product/integrations/channel-integrations) — DM Valet in Slack. | Inline actions | 19 | — |
+| [Slack (personal)](/product/integrations/slack-personal) | Act on Slack as yourself via a per-user OAuth token — search, read, and post under your own identity. | Inline actions | 14 | — |
 | [Socket.dev](/product/integrations/socket) | Scan packages for supply-chain risks, vulnerabilities, and malware via Socket.dev. | MCP-proxied | — | — |
 | [Stripe](/product/integrations/stripe) | Read and act on Stripe customers, payments, subscriptions, invoices, and products. | MCP-proxied | — | — |
 | [Turnkey Docs](/product/integrations/turnkey-docs) | Search the Turnkey product documentation and knowledge base. | MCP-proxied | — | — |
 | [Typefully](/product/integrations/typefully) | Manage Typefully drafts, posts, and accounts for social-media content workflows. | MCP-proxied | — | — |
 
+## Channel Integrations
+
+Two integrations behave as bi-directional channels rather than callable actions. See [Channel Integrations](/product/integrations/channel-integrations) for the full picture.
+
+| Integration | Kind | Setup |
+| --- | --- | --- |
+| [Slack](/product/integrations/slack) | Action + Channel | Same connection covers both. |
+| Telegram | Channel only | [Telegram setup](/product/telegram-setup). |
+
 ## See also
 
+- [Channel Integrations](/product/integrations/channel-integrations) — what Slack and Telegram unlock, and how they differ from Action Integrations.
 - [Connect Tools](/product/tools) — the product-level concept.
 - [Built-in tools](/product/built-in-tools) — sandbox and orchestrator tools that are not external integrations.
+- [Integration System](/engineering/integration-system) — engineering reference for how Action and Channel plugins are implemented.
 - [Plugin system](/engineering/plugin-system) — how plugins are built and loaded.
-- [OAuth setup](/oauth-setup) — provider credentials for OAuth-based integrations.
+- Users connect integrations from the **Integrations** page in the sidebar. Self-hosters configure provider credentials via [OAuth setup](/oauth-setup).

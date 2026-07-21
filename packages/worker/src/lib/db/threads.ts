@@ -153,6 +153,31 @@ export async function getThread(
   return row ? rowToThread(row) : null;
 }
 
+/**
+ * Resolve an OpenCode session (thread) id to its session_threads row, scoped
+ * to the owning user. Used to turn a memory file's `source_session_id`
+ * provenance into a navigable /sessions/:id/threads/:threadId link. Resumed
+ * threads can span multiple session rows sharing one OpenCode id — take the
+ * most recently active.
+ */
+export async function getThreadByOpencodeSessionId(
+  db: D1Database,
+  opencodeSessionId: string,
+  userId: string
+): Promise<SessionThread | null> {
+  const row = await db
+    .prepare(
+      `SELECT st.* FROM session_threads st
+       JOIN sessions s ON s.id = st.session_id
+       WHERE st.opencode_session_id = ? AND s.user_id = ?
+       ORDER BY st.last_active_at DESC LIMIT 1`
+    )
+    .bind(opencodeSessionId, userId)
+    .first<ThreadRow>();
+
+  return row ? rowToThread(row) : null;
+}
+
 export async function getActiveThread(
   db: D1Database,
   sessionId: string

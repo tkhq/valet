@@ -1,5 +1,6 @@
 import { tool } from "@opencode-ai/plugin"
 import { formatOutput } from "./_format"
+import { parseToolParams } from "./_params"
 
 export default tool({
   description:
@@ -9,9 +10,14 @@ export default tool({
       .string()
       .describe("The fully-qualified tool ID (e.g. 'gmail:send_email', 'github:create_issue')"),
     params: tool.schema
-      .string()
+      .union([
+        tool.schema.record(tool.schema.string(), tool.schema.unknown()),
+        tool.schema.string(),
+      ])
       .optional()
-      .describe("JSON object of parameters for the tool. Must match the schema from list_tools."),
+      .describe(
+        "Parameters for the tool, as a JSON object matching the schema from list_tools. Pass the object directly — do not stringify it.",
+      ),
     summary: tool.schema
       .string()
       .describe("A brief, human-readable summary of what this tool call will do and why. This is shown to the user for approval. Example: 'Send a Slack message to #engineering with the deployment status update'"),
@@ -25,14 +31,11 @@ export default tool({
         return "Error: summary is required. Provide a brief human-readable description of what this tool call does."
       }
 
-      let params: Record<string, unknown> = {}
-      if (args.params) {
-        try {
-          params = JSON.parse(args.params)
-        } catch {
-          return "Error: params must be a valid JSON object."
-        }
+      const parsed = parseToolParams(args.params)
+      if (!parsed.ok) {
+        return parsed.error
       }
+      const params = parsed.params
 
       // Pass the calling OpenCode session id so the DO can resolve the
       // originating channel without falling back to a non-deterministic
