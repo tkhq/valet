@@ -145,6 +145,29 @@ linearConnectRouter.get("/callback", async (c) => {
   try {
     ({ accessToken } = await service.exchangeCode(code, callbackUrl(c)));
     ({ workspaceId, workspaceName } = await service.fetchWorkspace(accessToken));
+  } catch (err) {
+    console.error("linear connect callback failed:", err);
+    return c.json({ error: "failed to complete the Linear connection" }, 502);
+  }
+
+  // Look up any existing installation for this workspace so we can clean up
+  // its webhook before creating a new one (avoids orphaned webhooks delivering
+  // with a dead secret on reconnect).
+  const [existing] = await db
+    .select()
+    .from(linearInstallations)
+    .where(and(eq(linearInstallations.orgId, verified.orgId), eq(linearInstallations.workspaceId, workspaceId)))
+    .limit(1);
+
+  if (existing?.webhookId) {
+    try {
+      await service.deleteWebhook(accessToken, existing.webhookId);
+    } catch (err) {
+      console.error("linear reconnect: best-effort old webhookDelete failed:", err);
+    }
+  }
+
+  try {
     ({ webhookId } = await service.createWebhook(accessToken, {
       url: `${apiBase(c)}/webhooks/events/linear`,
       secret: webhookSecret,
@@ -161,11 +184,6 @@ linearConnectRouter.get("/callback", async (c) => {
   });
 
   const now = Date.now();
-  const [existing] = await db
-    .select()
-    .from(linearInstallations)
-    .where(and(eq(linearInstallations.orgId, verified.orgId), eq(linearInstallations.workspaceId, workspaceId)))
-    .limit(1);
   if (existing) {
     await db
       .update(linearInstallations)

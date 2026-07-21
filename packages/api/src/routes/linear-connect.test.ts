@@ -184,12 +184,19 @@ describe("GET /api/org/linear/callback", () => {
 
   it("reconnecting the same workspace updates the existing row instead of duplicating it", async () => {
     api = await bootTestApi();
-    useFixture();
+    const f = useFixture();
     expect((await completeConnect(api.baseUrl)).status).toBe(302);
     expect((await completeConnect(api.baseUrl)).status).toBe(302);
 
     const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
     expect(rows).toHaveLength(1);
+
+    // The old webhook (wh-1, created during the first connect) must have been
+    // deleted before the new one was registered — prevents an orphaned webhook
+    // delivering with a dead signing secret.
+    const [deleteCall] = graphqlCalls(f, "webhookDelete");
+    expect(deleteCall).toBeDefined();
+    expect((deleteCall.body as { variables: { id: string } }).variables.id).toBe("wh-1");
   });
 
   it("502s (and saves nothing) when the webhook creation fails", async () => {
