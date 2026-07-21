@@ -29,6 +29,7 @@
       "enabled": true,
       "firstName": "Alice",
       "lastName": "Dev",
+      "realmRoles": ["offline_access"],
       "credentials": [
         {
           "type": "password",
@@ -44,6 +45,7 @@
       "enabled": true,
       "firstName": "Bob",
       "lastName": "Dev",
+      "realmRoles": ["offline_access"],
       "credentials": [
         {
           "type": "password",
