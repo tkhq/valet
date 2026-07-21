@@ -79,8 +79,11 @@ function InviteRow({ invite }: { invite: InviteWire }) {
         <div className="truncate text-sm text-ink">{invite.email ?? "anyone with the link"}</div>
         <div className="text-xs text-muted">Expires {formatDate(invite.expiresAt)}</div>
       </div>
-      <Badge variant={invite.role === "admin" ? "accent" : "neutral"} className="shrink-0">
-        {invite.role === "admin" ? "Admin" : "Member"}
+      <Badge
+        variant={invite.role === "admin" ? "accent" : invite.role === "operator" ? "success" : "neutral"}
+        className="shrink-0"
+      >
+        {invite.role === "admin" ? "Admin" : invite.role === "operator" ? "Operator" : "Member"}
       </Badge>
       {confirming ? (
         <span className="flex shrink-0 items-center gap-2">
@@ -120,7 +123,7 @@ function InviteRow({ invite }: { invite: InviteWire }) {
 
 function InviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"member" | "admin">("member");
+  const [role, setRole] = useState<"member" | "operator" | "admin">("member");
   const [code, setCode] = useState<string | null>(null);
   const createInvite = useCreateInvite();
 
@@ -172,6 +175,12 @@ function InviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (op
                   description="Can use the app."
                   selected={role === "member"}
                   onSelect={() => setRole("member")}
+                />
+                <RadioCard
+                  title="Operator"
+                  description="Runs providers, images, and org credentials."
+                  selected={role === "operator"}
+                  onSelect={() => setRole("operator")}
                 />
                 <RadioCard
                   title="Admin"
