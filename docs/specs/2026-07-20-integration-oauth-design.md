@@ -1,7 +1,7 @@
 # Integration OAuth Connect Flow (v2)
 
 Date: 2026-07-20
-Status: approved design
+Status: implemented (this branch)
 Depends on: plugin-system-v2 (`2026-07-13-plugin-system-v2-design.md`, shipped), auth-v2 (`2026-07-14-auth-v2-design.md`, shipped), GitHub repo integration (`2026-07-16-github-repo-integration-design.md`, shipped — pattern precedent)
 
 ## Problem
@@ -55,7 +55,7 @@ Plugin manifest updates in this change:
 | Plugin | `oauth` |
 |---|---|
 | linear, notion, sentry, stripe, cloudflare, figma | `{ mode: "mcp", serverUrl: "<same mcpUrl the plugin's mcpActionPlugin uses>" }` |
-| gmail, google-calendar, google-drive, google-sheets | `{ mode: "authorization_code", authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth", tokenUrl: "https://oauth2.googleapis.com/token", clientIdEnv: "GOOGLE_CLIENT_ID", clientSecretEnv: "GOOGLE_CLIENT_SECRET", extraAuthParams: { access_type: "offline", prompt: "consent" } }` |
+| gmail, google-calendar, google-workspace | `{ mode: "authorization_code", authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth", tokenUrl: "https://oauth2.googleapis.com/token", clientIdEnv: "GOOGLE_CLIENT_ID", clientSecretEnv: "GOOGLE_CLIENT_SECRET", extraAuthParams: { access_type: "offline", prompt: "consent" } }` — there is no separate google-drive/google-sheets plugin; google-workspace covers Drive/Docs/Sheets under one oauth2 credential |
 | github | unchanged (dedicated App flow) |
 | slack, telegram (bot_token), typefully (api_key), deepwiki (no creds) | unchanged — manual entry |
 
@@ -155,6 +155,12 @@ A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the
 - **API unit/integration** (vitest, in-process Hono): a fake OAuth+MCP server fixture (serves `.well-known/oauth-authorization-server`, registration, authorize is not hit — we assert the 302 Location instead, token endpoint validates PKCE/client_secret). Covers: connect 302 URL shape for both modes, state round-trip, callback persistence into the credential store, user-mismatch rejection, denied-consent redirect, `ensureMcpOAuthClient` idempotency under concurrent calls, refresh-on-get including refresh-failure stamping.
 - **Web**: `-integrations.test.tsx` — Connect button rendered iff `connect: "oauth"`, manual fallback toggle, toast on `?connected=`.
 - **Live pass** (human-in-the-loop, before merge): connect a real MCP service (Linear or Notion) end-to-end in the browser against `make dev-local`, verify the action actually runs with the stored token.
+
+## Deviations / implementation notes
+
+- **Refresh serialization**: `RefreshingCredentialStore` serializes concurrent refreshes per credential key in-process (a pending-refresh map keyed by `userId:service`), with a double-check re-read of the stored credential before refreshing — a request that lost the race picks up the winner's already-rotated tokens instead of firing its own redundant (and potentially clobbering) refresh call.
+- **Missing `expires_in` on refresh**: if a token refresh response omits `expires_in`, the decorator stores `expiresAt: undefined` rather than guessing a TTL. This disables future auto-refresh for that credential (treated as non-expiring going forward) until the user reconnects. Accepted trade-off — no provider in the current fleet does this in practice, and guessing a TTL risks silently expiring a token that's actually still valid.
+- **Engine test location**: the `validateValetPlugin` oauth-shape coverage lives at `packages/engine/test/valet-plugin.test.ts` (per the package's vitest config `include` path), not under a new file.
 
 ## Out of scope / follow-ups
 

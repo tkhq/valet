@@ -180,3 +180,4 @@ Two credentials, one file, both independent of better-auth:
 - The full Valet MCP tool surface (own design pass; this pass proves the OAuth plumbing with two tools).
 - The in-sandbox auth gateway itself (v1's :9000 proxy) and any in-sandbox services consuming the service JWTs — this pass ships the tested token/JWT contract only.
 - Multi-org.
+- Per-service integration OAuth connect flows (Linear, Notion, Google APIs, etc. beyond the login-doubles-as-connect hook above) — specified in `2026-07-20-integration-oauth-design.md`.
