@@ -40,7 +40,11 @@ function getRawD1Client(db: AppDb): RawD1Client | null {
   return client as RawD1Client;
 }
 
-async function syncSkillFts(db: AppDb, skillId: string): Promise<void> {
+async function syncSkillFts(
+  db: AppDb,
+  skillId: string,
+  opts: { skipIfIndexed?: boolean } = {},
+): Promise<void> {
   try {
     // Fetch the skill row first — INSERT...SELECT into FTS5 virtual tables
     // fails on D1 at runtime, so we insert with explicit values instead.
@@ -51,25 +55,40 @@ async function syncSkillFts(db: AppDb, skillId: string): Promise<void> {
 
     const { rowid, name, description, content } = row[0];
 
+    // When the caller already knows the source row is unchanged, only (re)index
+    // if the FTS entry is missing. This keeps the sync self-healing (a skill that
+    // failed to index earlier still gets picked up) without re-writing rows that
+    // are already indexed on every cold isolate — the redundant write load that
+    // contends with live D1 traffic.
+    if (opts.skipIfIndexed) {
+      const indexed = await db.all<{ rowid: number }>(
+        sql`SELECT rowid FROM skills_fts WHERE rowid = ${rowid} LIMIT 1`,
+      );
+      if (indexed.length > 0) return;
+    }
+
     // Truncate content for FTS — D1 has a bind-parameter size limit (~100KB total
     // per query, but FTS tokenization can amplify size). Keep it short since full
     // content isn't needed for search relevance.
     const truncatedContent = content.length > 2000 ? content.slice(0, 2000) : content;
 
+    // INSERT OR REPLACE is a single atomic statement. A DELETE-then-INSERT pair
+    // lets two concurrent cold isolates interleave (A.DELETE, B.DELETE, A.INSERT,
+    // B.INSERT) so B's INSERT collides on the rowid — the SQLITE_CONSTRAINT that
+    // flooded dev logs. Collapsing to one statement removes that window and is
+    // idempotent, so re-running the sync is a harmless overwrite.
     const rawClient = getRawD1Client(db);
     if (rawClient) {
-      await rawClient.prepare('DELETE FROM skills_fts WHERE rowid = ?').bind(rowid).run();
       await rawClient
-        .prepare('INSERT INTO skills_fts(rowid, name, description, content) VALUES (?, ?, ?, ?)')
+        .prepare('INSERT OR REPLACE INTO skills_fts(rowid, name, description, content) VALUES (?, ?, ?, ?)')
         .bind(rowid, name, description, truncatedContent)
         .run();
       return;
     }
 
     // Better-sqlite3 test path fallback.
-    await db.run(sql`DELETE FROM skills_fts WHERE rowid = ${rowid}`);
     await db.run(sql`
-      INSERT INTO skills_fts(rowid, name, description, content)
+      INSERT OR REPLACE INTO skills_fts(rowid, name, description, content)
       VALUES (${rowid}, ${name}, ${description}, ${truncatedContent})
     `);
   } catch (err) {
@@ -340,15 +359,41 @@ export async function upsertSkillFromSync(
     visibility?: SkillVisibility;
   },
 ): Promise<void> {
+  const newDescription = data.description ?? null;
+  const newVisibility = data.visibility ?? 'shared';
+
   // Check if skill already exists, then INSERT or UPDATE.
   // Avoids ON CONFLICT which has issues with D1's Drizzle driver.
-  const existing = await db.select({ id: skills.id }).from(skills).where(eq(skills.id, data.id)).limit(1);
+  const existing = await db
+    .select({
+      name: skills.name,
+      description: skills.description,
+      content: skills.content,
+      visibility: skills.visibility,
+    })
+    .from(skills)
+    .where(eq(skills.id, data.id))
+    .limit(1);
+
   if (existing.length > 0) {
+    const current = existing[0];
+    const unchanged =
+      current.name === data.name &&
+      (current.description ?? null) === newDescription &&
+      current.content === data.content &&
+      current.visibility === newVisibility;
+    if (unchanged) {
+      // Row is already current. Skip the UPDATE + FTS rewrite that every cold
+      // isolate would otherwise repeat on a static registry — the redundant D1
+      // writes that contend with live traffic. Only backfill FTS if missing.
+      await syncSkillFts(db, data.id, { skipIfIndexed: true });
+      return;
+    }
     await db.update(skills).set({
       name: data.name,
-      description: data.description ?? null,
+      description: newDescription,
       content: data.content,
-      visibility: data.visibility ?? 'shared',
+      visibility: newVisibility,
       updatedAt: sql`datetime('now')`,
     }).where(eq(skills.id, data.id));
   } else {
@@ -359,9 +404,9 @@ export async function upsertSkillFromSync(
       source: data.source,
       name: data.name,
       slug: data.slug,
-      description: data.description ?? null,
+      description: newDescription,
       content: data.content,
-      visibility: data.visibility ?? 'shared',
+      visibility: newVisibility,
       status: 'active',
     });
   }
