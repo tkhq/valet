@@ -8,9 +8,17 @@ name: Release CLI
 # assets — `./valet serve` and browse. See docs/plans/2026-07-18-native-binary-
 # bun-compile.md and the spec Deviations.
 #
-# Platforms: macOS arm64 (native runner), Linux x64 (native runner) + Linux
-# arm64 (cross-compiled from the x64 runner — the embedded assets are
-# platform-agnostic). Windows = WSL (run the linux-x64 binary).
+# Platforms: macOS arm64 (native runner) + macOS x64 (cross-compiled), Linux
+# x64 (native runner) + Linux arm64 (cross-compiled from the x64 runner —
+# the embedded assets are platform-agnostic). Windows = WSL (run the
+# linux-x64 binary).
+#
+# macOS Gatekeeper: the binaries are ad-hoc signed (Bun's default), not
+# Developer-ID-signed/notarized. A BROWSER download gets quarantined and
+# macOS shows a misleading "binary is damaged" dialog; `curl` downloads
+# carry no quarantine flag and just run. Both release bodies carry the
+# `xattr -d com.apple.quarantine` escape hatch. Real notarization needs an
+# Apple Developer cert wired into this workflow (not done).
 #
 # Publish paths:
 #   - tag push (v*): versioned GitHub Release with all binaries attached.
@@ -44,7 +52,9 @@ jobs:
       matrix:
         include:
           - runner: macos-14
-            targets: bun-darwin-arm64
+            # darwin-x64 (Intel Macs) is cross-compiled from the arm64
+            # runner; only the native arm64 binary is smoke-tested.
+            targets: bun-darwin-arm64 bun-darwin-x64
             smoke: valet-darwin-arm64
           - runner: ubuntu-latest
             targets: bun-linux-x64 bun-linux-arm64
@@ -149,6 +159,15 @@ jobs:
             `valet send --json …`, `valet login <url>` all work from the same
             file. Windows: run the linux-x64 binary under WSL.
 
+            **macOS:** if you downloaded with a browser, Gatekeeper shows a
+            bogus "binary is damaged" dialog (the binaries are not notarized).
+            Clear the quarantine flag — or download with `curl -LO`, which
+            never sets it:
+
+            ```
+            xattr -d com.apple.quarantine ./valet-darwin-<arch>
+            ```
+
       # Rolling prerelease on dev-v2 merges: fixed tag, same-named assets are
       # replaced in place, so download URLs are stable across merges. The
       # release's "source code" links point at whatever commit first created
@@ -170,3 +189,12 @@ jobs:
             Download the binary for your platform, `chmod +x`, and run
             `./valet-<os>-<arch> serve`. Windows: run the linux-x64 binary
             under WSL.
+
+            **macOS:** if you downloaded with a browser, Gatekeeper shows a
+            bogus "binary is damaged" dialog (the binaries are not notarized).
+            Clear the quarantine flag — or download with `curl -LO`, which
+            never sets it:
+
+            ```
+            xattr -d com.apple.quarantine ./valet-darwin-<arch>
+            ```
