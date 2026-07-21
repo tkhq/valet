@@ -167,11 +167,17 @@ on exit code, parse the JSON.
 
 ## Getting the Binary
 
-Prebuilt binaries (macOS arm64, Linux x64/arm64) are on GitHub Releases:
+Prebuilt binaries (macOS arm64/x64, Linux x64/arm64) are on GitHub Releases:
 versioned releases on `v*` tags, and a rolling `dev-v2-latest` prerelease
 whose assets are replaced on every merge to `dev-v2` — its download URLs
 (`…/releases/download/dev-v2-latest/valet-<os>-<arch>`) are stable. Download,
 `chmod +x`, run. Windows runs the linux-x64 binary under WSL.
+
+**macOS Gatekeeper:** the binaries are ad-hoc signed, not notarized. A
+*browser* download gets a quarantine flag and macOS shows a misleading
+"binary is damaged and can't be opened" dialog. Either clear the flag —
+`xattr -d com.apple.quarantine ./valet-darwin-<arch>` — or download with
+`curl -LO`, which sets no quarantine flag and just runs.
 
 Or build from source:
 
