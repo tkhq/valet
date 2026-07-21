@@ -178,7 +178,14 @@ function buildProvisionUser(db: AppDb, roleMap: { claimValue: string; role: OrgR
       userInfo: data.userInfo,
       idTokenClaims: idToken ? (decodeJwtClaims(idToken) ?? undefined) : undefined,
     });
-    await syncSsoOrgRole(db, data.user.id, role);
+    try {
+      await syncSsoOrgRole(db, data.user.id, role);
+    } catch (err) {
+      // Sync is idempotent and re-runs on the next login — a transient DB
+      // error here must never brick the login itself. A stale role beats
+      // a bricked login.
+      console.error(`[sso-role-sync] failed to sync org role for user ${data.user.id}:`, err);
+    }
   };
 }
 

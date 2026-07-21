@@ -95,15 +95,39 @@ export function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
  * login, `provisioning.ts`'s `userCreateAfter` inserts the row earlier in
  * the same request, so this only ever "misses" if that hook hasn't run
  * (shouldn't happen in the wired flow). Never writes `users.role`.
+ *
+ * Guards against a sole-admin lockout: if the incoming claim would demote
+ * the org's last remaining admin (e.g. a revoked IdP group or a typo'd
+ * role map), the write is skipped and a loud `console.error` is logged
+ * instead — leaving the existing admin role in place until a later login
+ * with corrected claims resolves it. Mirrors `setOrgMemberRole`'s
+ * count-then-update-in-one-transaction posture in services/org.ts.
  */
 export async function syncSsoOrgRole(db: AppDb, userId: string, role: OrgRole): Promise<void> {
   const rows = await db.select().from(orgMembers).where(eq(orgMembers.userId, userId));
   for (const row of rows) {
-    if (row.role !== role) {
-      await db
+    if (row.role === role) continue;
+
+    await db.transaction(async (tx) => {
+      if (row.role === "admin" && role !== "admin") {
+        const admins = await tx
+          .select({ userId: orgMembers.userId })
+          .from(orgMembers)
+          .where(and(eq(orgMembers.orgId, row.orgId), eq(orgMembers.role, "admin")));
+        if (admins.length <= 1) {
+          console.error(
+            `[sso-role-sync] refused to demote user ${userId} in org ${row.orgId} from admin to ${role}: ` +
+              `this would leave the org with zero admins. IdP-driven demotion skipped; a later login with ` +
+              `corrected claims will apply the change.`,
+          );
+          return;
+        }
+      }
+
+      await tx
         .update(orgMembers)
         .set({ role })
         .where(and(eq(orgMembers.orgId, row.orgId), eq(orgMembers.userId, userId)));
-    }
+    });
   }
 }

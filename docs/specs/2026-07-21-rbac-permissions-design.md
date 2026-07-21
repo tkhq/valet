@@ -113,6 +113,7 @@ Behavior (in the SSO provisioning/login path, `auth/provisioning.ts` + the bette
 - On **every** SSO login (not just first): read the claim, map the first matching entry (map order = precedence) → write `org_members.role` when it differs. No match → `member`. The IdP is the source of truth for SSO users while the map is set — app-side role edits to an SSO user do not survive their next login (documented, deliberate).
 - Non-SSO users (email/password, social) are untouched by the map; existing first-user/invite rules continue to govern their provisioning. First-user-bootstrap still applies when the map is unset or the claim is absent.
 - `users.role` (global operator) is NEVER written by the map — IdP roles govern org roles only.
+- Last-admin safety valve: an IdP-driven demotion that would leave the org with zero admins (e.g. a revoked group or typo'd map) is refused and logged instead of applied; a later login with corrected claims proceeds normally.
 
 Dev harness (`docker/keycloak/valet-realm.json`): add realm roles `valet-admin` and `valet-operator`; grant `valet-admin` to alice, `valet-operator` to bob. `make dev-keycloak`'s printed `.env` block gains `AUTH_OIDC_ROLE_MAP=valet-admin:admin,valet-operator:operator`.
 

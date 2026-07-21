@@ -93,4 +93,27 @@ describe("syncSsoOrgRole", () => {
     const rows = await db.select().from(orgMembers).where(eq(orgMembers.userId, "u3"));
     expect(rows).toHaveLength(0);
   });
+
+  it("refuses to demote the org's last admin", async () => {
+    await seedOrgAndMember("u4", "admin");
+
+    await syncSsoOrgRole(db, "u4", "member");
+
+    const [member] = await db.select().from(orgMembers).where(eq(orgMembers.userId, "u4"));
+    expect(member?.role).toBe("admin");
+  });
+
+  it("demotes an admin when another admin remains", async () => {
+    await seedOrgAndMember("u5", "admin");
+    await db.insert(users).values({ id: "u6", email: "u6@x.test", name: "u6", role: "member" });
+    await db.insert(orgMembers).values({ orgId: "org1", userId: "u6", role: "admin", createdAt: Date.now() });
+
+    await syncSsoOrgRole(db, "u5", "member");
+
+    const [demoted] = await db.select().from(orgMembers).where(eq(orgMembers.userId, "u5"));
+    expect(demoted?.role).toBe("member");
+
+    const [other] = await db.select().from(orgMembers).where(eq(orgMembers.userId, "u6"));
+    expect(other?.role).toBe("admin");
+  });
 });
