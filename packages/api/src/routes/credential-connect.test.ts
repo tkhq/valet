@@ -169,6 +169,32 @@ describe("GET /api/credentials/oauth/callback", () => {
     );
     expect(cb.headers.get("location")).toBe("/integrations?error=oauth_failed");
   });
+
+  it("state signed for a different user redirects with error=oauth_state and persists nothing for either user", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    // Started as the default (local-user) identity.
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    // Completed as a different authenticated user (test-member).
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual", headers: { "x-valet-test-user-id": "test-member" } },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_state");
+
+    // The mismatch must be caught before any token exchange is attempted.
+    expect(fake.tokenRequests).toHaveLength(0);
+
+    // Nothing persisted for either identity.
+    const listAsStarter = await fetch(`${api.baseUrl}/api/credentials`);
+    expect(((await listAsStarter.json()) as ListCredentialsResponse).credentials).toHaveLength(0);
+    const listAsCompleter = await fetch(`${api.baseUrl}/api/credentials`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(((await listAsCompleter.json()) as ListCredentialsResponse).credentials).toHaveLength(0);
+  });
 });
 
 describe("verifyOAuthConnectState", () => {
@@ -183,11 +209,5 @@ describe("verifyOAuthConnectState", () => {
   it("rejects an expired payload", () => {
     const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() - 1000 }, key);
     expect(verifyOAuthConnectState(state, key, Date.now())).toBeNull();
-  });
-
-  it("does not itself enforce a specific expected userId (caller compares)", () => {
-    const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() + 10_000 }, key);
-    const verified = verifyOAuthConnectState(state, key, Date.now());
-    expect(verified?.userId).not.toBe("someone-else");
   });
 });
