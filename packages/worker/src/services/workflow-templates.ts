@@ -24,7 +24,7 @@ import { saveDraft, publishDraft } from './workflow-versions.js';
 import { resolveAvailableModels } from './model-catalog.js';
 import { assembleLlmProviderEnv } from '../lib/llm/provider-env.js';
 import { createTrigger, generateWebhookToken, getWorkflowForTrigger } from '../lib/db/triggers.js';
-import { getGithubInstallationByLogin } from '../lib/db/github-installations.js';
+import { assertCallerCanAdministerRepo } from './github-repo-authority.js';
 
 /** Every template contributed by a registered plugin (flattened). */
 export function listWorkflowTemplates(): readonly WorkflowTemplate[] {
@@ -65,10 +65,11 @@ export interface InstallTemplateResult {
  * no-webhook-setup alternative. Creates a `github-app` trigger scoped to
  * owner/repo, reusing the template's webhook variableMapping so App-delivered
  * events map into trigger.data exactly as a manual webhook would. Requires the
- * caller to own the workflow and the App to be installed on the owner.
+ * caller to own the workflow and to have write access to the repo itself.
  */
 export async function enableTemplateGithubApp(
   db: AppDb,
+  env: Env,
   userId: string,
   templateId: string,
   workflowId: string,
@@ -85,14 +86,11 @@ export async function enableTemplateGithubApp(
   const workflow = await getWorkflowForTrigger(db, userId, workflowId);
   if (!workflow) throw new NotFoundError('Workflow', workflowId);
 
-  // Coverage: the App must be installed on the repo owner, else the trigger
-  // would never fire.
-  const installation = await getGithubInstallationByLogin(db, owner);
-  if (!installation) {
-    throw new ValidationError(
-      `The Valet GitHub App is not installed on "${owner}". Ask an admin to install it, then try again.`,
-    );
-  }
+  // Coverage + authority: the App must reach the owner AND the caller must
+  // personally have write access to the repo. Owning the workflow says nothing
+  // about the repo, so without this any member could point the App at a private
+  // repo they cannot read and have the review step hand them the diff.
+  await assertCallerCanAdministerRepo(db, env, userId, owner, repo);
 
   // Idempotent: one github-app trigger per (user, repo). The name is unique per
   // user (idx_triggers_user_name), so re-arming the same repo — or arming it on
@@ -135,10 +133,23 @@ export async function installWorkflowTemplate(
   env: Env,
   userId: string,
   templateId: string,
+  repoPin?: { owner: string; repo: string },
 ): Promise<InstallTemplateResult> {
   const template = getWorkflowTemplate(templateId);
   if (!template) {
     throw new NotFoundError('WorkflowTemplate', templateId);
+  }
+
+  // A repo-scoped trigger is armed for exactly one repository. Establish which
+  // one — and that the installer may speak for it — BEFORE anything is created,
+  // so the token minted below is worthless against every other repository.
+  if (template.trigger?.repoScoped) {
+    if (!repoPin?.owner || !repoPin?.repo) {
+      throw new ValidationError(
+        `Template "${templateId}" is scoped to one repository; provide owner and repo to install it.`,
+      );
+    }
+    await assertCallerCanAdministerRepo(db, env, userId, repoPin.owner, repoPin.repo);
   }
 
   // 1. Create the workflow (blank draft). Everything after this is wrapped so a
@@ -177,6 +188,11 @@ export async function installWorkflowTemplate(
       const path = `${template.trigger.path}-${suffix}`;
       const name = `${template.trigger.name} (${suffix})`;
       const now = new Date().toISOString();
+      // The pin travels on the trigger config, where the delivery path reads it
+      // back: a payload naming any other repository is refused outright.
+      const repoScope = template.trigger.repoScoped && repoPin
+        ? { github: { codeReview: true as const, owner: repoPin.owner, repo: repoPin.repo } }
+        : {};
       await createTrigger(db, {
         id,
         userId,
@@ -184,7 +200,7 @@ export async function installWorkflowTemplate(
         name,
         enabled: true,
         type: 'webhook',
-        config: JSON.stringify({ type: 'webhook', path, method: 'POST' }),
+        config: JSON.stringify({ type: 'webhook', path, method: 'POST', ...repoScope }),
         variableMapping: JSON.stringify(template.trigger.variableMapping),
         now,
         webhookToken,

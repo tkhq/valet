@@ -4,6 +4,31 @@
 -- CHECK, so we recreate the table with the expanded set. Columns + indexes are
 -- preserved exactly (webhook_token added in 0020; the two partial unique indexes
 -- on webhook_token and config.path; the COLLATE NOCASE user/name unique index).
+--
+-- The rebuild has to survive the foreign keys pointed at triggers(id):
+--   workflow_executions.trigger_id     ON DELETE SET NULL
+--   trigger_webhook_rate.trigger_id    ON DELETE CASCADE
+--   workflow_schedule_ticks.trigger_id ON DELETE CASCADE
+-- With foreign keys enforced, `DROP TABLE triggers` fires those actions, which
+-- blanks every historical execution's trigger_id and empties the rate and
+-- schedule-tick tables — data nothing afterwards can reconstruct.
+--
+-- PRAGMA defer_foreign_keys below is the standard SQLite 12-step guard, but it
+-- holds only for the duration of one transaction, and a migration file is not
+-- guaranteed to run as one. The snapshot/restore tables around the swap are
+-- therefore what makes this safe: they reinstate the child rows whether or not
+-- the pragma took effect. The result stays backward-compatible — an old Worker
+-- reads the rebuilt table exactly as it read the old one.
+
+PRAGMA defer_foreign_keys = on;
+
+-- 0. Snapshot every child reference the drop could destroy.
+CREATE TABLE _m0029_exec_trigger AS
+  SELECT id, trigger_id FROM workflow_executions WHERE trigger_id IS NOT NULL;
+CREATE TABLE _m0029_webhook_rate AS
+  SELECT trigger_id, window_start_ts, count FROM trigger_webhook_rate;
+CREATE TABLE _m0029_schedule_ticks AS
+  SELECT id, trigger_id, tick_bucket, created_at FROM workflow_schedule_ticks;
 
 -- 1. Drop named indexes (recreated after the swap).
 DROP INDEX IF EXISTS idx_triggers_user;
@@ -56,3 +81,25 @@ CREATE UNIQUE INDEX idx_triggers_webhook_token
 CREATE UNIQUE INDEX idx_triggers_webhook_path_unique
   ON triggers(json_extract(config, '$.path'))
   WHERE type = 'webhook';
+
+-- 6. Reinstate whatever the drop's referential actions removed. Every trigger id
+-- was carried over verbatim, so each restored reference still resolves. Both
+-- restores are no-ops when the pragma held and nothing was lost.
+UPDATE workflow_executions
+SET trigger_id = (
+  SELECT s.trigger_id FROM _m0029_exec_trigger s WHERE s.id = workflow_executions.id
+)
+WHERE trigger_id IS NULL
+  AND id IN (SELECT id FROM _m0029_exec_trigger);
+
+INSERT OR IGNORE INTO trigger_webhook_rate (trigger_id, window_start_ts, count)
+  SELECT trigger_id, window_start_ts, count FROM _m0029_webhook_rate;
+
+INSERT OR IGNORE INTO workflow_schedule_ticks (id, trigger_id, tick_bucket, created_at)
+  SELECT id, trigger_id, tick_bucket, created_at FROM _m0029_schedule_ticks;
+
+DROP TABLE _m0029_exec_trigger;
+DROP TABLE _m0029_webhook_rate;
+DROP TABLE _m0029_schedule_ticks;
+
+PRAGMA defer_foreign_keys = off;

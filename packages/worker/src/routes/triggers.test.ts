@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
 import { errorHandler } from '../middleware/error-handler.js';
+import { ForbiddenError } from '@valet/shared';
 
 const {
   listTriggersMock,
@@ -44,6 +45,14 @@ vi.mock('../lib/db.js', () => ({
   getWebhookTriggerById: getWebhookTriggerByIdMock,
   bumpWebhookRateCount: bumpWebhookRateCountMock,
   WEBHOOK_RATE_LIMIT_DEFAULT: 60,
+}));
+
+// The repo-authority precondition for a github-app trigger talks to GitHub with
+// the caller's own token; the route's contract is that it runs and that a
+// rejection stops the create.
+const { assertRepoAuthorityMock } = vi.hoisted(() => ({ assertRepoAuthorityMock: vi.fn() }));
+vi.mock('../services/github-repo-authority.js', () => ({
+  assertCallerCanAdministerRepo: assertRepoAuthorityMock,
 }));
 
 vi.mock('../services/triggers.js', () => ({
@@ -537,4 +546,46 @@ describe('triggersRouter rejects legacy repo* run fields', () => {
       expect(res.status).toBe(400);
     },
   );
+});
+
+describe('triggersRouter create — github-app repo authority', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getWorkflowForTriggerMock.mockResolvedValue({ id: 'wf-1' });
+    createTriggerMock.mockResolvedValue(undefined);
+    assertRepoAuthorityMock.mockResolvedValue(undefined);
+  });
+
+  function createAppTrigger() {
+    return buildApp().fetch(
+      new Request('http://localhost/', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          workflowId: 'wf-1',
+          name: 'GitHub App: tkhq/valet',
+          config: { type: 'github-app', owner: 'tkhq', repo: 'valet', events: ['pull_request'] },
+        }),
+      }),
+      baseEnv,
+    );
+  }
+
+  it('checks the caller against the repository before creating the trigger', async () => {
+    const res = await createAppTrigger();
+
+    expect(res.status).toBe(201);
+    expect(assertRepoAuthorityMock).toHaveBeenCalledWith(
+      expect.anything(), baseEnv, 'user-1', 'tkhq', 'valet',
+    );
+  });
+
+  it('does not create a trigger when the caller has no authority over the repository', async () => {
+    assertRepoAuthorityMock.mockRejectedValue(new ForbiddenError('You need write access to "tkhq/valet" to arm it for review.'));
+
+    const res = await createAppTrigger();
+
+    expect(res.status).toBe(403);
+    expect(createTriggerMock).not.toHaveBeenCalled();
+  });
 });

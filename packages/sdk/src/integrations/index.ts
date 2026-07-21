@@ -144,6 +144,13 @@ export interface TemplateWebhookTrigger {
   /** Base webhook path; install appends a unique suffix to keep it globally unique. */
   path: string;
   variableMapping: Record<string, string>;
+  /**
+   * The trigger acts on exactly one repository. Install pins owner/repo onto
+   * the trigger config after checking the installer's access to it, and the
+   * delivery path refuses payloads naming a different repository — a trigger
+   * token is then useless against any repo but the one it was armed for.
+   */
+  repoScoped?: boolean;
 }
 
 /**

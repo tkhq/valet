@@ -26,12 +26,16 @@ export function useWorkflowTemplates() {
   });
 }
 
-/** POST /api/templates/:id/install — install a template as a published workflow. */
+/**
+ * POST /api/templates/:id/install — install a template as a published workflow.
+ * A repo-scoped template also takes the repository it is being armed for; its
+ * trigger is pinned to that repository server-side.
+ */
 export function useInstallTemplate() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (templateId: string) =>
-      api.post<InstallTemplateResponse>(`/templates/${templateId}/install`),
+    mutationFn: ({ templateId, owner, repo }: { templateId: string; owner?: string; repo?: string }) =>
+      api.post<InstallTemplateResponse>(`/templates/${templateId}/install`, { owner, repo }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workflowKeys.lists() });
     },

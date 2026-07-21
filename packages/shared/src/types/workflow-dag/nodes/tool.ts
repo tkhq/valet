@@ -63,6 +63,9 @@ UI (or the configured \`onPolicyDeny\` behavior kicks in).`,
     retries: {
       help: 'How many times to retry transient failures. 0 disables retries; default is 3 retries with backoff.',
     },
+    credential: {
+      help: "Which identity the call acts as. 'user' (the default) uses the workflow owner's connected account; 'app' uses the org's app/bot credential — GitHub only today — and fails rather than falling back to a person.",
+    },
   },
   gotchas: [
     'Action invocations are durable — a retry of the workflow step reuses the original invocation row instead of re-calling the service.',

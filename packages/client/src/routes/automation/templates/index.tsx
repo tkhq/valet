@@ -184,6 +184,11 @@ function TemplateSetupDialog({
   const [installedWorkflowId, setInstalledWorkflowId] = React.useState<string | null>(null);
   const [webhook, setWebhook] = React.useState<InstalledTemplateTrigger | null>(null);
   const [values, setValues] = React.useState<Record<string, string>>({});
+  // A repo-scoped template is armed for one repository, so the repo is chosen
+  // before install: the server pins the trigger to it and checks the installer's
+  // access to it.
+  const [owner, setOwner] = React.useState('');
+  const [repo, setRepo] = React.useState('');
 
   // Reset per-install state when the dialog closes, so reopening the same
   // template starts fresh instead of showing a stale "already installed" form.
@@ -192,18 +197,24 @@ function TemplateSetupDialog({
       setInstalledWorkflowId(null);
       setWebhook(null);
       setValues({});
+      setOwner('');
+      setRepo('');
     }
   }, [open]);
 
   const handleInstall = () => {
-    install.mutate(template.id, {
-      onSuccess: (res) => {
-        setInstalledWorkflowId(res.workflowId);
-        if (res.trigger) setWebhook(res.trigger);
+    install.mutate(
+      template.repoScoped ? { templateId: template.id, owner, repo } : { templateId: template.id },
+      {
+        onSuccess: (res) => {
+          setInstalledWorkflowId(res.workflowId);
+          if (res.trigger) setWebhook(res.trigger);
+          if (template.repoScoped) setValues((prev) => ({ ...prev, owner, repo }));
+        },
+        onError: (err) =>
+          toastError('Couldn’t add template', err instanceof Error ? err.message : 'Something went wrong.'),
       },
-      onError: (err) =>
-        toastError('Couldn’t add template', err instanceof Error ? err.message : 'Something went wrong.'),
-    });
+    );
   };
 
   const runNow = () => {
@@ -258,11 +269,21 @@ function TemplateSetupDialog({
             ))}
           </ol>
 
+          {!installedWorkflowId && template.repoScoped && (
+            <RepoScopePicker owner={owner} repo={repo} onSelect={(o, r) => { setOwner(o); setRepo(r); }} />
+          )}
+
           {installedWorkflowId && (
             <div className="flex flex-col gap-4 border-t border-neutral-100 pt-4 dark:border-neutral-800">
               {/* Primary: the GitHub App is the recommended way to install for a repo — no webhook setup. */}
               {template.runForm === 'github-pr' ? (
-                <GithubAppInstallSection templateId={template.id} workflowId={installedWorkflowId} webhook={webhook} />
+                <GithubAppInstallSection
+                  templateId={template.id}
+                  workflowId={installedWorkflowId}
+                  webhook={webhook}
+                  owner={owner}
+                  repo={repo}
+                />
               ) : (
                 webhook && (
                   <div className="flex flex-col gap-2">
@@ -316,7 +337,11 @@ function TemplateSetupDialog({
               <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
-              <Button size="sm" onClick={handleInstall} disabled={install.isPending}>
+              <Button
+                size="sm"
+                onClick={handleInstall}
+                disabled={install.isPending || (template.repoScoped && (!owner || !repo))}
+              >
                 {install.isPending ? 'Adding…' : 'Use this template'}
               </Button>
             </>
@@ -384,22 +409,57 @@ function RepoSelect({
 }
 
 /**
+ * The repository a repo-scoped template is being installed for. Chosen before
+ * install: the trigger is pinned to it server-side, and only somebody with write
+ * access to it may install.
+ */
+function RepoScopePicker({
+  owner,
+  repo,
+  onSelect,
+}: {
+  owner: string;
+  repo: string;
+  onSelect: (owner: string, repo: string) => void;
+}) {
+  const { data: reposData, isLoading: reposLoading } = useRepos();
+  return (
+    <div className="flex flex-col gap-2 border-t border-neutral-100 pt-4 dark:border-neutral-800">
+      <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">Which repository?</p>
+      <p className="text-xs text-neutral-500 dark:text-neutral-400">
+        This template reviews one repository. It only works on repos you can write to.
+      </p>
+      <RepoSelect
+        repos={reposData?.repos ?? []}
+        reposLoading={reposLoading}
+        owner={owner}
+        repo={repo}
+        onSelect={onSelect}
+      />
+    </div>
+  );
+}
+
+/**
  * "Install it for a repository" for the code-review template — the recommended path.
- * Pick a connected repo; if the Valet GitHub App is installed on that owner, one
- * click enables reviews on every PR (posted as the bot, no webhook). Otherwise the
- * manual webhook below is the fallback.
+ * The repository was chosen before install (the trigger is pinned to it); if the
+ * Valet GitHub App is installed on that owner, one click enables reviews on every
+ * PR (posted as the bot, no webhook). Otherwise the manual webhook below is the
+ * fallback.
  */
 function GithubAppInstallSection({
   templateId,
   workflowId,
   webhook,
+  owner,
+  repo,
 }: {
   templateId: string;
   workflowId: string;
   webhook: InstalledTemplateTrigger | null;
+  owner: string;
+  repo: string;
 }) {
-  const { data: reposData, isLoading: reposLoading } = useRepos();
-  const repos = reposData?.repos ?? [];
   const { data: installationsData } = useGithubAppInstallations();
   const installations = installationsData?.installations ?? [];
   const { data: triggersData } = useTriggers();
@@ -407,8 +467,6 @@ function GithubAppInstallSection({
   const appSlug = ghStatus?.appSlug ?? null;
   const enableApp = useEnableTemplateApp();
 
-  const [owner, setOwner] = React.useState('');
-  const [repo, setRepo] = React.useState('');
   const [justInstalled, setJustInstalled] = React.useState(false);
 
   const covered =
@@ -454,23 +512,9 @@ function GithubAppInstallSection({
         Install it for a repository
       </p>
       <p className="text-xs text-neutral-500 dark:text-neutral-400">
-        Pick a connected repo. If the Valet GitHub App is installed on its owner, enable reviews on
-        every PR in one click — posted as the bot, no webhook setup.
+        If the Valet GitHub App is installed on {owner || 'the owner'}, enable reviews on every PR in
+        one click — posted as the bot, no webhook setup.
       </p>
-
-      <RepoSelect
-        repos={repos}
-        reposLoading={reposLoading}
-        owner={owner}
-        repo={repo}
-        onSelect={(o, r) => {
-          setOwner(o);
-          setRepo(r);
-          // New repo → drop any just-installed confirmation (alreadyInstalled
-          // re-derives from the triggers list for the newly-picked repo).
-          setJustInstalled(false);
-        }}
-      />
 
       {!owner || !repo ? (
         <p className="text-xs text-neutral-500 dark:text-neutral-400">

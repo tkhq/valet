@@ -36,6 +36,12 @@ export interface WorkflowTemplateSummary {
   /** Whether installing also provisions a webhook trigger for external events. */
   hasWebhook: boolean;
   /**
+   * Whether the template's trigger is scoped to a single repository. When true
+   * the install request must name owner/repo: the trigger is pinned to that
+   * repository and deliveries naming any other one are refused.
+   */
+  repoScoped: boolean;
+  /**
    * Optional hint for a richer "test it now" form than the generic input list.
    * 'github-pr' renders a connected-repo picker + open-PR picker (populating the
    * owner/repo/pullNumber inputs) instead of free-text fields. Absent = generic.
@@ -54,6 +60,15 @@ export interface InstalledTemplateTrigger {
   webhookUrl: string;
   /** Server-issued token — returned exactly once, at install time. */
   webhookToken: string;
+}
+
+/**
+ * Install request body. `owner`/`repo` are required for a repoScoped template —
+ * its trigger is pinned to that repository at install time.
+ */
+export interface InstallTemplateRequest {
+  owner?: string;
+  repo?: string;
 }
 
 export interface InstallTemplateResponse {

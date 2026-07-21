@@ -97,7 +97,7 @@ Schema in `packages/worker/src/lib/schema/workflows.ts`.
 | `workflowId` | text | — | FK to workflows, CASCADE DELETE. **Nullable** for orchestrator-target schedule triggers |
 | `name` | text NOT NULL | — | Display name |
 | `enabled` | boolean | `true` | Active flag |
-| `type` | text NOT NULL | — | `'webhook'` / `'schedule'` / `'manual'` |
+| `type` | text NOT NULL | — | `'webhook'` / `'schedule'` / `'manual'` / `'github-app'` |
 | `config` | text NOT NULL | — | JSON: discriminated union by type |
 | `variableMapping` | text | — | JSON: `Record<string, string>` mapping incoming data to workflow vars |
 | `webhookToken` | text | — | Server-issued one-time token. Set on create / type-transition-to-webhook. Never re-exposed via GET/PATCH. |
@@ -107,10 +107,40 @@ Trigger config shapes:
 
 ```typescript
 type TriggerConfig =
-  | { type: 'webhook'; path: string; method?: 'GET' | 'POST'; secret?: string; headers?: Record<string, string>; rateLimit?: number }
+  | {
+      type: 'webhook'; path: string; method?: 'GET' | 'POST'; secret?: string;
+      headers?: Record<string, string>; rateLimit?: number;
+      /** Set by a repo-scoped template install; see "Repo-pinned code review" below. */
+      github?: { codeReview: true; owner: string; repo: string };
+    }
   | { type: 'schedule'; cron: string; timezone?: string; target?: 'workflow' | 'orchestrator'; prompt?: string; triggerData?: Record<string, unknown> }
-  | { type: 'manual' };
+  | { type: 'manual' }
+  | { type: 'github-app'; owner: string; repo: string; events: string[] };
 ```
+
+A `github-app` trigger fires from the org GitHub App's event stream rather than a
+per-workflow webhook URL, so there is nothing for the user to configure on the
+repository. Creating one — through `POST /api/triggers` or the template
+`enable-app` route — requires both that the App is installed on `owner` and that
+the caller personally has push or admin rights on `owner/repo`, checked with the
+caller's own linked GitHub token (`assertCallerCanAdministerRepo`). The App's
+installation token is deliberately not used for that check: it can reach every
+repo in the org, which is the thing being guarded against. The check fails
+closed — no linked GitHub identity, a 404, a 403, or read-only rights all reject.
+
+#### Repo-pinned code review
+
+A template may declare its webhook trigger `repoScoped`. Installing such a
+template requires `{ owner, repo }`, runs the same repo-authority check, and
+writes the repository onto the trigger's `config.github`. On delivery the worker
+then refuses any payload naming a different repository (403), and applies the
+same admission policy the App path applies: the author must belong to the
+repository (same-repo branch, or an `author_association` of OWNER / MEMBER /
+COLLABORATOR — a commenter requesting a re-review likewise), and the org and
+repo-owner code-review settings still gate the run. The dispatched
+`trigger.data` is taken from the pin and the admitted decision, not from the
+request body. Both entry points also share the per-trigger 60-second webhook
+rate limit.
 
 Schedule triggers with `target: 'workflow'` may include `triggerData`; these values become the scheduled run's `trigger.data` payload and are validated against the workflow trigger node's `dataSchema`. Schedule triggers with `target: 'orchestrator'` dispatch a prompt to the user's orchestrator session instead of running a workflow — these have a nullable `workflowId`.
 
@@ -368,7 +398,7 @@ For editor typeahead and edge inspection, `foreach` nodes expose their runtime r
 |------|----------|
 | `trigger` | Reserved source node for the invocation envelope. It returns `WorkflowTriggerPayload` as its node data and lets downstream nodes reference `{{nodes.trigger.data...}}` and `{{trigger...}}`. Optional `dataSchema` documents, validates, and renders typed `trigger.data` fields. |
 | `llm` | LLM completion via the configured provider. Without `outputSchema`, returns `{ response: string }`; with `outputSchema`, returns the validated JSON object. NO_RETRY at the runtime level — author-driven retries via `step.do` config. |
-| `tool` | Worker-side integration action through the same pipeline agent tool calls use. Honors action policy (`allow` / `deny` / `require_approval`). User-credentialed actions that return an auth failure (`401`, `unauthorized`, expired/revoked token text) force-refresh credentials and retry once before failing the node. |
+| `tool` | Worker-side integration action through the same pipeline agent tool calls use. Honors action policy (`allow` / `deny` / `require_approval`). User-credentialed actions that return an auth failure (`401`, `unauthorized`, expired/revoked token text) force-refresh credentials and retry once before failing the node. `credential: 'user' \| 'app'` selects the identity the call acts as: `'user'` (the default) resolves the workflow owner's connected account, `'app'` resolves the org's app/bot credential — GitHub only today — and fails rather than falling back to a person. The value is enumerated in the node schema, so a typo is rejected at save time instead of silently posting under the owner's identity. |
 | `set` | Computes JSON values from templates and surfaces them to downstream nodes via `state.nodes`. |
 | `if` | Branches on a `conditions` array; downstream edges carry `fromOutput: 'true' \| 'false'`. |
 | `wait` | Durable pause via `step.sleep` for a compact duration string (`'5s'`, `'1h'`). |

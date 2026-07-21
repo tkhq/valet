@@ -22,7 +22,7 @@ import {
 } from '../lib/db.js';
 import * as triggerService from '../services/triggers.js';
 import * as webhookService from '../services/webhooks.js';
-import { getGithubInstallationByLogin } from '../lib/db/github-installations.js';
+import { assertCallerCanAdministerRepo } from '../services/github-repo-authority.js';
 
 export const triggersRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -366,14 +366,16 @@ triggersRouter.post('/', zValidator('json', createTriggerSchema), async (c) => {
   }
 
   // A github-app trigger only fires if the org's GitHub App is installed on the
-  // repo owner — reject up front so we never create a dead trigger.
+  // repo owner, and it must not be armable by someone with no standing on the
+  // repository — the App's reach is org-wide, the caller's is not.
   if (body.config.type === 'github-app') {
-    const installation = await getGithubInstallationByLogin(c.get('db'), body.config.owner);
-    if (!installation) {
-      throw new ValidationError(
-        `The Valet GitHub App is not installed on "${body.config.owner}". Ask an admin to install it, then try again.`,
-      );
-    }
+    await assertCallerCanAdministerRepo(
+      c.get('db'),
+      c.env,
+      user.id,
+      body.config.owner,
+      body.config.repo,
+    );
   }
 
   const id = crypto.randomUUID();

@@ -40,15 +40,38 @@ import type { Env } from '../env.js';
 
 const REPO = { name: 'valet', owner: { login: 'tkhq' } };
 
-function prEvent(action: string, opts: { number?: number; draft?: boolean } = {}) {
-  return { action, repository: REPO, pull_request: { number: opts.number ?? 75, draft: opts.draft ?? false } };
+/**
+ * A pull_request event. Defaults to the trusted shape a real same-repo branch
+ * produces; `fork` and `association` model the outside contributor.
+ */
+function prEvent(
+  action: string,
+  opts: { number?: number; draft?: boolean; fork?: boolean; association?: string } = {},
+) {
+  return {
+    action,
+    repository: REPO,
+    pull_request: {
+      number: opts.number ?? 75,
+      draft: opts.draft ?? false,
+      head: { repo: { full_name: opts.fork ? 'stranger/valet' : 'tkhq/valet' } },
+      author_association: opts.association ?? 'MEMBER',
+    },
+  };
 }
-function commentEvent(body: string, opts: { action?: string; onPr?: boolean; botAuthor?: boolean } = {}) {
+function commentEvent(
+  body: string,
+  opts: { action?: string; onPr?: boolean; botAuthor?: boolean; association?: string } = {},
+) {
   return {
     action: opts.action ?? 'created',
     repository: REPO,
     issue: { number: 75, ...(opts.onPr === false ? {} : { pull_request: { url: 'x' } }) },
-    comment: { body, user: { type: opts.botAuthor ? 'Bot' : 'User' } },
+    comment: {
+      body,
+      user: { type: opts.botAuthor ? 'Bot' : 'User' },
+      author_association: opts.association ?? 'MEMBER',
+    },
   };
 }
 
@@ -105,17 +128,51 @@ describe('decideReview — Greptile-style review policy', () => {
   it('ignores edited/deleted comment actions', () => {
     expect(decideReview('issue_comment', commentEvent('@valet-turnkey', { action: 'edited' }), SLUG)).toBeNull();
   });
+
+  // ── author trust ────────────────────────────────────────────────────────
+
+  it('reviews a fork PR when its author belongs to the repo', () => {
+    expect(decideReview('pull_request', prEvent('opened', { fork: true, association: 'COLLABORATOR' }), SLUG))
+      .toMatchObject({ pullNumber: 75, reason: 'initial' });
+  });
+
+  it('does NOT review a fork PR from an unaffiliated author', () => {
+    for (const association of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE', 'MANNEQUIN']) {
+      expect(decideReview('pull_request', prEvent('opened', { fork: true, association }), SLUG)).toBeNull();
+    }
+  });
+
+  it('reviews a same-repo branch regardless of the author association', () => {
+    expect(decideReview('pull_request', prEvent('opened', { association: 'NONE' }), SLUG))
+      .toMatchObject({ reason: 'initial' });
+  });
+
+  it('does NOT re-review on an @mention from someone outside the repo', () => {
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey re-review', { association: 'NONE' }), SLUG)).toBeNull();
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey re-review', { association: 'CONTRIBUTOR' }), SLUG)).toBeNull();
+  });
+
+  it('re-reviews on an @mention from an owner', () => {
+    expect(decideReview('issue_comment', commentEvent('@valet-turnkey re-review', { association: 'OWNER' }), SLUG)?.reason)
+      .toBe('mention');
+  });
 });
 
-// Minimal D1 shim over better-sqlite3 — findGithubAppTriggersForRepo uses the
-// D1 prepare().bind().all() shape (returns { results }).
+// Minimal D1 shim over better-sqlite3. findGithubAppTriggersForRepo uses
+// prepare().bind().all() (returns { results }); the per-trigger rate limiter
+// uses .run() and .first().
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function asD1(sqlite: any) {
   return {
     prepare(sql: string) {
       return {
         bind(...args: unknown[]) {
-          return { all: async () => ({ results: sqlite.prepare(sql).all(...args) }) };
+          const stmt = sqlite.prepare(sql);
+          return {
+            all: async () => ({ results: stmt.all(...args) }),
+            run: async () => stmt.run(...args),
+            first: async () => stmt.get(...args) ?? null,
+          };
         },
       };
     },
@@ -183,6 +240,24 @@ describe('dispatchGithubAppReviews', () => {
     const other = { action: 'opened', repository: { name: 'repo', owner: { login: 'other' } }, pull_request: { number: 1, draft: false } };
     await dispatchGithubAppReviews(env, 'pull_request', other, 'd2');
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT dispatch for an unaffiliated fork PR', async () => {
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened', { fork: true, association: 'NONE' }), 'd-fork');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('stops dispatching once the per-trigger rate limit is exhausted', async () => {
+    db.update(triggers).set({
+      config: JSON.stringify({ type: 'github-app', owner: 'tkhq', repo: 'valet', events: ['pull_request'], rateLimit: 2 }),
+    }).run();
+
+    for (let i = 0; i < 4; i++) {
+      await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened', { number: 100 + i }), `d-rate-${i}`);
+    }
+    // An App delivery costs an LLM run, so it answers to the same ceiling the
+    // manual webhook path enforces.
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
   });
 
   it('does NOT dispatch a disabled trigger', async () => {

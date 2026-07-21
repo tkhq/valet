@@ -17,6 +17,11 @@ import { WorkflowVersionError } from '../services/workflow-versions.js';
 import { getDisabledPluginServices } from '../lib/db/plugins.js';
 import { integrationRegistry } from '../integrations/registry.js';
 
+const installSchema = z.object({
+  owner: z.string().min(1).optional(),
+  repo: z.string().min(1).optional(),
+});
+
 const enableAppSchema = z.object({
   workflowId: z.string().min(1),
   owner: z.string().min(1),
@@ -51,6 +56,7 @@ templatesRouter.get('/', async (c) => {
       steps: t.steps,
       inputs: templateRunInputs(t),
       hasWebhook: Boolean(t.trigger),
+      repoScoped: Boolean(t.trigger?.repoScoped),
       ...(t.runForm ? { runForm: t.runForm } : {}),
     }));
   const body: WorkflowTemplateListResponse = { templates };
@@ -60,14 +66,26 @@ templatesRouter.get('/', async (c) => {
 /**
  * POST /api/templates/:id/install
  * Install a template as a published workflow (plus its webhook trigger, if
- * any). The webhook token is returned exactly once.
+ * any). The webhook token is returned exactly once. A repo-scoped template
+ * requires { owner, repo } in the body: its trigger is pinned to that
+ * repository and only an installer with write access to it may install.
  */
 templatesRouter.post('/:id/install', async (c) => {
   const user = c.get('user');
   const { id } = c.req.param();
+  // The body is optional overall (templates without a repo-scoped trigger take
+  // none), so parse leniently and let the service reject a missing pin.
+  const raw = await c.req.json().catch(() => ({}));
+  const parsed = installSchema.safeParse(raw ?? {});
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid install request', code: 'validation_error' }, 400);
+  }
+  const pin = parsed.data.owner && parsed.data.repo
+    ? { owner: parsed.data.owner, repo: parsed.data.repo }
+    : undefined;
   let result;
   try {
-    result = await installWorkflowTemplate(c.get('db'), c.env, user.id, id);
+    result = await installWorkflowTemplate(c.get('db'), c.env, user.id, id, pin);
   } catch (err) {
     // publishDraft's env/model gate rejects a template whose model/provider
     // isn't configured here — a caller-fixable condition, not a server bug.
@@ -110,6 +128,6 @@ templatesRouter.post('/:id/enable-app', zValidator('json', enableAppSchema), asy
   const user = c.get('user');
   const { id } = c.req.param();
   const { workflowId, owner, repo } = c.req.valid('json');
-  const result = await enableTemplateGithubApp(c.get('db'), user.id, id, workflowId, owner, repo);
+  const result = await enableTemplateGithubApp(c.get('db'), c.env, user.id, id, workflowId, owner, repo);
   return c.json(result, 201);
 });
