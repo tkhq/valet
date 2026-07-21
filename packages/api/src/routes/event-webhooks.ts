@@ -24,6 +24,11 @@ eventWebhooksRouter.post("/:service", async (c) => {
   const triggerDefs = plugins.flatMap((p) => p.triggers ?? []).filter((t) => t.service === service);
   if (triggerDefs.length === 0) return c.json({ error: "unknown service" }, 404);
 
+  const contentLength = c.req.header("content-length");
+  if (contentLength !== undefined && Number(contentLength) > MAX_BODY_BYTES) {
+    return c.json({ error: "payload too large" }, 413);
+  }
+
   const rawBody = new Uint8Array(await c.req.arrayBuffer());
   if (rawBody.byteLength > MAX_BODY_BYTES) return c.json({ error: "payload too large" }, 413);
 

@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHmac } from "node:crypto";
 import { eq } from "drizzle-orm";
+import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions, linearInstallations } from "../schema/index.js";
@@ -101,6 +102,18 @@ describe("POST /webhooks/events/:service", () => {
     });
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "unknown service" });
+  });
+
+  it("413s when body exceeds 1 MiB (content-length pre-check)", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const oversizedBody = "x".repeat(1024 * 1024 + 1);
+    const res = await fetch(`${api.baseUrl}/webhooks/events/github`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: oversizedBody,
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "payload too large" });
   });
 
   // TODO(Task 8): unskip once plugin-linear ships its TriggerDefs — until
