@@ -54,6 +54,7 @@ import {
   type GithubAppDeps,
 } from "../services/github-app.js";
 import type { AppQueryable } from "../lib/drizzle.js";
+import { ingestEvent } from "../events/ingest.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import type {
   GetGithubAppResponse,
@@ -456,7 +457,20 @@ githubAppWebhookRouter.post("/", async (c) => {
     await handleInstallationEvent(deps, orgId, payload);
   } else if (event === "installation_repositories") {
     await handleInstallationRepositoriesEvent(db, orgId, payload);
+  } else if (event && event !== "ping") {
+    // Forward every other event family into the generic event pipeline.
+    // Signature + org are already verified above; build the VerifiedEvent
+    // directly instead of re-running TriggerDef.verify.
+    const deliveryId = c.req.header("x-github-delivery");
+    const def = c.var.providers.plugins
+      .flatMap((p) => p.triggers ?? [])
+      .find((t) => t.service === "github" && t.id === `github.${event}`);
+    if (def && deliveryId) {
+      await ingestEvent(
+        { db, plugins: c.var.providers.plugins, onIngest: undefined /* Task 6 wires the nudge */ },
+        { orgId, service: "github", event: def.toEvent({ eventType: event, deliveryId, payload }) },
+      );
+    }
   }
-  // Every other event type: acknowledged, ignored.
   return c.body(null, 204);
 });

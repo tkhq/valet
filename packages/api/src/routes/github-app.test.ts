@@ -8,9 +8,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { eq } from "drizzle-orm";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { githubInstallations } from "../schema/index.js";
+import { eventDeliveries, events, eventSubscriptions, githubInstallations } from "../schema/index.js";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -427,6 +428,123 @@ describe("POST /webhooks/github-app", () => {
     const payload = { action: "suspend", installation: { id: 1 } };
     const res = await postWebhook(api.baseUrl, "installation", payload, "sha256=irrelevant");
     expect(res.status).toBe(204);
+  });
+
+  // ── Generic event-pipeline forwarding (event-system plan, Task 5) ──────
+
+  async function postForwardedWebhook(
+    baseUrl: string,
+    event: string,
+    payload: unknown,
+    secret: string,
+    deliveryId: string,
+  ) {
+    const body = JSON.stringify(payload);
+    return fetch(`${baseUrl}/webhooks/github-app`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-github-event": event,
+        "x-github-delivery": deliveryId,
+        "x-hub-signature-256": signWebhookBody(body, secret),
+      },
+      body,
+    });
+  }
+
+  const PR_OPENED_PAYLOAD = {
+    action: "opened",
+    pull_request: { number: 7, title: "Add thing" },
+    repository: { full_name: "acme/widgets" },
+    sender: { id: 1234, login: "octocat" },
+  };
+
+  it("forwards a pull_request webhook into the event pipeline: events row + matched pending delivery", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_gh",
+      orgId: "local-org",
+      ownerType: "org",
+      ownerId: "local-org",
+      name: "PR opened",
+      eventKeys: ["github.pull_request.opened"],
+      filters: [],
+      target: { kind: "orchestrator" },
+      enabled: true,
+      createdBy: "local-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const res = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-1");
+    expect(res.status).toBe(204);
+
+    const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0].service).toBe("github");
+    expect(eventRows[0].eventKey).toBe("github.pull_request.opened");
+    expect(eventRows[0].dedupeKey).toBe("gh-del-1");
+
+    const deliveryRows = await api.providers.db
+      .select()
+      .from(eventDeliveries)
+      .where(eq(eventDeliveries.eventId, eventRows[0].id));
+    expect(deliveryRows).toHaveLength(1);
+    expect(deliveryRows[0].status).toBe("pending");
+    expect(deliveryRows[0].subscriptionId).toBe("sub_gh");
+  });
+
+  it("ingests forwarded events with no matching subscription (event row, zero deliveries)", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+
+    const res = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-2");
+    expect(res.status).toBe(204);
+
+    const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(eventRows).toHaveLength(1);
+    const deliveryRows = await api.providers.db
+      .select()
+      .from(eventDeliveries)
+      .where(eq(eventDeliveries.eventId, eventRows[0].id));
+    expect(deliveryRows).toHaveLength(0);
+  });
+
+  it("dedupes a redelivered webhook (same x-github-delivery -> one events row, one delivery)", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_gh",
+      orgId: "local-org",
+      ownerType: "org",
+      ownerId: "local-org",
+      name: "PR opened",
+      eventKeys: ["github.pull_request.opened"],
+      filters: [],
+      target: { kind: "orchestrator" },
+      enabled: true,
+      createdBy: "local-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const first = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-3");
+    expect(first.status).toBe(204);
+    const second = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-3");
+    expect(second.status).toBe(204);
+
+    const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(eventRows).toHaveLength(1);
+    const deliveryRows = await api.providers.db
+      .select()
+      .from(eventDeliveries)
+      .where(eq(eventDeliveries.eventId, eventRows[0].id));
+    expect(deliveryRows).toHaveLength(1);
   });
 
   it("413s a body over the 1 MiB cap", async () => {

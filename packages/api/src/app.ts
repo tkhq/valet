@@ -42,6 +42,7 @@ import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
+import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { mountWebStatic } from "./static-web.js";
 
 export interface CreatedApp {
@@ -106,6 +107,12 @@ export function createApp(
   // itself, not the auth gate below. Mounted BEFORE `buildAuthMiddleware`
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
+
+  // PUBLIC generic event-webhook ingress — same reasoning as the mounts
+  // above: the caller is the provider (Linear etc.), not a logged-in Valet
+  // user; verification is signature-level (plugin `TriggerDef.verify` over
+  // the raw bytes) inside the router itself, not the auth gate below.
+  app.route("/webhooks/events", eventWebhooksRouter);
 
   // Public health check (no auth).
   app.get("/api/health", (c) =>
