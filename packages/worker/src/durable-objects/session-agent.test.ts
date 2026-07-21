@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ACTION_APPROVAL_EXPIRY_MS, SessionAgentDO, buildActionApprovalPromptActions, buildForwardedParts, resolveSlackChannelId } from './session-agent.js';
 import { createTestDb } from '../test-utils/db.js';
+import { log } from '../lib/log.js';
 import { sessions } from '../lib/schema/sessions.js';
 import { users } from '../lib/schema/users.js';
 import { userIdentityLinks } from '../lib/schema/channels.js';
@@ -3710,6 +3711,94 @@ describe('SessionAgentDO', () => {
       expect(error).toContain('expired without a response');
       expect(error).not.toContain('Do not retry');
       expect(error).not.toContain('running unattended');
+    });
+  });
+
+  describe('runner RPC dispatch logging', () => {
+    it('emits a structured info log with requestId + type + durationMs on the success path', async () => {
+      const { agent } = await createTestAgent();
+      const infoSpy = vi.spyOn(log, 'info').mockImplementation(() => {});
+
+      // Faithful path: dispatchRunnerMessage → runnerLink.handleMessage → this handler.
+      (agent as any)._runnerHandlers = {
+        'skill-api': vi.fn().mockResolvedValue(undefined),
+      };
+
+      await (agent as any).dispatchRunnerMessage({
+        type: 'skill-api',
+        requestId: 'b9b57ce8-eaeb-4882-870c-de1036867f89',
+        action: 'triggers.list',
+      });
+
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+      const [message, fields] = infoSpy.mock.calls[0];
+      expect(message).toBe('runner rpc');
+      expect(fields).toMatchObject({
+        requestId: 'b9b57ce8-eaeb-4882-870c-de1036867f89',
+        type: 'skill-api',
+        action: 'triggers.list',
+        ok: true,
+      });
+      expect(typeof (fields as any).durationMs).toBe('number');
+      expect((fields as any).durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('emits a WARN log and rethrows when a handler throws', async () => {
+      const { agent } = await createTestAgent();
+      const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+      const infoSpy = vi.spyOn(log, 'info').mockImplementation(() => {});
+
+      (agent as any)._runnerHandlers = {
+        'call-tool': vi.fn().mockRejectedValue(new Error('boom')),
+      };
+
+      await expect(
+        (agent as any).dispatchRunnerMessage({
+          type: 'call-tool',
+          requestId: 'req-err-1',
+        }),
+      ).rejects.toThrow('boom');
+
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const [message, fields] = warnSpy.mock.calls[0];
+      expect(message).toBe('runner rpc failed');
+      expect(fields).toMatchObject({
+        requestId: 'req-err-1',
+        type: 'call-tool',
+        ok: false,
+      });
+      expect(typeof (fields as any).durationMs).toBe('number');
+    });
+
+    it('escalates a slow success to WARN so an abandoned near-miss stays visible', async () => {
+      const { agent } = await createTestAgent();
+      const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+      const infoSpy = vi.spyOn(log, 'info').mockImplementation(() => {});
+
+      // Advance the clock past the slow threshold between start and completion.
+      const nowSpy = vi.spyOn(Date, 'now');
+      nowSpy.mockReturnValueOnce(0).mockReturnValue(6000);
+
+      (agent as any)._runnerHandlers = {
+        'list-tools': vi.fn().mockResolvedValue(undefined),
+      };
+
+      await (agent as any).dispatchRunnerMessage({
+        type: 'list-tools',
+        requestId: 'req-slow-1',
+      });
+
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const [message, fields] = warnSpy.mock.calls[0];
+      expect(message).toBe('runner rpc slow');
+      expect(fields).toMatchObject({
+        requestId: 'req-slow-1',
+        type: 'list-tools',
+        durationMs: 6000,
+        ok: true,
+      });
     });
   });
 });

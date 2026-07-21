@@ -3,6 +3,7 @@ import type { AppDb } from '../lib/drizzle.js';
 import { getDb } from '../lib/drizzle.js';
 import { createDoTracer, parseTraceparent, type DoTracer } from '../lib/do-tracing.js';
 import { activeTraceparent } from '../lib/tracing.js';
+import { log } from '../lib/log.js';
 import type { Context } from '@opentelemetry/api';
 import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
 import { getCredential, type CredentialResult } from '../services/credentials.js';
@@ -348,6 +349,12 @@ export class SessionAgentDO {
   private static readonly TRACE_FLUSH_INTERVAL_MS = 10_000;
   // Per-token streaming frames + keepalive: high-frequency, low-value; not traced individually.
   private static readonly WS_TRACE_SKIP = new Set<string>(['ping', 'pong', 'message.part.text-delta', 'message.part.tool-update']);
+  /**
+   * A runner RPC that takes longer than this is logged at WARN even on success. The runner
+   * gives up on its side after a fixed request timeout, so a near-miss here means the client
+   * may already have abandoned the request by the time the DO completed it.
+   */
+  private static readonly RUNNER_RPC_SLOW_MS = 5000;
   private doTracerPromise?: Promise<DoTracer>;
   private traceFlushDeadline: number | null = null;
   // Per-turn W3C traceparent of the originating Worker trace, captured at prompt dispatch so
@@ -1039,14 +1046,7 @@ export class SessionAgentDO {
     console.log(`[SessionAgentDO] WebSocket message: isRunner=${isRunner}, type=${parsed.type}, data=${data.slice(0, 200)}`);
 
     const dispatch = isRunner
-      ? () => this.runnerLink.handleMessage(
-          parsed as RunnerToDOMessage,
-          this.runnerHandlers,
-          () => {
-            this.lifecycle.touchActivity();
-            this.rescheduleIdleAlarm();
-          },
-        )
+      ? () => this.dispatchRunnerMessage(parsed as RunnerToDOMessage)
       : () => this.handleClientMessage(ws, parsed as ClientMessage);
 
     // Trace each non-noise inbound message as a ROOT span — the WS protocol carries no
@@ -2758,6 +2758,51 @@ export class SessionAgentDO {
   private async handleDiff() {
     const requestId = crypto.randomUUID();
     this.runnerLink.send({ type: 'diff', requestId });
+  }
+
+  /**
+   * Single instrumentation point for every inbound runner RPC. Times the handler and emits one
+   * structured log line carrying the runner-minted `requestId` so a runner-side timeout (e.g.
+   * `Request <uuid> timed out after 15000ms`, thrown in agent-client) can be pivoted to the
+   * DO-side record by grepping that uuid: the log reports the RPC `type`/`action` and how long the
+   * DO actually took (or, if there is no line for the id, that the DO never completed it).
+   *
+   * `ok` reflects whether the handler threw; handlers that catch internally and reply with an error
+   * result still count as `ok` here (they completed). A slow success is logged at WARN so a
+   * near-miss the client may already have abandoned stays visible.
+   */
+  private async dispatchRunnerMessage(msg: RunnerToDOMessage): Promise<void> {
+    const start = Date.now();
+    let ok = true;
+    try {
+      await this.runnerLink.handleMessage(
+        msg,
+        this.runnerHandlers,
+        () => {
+          this.lifecycle.touchActivity();
+          this.rescheduleIdleAlarm();
+        },
+      );
+    } catch (err) {
+      ok = false;
+      throw err;
+    } finally {
+      const durationMs = Date.now() - start;
+      const fields = {
+        requestId: (msg as { requestId?: string }).requestId,
+        type: msg.type,
+        action: (msg as { action?: string }).action,
+        durationMs,
+        ok,
+      };
+      if (!ok) {
+        log.warn('runner rpc failed', fields);
+      } else if (durationMs > SessionAgentDO.RUNNER_RPC_SLOW_MS) {
+        log.warn('runner rpc slow', fields);
+      } else {
+        log.info('runner rpc', fields);
+      }
+    }
   }
 
   // ─── Runner Message Handlers ──────────────────────────────────────────
