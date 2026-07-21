@@ -22,7 +22,8 @@ reachable. Set `BETTER_AUTH_SECRET` to enable real auth; see
 `serve` holds an exclusive `serve.lock` per data dir — two servers can never
 share one PGlite. Client commands (`valet login`, `sessions`, `send`, `chat`,
 `gates`) work against any instance via named profiles in
-`~/.valet/config.json`.
+`~/.valet/config.json`. The full command reference is
+[`docs/cli.md`](cli.md).
 
 Build the binary from source: `pnpm --filter @valet/api build:binary`
 (cross-compile with `--target bun-<os>-<arch>`).
