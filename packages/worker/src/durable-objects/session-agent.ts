@@ -2799,7 +2799,10 @@ export class SessionAgentDO {
         log.warn('runner rpc failed', fields);
       } else if (durationMs > SessionAgentDO.RUNNER_RPC_SLOW_MS) {
         log.warn('runner rpc slow', fields);
-      } else {
+      } else if (!SessionAgentDO.WS_TRACE_SKIP.has(msg.type)) {
+        // High-frequency streaming frames (per-token text-delta, tool-update)
+        // and keepalives are excluded from the routine success line to avoid a
+        // per-token log flood — failures and slow frames above still always log.
         log.info('runner rpc', fields);
       }
     }

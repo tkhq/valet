@@ -3800,5 +3800,46 @@ describe('SessionAgentDO', () => {
         ok: true,
       });
     });
+
+    it('does not emit the routine info line for high-frequency streaming frames', async () => {
+      const { agent } = await createTestAgent();
+      const infoSpy = vi.spyOn(log, 'info').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+      (agent as any)._runnerHandlers = {
+        'message.part.text-delta': vi.fn().mockResolvedValue(undefined),
+      };
+
+      // A single assistant turn streams hundreds of these; one routine log line
+      // per token would flood dev logs, so the success path must stay silent.
+      await (agent as any).dispatchRunnerMessage({
+        type: 'message.part.text-delta',
+        requestId: 'stream-1',
+      });
+
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('still WARNs when a streaming frame handler throws', async () => {
+      const { agent } = await createTestAgent();
+      const infoSpy = vi.spyOn(log, 'info').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+      (agent as any)._runnerHandlers = {
+        'message.part.text-delta': vi.fn().mockRejectedValue(new Error('nope')),
+      };
+
+      await expect(
+        (agent as any).dispatchRunnerMessage({
+          type: 'message.part.text-delta',
+          requestId: 'stream-err-1',
+        }),
+      ).rejects.toThrow('nope');
+
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toBe('runner rpc failed');
+    });
   });
 });
