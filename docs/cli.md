@@ -167,7 +167,16 @@ on exit code, parse the JSON.
 
 ## Getting the Binary
 
-Prebuilt binaries (macOS arm64/x64, Linux x64/arm64) are on GitHub Releases:
+The fastest path is the install script — it detects your platform, downloads
+the right binary, and installs it to `~/.local/bin` (override with
+`VALET_INSTALL_DIR`; pin a version with `VALET_VERSION=v0.1.0`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tkhq/valet/dev-v2/scripts/install.sh | bash
+```
+
+Alternatively, prebuilt binaries (macOS arm64/x64, Linux x64/arm64) are on
+GitHub Releases:
 versioned releases on `v*` tags, and a rolling `dev-v2-latest` prerelease
 whose assets are replaced on every merge to `dev-v2` — its download URLs
 (`…/releases/download/dev-v2-latest/valet-<os>-<arch>`) are stable. Download,
@@ -176,8 +185,9 @@ whose assets are replaced on every merge to `dev-v2` — its download URLs
 **macOS Gatekeeper:** the binaries are ad-hoc signed, not notarized. A
 *browser* download gets a quarantine flag and macOS shows a misleading
 "binary is damaged and can't be opened" dialog. Either clear the flag —
-`xattr -d com.apple.quarantine ./valet-darwin-<arch>` — or download with
-`curl -LO`, which sets no quarantine flag and just runs.
+`xattr -d com.apple.quarantine ./valet-darwin-<arch>` — or download via
+curl (the install script above, or `curl -LO`), which sets no quarantine
+flag and just runs.
 
 Or build from source:
 
