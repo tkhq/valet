@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Type } from "typebox";
-import { validateValetPlugin, type ValetPlugin } from "../src/index.js";
+import { validateValetPlugin, type ValetPlugin, type NormalizedEvent, type EventCatalogEntry } from "../src/index.js";
 
 function minimalPlugin(): ValetPlugin {
   return { name: "demo", version: "1.0.0" };
@@ -38,10 +38,15 @@ describe("validateValetPlugin", () => {
           service: "demo",
           description: "an event",
           verify: () => null,
-          toSignal: () => ({
-            signal: { kind: "signal", signalType: "demo.event", body: "{}" },
-            dispatchId: "d-1",
+          toEvent: () => ({
+            key: "demo.event.fired",
+            dedupeKey: "d-1",
+            occurredAt: new Date(0).toISOString(),
+            refs: {},
+            summary: "Demo event fired",
+            payload: {},
           }),
+          catalog: [{ key: "demo.event.fired", description: "Demo event", filters: [] }],
         },
       ],
       skills: [{ name: "demo-skill", content: "# Demo" }],
@@ -102,17 +107,17 @@ describe("validateValetPlugin", () => {
     expect(badCred.ok).toBe(false);
   });
 
-  it("rejects a trigger whose verify/toSignal are not functions", () => {
+  it("rejects a trigger whose verify/toEvent are not functions", () => {
     const res = validateValetPlugin({
       name: "demo",
       version: "1",
-      triggers: [{ id: "demo.e", service: "demo", description: "e", verify: "nope", toSignal: {} }],
+      triggers: [{ id: "demo.e", service: "demo", description: "e", verify: "nope", toEvent: {}, catalog: [] }],
     });
     expect(res.ok).toBe(false);
     if (!res.ok) {
       const paths = res.issues.map((i) => i.path);
       expect(paths).toContain("triggers[0].verify");
-      expect(paths).toContain("triggers[0].toSignal");
+      expect(paths).toContain("triggers[0].toEvent");
     }
   });
 
@@ -154,6 +159,53 @@ describe("validateValetPlugin transports", () => {
     if (!res.ok) {
       expect(res.issues.some((i) => i.path === "transports[0].channelType")).toBe(true);
       expect(res.issues.some((i) => i.path === "transports[1].create")).toBe(true);
+    }
+  });
+});
+
+describe("TriggerDef toEvent/catalog validation", () => {
+  const validTrigger = {
+    id: "github.pull_request",
+    service: "github",
+    description: "PRs",
+    verify: () => null,
+    toEvent: (): NormalizedEvent => ({
+      key: "github.pull_request.opened",
+      dedupeKey: "d1",
+      occurredAt: new Date(0).toISOString(),
+      refs: {},
+      summary: "PR opened",
+      payload: {},
+    }),
+    catalog: [
+      {
+        key: "github.pull_request.opened",
+        description: "A pull request was opened",
+        filters: [{ field: "repo", path: "repository.full_name", description: "Repository" }],
+      },
+    ] satisfies EventCatalogEntry[],
+  };
+
+  it("accepts a trigger with toEvent and catalog", () => {
+    const res = validateValetPlugin({ name: "gh", version: "1.0.0", triggers: [validTrigger] });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a trigger missing toEvent", () => {
+    const { toEvent: _omit, ...rest } = validTrigger;
+    const res = validateValetPlugin({ name: "gh", version: "1.0.0", triggers: [rest] });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path.includes("toEvent"))).toBe(true);
+    }
+  });
+
+  it("rejects a catalog entry without a key", () => {
+    const bad = { ...validTrigger, catalog: [{ description: "x", filters: [] }] };
+    const res = validateValetPlugin({ name: "gh", version: "1.0.0", triggers: [bad] });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path.includes("catalog"))).toBe(true);
     }
   });
 });

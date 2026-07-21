@@ -13,7 +13,7 @@
  * contract (Telegram, Phase 7).
  */
 import type { ActionPlugin } from "./plugin-catalog.js";
-import type { RiskLevel, SignalContent, SkillSource, RoleSpec, StoredCredential } from "./types.js";
+import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 
 export interface CredentialDeclaration {
   /** Service the credential is stored under. Defaults to the plugin name. */
@@ -34,6 +34,31 @@ export interface VerifiedEvent {
   payload: unknown;
 }
 
+/** A provider webhook normalized into the generic event pipeline. */
+export interface NormalizedEvent {
+  /** Namespaced key, e.g. "github.pull_request.opened", "linear.issue.create". */
+  key: string;
+  /** Provider delivery id — unique per service; makes redelivery idempotent. */
+  dedupeKey: string;
+  /** ISO timestamp of when the event happened at the provider. */
+  occurredAt: string;
+  /** External actor, when the payload carries one (enables identity-link attribution). */
+  actor?: { externalId: string; login?: string };
+  /** Flat scope refs for filtering/display: repo, installation_id, team_id, … */
+  refs: Record<string, string>;
+  /** One-line human summary (used as the SignalContent body for orchestrator delivery). */
+  summary: string;
+  /** Raw provider payload. */
+  payload: unknown;
+}
+
+export interface EventCatalogEntry {
+  key: string;
+  description: string;
+  /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
+  filters: { field: string; path: string; description: string }[];
+}
+
 export interface TriggerDef {
   /** e.g. "github.pull_request" */
   id: string;
@@ -47,12 +72,10 @@ export interface TriggerDef {
     req: { headers: Record<string, string>; rawBody: Uint8Array },
     secrets: Record<string, string>,
   ): VerifiedEvent | null | Promise<VerifiedEvent | null>;
-  /** Normalize a verified event into an admissible signal. */
-  toSignal(event: VerifiedEvent): {
-    signal: SignalContent;
-    dispatchId: string;
-    conversationKey?: string;
-  };
+  /** Normalize a verified event for the generic event pipeline. */
+  toEvent(event: VerifiedEvent): NormalizedEvent;
+  /** Subscribable event keys this trigger can emit, with their filterable fields. */
+  catalog: EventCatalogEntry[];
 }
 
 // ─── Channel transports (v2 contract, Phase 7) ─────────────────────────────
@@ -192,7 +215,7 @@ const CREDENTIAL_TYPES = ["oauth2", "api_key", "bot_token", "service_account"] a
 /**
  * Structural validation of an unknown value as a ValetPlugin. Hand-rolled
  * rather than a TypeBox schema because manifests carry functions (execute,
- * verify, toSignal, resolveActions), which JSON Schema cannot express.
+ * verify, toEvent, resolveActions), which JSON Schema cannot express.
  * Collects every issue instead of failing fast so quarantine logs are
  * actionable in one pass.
  */
@@ -256,10 +279,27 @@ export function validateValetPlugin(
         issues.push({ path: `${path}.${key}`, message: "required non-empty string" });
       }
     }
-    for (const key of ["verify", "toSignal"] as const) {
+    for (const key of ["verify", "toEvent"] as const) {
       if (typeof trigger[key] !== "function") {
         issues.push({ path: `${path}.${key}`, message: "required function" });
       }
+    }
+    if (trigger.catalog === undefined) {
+      issues.push({ path: `${path}.catalog`, message: "required array" });
+    } else {
+      checkArray(trigger.catalog, `${path}.catalog`, issues, (entry, entryPath) => {
+        const e = asRecord(entry, entryPath, issues);
+        if (!e) return;
+        if (typeof e.key !== "string" || e.key.length === 0) {
+          issues.push({ path: `${entryPath}.key`, message: "required non-empty string" });
+        }
+        if (typeof e.description !== "string") {
+          issues.push({ path: `${entryPath}.description`, message: "required string" });
+        }
+        if (!Array.isArray(e.filters)) {
+          issues.push({ path: `${entryPath}.filters`, message: "required array" });
+        }
+      });
     }
   });
 
