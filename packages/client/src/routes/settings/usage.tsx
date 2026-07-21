@@ -12,6 +12,7 @@ import { UserBreakdownTable } from '@/components/usage/user-breakdown-table';
 import { PerformanceTab } from '@/components/analytics/performance-tab';
 import { EventsTab } from '@/components/analytics/events-tab';
 import { ValueTab } from '@/components/analytics/value-tab';
+import { AdoptionTab } from '@/components/analytics/adoption-tab';
 
 export const Route = createFileRoute('/settings/usage')({
   component: UsagePage,
@@ -21,7 +22,7 @@ function UsagePage() {
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
   const [period, setPeriod] = React.useState(720); // default 30 days in hours
-  const [tab, setTab] = React.useState<'billing' | 'value' | 'performance' | 'events'>('billing');
+  const [tab, setTab] = React.useState<'billing' | 'value' | 'adoption' | 'performance' | 'events'>('billing');
 
   // Redirect non-admins
   React.useEffect(() => {
@@ -46,7 +47,7 @@ function UsagePage() {
         </div>
 
         <div className="flex gap-1 border-b border-neutral-200 dark:border-neutral-800">
-          {(['billing', 'value', 'performance', 'events'] as const).map((t) => (
+          {(['billing', 'value', 'adoption', 'performance', 'events'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -63,6 +64,7 @@ function UsagePage() {
 
         {tab === 'billing' && <BillingContent period={period} />}
         {tab === 'value' && <ValueTab period={period} />}
+        {tab === 'adoption' && <AdoptionTab period={period} />}
         {tab === 'performance' && <PerformanceTab period={period} />}
         {tab === 'events' && <EventsTab period={period} />}
       </div>

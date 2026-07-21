@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
 import type { DashboardStatsResponse } from '@valet/shared';
 import * as db from '../lib/db.js';
-import type { SessionAggregateRow } from '../lib/db/dashboard.js';
+import type { FileChangeTotalsRow, SessionAggregateRow } from '../lib/db/dashboard.js';
 
 export const dashboardRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -57,6 +57,8 @@ dashboardRouter.get('/stats', async (c) => {
   const [
     orgAgg,
     userAgg,
+    orgFileTotals,
+    userFileTotals,
     prevPeriod,
     activity,
     topRepos,
@@ -65,6 +67,8 @@ dashboardRouter.get('/stats', async (c) => {
   ] = await Promise.all([
     db.getOrgSessionAggregate(c.env.DB, periodStartStr),
     db.getUserSessionAggregate(c.env.DB, user.id, periodStartStr),
+    db.getFileChangeTotals(c.env.DB, periodStartStr),
+    db.getFileChangeTotals(c.env.DB, periodStartStr, user.id),
     db.getPrevPeriodAggregate(c.env.DB, prevPeriodStartStr, periodStartStr),
     db.getSessionActivityByDay(c.env.DB, periodStartStr),
     db.getTopReposBySessionCount(c.env.DB, periodStartStr, 8),
@@ -72,7 +76,7 @@ dashboardRouter.get('/stats', async (c) => {
     db.getActiveUserSessions(c.env.DB, user.id),
   ]);
 
-  function buildHero(agg: SessionAggregateRow) {
+  function buildHero(agg: SessionAggregateRow, fileTotals: FileChangeTotalsRow) {
     const totalSessions = agg.total_sessions;
     const totalToolCalls = agg.total_tool_calls;
     const totalDuration = agg.total_duration;
@@ -84,7 +88,10 @@ dashboardRouter.get('/stats', async (c) => {
       totalToolCalls,
       totalSessionDurationSeconds: totalDuration,
       avgSessionDurationSeconds: totalSessions > 0 ? Math.floor(totalDuration / totalSessions) : 0,
-      estimatedLinesChanged: totalToolCalls * 15,
+      // Real diff totals from session_files_changed — 0 when nothing was
+      // recorded, never an estimate.
+      linesChanged: fileTotals.lines_changed,
+      filesChanged: fileTotals.files_changed,
       sessionHours: Math.round((totalDuration / 3600) * 10) / 10,
     };
   }
@@ -95,8 +102,8 @@ dashboardRouter.get('/stats', async (c) => {
   const messageDelta = prevMessages > 0 ? Math.round(((orgAgg.total_messages - prevMessages) / prevMessages) * 100) : 0;
 
   const response: DashboardStatsResponse = {
-    hero: buildHero(orgAgg),
-    userHero: buildHero(userAgg),
+    hero: buildHero(orgAgg, orgFileTotals),
+    userHero: buildHero(userAgg, userFileTotals),
     delta: {
       sessions: sessionDelta,
       messages: messageDelta,

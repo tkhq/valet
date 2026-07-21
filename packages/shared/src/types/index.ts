@@ -395,7 +395,14 @@ export interface DashboardHeroStats {
   totalToolCalls: number;
   totalSessionDurationSeconds: number;
   avgSessionDurationSeconds: number;
-  estimatedLinesChanged: number;
+  /**
+   * Real SUM(additions + deletions) from session_files_changed for the
+   * period's sessions — 0 when no file changes were recorded, never an
+   * estimate.
+   */
+  linesChanged: number;
+  /** Distinct changed files recorded for the period's sessions. */
+  filesChanged: number;
   sessionHours: number;
 }
 
@@ -1427,6 +1434,59 @@ export interface ValueMetricsWindow {
 export interface AnalyticsValueResponse {
   current: ValueMetricsWindow;
   previous: ValueMetricsWindow;
+  period: number;
+}
+
+/**
+ * Admin "Adoption" tab: activity-and-autonomy metrics aggregated from tables
+ * that are already written today. All rates are 0–1 fractions; null means the
+ * denominator was empty. Workflow numbers cover mode='production' runs only,
+ * windowed by when the run reached a terminal state. Durations are ABSOLUTE —
+ * no pre-Valet baseline exists, so no reduction/savings figure is derivable.
+ */
+export interface AnalyticsAdoptionResponse {
+  adoption: {
+    /** Distinct analytics_events users per UTC day. */
+    activeUsersByDay: Array<{ bucket: string; users: number }>;
+    /** Distinct analytics_events users per week (%Y-W%W, Monday-first). */
+    activeUsersByWeek: Array<{ bucket: string; users: number }>;
+    /** Distinct users with any attributed event in the window. */
+    activeUsers: number;
+    /** Users active in more than one distinct week (retention proxy). */
+    returningUsers: number;
+    returningUserRate: number | null;
+    /** Currently-enabled triggers by type — present state, not windowed. */
+    enabledTriggers: Array<{ type: string; count: number }>;
+    /** Production workflow runs started per UTC day. */
+    workflowRunsByDay: Array<{ day: string; runs: number }>;
+    /** Channels exercised (turn_complete events with a channel). */
+    channels: Array<{ channel: string; turns: number }>;
+    /** Integration services exercised (action_invocations.service). */
+    services: Array<{ service: string; invocations: number }>;
+  };
+  autonomy: {
+    terminalRuns: number;
+    completedRuns: number;
+    failedRuns: number;
+    cancelledRuns: number;
+    successRate: number | null;
+    /** Completed with zero human decision (no resolved_by on any invocation). */
+    unattendedCompletedRuns: number;
+    unattendedCompletionRate: number | null;
+    /** Runs where a human resolved at least one invocation. */
+    attendedRuns: number;
+    interventionRate: number | null;
+    /** Median minutes attended runs' invocations sat waiting on the human. */
+    medianBlockedMinutes: number | null;
+    outcomesByWorkflow: Array<{ workflowId: string | null; name: string; completed: number; failed: number; cancelled: number }>;
+    outcomesByTriggerType: Array<{ triggerType: string; completed: number; failed: number; cancelled: number }>;
+    /** Coarse keyword buckets over workflow_executions.error (failed runs). */
+    failureReasons: Array<{ reason: string; runs: number }>;
+    /** ABSOLUTE run duration; not a reduction claim. */
+    medianRunMinutes: number | null;
+    p95RunMinutes: number | null;
+    measuredRuns: number;
+  };
   period: number;
 }
 
