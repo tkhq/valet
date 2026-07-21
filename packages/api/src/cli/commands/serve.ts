@@ -349,10 +349,13 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   }
 
   // Implicit `local` profile so the client subcommands work with no login.
-  // Reuse the config loaded from the resolved data dir and persist it back
-  // under settings.dataDir (VALET_DATA_DIR now points there).
+  // Persist it back to the config file we actually LOADED (configDir), not the
+  // effective data dir: `config.serve.dataDir` may have redirected
+  // settings.dataDir (and VALET_DATA_DIR, above) elsewhere, but a fresh
+  // shell's client subcommands locate config from flag/env/default only and
+  // would never see a profile saved under the redirected dir.
   try {
-    saveConfig(upsertLocalProfile(config, settings.port));
+    saveConfig(upsertLocalProfile(config, settings.port), join(configDir, "config.json"));
   } catch (err) {
     printErr(`serve: failed to persist local profile: ${err instanceof Error ? err.message : String(err)}`);
   }

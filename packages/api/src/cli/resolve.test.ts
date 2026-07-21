@@ -9,6 +9,11 @@ describe("cli/resolve firstDefined", () => {
     expect(firstDefined<number>(undefined, null)).toBeUndefined();
     expect(firstDefined(0, 1)).toBe(0); // 0 is defined
   });
+
+  it("skips empty strings (VALET_DATA_DIR=\"\" means unset, not CWD-relative)", () => {
+    expect(firstDefined("", "x")).toBe("x");
+    expect(firstDefined<string>("")).toBeUndefined();
+  });
 });
 
 // Note: serve's port/sandbox precedence lives in resolveServeSettings
@@ -21,6 +26,11 @@ describe("cli/resolve resolveDataDir", () => {
     expect(resolveDataDir({ env: "/b", config: { dataDir: "/c" } })).toBe("/b");
     expect(resolveDataDir({ config: { dataDir: "/c" } })).toBe("/c");
     expect(resolveDataDir({})).toBe(SERVE_DEFAULTS.dataDir);
+  });
+
+  it("treats empty-string sources as unset", () => {
+    expect(resolveDataDir({ env: "" })).toBe(SERVE_DEFAULTS.dataDir);
+    expect(resolveDataDir({ flag: "", env: "", config: { dataDir: "/c" } })).toBe("/c");
   });
 });
 
@@ -49,6 +59,10 @@ describe("cli/resolve resolveInstance", () => {
       url: "https://staging",
       apiKey: undefined,
     });
+  });
+
+  it("treats VALET_INSTANCE=\"\" as unset and falls through to defaultProfile", () => {
+    expect(resolveInstance({ env: "", config }).name).toBe("staging");
   });
 
   it("throws ProfileNotFoundError when the selected name is absent", () => {

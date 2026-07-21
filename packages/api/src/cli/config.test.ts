@@ -46,6 +46,20 @@ describe("cli/config", () => {
     expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 
+  it("saves to an explicit path when given, ignoring VALET_DATA_DIR", () => {
+    const other = mkdtempSync(join(tmpdir(), "valet-cfg-other-"));
+    try {
+      const explicit = join(other, "config.json");
+      saveConfig({ defaultProfile: "prod", profiles: { prod: { url: "https://x" } } }, explicit);
+      expect(existsSync(explicit)).toBe(true);
+      // Nothing landed under the env-derived default path.
+      expect(existsSync(configPath())).toBe(false);
+      expect(statSync(explicit).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
   it("tightens perms on a pre-existing looser file", () => {
     writeFileSync(configPath(), "{}", { mode: 0o644 });
     expect(statSync(configPath()).mode & 0o777).toBe(0o644);

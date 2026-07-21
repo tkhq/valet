@@ -92,9 +92,13 @@ export function loadConfig(): ValetConfig {
  * Persist config, ensuring the data dir exists (mode 0700) and the file is
  * written with mode 0600. `chmodSync` is applied unconditionally so a file
  * that pre-existed with looser perms gets tightened.
+ *
+ * `path` defaults to `configPath()` (VALET_DATA_DIR-derived). Pass it
+ * explicitly when the target must not follow VALET_DATA_DIR — e.g. serve
+ * persisting the `local` profile back to the config file it loaded after
+ * `config.serve.dataDir` redirected the effective data dir.
  */
-export function saveConfig(cfg: ValetConfig): void {
-  const path = configPath();
+export function saveConfig(cfg: ValetConfig, path: string = configPath()): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   // recursive:true won't chmod an already-existing dir — force it.

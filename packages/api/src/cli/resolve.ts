@@ -10,10 +10,15 @@ import { resolve } from "node:path";
 import type { ProfileConfig, ServeConfig, ValetConfig } from "./config.js";
 import { NoInstanceError, ProfileNotFoundError } from "./exit.js";
 
-/** Return the first argument that is neither `undefined` nor `null`. */
+/** Return the first argument that is neither `undefined`, `null`, nor `""`.
+ * Empty strings count as unset so `VALET_DATA_DIR="" valet …` (a common
+ * shell-unset attempt) falls through to the default instead of resolving
+ * paths relative to CWD. */
 export function firstDefined<T>(...values: Array<T | undefined | null>): T | undefined {
   for (const v of values) {
-    if (v !== undefined && v !== null) return v;
+    if (v === undefined || v === null) continue;
+    if (typeof v === "string" && v === "") continue;
+    return v;
   }
   return undefined;
 }
