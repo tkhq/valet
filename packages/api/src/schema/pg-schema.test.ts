@@ -32,6 +32,10 @@ import {
   agentSessions,
   sessionRepos,
   githubInstallations,
+  events,
+  eventSubscriptions,
+  eventDeliveries,
+  linearInstallations,
 } from "./index.js";
 
 const APP_TABLES = [
@@ -70,6 +74,10 @@ const APP_TABLES = [
   "llm_providers",
   "session_repos",
   "github_installations",
+  "events",
+  "event_subscriptions",
+  "event_deliveries",
+  "linear_installations",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
