@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Spinner } from "~/components/primitives";
@@ -9,16 +10,35 @@ import { displayName } from "~/components/integrations/display-name";
  * `/integrations` — what the assistant can reach. Two groups in the
  * settings visual idiom (open hairline stacks, no card boxes): Services
  * (plugins with tools and/or credentials — connectable) and Built in
- * (content-only plugins that just work). Manual token entry only until the
- * auth design pass brings OAuth connect flows.
+ * (content-only plugins that just work). OAuth connect for services
+ * declaring `oauth` metadata redirects to `/api/credentials/:service/connect`
+ * and lands back here with `?connected=` or `?error=`; manual token entry
+ * remains the fallback for everything else.
  */
 export const Route = createFileRoute("/integrations")({
   component: IntegrationsPage,
 });
 
+type ConnectResult = { kind: "connected" | "error"; value: string } | null;
+
+function useConnectResult(): ConnectResult {
+  const [result] = useState<ConnectResult>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("connected");
+    const error = params.get("error");
+    if (!connected && !error) return null;
+    window.history.replaceState(null, "", window.location.pathname);
+    return connected
+      ? ({ kind: "connected", value: connected } as const)
+      : ({ kind: "error", value: error ?? "" } as const);
+  });
+  return result;
+}
+
 export function IntegrationsPage() {
   const { data, isLoading, error } = usePlugins();
   const plugins = data?.plugins ?? [];
+  const connectResult = useConnectResult();
 
   const services = plugins
     .filter(isService)
@@ -35,6 +55,17 @@ export function IntegrationsPage() {
           What your assistant can reach. Connect a service with a key; built-in abilities just
           work.
         </p>
+
+        {connectResult?.kind === "connected" && (
+          <div className="mt-4 rounded border border-moss/30 bg-moss/10 px-3 py-2 text-sm text-ink">
+            Connected {connectResult.value}.
+          </div>
+        )}
+        {connectResult?.kind === "error" && (
+          <div className="mt-4 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-sm text-danger-600">
+            Connection failed: {connectResult.value}
+          </div>
+        )}
 
         <div className="mt-10 space-y-12">
           {isLoading && (
