@@ -43,7 +43,7 @@ function getRawD1Client(db: AppDb): RawD1Client | null {
 async function syncSkillFts(
   db: AppDb,
   skillId: string,
-  opts: { skipIfIndexed?: boolean } = {},
+  opts: { skipIfCurrent?: boolean } = {},
 ): Promise<void> {
   try {
     // Fetch the skill row first — INSERT...SELECT into FTS5 virtual tables
@@ -55,22 +55,32 @@ async function syncSkillFts(
 
     const { rowid, name, description, content } = row[0];
 
-    // When the caller already knows the source row is unchanged, only (re)index
-    // if the FTS entry is missing. This keeps the sync self-healing (a skill that
-    // failed to index earlier still gets picked up) without re-writing rows that
-    // are already indexed on every cold isolate — the redundant write load that
-    // contends with live D1 traffic.
-    if (opts.skipIfIndexed) {
-      const indexed = await db.all<{ rowid: number }>(
-        sql`SELECT rowid FROM skills_fts WHERE rowid = ${rowid} LIMIT 1`,
-      );
-      if (indexed.length > 0) return;
-    }
-
     // Truncate content for FTS — D1 has a bind-parameter size limit (~100KB total
     // per query, but FTS tokenization can amplify size). Keep it short since full
     // content isn't needed for search relevance.
     const truncatedContent = content.length > 2000 ? content.slice(0, 2000) : content;
+
+    // When the caller already knows the source row is unchanged, skip the write
+    // only if the FTS row is present AND already holds these values. Checking
+    // presence alone would strand a stale row — e.g. a prior best-effort write
+    // that failed after the source row was updated — un-reconciled forever;
+    // comparing the indexed values keeps the sync self-healing (missing OR stale
+    // rows are rewritten) while still skipping the common case where the index
+    // already matches, which is the redundant write load that contends with
+    // live D1 traffic.
+    if (opts.skipIfCurrent) {
+      const indexed = await db.all<{ name: string; description: string; content: string }>(
+        sql`SELECT name, COALESCE(description, '') as description, content FROM skills_fts WHERE rowid = ${rowid} LIMIT 1`,
+      );
+      if (
+        indexed.length > 0 &&
+        indexed[0].name === name &&
+        indexed[0].description === description &&
+        indexed[0].content === truncatedContent
+      ) {
+        return;
+      }
+    }
 
     // INSERT OR REPLACE is a single atomic statement. A DELETE-then-INSERT pair
     // lets two concurrent cold isolates interleave (A.DELETE, B.DELETE, A.INSERT,
@@ -377,16 +387,20 @@ export async function upsertSkillFromSync(
 
   if (existing.length > 0) {
     const current = existing[0];
+    // source and slug are intentionally omitted: like the pre-existing UPDATE
+    // below, this sync never rewrites them — a synced skill's source/slug are
+    // fixed at first insert — so they are not part of the change comparison.
     const unchanged =
       current.name === data.name &&
-      (current.description ?? null) === newDescription &&
+      current.description === newDescription &&
       current.content === data.content &&
       current.visibility === newVisibility;
     if (unchanged) {
       // Row is already current. Skip the UPDATE + FTS rewrite that every cold
       // isolate would otherwise repeat on a static registry — the redundant D1
-      // writes that contend with live traffic. Only backfill FTS if missing.
-      await syncSkillFts(db, data.id, { skipIfIndexed: true });
+      // writes that contend with live traffic. Still reconcile FTS if the index
+      // row is missing or stale.
+      await syncSkillFts(db, data.id, { skipIfCurrent: true });
       return;
     }
     await db.update(skills).set({
