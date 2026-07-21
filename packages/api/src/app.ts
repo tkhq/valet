@@ -43,6 +43,7 @@ import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 
 export interface CreatedApp {
@@ -190,6 +191,10 @@ export function createApp(
   app.route("/api/prebuilds", prebuildsPublicRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
+  // Mounted at /api (not /api/events) because the router carries both the
+  // /events* and /event-subscriptions* path families. Placed after every
+  // more-specific /api/* router above so nothing gets shadowed.
+  app.route("/api", eventsRouter);
 
   // WebSocket — must be registered against the same Hono instance that
   // node-ws was constructed with. main.ts calls injectWebSocket(server)
