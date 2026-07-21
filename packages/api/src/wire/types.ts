@@ -773,6 +773,11 @@ export interface PluginServiceSummary {
   /** Set (to `true`) only when an `ActionPlugin` for this service declares
    * `resolveActions` — the plugin's action list isn't fully known statically. */
   dynamic?: true;
+  /** How the connect UI obtains this credential: "oauth" renders a Connect
+   * redirect button; "manual" renders token entry. authorization_code-mode
+   * declarations report "manual" when their client env vars are unset so
+   * the UI never renders a Connect button that would 503. */
+  connect: "oauth" | "manual";
 }
 
 export interface PluginSummary {

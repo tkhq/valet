@@ -11,6 +11,7 @@ import { Hono } from "hono";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { ListPluginsResponse, PluginServiceSummary, PluginSummary } from "../wire/types.js";
+import { findOAuthDeclaration, authCodeEnvReady } from "../services/integration-oauth.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
 
@@ -33,6 +34,10 @@ pluginsRouter.get("/", async (c) => {
 
     const services: PluginServiceSummary[] = (plugin.credentials ?? []).map((decl) => {
       const service = decl.service ?? plugin.name;
+      const found = findOAuthDeclaration(plugins, service);
+      const oauthReady =
+        found !== null &&
+        (found.oauth.mode === "mcp" || authCodeEnvReady(found.oauth, process.env));
       return {
         service,
         type: decl.type,
@@ -41,6 +46,7 @@ pluginsRouter.get("/", async (c) => {
         configKeys: decl.configKeys,
         connected: connectedServices.has(service),
         dynamic: dynamicServices.has(service) ? true : undefined,
+        connect: oauthReady ? "oauth" : "manual",
       };
     });
 

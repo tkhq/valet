@@ -78,6 +78,7 @@ describe("GET /api/plugins", () => {
         connectLabel: "Fixture API key",
         connected: false,
         dynamic: true,
+        connect: "manual",
       },
     ]);
 
@@ -134,5 +135,43 @@ describe("GET /api/plugins", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+});
+
+describe("GET /api/plugins connect mode", () => {
+  it("reports oauth for mcp-mode declarations and manual otherwise", async () => {
+    const plugins: ValetPlugin[] = [
+      {
+        name: "linear", version: "0.1.0",
+        credentials: [{ type: "oauth2", configKeys: ["accessToken"], oauth: { mode: "mcp", serverUrl: "https://mcp.linear.app/mcp" } }],
+      },
+      { name: "slack", version: "0.1.0", credentials: [{ type: "bot_token", configKeys: ["accessToken"] }] },
+    ];
+    api = await bootTestApi({ plugins });
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
+    const linear = summaries.find((p) => p.name === "linear")?.services[0];
+    const slack = summaries.find((p) => p.name === "slack")?.services[0];
+    expect(linear?.connect).toBe("oauth");
+    expect(slack?.connect).toBe("manual");
+  });
+
+  it("reports manual for authorization_code declarations whose env vars are unset", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "gmail", version: "0.1.0",
+      credentials: [{
+        type: "oauth2", configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+          tokenUrl: "https://oauth2.googleapis.com/token",
+          clientIdEnv: "UNSET_TEST_ID", clientSecretEnv: "UNSET_TEST_SECRET",
+        },
+      }],
+    }];
+    api = await bootTestApi({ plugins });
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
+    expect(summaries.find((p) => p.name === "gmail")?.services[0]?.connect).toBe("manual");
   });
 });
