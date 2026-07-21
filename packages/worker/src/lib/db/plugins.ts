@@ -75,17 +75,57 @@ export async function upsertPlugin(
     installedBy?: string;
   },
 ): Promise<void> {
+  const orgId = data.orgId ?? 'default';
+  const description = data.description ?? null;
+  const icon = data.icon ?? null;
+  const actionType = data.actionType ?? null;
+  const authRequired = data.authRequired ?? true;
+  const source = data.source ?? 'builtin';
+  const capabilities = data.capabilities ?? [];
+
+  // Skip the write when the stored row already matches. The registry is static
+  // between deploys, so on a cold isolate this is the common case; writing
+  // unconditionally put O(plugins) redundant writes on every request that spun
+  // a new isolate. Only the fields the conflict-update touches are compared —
+  // status/installedBy are set on insert and never overwritten here.
+  const existing = await db
+    .select({
+      version: orgPlugins.version,
+      description: orgPlugins.description,
+      icon: orgPlugins.icon,
+      actionType: orgPlugins.actionType,
+      authRequired: orgPlugins.authRequired,
+      source: orgPlugins.source,
+      capabilities: orgPlugins.capabilities,
+    })
+    .from(orgPlugins)
+    .where(and(eq(orgPlugins.orgId, orgId), eq(orgPlugins.name, data.name)))
+    .limit(1);
+
+  if (existing.length > 0) {
+    const cur = existing[0];
+    const unchanged =
+      cur.version === data.version &&
+      cur.description === description &&
+      cur.icon === icon &&
+      cur.actionType === actionType &&
+      cur.authRequired === authRequired &&
+      cur.source === source &&
+      JSON.stringify(cur.capabilities ?? []) === JSON.stringify(capabilities);
+    if (unchanged) return;
+  }
+
   await db.insert(orgPlugins).values({
     id: data.id,
-    orgId: data.orgId ?? 'default',
+    orgId,
     name: data.name,
     version: data.version,
-    description: data.description ?? null,
-    icon: data.icon ?? null,
-    actionType: data.actionType ?? null,
-    authRequired: data.authRequired ?? true,
-    source: data.source ?? 'builtin',
-    capabilities: data.capabilities ?? [],
+    description,
+    icon,
+    actionType,
+    authRequired,
+    source,
+    capabilities,
     status: data.status ?? 'active',
     installedBy: data.installedBy ?? 'system',
   }).onConflictDoUpdate({
@@ -194,13 +234,34 @@ export async function upsertPluginArtifact(
     sortOrder?: number;
   },
 ): Promise<void> {
+  const sortOrder = data.sortOrder ?? 0;
+
+  // Same rationale as upsertPlugin: skip the write when the artifact is already
+  // current, so a static registry stops generating a write per artifact on
+  // every cold isolate.
+  const existing = await db
+    .select({ content: orgPluginArtifacts.content, sortOrder: orgPluginArtifacts.sortOrder })
+    .from(orgPluginArtifacts)
+    .where(
+      and(
+        eq(orgPluginArtifacts.pluginId, data.pluginId),
+        eq(orgPluginArtifacts.type, data.type),
+        eq(orgPluginArtifacts.filename, data.filename),
+      ),
+    )
+    .limit(1);
+
+  if (existing.length > 0 && existing[0].content === data.content && existing[0].sortOrder === sortOrder) {
+    return;
+  }
+
   await db.insert(orgPluginArtifacts).values({
     id: data.id,
     pluginId: data.pluginId,
     type: data.type,
     filename: data.filename,
     content: data.content,
-    sortOrder: data.sortOrder ?? 0,
+    sortOrder,
   }).onConflictDoUpdate({
     target: [orgPluginArtifacts.pluginId, orgPluginArtifacts.type, orgPluginArtifacts.filename],
     set: {

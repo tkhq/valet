@@ -40,7 +40,11 @@ function getRawD1Client(db: AppDb): RawD1Client | null {
   return client as RawD1Client;
 }
 
-async function syncSkillFts(db: AppDb, skillId: string): Promise<void> {
+async function syncSkillFts(
+  db: AppDb,
+  skillId: string,
+  opts: { skipIfCurrent?: boolean } = {},
+): Promise<void> {
   try {
     // Fetch the skill row first — INSERT...SELECT into FTS5 virtual tables
     // fails on D1 at runtime, so we insert with explicit values instead.
@@ -56,20 +60,45 @@ async function syncSkillFts(db: AppDb, skillId: string): Promise<void> {
     // content isn't needed for search relevance.
     const truncatedContent = content.length > 2000 ? content.slice(0, 2000) : content;
 
+    // When the caller already knows the source row is unchanged, skip the write
+    // only if the FTS row is present AND already holds these values. Checking
+    // presence alone would strand a stale row — e.g. a prior best-effort write
+    // that failed after the source row was updated — un-reconciled forever;
+    // comparing the indexed values keeps the sync self-healing (missing OR stale
+    // rows are rewritten) while still skipping the common case where the index
+    // already matches, which is the redundant write load that contends with
+    // live D1 traffic.
+    if (opts.skipIfCurrent) {
+      const indexed = await db.all<{ name: string; description: string; content: string }>(
+        sql`SELECT name, COALESCE(description, '') as description, content FROM skills_fts WHERE rowid = ${rowid} LIMIT 1`,
+      );
+      if (
+        indexed.length > 0 &&
+        indexed[0].name === name &&
+        indexed[0].description === description &&
+        indexed[0].content === truncatedContent
+      ) {
+        return;
+      }
+    }
+
+    // INSERT OR REPLACE is a single atomic statement. A DELETE-then-INSERT pair
+    // lets two concurrent cold isolates interleave (A.DELETE, B.DELETE, A.INSERT,
+    // B.INSERT) so B's INSERT collides on the rowid — the SQLITE_CONSTRAINT that
+    // flooded dev logs. Collapsing to one statement removes that window and is
+    // idempotent, so re-running the sync is a harmless overwrite.
     const rawClient = getRawD1Client(db);
     if (rawClient) {
-      await rawClient.prepare('DELETE FROM skills_fts WHERE rowid = ?').bind(rowid).run();
       await rawClient
-        .prepare('INSERT INTO skills_fts(rowid, name, description, content) VALUES (?, ?, ?, ?)')
+        .prepare('INSERT OR REPLACE INTO skills_fts(rowid, name, description, content) VALUES (?, ?, ?, ?)')
         .bind(rowid, name, description, truncatedContent)
         .run();
       return;
     }
 
     // Better-sqlite3 test path fallback.
-    await db.run(sql`DELETE FROM skills_fts WHERE rowid = ${rowid}`);
     await db.run(sql`
-      INSERT INTO skills_fts(rowid, name, description, content)
+      INSERT OR REPLACE INTO skills_fts(rowid, name, description, content)
       VALUES (${rowid}, ${name}, ${description}, ${truncatedContent})
     `);
   } catch (err) {
@@ -340,15 +369,45 @@ export async function upsertSkillFromSync(
     visibility?: SkillVisibility;
   },
 ): Promise<void> {
+  const newDescription = data.description ?? null;
+  const newVisibility = data.visibility ?? 'shared';
+
   // Check if skill already exists, then INSERT or UPDATE.
   // Avoids ON CONFLICT which has issues with D1's Drizzle driver.
-  const existing = await db.select({ id: skills.id }).from(skills).where(eq(skills.id, data.id)).limit(1);
+  const existing = await db
+    .select({
+      name: skills.name,
+      description: skills.description,
+      content: skills.content,
+      visibility: skills.visibility,
+    })
+    .from(skills)
+    .where(eq(skills.id, data.id))
+    .limit(1);
+
   if (existing.length > 0) {
+    const current = existing[0];
+    // source and slug are intentionally omitted: like the pre-existing UPDATE
+    // below, this sync never rewrites them — a synced skill's source/slug are
+    // fixed at first insert — so they are not part of the change comparison.
+    const unchanged =
+      current.name === data.name &&
+      current.description === newDescription &&
+      current.content === data.content &&
+      current.visibility === newVisibility;
+    if (unchanged) {
+      // Row is already current. Skip the UPDATE + FTS rewrite that every cold
+      // isolate would otherwise repeat on a static registry — the redundant D1
+      // writes that contend with live traffic. Still reconcile FTS if the index
+      // row is missing or stale.
+      await syncSkillFts(db, data.id, { skipIfCurrent: true });
+      return;
+    }
     await db.update(skills).set({
       name: data.name,
-      description: data.description ?? null,
+      description: newDescription,
       content: data.content,
-      visibility: data.visibility ?? 'shared',
+      visibility: newVisibility,
       updatedAt: sql`datetime('now')`,
     }).where(eq(skills.id, data.id));
   } else {
@@ -359,9 +418,9 @@ export async function upsertSkillFromSync(
       source: data.source,
       name: data.name,
       slug: data.slug,
-      description: data.description ?? null,
+      description: newDescription,
       content: data.content,
-      visibility: data.visibility ?? 'shared',
+      visibility: newVisibility,
       status: 'active',
     });
   }
