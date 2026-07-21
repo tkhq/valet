@@ -105,20 +105,18 @@ RUN case "${TARGETARCH:-amd64}" in \
 
 # GitHub CLI (GitHub/repo integration plan, Task 8) — the `valet-gh` wrapper
 # (engine/git-credential-helper.ts) execs the real `gh` with a Valet-resolved
-# GH_TOKEN. Installed from GitHub's official apt repo and pinned (bump this
-# ARG to upgrade) rather than tracking whatever `stable` currently resolves
-# to, same rationale as CODE_SERVER_VERSION above. The exact pin is validated
-# by the Task 12 dogfood build, not `docker build --check`.
+# GH_TOKEN. Pinned (bump this ARG to upgrade), same rationale as
+# CODE_SERVER_VERSION above. Installed from the versioned GitHub Releases
+# .deb, NOT GitHub's apt repo: the apt repo only carries the latest version,
+# so an apt pin breaks the build the moment gh ships a release (this
+# happened — CI failed with "Version '2.63.2' for 'gh' was not found").
+# Release assets are immutable, and per-arch (.deb arch matches TARGETARCH).
 ARG GH_VERSION=2.63.2
-RUN mkdir -p -m 755 /etc/apt/keyrings \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-       > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends "gh=${GH_VERSION}" \
-    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/gh.deb \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${TARGETARCH:-amd64}.deb" \
+    && dpkg -i /tmp/gh.deb \
+    && rm /tmp/gh.deb \
+    && gh --version
 
 # Bundled auth gateway (Task 2): `node /gateway/dist/bin.js` is what
 # docker/start-full.sh execs. Requires VALET_SESSION_ID +
