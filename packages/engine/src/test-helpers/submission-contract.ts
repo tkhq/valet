@@ -958,8 +958,11 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded?.attemptId).toBeUndefined();
       expect(loaded?.ownerId).toBeUndefined();
       expect(loaded?.leaseExpiresAt).toBeUndefined();
-      // attemptCount is retained (bounds retries); the marker is gone.
-      expect(loaded?.attemptCount).toBe(1);
+      // A released claim never consumed run budget: the release DECREMENTS
+      // the claim's attempt_count increment (floor 0) in the same atomic
+      // write — keyless release cycles must not trip the stuck-head signal
+      // or exhaust the generic maxAttempts retry budget.
+      expect(loaded?.attemptCount).toBe(0);
       // The DURABLE credential budget landed atomically with the release —
       // it must survive restart (a crash-looping keyless session stays
       // boundedly failing, never an infinite queued→running→queued cycle).
@@ -976,7 +979,7 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
         ownerId: "owner-1",
       });
       expect(reclaimed?.status).toBe("running");
-      expect(reclaimed?.attemptCount).toBe(2);
+      expect(reclaimed?.attemptCount).toBe(1);
     });
 
     it("is a no-op on an attempt-id mismatch (a superseding attempt owns it now)", async () => {
@@ -1004,6 +1007,8 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       const loaded = await store.getQueueItem(SESSION_ID, item.id);
       expect(loaded?.status).toBe("running");
       expect(loaded?.attemptId).toBe("att-live");
+      // Refused CAS leaves attempt_count exactly as the live claim set it.
+      expect(loaded?.attemptCount).toBe(1);
       expect(await store.hasAttemptMarker(item.id, "att-live")).toBe(true);
       // Full no-op: it deleted NEITHER its own stale marker NOR the live one.
       expect(await store.hasAttemptMarker(item.id, "att-stale")).toBe(true);
@@ -1064,6 +1069,42 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded?.supersededByItemId).toBe(steer.id);
       expect(loaded?.credentialAttempts ?? 0).toBe(0);
       expect(loaded?.lastCredentialReleaseAt).toBeUndefined();
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
+    });
+
+    it("REFUSES to release a running item with abortRequestedAt stamped (settle aborted, never re-queue)", async () => {
+      // An abort landing between the caller's guard check and the CAS must
+      // refuse the release: the item settles `aborted` under the current
+      // attempt instead of flickering running→queued→aborted.
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-1");
+      await store.requestAbort(SESSION_ID, THREAD_ID);
+
+      const released = await store.releaseSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        item.id,
+        { itemId: item.id, attemptId: "att-1" },
+        { attempts: 1, lastReleaseAt: Date.now() },
+      );
+      expect(released).toBe(false);
+
+      // Full no-op: still running under the same attempt, abort stamp
+      // intact, run budget and credential counters untouched, marker kept.
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("running");
+      expect(loaded?.attemptId).toBe("att-1");
+      expect(loaded?.abortRequestedAt).toBeDefined();
+      expect(loaded?.attemptCount).toBe(1);
+      expect(loaded?.credentialAttempts ?? 0).toBe(0);
       expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
     });
 

@@ -1049,9 +1049,15 @@ export class PgSessionStore implements SessionStore {
     // would leave a queued item with a live-looking attempt marker (InMemory
     // is already atomic; PG must match). The marker is deleted ONLY when the
     // CAS matched — a stale caller's release is a full no-op that touches no
-    // marker at all. `superseded_by_item_id IS NULL` is part of the CAS: a
-    // superseded item released to `queued` would be an orphan (skipped by the
-    // claim head), so the release refuses and reports the miss to the caller.
+    // marker at all. `superseded_by_item_id IS NULL` and
+    // `abort_requested_at IS NULL` are part of the CAS: a superseded item
+    // released to `queued` would be an orphan (skipped by the claim head),
+    // and an abort stamped mid-window must settle `aborted` under the
+    // current attempt rather than flickering running→queued→aborted on the
+    // queue-state stream — both refuse and report the miss to the caller.
+    // `attempt_count` is DECREMENTED (floor 0) in the same write: a released
+    // claim never consumed run budget (keyless release cycles must not trip
+    // the stuck-head signal or exhaust decideReconciliation's maxAttempts).
     // The matched flag is RETURNED from the transaction callback, never
     // hoisted into outer state: the node-postgres wrapper retries the whole
     // callback on serialization failures (40P01), and a mutated outer
@@ -1063,9 +1069,10 @@ export class PgSessionStore implements SessionStore {
         ? await tx.query(
             `UPDATE engine_queue_items
              SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL,
+                 attempt_count = GREATEST(attempt_count - 1, 0),
                  credential_attempts = $6, last_credential_release_at = $7, updated_at = $1
              WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5
-               AND superseded_by_item_id IS NULL`,
+               AND superseded_by_item_id IS NULL AND abort_requested_at IS NULL`,
             [
               Date.now(),
               itemId,
@@ -1078,9 +1085,10 @@ export class PgSessionStore implements SessionStore {
           )
         : await tx.query(
             `UPDATE engine_queue_items
-             SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL, updated_at = $1
+             SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL,
+                 attempt_count = GREATEST(attempt_count - 1, 0), updated_at = $1
              WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5
-               AND superseded_by_item_id IS NULL`,
+               AND superseded_by_item_id IS NULL AND abort_requested_at IS NULL`,
             [Date.now(), itemId, sessionId, threadId, fence.attemptId],
           );
       if (result.rowCount === 0) return false;

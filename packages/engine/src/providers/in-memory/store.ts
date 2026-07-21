@@ -602,15 +602,21 @@ export class InMemorySessionStore implements SessionStore {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);
     if (!item || item.threadId !== threadId) return false;
-    // CAS: only the owning attempt may release, only from `running`, and only
-    // when NOT superseded — a superseded item re-queued would be an orphan
-    // (skipped by the claim head), so the release refuses and reports the miss.
+    // CAS: only the owning attempt may release, only from `running`, only
+    // when NOT superseded (a superseded item re-queued would be an orphan —
+    // skipped by the claim head) and NOT abort-stamped (an abort landed
+    // mid-window must settle `aborted` under the current attempt, never
+    // flicker running→queued→aborted) — otherwise refuse and report the miss.
     if (item.status !== "running" || item.attemptId !== fence.attemptId) return false;
     if (item.supersededByItemId) return false;
+    if (item.abortRequestedAt !== undefined) return false;
     item.status = "queued";
     item.attemptId = undefined;
     item.ownerId = undefined;
     item.leaseExpiresAt = undefined;
+    // A released claim never consumed run budget: hand the claim's
+    // attempt_count increment back (floor 0), matching the PG CAS.
+    item.attemptCount = Math.max(0, item.attemptCount - 1);
     if (credential) {
       // Durable credential budget: written only when the CAS matched.
       item.credentialAttempts = credential.attempts;

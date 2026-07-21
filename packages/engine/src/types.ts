@@ -1033,12 +1033,20 @@ export interface SessionStore {
    * dropped) without settling it — for a turn that could not run at all (e.g.
    * the host resolver yielded no usable model credentials). The submission stays
    * claimable and abortable. CAS-guarded on `status = 'running'` + the caller's
-   * attempt id + `supersededByItemId` unset: a superseding attempt's later
-   * release is a no-op, and a superseded item is REFUSED (releasing it to
-   * `queued` would orphan it — superseded items are skipped by the claim head
-   * and by unsettledHead, so nothing would ever settle it). Returns whether
-   * the CAS matched (true = released + marker deleted; false = full no-op,
-   * no state change, no markers touched).
+   * attempt id + `supersededByItemId` unset + `abortRequestedAt` unset: a
+   * superseding attempt's later release is a no-op; a superseded item is
+   * REFUSED (releasing it to `queued` would orphan it — superseded items are
+   * skipped by the claim head and by unsettledHead, so nothing would ever
+   * settle it); an abort-stamped item is REFUSED (it must settle `aborted`
+   * under the current attempt, never flicker running→queued→aborted).
+   * Returns whether the CAS matched (true = released + marker deleted;
+   * false = full no-op, no state change, no markers touched).
+   *
+   * A matched release DECREMENTS `attemptCount` (floor 0) in the same atomic
+   * write: a released claim never consumed run budget, so keyless release
+   * cycles can neither trip the stuck-head signal nor exhaust the generic
+   * retry budget (`maxAttempts`). `replaceSubmissionAttempt` increments are
+   * unaffected.
    *
    * `credential`, when present, atomically persists the durable
    * credential-release budget (`credentialAttempts` +
