@@ -116,9 +116,7 @@ describe("POST /webhooks/events/:service", () => {
     expect(await res.json()).toEqual({ error: "payload too large" });
   });
 
-  // TODO(Task 8): unskip once plugin-linear ships its TriggerDefs — until
-  // then `/webhooks/events/linear` 404s before signature verification runs.
-  describe.skip("linear ingress (enabled in Task 8)", () => {
+  describe("linear ingress", () => {
     it("ingests a signed linear webhook: event row + matched delivery row", async () => {
       api = await bootTestApi({ plugins: [linearPlugin] });
       await seedLinearOrg(api);
