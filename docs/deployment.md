@@ -1,140 +1,85 @@
 # Deployment Guide
 
-From zero to deployed in 4 steps. You need accounts on three services, one config value, and one command.
+Valet deploys as a single server process plus Postgres plus a sandbox
+backend. There are three ways to run it.
 
-## Prerequisites
+## 1. Single binary
 
-Install these tools locally. Commands below are for macOS with [Homebrew](https://brew.sh/) -- adjust for your platform.
-
-```bash
-# Node.js 22+
-brew install node@22
-
-# pnpm
-brew install pnpm
-
-# uv (Python package manager, used for Modal backend)
-brew install uv
-
-# Bun
-brew install oven-sh/bun/bun
-
-# Wrangler CLI (Cloudflare)
-npm install -g wrangler
-
-# Modal CLI
-uv tool install modal
-
-# jq (used by deploy script)
-brew install jq
-```
-
-## Step 1: Create Accounts
-
-You need three accounts:
-
-| Service | What it does | Sign up |
-|---------|-------------|---------|
-| **Cloudflare** | Hosts the API (Worker), database (D1), storage (R2), and frontend (Pages) | [dash.cloudflare.com](https://dash.cloudflare.com) |
-| **Modal** | Runs sandbox containers (the coding environments) | [modal.com](https://modal.com) |
-| **GitHub** | OAuth login for users + repo access inside sandboxes | [github.com/settings/developers](https://github.com/settings/developers) |
-
-**Cloudflare** -- Workers paid plan required for Durable Objects. R2 must be enabled in the Cloudflare dashboard (Workers & Pages > R2) before deploying.
-
-**GitHub OAuth App** -- Create one at [Settings > Developer settings > OAuth Apps](https://github.com/settings/developers):
-
-| Field | Value |
-|-------|-------|
-| Homepage URL | `https://your-domain.com` (or `http://localhost:5173` for dev) |
-| Callback URL | `https://<PROJECT_NAME>.<your-subdomain>.workers.dev/auth/github/callback` |
-
-Save the **Client ID** and **Client Secret**.
-
-Optional: [Google OAuth](oauth-setup.md) for Google sign-in and integrations.
-
-## Step 2: Authenticate CLIs
+The `valet` CLI ships as a self-contained executable (Bun-compiled, embedding
+the web client and migrations):
 
 ```bash
-wrangler login
-modal token set
+valet serve
 ```
 
-## Step 3: Configure
+That boots the API, serves the web UI on the same port, and uses embedded
+PGlite under `~/.valet` — no external database needed. Point it at real
+Postgres with `DATABASE_URL` (or `valet config set serve.databaseUrl ...`).
+Sandboxes default to the Docker backend, so a Docker daemon must be
+reachable. Set `BETTER_AUTH_SECRET` to enable real auth; see
+[environment-variables.md](environment-variables.md) for the full list.
+
+`serve` holds an exclusive `serve.lock` per data dir — two servers can never
+share one PGlite. Client commands (`valet login`, `sessions`, `send`, `chat`,
+`gates`) work against any instance via named profiles in
+`~/.valet/config.json`.
+
+Build the binary from source: `pnpm --filter @valet/api build:binary`
+(cross-compile with `--target bun-<os>-<arch>`).
+
+## 2. Local development
 
 ```bash
-cp .env.deploy.example .env.deploy
+make dev-local   # API on :8788 (VALET_LOCAL_AUTH=1) + Vite web on :5173
 ```
 
-Edit `.env.deploy` and set one value:
+Requires `ANTHROPIC_API_KEY` and Docker. Open http://localhost:5173. Setting
+`BETTER_AUTH_SECRET` switches the dev API to real auth.
+
+## 3. Kubernetes (Helm)
+
+The chart at `deploy/chart/valet` deploys:
+
+- **valet-api** — one replica (the engine is a stateful singleton), ClusterIP
+  service behind a Traefik ingress. Secrets are chart-generated and retained
+  when not supplied.
+- **Postgres** — bundled `postgres:17` StatefulSet, or bring your own via
+  `externalDatabase.url`.
+- **Sandbox infrastructure** — sessions become `Sandbox` CRs + pods in a
+  separate namespace (`valet-sandboxes`) with narrowly-scoped RBAC. The
+  [agent-sandbox](https://agent-sandbox.sigs.k8s.io/) controller (vendored
+  under `deploy/agent-sandbox/`) must be installed first.
+- **Image prebuilds** — a bundled OCI registry (`registry:2`, nightly GC) fed
+  by BuildKit jobs, so repos can get prebuilt sandbox images.
+
+The local reference environment is Rancher Desktop (moby mode):
 
 ```bash
-PROJECT_NAME=valet-yourname
+make k8s-sandbox-install  # one-time: agent-sandbox CRD + controller
+make k8s-build            # build valet-api:dev + valet-sandbox:dev
+make k8s-up               # helm upgrade --install into namespace valet
+make k8s-logs             # tail the api pod
+make k8s-down             # helm uninstall (PVCs + Sandbox CRs survive)
 ```
 
-All Cloudflare resource names derive from this automatically:
+**Context safety:** every `make k8s-*` target pins `--context
+rancher-desktop`. Never run bare `kubectl`/`helm` against this workflow — an
+ambient context may point at a production cluster.
 
-| Resource | Name |
-|----------|------|
-| Worker | `valet-yourname` |
-| Pages | `valet-yourname-client` |
-| D1 | `valet-yourname-db` |
-| R2 | `valet-yourname-storage` |
+The full runbook — hosts-file setup for `https://valet.localdev`, image
+rebuild flow, full-reset procedure — is
+[`deploy/README.md`](../deploy/README.md); the design rationale is
+[`docs/specs/2026-07-15-kubernetes-deployment-design.md`](specs/2026-07-15-kubernetes-deployment-design.md).
 
-## Step 4: Deploy
+## Migrations
 
-```bash
-pnpm install
-make deploy
-```
+Schema migrations (engine: `packages/store-postgres/migrations/pg/`, app:
+`packages/api/migrations/pg/`) run automatically at server boot. Pre-1.0 they
+are edited in place as a single `0000` file — a schema change on the embedded
+PGlite dev store requires wiping the data dir (`rm -rf ~/.valet/pg`).
 
-This automatically:
+## Legacy stack
 
-1. Creates D1 database and R2 bucket if they don't exist
-2. Discovers your Modal workspace from the CLI
-3. Deploys the **Cloudflare Worker** (API + Durable Objects)
-4. Runs **D1 migrations**
-5. Deploys the **Modal backend** (sandbox orchestration)
-6. Builds the **frontend** with the correct Worker URL and deploys to Cloudflare Pages
-
-After the first deploy, set worker secrets:
-
-```bash
-wrangler secret put ENCRYPTION_KEY --name valet-yourname        # Any string, 32+ chars
-wrangler secret put GITHUB_CLIENT_ID --name valet-yourname      # From your GitHub OAuth app
-wrangler secret put GITHUB_CLIENT_SECRET --name valet-yourname  # From your GitHub OAuth app
-wrangler secret put FRONTEND_URL --name valet-yourname          # e.g. https://valet-yourname-client.pages.dev
-```
-
-Visit `https://valet-yourname-client.pages.dev` and sign in with GitHub.
-
-## Individual Deployments
-
-For incremental updates after the initial deploy:
-
-```bash
-make deploy-worker        # Cloudflare Worker only
-make deploy-modal         # Modal backend only (sandbox orchestration)
-make deploy-client        # Frontend only (builds + deploys to Pages)
-make deploy               # Full deploy (auto-discovers everything)
-```
-
-There's also `make release`, which runs a more comprehensive pipeline: install, typecheck, build and push the OpenCode Docker image to GHCR, deploy Worker, run D1 migrations, and deploy Pages.
-
-## Forcing a Sandbox Image Rebuild
-
-Sandbox images are built and cached by Modal (defined in `backend/images/base.py`). To force a rebuild after changing `docker/` or `packages/runner/`:
-
-1. Bump `IMAGE_BUILD_VERSION` in `backend/images/base.py`
-2. Redeploy: `make deploy-modal`
-3. New sessions will use the updated image (existing sandboxes are not affected)
-
-## Quick Reference
-
-| What | Where |
-|------|-------|
-| Worker URL | `https://<PROJECT_NAME>.<subdomain>.workers.dev` |
-| Frontend URL | `https://<PROJECT_NAME>-client.pages.dev` |
-| Modal dashboard | `https://modal.com/apps/<workspace>/main/deployed` |
-| D1 console | Cloudflare dashboard > Workers & Pages > D1 |
-| Worker logs | `wrangler tail` (from `packages/worker/`) |
-| Worker secrets | `wrangler secret list` (from `packages/worker/`) |
+The Cloudflare Worker + Modal deployment (`make deploy`, `packages/worker`,
+`backend/`) is frozen and kept only for the legacy production environment; it
+is not part of this deployment path.
