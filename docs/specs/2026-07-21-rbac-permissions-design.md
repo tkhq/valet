@@ -123,6 +123,15 @@ Dev harness (`docker/keycloak/valet-realm.json`): add realm roles `valet-admin` 
   - Members table role picker offers the three roles; role badges render `operator`.
 - API gates remain authoritative; UI is hide-only, as today.
 
+## Teams and resource-scoped roles (framing, not built this pass)
+
+Access control has two axes, and team roles live on the second:
+
+- **Org axis** (this spec): org-wide capability — role → permission bundle → `can(principal, permission)`.
+- **Resource axis** (future): capability *within a granted container*. Team roles (`team_members.role: admin|member`) are the existing instance: today they govern only the team object itself (team-admin or org-admin manages membership/deletion; members read the roster) because teams own no resources yet. Session sharing (owner/collaborator/viewer per `auth-access.md`) is the same shape.
+
+When teams start owning resources (team orchestrators, shared workflows, team credentials — orchestrator spec direction), the designed extension is resource-context checks through the same seam — `can(principal, permission, { team })` — deriving the effective set from the caller's *team* role bundle, mirroring the org bundles. Team membership is the access grant; team role is the capability level within it; org `members:manage`/org-admin remains the recovery override. This composes with the OAuth vision as resource-qualified grants later, without renaming any permission. Nothing in this pass may assume permissions are org-global-only in a way that blocks adding the optional resource-context parameter.
+
 ## Compatibility with the full-RBAC / OAuth-scopes vision (binding)
 
 - Permission strings are the scope vocabulary: a future token grant of `providers:manage` means exactly what the route checks today. Never rename a shipped permission; add new ones.
