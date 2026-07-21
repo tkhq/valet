@@ -39,12 +39,18 @@ export const orgRouter = new Hono<AppEnv>();
 
 const GATE_OFF_ERROR = { error: "organizations not enabled" } as const;
 
+// widened in gate-migration task: `OrgRole` now has an "operator" tier but
+// the wire types haven't been widened yet — narrow at the mapping boundary.
+function toWireOrgRole(role: OrgRole): "admin" | "member" {
+  return role === "admin" ? "admin" : "member";
+}
+
 async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): Promise<OrgResponse | undefined> {
   const rows = await db.select().from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
   const features = await getOrgFeatures(db, orgId);
-  return { id: row.id, name: row.name, createdAt: row.createdAt, features, callerRole };
+  return { id: row.id, name: row.name, createdAt: row.createdAt, features, callerRole: toWireOrgRole(callerRole) };
 }
 
 /** Org-admin gate applied to every route below GET /api/org. */
@@ -149,7 +155,7 @@ orgRouter.get("/members", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
   const members = await listOrgMembers(db, user.orgId);
-  const body: OrgMembersResponse = { members };
+  const body: OrgMembersResponse = { members: members.map((m) => ({ ...m, role: toWireOrgRole(m.role) })) };
   return c.json(body);
 });
 

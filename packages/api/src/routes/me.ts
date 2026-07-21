@@ -49,7 +49,9 @@ async function loadMeResponse(
     avatarUrl: row.image,
     role: user.role,
     orgId: user.orgId,
-    orgRole: membership?.role ?? "member",
+    // widened in gate-migration task: `org_members.role` now has an
+    // "operator" tier but `MeResponse.orgRole` hasn't been widened yet.
+    orgRole: membership?.role === "admin" ? "admin" : "member",
     defaultModel: row.defaultModel,
   };
 }

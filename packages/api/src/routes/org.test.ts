@@ -280,6 +280,28 @@ describe("PATCH /api/org/members/:userId", () => {
     expect(body.error).toBe(LAST_ADMIN_ERROR);
   });
 
+  it("400s with the exact copy string when demoting the sole admin to operator", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+
+    // Demote test-admin (the second admin) first so local-user is sole admin.
+    const demoteSecond = await fetch(`${api.baseUrl}/api/org/members/test-admin`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ role: "member" }),
+    });
+    expect(demoteSecond.status).toBe(200);
+
+    const res = await fetch(`${api.baseUrl}/api/org/members/local-user`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ role: "operator" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(LAST_ADMIN_ERROR);
+  });
+
   it("401s without auth configured", async () => {
     api = await bootTestApi();
     await enableGate(api.baseUrl);

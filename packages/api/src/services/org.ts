@@ -169,7 +169,7 @@ export async function setOrgMemberRole(
       return { ok: false, reason: "not_found", error: MEMBER_NOT_FOUND_ERROR };
     }
 
-    if (member.role === "admin" && role === "member") {
+    if (member.role === "admin" && role !== "admin") {
       const admins = await countOrgAdmins(tx, orgId);
       if (admins <= 1) {
         return { ok: false, reason: "last_admin", error: LAST_ADMIN_ERROR };
