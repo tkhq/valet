@@ -511,20 +511,21 @@ describe("host model resolver seam", () => {
       expect(replaced).not.toBeNull();
       prevAtt = att;
     }
-    // claim(1) + two recycles(3); the credential-less release hands ONE
-    // claim increment back → 2. (replaceSubmissionAttempt increments are
-    // unaffected by the release-decrement rule.)
+    // claim(1) + two recycles(3); this is a PLAIN release (no credential
+    // payload), so the claim increment is KEPT — only credential releases
+    // hand it back (a crashed attempt consumed real run budget; handing it
+    // back would let a crash-looping item dodge maxAttempts forever).
     await store.releaseSubmission(session.id, thread.id, itemId, {
       itemId,
       attemptId: prevAtt,
     });
-    expect((await store.getQueueItem(session.id, itemId))?.attemptCount).toBe(2);
+    expect((await store.getQueueItem(session.id, itemId))?.attemptCount).toBe(3);
 
     // The credential budget is the DURABLE per-item counter — untouched by
     // the pre-burned recycles (their release carried no credential arg), so
     // the item still gets the full MAX_CREDENTIAL_ATTEMPTS (3) credential
     // cycles: 2 net-zero claim/release pairs + the terminal cap claim on top
-    // of the 2 surviving pre-burn increments.
+    // of the 3 surviving pre-burn increments.
     for (let i = 0; i < 8; i++) {
       await thread.kick();
       if ((await store.getQueueItem(session.id, itemId))?.status === "settled") break;
@@ -533,7 +534,7 @@ describe("host model resolver seam", () => {
     expect(item?.status).toBe("settled");
     expect(item?.outcome?.outcome).toBe("failed");
     expect(item?.outcome?.error).toBe(hostMessage);
-    expect(item?.attemptCount).toBe(3);
+    expect(item?.attemptCount).toBe(4);
   });
 
   it("a burst of external kicks inside the backoff window counts as ONE credential cycle — never caps the item", async () => {

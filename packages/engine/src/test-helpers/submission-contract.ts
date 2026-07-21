@@ -1014,6 +1014,39 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(await store.hasAttemptMarker(item.id, "att-stale")).toBe(true);
     });
 
+    it("plain release (no credential payload) keeps the claim's attemptCount increment", async () => {
+      // Reconciliation's fresh re-run of a crashed pre-stream attempt is a
+      // PLAIN release: the attempt genuinely consumed run budget, and handing
+      // it back would let a deterministically crash-looping item oscillate
+      // attempt_count net-zero forever, never exhausting the generic
+      // maxAttempts retry budget. Only credential releases (separately
+      // bounded by the durable credential budget) decrement.
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-1");
+
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-1",
+      });
+      expect(released).toBe(true);
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("queued");
+      expect(loaded?.attemptId).toBeUndefined();
+      expect(loaded?.attemptCount).toBe(1);
+      expect(loaded?.credentialAttempts ?? 0).toBe(0);
+      expect(loaded?.lastCredentialReleaseAt).toBeUndefined();
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
+    });
+
     it("is a no-op when the item is not running (e.g. still queued)", async () => {
       const item = makeItem();
       await store.admitSubmission(SESSION_ID, THREAD_ID, item);

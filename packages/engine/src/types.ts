@@ -1042,11 +1042,15 @@ export interface SessionStore {
    * Returns whether the CAS matched (true = released + marker deleted;
    * false = full no-op, no state change, no markers touched).
    *
-   * A matched release DECREMENTS `attemptCount` (floor 0) in the same atomic
-   * write: a released claim never consumed run budget, so keyless release
-   * cycles can neither trip the stuck-head signal nor exhaust the generic
-   * retry budget (`maxAttempts`). `replaceSubmissionAttempt` increments are
-   * unaffected.
+   * A matched CREDENTIAL release (payload present) DECREMENTS `attemptCount`
+   * (floor 0) in the same atomic write: a keyless release cycle never
+   * consumed run budget, so it can neither trip the stuck-head signal nor
+   * exhaust the generic retry budget (`maxAttempts`) — those cycles are
+   * separately bounded by the durable credential budget. A PLAIN release
+   * (no payload — reconciliation's fresh re-run of a crashed pre-stream
+   * attempt) keeps the claim's increment, so a deterministically
+   * crash-looping item still exhausts `maxAttempts` instead of oscillating
+   * net-zero forever. `replaceSubmissionAttempt` increments are unaffected.
    *
    * `credential`, when present, atomically persists the durable
    * credential-release budget (`credentialAttempts` +

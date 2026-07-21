@@ -1055,9 +1055,14 @@ export class PgSessionStore implements SessionStore {
     // and an abort stamped mid-window must settle `aborted` under the
     // current attempt rather than flickering running→queued→aborted on the
     // queue-state stream — both refuse and report the miss to the caller.
-    // `attempt_count` is DECREMENTED (floor 0) in the same write: a released
-    // claim never consumed run budget (keyless release cycles must not trip
-    // the stuck-head signal or exhaust decideReconciliation's maxAttempts).
+    // `attempt_count` is DECREMENTED (floor 0) in the CREDENTIAL branch only:
+    // a keyless release cycle never consumed run budget (must not trip the
+    // stuck-head signal or exhaust decideReconciliation's maxAttempts), and
+    // those cycles are separately bounded by the durable credential budget.
+    // A plain release (reconciliation's fresh re-run of a crashed pre-stream
+    // attempt) keeps the increment — otherwise a deterministically
+    // crash-looping item oscillates attempt_count net-zero and NEVER exhausts
+    // the generic retry budget.
     // The matched flag is RETURNED from the transaction callback, never
     // hoisted into outer state: the node-postgres wrapper retries the whole
     // callback on serialization failures (40P01), and a mutated outer
@@ -1085,8 +1090,7 @@ export class PgSessionStore implements SessionStore {
           )
         : await tx.query(
             `UPDATE engine_queue_items
-             SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL,
-                 attempt_count = GREATEST(attempt_count - 1, 0), updated_at = $1
+             SET status = 'queued', attempt_id = NULL, owner_id = NULL, lease_expires_at = NULL, updated_at = $1
              WHERE id = $2 AND session_id = $3 AND thread_id = $4 AND status = 'running' AND attempt_id = $5
                AND superseded_by_item_id IS NULL AND abort_requested_at IS NULL`,
             [Date.now(), itemId, sessionId, threadId, fence.attemptId],

@@ -614,10 +614,15 @@ export class InMemorySessionStore implements SessionStore {
     item.attemptId = undefined;
     item.ownerId = undefined;
     item.leaseExpiresAt = undefined;
-    // A released claim never consumed run budget: hand the claim's
-    // attempt_count increment back (floor 0), matching the PG CAS.
-    item.attemptCount = Math.max(0, item.attemptCount - 1);
     if (credential) {
+      // A CREDENTIAL release never consumed run budget: hand the claim's
+      // attempt_count increment back (floor 0), matching the PG CAS. Scoped
+      // to credential cycles only — they are separately bounded by the
+      // durable credential budget. A plain release (reconciliation's fresh
+      // re-run of a crashed pre-stream attempt) keeps the increment so a
+      // deterministically crash-looping item still exhausts the generic
+      // retry budget instead of oscillating net-zero forever.
+      item.attemptCount = Math.max(0, item.attemptCount - 1);
       // Durable credential budget: written only when the CAS matched.
       item.credentialAttempts = credential.attempts;
       item.lastCredentialReleaseAt = credential.lastReleaseAt;
