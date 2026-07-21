@@ -122,6 +122,23 @@ dev-local: ## Start API + web together (greenfield agent-loop stack)
 	@echo "$(GREEN)Starting greenfield API + web. Open http://localhost:5173$(NC)"
 	@make -j2 dev-api-node dev-web
 
+dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO path
+	@echo "$(GREEN)Starting Keycloak on http://localhost:8081 (admin/admin)$(NC)"
+	docker compose --profile keycloak up -d keycloak
+	@echo "Waiting for the valet realm to come up..."
+	@until curl -sf http://localhost:8081/realms/valet/.well-known/openid-configuration >/dev/null 2>&1; do sleep 2; done
+	@echo "$(GREEN)Keycloak ready.$(NC) Add to .env, then run 'make dev-local':"
+	@echo "  BETTER_AUTH_SECRET=dev-only-secret-change-me"
+	@echo "  AUTH_OIDC_ISSUER=http://localhost:8081/realms/valet"
+	@echo "  AUTH_OIDC_CLIENT_ID=valet"
+	@echo "  AUTH_OIDC_CLIENT_SECRET=valet-dev-secret"
+	@echo "  AUTH_OIDC_DOMAIN=valet.test"
+	@echo "  AUTH_OIDC_NAME=Keycloak"
+	@echo "Test users: alice@valet.test / bob@valet.test, password 'password'"
+
+dev-keycloak-down: ## Stop the local Keycloak container
+	docker compose --profile keycloak down keycloak
+
 dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
