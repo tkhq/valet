@@ -29,6 +29,14 @@ const plugin: ValetPlugin = {
       ],
       configKeys: ["accessToken", "refreshToken"],
       connectLabel: "Connect Google Workspace",
+      oauth: {
+        mode: 'authorization_code',
+        authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+        tokenUrl: 'https://oauth2.googleapis.com/token',
+        clientIdEnv: 'GOOGLE_CLIENT_ID',
+        clientSecretEnv: 'GOOGLE_CLIENT_SECRET',
+        extraAuthParams: { access_type: 'offline', prompt: 'consent' },
+      },
     },
   ],
 };

@@ -15,6 +15,25 @@
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SignalContent, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 
+/** How the connect UI obtains an oauth2 credential (integration-OAuth design). */
+export type OAuthDeclaration =
+  | {
+      /** MCP OAuth: RFC 8414 discovery + RFC 7591 dynamic registration, PKCE public client. */
+      mode: "mcp";
+      /** The MCP server URL discovery runs against (same URL the plugin's mcpActionPlugin uses). */
+      serverUrl: string;
+    }
+  | {
+      /** Pre-registered confidential client; id/secret come from the host's env. */
+      mode: "authorization_code";
+      authorizationUrl: string;
+      tokenUrl: string;
+      clientIdEnv: string;
+      clientSecretEnv: string;
+      /** Extra authorize-URL params, e.g. Google's access_type=offline&prompt=consent. */
+      extraAuthParams?: Record<string, string>;
+    };
+
 export interface CredentialDeclaration {
   /** Service the credential is stored under. Defaults to the plugin name. */
   service?: string;
@@ -25,6 +44,8 @@ export interface CredentialDeclaration {
   configKeys: string[];
   /** Human copy for connect UI. */
   connectLabel?: string;
+  /** How the connect UI obtains this credential via OAuth. Absent = manual token entry only. Only valid on `type: "oauth2"`. */
+  oauth?: OAuthDeclaration;
 }
 
 /** A webhook event that passed signature verification. */
@@ -296,6 +317,33 @@ export function validateValetPlugin(
     }
     if (cred.service !== undefined && typeof cred.service !== "string") {
       issues.push({ path: `${path}.service`, message: "must be a string when present" });
+    }
+    if (cred.oauth !== undefined) {
+      const oauth = asRecord(cred.oauth, `${path}.oauth`, issues);
+      if (!oauth) return;
+      if (cred.type !== "oauth2") {
+        issues.push({ path: `${path}.oauth`, message: "only valid on type=\"oauth2\" declarations" });
+        return;
+      }
+      if (oauth.mode === "mcp") {
+        if (typeof oauth.serverUrl !== "string" || oauth.serverUrl.length === 0) {
+          issues.push({ path: `${path}.oauth.serverUrl`, message: "required non-empty string" });
+        }
+      } else if (oauth.mode === "authorization_code") {
+        for (const key of ["authorizationUrl", "tokenUrl", "clientIdEnv", "clientSecretEnv"] as const) {
+          if (typeof oauth[key] !== "string" || oauth[key].length === 0) {
+            issues.push({ path: `${path}.oauth.${key}`, message: "required non-empty string" });
+          }
+        }
+        if (oauth.extraAuthParams !== undefined) {
+          const params = asRecord(oauth.extraAuthParams, `${path}.oauth.extraAuthParams`, issues);
+          if (params && Object.values(params).some((v) => typeof v !== "string")) {
+            issues.push({ path: `${path}.oauth.extraAuthParams`, message: "values must be strings" });
+          }
+        }
+      } else {
+        issues.push({ path: `${path}.oauth.mode`, message: "must be \"mcp\" or \"authorization_code\"" });
+      }
     }
   });
 

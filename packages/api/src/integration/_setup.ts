@@ -32,6 +32,7 @@ import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { assemblePlugins } from "../plugins/assemble.js";
+import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -320,6 +321,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowRunHost,
     plugins,
     actionPluginByService,
+    dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,
   };
 

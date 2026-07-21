@@ -10,6 +10,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ListPluginsResponse } from "@valet/api/wire";
 
 const pluginsData = {
   plugins: [
@@ -25,6 +26,7 @@ const pluginsData = {
           configKeys: ["accessToken"],
           connectLabel: "Connect GitHub (via GitHub App)",
           connected: false,
+          connect: "manual" as const,
         },
       ],
     },
@@ -41,6 +43,7 @@ const pluginsData = {
           connectLabel: "Typefully API key",
           connected: false,
           dynamic: true as const,
+          connect: "manual" as const,
         },
       ],
     },
@@ -54,6 +57,7 @@ const pluginsData = {
           type: "bot_token" as const,
           configKeys: ["accessToken"],
           connected: true,
+          connect: "manual" as const,
         },
       ],
     },
@@ -78,6 +82,50 @@ const pluginsData = {
   ],
 };
 
+const oauthPluginsData = {
+  plugins: [
+    {
+      name: "linear",
+      version: "0.1.0",
+      description: "Linear issue tracking",
+      actionCount: 5,
+      services: [
+        {
+          service: "linear",
+          type: "oauth2" as const,
+          configKeys: ["accessToken"],
+          connected: false,
+          connect: "oauth" as const,
+        },
+      ],
+    },
+  ],
+};
+
+const manualOnlyPluginsData = {
+  plugins: [
+    {
+      name: "typefully",
+      version: "0.1.0",
+      actionCount: 0,
+      dynamic: true as const,
+      services: [
+        {
+          service: "typefully",
+          type: "api_key" as const,
+          configKeys: ["accessToken"],
+          connectLabel: "Typefully API key",
+          connected: false,
+          dynamic: true as const,
+          connect: "manual" as const,
+        },
+      ],
+    },
+  ],
+};
+
+let currentPluginsData: ListPluginsResponse = pluginsData;
+
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const disconnectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 
@@ -86,7 +134,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("~/api/integrations", () => ({
-  usePlugins: () => ({ data: pluginsData, isLoading: false, error: null }),
+  usePlugins: () => ({ data: currentPluginsData, isLoading: false, error: null }),
   useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
   useDisconnectCredential: () => ({ mutateAsync: disconnectMutateAsync, isPending: false, error: null }),
 }));
@@ -95,6 +143,7 @@ import { IntegrationsPage } from "./integrations";
 
 describe("IntegrationsPage", () => {
   beforeEach(() => {
+    currentPluginsData = pluginsData;
     connectMutateAsync.mockClear();
     disconnectMutateAsync.mockClear();
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -161,5 +210,91 @@ describe("IntegrationsPage", () => {
 
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith("slack"));
+  });
+
+  it("renders an anchor Connect button pointing at the connect route when connect is oauth", () => {
+    currentPluginsData = oauthPluginsData;
+    render(<IntegrationsPage />);
+    const link = screen.getByRole("link", { name: "Connect" });
+    expect(link.getAttribute("href")).toBe("/api/credentials/linear/connect");
+  });
+
+  it("oauth services still offer manual token entry behind a secondary toggle", () => {
+    currentPluginsData = oauthPluginsData;
+    render(<IntegrationsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Enter token manually" }));
+    expect(screen.getByText(/Access token/)).toBeTruthy();
+  });
+
+  it("manual services render the token-entry Connect button, not an anchor", () => {
+    currentPluginsData = manualOnlyPluginsData;
+    render(<IntegrationsPage />);
+    expect(screen.queryByRole("link", { name: "Connect" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+  });
+
+  it("shows a success notice for ?connected= and an error notice for ?error=", () => {
+    window.history.replaceState(null, "", "/integrations?connected=linear");
+    const { unmount } = render(<IntegrationsPage />);
+    expect(screen.getByText(/Connected linear/i)).toBeTruthy();
+    unmount();
+
+    window.history.replaceState(null, "", "/integrations?error=access_denied");
+    render(<IntegrationsPage />);
+    expect(screen.getByText(/access_denied/)).toBeTruthy();
+  });
+});
+
+describe("connected dynamic service tool count", () => {
+  it("shows the resolved toolCount instead of 'tools load on connect' once connected", () => {
+    currentPluginsData = {
+      plugins: [
+        {
+          name: "linear",
+          version: "0.1.0",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [
+            {
+              service: "linear",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: true,
+              dynamic: true as const,
+              connect: "oauth" as const,
+              toolCount: 52,
+            },
+          ],
+        },
+      ],
+    };
+    render(<IntegrationsPage />);
+    expect(screen.getByText("52 tools")).toBeTruthy();
+    expect(screen.queryByText("tools load on connect")).toBeNull();
+  });
+
+  it("keeps the static label when connected but toolCount is absent (resolution failed)", () => {
+    currentPluginsData = {
+      plugins: [
+        {
+          name: "linear",
+          version: "0.1.0",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [
+            {
+              service: "linear",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: true,
+              dynamic: true as const,
+              connect: "oauth" as const,
+            },
+          ],
+        },
+      ],
+    };
+    render(<IntegrationsPage />);
+    expect(screen.getByText("tools load on connect")).toBeTruthy();
   });
 });

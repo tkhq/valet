@@ -14,6 +14,8 @@ import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
+import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
@@ -182,7 +184,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const sandboxProvider = buildSandboxProvider(process.env);
   const imageBuilder = resolveImageBuilder(process.env);
   const eventStream = new PgEventStream(pgdb);
-  const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
+  const baseCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
 
   // Plugin loading (plugin-system-v2 plan Task 4): tests supply `opts.plugins`
   // directly and skip the node_modules scan entirely; the normal boot path
@@ -200,6 +202,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
           })
         ).plugins,
       ]);
+
+  // Refresh-on-read decorator (integration-OAuth design): wraps the raw
+  // credential store so any `engineCredentials.get()` call transparently
+  // refreshes near-expiry oauth2 tokens using the plugins' oauth
+  // declarations. Constructed after plugin assembly since it needs `plugins`.
+  const engineCredentials = new OAuthRefreshingCredentialStore(baseCredentials, {
+    db,
+    plugins,
+    env: process.env,
+  });
 
   // Circular construction: EngineHost needs the ChildSpawner at construction
   // time (it's baked into every orchestrator session's toolConfig), but the
@@ -331,6 +343,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowRunHost,
     plugins,
     actionPluginByService,
+    dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,
   };
 }

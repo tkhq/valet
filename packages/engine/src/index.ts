@@ -92,6 +92,7 @@ export {
   validateValetPlugin,
   type ValetPlugin,
   type CredentialDeclaration,
+  type OAuthDeclaration,
   type TriggerDef,
   type VerifiedEvent,
   type PluginValidationIssue,
