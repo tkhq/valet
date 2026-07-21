@@ -27,6 +27,7 @@ import { notificationsRouter } from "./routes/notifications.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { credentialsRouter } from "./routes/credentials.js";
+import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
 import { modelsRouter } from "./routes/models.js";
@@ -163,6 +164,7 @@ export function createApp(
   app.route("/api/notifications", notificationsRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
+  app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);
   // Mounted BEFORE /api/me — defensive ordering only: meRouter today
   // registers just GET / and PATCH / (no wildcard/param routes), so there is
