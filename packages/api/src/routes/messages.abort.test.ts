@@ -141,6 +141,9 @@ describe("POST /threads/:threadId/abort", () => {
 
     const item = await api.providers.engineStore.getQueueItem(sessionId, receiptA.queueItemId);
     expect(item?.status).not.toBe("settled");
+    // The cross-thread pin proper: B's abort must not even STAMP A's item
+    // (a stamped-but-unsettled item would still abort on its next cycle).
+    expect(item?.abortRequestedAt).toBeUndefined();
 
     // Clean up: abort A directly so the test doesn't leave a dangling
     // claim loop racing the store teardown.

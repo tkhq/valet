@@ -643,11 +643,11 @@ describe("host model resolver seam", () => {
     expect(item?.outcome?.outcome).toBe("completed");
   });
 
-  it("gate replay after restart stamps the resolver's model even when keyless — the resumed continuation runs on it", async () => {
-    // Scenario: setModel to Y while the turn is suspended on a gate and the
-    // org is keyless; the engine restarts; the gate was resolved while down.
-    // The replayed continuation must run on Y (the model attached to the
-    // resolver's NoCredentialsError), not the stale restore-time model X.
+  it("gate replay after restart runs the continuation on the resolver's CURRENT model, not the stale restore-time model", async () => {
+    // Scenario: setModel to Y while the turn is suspended on a gate; the
+    // engine restarts; the gate was resolved while down. The replayed
+    // continuation must run on Y (what the resolver returns NOW), not the
+    // stale restore-time model X.
     const fauxX = makeFaux("seam-resume-x");
     const fauxY = makeFaux("seam-resume-y");
     const modelX = fauxX.getModel();
@@ -735,9 +735,9 @@ describe("host model resolver seam", () => {
         sandbox: {},
         model: modelX,
         tools: [gateTool],
-        resolveModel: async (): Promise<ResolvedModel | null> => {
-          throw new NoCredentialsError("no key anywhere", modelY);
-        },
+        // The resolver now resolves the spec to Y WITH a key (the
+        // keyless-resume policy is pinned separately below: it fails loudly).
+        resolveModel: async (): Promise<ResolvedModel | null> => ({ model: modelY, apiKey: "k" }),
       },
     });
 
@@ -748,8 +748,376 @@ describe("host model resolver seam", () => {
     const entries = await store.getEntries(sessionA.id, gate.threadId);
     const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
     const lastAssistant = assistants[assistants.length - 1];
-    // The continuation streamed on Y — proof the keyless resume stamped the
-    // resolver's model instead of silently continuing on stale X.
+    // The continuation streamed on Y — proof the resume re-resolved and
+    // stamped the resolver's model instead of silently continuing on stale X.
     expect(lastAssistant?.content).toBe("on-Y");
+  });
+
+  it("a KEYLESS gate replay settles failed — never silently continues on pi-ai's ambient env fallback", async () => {
+    const fauxX = makeFaux("seam-resume-keyless");
+    const modelX = fauxX.getModel();
+    fauxX.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "a" }, { id: "tc1" })], {
+        stopReason: "toolUse",
+      }),
+      // Must NOT be consumed: a keyless resume has no authorized credential —
+      // continuing here would mean pi-ai fell back to ambient env auth the
+      // org never granted.
+      fauxAssistantMessage("ambient continuation"),
+    ]);
+
+    const gateTool: ToolDef = {
+      name: "do_thing",
+      description: "gated thing",
+      parameters: Type.Object({ arg: Type.String() }),
+      execute: async (args, ctx) => {
+        const resolution = await ctx.requestDecision({
+          type: "approval",
+          title: "approve?",
+          body: `arg=${String(args.arg)}`,
+          resumeKey: `do_thing:${String(args.arg)}`,
+        });
+        return { text: resolution.actionId };
+      },
+    };
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+
+    const engineA = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const sessionA = await engineA.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: modelX,
+      tools: [gateTool],
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model: modelX, apiKey: "k" }),
+    });
+    void sessionA.prompt("do the thing");
+    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
+    const gateEvent = events.find((e) => e.event.type === "decision_gate");
+    const gate = (gateEvent?.event as { gate: DecisionGate }).gate;
+    await waitForAsync(
+      async () =>
+        (await store.getQueueItem(sessionA.id, gate.queueItemId))?.status ===
+        "blocked_on_decision_gate",
+    );
+    sessionA.suspendTimers();
+
+    const resolution = { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() };
+    await store.saveDecisionGate(sessionA.id, gate.threadId, {
+      ...gate,
+      status: "resolved",
+      resolution,
+      updatedAt: Date.now(),
+    });
+    const gateEntries = await store.getEntries(sessionA.id, gate.threadId);
+    const gateEntry = gateEntries.find((e) => e.type === "decision_gate" && e.gate.id === gate.id);
+    if (gateEntry?.type === "decision_gate") {
+      gateEntry.resolution = resolution;
+      gateEntry.gate = { ...gateEntry.gate, status: "resolved", resolution };
+      await store.updateEntry(sessionA.id, gate.threadId, gateEntry);
+    }
+
+    const engineB = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    await engineB.restoreSession({
+      sessionId: sessionA.id,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: modelX,
+        tools: [gateTool],
+        resolveModel: async (): Promise<ResolvedModel | null> => {
+          throw new NoCredentialsError("no key anywhere for resume", modelX);
+        },
+      },
+    });
+
+    await waitForAsync(
+      async () => (await store.getQueueItem(sessionA.id, gate.queueItemId))?.status === "settled",
+      4000,
+    );
+    const item = await store.getQueueItem(sessionA.id, gate.queueItemId);
+    // Fails loudly with the credential message — never a silent completion
+    // on unauthorized ambient credentials.
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toContain("no key anywhere for resume");
+    const entries = await store.getEntries(sessionA.id, gate.threadId);
+    const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
+    expect(assistants.some((e) => e.content === "ambient continuation")).toBe(false);
+  });
+
+  it("the credential budget is DURABLE: attempts burned before a restart still count toward the cap after restore", async () => {
+    const faux = makeFaux("seam-durable-budget");
+    const model = faux.getModel();
+
+    const hostMessage = "no key, durable budget";
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const options = {
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        throw new NoCredentialsError(hostMessage, model);
+      },
+      credentialReleaseBackoffMs: 0,
+    };
+
+    const engineA = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const sessionA = await engineA.createSession(options);
+    const threadA = sessionA.thread();
+    const r = await sessionA.prompt("go");
+    // Burn exactly TWO counted cycles under engine A (cap is 3).
+    for (let i = 0; i < 8; i++) {
+      if (((await store.getQueueItem(sessionA.id, r.queueItemId))?.credentialAttempts ?? 0) >= 2) {
+        break;
+      }
+      await threadA.kick();
+    }
+    const burned = await store.getQueueItem(sessionA.id, r.queueItemId);
+    expect(burned?.status).toBe("queued");
+    expect(burned?.credentialAttempts).toBe(2);
+    sessionA.suspendTimers();
+
+    // "Crash-loop" restart, STILL keyless: the restore wakeup kick is cycle
+    // 3 — the durable budget caps and the item settles failed. (Were the
+    // budget in-memory, the restore would just release again and the item
+    // would cycle queued→running→queued forever.)
+    const engineB = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    await engineB.restoreSession({ sessionId: sessionA.id, options });
+
+    await waitForAsync(
+      async () => (await store.getQueueItem(sessionA.id, r.queueItemId))?.status === "settled",
+    );
+    const item = await store.getQueueItem(sessionA.id, r.queueItemId);
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toBe(hostMessage);
+  });
+
+  it("a stream failure that yields an error-stop message settles failed with the real error", async () => {
+    const faux = makeFaux("seam-pretoken");
+    const model = faux.getModel();
+    // The response factory throws; pi-agent-core surfaces it as an
+    // error-stop assistant message.
+    faux.setResponses([
+      () => {
+        throw new Error("boom before first token");
+      },
+    ]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model, apiKey: "k" }),
+    });
+
+    const r = await session.prompt("go");
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r.queueItemId))?.status === "settled",
+    );
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toContain("boom before first token");
+    expect(item?.attemptCount).toBe(1);
+  });
+
+  it("an agent-run REJECTION before any message_start settles failed — never completed off a stale clean transcript", async () => {
+    const faux = makeFaux("seam-preject");
+    const model = faux.getModel();
+    // Turn ONE completes cleanly, leaving a trailing stop-reason "stop"
+    // assistant message in agent.state (the stale transcript a later broken
+    // turn must not inherit as `completed`).
+    faux.setResponses([fauxAssistantMessage("first turn ok")]);
+
+    // Turn TWO's resolver hands back a model whose provider is not
+    // registered: the agent run REJECTS before producing any message —
+    // no message_start, no assistant message for that turn.
+    const broken = { ...model, provider: "seam-preject-unregistered" };
+    let calls = 0;
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        calls += 1;
+        return { model: calls === 1 ? model : broken, apiKey: "k" };
+      },
+    });
+
+    const r1 = await session.prompt("one");
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r1.queueItemId))?.status === "settled",
+    );
+    expect((await store.getQueueItem(session.id, r1.queueItemId))?.outcome?.outcome).toBe(
+      "completed",
+    );
+
+    const r2 = await session.prompt("two");
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r2.queueItemId))?.status === "settled",
+    );
+    const two = await store.getQueueItem(session.id, r2.queueItemId);
+    // The failure is detected independently of the transcript: turn two has
+    // no assistant message of its own, and the trailing clean stop from turn
+    // one must not decide `completed`.
+    expect(two?.outcome?.outcome).toBe("failed");
+    expect(two?.outcome?.error).toBeTruthy();
+  });
+
+  it("a store failure while persisting the assistant entry settles failed — never completed off the in-memory clean stop", async () => {
+    // The one reachable "runAgent throws" shape: pi-agent-core converts
+    // provider/stream failures into error-stop assistant messages, but a
+    // throw from OUR emit handler (e.g. the fenced message_end append)
+    // propagates out of the agent loop. The message then exists in
+    // agent.state with a clean stop — settling by transcript would report
+    // `completed` for a turn whose assistant entry was never persisted.
+    const faux = makeFaux("seam-appendfail");
+    const model = faux.getModel();
+    faux.setResponses([fauxAssistantMessage("looks clean")]);
+
+    const { engine, store } = makeEngine();
+    const realAppend = store.appendEntries.bind(store);
+    let blew = false;
+    vi.spyOn(store, "appendEntries").mockImplementation(async (sid, tid, entries, fence) => {
+      if (!blew && entries.some((e) => e.type === "message" && e.role === "assistant")) {
+        blew = true;
+        throw new Error("append blew up");
+      }
+      return realAppend(sid, tid, entries, fence);
+    });
+
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model, apiKey: "k" }),
+    });
+
+    const r = await session.prompt("go");
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r.queueItemId))?.status === "settled",
+    );
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    expect(blew).toBe(true);
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toContain("append blew up");
+  });
+
+  it("a non-credential resolver throw (e.g. disabled provider) settles failed WITH the user entry preserved", async () => {
+    const faux = makeFaux("seam-disabled");
+    const model = faux.getModel();
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        throw new Error("provider acme is disabled");
+      },
+    });
+    const thread = session.thread();
+
+    const r = await session.prompt("please do the thing");
+    await waitForAsync(
+      async () => (await store.getQueueItem(session.id, r.queueItemId))?.status === "settled",
+    );
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    // Identical failure surface (no release cycles — this is not a
+    // credential problem), settled on the first attempt…
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toContain("provider acme is disabled");
+    expect(item?.attemptCount).toBe(1);
+    // …but the prompt is still recorded in the transcript.
+    const entries = await store.getEntries(session.id, thread.id);
+    const users = entries.filter((e) => e.type === "message" && e.role === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0]?.type === "message" ? users[0].content : "").toBe("please do the thing");
+  });
+
+  it("reconciliation RE-RUNS (not resumes) a running item whose attempt never appended its user entry", async () => {
+    const faux = makeFaux("seam-rerun");
+    const model = faux.getModel();
+    faux.setResponses([fauxAssistantMessage("fresh run")]);
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const options = {
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model, apiKey: "k" }),
+    };
+    const engineA = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const sessionA = await engineA.createSession(options);
+    const thread = sessionA.thread();
+    sessionA.suspendTimers();
+
+    // Craft the crash shape directly: a claimed (running) item whose attempt
+    // died before appending ANY entry — e.g. a store throw inside the
+    // credential-release path. Resuming it would continue the (empty /
+    // previous) transcript and the prompt would never run.
+    const itemId = "q-rerun-no-entry";
+    await store.admitSubmission(sessionA.id, thread.id, {
+      id: itemId,
+      threadId: thread.id,
+      content: "run me from scratch",
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: Date.now() + 3_600_000,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await store.claimSubmission({
+      sessionId: sessionA.id,
+      threadId: thread.id,
+      itemId,
+      attemptId: "att-dead",
+      ownerId: "crashed-owner",
+    });
+    await store.insertAttemptMarker(itemId, "att-dead");
+
+    // Restart: reconciliation must route this to a fresh from-scratch run.
+    const engineB = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    await engineB.restoreSession({ sessionId: sessionA.id, options });
+
+    await waitForAsync(
+      async () => (await store.getQueueItem(sessionA.id, itemId))?.status === "settled",
+    );
+    const item = await store.getQueueItem(sessionA.id, itemId);
+    expect(item?.outcome?.outcome).toBe("completed");
+    // The fresh run recorded the prompt and produced the assistant reply —
+    // a resume would have replayed a transcript with NO user entry.
+    const entries = await store.getEntries(sessionA.id, thread.id);
+    expect(
+      entries.filter((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId),
+    ).toHaveLength(1);
+    const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
+    expect(assistants.some((e) => e.content === "fresh run")).toBe(true);
   });
 });

@@ -128,6 +128,18 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(err).toBeInstanceOf(NoCredentialsError);
       expect((err as NoCredentialsError).model?.id).toBe(ANTHROPIC_MODEL);
     });
+
+    it("an EMPTY-STRING stored org key behaves as missing (known kind, no env key)", async () => {
+      const row = await createLlmProvider(db, { orgId, kind: "openai", name: "OpenAI" });
+      await saveKey(row.id, "   ");
+      const err = await resolveModelSpec(db, credentials, orgId, `openai/${OPENAI_MODEL}`).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      // Blank ≡ absent: NoCredentialsError, never "" sent to the provider.
+      expect(err).toBeInstanceOf(NoCredentialsError);
+      expect((err as NoCredentialsError).model?.id).toBe(`openai/${OPENAI_MODEL}`);
+    });
   });
 
   describe("custom (openai_compatible) provider", () => {
@@ -181,6 +193,19 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(err).toBeInstanceOf(NoCredentialsError);
       expect((err as NoCredentialsError).message).toMatch(/provider Together has no API key/);
       expect((err as NoCredentialsError).model?.id).toBe(`${row.id}/qwen-coder`);
+    });
+
+    it("an EMPTY-STRING stored org key behaves as missing on the custom branch too", async () => {
+      const row = await makeCustom();
+      await saveKey(row.id, "");
+      const err = await resolveModelSpec(db, credentials, orgId, `${row.id}/qwen-coder`).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      // Uniform empty≡missing semantics: the custom branch's "has no API
+      // key" message stays accurate for a blanked-out credential.
+      expect(err).toBeInstanceOf(NoCredentialsError);
+      expect((err as NoCredentialsError).message).toMatch(/provider Together has no API key/);
     });
 
     it("model not on the provider's list throws (inactive model)", async () => {

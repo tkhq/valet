@@ -56,7 +56,13 @@ function isKnownKindNamespace(ns: string): ns is KnownKind {
 async function orgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<string | undefined> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
-  return stored?.apiKey ?? undefined;
+  // Normalize empty/whitespace-only stored keys to "missing" so both the
+  // known-kind branch (`=== undefined` check after the env fallback) and the
+  // custom branch (`!apiKey`) treat empty ≡ absent uniformly — a blanked-out
+  // credential must trigger NoCredentialsError ("has no API key"), never be
+  // sent to a provider as a real key.
+  const key = stored?.apiKey;
+  return key !== undefined && key.trim() !== "" ? key : undefined;
 }
 
 /**
