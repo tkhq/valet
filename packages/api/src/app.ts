@@ -8,15 +8,18 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { createNodeWebSocket } from "@hono/node-ws";
 import type { AppEnv } from "./env.js";
+import type { RunningServer, ServerAdapter } from "./server-adapter.js";
+import { nodeServerAdapter } from "./server-adapter.node.js";
 import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
 import { buildAuthMiddleware } from "./middleware/auth.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
-import type { AuthConfigResponse } from "./wire/types.js";
+import type { AuthConfigResponse, HealthResponse } from "./wire/types.js";
+import { VALET_VERSION } from "./version.js";
+import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
@@ -47,8 +50,13 @@ import { mountWebStatic } from "./static-web.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
-  /** Call after `serve()` to attach the WS upgrade handler to the http server. */
-  injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
+  /**
+   * Start listening on `port` and attach the WS upgrade handler, using the
+   * runtime adapter passed to `createApp`. Returns a uniform handle whose
+   * `close()` stops the socket. The WS `attach` token is captured internally,
+   * so callers never touch runtime-specific plumbing.
+   */
+  startServer(opts: { port: number; onListen?: (port: number) => void }): RunningServer;
   /** True when `opts.webDistDir` pointed at a real build and the SPA was
    * mounted. `false` when unset (dev mode) OR set-but-missing-index.html —
    * the caller distinguishes those two (a set-but-unmounted dist is fatal). */
@@ -80,6 +88,13 @@ export function createApp(
   providers: Providers,
   authWiring: AuthWiring = {},
   opts: CreateAppOpts = {},
+  // Default to the Node adapter so the many HTTP-only test callers (and the
+  // node bundle) need no change. Under Bun, `main.ts` passes the Bun adapter
+  // explicitly via `selectServerAdapter()` — the Node adapter's `serve` /
+  // `createWebSocket` are then never called. The Node adapter is import-safe
+  // under Bun; only `hono/bun` (the Bun adapter's dep) is not import-safe
+  // under Node, and it is never statically imported here.
+  adapter: ServerAdapter = nodeServerAdapter,
 ): CreatedApp {
   const app = new Hono<AppEnv>();
   const { auth, authConfig } = authWiring;
@@ -108,10 +123,19 @@ export function createApp(
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
 
-  // Public health check (no auth).
-  app.get("/api/health", (c) =>
-    c.json({ ok: true, service: "valet-api", ts: Date.now() }),
-  );
+  // Public health check (no auth). Carries the running binary's version and
+  // the resolved sandbox backend so `valet status` can report client/server
+  // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
+  app.get("/api/health", (c) => {
+    const body: HealthResponse = {
+      ok: true,
+      service: "valet-api",
+      ts: Date.now(),
+      version: VALET_VERSION,
+      sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
+    };
+    return c.json(body);
+  });
 
   // better-auth owns everything under /api/auth/* (signup, login, session,
   // social + SSO callbacks, api-key endpoints, MCP OAuth). Mounted BEFORE
@@ -186,10 +210,11 @@ export function createApp(
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
 
-  // WebSocket — must be registered against the same Hono instance that
-  // node-ws was constructed with. main.ts calls injectWebSocket(server)
-  // after serve().
-  const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
+  // WebSocket — must be registered against the same Hono instance the runtime
+  // WS handler was constructed with. The adapter's `serve` (returned in
+  // `startServer` below) attaches the upgrade handler at listen time (Node:
+  // `injectWebSocket(server)`; Bun: `Bun.serve({ websocket })`).
+  const { upgradeWebSocket, serve } = adapter.createWebSocket(app);
   registerWsRoutes(app, upgradeWebSocket);
   // Gateway reverse-proxy: WS upgrade `GET` registered before the HTTP
   // `ALL` on the same `/api/sessions/:id/gateway/*` path — `upgradeWebSocket`
@@ -222,7 +247,11 @@ export function createApp(
     );
   });
 
-  return { app, injectWebSocket, webServed };
+  return {
+    app,
+    startServer: (startOpts) => serve(startOpts),
+    webServed,
+  };
 }
 
 export type App = ReturnType<typeof createApp>["app"];

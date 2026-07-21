@@ -1350,3 +1350,20 @@ export interface GetPrebuildsMetaResponse {
 export interface GetPrebuildForRepoResponse {
   prebuild: { commitSha: string; finishedAt: number } | null;
 }
+
+// ── REST: health (single-binary CLI, portable-runtime plan) ──────────────
+//
+// `GET /api/health` — public, unauthenticated. The API currently answers
+// `{ ok, service, ts }`; `version` is optional here so a future build that
+// stamps the running binary version (single-binary plan Task 6) is a
+// non-breaking addition. Append-only: existing consumers ignore it.
+
+export interface HealthResponse {
+  ok: boolean;
+  service: string;
+  ts: number;
+  version?: string;
+  /** Resolved sandbox backend (`docker` | `local` | `kubernetes`) the server
+   * is running. Append-only; existing consumers ignore it. */
+  sandboxBackend?: string;
+}

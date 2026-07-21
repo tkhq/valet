@@ -13,7 +13,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type AddressInfo } from "node:net";
-import { serve } from "@hono/node-server";
 import {
   VirtualSandboxProvider,
   type ChildSpawner,
@@ -335,18 +334,18 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     authWiring = { auth: buildAuth({ db, cfg: authConfig, hooks }), authConfig };
   }
 
-  const { app, injectWebSocket } = createApp(providers, authWiring, { webDistDir: opts.webDistDir });
-  const server = serve({ fetch: app.fetch, port });
-  injectWebSocket(server);
-
-  await new Promise<void>((resolve) => server.on("listening", () => resolve()));
+  // Node-only test boot: `createApp` defaults to the Node server adapter.
+  const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir });
+  const server = await new Promise<ReturnType<typeof startServer>>((resolve) => {
+    const handle = startServer({ port, onListen: () => resolve(handle) });
+  });
 
   return {
     baseUrl: `http://localhost:${port}`,
     wsUrl: `ws://localhost:${port}`,
     providers,
     async cleanup() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await server.close();
       await channelHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();

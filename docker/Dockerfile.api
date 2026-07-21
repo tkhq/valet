@@ -69,4 +69,4 @@ ENV VALET_WEB_DIST_DIR=/app/web/dist
 ENV PORT=8787
 EXPOSE 8787
 
-ENTRYPOINT ["node_modules/.bin/tsx", "src/main.ts"]
+ENTRYPOINT ["node_modules/.bin/tsx", "src/cli.ts", "serve"]
