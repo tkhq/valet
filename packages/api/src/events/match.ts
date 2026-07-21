@@ -41,6 +41,7 @@ export function filtersMatch(
   catalog: EventCatalogEntry[],
 ): boolean {
   if (filters.length === 0) return true;
+  // No catalog entry for this key → all field filters are undeclared → no match.
   const entry = catalog.find((e) => e.key === eventKey);
   return filters.every((filter) => {
     const declared = entry?.filters.find((f) => f.field === filter.field);
