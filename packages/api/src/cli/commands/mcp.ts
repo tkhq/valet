@@ -22,7 +22,7 @@
  * otherwise the header carries a clear `<MCP_OAUTH_TOKEN>` placeholder and the
  * command prints the caveat.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ConfigError, ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine } from "../output.js";
@@ -84,8 +84,8 @@ export function buildMcpServerConfig(input: BuildConfigInput): ClaudeCodeMcpConf
 export interface FsSeam {
   /** Return the file contents, or `undefined` if the file does not exist. */
   readFile(path: string): string | undefined;
-  /** Write the file contents. */
-  writeFile(path: string, content: string): void;
+  /** Write the file contents. `secret` → owner-only perms (0600). */
+  writeFile(path: string, content: string, opts?: { secret?: boolean }): void;
 }
 
 /** The default fs seam over `node:fs` (returns `undefined` on a missing file). */
@@ -97,7 +97,16 @@ export const defaultFsSeam: FsSeam = {
       return undefined;
     }
   },
-  writeFile: (path, content) => writeFileSync(path, content),
+  writeFile: (path, content, opts) => {
+    if (opts?.secret) {
+      // `mode` only applies at creation — chmod too, so a pre-existing looser
+      // file gets tightened (same treatment as config.ts saveConfig).
+      writeFileSync(path, content, { mode: 0o600 });
+      chmodSync(path, 0o600);
+    } else {
+      writeFileSync(path, content);
+    }
+  },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -109,12 +118,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * every other server and top-level key. On a missing file we start fresh; on
  * malformed existing JSON we throw a `ConfigError` rather than clobber the
  * user's file. The fs access is injected via `fs` so tests use a temp path.
+ *
+ * `opts.secret` → the write is 0600. Only set when the entry embeds a REAL
+ * bearer token (`--token`): `.mcp.json` is a project-local file that users
+ * legitimately commit/share when it only carries the placeholder.
  */
 export function writeClaudeCodeConfig(
   path: string,
   serverName: string,
   entry: McpServerEntry,
   fs: FsSeam = defaultFsSeam,
+  opts?: { secret?: boolean },
 ): void {
   const existing = fs.readFile(path);
 
@@ -139,7 +153,7 @@ export function writeClaudeCodeConfig(
   servers[serverName] = entry;
   doc.mcpServers = servers;
 
-  fs.writeFile(path, `${JSON.stringify(doc, null, 2)}\n`);
+  fs.writeFile(path, `${JSON.stringify(doc, null, 2)}\n`, { secret: opts?.secret === true });
 }
 
 const USAGE = `usage: valet mcp setup [claude-code] [options]
@@ -198,7 +212,8 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   // global `~/.claude.json` — it's scoped to the repo and easy to inspect/undo.
   const target = resolve(process.cwd(), ".mcp.json");
   const entry = config.mcpServers[name];
-  writeClaudeCodeConfig(target, name, entry, defaultFsSeam);
+  // A real --token in the file → owner-only perms; placeholder-only stays default.
+  writeClaudeCodeConfig(target, name, entry, defaultFsSeam, { secret: token !== undefined });
 
   printLine(`wrote MCP server "${name}" → ${target}`);
   printLine(`endpoint: ${entry.url}`);

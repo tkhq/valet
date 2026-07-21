@@ -201,6 +201,12 @@ describe("serve/parseLock", () => {
     expect(parseLock(JSON.stringify({ pid: "x", port: 1, startedAt: "t" }))).toBeUndefined();
     expect(parseLock(JSON.stringify({ port: 1, startedAt: "t" }))).toBeUndefined();
   });
+
+  it("rejects non-positive/non-integer pids (kill(0/-n, 0) probes a process GROUP)", () => {
+    expect(parseLock(JSON.stringify({ pid: 0, port: 1, startedAt: "t" }))).toBeUndefined();
+    expect(parseLock(JSON.stringify({ pid: -42, port: 1, startedAt: "t" }))).toBeUndefined();
+    expect(parseLock(JSON.stringify({ pid: 1.5, port: 1, startedAt: "t" }))).toBeUndefined();
+  });
 });
 
 describe("serve/isLiveLock", () => {

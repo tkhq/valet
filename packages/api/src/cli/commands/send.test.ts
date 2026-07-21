@@ -51,6 +51,9 @@ const GATE: DecisionGate = {
 function gateEvent(threadId = "t1"): WireEvent {
   return { seq: 1, ts: 1, type: "decision_gate", threadId, gate: GATE };
 }
+function turnEnd(threadId = "t1"): WireEvent {
+  return { seq: 1, ts: 1, type: "turn_end", threadId, reason: "end_turn" };
+}
 
 function makeStream(events: WireEvent[]): StreamFn {
   return () =>
@@ -172,6 +175,16 @@ describe("consumeSend", () => {
   it("ignores a settle for a different queueItemId", async () => {
     const { deps } = stubDeps([settled("failed", "other-q"), settled("completed", "q1")]);
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+  });
+
+  it("returns OK on turn_end for our thread (fallback when the settle frame is missed)", async () => {
+    const { deps } = stubDeps([textDelta("hi"), turnEnd()]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+  });
+
+  it("keeps consuming past a turn_end on another thread", async () => {
+    const { deps } = stubDeps([turnEnd("other-t"), settled("failed")]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.TurnError);
   });
 
   it("emits NDJSON of raw events in --json mode and returns the exit code", async () => {

@@ -146,6 +146,14 @@ export async function consumeSend(deps: SendDeps, ctx: ConsumeCtx): Promise<numb
       if (!ctx.json) printLine(`\n${renderGate(ev.gate)}`);
       return ExitCode.GatePending;
     }
+
+    // Fallback terminal (mirrors chatTurn): turns are sequential per thread,
+    // so a turn_end on our thread ends our turn even if the settle frame is
+    // missed — without this a dropped settle leaves the command hanging.
+    if (ev.type === "turn_end" && ev.threadId === ctx.threadId) {
+      if (!ctx.json) printLine("");
+      return ExitCode.OK;
+    }
   }
 
   // Stream ended without a matching settle (unexpected close after retries, or

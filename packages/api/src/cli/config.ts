@@ -60,14 +60,14 @@ export function loadConfig(): ValetConfig {
   try {
     raw = readFileSync(path, "utf8");
   } catch (err) {
-    throw new ConfigError(`config: failed to read ${path}: ${(err as Error).message}`);
+    throw new ConfigError(`config: failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new ConfigError(`config: ${path} is not valid JSON: ${(err as Error).message}`);
+    throw new ConfigError(`config: ${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {

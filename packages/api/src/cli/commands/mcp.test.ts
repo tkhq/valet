@@ -1,11 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { ValetConfig } from "../config.js";
 import { ExitCode } from "../exit.js";
 import { NoInstanceError } from "../exit.js";
-import { buildMcpServerConfig, run, writeClaudeCodeConfig, type FsSeam } from "./mcp.js";
+import { buildMcpServerConfig, defaultFsSeam, run, writeClaudeCodeConfig, type FsSeam } from "./mcp.js";
 
 let outSpy: MockInstance;
 let errSpy: MockInstance;
@@ -142,6 +142,26 @@ describe("writeClaudeCodeConfig", () => {
     writeClaudeCodeConfig(path, "valet", entry, realFs);
     const written = JSON.parse(readFileSync(path, "utf8")) as { mcpServers: Record<string, typeof entry> };
     expect(written.mcpServers.valet).toEqual(entry);
+  });
+
+  it("writes the file 0600 when the entry embeds a real token (secret)", () => {
+    const path = join(dir, ".mcp.json");
+    writeClaudeCodeConfig(path, "valet", entry, defaultFsSeam, { secret: true });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it("tightens a pre-existing looser file when secret", () => {
+    const path = join(dir, ".mcp.json");
+    writeFileSync(path, "{}", { mode: 0o644 });
+    writeClaudeCodeConfig(path, "valet", entry, defaultFsSeam, { secret: true });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it("leaves default perms alone when only the placeholder is embedded", () => {
+    const path = join(dir, ".mcp.json");
+    writeFileSync(path, "{}", { mode: 0o644 });
+    writeClaudeCodeConfig(path, "valet", entry, defaultFsSeam);
+    expect(statSync(path).mode & 0o777).toBe(0o644);
   });
 
   it("throws a clear error on malformed existing JSON rather than clobbering it", () => {

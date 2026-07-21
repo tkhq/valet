@@ -239,7 +239,9 @@ const webDistDir = webDistPath();
 // (`Bun.serve` + `hono/bun`) inside a `bun --compile` binary. See
 // server-adapter.ts.
 const adapter = await selectServerAdapter();
-const { app, startServer, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
+// `startServer` from createApp is renamed at the destructure so it can't
+// shadow this module's exported `startServer()` (we're inside its body).
+const { app, startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
 // A set-but-unmounted dist means the bundled image shipped without a valid
 // build (missing/incomplete web/dist/index.html) — the api would boot and
 // silently 404 JSON at `/` instead of serving the SPA. Fail loud at boot.
@@ -250,7 +252,7 @@ if (webDistDir && !webServed) {
   process.exit(1);
 }
 
-const server = startServer({
+const server = startListening({
   port,
   onListen: (boundPort) => {
     console.log(`@valet/api listening on http://localhost:${boundPort}`);

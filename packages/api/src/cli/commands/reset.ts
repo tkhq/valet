@@ -21,13 +21,13 @@
  * confirmation reader, and TTY-ness are injected so a temp dir + scripted deps
  * fully exercise it.
  */
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine } from "../output.js";
 import { resolveDataDir } from "../resolve.js";
 import type { CliContext } from "../types.js";
-import { isLiveLock, parseLock } from "./serve.js";
+import { defaultIsPidAlive, isLiveLock, readLock } from "./serve.js";
 
 /** The single file the wipe preserves. */
 const PRESERVE = "config.json";
@@ -49,35 +49,13 @@ export interface ResetOpts {
   dataDir: string;
 }
 
-/** Read + parse the serve lock at `dataDir/serve.lock`; `undefined` if absent/malformed. */
-function readLock(dataDir: string): ReturnType<typeof parseLock> {
-  const path = join(dataDir, "serve.lock");
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return undefined;
-  }
-  return parseLock(raw);
-}
-
-/** True if a pid is alive (signal 0 probe). `EPERM` → exists but not ours (alive). */
-export function defaultIsPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 /**
  * Pure reset: refuse on a live lock, confirm, then wipe every entry except
  * `config.json`. Returns the process exit code.
  */
 export async function runReset(deps: ResetDeps, opts: ResetOpts): Promise<number> {
   // ── Refuse while a live serve owns the dir.
-  const lock = readLock(opts.dataDir);
+  const lock = readLock(join(opts.dataDir, "serve.lock"));
   if (lock && isLiveLock(lock, deps.isAlive)) {
     printErr(`valet reset: a valet serve (pid ${lock.pid}) is running; stop it first`);
     return ExitCode.Usage;

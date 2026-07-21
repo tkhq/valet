@@ -169,12 +169,16 @@ export function parseLock(raw: string): ServeLock | undefined {
   if (typeof obj.pid !== "number" || typeof obj.port !== "number" || typeof obj.startedAt !== "string") {
     return undefined;
   }
+  // A non-positive pid must read as malformed: `process.kill(0/-n, 0)` probes
+  // a process GROUP (usually alive), so a corrupted lock with pid<=0 would
+  // wedge serve/reset on this data dir forever instead of being reclaimed.
+  if (!Number.isInteger(obj.pid) || obj.pid <= 0) return undefined;
   return { pid: obj.pid, port: obj.port, startedAt: obj.startedAt };
 }
 
 /** True if a pid is alive (signal 0 probe). `EPERM` means it exists but isn't
  * ours — still alive. Any other error → dead/absent. */
-function defaultIsPidAlive(pid: number): boolean {
+export function defaultIsPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -190,7 +194,7 @@ export function isLiveLock(lock: ServeLock, isAlive: (pid: number) => boolean = 
 }
 
 /** Read + parse the lock at `path`; `undefined` if absent or malformed. */
-function readLock(path: string): ServeLock | undefined {
+export function readLock(path: string): ServeLock | undefined {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
