@@ -132,7 +132,9 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            # `latest` tracks stable version tags only — not pre-release
+            # (-suffixed) tags, not branch pushes.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
 
       - name: Create multi-arch manifest
         working-directory: /tmp/digests

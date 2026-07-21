@@ -130,6 +130,9 @@ jobs:
         with:
           files: packages/api/dist/valet-*-*
           fail_on_unmatched_files: true
+          # Pre-release-suffixed tags (v0.2.0-rc.1) are marked prerelease.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
           body: |
             Valet native single-file CLI (`${{ github.ref_name }}`).
 
