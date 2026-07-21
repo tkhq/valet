@@ -1086,21 +1086,30 @@ export class Thread {
    * resolver is absent (byte-identical to the pre-seam resume paths).
    *
    * THROWS `NoCredentialsError` straight through — symmetric with the
-   * pre-run detection in runItem. Swallowing it here and continuing with an
-   * unset key would silently activate pi-ai's AMBIENT env fallback: a
-   * revoked org key could resume on a dev-shell/pod env key the org never
-   * authorized. Callers treat the throw as a normal turn failure (the
-   * continuation settles `failed` with the credential message; claim
-   * cleaned, no wedge).
+   * pre-run detection in runItem — and throws `unknown model id` when the
+   * resolver returns null (spec no longer resolvable). Swallowing either and
+   * continuing with a stale/unset key would silently activate pi-ai's
+   * AMBIENT env fallback: a revoked org key could resume on a dev-shell/pod
+   * env key the org never authorized. Callers treat the throw as a normal
+   * turn failure (the continuation settles `failed`; claim cleaned, no
+   * wedge).
    */
   private async applyResolvedKeyForResume(): Promise<void> {
     const resolver = this.session.options.resolveModel;
     if (!resolver) return;
-    const resolved = await resolver(this.turnModelSpec());
-    if (resolved) {
-      this.turnApiKey = resolved.apiKey;
-      this.agent.state.model = resolved.model;
+    const spec = this.turnModelSpec();
+    const resolved = await resolver(spec);
+    if (resolved === null) {
+      // Unknown spec — e.g. an admin deleted the custom provider row while
+      // the session sat suspended at a gate. Silently proceeding would keep
+      // the stale turnApiKey/model and continue on ambient env creds — the
+      // exact failure mode the loud-fail contract exists to prevent. Same
+      // surface as setModel's unknown-spec rejection; the caller settles the
+      // resume `failed`.
+      throw new Error(`unknown model id: ${spec}`);
     }
+    this.turnApiKey = resolved.apiKey;
+    this.agent.state.model = resolved.model;
   }
 
   async readEntries(opts?: MessageQuery): Promise<SessionEntry[]> {
@@ -1249,10 +1258,18 @@ export class Thread {
             // no other path cleans it (the successor only deletes its own on
             // settle; the refused release CAS is contract-bound to touch no
             // markers). Delete it here or one row leaks per ownership-loss
-            // cycle for the session's lifetime. A throw lands in the
-            // settlement_failed catch below; the marker then leaks once,
-            // which is the pre-existing transient-failure tradeoff.
-            await store.deleteAttemptMarker(claimed.id, releaseFence.attemptId);
+            // cycle for the session's lifetime. Best-effort: a transient
+            // store blip must not escape to the settlement_failed catch and
+            // abort the iteration over pure cleanup — on failure the marker
+            // simply leaks this one row.
+            try {
+              await store.deleteAttemptMarker(claimed.id, releaseFence.attemptId);
+            } catch (err) {
+              this.emitError(
+                "stale_marker_cleanup_failed",
+                err instanceof Error ? err.message : String(err),
+              );
+            }
             return;
           }
           if (verdict === "settle-cap") {
@@ -1266,10 +1283,12 @@ export class Thread {
             turnFailed = true;
             turnError = credentialError;
           }
-          // "settle-superseded": fall through with turnFailed still false so
-          // decideTurnOutcome settles it `superseded` (do NOT release — a
-          // re-queued superseded item is skipped by both unsettledHead and
-          // the store's claim head: an orphan that hangs awaitResult forever).
+          // "settle-owned": a supersession or abort stamp owns the outcome —
+          // fall through with turnFailed still false so decideTurnOutcome
+          // settles it `superseded`/`aborted` (do NOT release — a re-queued
+          // superseded item is an orphan skipped by both unsettledHead and
+          // the store's claim head; a re-queued aborted item is a
+          // running→queued→aborted flicker on the queue-state stream).
         }
 
         await this.settleTurn(claimed, turnFailed ? { error: turnError } : undefined);
@@ -1303,21 +1322,26 @@ export class Thread {
    * Verdicts for the claim loop:
    *  - "released": claim released back to `queued` (budget persisted).
    *  - "settle-cap": budget exhausted — settle `failed` with the host error.
-   *  - "settle-superseded": a supersession owns the outcome — settle so
-   *    decideTurnOutcome yields `superseded` (never re-queue: orphan).
+   *  - "settle-owned": a durable stamp (supersession OR abort) landed on the
+   *    item, possibly mid-window — the outcome belongs to that stamp: settle
+   *    under our attempt with no failure so decideTurnOutcome yields
+   *    `superseded`/`aborted` accordingly (never re-queue: a superseded
+   *    re-queue is an orphan; an aborted one is a queue-state flicker).
    *  - "abandon": a successor attempt owns the item (or it settled) —
    *    nothing of ours left to settle.
    */
   private async attemptCredentialRelease(
     claimed: QueueItem,
     releaseFence: WriteFence,
-  ): Promise<"released" | "settle-cap" | "settle-superseded" | "abandon"> {
+  ): Promise<"released" | "settle-cap" | "settle-owned" | "abandon"> {
     const store = this.session.providers.store;
     // Mirror settleTurn's guards: a successor attempt may own the item now.
     if (this.staleFenceDetected) return "abandon";
     const current = await store.getQueueItem(this.session.id, claimed.id);
     if (!current || current.status !== "running") return "abandon";
-    if (current.supersededByItemId) return "settle-superseded";
+    if (current.supersededByItemId || current.abortRequestedAt !== undefined) {
+      return "settle-owned";
+    }
 
     const now = Date.now();
     const backoffMs =
@@ -1326,11 +1350,17 @@ export class Thread {
     const lastAt = current.lastCredentialReleaseAt;
     const withinBackoff = lastAt !== undefined && now - lastAt < backoffMs;
     const count = withinBackoff ? prevCount : prevCount + 1;
+    // NB: the durable counter records COMPLETED release cycles, not the
+    // terminal attempt — on settle-cap the row keeps credential_attempts at
+    // MAX-1 (or lower under burst coalescing) because the cap returns before
+    // any CAS and settlement deliberately writes no counter. Any future
+    // feature that re-runs a settled row must reset or re-derive the budget
+    // rather than trusting this value.
     if (!withinBackoff && count >= MAX_CREDENTIAL_ATTEMPTS) return "settle-cap";
 
     // The release CAS is the atomic authority, not the `current` snapshot
-    // above: it refuses when a supersession stamp landed between the
-    // snapshot read and this commit (TOCTOU window). The budget counters
+    // above: it refuses when a supersession or abort stamp landed between
+    // the snapshot read and this commit (TOCTOU window). The budget counters
     // ride the same CAS — persisted iff the release lands.
     const released = await store.releaseSubmission(
       this.session.id,
@@ -1341,14 +1371,14 @@ export class Thread {
     );
     if (released) return "released";
     // CAS refused. Re-read to decide who owns the item now: still running
-    // under OUR attempt means a supersession stamped after the snapshot —
-    // we must settle it ourselves (a bare CAS-fail must never strand the
-    // item running+superseded). Anything else: a successor owns it.
+    // under OUR attempt means a supersession/abort stamped after the
+    // snapshot — we must settle it ourselves (a bare CAS-fail must never
+    // strand the item running+stamped). Anything else: a successor owns it.
     const after = await store.getQueueItem(this.session.id, claimed.id);
     if (!after || after.status !== "running" || after.attemptId !== releaseFence.attemptId) {
       return "abandon";
     }
-    return "settle-superseded";
+    return "settle-owned";
   }
 
   /**
@@ -1812,6 +1842,16 @@ export class Thread {
     } else {
       text = promptText(item.content);
       entryContent = text;
+    }
+    // IDEMPOTENT: skip when this submission's user entry already exists — a
+    // transient settle throw after the credential-cap append leaves a
+    // `running` item WITH its user entry; the retried attempt (fresh re-run
+    // or a second cap pass) must not duplicate it.
+    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
+    if (
+      existing.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === item.id)
+    ) {
+      return text;
     }
     // QueueItem.metadata flows through onto the entry so synthetic flags like
     // compaction_continue survive into the DAG for client UIs and for later

@@ -28,6 +28,7 @@ import {
   VirtualSandboxProvider,
   type BusEvent,
   type DecisionGate,
+  type MessageEntry,
   type ResolvedModel,
   type ToolDef,
 } from "../src/index.js";
@@ -255,8 +256,10 @@ describe("host model resolver seam", () => {
     expect(item?.outcome?.outcome).toBe("failed");
     // The settled error is the HOST's own message — never a fabricated one.
     expect(item?.outcome?.error).toBe(hostMessage);
-    // 2 releases + 1 terminal attempt (MAX_CREDENTIAL_ATTEMPTS = 3).
-    expect(item?.attemptCount).toBe(3);
+    // 2 releases + 1 terminal attempt (MAX_CREDENTIAL_ATTEMPTS = 3) — each
+    // release hands its claim's attempt_count increment back (a released
+    // claim never consumed run budget), so only the terminal claim remains.
+    expect(item?.attemptCount).toBe(1);
 
     // Pre-run credential attempts append NOTHING; the CAP attempt appends
     // exactly the user entry (the transcript must record what was asked when
@@ -472,9 +475,11 @@ describe("host model resolver seam", () => {
     });
     const thread = session.thread();
 
-    // Admit directly at the store (no kick yet), then burn TWO store-level
-    // attempts the way lease-expiry reconciliation would — claim + release —
-    // before the thread ever sees the item.
+    // Admit directly at the store (no kick yet), then burn store-level
+    // attempts the way lease-expiry reconciliation would — one claim plus
+    // TWO replaceSubmissionAttempt recycles (which increment attempt_count
+    // and are deliberately NOT handed back by a release) — before the thread
+    // ever sees the item.
     const itemId = "q-lease-recycle";
     await store.admitSubmission(session.id, thread.id, {
       id: itemId,
@@ -487,23 +492,39 @@ describe("host model resolver seam", () => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
-    for (const att of ["att-pre-1", "att-pre-2"]) {
-      await store.claimSubmission({
-        sessionId: session.id,
-        threadId: thread.id,
+    await store.claimSubmission({
+      sessionId: session.id,
+      threadId: thread.id,
+      itemId,
+      attemptId: "att-pre-1",
+      ownerId: "sweeper",
+    });
+    let prevAtt = "att-pre-1";
+    for (const att of ["att-pre-2", "att-pre-3"]) {
+      const replaced = await store.replaceSubmissionAttempt(
+        session.id,
+        thread.id,
         itemId,
-        attemptId: att,
-        ownerId: "sweeper",
-      });
-      await store.insertAttemptMarker(itemId, att);
-      await store.releaseSubmission(session.id, thread.id, itemId, { itemId, attemptId: att });
+        { sessionId: session.id, threadId: thread.id, itemId, attemptId: att, ownerId: "sweeper" },
+        { expectedAttemptId: prevAtt },
+      );
+      expect(replaced).not.toBeNull();
+      prevAtt = att;
     }
+    // claim(1) + two recycles(3); the credential-less release hands ONE
+    // claim increment back → 2. (replaceSubmissionAttempt increments are
+    // unaffected by the release-decrement rule.)
+    await store.releaseSubmission(session.id, thread.id, itemId, {
+      itemId,
+      attemptId: prevAtt,
+    });
     expect((await store.getQueueItem(session.id, itemId))?.attemptCount).toBe(2);
 
-    // The thread's credential budget is its own (Thread-local map, keyed by
-    // itemId) — the pre-burned store attempts must not count against it, so
+    // The credential budget is the DURABLE per-item counter — untouched by
+    // the pre-burned recycles (their release carried no credential arg), so
     // the item still gets the full MAX_CREDENTIAL_ATTEMPTS (3) credential
-    // attempts: settled on store attempt 2 + 3 = 5, not at 3.
+    // cycles: 2 net-zero claim/release pairs + the terminal cap claim on top
+    // of the 2 surviving pre-burn increments.
     for (let i = 0; i < 8; i++) {
       await thread.kick();
       if ((await store.getQueueItem(session.id, itemId))?.status === "settled") break;
@@ -512,7 +533,7 @@ describe("host model resolver seam", () => {
     expect(item?.status).toBe("settled");
     expect(item?.outcome?.outcome).toBe("failed");
     expect(item?.outcome?.error).toBe(hostMessage);
-    expect(item?.attemptCount).toBe(5);
+    expect(item?.attemptCount).toBe(3);
   });
 
   it("a burst of external kicks inside the backoff window counts as ONE credential cycle — never caps the item", async () => {
@@ -1119,5 +1140,232 @@ describe("host model resolver seam", () => {
     ).toHaveLength(1);
     const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
     expect(assistants.some((e) => e.content === "fresh run")).toBe(true);
+  });
+
+  it("reconciliation re-runs a crashed running item that HAS its user entry but no assistant entry — without duplicating the entry", async () => {
+    // The settle-cap crash shape: appendUserEntry landed, then the settle
+    // threw and the process died. The reconcile guard keys on "no ASSISTANT
+    // entry" (not "no user entry"), so this still re-runs from scratch; the
+    // idempotent append means the re-run does not duplicate the prompt.
+    const faux = makeFaux("seam-rerun-with-entry");
+    const model = faux.getModel();
+    faux.setResponses([fauxAssistantMessage("fresh run after crash")]);
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const options = {
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model, apiKey: "k" }),
+    };
+    const engineA = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const sessionA = await engineA.createSession(options);
+    const thread = sessionA.thread();
+    sessionA.suspendTimers();
+
+    const itemId = "q-rerun-with-entry";
+    await store.admitSubmission(sessionA.id, thread.id, {
+      id: itemId,
+      threadId: thread.id,
+      content: "crashed after append",
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: Date.now() + 3_600_000,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await store.claimSubmission({
+      sessionId: sessionA.id,
+      threadId: thread.id,
+      itemId,
+      attemptId: "att-dead",
+      ownerId: "crashed-owner",
+    });
+    await store.insertAttemptMarker(itemId, "att-dead");
+    // The dead attempt got as far as persisting the user entry.
+    const crafted: MessageEntry = {
+      id: "e-crafted-user",
+      sessionId: sessionA.id,
+      threadId: thread.id,
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: "crashed after append",
+      queueItemId: itemId,
+      createdAt: Date.now(),
+    };
+    await store.appendEntries(sessionA.id, thread.id, [crafted]);
+
+    const engineB = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    await engineB.restoreSession({ sessionId: sessionA.id, options });
+
+    await waitForAsync(
+      async () => (await store.getQueueItem(sessionA.id, itemId))?.status === "settled",
+    );
+    const item = await store.getQueueItem(sessionA.id, itemId);
+    expect(item?.outcome?.outcome).toBe("completed");
+    // Fresh re-run happened (assistant reply exists) and the idempotent
+    // append did NOT duplicate the user entry.
+    const entries = await store.getEntries(sessionA.id, thread.id);
+    expect(
+      entries.filter((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId),
+    ).toHaveLength(1);
+    const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
+    expect(assistants.some((e) => e.content === "fresh run after crash")).toBe(true);
+  });
+
+  it("a resolver returning NULL on gate replay settles failed (unknown spec) — never streams on stale creds", async () => {
+    const fauxX = makeFaux("seam-resume-nullspec");
+    const modelX = fauxX.getModel();
+    fauxX.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "a" }, { id: "tc1" })], {
+        stopReason: "toolUse",
+      }),
+      // Must NOT be consumed: the spec no longer resolves (e.g. the admin
+      // deleted the custom provider row while the session sat at the gate) —
+      // continuing would run on the stale key/model or ambient env creds.
+      fauxAssistantMessage("stale continuation"),
+    ]);
+
+    const gateTool: ToolDef = {
+      name: "do_thing",
+      description: "gated thing",
+      parameters: Type.Object({ arg: Type.String() }),
+      execute: async (args, ctx) => {
+        const resolution = await ctx.requestDecision({
+          type: "approval",
+          title: "approve?",
+          body: `arg=${String(args.arg)}`,
+          resumeKey: `do_thing:${String(args.arg)}`,
+        });
+        return { text: resolution.actionId };
+      },
+    };
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+
+    const engineA = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const sessionA = await engineA.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: modelX,
+      tools: [gateTool],
+      resolveModel: async (): Promise<ResolvedModel | null> => ({ model: modelX, apiKey: "k" }),
+    });
+    void sessionA.prompt("do the thing");
+    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
+    const gateEvent = events.find((e) => e.event.type === "decision_gate");
+    const gate = (gateEvent?.event as { gate: DecisionGate }).gate;
+    await waitForAsync(
+      async () =>
+        (await store.getQueueItem(sessionA.id, gate.queueItemId))?.status ===
+        "blocked_on_decision_gate",
+    );
+    sessionA.suspendTimers();
+
+    const resolution = { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() };
+    await store.saveDecisionGate(sessionA.id, gate.threadId, {
+      ...gate,
+      status: "resolved",
+      resolution,
+      updatedAt: Date.now(),
+    });
+    const gateEntries = await store.getEntries(sessionA.id, gate.threadId);
+    const gateEntry = gateEntries.find((e) => e.type === "decision_gate" && e.gate.id === gate.id);
+    if (gateEntry?.type === "decision_gate") {
+      gateEntry.resolution = resolution;
+      gateEntry.gate = { ...gateEntry.gate, status: "resolved", resolution };
+      await store.updateEntry(sessionA.id, gate.threadId, gateEntry);
+    }
+
+    const engineB = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    await engineB.restoreSession({
+      sessionId: sessionA.id,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: modelX,
+        tools: [gateTool],
+        // The spec is now UNKNOWN to the resolver (deleted provider row).
+        resolveModel: async (): Promise<ResolvedModel | null> => null,
+      },
+    });
+
+    await waitForAsync(
+      async () => (await store.getQueueItem(sessionA.id, gate.queueItemId))?.status === "settled",
+      4000,
+    );
+    const item = await store.getQueueItem(sessionA.id, gate.queueItemId);
+    expect(item?.outcome?.outcome).toBe("failed");
+    expect(item?.outcome?.error).toMatch(/unknown model id/);
+    const entries = await store.getEntries(sessionA.id, gate.threadId);
+    const assistants = entries.filter((e) => e.type === "message" && e.role === "assistant");
+    expect(assistants.some((e) => e.content === "stale continuation")).toBe(false);
+  });
+
+  it("an abort stamped mid-release-window settles aborted under the same attempt — never passes through queued", async () => {
+    const faux = makeFaux("seam-abort-window");
+    const model = faux.getModel();
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      resolveModel: async (): Promise<ResolvedModel | null> => {
+        throw new NoCredentialsError("no key", model);
+      },
+      credentialReleaseBackoffMs: 0,
+    });
+    const thread = session.thread();
+
+    // Interpose on the store seam: by releaseSubmission time the thread's
+    // guard snapshot saw NO abort — stamping it here lands the abort exactly
+    // in the guard→CAS window. The CAS must refuse; the item must settle
+    // `aborted` without ever flickering through `queued`.
+    const realRelease = store.releaseSubmission.bind(store);
+    let stamped = false;
+    let statusAfterRefusedRelease: string | undefined;
+    vi.spyOn(store, "releaseSubmission").mockImplementation(
+      async (sessionId, threadId, itemId, fence, credential) => {
+        if (!stamped) {
+          stamped = true;
+          await store.requestAbort(sessionId, threadId);
+          const released = await realRelease(sessionId, threadId, itemId, fence, credential);
+          statusAfterRefusedRelease = (await store.getQueueItem(sessionId, itemId))?.status;
+          return released;
+        }
+        return realRelease(sessionId, threadId, itemId, fence, credential);
+      },
+    );
+
+    const r = await session.prompt("go");
+    for (let i = 0; i < 4; i++) {
+      await thread.kick();
+      if ((await store.getQueueItem(session.id, r.queueItemId))?.status === "settled") break;
+    }
+
+    expect(stamped).toBe(true);
+    // The refused CAS left it running (never queued) …
+    expect(statusAfterRefusedRelease).toBe("running");
+    // … and it settled `aborted` under the same attempt.
+    const item = await store.getQueueItem(session.id, r.queueItemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome?.outcome).toBe("aborted");
   });
 });

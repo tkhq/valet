@@ -432,17 +432,22 @@ export class Session {
         if (suspended) await thread.reconcileGate(item, suspended, "replay");
         return;
       case "resume": {
-        // A running item whose attempt died BEFORE appending its user entry
-        // (e.g. a store throw inside the credential-release path) must not be
-        // resumed: `resumeInterrupted` continues the transcript, which is the
-        // PREVIOUS turn's — the prompt would never be recorded and never run.
-        // Re-queue it for a fresh from-scratch run instead (fenced release,
-        // no credential counters — this is not a credential cycle); the
-        // post-reconcile kick (startup) / sweep kick picks it up.
-        const hasUserEntry = entries.some(
-          (e) => e.type === "message" && e.role === "user" && e.queueItemId === item.id,
+        // A running item whose attempt never reached the model — NO assistant
+        // entry carries its queueItemId (a crashed pre-stream attempt has at
+        // most a user entry, e.g. a store throw inside the credential-release
+        // path or a settle throw after the cap append) — must not be resumed:
+        // `resumeInterrupted` continues the transcript, which is the PREVIOUS
+        // turn's, and the prompt would never actually run. Re-queue it for a
+        // fresh from-scratch run instead (fenced release, no credential
+        // counters — this is not a credential cycle; the idempotent
+        // user-entry append means no duplicates); the post-reconcile kick
+        // (startup) / sweep kick picks it up. A genuine mid-stream crash HAS
+        // assistant entries and still resumes; gate-suspended items are
+        // excluded by the `running` status check.
+        const hasAssistantEntry = entries.some(
+          (e) => e.type === "message" && e.role === "assistant" && e.queueItemId === item.id,
         );
-        if (item.status === "running" && item.attemptId !== undefined && !hasUserEntry) {
+        if (item.status === "running" && item.attemptId !== undefined && !hasAssistantEntry) {
           const released = await store.releaseSubmission(this.id, item.threadId, item.id, {
             itemId: item.id,
             attemptId: item.attemptId,
