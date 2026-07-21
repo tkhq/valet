@@ -44,7 +44,8 @@ export function ProfilePage() {
   }
 
   const showEnableCard =
-    orgQ.data?.callerRole === "admin" && orgQ.data.features.organizations === false;
+    orgQ.data?.permissions.includes("org:manage") === true &&
+    orgQ.data.features.organizations === false;
 
   async function signOut() {
     await authClient.signOut();
