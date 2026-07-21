@@ -93,7 +93,7 @@ credentials.set({ type: "user", id: userId }, service, {
 });
 ```
 
-Then 302 to `/integrations?connected=<service>` — a relative redirect, same as `github-connect.ts`. Same-origin serving covers prod; in dev the vite server proxies `/api`, so the browser stays on the web origin throughout and the relative target resolves there.
+Then 302 to `/integrations?connected=<service>`. In prod the api serves the SPA same-origin, so a relative target is right. In dev the OAuth provider redirects the browser to the api origin (`:8788`) directly — the vite proxy is not in that path — so a bare relative redirect 404s as JSON (the same failure auth-v2's login `callbackURL` hit, live-verified). The connect route therefore captures the **Referer origin** at mint time, validates it against an allowlist (request origin, configured public URL, auth `trustedOrigins` — which always includes the dev vite origin), and carries it in the signed state as `returnTo`; the callback prefixes every success/error redirect with it. Untrusted or absent Referer → empty prefix (relative), so a crafted connect link cannot turn the callback into an open redirect.
 
 Failure at any step logs the upstream error server-side and redirects to `/integrations?error=oauth_failed` — provider error bodies are never surfaced raw to the browser.
 

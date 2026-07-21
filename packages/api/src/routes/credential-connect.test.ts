@@ -197,6 +197,56 @@ describe("GET /api/credentials/oauth/callback", () => {
   });
 });
 
+describe("cross-origin return redirect (dev web origin)", () => {
+  async function startConnectWithReferer(baseUrl: string, service: string, referer: string): Promise<URL> {
+    const res = await fetch(`${baseUrl}/api/credentials/${service}/connect`, {
+      redirect: "manual",
+      headers: { referer },
+    });
+    expect(res.status).toBe(302);
+    return new URL(res.headers.get("location") ?? "");
+  }
+
+  it("a trusted Referer origin rides the signed state and prefixes the callback redirect", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    // The dev vite origin is always in the auth trustedOrigins allowlist.
+    const authUrl = await startConnectWithReferer(api.baseUrl, "linear", "http://localhost:5173/integrations");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("http://localhost:5173/integrations?connected=linear");
+  });
+
+  it("an untrusted Referer origin is ignored — redirect stays relative (no open redirect)", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const authUrl = await startConnectWithReferer(api.baseUrl, "linear", "https://evil.example/phish");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toBe("/integrations?connected=linear");
+  });
+
+  it("a trusted Referer also prefixes error redirects (denied consent)", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const authUrl = await startConnectWithReferer(api.baseUrl, "linear", "http://localhost:5173/integrations");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    const cb = await fetch(
+      `${api.baseUrl}/api/credentials/oauth/callback?error=access_denied&state=${encodeURIComponent(state)}`,
+      { redirect: "manual" },
+    );
+    expect(cb.headers.get("location")).toBe("http://localhost:5173/integrations?error=access_denied");
+  });
+});
+
 describe("verifyOAuthConnectState", () => {
   const key = Buffer.from("test-key-material-32-bytes-long");
 

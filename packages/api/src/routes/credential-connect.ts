@@ -18,6 +18,7 @@ import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { publicUrlFromEnv } from "../channels/host.js";
+import { loadAuthConfig } from "../auth/config.js";
 import {
   authCodeEnvReady,
   ensureMcpOAuthClient,
@@ -31,6 +32,9 @@ interface OAuthConnectState {
   userId: string;
   service: string;
   codeVerifier?: string;
+  /** Validated web origin to land back on, e.g. "http://localhost:5173".
+   * Empty/absent → relative redirect (prod same-origin serving). */
+  returnTo?: string;
   nonce: string;
   exp: number;
 }
@@ -38,18 +42,52 @@ interface OAuthConnectState {
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, nonce, exp } = payload;
+    const { userId, service, codeVerifier, returnTo, nonce, exp } = payload;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
+    if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (exp < nowMs) return null;
-    return { userId, service, codeVerifier, nonce, exp };
+    return { userId, service, codeVerifier, returnTo, nonce, exp };
   });
 }
 
 function callbackUrl(reqUrl: string): string {
   const base = publicUrlFromEnv(process.env) ?? new URL(reqUrl).origin;
   return `${base.replace(/\/+$/, "")}/api/credentials/oauth/callback`;
+}
+
+/**
+ * The web origin the flow should land back on, or "" for a relative
+ * redirect. In prod the api serves the SPA same-origin so relative is
+ * right; in dev the browser sits on the vite origin (:5173) while this
+ * route runs on the api origin (:8788), so a relative `/integrations`
+ * 404s as JSON (same failure auth-v2 hit with its login callbackURL).
+ * Derived from the Referer origin — but only when that origin is
+ * allowlisted (request origin, configured public URL, or the auth
+ * config's trustedOrigins, which always includes the dev vite origin) so
+ * a crafted connect link can't turn the callback into an open redirect.
+ */
+export function resolveReturnOrigin(reqUrl: string, referer: string | undefined, env: NodeJS.ProcessEnv): string {
+  if (!referer) return "";
+  let refererOrigin: string;
+  try {
+    refererOrigin = new URL(referer).origin;
+  } catch {
+    return "";
+  }
+  const requestOrigin = new URL(reqUrl).origin;
+  if (refererOrigin === requestOrigin) return ""; // same-origin: relative works
+  const allowed = new Set(loadAuthConfig(env)?.trustedOrigins ?? ["http://localhost:5173"]);
+  const publicUrl = publicUrlFromEnv(env);
+  if (publicUrl) {
+    try {
+      allowed.add(new URL(publicUrl).origin);
+    } catch {
+      // ignore unparsable configured URL
+    }
+  }
+  return allowed.has(refererOrigin) ? refererOrigin : "";
 }
 
 credentialConnectRouter.get("/:service/connect", async (c) => {
@@ -62,9 +100,11 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
 
   const redirectUri = callbackUrl(c.req.url);
   const key = deriveSecretKey(encryptionKey);
+  const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
   const base: Omit<OAuthConnectState, "codeVerifier"> = {
     userId: user.id,
     service,
+    ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
     exp: Date.now() + STATE_TTL_MS,
   };
@@ -75,7 +115,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       clientRow = await ensureMcpOAuthClient({ db }, service, found.oauth.serverUrl, redirectUri);
     } catch (err) {
       console.error(`oauth connect: MCP client registration failed for ${service}:`, err);
-      return c.redirect("/integrations?error=oauth_failed", 302);
+      return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
     }
     const { codeVerifier, codeChallenge } = await generatePkceChallenge();
     const state = signState<OAuthConnectState>({ ...base, codeVerifier }, key);
@@ -115,23 +155,25 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   const stateParam = c.req.query("state");
   const verified = stateParam ? verifyOAuthConnectState(stateParam, key, Date.now()) : null;
   if (!verified || verified.userId !== user.id) {
+    // No trusted state → no trusted returnTo; relative is the safe fallback.
     return c.redirect("/integrations?error=oauth_state", 302);
   }
+  const returnTo = verified.returnTo ?? "";
 
   const providerError = c.req.query("error");
   if (providerError) {
-    return c.redirect(`/integrations?error=${encodeURIComponent(providerError)}`, 302);
+    return c.redirect(`${returnTo}/integrations?error=${encodeURIComponent(providerError)}`, 302);
   }
 
   const code = c.req.query("code");
   const found = findOAuthDeclaration(plugins, verified.service);
-  if (!code || !found) return c.redirect("/integrations?error=oauth_failed", 302);
+  if (!code || !found) return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
 
   const redirectUri = callbackUrl(c.req.url);
   let tokens;
   try {
     if (found.oauth.mode === "mcp") {
-      if (!verified.codeVerifier) return c.redirect("/integrations?error=oauth_state", 302);
+      if (!verified.codeVerifier) return c.redirect(`${returnTo}/integrations?error=oauth_state`, 302);
       const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri);
       tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
@@ -150,7 +192,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     }
   } catch (err) {
     console.error(`oauth callback: token exchange failed for ${verified.service}:`, err);
-    return c.redirect("/integrations?error=oauth_failed", 302);
+    return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
   }
 
   const now = Date.now();
@@ -163,5 +205,5 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     metadata: { connectedVia: "oauth" },
   });
 
-  return c.redirect(`/integrations?connected=${encodeURIComponent(verified.service)}`, 302);
+  return c.redirect(`${returnTo}/integrations?connected=${encodeURIComponent(verified.service)}`, 302);
 });
