@@ -1220,6 +1220,13 @@ export class Thread {
       this.credentialError = undefined;
       const releaseFence = this.fence;
       try {
+        // Invariant: credentialError and turnFailed are mutually exclusive —
+        // runItem catches NoCredentialsError internally and returns normally
+        // (it never propagates to the catch that sets turnFailed). The
+        // `!turnFailed` guard is therefore provably redundant today, but
+        // load-bearing if that invariant ever breaks: a turn that BOTH
+        // errored and lacked credentials must settle failed, never enter the
+        // release cycle. Keep the guard.
         if (credentialError !== undefined && !turnFailed && releaseFence) {
           const verdict = await this.attemptCredentialRelease(claimed, releaseFence);
           if (verdict === "released") {
@@ -1238,7 +1245,14 @@ export class Thread {
           }
           if (verdict === "abandon") {
             // A successor attempt owns the item (or it settled): nothing of
-            // ours left to settle.
+            // ours left to settle — but OUR attempt's marker is now stale and
+            // no other path cleans it (the successor only deletes its own on
+            // settle; the refused release CAS is contract-bound to touch no
+            // markers). Delete it here or one row leaks per ownership-loss
+            // cycle for the session's lifetime. A throw lands in the
+            // settlement_failed catch below; the marker then leaks once,
+            // which is the pre-existing transient-failure tradeoff.
+            await store.deleteAttemptMarker(claimed.id, releaseFence.attemptId);
             return;
           }
           if (verdict === "settle-cap") {

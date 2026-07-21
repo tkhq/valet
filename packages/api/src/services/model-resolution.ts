@@ -53,6 +53,11 @@ function isKnownKindNamespace(ns: string): ns is KnownKind {
   return ns === "anthropic" || ns === "openai" || ns === "google";
 }
 
+/** Shared no-key message for the two registry-model credential-throw sites. */
+function noKeyMessage(canonicalId: string): string {
+  return `no usable API key for model "${canonicalId}" — configure an org LLM key or set the provider's API key env var`;
+}
+
 async function orgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<string | undefined> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
@@ -135,12 +140,7 @@ export async function resolveModelSpec(
       const model = registryModelWithCanonicalId(kind, modelId, canonicalId);
       if (!model) return null;
       const apiKey = (await orgKey(credentials, orgId, row.id)) ?? getEnvApiKey(kind);
-      if (apiKey === undefined) {
-        throw new NoCredentialsError(
-          `no usable API key for model "${canonicalId}" — configure an org LLM key or set the provider's API key env var`,
-          model,
-        );
-      }
+      if (apiKey === undefined) throw new NoCredentialsError(noKeyMessage(canonicalId), model);
       return { model, apiKey };
     }
     // Custom (openai_compatible): org key only, no env fallback.
@@ -160,12 +160,7 @@ export async function resolveModelSpec(
     const model = registryModelWithCanonicalId(namespace, modelId, canonicalId);
     if (!model) return null;
     const apiKey = getEnvApiKey(namespace);
-    if (apiKey === undefined) {
-      throw new NoCredentialsError(
-        `no usable API key for model "${canonicalId}" — configure an org LLM key or set the provider's API key env var`,
-        model,
-      );
-    }
+    if (apiKey === undefined) throw new NoCredentialsError(noKeyMessage(canonicalId), model);
     return { model, apiKey };
   }
 
