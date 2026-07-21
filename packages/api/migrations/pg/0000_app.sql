@@ -506,6 +506,18 @@ CREATE TABLE "credentials" (
 	PRIMARY KEY("owner_type", "owner_id", "service")
 );
 --> statement-breakpoint
+CREATE TABLE "mcp_oauth_clients" (
+	"service" text PRIMARY KEY NOT NULL,
+	"client_id" text NOT NULL,
+	"client_secret_enc" text,
+	"authorization_endpoint" text NOT NULL,
+	"token_endpoint" text NOT NULL,
+	"registration_endpoint" text,
+	"metadata" jsonb,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "action_invocations" (
 	"invocation_id" text PRIMARY KEY NOT NULL,
 	"result" jsonb NOT NULL,

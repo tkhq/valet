@@ -1,6 +1,7 @@
 export * from "./types.js";
 export {
   NotFoundError,
+  NoCredentialsError,
   StaleAttemptError,
   ConflictError,
   TimeoutError,
@@ -91,6 +92,7 @@ export {
   validateValetPlugin,
   type ValetPlugin,
   type CredentialDeclaration,
+  type OAuthDeclaration,
   type TriggerDef,
   type VerifiedEvent,
   type NormalizedEvent,

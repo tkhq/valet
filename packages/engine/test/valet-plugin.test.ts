@@ -209,3 +209,101 @@ describe("TriggerDef toEvent/catalog validation", () => {
     }
   });
 });
+
+describe("validateValetPlugin credential.oauth", () => {
+  function manifestWith(credential: Record<string, unknown>): Record<string, unknown> {
+    return { name: "fixture", version: "0.1.0", credentials: [credential] };
+  }
+
+  it("accepts an mcp-mode declaration on an oauth2 credential", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: { mode: "mcp", serverUrl: "https://mcp.example.com/mcp" },
+      }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts an authorization_code-mode declaration with all required fields", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://example.com/authorize",
+          tokenUrl: "https://example.com/token",
+          clientIdEnv: "EXAMPLE_CLIENT_ID",
+          clientSecretEnv: "EXAMPLE_CLIENT_SECRET",
+          extraAuthParams: { access_type: "offline" },
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects oauth on a non-oauth2 credential", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "api_key",
+        configKeys: ["apiKey"],
+        oauth: { mode: "mcp", serverUrl: "https://mcp.example.com/mcp" },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some((i) => i.path === "credentials[0].oauth")).toBe(true);
+    }
+  });
+
+  it("rejects an unknown mode", () => {
+    const result = validateValetPlugin(
+      manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauth: { mode: "implicit" } }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects mcp mode without serverUrl", () => {
+    const result = validateValetPlugin(
+      manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauth: { mode: "mcp" } }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects authorization_code mode missing any of its four required strings", () => {
+    for (const missing of ["authorizationUrl", "tokenUrl", "clientIdEnv", "clientSecretEnv"]) {
+      const oauth: Record<string, unknown> = {
+        mode: "authorization_code",
+        authorizationUrl: "https://example.com/authorize",
+        tokenUrl: "https://example.com/token",
+        clientIdEnv: "X_ID",
+        clientSecretEnv: "X_SECRET",
+      };
+      delete oauth[missing];
+      const result = validateValetPlugin(
+        manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauth }),
+      );
+      expect(result.ok, `expected rejection when ${missing} missing`).toBe(false);
+    }
+  });
+
+  it("rejects non-string extraAuthParams values", () => {
+    const result = validateValetPlugin(
+      manifestWith({
+        type: "oauth2",
+        configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://example.com/authorize",
+          tokenUrl: "https://example.com/token",
+          clientIdEnv: "X_ID",
+          clientSecretEnv: "X_SECRET",
+          extraAuthParams: { prompt: 42 },
+        },
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
+});

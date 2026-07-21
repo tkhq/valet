@@ -771,6 +771,23 @@ export const credentials = pgTable(
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.service] })],
 );
 
+// `mcp_oauth_clients` — one dynamically-registered OAuth client per MCP
+// service, shared across all users (integration-OAuth design,
+// docs/specs/2026-07-20-integration-oauth-design.md). Never deleted on
+// disconnect; if the deployment's public URL changes the registered
+// redirect URI goes stale and the recovery is deleting the row.
+export const mcpOauthClients = pgTable("mcp_oauth_clients", {
+  service: text("service").primaryKey(),
+  clientId: text("client_id").notNull(),
+  clientSecretEnc: text("client_secret_enc"),
+  authorizationEndpoint: text("authorization_endpoint").notNull(),
+  tokenEndpoint: text("token_endpoint").notNull(),
+  registrationEndpoint: text("registration_endpoint"),
+  metadata: jsonb("metadata"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
 // `action_invocations` — durable dedup table for the workflow `tool` node's
 // `invokeAction` seam (plugin-system-v2 plan Task 6). `result` is
 // `JSON.stringify`'d by `plugins/action-invoker.ts` and `JSON.parse`'d back

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import {
@@ -76,6 +76,10 @@ describe("ChannelHost.handleUpdate", () => {
     // unmodified (non-EngineHost) faux usage this mirrors.
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     faux.setResponses([fauxAssistantMessage("ok")]);
+    // The host resolver now throws NoCredentialsError pre-run when no key
+    // exists anywhere (vitest.setup.ts scrubs the real env); the faux stream
+    // ignores the key's value, it just has to exist for the turn to start.
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
 
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
@@ -122,6 +126,7 @@ describe("ChannelHost.handleUpdate", () => {
   afterEach(async () => {
     await engineHost.destroyAll();
     faux.unregister();
+    vi.unstubAllEnvs();
   });
 
   it("unlinked sender: drop log row + one rate-limited reply", async () => {

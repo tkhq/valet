@@ -11,14 +11,28 @@ import { Hono } from "hono";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { ListPluginsResponse, PluginServiceSummary, PluginSummary } from "../wire/types.js";
+import { findOAuthDeclaration, authCodeEnvReady } from "../services/integration-oauth.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
 
 pluginsRouter.get("/", async (c) => {
-  const { plugins, engineCredentials } = c.var.providers;
+  const { plugins, engineCredentials, actionPluginByService, dynamicToolCounts } = c.var.providers;
   const owner: CredentialOwner = { type: "user", id: c.var.user.id };
 
   const connectedServices = new Set((await engineCredentials.list(owner)).map((cred) => cred.service));
+
+  // Connected dynamic services get a live-resolved tool count (TTL-cached,
+  // fail-soft — see plugins/dynamic-tool-count.ts). Resolved up front and
+  // concurrently so a slow MCP server costs one timeout, not one per row.
+  const toolCounts = new Map<string, number>();
+  await Promise.all(
+    [...connectedServices].map(async (service) => {
+      const entry = actionPluginByService.get(service);
+      if (!entry?.actionPlugin.resolveActions) return;
+      const count = await dynamicToolCounts.get(owner, service, entry.actionPlugin);
+      if (count !== undefined) toolCounts.set(service, count);
+    }),
+  );
 
   const summaries: PluginSummary[] = plugins.map((plugin) => {
     const actionPlugins = plugin.actions ?? [];
@@ -33,6 +47,10 @@ pluginsRouter.get("/", async (c) => {
 
     const services: PluginServiceSummary[] = (plugin.credentials ?? []).map((decl) => {
       const service = decl.service ?? plugin.name;
+      const found = findOAuthDeclaration(plugins, service);
+      const oauthReady =
+        found !== null &&
+        (found.oauth.mode === "mcp" || authCodeEnvReady(found.oauth, process.env));
       return {
         service,
         type: decl.type,
@@ -41,6 +59,8 @@ pluginsRouter.get("/", async (c) => {
         configKeys: decl.configKeys,
         connected: connectedServices.has(service),
         dynamic: dynamicServices.has(service) ? true : undefined,
+        connect: oauthReady ? "oauth" : "manual",
+        toolCount: toolCounts.get(service),
       };
     });
 

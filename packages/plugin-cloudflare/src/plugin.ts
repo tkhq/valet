@@ -12,7 +12,13 @@ const plugin: ValetPlugin = {
       defaultRiskLevel: 'medium',
     }),
   ],
-  credentials: [{ type: 'oauth2', configKeys: ['accessToken'] }],
+  credentials: [
+    {
+      type: 'oauth2',
+      configKeys: ['accessToken'],
+      oauth: { mode: 'mcp', serverUrl: 'https://mcp.cloudflare.com/mcp' },
+    },
+  ],
 };
 
 export default plugin;

@@ -592,6 +592,46 @@ export class InMemorySessionStore implements SessionStore {
     return true;
   }
 
+  async releaseSubmission(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+    credential?: { attempts: number; lastReleaseAt: number },
+  ): Promise<boolean> {
+    const r = this.row(sessionId);
+    const item = r.queueItems.get(itemId);
+    if (!item || item.threadId !== threadId) return false;
+    // CAS: only the owning attempt may release, only from `running`, only
+    // when NOT superseded (a superseded item re-queued would be an orphan —
+    // skipped by the claim head) and NOT abort-stamped (an abort landed
+    // mid-window must settle `aborted` under the current attempt, never
+    // flicker running→queued→aborted) — otherwise refuse and report the miss.
+    if (item.status !== "running" || item.attemptId !== fence.attemptId) return false;
+    if (item.supersededByItemId) return false;
+    if (item.abortRequestedAt !== undefined) return false;
+    item.status = "queued";
+    item.attemptId = undefined;
+    item.ownerId = undefined;
+    item.leaseExpiresAt = undefined;
+    if (credential) {
+      // A CREDENTIAL release never consumed run budget: hand the claim's
+      // attempt_count increment back (floor 0), matching the PG CAS. Scoped
+      // to credential cycles only — they are separately bounded by the
+      // durable credential budget. A plain release (reconciliation's fresh
+      // re-run of a crashed pre-stream attempt) keeps the increment so a
+      // deterministically crash-looping item still exhausts the generic
+      // retry budget instead of oscillating net-zero forever.
+      item.attemptCount = Math.max(0, item.attemptCount - 1);
+      // Durable credential budget: written only when the CAS matched.
+      item.credentialAttempts = credential.attempts;
+      item.lastCredentialReleaseAt = credential.lastReleaseAt;
+    }
+    item.updatedAt = Date.now();
+    this.attemptMarkers.delete(`${itemId}:${fence.attemptId}`);
+    return true;
+  }
+
   async setSubmissionBlocked(
     sessionId: string,
     threadId: string,

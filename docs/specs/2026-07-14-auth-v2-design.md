@@ -64,13 +64,13 @@ packages/api/src/auth/
 | `AUTH_OIDC_DOMAIN` | Email domain for the SSO provider registration (the sso plugin requires one; also enables domain-matched sign-in). |
 | `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Optional social provider. |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | Optional social provider. |
-| `AUTH_TRUSTED_ORIGINS` | Comma-separated extra origins (dev default adds `http://localhost:5173` for the Vite proxy). |
+| `AUTH_TRUSTED_ORIGINS` | Comma-separated extra origins (dev default adds `http://localhost:5173` for the Vite proxy). When OIDC is enabled, MUST include the issuer's origin — the sso plugin rejects discovery URLs outside `trustedOrigins` (`discovery_untrusted_origin`, sign-in 400s). |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Optional comma-separated domains admitted without an invite (decision 5). |
 | `VALET_SANDBOX_JWT_MASTER` | Optional master secret for per-session service-JWT derivation; falls back to `BETTER_AUTH_SECRET`. |
 
 Keycloak is configured via the sso plugin's **`defaultSSO` option** (config-only, idempotent, takes precedence over DB rows — no `sso_provider` seeding, no `registerSSOProvider` call, which requires a session and is non-idempotent). Set `trustEmailVerified: true` on the plugin: we trust the enterprise IdP's `email_verified` claim.
 
-Keycloak client config gets redirect URI `{BETTER_AUTH_URL}/api/auth/sso/callback/oidc`; social providers use `{BETTER_AUTH_URL}/api/auth/callback/{google|github}`. Google is configured with `accessType: "offline"` + `prompt: "select_account consent"` so a refresh token is captured.
+Keycloak client config gets redirect URI `{BETTER_AUTH_URL}/api/auth/sso/callback/oidc`; social providers use `{BETTER_AUTH_URL}/api/auth/callback/{google|github}`. Google is configured with `accessType: "offline"` + `prompt: "select_account consent"` so a refresh token is captured. better-auth requests the `offline_access` scope on SSO sign-in, so Keycloak users need the `offline_access` realm role (default in stock realms; explicit in imported ones) or the token exchange fails with `not_allowed`. A local Keycloak harness for this flow ships in `docker-compose.yml` (`make dev-keycloak`, realm import at `docker/keycloak/valet-realm.json`).
 
 Rate limiting: better-auth's built-in limiter (enabled in production; `/sign-in/email` 3 req/10s built-in rule). In-memory storage is acceptable — the api is a single Node process.
 
@@ -180,3 +180,4 @@ Two credentials, one file, both independent of better-auth:
 - The full Valet MCP tool surface (own design pass; this pass proves the OAuth plumbing with two tools).
 - The in-sandbox auth gateway itself (v1's :9000 proxy) and any in-sandbox services consuming the service JWTs — this pass ships the tested token/JWT contract only.
 - Multi-org.
+- Per-service integration OAuth connect flows (Linear, Notion, Google APIs, etc. beyond the login-doubles-as-connect hook above) — specified in `2026-07-20-integration-oauth-design.md`.

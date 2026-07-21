@@ -7,9 +7,10 @@
  * token-entry reveal is the page's one contained element, mirroring the
  * enable-organizations card's invitation treatment.
  *
- * Manual token entry only — OAuth flows land with the auth design pass.
- * The submit action is named "Connect" end to end (button → form submit),
- * never "Save": the action keeps one name through the whole flow.
+ * OAuth connect for services declaring `oauth` metadata; manual token entry
+ * remains the fallback. The submit action is named "Connect" end to end
+ * (button → form submit), never "Save": the action keeps one name through
+ * the whole flow.
  */
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
@@ -34,6 +35,13 @@ function reachMeta(plugin: PluginSummary): string | null {
     return `${plugin.actionCount} tool${plugin.actionCount === 1 ? "" : "s"}`;
   }
   if (plugin.dynamic) {
+    // Connected dynamic services report a live-resolved count (`toolCount`,
+    // TTL-cached server-side); before connecting — or when resolution timed
+    // out — fall back to the static copy.
+    const resolved = plugin.services.find((s) => s.toolCount !== undefined)?.toolCount;
+    if (resolved !== undefined) {
+      return `${resolved} tool${resolved === 1 ? "" : "s"}`;
+    }
     return plugin.services.length === 0 ? "no key needed" : "tools load on connect";
   }
   return null;
@@ -139,6 +147,10 @@ function ServiceBlock({
         {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
       </Button>
     </span>
+  ) : service.connect === "oauth" ? (
+    <Button size="sm" asChild>
+      <a href={`/api/credentials/${encodeURIComponent(service.service)}/connect`}>Connect</a>
+    </Button>
   ) : (
     <Button size="sm" onClick={() => setRevealed((r) => !r)}>
       Connect
@@ -148,6 +160,15 @@ function ServiceBlock({
   return (
     <>
       <RowHeading title={title} description={description} meta={meta} right={right} />
+      {!service.connected && service.connect === "oauth" && (
+        <button
+          type="button"
+          className="mt-1 text-xs text-muted underline-offset-2 hover:underline"
+          onClick={() => setRevealed((r) => !r)}
+        >
+          Enter token manually
+        </button>
+      )}
       {revealed && !service.connected && (
         <ConnectForm service={service} onClose={() => setRevealed(false)} />
       )}

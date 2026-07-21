@@ -1,7 +1,10 @@
 /**
- * `/api/credentials` — manual token entry for the connect UI
- * (plugin-system-v2 plan Task 15; OAuth flows are deliberately out of scope
- * this phase). Owner defaults to the authenticated caller's `user:{id}`
+ * `/api/credentials` — manual token entry + connection summary for the
+ * connect UI (plugin-system-v2 plan Task 15). OAuth connect/callback lives
+ * in `routes/credential-connect.ts` (integration-oauth design); this file
+ * remains the manual-entry and summary surface for every service,
+ * including oauth2-typed credentials once connected. Owner defaults to the
+ * authenticated caller's `user:{id}`
  * scope — same `CredentialOwner` shape `plugins/action-invoker.ts` and the
  * engine's `Session.credentialProvider` read at call time. `PUT`'s optional
  * `scope: "org"` body field (and `GET`/`DELETE`'s `?scope=org` query param)

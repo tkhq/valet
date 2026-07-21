@@ -69,14 +69,12 @@ describe("POST /threads/:threadId/abort", () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
-  // KNOWN-FAILING (quarantined, tracked separately): the engine's queued-item
-  // abort path settles a still-queued submission as `failed` instead of
-  // `aborted` (and, below, a cross-thread abort settles the wrong thread's
-  // item). This is a deterministic @valet/engine `Thread` settlement race that
-  // predates the single-binary/native-binary work; `.skip`ed so CI is green
-  // while the engine fix is owned separately. Un-skip when the engine abort
-  // settlement is corrected.
-  it.skip("settles a still-queued submission aborted (store-level, no LLM call)", async () => {
+  // Exercises the engine's queued-item abort path: with no ANTHROPIC_API_KEY the
+  // host resolver yields no usable key, so the claim loop releases the turn back
+  // to `queued` (never burning it `failed` on a keyless model call) and the
+  // abort settles the still-queued submission `aborted`. See
+  // `Thread.releaseSubmission`/`turnLackedCredentials` in packages/engine.
+  it("settles a still-queued submission aborted (store-level, no LLM call)", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
 
@@ -103,8 +101,9 @@ describe("POST /threads/:threadId/abort", () => {
     expect(result.outcome).toBe("aborted");
   });
 
-  // KNOWN-FAILING (quarantined) — see the note on the test above.
-  it.skip("does not abort a different thread's queued submission", async () => {
+  // Aborting an idle sibling thread must not touch this thread's queued (again,
+  // released-to-queued for want of credentials) submission — see above.
+  it("does not abort a different thread's queued submission", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
 
@@ -125,6 +124,12 @@ describe("POST /threads/:threadId/abort", () => {
     const threadB = engineSession.threadById(threadBSummary.id);
     expect(threadB).not.toBeNull();
 
+    // Pause A first: without this, the session's 5s sweep can drive A's
+    // keyless item through its bounded credential-release cycles DURING the
+    // abort HTTP round-trip and settle it `failed` before the read below —
+    // a racy false negative. Paused, A's item durably stays `queued`, which
+    // keeps the strong not-settled assertion sound.
+    await threadA.pause();
     const receiptA = await threadA.submitPrompt("say hello on A", {});
 
     // Abort thread B — a different, idle thread — should not touch A's
@@ -136,6 +141,9 @@ describe("POST /threads/:threadId/abort", () => {
 
     const item = await api.providers.engineStore.getQueueItem(sessionId, receiptA.queueItemId);
     expect(item?.status).not.toBe("settled");
+    // The cross-thread pin proper: B's abort must not even STAMP A's item
+    // (a stamped-but-unsettled item would still abort on its next cycle).
+    expect(item?.abortRequestedAt).toBeUndefined();
 
     // Clean up: abort A directly so the test doesn't leave a dangling
     // claim loop racing the store teardown.

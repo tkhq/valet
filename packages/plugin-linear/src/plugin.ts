@@ -14,7 +14,13 @@ const plugin: ValetPlugin = {
     }),
   ],
   triggers: linearTriggerDefs,
-  credentials: [{ type: 'oauth2', configKeys: ['accessToken'] }],
+  credentials: [
+    {
+      type: 'oauth2',
+      configKeys: ['accessToken'],
+      oauth: { mode: 'mcp', serverUrl: 'https://mcp.linear.app/mcp' },
+    },
+  ],
 };
 
 export default plugin;

@@ -15,5 +15,22 @@ services:
       - ./workspaces:/workspace
     restart: unless-stopped
 
+  # Local Keycloak for testing the auth-v2 OIDC/SSO path (make dev-keycloak).
+  # Imports the `valet` realm (client `valet` / secret `valet-dev-secret`,
+  # users alice@valet.test + bob@valet.test, password `password`).
+  # Admin console: http://localhost:8081 (admin / admin).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./docker/keycloak:/opt/keycloak/data/import:ro
+    profiles:
+      - keycloak
+
   # Note: Worker runs via wrangler dev locally, not in Docker
   # This is because wrangler needs local D1/R2 emulation

@@ -78,6 +78,7 @@ describe("GET /api/plugins", () => {
         connectLabel: "Fixture API key",
         connected: false,
         dynamic: true,
+        connect: "manual",
       },
     ]);
 
@@ -134,5 +135,116 @@ describe("GET /api/plugins", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+});
+
+describe("GET /api/plugins connect mode", () => {
+  it("reports oauth for mcp-mode declarations and manual otherwise", async () => {
+    const plugins: ValetPlugin[] = [
+      {
+        name: "linear", version: "0.1.0",
+        credentials: [{ type: "oauth2", configKeys: ["accessToken"], oauth: { mode: "mcp", serverUrl: "https://mcp.linear.app/mcp" } }],
+      },
+      { name: "slack", version: "0.1.0", credentials: [{ type: "bot_token", configKeys: ["accessToken"] }] },
+    ];
+    api = await bootTestApi({ plugins });
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
+    const linear = summaries.find((p) => p.name === "linear")?.services[0];
+    const slack = summaries.find((p) => p.name === "slack")?.services[0];
+    expect(linear?.connect).toBe("oauth");
+    expect(slack?.connect).toBe("manual");
+  });
+
+  it("reports manual for authorization_code declarations whose env vars are unset", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "gmail", version: "0.1.0",
+      credentials: [{
+        type: "oauth2", configKeys: ["accessToken"],
+        oauth: {
+          mode: "authorization_code",
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+          tokenUrl: "https://oauth2.googleapis.com/token",
+          clientIdEnv: "UNSET_TEST_ID", clientSecretEnv: "UNSET_TEST_SECRET",
+        },
+      }],
+    }];
+    api = await bootTestApi({ plugins });
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins: summaries } = (await res.json()) as ListPluginsResponse;
+    expect(summaries.find((p) => p.name === "gmail")?.services[0]?.connect).toBe("manual");
+  });
+});
+
+describe("GET /api/plugins toolCount (connected dynamic services)", () => {
+  function dynamicPlugin(resolveCalls: { count: number }): ValetPlugin {
+    return {
+      name: "dyn",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "dyn",
+          actions: [],
+          resolveActions: async () => {
+            resolveCalls.count += 1;
+            return [pingAction("dyn.a"), pingAction("dyn.b"), pingAction("dyn.c")];
+          },
+        },
+      ],
+      credentials: [{ service: "dyn", type: "api_key", configKeys: ["apiKey"] }],
+    };
+  }
+
+  it("reports the resolved count once connected, and never resolves while disconnected", async () => {
+    const resolveCalls = { count: 0 };
+    api = await bootTestApi({ plugins: [dynamicPlugin(resolveCalls)] });
+
+    const before = await fetch(`${api.baseUrl}/api/plugins`);
+    const beforeBody = (await before.json()) as ListPluginsResponse;
+    expect(beforeBody.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
+    expect(resolveCalls.count).toBe(0);
+
+    await fetch(`${api.baseUrl}/api/credentials/dyn`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    const after = await fetch(`${api.baseUrl}/api/plugins`);
+    const afterBody = (await after.json()) as ListPluginsResponse;
+    expect(afterBody.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBe(3);
+    expect(resolveCalls.count).toBe(1);
+
+    // TTL cache: a second listing serves the cached count without re-resolving.
+    await fetch(`${api.baseUrl}/api/plugins`);
+    expect(resolveCalls.count).toBe(1);
+  });
+
+  it("fails soft to no toolCount when resolveActions rejects", async () => {
+    const plugin: ValetPlugin = {
+      name: "dyn",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "dyn",
+          actions: [],
+          resolveActions: async () => {
+            throw new Error("mcp unreachable");
+          },
+        },
+      ],
+      credentials: [{ service: "dyn", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+    await fetch(`${api.baseUrl}/api/credentials/dyn`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListPluginsResponse;
+    expect(body.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
   });
 });

@@ -137,6 +137,19 @@ export interface QueueItem {
   attemptId?: string;
   attemptCount: number; // starts 0; claim/replace set+increment
   maxAttempts: number; // default 10
+  /**
+   * DURABLE credential-release budget: counted keyless release cycles
+   * (bounded by the engine's MAX_CREDENTIAL_ATTEMPTS). Written by
+   * `releaseSubmission` when the caller passes counters; survives restart so
+   * a keyless session in a crash-loop still fails boundedly instead of
+   * cycling queued→running→queued forever. Absent ≡ 0.
+   */
+  credentialAttempts?: number;
+  /**
+   * Time (ms) of the last COUNTED credential-release cycle — releases within
+   * the backoff window of it coalesce into the same cycle (no increment).
+   */
+  lastCredentialReleaseAt?: number;
   timeoutAt: number; // default createdAt + 3_600_000
   abortRequestedAt?: number;
   ownerId?: string;
@@ -1015,6 +1028,44 @@ export interface SessionStore {
     outcome: SubmissionOutcome,
     opts?: { mergedIntoItemId?: string },
   ): Promise<boolean>;
+  /**
+   * Fenced release of a claimed turn back to `queued` (attempt cleared, lease
+   * dropped) without settling it — for a turn that could not run at all (e.g.
+   * the host resolver yielded no usable model credentials). The submission stays
+   * claimable and abortable. CAS-guarded on `status = 'running'` + the caller's
+   * attempt id + `supersededByItemId` unset + `abortRequestedAt` unset: a
+   * superseding attempt's later release is a no-op; a superseded item is
+   * REFUSED (releasing it to `queued` would orphan it — superseded items are
+   * skipped by the claim head and by unsettledHead, so nothing would ever
+   * settle it); an abort-stamped item is REFUSED (it must settle `aborted`
+   * under the current attempt, never flicker running→queued→aborted).
+   * Returns whether the CAS matched (true = released + marker deleted;
+   * false = full no-op, no state change, no markers touched).
+   *
+   * A matched CREDENTIAL release (payload present) DECREMENTS `attemptCount`
+   * (floor 0) in the same atomic write: a keyless release cycle never
+   * consumed run budget, so it can neither trip the stuck-head signal nor
+   * exhaust the generic retry budget (`maxAttempts`) — those cycles are
+   * separately bounded by the durable credential budget. A PLAIN release
+   * (no payload — reconciliation's fresh re-run of a crashed pre-stream
+   * attempt) keeps the claim's increment, so a deterministically
+   * crash-looping item still exhausts `maxAttempts` instead of oscillating
+   * net-zero forever. `replaceSubmissionAttempt` increments are unaffected.
+   *
+   * `credential`, when present, atomically persists the durable
+   * credential-release budget (`credentialAttempts` +
+   * `lastCredentialReleaseAt`) in the same CAS transaction — the engine
+   * computes the counters and the store writes them only when the CAS
+   * matches. Omitted (e.g. a reconciliation re-queue that is not a
+   * credential cycle) the columns are left untouched.
+   */
+  releaseSubmission(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+    credential?: { attempts: number; lastReleaseAt: number },
+  ): Promise<boolean>;
   /** Fenced: running↔blocked_on_decision_gate transitions for the claimed turn. */
   setSubmissionBlocked(
     sessionId: string,
@@ -1110,6 +1161,14 @@ export interface CreateSessionOptions {
    *    takes effect on the next turn;
    *  - the Agent's `getApiKey` returns that per-turn key so pi-agent-core
    *    stamps `StreamOptions.apiKey` (an `undefined` key preserves env fallback).
+   *
+   * Credential contract: the resolver throws `NoCredentialsError` when the
+   * spec resolves to a REAL model but no API key is available anywhere (org
+   * key absent AND env fallback absent). The engine detects this at turn
+   * start, before any side-effecting work, and releases the claim back to
+   * `queued` for a bounded number of attempts. `{ model, apiKey: undefined }`
+   * remains legal and means "engine/pi-ai env fallback will work" — the
+   * engine infers nothing from an undefined key.
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   /**
@@ -1157,6 +1216,15 @@ export interface CreateSessionOptions {
   signalHopBudget?: number;
   /** Max unsettled, non-superseded submissions a single thread may hold. Default MAX_PENDING_PER_THREAD (20). */
   maxPendingPerThread?: number;
+  /**
+   * Minimum spacing (ms) between COUNTED credential-release cycles for a
+   * keyless submission: releases landing inside the window still release but
+   * do not advance the bounded credential-attempt budget (external kicks fire
+   * on every submit/resume/abort; a burst must not burn the budget in
+   * milliseconds). Default CREDENTIAL_RELEASE_BACKOFF_MS (4000, just under
+   * the 5s sweep). Tests pass 0 to make every release cycle count.
+   */
+  credentialReleaseBackoffMs?: number;
   /**
    * Ordered fragments assembled into the agent's system prompt once at
    * construction (Phase 4 decision 6): `base systemPrompt + "\n\n" +
