@@ -74,6 +74,14 @@ jobs:
       - name: Generate plugin registries
         run: make generate-registries
 
+      # A fresh checkout has no workspace dist/ outputs. Root `pnpm
+      # typecheck` is `tsc --build` over the project-reference graph — the
+      # only command that emits them in dependency order (per-package plain
+      # `tsc` can't: it doesn't build referenced projects). The web SPA
+      # typecheck and the server bundle resolve against these dist/ outputs.
+      - name: Build workspace packages (tsc --build)
+        run: pnpm typecheck
+
       - name: Build web SPA
         run: pnpm --filter @valet/web build
 
