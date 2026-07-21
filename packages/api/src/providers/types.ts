@@ -10,6 +10,7 @@ import type {
 import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { PrebuildService } from "../prebuilds/service.js";
+import type { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
@@ -60,4 +61,8 @@ export interface Providers {
   // node_modules scan (or a test override), deduped and service-indexed.
   plugins: ValetPlugin[];
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+
+  /** TTL-cached resolved tool counts for connected dynamic services
+   * (`/api/plugins`'s `toolCount` field — see `plugins/dynamic-tool-count.ts`). */
+  dynamicToolCounts: DynamicToolCounts;
 }

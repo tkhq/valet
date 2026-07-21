@@ -35,6 +35,13 @@ function reachMeta(plugin: PluginSummary): string | null {
     return `${plugin.actionCount} tool${plugin.actionCount === 1 ? "" : "s"}`;
   }
   if (plugin.dynamic) {
+    // Connected dynamic services report a live-resolved count (`toolCount`,
+    // TTL-cached server-side); before connecting — or when resolution timed
+    // out — fall back to the static copy.
+    const resolved = plugin.services.find((s) => s.toolCount !== undefined)?.toolCount;
+    if (resolved !== undefined) {
+      return `${resolved} tool${resolved === 1 ? "" : "s"}`;
+    }
     return plugin.services.length === 0 ? "no key needed" : "tools load on connect";
   }
   return null;

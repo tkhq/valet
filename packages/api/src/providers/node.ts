@@ -15,6 +15,7 @@ import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
@@ -342,6 +343,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowRunHost,
     plugins,
     actionPluginByService,
+    dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,
   };
 }

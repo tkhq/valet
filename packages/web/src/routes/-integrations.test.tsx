@@ -244,3 +244,57 @@ describe("IntegrationsPage", () => {
     expect(screen.getByText(/access_denied/)).toBeTruthy();
   });
 });
+
+describe("connected dynamic service tool count", () => {
+  it("shows the resolved toolCount instead of 'tools load on connect' once connected", () => {
+    currentPluginsData = {
+      plugins: [
+        {
+          name: "linear",
+          version: "0.1.0",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [
+            {
+              service: "linear",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: true,
+              dynamic: true as const,
+              connect: "oauth" as const,
+              toolCount: 52,
+            },
+          ],
+        },
+      ],
+    };
+    render(<IntegrationsPage />);
+    expect(screen.getByText("52 tools")).toBeTruthy();
+    expect(screen.queryByText("tools load on connect")).toBeNull();
+  });
+
+  it("keeps the static label when connected but toolCount is absent (resolution failed)", () => {
+    currentPluginsData = {
+      plugins: [
+        {
+          name: "linear",
+          version: "0.1.0",
+          actionCount: 0,
+          dynamic: true as const,
+          services: [
+            {
+              service: "linear",
+              type: "oauth2" as const,
+              configKeys: ["accessToken"],
+              connected: true,
+              dynamic: true as const,
+              connect: "oauth" as const,
+            },
+          ],
+        },
+      ],
+    };
+    render(<IntegrationsPage />);
+    expect(screen.getByText("tools load on connect")).toBeTruthy();
+  });
+});

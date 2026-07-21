@@ -773,6 +773,10 @@ export interface PluginServiceSummary {
   /** Set (to `true`) only when an `ActionPlugin` for this service declares
    * `resolveActions` — the plugin's action list isn't fully known statically. */
   dynamic?: true;
+  /** For CONNECTED dynamic services only: the tool count resolved live from
+   * the service (TTL-cached server-side). Absent while disconnected, and on
+   * resolution timeout/failure — the UI falls back to its static copy. */
+  toolCount?: number;
   /** How the connect UI obtains this credential: "oauth" renders a Connect
    * redirect button; "manual" renders token entry. authorization_code-mode
    * declarations report "manual" when their client env vars are unset so

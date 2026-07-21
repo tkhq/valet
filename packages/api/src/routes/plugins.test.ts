@@ -175,3 +175,76 @@ describe("GET /api/plugins connect mode", () => {
     expect(summaries.find((p) => p.name === "gmail")?.services[0]?.connect).toBe("manual");
   });
 });
+
+describe("GET /api/plugins toolCount (connected dynamic services)", () => {
+  function dynamicPlugin(resolveCalls: { count: number }): ValetPlugin {
+    return {
+      name: "dyn",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "dyn",
+          actions: [],
+          resolveActions: async () => {
+            resolveCalls.count += 1;
+            return [pingAction("dyn.a"), pingAction("dyn.b"), pingAction("dyn.c")];
+          },
+        },
+      ],
+      credentials: [{ service: "dyn", type: "api_key", configKeys: ["apiKey"] }],
+    };
+  }
+
+  it("reports the resolved count once connected, and never resolves while disconnected", async () => {
+    const resolveCalls = { count: 0 };
+    api = await bootTestApi({ plugins: [dynamicPlugin(resolveCalls)] });
+
+    const before = await fetch(`${api.baseUrl}/api/plugins`);
+    const beforeBody = (await before.json()) as ListPluginsResponse;
+    expect(beforeBody.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
+    expect(resolveCalls.count).toBe(0);
+
+    await fetch(`${api.baseUrl}/api/credentials/dyn`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    const after = await fetch(`${api.baseUrl}/api/plugins`);
+    const afterBody = (await after.json()) as ListPluginsResponse;
+    expect(afterBody.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBe(3);
+    expect(resolveCalls.count).toBe(1);
+
+    // TTL cache: a second listing serves the cached count without re-resolving.
+    await fetch(`${api.baseUrl}/api/plugins`);
+    expect(resolveCalls.count).toBe(1);
+  });
+
+  it("fails soft to no toolCount when resolveActions rejects", async () => {
+    const plugin: ValetPlugin = {
+      name: "dyn",
+      version: "0.1.0",
+      actions: [
+        {
+          service: "dyn",
+          actions: [],
+          resolveActions: async () => {
+            throw new Error("mcp unreachable");
+          },
+        },
+      ],
+      credentials: [{ service: "dyn", type: "api_key", configKeys: ["apiKey"] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+    await fetch(`${api.baseUrl}/api/credentials/dyn`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListPluginsResponse;
+    expect(body.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
+  });
+});
