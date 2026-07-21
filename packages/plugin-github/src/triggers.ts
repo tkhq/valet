@@ -129,6 +129,10 @@ const COMMON_FILTERS: EventCatalogEntry["filters"] = [
 ];
 
 function catalogFor(eventType: string): EventCatalogEntry[] {
+  // ping is the webhook-setup handshake, not a subscribable event; its payload
+  // has no `repository` so the repo filter would be non-functional anyway.
+  if (eventType === "ping") return [];
+
   const actions = EVENT_ACTIONS[eventType];
   if (!actions) {
     return [{ key: `github.${eventType}`, description: `GitHub ${eventType} event`, filters: COMMON_FILTERS }];

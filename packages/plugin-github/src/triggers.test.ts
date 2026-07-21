@@ -154,8 +154,11 @@ describe("github toEvent", () => {
     expect(event.key).toBe("github.push");
   });
 
-  it("declares a catalog with repo filter on every def", () => {
-    for (const def of githubTriggerDefs) {
+  it("declares a catalog with repo filter on every def (except ping)", () => {
+    const pingDef = githubTriggerDefs.find((t) => t.id === "github.ping")!;
+    expect(pingDef.catalog).toHaveLength(0);
+
+    for (const def of githubTriggerDefs.filter((t) => t.id !== "github.ping")) {
       expect(def.catalog.length).toBeGreaterThan(0);
       expect(def.catalog[0].filters.some((f) => f.field === "repo")).toBe(true);
     }
