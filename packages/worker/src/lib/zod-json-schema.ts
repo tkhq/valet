@@ -23,6 +23,7 @@ interface ZodLike {
     description?: string;
     shape?: () => Record<string, ZodLike>;
     innerType?: ZodLike;
+    schema?: ZodLike;
     defaultValue?: unknown;
     type?: ZodLike;
     values?: readonly string[];
@@ -120,6 +121,12 @@ function convert(node: ZodLike): Record<string, unknown> {
     case 'ZodDefault':
     case 'ZodNullable': {
       const inner = node._def?.innerType;
+      return inner ? convert(inner) : base;
+    }
+
+    case 'ZodEffects': {
+      // `.refine()` wraps the schema it validates; describe the inner schema.
+      const inner = node._def?.schema;
       return inner ? convert(inner) : base;
     }
 

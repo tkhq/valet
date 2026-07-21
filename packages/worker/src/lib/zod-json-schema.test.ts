@@ -114,6 +114,19 @@ describe('zodToJsonSchema', () => {
     expect((zodToJsonSchema(schema) as { required: string[] }).required).toEqual(['cursor']);
   });
 
+  it('sees through a refined object to its properties', () => {
+    const schema = z
+      .object({ event: z.enum(['APPROVE', 'COMMENT']).optional(), body: z.string().optional() })
+      .refine((v) => v.event !== 'COMMENT' || !!v.body, { path: ['body'] });
+    expect(zodToJsonSchema(schema)).toEqual({
+      type: 'object',
+      properties: {
+        event: { type: 'string', enum: ['APPROVE', 'COMMENT'] },
+        body: { type: 'string' },
+      },
+    });
+  });
+
   it('falls through to {} on unknown constructs without throwing', () => {
     const exotic = z.lazy(() => z.string());
     expect(zodToJsonSchema(z.object({ x: exotic }))).toEqual({

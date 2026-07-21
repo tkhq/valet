@@ -109,8 +109,12 @@ export function zodTypeToString(inner: any): string {
 export function serializeZodSchema(schema: unknown): Record<string, { type: string; required: boolean; description?: string }> {
   const result: Record<string, { type: string; required: boolean; description?: string }> = {};
 
+  // Unwrap ZodEffects (`.refine()`) to reach the object it validates.
+  let root: any = schema;
+  while (root?._def?.typeName === 'ZodEffects') root = root._def.schema;
+
   // Walk ZodObject .shape
-  const shape = (schema as any)?._def?.shape?.();
+  const shape = root?._def?.shape?.();
   if (!shape || typeof shape !== 'object') return result;
 
   for (const [key, fieldSchema] of Object.entries(shape)) {
