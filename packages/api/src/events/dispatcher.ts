@@ -12,10 +12,17 @@
  * its locks at statement end (autocommit), so it wouldn't fence anything
  * here — and this codebase's established row-claim pattern is a
  * single-statement CAS (`pg-store.ts` `claimRun`). The claim below is one
- * atomic `UPDATE ... WHERE id IN (<due subquery>) RETURNING id` that
- * pushes `next_attempt_at` forward by a lease, so a concurrent poll no
- * longer sees the rows as due. A crash mid-delivery leaves the row
- * pending; it becomes due again when the lease lapses.
+ * atomic `UPDATE ... RETURNING id` whose OUTER `WHERE` repeats the due
+ * conditions (status + `next_attempt_at <= now`); the `id IN (<subquery>)`
+ * part only provides ordering/LIMIT. That outer qual is the cross-process
+ * fence: under READ COMMITTED, when two connections race, the loser's
+ * EvalPlanQual recheck re-evaluates the outer predicate against the
+ * winner's committed row — where `next_attempt_at` has already been
+ * pushed forward by the lease — so the recheck fails and the loser skips
+ * the row. (Fencing only via the `IN (subquery)` would NOT work: EPQ
+ * rechecks the subquery against its original snapshot, so both sides
+ * would claim the row.) A crash mid-delivery leaves the row pending; it
+ * becomes due again when the lease lapses.
  */
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
@@ -86,6 +93,9 @@ export class EventDispatcher {
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
       // next_attempt_at forward in the same statement that selects them.
+      // The due conditions are repeated on the OUTER update — that's the
+      // cross-process fence (a raced loser's EPQ recheck fails once the
+      // winner bumps next_attempt_at); the subquery only orders and limits.
       const due = this.deps.db
         .select({ id: eventDeliveries.id })
         .from(eventDeliveries)
@@ -95,7 +105,13 @@ export class EventDispatcher {
       const claimed = await this.deps.db
         .update(eventDeliveries)
         .set({ nextAttemptAt: now + CLAIM_LEASE_MS })
-        .where(inArray(eventDeliveries.id, due))
+        .where(
+          and(
+            inArray(eventDeliveries.id, due),
+            inArray(eventDeliveries.status, ["pending", "failed"]),
+            lte(eventDeliveries.nextAttemptAt, now),
+          ),
+        )
         .returning({ id: eventDeliveries.id });
 
       for (const row of claimed) {
