@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-20
 **Branch:** dev-v2
-**Status:** Approved design, pre-implementation
+**Status:** Implemented on dev-v2 (branch docs/event-system-design)
 
 ## Goal
 
@@ -11,7 +11,7 @@ durable events, pre-configured by app installation (no per-event setup). Users
 subscribe to events via triggers that can start workflows, prompt orchestrators,
 signal waiting workflow runs, or be browsed in an API/UI feed.
 
-## What exists today (dev-v2)
+## What existed before this work (dev-v2)
 
 - **`TriggerDef` contract** (`packages/engine/src/valet-plugin.ts:37`):
   `verify()` over raw request bytes + `toSignal()`. Defined but not consumed by
@@ -37,7 +37,7 @@ The core of this project is building the **host side** of the existing
 GitHub App webhook ─┐
 Linear webhook ─────┤→ Ingest (verify sig → resolve org → normalize) → events table
 future plugins ─────┘                                                       │
-                                                   Dispatcher (PG-polled + LISTEN/NOTIFY)
+                                            Dispatcher (1s poll + in-process ingest nudge)
                                                                             │
                                               match against event_subscriptions
                                                                             │
@@ -56,7 +56,7 @@ Decisions (locked in during brainstorming):
 - **Source contract:** plugin-level (`TriggerDef` evolution) — GitHub and
   Linear are the first two implementations; future sources plug in without
   touching core.
-- **Delivery semantics:** persist first, return 200 fast, dispatch async with
+- **Delivery semantics:** persist first, return 204 fast, dispatch async with
   retries and per-delivery status.
 
 ## Plugin contract evolution
@@ -71,8 +71,8 @@ interface TriggerDef {
   description: string;
   verify(req: { headers: Record<string, string>; rawBody: Uint8Array },
          secrets: Record<string, string>): VerifiedEvent | null | Promise<VerifiedEvent | null>;
-  toEvent(event: VerifiedEvent): NormalizedEvent;    // NEW — generalizes toSignal
-  catalog: EventCatalogEntry[];                      // NEW — subscribable keys + filter fields
+  toEvent(event: VerifiedEvent): NormalizedEvent;    // replaces toSignal
+  catalog: EventCatalogEntry[];                      // subscribable keys + filter fields
 }
 
 interface NormalizedEvent {
@@ -93,9 +93,10 @@ interface EventCatalogEntry {
 }
 ```
 
-`toSignal` is subsumed: orchestrator delivery synthesizes `SignalContent`
-generically from `key` + `summary` + `refs`. The catalog powers the
-subscription-builder UI and filter validation.
+`toSignal` was removed from the contract (it was never consumed by
+`packages/api`): orchestrator delivery synthesizes `SignalContent` generically
+from `key` + `summary` + `refs`. The catalog powers the subscription-builder
+UI and filter validation.
 
 ## Data model
 
@@ -117,7 +118,8 @@ Three new tables plus a Linear installation mapping (Drizzle schema in
 | `payload` | jsonb (raw provider payload) |
 | `occurred_at`, `received_at` | timestamps |
 
-Pruned by a retention job (default 30 days).
+A retention job (default 30 days) is a deferred follow-up; nothing prunes
+`events` yet.
 
 ### `event_subscriptions`
 
@@ -147,8 +149,10 @@ serves everything.
 
 ### `linear_installations`
 
-`org_id, workspace_id, workspace_name, webhook_id, webhook_secret_enc,
-connected_by, timestamps` — mirrors `github_installations`.
+`org_id, workspace_id, workspace_name, webhook_id, connected_by, timestamps` —
+mirrors `github_installations`. The webhook signing secret is NOT a column
+here: it lives in the org `linear` credential's `metadata.webhookSecret`,
+the same way GitHub's `webhookSecret` lives in the `github_app` credential.
 
 ## Ingest
 
@@ -160,10 +164,10 @@ Public route `POST /webhooks/events/:service`, mounted pre-auth (like
    `organizationId` from body → `linear_installations`; GitHub —
    `installation.id` → `github_installations`. Then run the plugin's
    `verify()` with that org's secret over the raw bytes.
-3. `toEvent()` → insert into `events`. Duplicate `dedupe_key` → 200 no-op.
+3. `toEvent()` → insert into `events`. Duplicate `dedupe_key` → 204 no-op.
 4. In the same transaction, match active subscriptions (indexed `org_id` +
    event-key match, filters evaluated in memory) and insert `event_deliveries`
-   rows. `NOTIFY event_deliveries`; return 200.
+   rows. Nudge the in-process dispatcher (`dispatcher.nudge()`); return 204.
 
 Matching inside the ingest transaction means an accepted event either has its
 delivery rows or doesn't exist — no persisted-but-never-matched window. Actual
@@ -172,17 +176,30 @@ delivery stays async.
 **GitHub routing:** the existing `/webhooks/github-app` route keeps handling
 `installation*` events (installations sync); all other event types it receives
 are forwarded into the event pipeline. One GitHub webhook URL, two concerns.
-The App manifest must also declare `default_events` (issues, pull_request,
-push, issue_comment, release, …) so installations actually deliver them;
-existing installs need a one-time re-config note.
+Deferred follow-up: the App manifest must also declare `default_events`
+(issues, pull_request, push, issue_comment, release, …) so installations
+actually deliver them; existing installs need a one-time re-config note.
+Until then, only the events GitHub already sends reach the pipeline.
 
 ## Dispatcher
 
-In-process loop in the API server (matches how v2 runs background work):
+In-process loop in the API server (matches how v2 runs background work),
+implemented in `packages/api/src/events/dispatcher.ts`:
 
-- `LISTEN event_deliveries` for latency; poll every ~15s as a sweeper for
-  retries and missed notifies.
-- Claim due deliveries with `FOR UPDATE SKIP LOCKED`.
+- 1s poll as a staleness floor; the ingest path nudges the dispatcher
+  in-process (`nudge()`) so fresh deliveries dispatch immediately. The
+  original sketch used `LISTEN/NOTIFY`, but the API is single-process — a
+  direct in-process nudge is simpler and just as fast, and the poll sweeps
+  retries and anything a crash left behind.
+- Claim due deliveries with a single-statement CAS lease (the codebase's
+  established row-claim pattern, cf. `pg-store.ts` `claimRun`), not
+  `FOR UPDATE SKIP LOCKED` (a bare `FOR UPDATE` outside a transaction
+  releases its locks at statement end): one atomic `UPDATE ... RETURNING`
+  pushes `next_attempt_at` forward by a 60s lease, with the due conditions
+  repeated on the OUTER `WHERE` as the cross-process fence — a raced
+  loser's EvalPlanQual recheck sees the winner's bumped `next_attempt_at`
+  and skips the row. A crash mid-delivery leaves the row pending; it
+  becomes due again when the lease lapses.
 - Per target kind:
   - **workflow** — `workflowRunHost.start()` with
     `WorkflowTriggerPayload { type: 'event', triggerId: subscription.id, data: normalizedEvent }`.
@@ -207,8 +224,9 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
    secret; record `linear_installations`.
 3. Verification: `Linear-Signature` header (HMAC-SHA256 over raw body) +
    `webhookTimestamp` replay check, implemented in `plugin-linear`'s new
-   `triggers.ts` (`verify` + `toEvent` + catalog: `linear.issue.created`,
-   `linear.issue.updated`, `linear.comment.created`, `linear.project.updated`, …).
+   `triggers.ts` (`verify` + `toEvent` + catalog: `linear.issue.create`,
+   `linear.issue.update`, `linear.comment.create`, `linear.project.update`, …
+   — keys use Linear's own action verbs, `create`/`update`/`remove`).
 4. Disconnect: `webhookDelete` via API; remove installation + credential rows.
 
 ## API surface
@@ -244,6 +262,9 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
   the event payload.
 
 ## Out of scope
+
+Deferred follow-ups (designed above, not yet built): the `events` retention
+job and the GitHub App manifest `default_events` declaration.
 
 - SSE/WebSocket streaming of the event feed (poll the API for now).
 - Sources beyond GitHub and Linear (the contract supports them; none built).
