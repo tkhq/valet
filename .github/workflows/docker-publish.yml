@@ -123,6 +123,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # `latest` tracks stable version tags only — not pre-release
+      # (-suffixed) tags, not branch pushes. (No comments inside `tags:` —
+      # metadata-action parses every line as an entry.)
       - name: Compute tags
         id: meta
         uses: docker/metadata-action@v5
@@ -132,8 +135,6 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
-            # `latest` tracks stable version tags only — not pre-release
-            # (-suffixed) tags, not branch pushes.
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
 
       - name: Create multi-arch manifest
