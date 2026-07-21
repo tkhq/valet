@@ -53,16 +53,18 @@ flowchart TB
 
 ## Topology and Ordering
 
-### The API is a singleton
+### The API is a singleton (today)
 
-`api.replicas` is pinned to 1 and must stay there. The engine keeps
-in-memory state that has no cross-pod story: the submission claim loop,
-WebSocket fan-out, and the per-process session cache. There is no leader
-election. Running two replicas means two engines claiming the same durable
-submissions and clients missing events depending on which pod their socket
-landed on. Restart tolerance comes from durability (boot-time
-reconciliation over Postgres), not from redundancy — so there's no HPA and
-no PodDisruptionBudget, by design.
+`api.replicas` is pinned to 1 and must stay there for now. The engine keeps
+in-memory state that has no cross-pod story yet: live event fan-out to
+WebSockets, the per-process session cache, and the singleton pollers
+(channel long-poll, idle sweep). Running two replicas means clients missing
+events depending on which pod their socket landed on. Restart tolerance
+comes from durability (boot-time reconciliation over Postgres), not from
+redundancy — so there is no HPA and no PodDisruptionBudget. This is a
+current limitation, not the end state; see
+[Not Implemented Yet](#not-implemented-yet) for the path to horizontal
+scaling.
 
 ### Install the agent-sandbox controller first
 
@@ -215,12 +217,24 @@ multi-node cluster needs images pushed to a real registry — CI publishing
 is a recorded follow-up, so today that's a manual step for a non-local
 deploy.
 
-## What Is Deliberately NOT Handled Yet
+## Not Implemented Yet
 
-Recorded non-goals — plan around them rather than assuming them:
+These are on the roadmap but not built — plan deployments around their
+absence today rather than assuming them:
 
-- **Horizontal API scaling** (HPA, PDBs, leader election) — the API is a
-  singleton by design.
+- **Horizontal API scaling** (HPA, PDBs). The singleton is a v1
+  simplification, not the end state: the durable substrate was built for
+  distribution (submissions are CAS-claimed with leases and expiry
+  takeover, settlement is write-fenced, the event log is offset-addressed,
+  workflow runs carry owner leases). What's missing is the coordination
+  layer on top — cross-pod event wake-up (the live fan-out in
+  `PgEventStream` is in-process only; Postgres `LISTEN/NOTIFY` is the
+  natural fix), per-session ownership (sticky routing or a session lease),
+  and leader election for the singleton pollers (channel long-poll, idle
+  sweep, workflow host). No schema changes required. Until then, note that
+  the API pod is orchestration, not compute — sandboxes already scale out
+  per-session — so one replica is an availability constraint (brief blip on
+  rollout) more than a throughput one.
 - **Network policies and pod security admission hardening** beyond the
   namespace split; gVisor/Kata runtime classes for sandbox pods likewise
   (prod-hardening follow-ups).
