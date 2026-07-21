@@ -216,6 +216,28 @@ describe("POST /api/event-subscriptions", () => {
     expect(body.error).toContain("regex");
   });
 
+  it("400s a filter with missing/empty value for op eq, naming the field", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      filters: [{ field: "repo", op: "eq", value: "" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("repo");
+  });
+
+  it("400s a filter with a string value for op in (must be array), naming the field", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      filters: [{ field: "repo", op: "in", value: "acme/widgets" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("repo");
+  });
+
   it("400s an unknown target kind", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "webhook" } });

@@ -12,7 +12,7 @@
  */
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
@@ -90,6 +90,19 @@ export function validateSubscription(
     }
     if (typeof f.op !== "string" || !(FILTER_OPS as readonly string[]).includes(f.op)) {
       return `unknown filter op: ${String(f.op)}`;
+    }
+    if (f.op === "in") {
+      if (
+        !Array.isArray(f.value) ||
+        (f.value as unknown[]).some((v) => typeof v !== "string")
+      ) {
+        return `filter value invalid for op in on field ${f.field}`;
+      }
+    } else {
+      // eq / prefix / contains — value must be a non-empty string
+      if (typeof f.value !== "string" || f.value.length === 0) {
+        return `filter value invalid for op ${f.op} on field ${f.field}`;
+      }
     }
     if (!entries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
       return `unknown filter field: ${f.field}`;
@@ -203,7 +216,18 @@ eventsRouter.get("/events/:id", async (c) => {
   const deliveryRows = await db
     .select()
     .from(eventDeliveries)
-    .where(eq(eventDeliveries.eventId, id))
+    .where(
+      and(
+        eq(eventDeliveries.eventId, id),
+        inArray(
+          eventDeliveries.subscriptionId,
+          db
+            .select({ id: eventSubscriptions.id })
+            .from(eventSubscriptions)
+            .where(eq(eventSubscriptions.orgId, user.orgId)),
+        ),
+      ),
+    )
     .orderBy(desc(eventDeliveries.createdAt));
 
   const resp: GetEventResponse = {
