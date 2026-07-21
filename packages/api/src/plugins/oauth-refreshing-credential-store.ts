@@ -27,6 +27,8 @@ interface Deps {
 }
 
 export class OAuthRefreshingCredentialStore implements CredentialStore {
+  private readonly inFlightRefreshes = new Map<string, Promise<StoredCredential | null>>();
+
   constructor(
     private readonly inner: CredentialStore,
     private readonly deps: Deps,
@@ -37,6 +39,27 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
     if (!stored) return null;
     if (stored.type !== "oauth2" || !stored.refreshToken || stored.expiresAt === undefined) return stored;
     const now = (this.deps.now ?? Date.now)();
+    if (stored.expiresAt - now >= REFRESH_BUFFER_MS) return stored;
+    const found = findOAuthDeclaration(this.deps.plugins, service);
+    if (!found) return stored;
+
+    const key = `${owner.type}:${owner.id}:${service}`;
+    const existing = this.inFlightRefreshes.get(key);
+    if (existing) return existing;
+
+    const refreshPromise = this.doRefresh(owner, service, now).finally(() => {
+      this.inFlightRefreshes.delete(key);
+    });
+    this.inFlightRefreshes.set(key, refreshPromise);
+    return refreshPromise;
+  }
+
+  private async doRefresh(owner: CredentialOwner, service: string, now: number): Promise<StoredCredential | null> {
+    // Re-read + re-check: another caller may have already refreshed (or the
+    // credential may have changed) while we were queued behind the map lookup.
+    const stored = await this.inner.get(owner, service);
+    if (!stored) return null;
+    if (stored.type !== "oauth2" || !stored.refreshToken || stored.expiresAt === undefined) return stored;
     if (stored.expiresAt - now >= REFRESH_BUFFER_MS) return stored;
     const found = findOAuthDeclaration(this.deps.plugins, service);
     if (!found) return stored;

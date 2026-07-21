@@ -136,6 +136,33 @@ describe("OAuthRefreshingCredentialStore", () => {
     expect(fake.tokenRequests).toHaveLength(0);
   });
 
+  it("concurrent gets of the same near-expiry credential refresh once", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "stale", refreshToken: "rt-old", expiresAt: NOW + 30_000 });
+    fake.tokenResponse = { access_token: "at-new", expires_in: 3600 };
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+
+    const [a, b] = await Promise.all([store.get(OWNER, "linear"), store.get(OWNER, "linear")]);
+    expect(a?.accessToken).toBe("at-new");
+    expect(b?.accessToken).toBe("at-new");
+    expect(fake.tokenRequests).toHaveLength(1);
+  });
+
+  it("a second get after a completed refresh does not refresh again", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "stale", refreshToken: "rt-old", expiresAt: NOW + 30_000 });
+    fake.tokenResponse = { access_token: "at-new", expires_in: 3600 };
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+
+    await store.get(OWNER, "linear");
+    expect(fake.tokenRequests).toHaveLength(1);
+    const second = await store.get(OWNER, "linear");
+    expect(second?.accessToken).toBe("at-new");
+    expect(fake.tokenRequests).toHaveLength(1);
+  });
+
   it("refreshes an authorization_code credential using client id/secret from env", async () => {
     const inner = memoryStore();
     await inner.save(OWNER, "widget", { type: "oauth2", accessToken: "stale", refreshToken: "rt-ac", expiresAt: NOW + 30_000 });
