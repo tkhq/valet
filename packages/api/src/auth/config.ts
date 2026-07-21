@@ -4,6 +4,9 @@
  * Pure function — no process.env reads inside the module.
  */
 
+import type { OrgRole } from "./permissions.js";
+import { isOrgRole } from "./permissions.js";
+
 export interface AuthConfig {
   secret: string;
   baseUrl: string;
@@ -15,6 +18,8 @@ export interface AuthConfig {
     clientSecret: string;
     name: string;
     domain: string;
+    roleMap?: { claimValue: string; role: OrgRole }[];
+    roleClaim: string;
   };
   social: {
     google?: {
@@ -80,12 +85,30 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     const domain = env.AUTH_OIDC_DOMAIN ?? defaultDomain;
     const name = env.AUTH_OIDC_NAME ?? "SSO";
 
+    const roleClaim = env.AUTH_OIDC_ROLE_CLAIM?.trim() || "realm_access.roles";
+    let roleMap: { claimValue: string; role: OrgRole }[] | undefined;
+    if (env.AUTH_OIDC_ROLE_MAP) {
+      roleMap = env.AUTH_OIDC_ROLE_MAP.split(",").map((pair) => {
+        const idx = pair.indexOf(":");
+        const claimValue = idx === -1 ? "" : pair.slice(0, idx).trim();
+        const role = idx === -1 ? "" : pair.slice(idx + 1).trim();
+        if (!claimValue || !isOrgRole(role)) {
+          throw new Error(
+            `AUTH_OIDC_ROLE_MAP entry "${pair.trim()}" must be "<claimValue>:<admin|operator|member>"`,
+          );
+        }
+        return { claimValue, role };
+      });
+    }
+
     oidc = {
       issuer: oidcIssuer,
       clientId: oidcClientId,
       clientSecret: oidcClientSecret,
       name,
       domain,
+      roleMap,
+      roleClaim,
     };
   } else {
     // Partial OIDC config: invalid
@@ -95,6 +118,13 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     if (!oidcClientSecret) missing.push("AUTH_OIDC_CLIENT_SECRET");
     throw new Error(
       `OIDC configuration is incomplete. Set all three or none: ${missing.join(", ")}`,
+    );
+  }
+
+  // OIDC role-map: requires OIDC to be configured
+  if (env.AUTH_OIDC_ROLE_MAP && !oidc) {
+    throw new Error(
+      "AUTH_OIDC_ROLE_MAP requires the AUTH_OIDC_* provider to be configured",
     );
   }
 
