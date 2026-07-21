@@ -177,10 +177,11 @@ delivery stays async.
 **GitHub routing:** the existing `/webhooks/github-app` route keeps handling
 `installation*` events (installations sync); all other event types it receives
 are forwarded into the event pipeline. One GitHub webhook URL, two concerns.
-Deferred follow-up: the App manifest must also declare `default_events`
-(issues, pull_request, push, issue_comment, release, …) so installations
-actually deliver them; existing installs need a one-time re-config note.
-Until then, only the events GitHub already sends reach the pipeline.
+The App manifest declares `default_events` for every ingestable trigger
+family (derived from the registered github TriggerDefs, excluding `ping`)
+plus a `statuses: read` permission, so new installations deliver everything
+the catalog advertises. Apps created before this change need a one-time
+event-subscription update in GitHub's App settings.
 
 ## Dispatcher
 
@@ -264,8 +265,8 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
 
 ## Out of scope
 
-Deferred follow-ups (designed above, not yet built): the `events` retention
-job and the GitHub App manifest `default_events` declaration.
+Deferred follow-up (designed above, not yet built): the `events` retention
+job.
 
 - Workflow event-trigger node auto-sync of `event_subscriptions` — users
   create subscriptions (with workflow targets) via the API for now; the

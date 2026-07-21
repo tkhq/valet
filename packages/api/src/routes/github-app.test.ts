@@ -159,13 +159,14 @@ describe("POST /api/org/github-app/manifest", () => {
       issues: "write",
       actions: "write",
       checks: "read",
+      statuses: "read",
     });
     expect(body.manifest.redirect_url).toContain("/api/org/github-app/setup");
     expect(typeof body.state).toBe("string");
   });
 
   it("builds a public-mode manifest when VALET_PUBLIC_URL is set: non-empty default_events, active hook", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     process.env.VALET_PUBLIC_URL = "https://valet.example.com";
     const res = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {
       method: "POST",
@@ -173,7 +174,14 @@ describe("POST /api/org/github-app/manifest", () => {
       body: JSON.stringify({}),
     });
     const body = (await res.json()) as PostGithubAppManifestResponse;
-    expect(body.manifest.default_events).toEqual(["installation", "installation_repositories"]);
+    // installation sync events + every ingestable trigger family (no ping —
+    // GitHub sends it unconditionally on webhook creation).
+    expect(body.manifest.default_events.slice(0, 2)).toEqual(["installation", "installation_repositories"]);
+    const triggerFamilies = githubPlugin.triggers!.map((t) => t.id.slice("github.".length));
+    expect(body.manifest.default_events.slice(2).sort()).toEqual(
+      triggerFamilies.filter((e) => e !== "ping").sort(),
+    );
+    expect(body.manifest.default_events).not.toContain("ping");
     expect(body.manifest.hook_attributes).toEqual({ url: "https://valet.example.com/webhooks/github-app" });
   });
 
