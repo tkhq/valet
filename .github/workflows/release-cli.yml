@@ -11,10 +11,17 @@ name: Release CLI
 # Platforms: macOS arm64 (native runner), Linux x64 (native runner) + Linux
 # arm64 (cross-compiled from the x64 runner — the embedded assets are
 # platform-agnostic). Windows = WSL (run the linux-x64 binary).
+#
+# Publish paths:
+#   - tag push (v*): versioned GitHub Release with all binaries attached.
+#   - merge to dev-v2: the same binaries replace the assets of a single
+#     rolling prerelease tagged `dev-v2-latest`, so the download URLs
+#     (…/releases/download/dev-v2-latest/valet-<os>-<arch>) stay stable.
 
 on:
   push:
     tags: ["v*"]
+    branches: [dev-v2]
   workflow_dispatch:
     inputs:
       tag:
@@ -23,6 +30,12 @@ on:
 
 permissions:
   contents: write # create the GitHub Release + upload assets
+
+# Superseded dev-v2 builds are pointless (the rolling prerelease only keeps
+# the latest); never cancel a tag release build.
+concurrency:
+  group: release-cli-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/') }}
 
 jobs:
   binaries:
@@ -124,3 +137,25 @@ jobs:
             `./valet-<os>-<arch> serve` — no Node, no install. `valet chat`,
             `valet send --json …`, `valet login <url>` all work from the same
             file. Windows: run the linux-x64 binary under WSL.
+
+      # Rolling prerelease on dev-v2 merges: fixed tag, same-named assets are
+      # replaced in place, so download URLs are stable across merges. The
+      # release's "source code" links point at whatever commit first created
+      # the tag — the body carries the actual SHA.
+      - name: Publish rolling dev-v2 prerelease
+        if: github.ref == 'refs/heads/dev-v2'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-v2-latest
+          name: dev-v2 rolling build
+          prerelease: true
+          files: packages/api/dist/valet-*-*
+          fail_on_unmatched_files: true
+          body: |
+            Rolling native `valet` binaries from the latest merge to `dev-v2`
+            (currently `${{ github.sha }}`). Assets are replaced on every
+            merge — this is not a versioned release.
+
+            Download the binary for your platform, `chmod +x`, and run
+            `./valet-<os>-<arch> serve`. Windows: run the linux-x64 binary
+            under WSL.

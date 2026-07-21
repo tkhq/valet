@@ -20,6 +20,12 @@ spec:
         app.kubernetes.io/component: api
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.api.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       {{- if and .Values.postgres.bundled (not .Values.externalDatabase.url) }}
       initContainers:
         # Boot runs migrations against DATABASE_URL; without this gate the

@@ -90,9 +90,17 @@ FROM base
 ARG CODE_SERVER_VERSION=4.128.0
 RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --version "${CODE_SERVER_VERSION}"
 
-# ttyd (web terminal) — lifted from docker/Dockerfile.sandbox.
-RUN curl -fsSL -o /usr/local/bin/ttyd \
-    "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
+# ttyd (web terminal) — lifted from docker/Dockerfile.sandbox. ttyd's release
+# assets are per-arch static binaries; map buildx's TARGETARCH onto its
+# naming so multi-arch CI builds (amd64 + arm64) both resolve.
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) TTYD_ARCH=x86_64 ;; \
+      arm64) TTYD_ARCH=aarch64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /usr/local/bin/ttyd \
+      "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${TTYD_ARCH}" \
     && chmod +x /usr/local/bin/ttyd
 
 # GitHub CLI (GitHub/repo integration plan, Task 8) — the `valet-gh` wrapper
