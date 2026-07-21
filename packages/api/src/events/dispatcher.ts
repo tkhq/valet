@@ -67,15 +67,18 @@ interface SubscriptionTarget {
 export class EventDispatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private draining = false;
+  private stopped = false;
 
   constructor(private readonly deps: EventDispatcherDeps) {}
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     this.timer = setInterval(() => void this.pollOnce(), POLL_MS);
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     while (this.draining) await new Promise((r) => setTimeout(r, 25));
@@ -83,11 +86,12 @@ export class EventDispatcher {
 
   /** In-process nudge from the ingest path. Arrow property so callers can pass it unbound. */
   nudge = (): void => {
+    if (this.stopped) return;
     void this.pollOnce().catch((err) => console.error("event dispatcher poll failed:", err));
   };
 
   async pollOnce(): Promise<void> {
-    if (this.draining) return;
+    if (this.stopped || this.draining) return;
     this.draining = true;
     try {
       const now = Date.now();

@@ -324,9 +324,11 @@ describe("EventDispatcher", () => {
     // PGlite is single-connection, so the claim UPDATEs serialize and a
     // true cross-connection EvalPlanQual interleave can't be reproduced
     // here. This test only covers the sequential shape (d2 polls after
-    // d1's claim committed); the cross-process fence is the due
-    // conditions repeated on the outer UPDATE qual — see the dispatcher's
-    // file doc comment.
+    // d1's claim committed). In-process, the `draining` guard fires before
+    // d2's claim ever reaches the DB; the real cross-process fence is the
+    // due conditions repeated on the outer UPDATE qual (EPQ recheck fails
+    // once the winner bumps next_attempt_at) — see the dispatcher's file
+    // doc comment.
     // The slow seam holds the first dispatcher's delivery open while the
     // second polls; the atomic claim must keep the row invisible to it.
     let release: () => void = () => {};
