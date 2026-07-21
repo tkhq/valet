@@ -93,7 +93,7 @@ credentials.set({ type: "user", id: userId }, service, {
 });
 ```
 
-Then 302 to `/integrations?connected=<service>` (relative redirect — same-origin serving in prod; in dev the api serves no SPA, so the redirect target uses the web origin the same way `github-connect.ts` resolves it today — follow that file's precedent exactly).
+Then 302 to `/integrations?connected=<service>` — a relative redirect, same as `github-connect.ts`. Same-origin serving covers prod; in dev the vite server proxies `/api`, so the browser stays on the web origin throughout and the relative target resolves there.
 
 Failure at any step logs the upstream error server-side and redirects to `/integrations?error=oauth_failed` — provider error bodies are never surfaced raw to the browser.
 

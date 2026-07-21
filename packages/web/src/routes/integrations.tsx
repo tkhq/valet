@@ -57,12 +57,18 @@ export function IntegrationsPage() {
         </p>
 
         {connectResult?.kind === "connected" && (
-          <div className="mt-4 rounded border border-moss/30 bg-moss/10 px-3 py-2 text-sm text-ink">
+          <div
+            role="status"
+            className="mt-4 rounded border border-moss/30 bg-moss/10 px-3 py-2 text-sm text-ink"
+          >
             Connected {connectResult.value}.
           </div>
         )}
         {connectResult?.kind === "error" && (
-          <div className="mt-4 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-sm text-danger-600">
+          <div
+            role="status"
+            className="mt-4 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-sm text-danger-600"
+          >
             Connection failed: {connectResult.value}
           </div>
         )}
