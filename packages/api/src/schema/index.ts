@@ -286,7 +286,7 @@ export const orgMembers = pgTable(
   {
     orgId: text("org_id").notNull(),
     userId: text("user_id").notNull(),
-    role: text("role", { enum: ["admin", "member"] }).notNull(),
+    role: text("role", { enum: ["admin", "operator", "member"] }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }),
   },
   (t) => [primaryKey({ columns: [t.orgId, t.userId] })],

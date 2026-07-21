@@ -9,9 +9,10 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import type { OrgRole } from "../auth/permissions.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 
-export type OrgRole = "admin" | "member";
+export { type OrgRole, isOrgRole } from "../auth/permissions.js";
 
 export interface OrgFeatures {
   organizations: boolean;

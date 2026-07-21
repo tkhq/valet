@@ -866,7 +866,7 @@ export interface MeResponse {
   avatarUrl: string | null;
   role: "admin" | "member";
   orgId: string;
-  orgRole: "admin" | "member";
+  orgRole: "admin" | "operator" | "member";
   defaultModel: string | null;
 }
 
@@ -916,7 +916,7 @@ export interface OrgResponse {
   name: string;
   createdAt: number;
   features: OrgFeaturesWire;
-  callerRole: "admin" | "member";
+  callerRole: "admin" | "operator" | "member";
 }
 
 /** Whitelisted fields only — unknown top-level keys 400. */
@@ -932,7 +932,7 @@ export interface OrgMemberWire {
   email: string;
   name: string;
   avatarUrl: string | null;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   joinedAt: number;
 }
 

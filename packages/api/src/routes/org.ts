@@ -19,6 +19,7 @@ import { orgs } from "../schema/index.js";
 import {
   getOrgFeatures,
   isOrgAdmin,
+  isOrgRole,
   listOrgMembers,
   renameOrg,
   setOrgFeatures,
@@ -37,10 +38,6 @@ import type {
 export const orgRouter = new Hono<AppEnv>();
 
 const GATE_OFF_ERROR = { error: "organizations not enabled" } as const;
-
-function isOrgRole(v: unknown): v is OrgRole {
-  return v === "admin" || v === "member";
-}
 
 async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): Promise<OrgResponse | undefined> {
   const rows = await db.select().from(orgs).where(eq(orgs.id, orgId)).limit(1);
