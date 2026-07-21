@@ -28,7 +28,7 @@ describe("linear verify", () => {
   });
 
   it("rejects a stale webhookTimestamp", async () => {
-    const body = JSON.stringify({ webhookTimestamp: Date.now() - 120_000, ...payload });
+    const body = JSON.stringify({ webhookTimestamp: Date.now() - 600_000, ...payload });
     const rawBody = new TextEncoder().encode(body);
     const sig = createHmac("sha256", SECRET).update(Buffer.from(rawBody)).digest("hex");
     const verified = await issueDef.verify({ headers: { "linear-signature": sig, "linear-delivery": "d" }, rawBody }, { webhookSecret: SECRET });

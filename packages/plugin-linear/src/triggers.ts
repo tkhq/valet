@@ -3,7 +3,10 @@ import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } fr
 
 const LINEAR_TYPES = ["Issue", "Comment", "Project", "Cycle", "IssueLabel", "Reaction"] as const;
 const ACTIONS = ["create", "update", "remove"] as const;
-const TIMESTAMP_TOLERANCE_MS = 60_000;
+// Linear recommends ~1 minute; we allow 5 to survive clock skew and delayed
+// redeliveries. True replays are already caught by the Linear-Delivery
+// dedupe key, so this window only bounds crude replay attacks.
+const TIMESTAMP_TOLERANCE_MS = 300_000;
 
 function lookupHeader(headers: Record<string, string>, name: string): string | undefined {
   const lower = name.toLowerCase();

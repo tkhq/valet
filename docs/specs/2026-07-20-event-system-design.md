@@ -134,9 +134,10 @@ A retention job (default 30 days) is a deferred follow-up; nothing prunes
 | `enabled` | bool |
 | `created_by`, timestamps | |
 
-Workflow event-triggers are rows here too: saving a workflow definition with an
-event trigger node creates/syncs a subscription row, so one matching engine
-serves everything.
+Workflow event-triggers are rows here too — a subscription with a
+`{ kind: "workflow" }` target starts that workflow, so one matching engine
+serves everything. (Auto-syncing subscription rows from workflow-definition
+trigger nodes is deferred — see Out of scope.)
 
 ### `event_deliveries`
 
@@ -266,6 +267,9 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
 Deferred follow-ups (designed above, not yet built): the `events` retention
 job and the GitHub App manifest `default_events` declaration.
 
+- Workflow event-trigger node auto-sync of `event_subscriptions` — users
+  create subscriptions (with workflow targets) via the API for now; the
+  workflow editor does not create/sync subscription rows yet.
 - SSE/WebSocket streaming of the event feed (poll the API for now).
 - Sources beyond GitHub and Linear (the contract supports them; none built).
 - Per-event user-level webhook config — installation-level only.
