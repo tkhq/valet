@@ -39,6 +39,29 @@ describe("linear verify", () => {
     const verified = await issueDef.verify(makeReq({ ...payload, type: "Comment" }), { webhookSecret: SECRET });
     expect(verified).toBeNull();
   });
+
+  it("rejects when Linear-Delivery header is absent", async () => {
+    const body = JSON.stringify({ webhookTimestamp: Date.now(), ...payload });
+    const rawBody = new TextEncoder().encode(body);
+    const sig = createHmac("sha256", SECRET).update(Buffer.from(rawBody)).digest("hex");
+    const verified = await issueDef.verify({ headers: { "linear-signature": sig }, rawBody }, { webhookSecret: SECRET });
+    expect(verified).toBeNull();
+  });
+
+  it("rejects when webhookTimestamp is missing", async () => {
+    const { webhookTimestamp: _ts, ...rest } = { webhookTimestamp: 0, ...payload };
+    void _ts;
+    const body = JSON.stringify(rest);
+    const rawBody = new TextEncoder().encode(body);
+    const sig = createHmac("sha256", SECRET).update(Buffer.from(rawBody)).digest("hex");
+    const verified = await issueDef.verify({ headers: { "linear-signature": sig, "linear-delivery": "d" }, rawBody }, { webhookSecret: SECRET });
+    expect(verified).toBeNull();
+  });
+
+  it("rejects when action is not create/update/remove", async () => {
+    const verified = await issueDef.verify(makeReq({ ...payload, action: "delete" }), { webhookSecret: SECRET });
+    expect(verified).toBeNull();
+  });
 });
 
 describe("linear toEvent", () => {

@@ -35,7 +35,9 @@ function makeVerify(family: (typeof LINEAR_TYPES)[number]): TriggerDef["verify"]
       return null;
     }
     if (payload.type !== family) return null;
-    const ts = typeof payload.webhookTimestamp === "number" ? payload.webhookTimestamp : 0;
+    if (payload.action !== "create" && payload.action !== "update" && payload.action !== "remove") return null;
+    const ts = payload.webhookTimestamp;
+    if (typeof ts !== "number") return null;
     if (Math.abs(Date.now() - ts) > TIMESTAMP_TOLERANCE_MS) return null;
     const deliveryId = lookupHeader(req.headers, "linear-delivery");
     if (!deliveryId) return null;
