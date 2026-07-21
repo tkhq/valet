@@ -977,6 +977,7 @@ export const eventSubscriptions = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
+    // "team" is intentionally excluded: subscription dispatch targets only user/org orchestrators.
     ownerType: text("owner_type", { enum: ["user", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),

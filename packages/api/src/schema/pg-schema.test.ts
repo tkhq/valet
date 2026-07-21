@@ -33,8 +33,6 @@ import {
   sessionRepos,
   githubInstallations,
   events,
-  eventSubscriptions,
-  eventDeliveries,
   linearInstallations,
 } from "./index.js";
 
@@ -432,6 +430,114 @@ describe("pg app schema + migrations", () => {
           updatedAt: now,
         }),
       ).rejects.toThrow();
+    });
+  });
+
+  describe("linear_installations", () => {
+    const now = Date.now();
+
+    it("round-trips an insert/select and enforces the (org_id, workspace_id) unique index", async () => {
+      await drizzleDb.insert(orgs).values({ id: "org-li-1", name: "Org LI", createdAt: now });
+      await drizzleDb.insert(linearInstallations).values({
+        id: "li_1",
+        orgId: "org-li-1",
+        workspaceId: "ws-abc",
+        workspaceName: "Acme Workspace",
+        connectedBy: "user-1",
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const rows = await drizzleDb
+        .select()
+        .from(linearInstallations)
+        .where(eq(linearInstallations.id, "li_1"));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        id: "li_1",
+        orgId: "org-li-1",
+        workspaceId: "ws-abc",
+        workspaceName: "Acme Workspace",
+        webhookId: null,
+        connectedBy: "user-1",
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await expect(
+        drizzleDb.insert(linearInstallations).values({
+          id: "li_2",
+          orgId: "org-li-1",
+          workspaceId: "ws-abc",
+          workspaceName: "Acme Workspace Dupe",
+          connectedBy: "user-2",
+          createdAt: now,
+          updatedAt: now,
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe("events", () => {
+    const now = Date.now();
+
+    it("round-trips an insert/select, enforces the (service, dedupe_key) unique index, and onConflictDoNothing no-ops", async () => {
+      await drizzleDb.insert(orgs).values({ id: "org-ev-1", name: "Org EV", createdAt: now });
+      await drizzleDb.insert(events).values({
+        id: "ev_1",
+        orgId: "org-ev-1",
+        service: "github",
+        eventKey: "github.pull_request.opened",
+        dedupeKey: "github:pr:42:opened",
+        summary: "PR #42 opened",
+        payload: {},
+        occurredAt: now,
+        receivedAt: now,
+      });
+
+      const rows = await drizzleDb
+        .select()
+        .from(events)
+        .where(eq(events.id, "ev_1"));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.service).toBe("github");
+      expect(rows[0]?.dedupeKey).toBe("github:pr:42:opened");
+
+      // A hard insert with the same (service, dedupe_key) must violate the unique index.
+      await expect(
+        drizzleDb.insert(events).values({
+          id: "ev_2",
+          orgId: "org-ev-1",
+          service: "github",
+          eventKey: "github.pull_request.opened",
+          dedupeKey: "github:pr:42:opened",
+          summary: "PR #42 opened (dupe)",
+          payload: {},
+          occurredAt: now,
+          receivedAt: now,
+        }),
+      ).rejects.toThrow();
+
+      // onConflictDoNothing on the same target must silently no-op (load-bearing for ingest).
+      await drizzleDb
+        .insert(events)
+        .values({
+          id: "ev_3",
+          orgId: "org-ev-1",
+          service: "github",
+          eventKey: "github.pull_request.opened",
+          dedupeKey: "github:pr:42:opened",
+          summary: "PR #42 opened (idempotent)",
+          payload: {},
+          occurredAt: now,
+          receivedAt: now,
+        })
+        .onConflictDoNothing({ target: [events.service, events.dedupeKey] });
+
+      // Only the original row should exist.
+      const after = await drizzleDb.select().from(events).where(eq(events.orgId, "org-ev-1"));
+      expect(after).toHaveLength(1);
+      expect(after[0]?.id).toBe("ev_1");
     });
   });
 
