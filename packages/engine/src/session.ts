@@ -431,9 +431,29 @@ export class Session {
       case "replay_gate":
         if (suspended) await thread.reconcileGate(item, suspended, "replay");
         return;
-      case "resume":
+      case "resume": {
+        // A running item whose attempt died BEFORE appending its user entry
+        // (e.g. a store throw inside the credential-release path) must not be
+        // resumed: `resumeInterrupted` continues the transcript, which is the
+        // PREVIOUS turn's — the prompt would never be recorded and never run.
+        // Re-queue it for a fresh from-scratch run instead (fenced release,
+        // no credential counters — this is not a credential cycle); the
+        // post-reconcile kick (startup) / sweep kick picks it up.
+        const hasUserEntry = entries.some(
+          (e) => e.type === "message" && e.role === "user" && e.queueItemId === item.id,
+        );
+        if (item.status === "running" && item.attemptId !== undefined && !hasUserEntry) {
+          const released = await store.releaseSubmission(this.id, item.threadId, item.id, {
+            itemId: item.id,
+            attemptId: item.attemptId,
+          });
+          if (released) return;
+          // CAS refused (superseded / successor) — fall through to resume,
+          // whose own fencing resolves ownership safely.
+        }
         await thread.resumeInterrupted(item);
         return;
+      }
     }
   }
 

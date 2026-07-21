@@ -151,28 +151,24 @@ export class Thread {
   /**
    * Set by `runItem` when the host resolver threw `NoCredentialsError` at
    * turn start (the turn never appended a user entry or reached the model).
-   * The claim loop reads it to release the claim back to `queued` rather than
-   * settling the submission `failed` — so it stays abortable and re-runs once
-   * credentials resolve. Set ONLY by that explicit throw; reset at the start
-   * of every turn.
+   * The claim loop reads it (`credentialError !== undefined`) to release the
+   * claim back to `queued` rather than settling the submission `failed` — so
+   * it stays abortable and re-runs once credentials resolve; the cap-path
+   * settlement surfaces this exact HOST message, never a fabricated generic
+   * one. Set ONLY by that explicit throw; reset at the start of every turn.
+   * The bounded budget itself is DURABLE on the queue item
+   * (`credentialAttempts`/`lastCredentialReleaseAt`), not Thread state.
    */
-  private turnLackedCredentials = false;
-  /** The host resolver's `NoCredentialsError` for the current turn — preserved
-   * so the cap-path settlement surfaces the HOST's message, never a fabricated
-   * generic one. Reset alongside `turnLackedCredentials`. */
   private credentialError: NoCredentialsError | undefined;
   /**
-   * Credential-less claim attempts per submission, keyed by itemId. Kept
-   * Thread-local instead of reading the store's `attemptCount` (shared with
-   * lease-expiry reconciliation — a lease recycle must not burn the
-   * credential budget). `lastAt` is the time of the last COUNTED cycle:
-   * releases within `CREDENTIAL_RELEASE_BACKOFF_MS` of it are the same cycle
-   * and do not advance `count`. Entries are deleted when the item settles
-   * (`emitSettled` — every settlement path routes through it) and when the
-   * item leaves this thread's ownership mid-release. A process restart resets
-   * the map; the budget simply re-bounds after restart.
+   * The agent-run throw for the current turn, recorded independently of the
+   * transcript: a stream that fails before its first `message_start` leaves
+   * NO assistant message for this turn, and decideTurnOutcome deliberately
+   * ignores stale trailing messages — without this field such a failure
+   * would settle `completed`. Reset at the start of every turn; the claim
+   * loop folds it into the turn failure after runItem returns.
    */
-  private credentialAttempts = new Map<string, { count: number; lastAt: number }>();
+  private turnAgentError: unknown;
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
   private currentToolCalls = new Map<string, MessagePart>();
@@ -772,13 +768,20 @@ export class Thread {
     await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
-    // Host resolver (if any) delivers this resumed turn's per-turn key before
-    // the continuation LLM call; no-op when absent.
-    await this.applyResolvedKeyForResume();
+    // Drive the continuation, recording any failure for settlement — a
+    // keyless resume (applyResolvedKeyForResume rethrows NoCredentialsError
+    // rather than continuing on pi-ai's ambient env fallback) and a
+    // continuation stream failure both settle the turn `failed` instead of
+    // wedging or mislabeling it.
+    let continueError: unknown;
     try {
+      // Host resolver (if any) delivers this resumed turn's per-turn key
+      // before the continuation LLM call; no-op when absent.
+      await this.applyResolvedKeyForResume();
       await this.agent.continue();
       await this.agent.waitForIdle();
     } catch (err) {
+      continueError = err;
       this.emitError(
         "replay_continue_failed",
         err instanceof Error ? err.message : String(err),
@@ -800,7 +803,10 @@ export class Thread {
         );
       }
       try {
-        await this.settleTurn(settleItem);
+        await this.settleTurn(
+          settleItem,
+          continueError !== undefined ? { error: continueError } : undefined,
+        );
       } catch (err) {
         this.emitError("settlement_failed", err instanceof Error ? err.message : String(err));
       }
@@ -1078,29 +1084,19 @@ export class Thread {
    * turn's effective spec and stamp the per-turn key + agent model before the
    * agent continues an interrupted or gate-resolved turn. No-op when the
    * resolver is absent (byte-identical to the pre-seam resume paths).
+   *
+   * THROWS `NoCredentialsError` straight through — symmetric with the
+   * pre-run detection in runItem. Swallowing it here and continuing with an
+   * unset key would silently activate pi-ai's AMBIENT env fallback: a
+   * revoked org key could resume on a dev-shell/pod env key the org never
+   * authorized. Callers treat the throw as a normal turn failure (the
+   * continuation settles `failed` with the credential message; claim
+   * cleaned, no wedge).
    */
   private async applyResolvedKeyForResume(): Promise<void> {
     const resolver = this.session.options.resolveModel;
     if (!resolver) return;
-    let resolved: ResolvedModel | null;
-    try {
-      resolved = await resolver(this.turnModelSpec());
-    } catch (err) {
-      if (err instanceof NoCredentialsError) {
-        // Mid-turn continuation with no key anywhere: still stamp the
-        // resolved MODEL (mirroring the success branch) so a setModel that
-        // happened while keyless mid-gate takes effect on the resumed
-        // continuation instead of silently continuing on the stale model —
-        // and clear any previously-resolved key so a now-revoked credential
-        // is not reused. The continuation then fails with the provider's own
-        // error and the turn settles `failed` normally (the pre-run release
-        // path only applies to turns that haven't started).
-        this.turnApiKey = undefined;
-        this.agent.state.model = err.model;
-        return;
-      }
-      throw err;
-    }
+    const resolved = await resolver(this.turnModelSpec());
     if (resolved) {
       this.turnApiKey = resolved.apiKey;
       this.agent.state.model = resolved.model;
@@ -1146,15 +1142,7 @@ export class Thread {
       if (this.paused) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
-      if (!head) {
-        // No claimable work left: any surviving credential-budget entries are
-        // for items that settled OUTSIDE this thread's own settlement paths
-        // (e.g. the admin force-settle endpoint writes straight to the store)
-        // — emitSettled never ran for them, so sweep the map here to keep the
-        // bypass paths leak-free.
-        this.credentialAttempts.clear();
-        return;
-      }
+      if (!head) return;
 
       // A previous settlement durably recorded its outcome (reserve) but the
       // finalize half failed transiently: retry it under the item's stored
@@ -1202,115 +1190,72 @@ export class Thread {
         turnError = err;
         this.emitError("run_failed", err instanceof Error ? err.message : String(err));
       }
+      // A pre-first-token stream failure may leave NO assistant message for
+      // this turn, so settlement can't rely on the transcript to detect it
+      // (decideTurnOutcome deliberately ignores stale trailing messages) —
+      // runItem records the agent throw independently and it becomes a
+      // normal turn failure here.
+      if (!turnFailed && this.turnAgentError !== undefined) {
+        turnFailed = true;
+        turnError = this.turnAgentError;
+      }
 
       // The turn couldn't run because the host resolver threw
-      // NoCredentialsError at turn start. For the first few attempts, release
-      // the claim back to `queued` (fenced) instead of settling `failed`, so
-      // the submission stays abortable and re-runs once credentials appear —
-      // a racing abort settles it `aborted` via the queued settle-unclaimed
-      // path. Past the cap, settle `failed` with the host's own credentials
-      // error so a genuinely key-less session gets one bounded, surfaced
-      // failure instead of a silent forever-spin.
+      // NoCredentialsError at turn start (`credentialError` is set ONLY by
+      // that throw). For the first few attempts, release the claim back to
+      // `queued` (fenced) instead of settling `failed`, so the submission
+      // stays abortable and re-runs once credentials appear — a racing abort
+      // settles it `aborted` via the queued settle-unclaimed path. Past the
+      // cap, settle `failed` with the host's own credentials error so a
+      // genuinely key-less session gets one bounded, surfaced failure
+      // instead of a silent forever-spin.
       // From here to the end of the iteration the claim is installed: every
-      // exit — release-success return, ownership-loss bail, cap fall-through,
-      // settleTurn success or throw, and any transient store throw inside the
-      // credential-release block — must clear runningItem/fence exactly once,
-      // via the single finally below. A store throw escaping with the claim
-      // still set would wedge the thread (heartbeat renews the lease forever,
-      // nothing ever settles the item).
+      // exit — release-success return, ownership-loss abandon, cap
+      // fall-through, settleTurn success or throw, and any transient store
+      // throw inside the credential-release helper — must clear
+      // runningItem/fence exactly once, via the single finally below. A
+      // store throw escaping with the claim still set would wedge the thread
+      // (heartbeat renews the lease forever, nothing ever settles the item).
+      const credentialError = this.credentialError;
+      this.credentialError = undefined;
       const releaseFence = this.fence;
       try {
-        if (this.turnLackedCredentials && !turnFailed && releaseFence) {
-          this.turnLackedCredentials = false;
-          // Mirror settleTurn's guards: a successor attempt may own the item now.
-          if (this.staleFenceDetected) {
-            this.credentialAttempts.delete(claimed.id);
+        if (credentialError !== undefined && !turnFailed && releaseFence) {
+          const verdict = await this.attemptCredentialRelease(claimed, releaseFence);
+          if (verdict === "released") {
+            // Emit untagged (queueItemId: null): the item just went back to
+            // `queued`, so the envelope must not carry it as a live claim.
+            // runningItem/fence themselves clear only in the finally —
+            // clearing them early opens an idle window in which a concurrent
+            // reconcile pass could install a fresh claim that the pending
+            // finally would then strip.
+            await this.emitQueueState({ queueItemId: null });
+            // Deliberately NO re-kick here: the session's 5s sweep interval
+            // is the retry backoff. With pre-run credential detection an
+            // immediate re-kick would burn all attempts in milliseconds and
+            // defeat the "wait for a key to appear" grace window.
             return;
           }
-          const current = await store.getQueueItem(this.session.id, claimed.id);
-          if (!current || current.status !== "running") {
-            this.credentialAttempts.delete(claimed.id);
+          if (verdict === "abandon") {
+            // A successor attempt owns the item (or it settled): nothing of
+            // ours left to settle.
             return;
           }
-          if (!current.supersededByItemId) {
-            // Backoff-aware budget: a release landing within
-            // CREDENTIAL_RELEASE_BACKOFF_MS of the last COUNTED cycle is the
-            // same cycle (external kicks fire on every submit/resume/abort —
-            // a burst must not burn the budget in milliseconds). Only a
-            // counted cycle advances `count` and moves `lastAt`.
-            const now = Date.now();
-            const backoffMs =
-              this.session.options.credentialReleaseBackoffMs ?? CREDENTIAL_RELEASE_BACKOFF_MS;
-            const prev = this.credentialAttempts.get(claimed.id);
-            const withinBackoff = prev !== undefined && now - prev.lastAt < backoffMs;
-            const count = prev === undefined ? 1 : withinBackoff ? prev.count : prev.count + 1;
-            this.credentialAttempts.set(claimed.id, {
-              count,
-              lastAt: prev !== undefined && withinBackoff ? prev.lastAt : now,
-            });
-            if (withinBackoff || count < MAX_CREDENTIAL_ATTEMPTS) {
-              // The release CAS is the atomic authority, not the `current`
-              // snapshot above: it refuses when a supersession stamp landed
-              // between the snapshot read and this commit (TOCTOU window).
-              const released = await store.releaseSubmission(
-                this.session.id,
-                this.id,
-                claimed.id,
-                releaseFence,
-              );
-              if (released) {
-                // The item is no longer running: drop the claim before the
-                // emit so the queue_state envelope isn't tagged with a
-                // queueItemId that just went back to `queued` (the finally
-                // re-clears harmlessly).
-                this.runningItem = null;
-                await this.emitQueueState();
-                // Deliberately NO re-kick here: the session's 5s sweep interval
-                // is the retry backoff. With pre-run credential detection an
-                // immediate re-kick would burn all attempts in milliseconds and
-                // defeat the "wait for a key to appear" grace window.
-                return;
-              }
-              // CAS refused. Re-read to decide who owns the item now: if it is
-              // still running under OUR attempt (a supersession stamped after
-              // the snapshot), we must settle it ourselves — fall through to
-              // settleTurn with turnFailed false so decideTurnOutcome yields
-              // `superseded`. A bare CAS-fail must never strand the item
-              // running+superseded.
-              const after = await store.getQueueItem(this.session.id, claimed.id);
-              if (
-                !after ||
-                after.status !== "running" ||
-                after.attemptId !== releaseFence.attemptId
-              ) {
-                // A successor attempt owns it (or it settled/changed state):
-                // nothing of ours left to settle — clean up like the
-                // stale-fence path. The item left our ownership, so its
-                // budget entry is dead weight — drop it.
-                this.credentialAttempts.delete(claimed.id);
-                return;
-              }
-            } else {
-              // Cap reached — settle `failed` with the HOST's message.
-              // decideTurnOutcome still yields to a racing abort/supersession
-              // first. Append the user entry NOW (every credential attempt
-              // returned pre-append, so this cannot double-append): the
-              // transcript must record what the user asked when the failure
-              // surfaces.
-              await this.appendUserEntry(claimed);
-              turnFailed = true;
-              turnError =
-                this.credentialError ??
-                new Error(
-                  `no usable API key for model "${this.turnModelSpec()}" — configure an org LLM key or set the provider's API key env var`,
-                );
-            }
+          if (verdict === "settle-cap") {
+            // Cap reached — settle `failed` with the HOST's message.
+            // decideTurnOutcome still yields to a racing abort/supersession
+            // first. Append the user entry NOW (every credential attempt
+            // returned pre-append, so this cannot double-append): the
+            // transcript must record what the user asked when the failure
+            // surfaces.
+            await this.appendUserEntry(claimed);
+            turnFailed = true;
+            turnError = credentialError;
           }
-          // A superseding submission claimed this item mid-attempt: do NOT
-          // release (a re-queued superseded item is skipped by both
-          // unsettledHead and the store's claim head — an orphan that hangs
-          // awaitResult forever). Fall through to settleTurn with turnFailed
-          // still false so decideTurnOutcome settles it `superseded`.
+          // "settle-superseded": fall through with turnFailed still false so
+          // decideTurnOutcome settles it `superseded` (do NOT release — a
+          // re-queued superseded item is skipped by both unsettledHead and
+          // the store's claim head: an orphan that hangs awaitResult forever).
         }
 
         await this.settleTurn(claimed, turnFailed ? { error: turnError } : undefined);
@@ -1328,6 +1273,68 @@ export class Thread {
         this.fence = undefined;
       }
     }
+  }
+
+  /**
+   * One credential-release cycle for a claimed turn whose host resolver
+   * threw `NoCredentialsError` before the turn could run. Consults and
+   * updates the DURABLE budget on the queue item (`credentialAttempts` /
+   * `lastCredentialReleaseAt` — written atomically inside the release CAS,
+   * surviving restarts so a crash-looping keyless session still fails
+   * boundedly). Backoff-aware: a release within
+   * `credentialReleaseBackoffMs` of the last COUNTED cycle coalesces into it
+   * (external kicks fire on every submit/resume/abort; a burst must not burn
+   * the budget in milliseconds).
+   *
+   * Verdicts for the claim loop:
+   *  - "released": claim released back to `queued` (budget persisted).
+   *  - "settle-cap": budget exhausted — settle `failed` with the host error.
+   *  - "settle-superseded": a supersession owns the outcome — settle so
+   *    decideTurnOutcome yields `superseded` (never re-queue: orphan).
+   *  - "abandon": a successor attempt owns the item (or it settled) —
+   *    nothing of ours left to settle.
+   */
+  private async attemptCredentialRelease(
+    claimed: QueueItem,
+    releaseFence: WriteFence,
+  ): Promise<"released" | "settle-cap" | "settle-superseded" | "abandon"> {
+    const store = this.session.providers.store;
+    // Mirror settleTurn's guards: a successor attempt may own the item now.
+    if (this.staleFenceDetected) return "abandon";
+    const current = await store.getQueueItem(this.session.id, claimed.id);
+    if (!current || current.status !== "running") return "abandon";
+    if (current.supersededByItemId) return "settle-superseded";
+
+    const now = Date.now();
+    const backoffMs =
+      this.session.options.credentialReleaseBackoffMs ?? CREDENTIAL_RELEASE_BACKOFF_MS;
+    const prevCount = current.credentialAttempts ?? 0;
+    const lastAt = current.lastCredentialReleaseAt;
+    const withinBackoff = lastAt !== undefined && now - lastAt < backoffMs;
+    const count = withinBackoff ? prevCount : prevCount + 1;
+    if (!withinBackoff && count >= MAX_CREDENTIAL_ATTEMPTS) return "settle-cap";
+
+    // The release CAS is the atomic authority, not the `current` snapshot
+    // above: it refuses when a supersession stamp landed between the
+    // snapshot read and this commit (TOCTOU window). The budget counters
+    // ride the same CAS — persisted iff the release lands.
+    const released = await store.releaseSubmission(
+      this.session.id,
+      this.id,
+      claimed.id,
+      releaseFence,
+      { attempts: count, lastReleaseAt: withinBackoff && lastAt !== undefined ? lastAt : now },
+    );
+    if (released) return "released";
+    // CAS refused. Re-read to decide who owns the item now: still running
+    // under OUR attempt means a supersession stamped after the snapshot —
+    // we must settle it ourselves (a bare CAS-fail must never strand the
+    // item running+superseded). Anything else: a successor owns it.
+    const after = await store.getQueueItem(this.session.id, claimed.id);
+    if (!after || after.status !== "running" || after.attemptId !== releaseFence.attemptId) {
+      return "abandon";
+    }
+    return "settle-superseded";
   }
 
   /**
@@ -1475,10 +1482,6 @@ export class Thread {
   }
 
   private async emitSettled(itemId: string, outcome: SubmissionOutcome): Promise<void> {
-    // The item is settled — its credential-attempt budget entry is done.
-    // Every settlement path routes through here (see the eventKey note
-    // below), so this is the single cleanup point for the map.
-    this.credentialAttempts.delete(itemId);
     // Deterministic eventKey `settled:{itemId}`: every settlement path (fenced
     // two-phase, retryFinalize, reconciliation, and the fenceless
     // settleUnclaimed sites) routes through here, so a double-emission across
@@ -1752,13 +1755,22 @@ export class Thread {
     void this.kick();
   }
 
-  /** Emit the derived `queue_state` event for this thread from durable rows. */
-  private async emitQueueState(): Promise<void> {
+  /**
+   * Emit the derived `queue_state` event for this thread from durable rows.
+   * The emit envelope's retention-linkage `queueItemId` defaults to the
+   * running item; pass `{ queueItemId: null }` to emit untagged (used by the
+   * credential-release path, where the item has just gone back to `queued`
+   * but the in-memory claim must stay installed until the loop's finally —
+   * clearing it early opens a window for a concurrent reconcile to install a
+   * fresh claim that the pending finally would strip).
+   */
+  private async emitQueueState(opts?: { queueItemId?: string | null }): Promise<void> {
     const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
     const state = deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
+    const tag = opts?.queueItemId === undefined ? this.runningItem?.id : opts.queueItemId;
     await this.session.emit(
       { type: "queue_state", threadId: this.id, state },
-      { queueItemId: this.runningItem?.id },
+      { queueItemId: tag ?? undefined },
     );
   }
 
@@ -1818,41 +1830,46 @@ export class Thread {
 
   private async runItem(item: QueueItem): Promise<void> {
     this.aborted = false;
-    this.turnLackedCredentials = false;
     this.credentialError = undefined;
+    this.turnAgentError = undefined;
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
 
-    // Layered model resolution (thread override → session default), FIRST —
-    // before any side-effecting work (user-entry append, buildTools, sandbox
-    // warm). A host resolver that throws NoCredentialsError means the turn
-    // cannot reach the model at all: flag it for the claim loop's release
-    // path and return with NO user entry appended, NO agent run, and NO
-    // assistant error entry — so bounded credential retries never duplicate
-    // entries. Any other resolver throw propagates and settles the turn
-    // `failed` (real model-resolution errors, e.g. a disabled provider).
+    // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
+    // start of the claimed turn, in parallel with the LLM call — never at
+    // session-create time. Hoisted ABOVE model resolution so provisioning is
+    // amortized over credential-release cycles too (a keyless turn still
+    // warms; the sandbox is ready by the time a key appears). Fire-and-forget;
+    // tool ops that touch the sandbox await readiness themselves via
+    // PolicySandbox. Sessions opted out via `warmSandboxOnClaim: false`
+    // (e.g. orchestrators) stay sandbox-less until a turn's tool actually
+    // touches the filesystem — the lazy PolicySandbox attachment provisions
+    // on that first touch.
+    if (this.session.options.warmSandboxOnClaim !== false) {
+      this.session.attachment.warm();
+    }
+
+    // Layered model resolution (thread override → session default), BEFORE
+    // the user-entry append and buildTools. A host resolver that throws
+    // NoCredentialsError means the turn cannot reach the model at all: flag
+    // it for the claim loop's release path and return with NO user entry
+    // appended, NO agent run, and NO assistant error entry — so bounded
+    // credential retries never duplicate entries. Any OTHER resolver throw
+    // (disabled provider, model not active, unknown provider) settles the
+    // turn `failed`: append the user entry FIRST so the prompt is still in
+    // the transcript when the failure surfaces, then rethrow with an
+    // identical failure surface.
     let turnModel: PiModel;
     try {
       turnModel = await this.resolveTurnModelForTurn();
     } catch (err) {
       if (err instanceof NoCredentialsError) {
-        this.turnLackedCredentials = true;
         this.credentialError = err;
         return;
       }
+      await this.appendUserEntry(item);
       throw err;
-    }
-
-    // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
-    // start of the claimed turn, in parallel with the LLM call — never at
-    // session-create time. Fire-and-forget; tool ops that touch the
-    // sandbox await readiness themselves via PolicySandbox. Sessions opted
-    // out via `warmSandboxOnClaim: false` (e.g. orchestrators) stay
-    // sandbox-less until a turn's tool actually touches the filesystem —
-    // the lazy PolicySandbox attachment provisions on that first touch.
-    if (this.session.options.warmSandboxOnClaim !== false) {
-      this.session.attachment.warm();
     }
 
     // Persist the user message entry (shared helper — the claim loop's
@@ -1883,6 +1900,12 @@ export class Thread {
       try {
         await this.runAgent(text);
       } catch (err) {
+        // Record the throw for settlement: a stream failing before its first
+        // message_start leaves no assistant message this turn, and
+        // decideTurnOutcome ignores stale trailing messages — without this
+        // the turn would settle `completed`. The claim loop folds it into
+        // turnFailed; abort/supersession still take precedence there.
+        this.turnAgentError = err;
         this.emitError("agent_failed", err instanceof Error ? err.message : String(err));
       }
 
