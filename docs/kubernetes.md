@@ -207,15 +207,38 @@ default 1–2 CPU / 2–4 Gi, `activeDeadlineSeconds: 1800` (a stuck build is
 killed, not left running), and an in-process concurrency cap of 1 (extra
 builds queue FIFO). Size node capacity accordingly if you enable prebuilds.
 
+### Published images: GHCR on every dev-v2 merge
+
+CI (`.github/workflows/docker-publish.yml`) publishes both deployable
+images to GHCR as public multi-arch (amd64 + arm64) manifests on every
+merge to `dev-v2` and on version tags:
+
+- `ghcr.io/<owner>/valet-api` — the api with the web SPA baked in
+- `ghcr.io/<owner>/valet-sandbox` — the session sandbox pod image
+
+Each publish carries a moving branch tag (`dev-v2`) and an immutable
+`sha-<shortsha>` tag. **Deploy the sha tag.** The chart defaults to
+`imagePullPolicy: IfNotPresent`, so a moving tag silently goes stale on any
+node that has pulled it before:
+
+```bash
+helm upgrade ... \
+  --set api.image.repository=ghcr.io/<owner>/valet-api \
+  --set api.image.tag=sha-<shortsha> \
+  --set sandbox.image.repository=ghcr.io/<owner>/valet-sandbox \
+  --set sandbox.image.tag=sha-<shortsha>
+```
+
+The images are public, so no pull secrets are needed (`api.imagePullSecrets`
+exists for private mirrors).
+
 ### Local image visibility is a moby-mode trick — it doesn't generalize
 
 Locally, `make k8s-build` uses plain `docker build`, and the images are
 visible to pods *only because* Rancher Desktop's moby mode backs k3s with
 cri-dockerd (the chart pins concrete tags with
 `imagePullPolicy: IfNotPresent`, so no pull is attempted). Any remote or
-multi-node cluster needs images pushed to a real registry — CI publishing
-is a recorded follow-up, so today that's a manual step for a non-local
-deploy.
+multi-node cluster should use the GHCR images above instead.
 
 ## Not Implemented Yet
 
@@ -238,8 +261,9 @@ absence today rather than assuming them:
 - **Network policies and pod security admission hardening** beyond the
   namespace split; gVisor/Kata runtime classes for sandbox pods likewise
   (prod-hardening follow-ups).
-- **CI image publishing / remote-cluster automation** — the pipeline ends at
-  the local reference environment today.
+- **Remote-cluster deploy automation** — CI publishes the images (see
+  [Images and Builds](#images-and-builds)), but rolling them out to a
+  cluster is still a manual `helm upgrade`.
 - **Operator-managed Postgres** (e.g. CloudNativePG) — the supported prod
   path is `externalDatabase.url` pointing at managed Postgres.
 - **agent-sandbox warm pools** (`SandboxWarmPool`) — the fast-follow that

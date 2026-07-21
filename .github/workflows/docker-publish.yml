@@ -1,0 +1,148 @@
+name: Docker Images
+
+# Builds and publishes the two deployable images to GHCR on every merge to
+# dev-v2 (and on version tags):
+#
+#   ghcr.io/<owner>/valet-api      — docker/Dockerfile.api (api + baked web SPA)
+#   ghcr.io/<owner>/valet-sandbox  — docker/Dockerfile.sandbox-k8s (session pods)
+#
+# Multi-arch (linux/amd64 + linux/arm64) on NATIVE runners — public repos get
+# free ubuntu-24.04-arm runners, so no QEMU emulation (the sandbox image is a
+# long build even natively). Each (image, arch) is built and pushed by digest;
+# a per-image merge job then stitches the manifest list and applies the tags.
+#
+# Tags per publish:
+#   dev-v2            moving branch tag (convenience — do NOT pin deploys to it)
+#   sha-<shortsha>    immutable; what Helm deploys should pin
+#   vX.Y.Z + latest   on version-tag pushes
+#
+# The images must be public GHCR packages (first publish may need the
+# visibility flipped once in the package settings) — the chart wires no
+# imagePullSecrets by default.
+
+on:
+  push:
+    branches: [dev-v2]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-images-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/') }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: valet-api
+            dockerfile: docker/Dockerfile.api
+          - name: valet-sandbox
+            dockerfile: docker/Dockerfile.sandbox-k8s
+        platform:
+          - arch: amd64
+            runner: ubuntu-latest
+            docker: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            docker: linux/arm64
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR requires a lowercase namespace; github.repository_owner isn't
+      # guaranteed lowercase.
+      - name: Compute image name
+        id: img
+        run: echo "name=ghcr.io/${OWNER,,}/${{ matrix.image.name }}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.platform.docker }}
+          outputs: type=image,name=${{ steps.img.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [valet-api, valet-sandbox]
+    steps:
+      - name: Compute image name
+        id: img
+        run: echo "name=ghcr.io/${OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest` tracks stable version tags only — not pre-release
+      # (-suffixed) tags, not branch pushes. (No comments inside `tags:` —
+      # metadata-action parses every line as an entry.)
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.img.outputs.name }}@sha256:%s ' *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "${{ steps.img.outputs.name }}:${{ steps.meta.outputs.version }}"

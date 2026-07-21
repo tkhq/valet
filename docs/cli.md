@@ -165,7 +165,15 @@ Refuses while a live `valet serve` owns the dir, and requires confirmation
 exit codes above, this makes `send` usable in scripts: send a prompt, branch
 on exit code, parse the JSON.
 
-## Building the Binary
+## Getting the Binary
+
+Prebuilt binaries (macOS arm64, Linux x64/arm64) are on GitHub Releases:
+versioned releases on `v*` tags, and a rolling `dev-v2-latest` prerelease
+whose assets are replaced on every merge to `dev-v2` — its download URLs
+(`…/releases/download/dev-v2-latest/valet-<os>-<arch>`) are stable. Download,
+`chmod +x`, run. Windows runs the linux-x64 binary under WSL.
+
+Or build from source:
 
 ```bash
 pnpm --filter @valet/api build:binary                       # host platform

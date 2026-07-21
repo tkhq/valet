@@ -25,8 +25,11 @@ share one PGlite. Client commands (`valet login`, `sessions`, `send`, `chat`,
 `~/.valet/config.json`. The full command reference is
 [`docs/cli.md`](cli.md).
 
-Build the binary from source: `pnpm --filter @valet/api build:binary`
-(cross-compile with `--target bun-<os>-<arch>`).
+Prebuilt binaries (macOS arm64, Linux x64/arm64) are published on GitHub
+Releases: versioned releases on `v*` tags, plus a rolling `dev-v2-latest`
+prerelease refreshed on every merge to `dev-v2`. Or build from source:
+`pnpm --filter @valet/api build:binary` (cross-compile with
+`--target bun-<os>-<arch>`).
 
 ## 2. Local development
 
@@ -52,6 +55,11 @@ The chart at `deploy/chart/valet` deploys:
   under `deploy/agent-sandbox/`) must be installed first.
 - **Image prebuilds** — a bundled OCI registry (`registry:2`, nightly GC) fed
   by BuildKit jobs, so repos can get prebuilt sandbox images.
+
+CI publishes the api and sandbox images to GHCR (public, multi-arch) on
+every `dev-v2` merge — remote clusters should deploy those, pinned to the
+immutable `sha-<shortsha>` tag (see
+[`docs/kubernetes.md`](kubernetes.md#images-and-builds)).
 
 The local reference environment is Rancher Desktop (moby mode):
 
