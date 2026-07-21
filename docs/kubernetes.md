@@ -215,14 +215,6 @@ multi-node cluster needs images pushed to a real registry — CI publishing
 is a recorded follow-up, so today that's a manual step for a non-local
 deploy.
 
-## Operational Safety
-
-Developer machines' ambient kubectl context may point at a production
-cluster. Every `make k8s-*` target and every documented command pins
-`--context rancher-desktop` (`--kube-context` for helm). Never run a bare
-`kubectl`/`helm` against this workflow — pin the context explicitly,
-always.
-
 ## What Is Deliberately NOT Handled Yet
 
 Recorded non-goals — plan around them rather than assuming them:
