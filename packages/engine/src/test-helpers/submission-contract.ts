@@ -928,6 +928,219 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded?.status).toBe("running");
     });
 
+    // --- releaseSubmission (fenced running→queued, no settlement) ---
+
+    it("releases a running item claimed by the caller's attempt back to queued + deletes the marker", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      expect(claimed?.status).toBe("running");
+      await store.insertAttemptMarker(item.id, "att-1");
+
+      const releasedAt = Date.now();
+      const released = await store.releaseSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        item.id,
+        { itemId: item.id, attemptId: "att-1" },
+        { attempts: 1, lastReleaseAt: releasedAt },
+      );
+      expect(released).toBe(true);
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("queued");
+      expect(loaded?.attemptId).toBeUndefined();
+      expect(loaded?.ownerId).toBeUndefined();
+      expect(loaded?.leaseExpiresAt).toBeUndefined();
+      // A released claim never consumed run budget: the release DECREMENTS
+      // the claim's attempt_count increment (floor 0) in the same atomic
+      // write — keyless release cycles must not trip the stuck-head signal
+      // or exhaust the generic maxAttempts retry budget.
+      expect(loaded?.attemptCount).toBe(0);
+      // The DURABLE credential budget landed atomically with the release —
+      // it must survive restart (a crash-looping keyless session stays
+      // boundedly failing, never an infinite queued→running→queued cycle).
+      expect(loaded?.credentialAttempts).toBe(1);
+      expect(loaded?.lastCredentialReleaseAt).toBe(releasedAt);
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
+
+      // Re-claimable after release.
+      const reclaimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-2",
+        ownerId: "owner-1",
+      });
+      expect(reclaimed?.status).toBe("running");
+      expect(reclaimed?.attemptCount).toBe(1);
+    });
+
+    it("is a no-op on an attempt-id mismatch (a superseding attempt owns it now)", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-live",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-live");
+      // A leftover marker for the STALE attempt (e.g. its own insert before it
+      // lost the item) must survive too — the stale release is a full no-op.
+      await store.insertAttemptMarker(item.id, "att-stale");
+
+      // A stale attempt tries to release — must not touch the live claim.
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-stale",
+      });
+      expect(released).toBe(false);
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("running");
+      expect(loaded?.attemptId).toBe("att-live");
+      // Refused CAS leaves attempt_count exactly as the live claim set it.
+      expect(loaded?.attemptCount).toBe(1);
+      expect(await store.hasAttemptMarker(item.id, "att-live")).toBe(true);
+      // Full no-op: it deleted NEITHER its own stale marker NOR the live one.
+      expect(await store.hasAttemptMarker(item.id, "att-stale")).toBe(true);
+    });
+
+    it("plain release (no credential payload) keeps the claim's attemptCount increment", async () => {
+      // Reconciliation's fresh re-run of a crashed pre-stream attempt is a
+      // PLAIN release: the attempt genuinely consumed run budget, and handing
+      // it back would let a deterministically crash-looping item oscillate
+      // attempt_count net-zero forever, never exhausting the generic
+      // maxAttempts retry budget. Only credential releases (separately
+      // bounded by the durable credential budget) decrement.
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-1");
+
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-1",
+      });
+      expect(released).toBe(true);
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("queued");
+      expect(loaded?.attemptId).toBeUndefined();
+      expect(loaded?.attemptCount).toBe(1);
+      expect(loaded?.credentialAttempts ?? 0).toBe(0);
+      expect(loaded?.lastCredentialReleaseAt).toBeUndefined();
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(false);
+    });
+
+    it("is a no-op when the item is not running (e.g. still queued)", async () => {
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+
+      const released = await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, {
+        itemId: item.id,
+        attemptId: "att-none",
+      });
+      expect(released).toBe(false);
+
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("queued");
+    });
+
+    it("REFUSES to release a running item that has been superseded (returns false, no state change, markers untouched)", async () => {
+      // TOCTOU pin: a supersession stamp landing between the caller's
+      // getQueueItem snapshot and this CAS must make the release refuse —
+      // releasing a superseded item to `queued` orphans it (skipped by the
+      // claim head and unsettledHead; nothing would ever settle it).
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-1");
+
+      // Steer admission stamps supersededByItemId on the running item.
+      const steer = makeItem();
+      const { supersededItemIds } = await store.admitSubmission(SESSION_ID, THREAD_ID, steer, {
+        steer: true,
+      });
+      expect(supersededItemIds).toContain(item.id);
+
+      const released = await store.releaseSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        item.id,
+        { itemId: item.id, attemptId: "att-1" },
+        { attempts: 5, lastReleaseAt: Date.now() },
+      );
+      expect(released).toBe(false);
+
+      // Full no-op: still running under the same attempt, supersession stamp
+      // intact, marker untouched, credential counters NOT written (they ride
+      // the CAS — a refused release must not leak a partial counter write).
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("running");
+      expect(loaded?.attemptId).toBe("att-1");
+      expect(loaded?.supersededByItemId).toBe(steer.id);
+      expect(loaded?.credentialAttempts ?? 0).toBe(0);
+      expect(loaded?.lastCredentialReleaseAt).toBeUndefined();
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
+    });
+
+    it("REFUSES to release a running item with abortRequestedAt stamped (settle aborted, never re-queue)", async () => {
+      // An abort landing between the caller's guard check and the CAS must
+      // refuse the release: the item settles `aborted` under the current
+      // attempt instead of flickering running→queued→aborted.
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: item.id,
+        attemptId: "att-1",
+        ownerId: "owner-1",
+      });
+      await store.insertAttemptMarker(item.id, "att-1");
+      await store.requestAbort(SESSION_ID, THREAD_ID);
+
+      const released = await store.releaseSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        item.id,
+        { itemId: item.id, attemptId: "att-1" },
+        { attempts: 1, lastReleaseAt: Date.now() },
+      );
+      expect(released).toBe(false);
+
+      // Full no-op: still running under the same attempt, abort stamp
+      // intact, run budget and credential counters untouched, marker kept.
+      const loaded = await store.getQueueItem(SESSION_ID, item.id);
+      expect(loaded?.status).toBe("running");
+      expect(loaded?.attemptId).toBe("att-1");
+      expect(loaded?.abortRequestedAt).toBeDefined();
+      expect(loaded?.attemptCount).toBe(1);
+      expect(loaded?.credentialAttempts ?? 0).toBe(0);
+      expect(await store.hasAttemptMarker(item.id, "att-1")).toBe(true);
+    });
+
     // --- Abort + blocked ---
 
     it("requestAbort stamps abortRequestedAt on unsettled items in scope only; first write wins", async () => {

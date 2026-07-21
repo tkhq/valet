@@ -1,6 +1,7 @@
 export * from "./types.js";
 export {
   NotFoundError,
+  NoCredentialsError,
   StaleAttemptError,
   ConflictError,
   TimeoutError,

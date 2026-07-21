@@ -2,7 +2,8 @@ import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
-import { StaleAttemptError } from "./errors.js";
+import { NoCredentialsError, StaleAttemptError } from "./errors.js";
+import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
   CreateSessionOptions,
@@ -321,8 +322,10 @@ export class Session {
 
   /**
    * Reconcile every unsettled submission of this session through the normative
-   * decision tree (spec §Reconciliation). Called on rehydrate and, for
-   * expired-lease items, from the sweep. Idempotent — re-running is safe.
+   * decision tree (spec §Reconciliation). Called only from `restoreSession`
+   * (the sweep goes through `reconcileItem` directly, never this method), so
+   * the end-of-reconcile kick below runs once per rehydrate. Idempotent —
+   * re-running is safe.
    */
   async reconcile(): Promise<void> {
     const items = await this.providers.store.listUnsettledSubmissions(this.id);
@@ -332,6 +335,25 @@ export class Session {
       // live attempt — reclaim eagerly. Fencing (fresh attemptId) makes a slow
       // zombie's late writes fail, so eager takeover stays safe.
       await this.reconcileItem(item, { startup: true });
+    }
+    // Durable wakeup for still-queued heads. A `queued` item carries no
+    // attempt id (admission never sets one; a credential release explicitly
+    // clears it), so the decision tree's `resume` action short-circuits in
+    // `resumeInterrupted` — and right after a restart no sweep timer is armed
+    // yet (`ensureTimers` runs on the first claim). Without this kick a
+    // released credential-less item — or any queued-at-crash item — would sit
+    // queued forever until an unrelated external prompt. Fire-and-forget: the
+    // drive is asynchronous (same contract as submitPrompt's kick); the kick
+    // itself arms the timers on claim, so the 5s sweep takes over as the
+    // retry backoff.
+    const remaining = await this.providers.store.listUnsettledSubmissions(this.id);
+    const queuedThreadIds = new Set(
+      remaining
+        .filter((i) => i.status === "queued" && !i.supersededByItemId)
+        .map((i) => i.threadId),
+    );
+    for (const t of this.threads.values()) {
+      if (queuedThreadIds.has(t.id)) void t.kick();
     }
   }
 
@@ -409,9 +431,34 @@ export class Session {
       case "replay_gate":
         if (suspended) await thread.reconcileGate(item, suspended, "replay");
         return;
-      case "resume":
+      case "resume": {
+        // A running item whose attempt never reached the model — NO assistant
+        // entry carries its queueItemId (a crashed pre-stream attempt has at
+        // most a user entry, e.g. a store throw inside the credential-release
+        // path or a settle throw after the cap append) — must not be resumed:
+        // `resumeInterrupted` continues the transcript, which is the PREVIOUS
+        // turn's, and the prompt would never actually run. Re-queue it for a
+        // fresh from-scratch run instead (fenced release, no credential
+        // counters — this is not a credential cycle; the idempotent
+        // user-entry append means no duplicates); the post-reconcile kick
+        // (startup) / sweep kick picks it up. A genuine mid-stream crash HAS
+        // assistant entries and still resumes; gate-suspended items are
+        // excluded by the `running` status check.
+        const hasAssistantEntry = entries.some(
+          (e) => e.type === "message" && e.role === "assistant" && e.queueItemId === item.id,
+        );
+        if (item.status === "running" && item.attemptId !== undefined && !hasAssistantEntry) {
+          const released = await store.releaseSubmission(this.id, item.threadId, item.id, {
+            itemId: item.id,
+            attemptId: item.attemptId,
+          });
+          if (released) return;
+          // CAS refused (superseded / successor) — fall through to resume,
+          // whose own fencing resolves ownership safely.
+        }
         await thread.resumeInterrupted(item);
         return;
+      }
     }
   }
 
@@ -590,9 +637,18 @@ export class Session {
     const before = this.options.model.id;
     // With a host resolver present, validate through it (null → same "unknown
     // model id" surface as the internal resolver's undefined). Absent → today's
-    // internal `resolveModelId` path, unchanged.
+    // internal `resolveModelId` path, unchanged. NoCredentialsError means the
+    // spec IS valid (the model resolved) but no key exists yet — accept it via
+    // the attached model: a user must be able to select a model before
+    // configuring its key.
     const resolver = this.options.resolveModel;
-    const next = resolver ? (await resolver(modelId))?.model : resolveSessionModel(modelId);
+    let next: Model<any> | undefined;
+    try {
+      next = resolver ? (await resolver(modelId))?.model : resolveSessionModel(modelId);
+    } catch (err) {
+      if (!(err instanceof NoCredentialsError)) throw err;
+      next = err.model;
+    }
     if (!next) throw new Error(`unknown model id: ${modelId}`);
     this.options.model = next;
     await this.providers.store.saveSession(await this.toData());

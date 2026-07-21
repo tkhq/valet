@@ -327,6 +327,8 @@ export interface QueueItemRow {
   attemptId: string | null;
   attemptCount: number;
   maxAttempts: number;
+  credentialAttempts: number;
+  lastCredentialReleaseAt: number | null;
   timeoutAt: number;
   abortRequestedAt: number | null;
   ownerId: string | null;
@@ -356,6 +358,8 @@ export function rawToQueueItemRow(raw: Record<string, unknown>): QueueItemRow {
     attemptId: asStringOrNull(raw.attempt_id, "attempt_id"),
     attemptCount: toNum(raw.attempt_count, "attempt_count"),
     maxAttempts: toNum(raw.max_attempts, "max_attempts"),
+    credentialAttempts: toNum(raw.credential_attempts, "credential_attempts"),
+    lastCredentialReleaseAt: toNumOrNull(raw.last_credential_release_at, "last_credential_release_at"),
     timeoutAt: toNum(raw.timeout_at, "timeout_at"),
     abortRequestedAt: toNumOrNull(raw.abort_requested_at, "abort_requested_at"),
     ownerId: asStringOrNull(raw.owner_id, "owner_id"),

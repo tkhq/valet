@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import {
   VirtualSandboxProvider,
@@ -122,12 +122,16 @@ describe("long-poll mode", () => {
   beforeEach(async () => {
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     faux.setResponses([fauxAssistantMessage("ok")]);
+    // Pre-run credential detection: the faux stream ignores the key's value,
+    // it just has to exist for the turn to start (env scrubbed by setup).
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
     testDb = await freshTestPgDb();
   });
 
   afterEach(async () => {
     await engineHost?.destroyAll();
     faux.unregister();
+    vi.unstubAllEnvs();
   });
 
   function buildHost(transport: PollingFakeTransport): ChannelHost {

@@ -98,6 +98,9 @@ describe("ChannelHost outbound delivery", () => {
     // intercepted — no ANTHROPIC_API_KEY / network needed.
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     faux.setResponses([fauxAssistantMessage("ok")]);
+    // Pre-run credential detection: the faux stream ignores the key's value,
+    // it just has to exist for the turn to start (env scrubbed by setup).
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
 
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
@@ -162,6 +165,7 @@ describe("ChannelHost outbound delivery", () => {
     host.stopOutbound();
     await engineHost.destroyAll();
     faux.unregister();
+    vi.unstubAllEnvs();
   });
 
   it("delivers a completed assistant message on a channel-keyed thread", async () => {

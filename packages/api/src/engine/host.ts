@@ -8,6 +8,7 @@ import {
   Engine,
   orchestratorSessionId,
   parseOrchestratorSessionId,
+  NoCredentialsError,
   type BlobStore,
   type ChildSpawner,
   type CredentialStore,
@@ -1055,7 +1056,17 @@ export class EngineHost {
    * session never silently boots on the wrong model.
    */
   private async resolveModelObject(orgId: string, spec: string): Promise<Model<any>> {
-    const resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+    // Session builds only need the model OBJECT; NoCredentialsError means the
+    // spec is valid but no key exists yet — accept via the attached model so
+    // a keyless org can still open sessions (turns get the engine's bounded
+    // credential-release path instead of a failed build).
+    let resolved: ResolvedModel | null;
+    try {
+      resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+    } catch (err) {
+      if (err instanceof NoCredentialsError) return err.model;
+      throw err;
+    }
     if (!resolved) {
       throw new Error(`EngineHost: unknown model "${spec}" — not in the org catalog or pi-ai registry`);
     }
@@ -1087,11 +1098,13 @@ export class EngineHost {
    *   - known kind (anthropic/openai/google), no row → always active
    *     (zero-config path, same as `resolveModelSpec`'s no-row branch).
    *   - known kind WITH a row → active iff `row.enabled`. A row with
-   *     neither an org key nor an env key is still "active" here because
-   *     `resolveModelSpec` does NOT throw for that case — it passes
-   *     `apiKey: undefined` through to pi-ai's own env fallback rather than
-   *     failing session build; that's a downstream completion-time concern,
-   *     not a reason to skip this preference entry.
+   *     neither an org key nor an env key is still "active" here even
+   *     though `resolveModelSpec` now throws `NoCredentialsError` for that
+   *     case — session build goes through `resolveModelObject`, which
+   *     swallows `NoCredentialsError` and returns the attached model, so a
+   *     keyless org still builds; keylessness is a turn-time concern (the
+   *     engine's pre-run release/cap path), not a reason to skip this
+   *     preference entry.
    *   - custom (`openai_compatible`) row → active iff `row.enabled` AND an
    *     org credential exists at `llm:{row.id}` — custom providers have NO
    *     env fallback, so a keyless custom row is exactly the case
