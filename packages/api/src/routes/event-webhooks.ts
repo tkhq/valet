@@ -74,7 +74,7 @@ eventWebhooksRouter.post("/:service", async (c) => {
     verified = await def.verify({ headers, rawBody }, secrets);
     if (verified) {
       await ingestEvent(
-        { db, plugins, onIngest: undefined /* Task 6 wires providers.eventDispatcher.nudge */ },
+        { db, plugins, onIngest: c.var.providers.eventDispatcher.nudge },
         { orgId, service, event: def.toEvent(verified) },
       );
       return c.body(null, 204);

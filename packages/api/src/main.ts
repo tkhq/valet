@@ -179,6 +179,11 @@ console.log("channel host started");
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
 
+// Event dispatcher (event-system plan Task 6): begin the delivery drain loop
+// so pending/failed event_deliveries left over from a prior process (and
+// freshly-ingested ones between nudges) get delivered.
+providers.eventDispatcher.start();
+
 // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
 // queued/building rows orphaned by a prior process crash/restart, then begin
 // the 10s build-status poll + 10min nightly-scheduler intervals. A no-op
@@ -238,6 +243,11 @@ async function shutdown(signal: NodeJS.Signals) {
     await providers.workflowRunHost.stopHost();
   } catch (err) {
     console.error("workflowRunHost.stopHost failed:", err);
+  }
+  try {
+    await providers.eventDispatcher.stop();
+  } catch (err) {
+    console.error("eventDispatcher.stop failed:", err);
   }
   try {
     providers.prebuildService.stop();

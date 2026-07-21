@@ -21,6 +21,8 @@ import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
+import { EventDispatcher } from "../events/dispatcher.js";
+import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
@@ -305,6 +307,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     crashAt: opts.workflowCrashAt,
   });
 
+  // Event dispatcher (event-system plan Task 6): drains event_deliveries
+  // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
+  // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
+  const eventDispatcher = new EventDispatcher({
+    db,
+    workflowRunHost,
+    workflowStore,
+    deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+  });
+
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
   // in this file builds (`{ db, credentials: engineCredentials, key }`).
@@ -329,6 +341,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     channelHost,
     workflowStore,
     workflowRunHost,
+    eventDispatcher,
     plugins,
     actionPluginByService,
     prebuildService,

@@ -467,7 +467,7 @@ githubAppWebhookRouter.post("/", async (c) => {
       .find((t) => t.service === "github" && t.id === `github.${event}`);
     if (def && deliveryId) {
       await ingestEvent(
-        { db, plugins: c.var.providers.plugins, onIngest: undefined /* Task 6 wires the nudge */ },
+        { db, plugins: c.var.providers.plugins, onIngest: c.var.providers.eventDispatcher.nudge },
         { orgId, service: "github", event: def.toEvent({ eventType: event, deliveryId, payload }) },
       );
     }

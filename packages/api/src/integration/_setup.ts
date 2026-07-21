@@ -27,6 +27,8 @@ import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
+import { EventDispatcher } from "../events/dispatcher.js";
+import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -289,6 +291,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowRunHost.startHost();
   }
 
+  // Event dispatcher (event-system plan Task 6): constructed with the same
+  // real deps as buildNodeProviders but NEVER started on its timer — tests
+  // drive `providers.eventDispatcher.pollOnce()` themselves (the ingest
+  // path's `nudge` still triggers an immediate poll, matching production).
+  const eventDispatcher = new EventDispatcher({
+    db,
+    workflowRunHost,
+    workflowStore,
+    deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+  });
+
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here); routes must treat this as
   // "unavailable", same as a `local` sandbox-backend boot.
@@ -318,6 +331,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     channelHost,
     workflowStore,
     workflowRunHost,
+    eventDispatcher,
     plugins,
     actionPluginByService,
     prebuildService,
@@ -345,6 +359,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     providers,
     async cleanup() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await eventDispatcher.stop();
       await channelHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
