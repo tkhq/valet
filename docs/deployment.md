@@ -66,8 +66,11 @@ make k8s-down             # helm uninstall (PVCs + Sandbox CRs survive)
 rancher-desktop`. Never run bare `kubectl`/`helm` against this workflow — an
 ambient context may point at a production cluster.
 
-The full runbook — hosts-file setup for `https://valet.localdev`, image
-rebuild flow, full-reset procedure — is
+The deployment architecture and its infra-level constraints (singleton API,
+install ordering, secret retention, RBAC verbs, PVC/teardown semantics,
+registry networking) are documented in
+[`docs/kubernetes.md`](kubernetes.md). The full runbook — hosts-file setup
+for `https://valet.localdev`, image rebuild flow, full-reset procedure — is
 [`deploy/README.md`](../deploy/README.md); the design rationale is
 [`docs/specs/2026-07-15-kubernetes-deployment-design.md`](specs/2026-07-15-kubernetes-deployment-design.md).
 
