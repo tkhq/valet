@@ -82,6 +82,12 @@ function roleLabel(role: "admin" | "operator" | "member"): string {
   return "Member";
 }
 
+function roleBadgeVariant(role: "admin" | "operator" | "member"): "accent" | "success" | "neutral" {
+  if (role === "admin") return "accent";
+  if (role === "operator") return "success";
+  return "neutral";
+}
+
 function RoleControl({
   role,
   disabled,
@@ -89,7 +95,7 @@ function RoleControl({
 }: {
   role: "admin" | "operator" | "member";
   disabled: boolean;
-  onSelect: (role: "admin" | "member") => void;
+  onSelect: (role: "admin" | "operator" | "member") => void;
 }) {
   const trigger = (
     <Button
@@ -99,7 +105,7 @@ function RoleControl({
       disabled={disabled}
       className="gap-1.5"
     >
-      <Badge variant={role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
+      <Badge variant={roleBadgeVariant(role)} className="pointer-events-none">
         {roleLabel(role)}
       </Badge>
       <ChevronDown className="h-3.5 w-3.5" aria-hidden />
@@ -119,6 +125,7 @@ function RoleControl({
       <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onSelect={() => onSelect("admin")}>Admin</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onSelect("operator")}>Operator</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onSelect("member")}>Member</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

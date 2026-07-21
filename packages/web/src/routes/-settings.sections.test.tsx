@@ -44,8 +44,15 @@ let meData: {
   defaultModel: null,
 };
 
-let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined = {
+let orgData:
+  | {
+      callerRole: "admin" | "operator" | "member";
+      permissions: ("org:manage" | "members:manage" | "providers:manage" | "infra:manage" | "credentials:org")[];
+      features: { organizations: boolean };
+    }
+  | undefined = {
   callerRole: "admin",
+  permissions: ["org:manage", "members:manage", "providers:manage", "infra:manage", "credentials:org"],
   features: { organizations: false },
 };
 
@@ -124,7 +131,11 @@ describe("ProfilePage", () => {
       orgRole: "admin",
       defaultModel: null,
     };
-    orgData = { callerRole: "admin", features: { organizations: false } };
+    orgData = {
+      callerRole: "admin",
+      permissions: ["org:manage", "members:manage", "providers:manage", "infra:manage", "credentials:org"],
+      features: { organizations: false },
+    };
   });
 
   it("renders name/avatar and a read-only email row with the spec hint", () => {
@@ -163,13 +174,17 @@ describe("ProfilePage", () => {
   });
 
   it("hides the enable-org card when the gate is already on", () => {
-    orgData = { callerRole: "admin", features: { organizations: true } };
+    orgData = {
+      callerRole: "admin",
+      permissions: ["org:manage", "members:manage", "providers:manage", "infra:manage", "credentials:org"],
+      features: { organizations: true },
+    };
     render(<ProfilePage />);
     expect(screen.queryByText("Working with a team? Enable organizations")).toBeNull();
   });
 
   it("hides the enable-org card for a non-admin", () => {
-    orgData = { callerRole: "member", features: { organizations: false } };
+    orgData = { callerRole: "member", permissions: [], features: { organizations: false } };
     render(<ProfilePage />);
     expect(screen.queryByText("Working with a team? Enable organizations")).toBeNull();
   });

@@ -36,17 +36,29 @@ const removeTeamMemberMutate = vi.fn();
 const createInviteMutate = vi.fn();
 const revokeInviteMutate = vi.fn();
 
+type OrgPermission = "org:manage" | "members:manage" | "providers:manage" | "infra:manage" | "credentials:org";
+
+const ADMIN_PERMISSIONS: OrgPermission[] = [
+  "org:manage",
+  "members:manage",
+  "providers:manage",
+  "infra:manage",
+  "credentials:org",
+];
+
 let orgData: {
   id: string;
   name: string;
   createdAt: number;
-  callerRole: "admin" | "member";
+  callerRole: "admin" | "operator" | "member";
+  permissions: OrgPermission[];
   features: { organizations: boolean };
 } = {
   id: "org_1",
   name: "Acme",
   createdAt: 0,
   callerRole: "admin",
+  permissions: ADMIN_PERMISSIONS,
   features: { organizations: true },
 };
 
@@ -56,7 +68,7 @@ let orgMembersData: {
     email: string;
     name: string | null;
     avatarUrl: string | null;
-    role: "admin" | "member";
+    role: "admin" | "operator" | "member";
     joinedAt: number;
   }>;
 } = {
@@ -126,6 +138,7 @@ beforeEach(() => {
     name: "Acme",
     createdAt: 0,
     callerRole: "admin",
+    permissions: ADMIN_PERMISSIONS,
     features: { organizations: true },
   };
   orgMembersData = {
@@ -200,6 +213,39 @@ describe("OrganizationMembersPage", () => {
     });
   });
 
+  it("the role picker offers Admin/Operator/Member", async () => {
+    const user = userEvent.setup();
+    renderWithTooltip(<OrganizationMembersPage />);
+    const memberButton = screen.getByRole("button", { name: /Member/ });
+    await user.click(memberButton);
+    expect(await screen.findByRole("menuitem", { name: "Admin" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Operator" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Member" })).toBeTruthy();
+  });
+
+  it("selecting Operator from the role picker fires the PATCH mutation with role: operator", async () => {
+    const user = userEvent.setup();
+    renderWithTooltip(<OrganizationMembersPage />);
+    const memberButton = screen.getByRole("button", { name: /Member/ });
+    await user.click(memberButton);
+    await user.click(await screen.findByRole("menuitem", { name: "Operator" }));
+    expect(setOrgMemberRoleMutate).toHaveBeenCalledWith({
+      userId: "u2",
+      body: { role: "operator" },
+    });
+  });
+
+  it("renders an operator badge for a member with role operator", () => {
+    orgMembersData = {
+      members: [
+        { userId: "u1", email: "ada@x.test", name: "Ada", avatarUrl: null, role: "admin", joinedAt: 0 },
+        { userId: "u2", email: "grace@x.test", name: "Grace", avatarUrl: null, role: "operator", joinedAt: 0 },
+      ],
+    };
+    renderWithTooltip(<OrganizationMembersPage />);
+    expect(screen.getByRole("button", { name: /Operator/ })).toBeTruthy();
+  });
+
   it("does not disable the role control when there are two admins", () => {
     orgMembersData = {
       members: [
@@ -217,10 +263,13 @@ describe("OrganizationMembersPage", () => {
     expect(screen.getByRole("button", { name: "Invite" })).toBeTruthy();
   });
 
-  it("hides the Invite button for a non-admin", () => {
-    orgData = { ...orgData, callerRole: "member" };
+  it("blocks a caller without members:manage from the whole Members page (Invite included)", () => {
+    orgData = { ...orgData, callerRole: "operator", permissions: ["providers:manage", "infra:manage", "credentials:org"] };
     renderWithTooltip(<OrganizationMembersPage />);
     expect(screen.queryByRole("button", { name: "Invite" })).toBeNull();
+    expect(
+      screen.getByText("Organization settings are managed by your org admins"),
+    ).toBeTruthy();
   });
 
   it("creating an invite posts { email?, role } and reveals the copyable link", async () => {

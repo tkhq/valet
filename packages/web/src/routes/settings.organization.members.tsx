@@ -4,23 +4,34 @@ import { Spinner } from "~/components/primitives";
 import { MembersTable } from "~/components/settings/members-table";
 import { InvitesPanel } from "~/components/settings/invites-panel";
 import { useOrg, useOrgMembers } from "~/api/settings";
+import { OrgPermissionGuard } from "./settings.organization";
 
 /**
  * `/settings/organization/members` — Organization · Members. Roster with
- * per-row role control, plus (admin only) the invite affordance and pending
- * invites list — `useOrg()`'s `callerRole` is the same admin signal the
- * `/settings/organization` layout guard already gates this whole route on,
- * reused here rather than re-derived so the Invite button never renders for
- * a member even if this component is reached directly (e.g. in tests).
+ * per-row role control, plus (permission-gated) the invite affordance and
+ * pending invites list — `useOrg()`'s `permissions` carries the
+ * `members:manage` signal the `/settings/organization` layout guard only
+ * checks loosely ("any org permission"); this page re-checks the specific
+ * permission it needs, both to gate the whole route and to gate the Invite
+ * button so it never renders for a caller without `members:manage` even if
+ * this component is reached directly (e.g. in tests).
  */
 export const Route = createFileRoute("/settings/organization/members")({
   component: OrganizationMembersPage,
 });
 
 export function OrganizationMembersPage() {
+  return (
+    <OrgPermissionGuard permission="members:manage">
+      <OrganizationMembersPageContent />
+    </OrgPermissionGuard>
+  );
+}
+
+function OrganizationMembersPageContent() {
   const membersQ = useOrgMembers();
   const orgQ = useOrg();
-  const isAdmin = orgQ.data?.callerRole === "admin";
+  const canManageMembers = orgQ.data?.permissions.includes("members:manage") ?? false;
 
   return (
     <Section title="Members" description="Everyone in your organization.">
@@ -33,7 +44,7 @@ export function OrganizationMembersPage() {
         <p className="py-4 text-sm text-danger-500">Failed to load members.</p>
       )}
       {membersQ.data && <MembersTable members={membersQ.data.members} />}
-      {isAdmin && <InvitesPanel />}
+      {canManageMembers && <InvitesPanel />}
     </Section>
   );
 }
