@@ -70,6 +70,20 @@ export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<O
   return { organizations: Boolean((row.features as Record<string, unknown>).organizations) };
 }
 
+/**
+ * Whether personal (per-user) 1Password service-account tokens are allowed
+ * for `orgId` (1Password credential provider plan, Task 1/2). Reads the same
+ * `orgs.features` jsonb column `getOrgFeatures` does, but with the OPPOSITE
+ * absent-key default: an absent `allowPersonalOnePassword` key reads as
+ * `true` (opt-out, not opt-in) — org admins disable it explicitly.
+ */
+export async function getAllowPersonalOnePassword(db: AppQueryable, orgId: string): Promise<boolean> {
+  const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
+  const row = rows[0];
+  if (!row?.features) return true;
+  return (row.features as Record<string, unknown>).allowPersonalOnePassword !== false;
+}
+
 /** Merges `features` into `orgs.features` (partial update — only provided keys change). */
 export async function setOrgFeatures(db: AppQueryable, orgId: string, features: Partial<OrgFeatures>): Promise<void> {
   const current = await getOrgFeatures(db, orgId);

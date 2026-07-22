@@ -15,6 +15,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
 import type { ChannelHost } from "../channels/host.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -32,6 +33,11 @@ export interface Providers {
   sandboxProvider: SandboxProvider;
   eventStream: EventStream;
   engineCredentials: CredentialStore;
+  /** 1Password reference-credential service (1Password credential provider
+   * plan, Task 1/2) — same instance threaded into `EngineHost`'s
+   * `onePassword` opt, and used directly by the (Task 3) `/api/onepassword`
+   * routes for connect status / vault-and-item browsing. */
+  onePassword: OnePasswordService;
   /** Sandbox-image prebuild backend (sandbox images v2 plan). `null` when
    * unresolvable for the configured `VALET_SANDBOX_BACKEND`/
    * `VALET_IMAGE_BUILDER` (e.g. `local`, or `kubernetes` pre-T5) — callers

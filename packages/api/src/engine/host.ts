@@ -27,6 +27,7 @@ import type { ValetPlugin } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { onePasswordMeta, type OnePasswordService } from "../services/onepassword.js";
 import { buildWorkspacePrep } from "./workspace-prep.js";
 import { resolvePrebuildImage, type PrebuildResolution } from "../prebuilds/resolve.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
@@ -130,6 +131,18 @@ export interface EngineHostOpts {
     fetchImpl?: typeof fetch;
     now?: () => number;
   };
+  /**
+   * 1Password reference-credential resolver (1Password credential provider
+   * plan, Task 2). When present, `buildCredentialResolver` additionally
+   * checks every resolved row (github's own `github`-service branch AND the
+   * default fall-through raw-store read) for `onePasswordMeta` and — when
+   * present — routes it through `onePassword.resolveCredential` instead of
+   * returning the reference-only row. Absent === no 1Password branch: rows
+   * pass through unchanged, byte-identical to before this task. Unlike
+   * `githubTokenDeps`, this alone is enough to make `buildCredentialResolver`
+   * return a resolver even with no `db`/`githubTokenDeps` wired.
+   */
+  onePassword?: OnePasswordService;
   /**
    * Idle window (minutes) before a `ready` sandbox is hibernated (sandbox
    * hibernation plan, Task 3). `resolveIdleMinutes` (sandbox-backend.ts)
@@ -625,14 +638,23 @@ export class EngineHost {
    * `credentialResolver` key at all → the engine reads the raw store).
    *
    * The resolver is the SINGLE decision point for this session's credentials:
-   *  - `github` → `resolveSessionGitHubToken` (`purpose: "api"`), which honors
-   *    the session's primary `session_repos` binding auth when it has one and
-   *    resolves repo-less `auto` otherwise. A `GitHubAuthError` propagates
-   *    unchanged — the engine surfaces it as the tool's error result, hint
-   *    text intact. Synthesizes a `StoredCredential` the engine's
-   *    `credentialProvider` maps to `{ accessToken }`.
-   *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
-   *    read, byte-identical to the engine's default (store-backed) path.
+   *  - `github` (when `githubTokenDeps`+`db` are wired) → `resolveSessionGitHubToken`
+   *    (`purpose: "api"`), which honors the session's primary `session_repos`
+   *    binding auth when it has one and resolves repo-less `auto` otherwise.
+   *    A `GitHubAuthError` propagates unchanged — the engine surfaces it as
+   *    the tool's error result, hint text intact. Synthesizes a
+   *    `StoredCredential` the engine's `credentialProvider` maps to
+   *    `{ accessToken }`.
+   *  - every OTHER service (and `github` itself when `githubTokenDeps`/`db`
+   *    aren't wired) → the raw `engineCredentials.get(owner, service)` read,
+   *    THEN — when `onePassword` is wired and the row carries
+   *    `metadata.onepassword` (`onePasswordMeta`) — `onePassword.resolveCredential`
+   *    fills in the secret from the referenced 1Password item. An
+   *    `OnePasswordAuthError` (missing/disabled token, SDK failure)
+   *    propagates unchanged, mirroring `GitHubAuthError`'s tool-error-result
+   *    behavior above. Rows without 1Password reference metadata pass
+   *    through unchanged (same object, no clone) — byte-identical to the
+   *    engine's default path.
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -660,33 +682,39 @@ export class EngineHost {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
-    if (!tokenDeps || !db) return undefined;
+    const onePassword = this.opts.onePassword;
+    if ((!tokenDeps || !db) && !onePassword) return undefined;
     return async (owner, service) => {
-      if (service !== "github") {
-        // Byte-identical to the engine's default store-backed read.
-        return credentials.get(owner, service);
-      }
-      const resolved = await resolveSessionGitHubToken(
-        {
-          db,
-          credentials,
-          key: tokenDeps.key,
-          apiUrl: tokenDeps.apiUrl,
-          githubUrl: tokenDeps.githubUrl,
-          fetchImpl: tokenDeps.fetchImpl,
-          now: tokenDeps.now,
-        },
-        { orgId, userId, sessionId, purpose: "api" },
-      );
-      // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
-      // rather than returning a null token; a null here would be a contract
-      // violation upstream, so surface it as the same unconnected gap.
-      if (resolved.token === null) {
-        throw new GitHubAuthError(
-          "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
+      if (service === "github" && tokenDeps && db) {
+        const resolved = await resolveSessionGitHubToken(
+          {
+            db,
+            credentials,
+            key: tokenDeps.key,
+            apiUrl: tokenDeps.apiUrl,
+            githubUrl: tokenDeps.githubUrl,
+            fetchImpl: tokenDeps.fetchImpl,
+            now: tokenDeps.now,
+          },
+          { orgId, userId, sessionId, purpose: "api" },
         );
+        // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
+        // rather than returning a null token; a null here would be a contract
+        // violation upstream, so surface it as the same unconnected gap.
+        if (resolved.token === null) {
+          throw new GitHubAuthError(
+            "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
+          );
+        }
+        return { type: "oauth2", accessToken: resolved.token };
       }
-      return { type: "oauth2", accessToken: resolved.token };
+      // Byte-identical to the engine's default store-backed read, unless
+      // `onePassword` is wired and the row carries reference metadata.
+      const stored = await credentials.get(owner, service);
+      if (stored && onePassword && onePasswordMeta(stored)) {
+        return onePassword.resolveCredential(stored, { orgId, userId });
+      }
+      return stored;
     };
   }
 

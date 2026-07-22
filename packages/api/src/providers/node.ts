@@ -15,6 +15,8 @@ import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { createOnePasswordService } from "../services/onepassword.js";
+import { getAllowPersonalOnePassword } from "../services/org.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
@@ -218,6 +220,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     env: process.env,
   });
 
+  // 1Password reference-credential service (1Password credential provider
+  // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s
+  // `onePassword` opt below and exposed on `Providers` for the (Task 3)
+  // `/api/onepassword` routes.
+  const onePassword = createOnePasswordService({
+    credentials: engineCredentials,
+    getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
+  });
+
   // Circular construction: EngineHost needs the ChildSpawner at construction
   // time (it's baked into every orchestrator session's toolConfig), but the
   // spawner itself needs the EngineHost (to create the child session) and
@@ -246,6 +257,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
+    onePassword,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -341,6 +353,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     imageBuilder,
     eventStream,
     engineCredentials,
+    onePassword,
     engineHost,
     childWatcher,
     channelHost,

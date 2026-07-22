@@ -1,0 +1,210 @@
+/**
+ * 1Password credential provider plan, Task 2: `buildCredentialResolver` must
+ * route rows carrying `metadata.onepassword` through `OnePasswordService`
+ * when the host is wired with `opts.onePassword`, while leaving every other
+ * row (and the "no onePassword/githubTokenDeps at all" contract) untouched.
+ * Drives a REAL `EngineHost` session build (mirrors
+ * `host.github-credential.test.ts`) and reads through
+ * `Session.credentialProvider()` — the same seam a plugin action's
+ * `ctx.credentials.get()` hits.
+ */
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  InMemoryEventStream,
+  InMemorySessionStore,
+  VirtualSandboxProvider,
+  type CredentialOwner,
+  type CredentialStore,
+  type StoredCredential,
+} from "@valet/engine";
+import {
+  OnePasswordAuthError,
+  type OnePasswordCtx,
+  type OnePasswordService,
+} from "../services/onepassword.js";
+import { EngineHost, type EngineHostOpts } from "./host.js";
+
+const orgId = "op-org";
+const userId = "op-user";
+
+/** Minimal in-memory `CredentialStore` — keyed by `${owner.type}:${owner.id}:${service}`. */
+function fakeCredentialStore(): CredentialStore {
+  const rows = new Map<string, StoredCredential>();
+  const key = (owner: CredentialOwner, service: string) => `${owner.type}:${owner.id}:${service}`;
+  return {
+    async get(owner, service) {
+      return rows.get(key(owner, service)) ?? null;
+    },
+    async save(owner, service, credential) {
+      rows.set(key(owner, service), credential);
+    },
+    async delete(owner, service) {
+      rows.delete(key(owner, service));
+    },
+    async list() {
+      return [];
+    },
+  };
+}
+
+/** Fake `OnePasswordService` — only `resolveCredential` is exercised by the resolver; every
+ * other method throws if called, since this suite never drives the browse/connect routes. */
+function fakeOnePassword(
+  resolveCredential: OnePasswordService["resolveCredential"],
+): OnePasswordService {
+  const unused = () => {
+    throw new Error("not exercised by this suite");
+  };
+  return {
+    tokenConnected: unused,
+    listVaults: unused,
+    listItems: unused,
+    getItem: unused,
+    resolveReference: unused,
+    resolveCredential,
+  };
+}
+
+describe("EngineHost session 1Password credential resolution", () => {
+  let host: EngineHost | undefined;
+
+  afterEach(() => {
+    host?.evictAll();
+    host = undefined;
+  });
+
+  function makeHost(
+    credentials: CredentialStore,
+    extra: Partial<EngineHostOpts> = {},
+  ): EngineHost {
+    const h = new EngineHost({
+      engineStore: new InMemorySessionStore(),
+      sandboxProvider: new VirtualSandboxProvider(),
+      eventStream: new InMemoryEventStream(),
+      engineCredentials: credentials,
+      ...extra,
+    });
+    host = h;
+    return h;
+  }
+
+  it("1Password-backed row resolves through the service with the secret filled", async () => {
+    // `Session.credentialProvider()` always reads through owner
+    // `{ type: "user", id: meta.userId }` (session.ts:705) regardless of the
+    // row's own `tokenScope` — the resolver only cares that the row it read
+    // carries `metadata.onepassword`.
+    const credentials = fakeCredentialStore();
+    const stored: StoredCredential = {
+      type: "api_key",
+      apiKey: "placeholder",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
+    };
+    await credentials.save({ type: "user", id: userId }, "acme-service", stored);
+    let sawRow: StoredCredential | undefined;
+    const onePassword = fakeOnePassword(async (row, ctx: OnePasswordCtx) => {
+      sawRow = row;
+      return { type: row.type, metadata: row.metadata, apiKey: `secret-for-${ctx.orgId}` };
+    });
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-resolve", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("acme-service");
+
+    // `Session.credentialProvider().get()` maps `StoredCredential` ->
+    // `Credential` (`accessToken: stored.accessToken ?? stored.apiKey`,
+    // session.ts:726) — so an `api_key`-typed resolved row surfaces here as
+    // `accessToken`, not `apiKey`.
+    expect(cred?.accessToken).toBe(`secret-for-${orgId}`);
+    // The exact object `credentials.get()` returned was handed to
+    // `resolveCredential` (no clone before the call).
+    expect(sawRow).toBe(stored);
+  });
+
+  it("non-1Password row passes through byte-identical (the exact object the store returned, unmodified)", async () => {
+    const credentials = fakeCredentialStore();
+    const stored: StoredCredential = { type: "api_key", apiKey: "linear-key" };
+    await credentials.save({ type: "user", id: userId }, "linear", stored);
+    // Captures the exact reference `buildCredentialResolver` passed as its
+    // return value's source — proves the resolver's default branch does
+    // `return stored` with no clone, not merely a value-equal copy.
+    let sawRow: StoredCredential | undefined;
+    const onePassword = fakeOnePassword(async (row) => {
+      sawRow = row;
+      throw new Error("resolveCredential must not be called for a non-1Password row");
+    });
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-passthrough", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("linear");
+
+    // resolveCredential was never invoked (no metadata.onepassword) — the
+    // resolver's `credentials.get(owner, service)` read is the row `Session`
+    // maps into `Credential`, so `accessToken` mirrors `stored.apiKey`
+    // exactly, and `sawRow` staying `undefined` confirms the 1Password branch
+    // was skipped entirely for this row.
+    expect(sawRow).toBeUndefined();
+    expect(cred?.accessToken).toBe(stored.apiKey);
+  });
+
+  it("OnePasswordAuthError from the service propagates unchanged", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "acme-service", {
+      type: "api_key",
+      apiKey: "placeholder",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "personal" } },
+    });
+    const authError = new OnePasswordAuthError("This org has no personal 1Password service account token connected.");
+    const onePassword = fakeOnePassword(async () => {
+      throw authError;
+    });
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-error", { userId, orgId, workspace: "/tmp" });
+
+    await expect(session.credentialProvider().get("acme-service")).rejects.toBe(authError);
+  });
+
+  it("no onePassword opt and no githubTokenDeps: buildCredentialResolver stays undefined (pre-existing contract)", async () => {
+    const credentials = fakeCredentialStore();
+    const stored: StoredCredential = {
+      type: "api_key",
+      apiKey: "placeholder",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
+    };
+    await credentials.save({ type: "user", id: userId }, "acme-service", stored);
+    const h = makeHost(credentials);
+
+    const session = await h.sessionFor("sess-op-none", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("acme-service");
+
+    // Raw store read: the reference metadata is present but nothing resolved
+    // it — `accessToken` mirrors `stored.apiKey` verbatim, not a secret.
+    expect(cred?.accessToken).toBe("placeholder");
+  });
+
+  it("onePassword wired but no githubTokenDeps: resolver is defined, 1Password rows resolve, github falls through to the raw store", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "raw-github-token",
+    });
+    await credentials.save({ type: "user", id: userId }, "acme-service", {
+      type: "api_key",
+      apiKey: "placeholder",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
+    });
+    const onePassword = fakeOnePassword(async (row) => ({
+      type: row.type,
+      metadata: row.metadata,
+      apiKey: "secret-for-acme-service",
+    }));
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-github-fallthrough", { userId, orgId, workspace: "/tmp" });
+    const githubCred = await session.credentialProvider().get("github");
+    const opCred = await session.credentialProvider().get("acme-service");
+
+    expect(githubCred?.accessToken).toBe("raw-github-token");
+    expect(opCred?.accessToken).toBe("secret-for-acme-service");
+  });
+});

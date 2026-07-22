@@ -30,6 +30,8 @@ import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { createOnePasswordService } from "../services/onepassword.js";
+import { getAllowPersonalOnePassword } from "../services/org.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
@@ -226,6 +228,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // that don't need to observe the hooks directly. `opts.on*` overrides
   // take precedence for tests that do (e.g. asserting call order/count).
   const defaultHibernationHooks = buildHibernationHooks(db);
+  const onePassword = createOnePasswordService({
+    credentials: engineCredentials,
+    getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
+  });
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -240,6 +246,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     onSessionReady: opts.onSessionReady ?? defaultHibernationHooks.onSessionReady,
     idleSweepTestHooks: opts.idleSweepTestHooks,
     githubTokenDeps: opts.githubTokenDeps,
+    onePassword,
     db,
     apiBaseUrl,
     plugins,
@@ -313,6 +320,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     imageBuilder: null,
     eventStream,
     engineCredentials,
+    onePassword,
     engineHost,
     childWatcher,
     channelHost,
