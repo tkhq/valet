@@ -209,7 +209,7 @@ describe("IntegrationsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
 
     expect(window.confirm).toHaveBeenCalled();
-    await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith("slack"));
+    await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith({ service: "slack" }));
   });
 
   it("renders an anchor Connect button pointing at the connect route when connect is oauth", () => {
