@@ -5,9 +5,16 @@ metadata:
   name: {{ include "valet.fullname" . }}-api
   labels:
     {{- include "valet.labels" . | nindent 4 }}
-  {{- if .Values.ingress.tls.enabled }}
+  {{- $annotations := dict }}
+  {{- if and .Values.ingress.tls.enabled (eq .Values.ingress.className "traefik") }}
+  {{- $_ := set $annotations "traefik.ingress.kubernetes.io/router.tls" "true" }}
+  {{- end }}
+  {{- range $k, $v := .Values.ingress.annotations }}
+  {{- $_ := set $annotations $k (toString $v) }}
+  {{- end }}
+  {{- with $annotations }}
   annotations:
-    traefik.ingress.kubernetes.io/router.tls: "true"
+    {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}

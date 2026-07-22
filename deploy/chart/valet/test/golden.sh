@@ -235,5 +235,22 @@ if grep -qiE 'ghp_|gho_|github_pat_' "$TMP_DIR/bundled.yaml" "$TMP_DIR/external-
 fi
 pass "no token-shaped secret material rendered anywhere (chart never bakes in a git token — minted per-build at runtime)"
 
+# --- ingress: generic annotations passthrough (EKS/cert-manager) ------------
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set ingress.className=nginx \
+  --set ingress.annotations."cert-manager\.io/cluster-issuer"=letsencrypt \
+  --set ingress.tls.secretName=valet-tls \
+  > "$TMP_DIR/ingress-nginx.yaml"
+grep -q 'cert-manager.io/cluster-issuer: letsencrypt' "$TMP_DIR/ingress-nginx.yaml" \
+  || fail "ingress.annotations not rendered into Ingress metadata"
+if grep -q 'traefik.ingress.kubernetes.io/router.tls' "$TMP_DIR/ingress-nginx.yaml"; then
+  fail "traefik annotation leaked into a non-traefik ingress"
+fi
+pass "ingress.annotations passthrough works; traefik annotation gated on className"
+
+grep -q 'traefik.ingress.kubernetes.io/router.tls: "true"' "$TMP_DIR/bundled.yaml" \
+  || fail "default traefik TLS annotation regressed"
+pass "default (traefik) ingress annotation unchanged"
+
 echo
 echo "All golden assertions passed."

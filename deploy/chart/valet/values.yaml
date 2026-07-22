@@ -88,6 +88,10 @@ service:
 ingress:
   enabled: true
   className: traefik
+  # Extra Ingress metadata.annotations (e.g. cert-manager.io/cluster-issuer
+  # on EKS). The traefik router.tls annotation is emitted automatically
+  # only when className is "traefik".
+  annotations: {}
   host: valet.localdev
   # TLS terminates at Traefik. Leave secretName empty to use Traefik's
   # built-in default (self-signed) certificate — fine for the local
