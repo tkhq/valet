@@ -27,6 +27,22 @@ describe("linear verify", () => {
     expect(verified).toBeNull();
   });
 
+  it("accepts a stringified webhookTimestamp (SDK shape drift)", async () => {
+    const verified = await issueDef.verify(
+      makeReq({ ...payload, webhookTimestamp: String(Date.now()) }),
+      { webhookSecret: SECRET },
+    );
+    expect(verified).not.toBeNull();
+  });
+
+  it("accepts a seconds-encoded webhookTimestamp", async () => {
+    const verified = await issueDef.verify(
+      makeReq({ ...payload, webhookTimestamp: Math.floor(Date.now() / 1000) }),
+      { webhookSecret: SECRET },
+    );
+    expect(verified).not.toBeNull();
+  });
+
   it("rejects a stale webhookTimestamp", async () => {
     const body = JSON.stringify({ webhookTimestamp: Date.now() - 600_000, ...payload });
     const rawBody = new TextEncoder().encode(body);

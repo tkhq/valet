@@ -35,7 +35,11 @@ import type {
 export const eventsRouter = new Hono<AppEnv>();
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains"] as const;
-const TARGET_KINDS = ["workflow", "orchestrator", "signal"] as const;
+// `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
+// no workflow node parks on the `event:{key}` signal shape the dispatcher
+// would emit, so a signal-target subscription would validate and then
+// silently never fire. Re-add once a waitForEvent node exists.
+const TARGET_KINDS = ["workflow", "orchestrator"] as const;
 
 const FEED_DEFAULT_LIMIT = 50;
 const FEED_MAX_LIMIT = 100;
@@ -69,14 +73,22 @@ export function validateSubscription(
   if (!Array.isArray(body.eventKeys) || body.eventKeys.length === 0) {
     return "eventKeys must be a non-empty array";
   }
+  // Catalog entries actually selected by the eventKeys patterns — filter
+  // fields are validated against THESE, not the union across all services,
+  // because the ingest matcher (`match.ts` filtersMatch) only consults the
+  // arriving event's own entry. Validating against the union would accept
+  // e.g. a GitHub-only `repo` filter on a `linear.issue.*` subscription,
+  // which then silently never matches anything.
+  const selectedEntries: EventCatalogEntry[] = [];
   for (const pattern of body.eventKeys) {
     if (typeof pattern !== "string" || pattern.length === 0) {
       return "eventKeys entries must be non-empty strings";
     }
     const matches = pattern.endsWith(".*")
-      ? entries.some((e) => e.key.startsWith(pattern.slice(0, -1)))
-      : entries.some((e) => e.key === pattern);
-    if (!matches) return `unknown event key: ${pattern}`;
+      ? entries.filter((e) => e.key.startsWith(pattern.slice(0, -1)))
+      : entries.filter((e) => e.key === pattern);
+    if (matches.length === 0) return `unknown event key: ${pattern}`;
+    selectedEntries.push(...matches);
   }
 
   if (!Array.isArray(body.filters)) {
@@ -104,8 +116,8 @@ export function validateSubscription(
         return `filter value invalid for op ${f.op} on field ${f.field}`;
       }
     }
-    if (!entries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
-      return `unknown filter field: ${f.field}`;
+    if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
+      return `filter field ${f.field} is not declared by any event selected by eventKeys`;
     }
   }
 

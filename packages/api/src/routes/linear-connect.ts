@@ -150,21 +150,65 @@ linearConnectRouter.get("/callback", async (c) => {
     return c.json({ error: "failed to complete the Linear connection" }, 502);
   }
 
-  // Look up any existing installation for this workspace so we can clean up
-  // its webhook before creating a new one (avoids orphaned webhooks delivering
-  // with a dead secret on reconnect).
-  const [existing] = await db
+  // One workspace per org: the org `linear` credential holds exactly one
+  // access token, so a second workspace's install rows would be orphaned the
+  // moment the credential is overwritten (its webhook could never be deleted
+  // again — the stored token isn't scoped to it). Reject instead of silently
+  // wedging; the admin disconnects first.
+  const orgInstalls = await db
     .select()
     .from(linearInstallations)
-    .where(and(eq(linearInstallations.orgId, verified.orgId), eq(linearInstallations.workspaceId, workspaceId)))
-    .limit(1);
+    .where(eq(linearInstallations.orgId, verified.orgId));
+  const foreign = orgInstalls.find((i) => i.workspaceId !== workspaceId);
+  if (foreign) {
+    return c.json(
+      { error: `another Linear workspace (${foreign.workspaceName}) is already connected — disconnect it first` },
+      409,
+    );
+  }
+  const existing = orgInstalls.find((i) => i.workspaceId === workspaceId);
 
   if (existing?.webhookId) {
+    // Reconnect: clean up the old webhook so it doesn't keep delivering with
+    // a dead secret.
     try {
       await service.deleteWebhook(accessToken, existing.webhookId);
     } catch (err) {
       console.error("linear reconnect: best-effort old webhookDelete failed:", err);
     }
+  }
+
+  // Persist the credential (with the signing secret) and the installation
+  // row BEFORE creating the webhook: Linear can start delivering the moment
+  // `webhookCreate` returns, and a delivery that arrives before the ingress
+  // can resolve the install + secret is 204'd and never retried — permanent
+  // loss. `webhookId` is patched in after creation succeeds.
+  await engineCredentials.save({ type: "org", id: verified.orgId }, LINEAR_CREDENTIAL_SERVICE, {
+    type: "oauth2",
+    accessToken,
+    metadata: { webhookSecret, workspaceId },
+  });
+
+  const now = Date.now();
+  let installId: string;
+  if (existing) {
+    installId = existing.id;
+    await db
+      .update(linearInstallations)
+      .set({ workspaceName, webhookId: null, connectedBy: user.id, updatedAt: now })
+      .where(eq(linearInstallations.id, existing.id));
+  } else {
+    installId = `lin_${randomUUID()}`;
+    await db.insert(linearInstallations).values({
+      id: installId,
+      orgId: verified.orgId,
+      workspaceId,
+      workspaceName,
+      webhookId: null,
+      connectedBy: user.id,
+      createdAt: now,
+      updatedAt: now,
+    });
   }
 
   try {
@@ -173,34 +217,16 @@ linearConnectRouter.get("/callback", async (c) => {
       secret: webhookSecret,
     }));
   } catch (err) {
+    // Credential + install row stay (the status route reports
+    // webhookConfigured: false); a re-run of the connect flow repairs this.
     console.error("linear connect callback failed:", err);
     return c.json({ error: "failed to complete the Linear connection" }, 502);
   }
 
-  await engineCredentials.save({ type: "org", id: verified.orgId }, LINEAR_CREDENTIAL_SERVICE, {
-    type: "oauth2",
-    accessToken,
-    metadata: { webhookSecret, workspaceId },
-  });
-
-  const now = Date.now();
-  if (existing) {
-    await db
-      .update(linearInstallations)
-      .set({ workspaceName, webhookId, connectedBy: user.id, updatedAt: now })
-      .where(eq(linearInstallations.id, existing.id));
-  } else {
-    await db.insert(linearInstallations).values({
-      id: `lin_${randomUUID()}`,
-      orgId: verified.orgId,
-      workspaceId,
-      workspaceName,
-      webhookId,
-      connectedBy: user.id,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
+  await db
+    .update(linearInstallations)
+    .set({ webhookId, updatedAt: Date.now() })
+    .where(eq(linearInstallations.id, installId));
 
   return c.redirect("/settings/organization/linear?setup=ok", 302);
 });
@@ -234,14 +260,27 @@ linearConnectRouter.delete("/", async (c) => {
 
   // Best-effort webhook cleanup: a transient Linear failure shouldn't block
   // disconnecting — an orphaned webhook just delivers to an ingress that no
-  // longer resolves the workspace (204 no-op).
+  // longer resolves the workspace (204 no-op). The token is only scoped to
+  // the workspace it was minted for (the connect flow enforces one workspace
+  // per org, so normally that's every install); a drifted row from another
+  // workspace can't be cleaned with this token — log it loudly instead of
+  // issuing a call Linear will reject.
   const config = loadOauthAppConfig(process.env);
   const cred = await engineCredentials.get({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
   if (config && cred?.accessToken) {
+    const tokenWorkspaceId =
+      isRecord(cred.metadata) && typeof cred.metadata.workspaceId === "string" ? cred.metadata.workspaceId : null;
     const installs = await db.select().from(linearInstallations).where(eq(linearInstallations.orgId, orgId));
     const service = linearService(config);
     for (const install of installs) {
       if (!install.webhookId) continue;
+      if (tokenWorkspaceId !== null && install.workspaceId !== tokenWorkspaceId) {
+        console.error(
+          `linear disconnect: webhook ${install.webhookId} in workspace ${install.workspaceId} cannot be deleted ` +
+            `with the stored token (scoped to ${tokenWorkspaceId}) — remove it in Linear's settings manually`,
+        );
+        continue;
+      }
       try {
         await service.deleteWebhook(cred.accessToken, install.webhookId);
       } catch (err) {

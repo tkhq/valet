@@ -199,16 +199,53 @@ describe("GET /api/org/linear/callback", () => {
     expect((deleteCall.body as { variables: { id: string } }).variables.id).toBe("wh-1");
   });
 
-  it("502s (and saves nothing) when the webhook creation fails", async () => {
+  it("502s when webhook creation fails — credential + install saved FIRST (repairable, no delivery gap)", async () => {
+    // The credential (with the signing secret) and the installation row are
+    // persisted BEFORE webhookCreate: Linear can deliver the moment the
+    // webhook exists, and a delivery the ingress can't resolve is 204'd and
+    // never retried. A failed webhookCreate therefore leaves a repairable
+    // half-connected state (webhookConfigured: false), not nothing.
     api = await bootTestApi();
     useFixture({ webhookCreate: () => ({ body: { data: { webhookCreate: { success: false } } } }) });
     const res = await completeConnect(api.baseUrl);
     expect(res.status).toBe(502);
 
     const cred = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear");
-    expect(cred).toBeNull();
+    expect(cred).toMatchObject({ type: "oauth2", accessToken: "lin_test" });
     const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
-    expect(rows).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ workspaceId: "lin-org-1", webhookId: null });
+
+    const status = await fetch(`${api.baseUrl}/api/org/linear`, { headers: HEADERS });
+    expect(await status.json()).toMatchObject({ webhookConfigured: false });
+  });
+
+  it("409s when a different workspace is already connected for the org", async () => {
+    // One workspace per org: the org credential holds exactly one token, so
+    // a second workspace would orphan the first's webhook forever.
+    api = await bootTestApi();
+    useFixture();
+    await api.providers.db.insert(linearInstallations).values({
+      id: "lin_pre-existing",
+      orgId: "local-org",
+      workspaceId: "lin-org-OTHER",
+      workspaceName: "Other Workspace",
+      webhookId: "wh-other",
+      connectedBy: "local-user",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const res = await completeConnect(api.baseUrl);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("Other Workspace");
+
+    // Nothing about the pre-existing install was touched, and no credential
+    // was written for the rejected workspace.
+    const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ workspaceId: "lin-org-OTHER", webhookId: "wh-other" });
+    expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear")).toBeNull();
   });
 });
 

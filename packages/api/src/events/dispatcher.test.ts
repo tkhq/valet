@@ -131,7 +131,8 @@ describe("EventDispatcher", () => {
 
     expect(runHost.start).toHaveBeenCalledTimes(1);
     const [runId, params, def, owner] = vi.mocked(runHost.start).mock.calls[0];
-    expect(runId).toMatch(/^wfrun_/);
+    // Derived, not minted: retried claims must resolve to the same run.
+    expect(runId).toBe(`wfrun_evt_${deliveryId}`);
     expect(def).toEqual(definition);
     expect(owner).toEqual({ ownerType: "user", ownerId: "user-1" });
     expect(params.workflowId).toBe("wf-1");
@@ -152,6 +153,52 @@ describe("EventDispatcher", () => {
     expect(row.attempts).toBe(1);
     expect(row.deliveredAt).not.toBeNull();
     expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("retried workflow delivery is idempotent: an already-started run is not started twice", async () => {
+    // Simulates the partial-failure retry: a prior attempt started the run
+    // but crashed before the delivered-status UPDATE, the claim lease lapsed,
+    // and the poll re-claimed the row. The derived runId already exists, so
+    // the retry must mark the delivery delivered WITHOUT a second start.
+    const db = tdb.appDb;
+    const now = Date.now();
+    const definition = { nodes: [], edges: [] };
+    await db.insert(workflowDefinitions).values({
+      id: "wf-1",
+      orgId: ORG,
+      ownerType: "user",
+      ownerId: "user-1",
+      name: "on issue",
+      definition,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const { deliveryId } = await seedDelivery({ target: { kind: "workflow", workflowId: "wf-1" } });
+    await db.insert(workflowRuns).values({
+      id: `wfrun_evt_${deliveryId}`,
+      workflowId: "wf-1",
+      definitionVersionId: "v-whatever",
+      definition,
+      params: {},
+      status: "running",
+      ownerType: "user",
+      ownerId: "user-1",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const runHost = fakeRunHost();
+    const dispatcher = new EventDispatcher({
+      db,
+      workflowRunHost: runHost,
+      workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {}),
+    });
+    await dispatcher.pollOnce();
+
+    expect(runHost.start).not.toHaveBeenCalled();
+    const row = await getDelivery(deliveryId);
+    expect(row.status).toBe("delivered");
   });
 
   it("delivers an orchestrator-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {

@@ -1375,10 +1375,12 @@ export interface EventSubscriptionFilterWire {
   value: string | string[];
 }
 
+// `{ kind: "signal" }` (wake parked workflow runs) is intentionally absent:
+// no workflow node parks on the event-signal shape yet, so the CRUD
+// validator rejects it — see routes/events.ts TARGET_KINDS.
 export type EventSubscriptionTargetWire =
   | { kind: "workflow"; workflowId: string }
-  | { kind: "orchestrator"; orchestrator?: "user" | "org" }
-  | { kind: "signal" };
+  | { kind: "orchestrator"; orchestrator?: "user" | "org" };
 
 export interface EventSubscriptionWire {
   id: string;

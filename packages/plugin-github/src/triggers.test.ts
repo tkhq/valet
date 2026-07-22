@@ -148,6 +148,51 @@ describe("github toEvent", () => {
     expect(event.summary).toContain("pull_request opened");
   });
 
+  it("takes occurredAt from the payload's own timestamps, not ingestion time", () => {
+    const event = prDef.toEvent({
+      eventType: "pull_request",
+      deliveryId: "d3",
+      payload: {
+        action: "closed",
+        repository: { full_name: "a/b" },
+        pull_request: { number: 5, updated_at: "2026-07-01T12:00:00Z" },
+      },
+    });
+    expect(event.occurredAt).toBe("2026-07-01T12:00:00Z");
+
+    // Comment events also carry issue/pull_request — the comment's own
+    // timestamp wins.
+    const commentDef = githubTriggerDefs.find((t) => t.id === "github.issue_comment")!;
+    const comment = commentDef.toEvent({
+      eventType: "issue_comment",
+      deliveryId: "d4",
+      payload: {
+        action: "created",
+        comment: { created_at: "2026-07-02T08:30:00Z" },
+        issue: { updated_at: "2026-07-02T09:00:00Z" },
+      },
+    });
+    expect(comment.occurredAt).toBe("2026-07-02T08:30:00Z");
+
+    // push: head_commit.timestamp.
+    const pushDef = githubTriggerDefs.find((t) => t.id === "github.push")!;
+    const push = pushDef.toEvent({
+      eventType: "push",
+      deliveryId: "d5",
+      payload: { repository: { full_name: "a/b" }, head_commit: { timestamp: "2026-07-03T10:00:00-07:00" } },
+    });
+    expect(push.occurredAt).toBe("2026-07-03T10:00:00-07:00");
+  });
+
+  it("falls back to wall clock when no payload timestamp is present", () => {
+    const before = Date.now();
+    const pushDef = githubTriggerDefs.find((t) => t.id === "github.push")!;
+    const event = pushDef.toEvent({ eventType: "push", deliveryId: "d6", payload: { repository: { full_name: "a/b" } } });
+    const parsed = Date.parse(event.occurredAt);
+    expect(parsed).toBeGreaterThanOrEqual(before);
+    expect(parsed).toBeLessThanOrEqual(Date.now());
+  });
+
   it("uses the bare event key when the payload has no action", () => {
     const pushDef = githubTriggerDefs.find((t) => t.id === "github.push")!;
     const event = pushDef.toEvent({ eventType: "push", deliveryId: "d2", payload: { repository: { full_name: "a/b" } } });

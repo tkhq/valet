@@ -151,7 +151,7 @@ export class EventDispatcher {
       const target = sub.target as SubscriptionTarget;
       const refs = event.refs as Record<string, string>;
       if (target.kind === "workflow" && target.workflowId) {
-        await this.startWorkflow(target.workflowId, sub.id, event, refs);
+        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
       } else if (target.kind === "orchestrator") {
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
@@ -192,6 +192,7 @@ export class EventDispatcher {
   private async startWorkflow(
     workflowId: string,
     subscriptionId: string,
+    deliveryId: string,
     event: typeof events.$inferSelect,
     refs: Record<string, string>,
   ): Promise<void> {
@@ -220,7 +221,19 @@ export class EventDispatcher {
       triggerId: subscriptionId,
       input: trigger,
     };
-    const runId = `wfrun_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    // Idempotency across delivery retries: the runId is DERIVED from the
+    // delivery row (not freshly minted), so a re-claim after a partially
+    // failed attempt (run started, but the delivered-status UPDATE lost a
+    // race with a DB blip and the claim lease lapsed) resolves to the same
+    // run instead of starting a duplicate. If that run already exists, the
+    // prior attempt got as far as starting it — nothing left to do.
+    const runId = `wfrun_evt_${deliveryId}`;
+    const existing = await this.deps.db
+      .select({ id: workflowRuns.id })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, runId))
+      .limit(1);
+    if (existing.length > 0) return;
     await this.deps.workflowRunHost.start(runId, params, def.definition, {
       ownerType: def.ownerType,
       ownerId: def.ownerId,

@@ -129,8 +129,8 @@ A retention job (default 30 days) is a deferred follow-up; nothing prunes
 | `org_id`, `owner_type`, `owner_id` | scoping |
 | `name` | display name |
 | `event_keys` | `text[]`; supports trailing-wildcard patterns (`github.pull_request.*`) |
-| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields |
-| `target` | jsonb: `{ kind: "workflow" \| "orchestrator" \| "signal", ...ref }` |
+| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields; a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest) |
+| `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }` — `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions |
 | `enabled` | bool |
 | `created_by`, timestamps | |
 
@@ -177,6 +177,17 @@ delivery stays async.
 **GitHub routing:** the existing `/webhooks/github-app` route keeps handling
 `installation*` events (installations sync); all other event types it receives
 are forwarded into the event pipeline. One GitHub webhook URL, two concerns.
+The forwarder builds the `VerifiedEvent` directly (signature + org already
+verified by the App route) instead of re-running `TriggerDef.verify` — a
+known invariant split between the two ingest paths; folding the App route
+into the generic ingress (e.g. a `resolveInstall` hook on `TriggerDef`) is a
+recorded follow-up. Events GitHub sends that the deployment can't ingest (no
+registered TriggerDef, missing delivery id) are drop-logged
+(`event_not_ingestable`), never silently 204'd.
+`occurredAt` is extracted from the payload's own per-family timestamps
+(`pull_request.updated_at`, `head_commit.timestamp`, …), falling back to
+wall clock — so redeliveries keep their original causality in the feed's
+sort order.
 The App manifest declares `default_events` for every ingestable trigger
 family (derived from the registered github TriggerDefs, excluding `ping`)
 plus a `statuses: read` permission, so new installations deliver everything
@@ -206,11 +217,22 @@ implemented in `packages/api/src/events/dispatcher.ts`:
   - **workflow** — `workflowRunHost.start()` with
     `WorkflowTriggerPayload { type: 'event', triggerId: subscription.id, data: normalizedEvent }`.
     Add `'event'` to the trigger union in `packages/workflow/src/dag/shape.ts`.
+    The runId is DERIVED from the delivery row (`wfrun_evt_{deliveryId}`), not
+    freshly minted, and an already-existing run short-circuits — so a retried
+    claim after a partial failure (run started, delivered-UPDATE lost) resolves
+    to the same run instead of starting a duplicate.
   - **orchestrator** — prompt the owner's orchestrator with `SignalContent`
     (`signalType: event.key`, `body`: summary + payload excerpt,
-    `attributes`: refs) — same delivery path ChannelHost uses.
+    `attributes`: refs) — same delivery path ChannelHost uses. `admitSignal`
+    doesn't apply (its edge ACL authorizes session→session edges and an event
+    has no sender session); its second-layer defense is replicated in
+    `orchestrator-target.ts` instead — the resolved session's durable org is
+    asserted against the event's org, mismatches drop-log
+    (`event_target_mismatch`) and throw.
   - **signal** — insert into `workflow_signals` for runs waiting on
-    `event:{key}` conditions.
+    `event:{key}` conditions. Dispatcher support exists but the CRUD validator
+    rejects the target kind until a `waitForEvent`-style node parks on that
+    shape (see `event_subscriptions` table notes).
 - Retries: backoff 30s → 2m → 10m → 30m, then `dead`. `last_error` recorded;
   dead deliveries visible in the UI feed.
 
@@ -219,11 +241,19 @@ implemented in `packages/api/src/events/dispatcher.ts`:
 New `linear-connect` routes (mirroring `github-connect` / `github-app`):
 
 1. Admin OAuth authorize → callback stores an org-level `linear` credential
-   (workspace access token) in `credentials`.
-2. On callback, call Linear GraphQL `webhookCreate` (resource types: Issue,
-   Comment, Project, Cycle, IssueLabel, Reaction) pointing at
-   `{API_PUBLIC_URL}/webhooks/events/linear`; generate + store the signing
-   secret; record `linear_installations`.
+   (workspace access token) in `credentials`. One workspace per org: the org
+   credential holds exactly one token, so connecting a second, different
+   workspace is rejected (409) until the first is disconnected — otherwise
+   the first workspace's webhook could never be deleted again.
+2. On callback: persist the credential (with the generated signing secret in
+   `metadata.webhookSecret`) and the `linear_installations` row FIRST, then
+   call Linear GraphQL `webhookCreate` (resource types: Issue, Comment,
+   Project, Cycle, IssueLabel, Reaction) pointing at
+   `{API_PUBLIC_URL}/webhooks/events/linear`, then patch `webhook_id` onto
+   the install row. Order matters: Linear can deliver the moment the webhook
+   exists, and a delivery the ingress can't resolve is 204'd and never
+   retried. A failed `webhookCreate` leaves a repairable half-connected
+   state (`webhookConfigured: false`), not a delivery gap.
 3. Verification: `Linear-Signature` header (HMAC-SHA256 over raw body) +
    `webhookTimestamp` replay check, implemented in `plugin-linear`'s new
    `triggers.ts` (`verify` + `toEvent` + catalog: `linear.issue.create`,

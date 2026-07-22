@@ -148,6 +148,39 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : typeof v === "number" ? String(v) : undefined;
 }
 
+/**
+ * Provider event time, not ingestion time: a redelivered webhook (outage
+ * replay, retry storm) must keep its original causality in `occurredAt`.
+ * GitHub has no single envelope timestamp, so probe the per-family payload
+ * objects in specificity order — comment events also carry `issue` /
+ * `pull_request`, so `comment` is checked first. Falls back to wall clock
+ * only when no candidate parses.
+ */
+const OCCURRED_AT_CANDIDATES: [string, string][] = [
+  ["comment", "updated_at"],
+  ["comment", "created_at"],
+  ["review", "submitted_at"],
+  ["pull_request", "updated_at"],
+  ["issue", "updated_at"],
+  ["head_commit", "timestamp"],
+  ["workflow_run", "updated_at"],
+  ["check_run", "completed_at"],
+  ["check_run", "started_at"],
+  ["check_suite", "updated_at"],
+  ["release", "published_at"],
+  ["release", "created_at"],
+];
+
+function extractOccurredAt(payload: Record<string, unknown>): string {
+  for (const [objKey, field] of OCCURRED_AT_CANDIDATES) {
+    const obj = payload[objKey];
+    if (typeof obj !== "object" || obj === null) continue;
+    const value = (obj as Record<string, unknown>)[field];
+    if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  }
+  return new Date().toISOString();
+}
+
 function toEvent(event: VerifiedEvent): NormalizedEvent {
   const payload = (event.payload ?? {}) as Record<string, unknown>;
   const action = typeof payload.action === "string" ? payload.action : undefined;
@@ -168,7 +201,7 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
   return {
     key: action ? `github.${event.eventType}.${action}` : `github.${event.eventType}`,
     dedupeKey: event.deliveryId,
-    occurredAt: new Date().toISOString(),
+    occurredAt: extractOccurredAt(payload),
     actor: senderId ? { externalId: senderId, login: senderLogin } : undefined,
     refs,
     summary: summaryParts.filter(Boolean).join(" — "),

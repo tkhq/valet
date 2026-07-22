@@ -39,8 +39,14 @@ function makeVerify(family: (typeof LINEAR_TYPES)[number]): TriggerDef["verify"]
     }
     if (payload.type !== family) return null;
     if (payload.action !== "create" && payload.action !== "update" && payload.action !== "remove") return null;
-    const ts = payload.webhookTimestamp;
-    if (typeof ts !== "number") return null;
+    // Tolerate shape drift: some SDKs stringify large ints, and a
+    // seconds-encoded timestamp (magnitude < ~1e12) would otherwise always
+    // look ancient in ms terms. Coerce before the freshness check so a
+    // legitimate delivery is never dropped over encoding.
+    const rawTs = payload.webhookTimestamp;
+    const tsNum = typeof rawTs === "string" ? Number(rawTs) : rawTs;
+    if (typeof tsNum !== "number" || !Number.isFinite(tsNum)) return null;
+    const ts = tsNum < 1e12 ? tsNum * 1000 : tsNum;
     if (Math.abs(Date.now() - ts) > TIMESTAMP_TOLERANCE_MS) return null;
     const deliveryId = lookupHeader(req.headers, "linear-delivery");
     if (!deliveryId) return null;

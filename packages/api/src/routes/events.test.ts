@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
+import linearPlugin from "@valet/plugin-linear/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import type {
@@ -203,6 +204,34 @@ describe("POST /api/event-subscriptions", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("nonsense");
+  });
+
+  it("400s a filter field declared only by a service the eventKeys don't select", async () => {
+    // `repo` is a GitHub catalog field; a linear-only subscription using it
+    // would validate against the cross-service union and then never match
+    // anything at ingest (filtersMatch only consults the arriving event's
+    // own entry). Must be rejected, not silently inert.
+    api = await bootTestApi({ plugins: [githubPlugin, linearPlugin] });
+    const res = await postSubscription(api.baseUrl, {
+      ...VALID_BODY,
+      eventKeys: ["linear.issue.*"],
+      filters: [{ field: "repo", op: "eq", value: "acme/widgets" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("repo");
+
+    // Sanity: the same filter is fine when the eventKeys DO select github.
+    const ok = await postSubscription(api.baseUrl, VALID_BODY);
+    expect(ok.status).toBe(201);
+  });
+
+  it("400s a signal target (no workflow node parks on event signals yet)", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "signal" } });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("signal");
   });
 
   it("400s a bad filter op, naming it", async () => {

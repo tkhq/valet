@@ -55,6 +55,7 @@ import {
 } from "../services/github-app.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { ingestEvent } from "../events/ingest.js";
+import { writeDropLog } from "../orchestrator/signals.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import type {
   GetGithubAppResponse,
@@ -475,7 +476,12 @@ githubAppWebhookRouter.post("/", async (c) => {
   } else if (event && event !== "ping") {
     // Forward every other event family into the generic event pipeline.
     // Signature + org are already verified above; build the VerifiedEvent
-    // directly instead of re-running TriggerDef.verify.
+    // directly instead of re-running TriggerDef.verify. NOTE this means two
+    // ingest paths with different invariants: any check added to the github
+    // TriggerDef.verify (payload sanity, dedupe policy) applies only to the
+    // generic `/webhooks/events/:service` ingress, not here — folding this
+    // path into the generic ingress (e.g. a `resolveInstall` hook on
+    // TriggerDef) is the recorded follow-up in the event-system spec.
     const deliveryId = c.req.header("x-github-delivery");
     const def = c.var.providers.plugins
       .flatMap((p) => p.triggers ?? [])
@@ -485,6 +491,18 @@ githubAppWebhookRouter.post("/", async (c) => {
         { db, plugins: c.var.providers.plugins, onIngest: c.var.providers.eventDispatcher.nudge },
         { orgId, service: "github", event: def.toEvent({ eventType: event, deliveryId, payload }) },
       );
+    } else {
+      // GitHub is sending an event this deployment can't ingest (no matching
+      // TriggerDef, or a missing delivery id). Drop-log instead of a silent
+      // 204 so ops can see the gap.
+      await writeDropLog(db, {
+        orgId,
+        reason: "event_not_ingestable",
+        conversationKey: deliveryId ?? undefined,
+        detail: def
+          ? `github event ${event}: missing x-github-delivery header`
+          : `github event ${event}: no registered TriggerDef (github.${event})`,
+      });
     }
   }
   return c.body(null, 204);

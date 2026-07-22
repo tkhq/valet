@@ -38,6 +38,10 @@ export async function ingestEvent(
   const now = Date.now();
   const eventId = randomUUID();
   const catalog = catalogForService(deps.plugins, service);
+  // Number.isFinite (not `|| now`): epoch-0 timestamps parse to 0, which is
+  // falsy but valid — only an unparseable occurredAt falls back to receipt time.
+  const parsedOccurredAt = Date.parse(event.occurredAt);
+  const occurredAt = Number.isFinite(parsedOccurredAt) ? parsedOccurredAt : now;
 
   const result = await deps.db.transaction(async (tx) => {
     const inserted = await tx
@@ -52,7 +56,7 @@ export async function ingestEvent(
         refs: event.refs,
         summary: event.summary,
         payload: event.payload,
-        occurredAt: Date.parse(event.occurredAt) || now,
+        occurredAt,
         receivedAt: now,
       })
       .onConflictDoNothing({ target: [events.service, events.dedupeKey] })
