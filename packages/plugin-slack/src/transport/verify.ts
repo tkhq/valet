@@ -77,7 +77,14 @@ export function verifySlackSignatureSync(
   const digest = createHmac("sha256", signingSecret).update(`v0:${timestamp}:${rawBody}`).digest("hex");
   const expected = `v0=${digest}`;
 
-  if (expected.length !== signature.length) return false;
+  // Guard on BYTE length, not string length: a crafted signature header with a
+  // multibyte char can match `expected.length` yet differ in encoded bytes,
+  // and timingSafeEqual throws RangeError on unequal-length buffers — which,
+  // uncaught in the webhook route, would surface as an unauthenticated 500
+  // instead of a clean rejection.
   const encoder = new TextEncoder();
-  return timingSafeEqual(encoder.encode(expected), encoder.encode(signature));
+  const expectedBytes = encoder.encode(expected);
+  const signatureBytes = encoder.encode(signature);
+  if (expectedBytes.length !== signatureBytes.length) return false;
+  return timingSafeEqual(expectedBytes, signatureBytes);
 }

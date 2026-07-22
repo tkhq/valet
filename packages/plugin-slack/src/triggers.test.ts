@@ -108,6 +108,22 @@ describe("slackTriggerDefs verify", () => {
     const verified = await trigger.verify(signedRequest(envelope(REACTION_EVENT)), {});
     expect(verified).toBeNull();
   });
+
+  it("drops the bot's own message posts (echo) so workflows can't self-trigger", async () => {
+    const trigger = findTrigger("slack.message");
+    const botMessage = { type: "message", channel: "C0ALERTS", user: "UBOT", bot_id: "B999", text: "workflow summary" };
+    const verified = await trigger.verify(signedRequest(envelope(botMessage, "Ev-bot")), { webhookSecret: SECRET });
+    expect(verified).toBeNull();
+  });
+
+  it("drops non-post message subtypes (edits/deletes) but keeps file_share", async () => {
+    const trigger = findTrigger("slack.message");
+    const edited = { type: "message", subtype: "message_changed", channel: "C1", message: { user: "U1", text: "new" } };
+    expect(await trigger.verify(signedRequest(envelope(edited, "Ev-edit")), { webhookSecret: SECRET })).toBeNull();
+
+    const fileShare = { type: "message", subtype: "file_share", channel: "C1", user: "U1", files: [{ id: "F1" }] };
+    expect(await trigger.verify(signedRequest(envelope(fileShare, "Ev-fs")), { webhookSecret: SECRET })).not.toBeNull();
+  });
 });
 
 describe("slackTriggerDefs toEvent", () => {

@@ -43,6 +43,19 @@ export const identityLinksRouter = new Hono<AppEnv>();
 
 const START_LINK_TTL_SECONDS = 600;
 
+/** Per-caller cooldown for the Slack link-start DM: the endpoint makes the
+ * bot DM an arbitrary workspace member a code, so an authenticated member
+ * must not be able to spam DMs from the trusted first-party bot. In-memory
+ * (per api process) is sufficient — it bounds the abuse rate, not a security
+ * boundary. */
+const SLACK_START_COOLDOWN_MS = 30_000;
+const slackStartAt = new Map<string, number>();
+
+/** Test-only: clears the per-process Slack link-start cooldown. */
+export function __resetSlackStartCooldown(): void {
+  slackStartAt.clear();
+}
+
 /** Slack-shaped transport extras (feature-detected, same pattern as the host's getMe probe). */
 function hasSlackLinkExtras(transport: ChannelTransport): transport is ChannelTransport & {
   openDirectConversation(externalId: string): Promise<string>;
@@ -126,6 +139,13 @@ identityLinksRouter.post("/slack/start", async (c) => {
   if (typeof body.externalId !== "string" || body.externalId === "") {
     return c.json({ error: "externalId is required" }, 400);
   }
+
+  const now = Date.now();
+  const last = slackStartAt.get(user.id);
+  if (last !== undefined && now - last < SLACK_START_COOLDOWN_MS) {
+    return c.json({ error: "slow down — wait a moment before requesting another Slack link code" }, 429);
+  }
+  slackStartAt.set(user.id, now);
 
   const code = await mintLinkCode(db, user.id, "slack", { externalId: body.externalId });
   const conversationKey = await transport.openDirectConversation(body.externalId);

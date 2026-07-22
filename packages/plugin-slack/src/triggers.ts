@@ -55,6 +55,19 @@ function makeVerify(eventTypes: readonly string[]): TriggerDef["verify"] {
     const eventType = str(event?.type);
     if (!event || eventType === undefined || !eventTypes.includes(eventType)) return null;
 
+    // Message events only: suppress the app's own posts and non-post subtypes.
+    // Slack redelivers the bot's own chat.postMessage output as a `message`
+    // event; without this, a workflow subscribed to slack.message that also
+    // posts to Slack self-triggers into an unbounded loop. Mirrors the
+    // channel transport's echo/SKIP_SUBTYPES suppression. Edits/deletes also
+    // nest their real author under `message`/`previous_message`, so their
+    // `user`/`channel` refs wouldn't populate anyway.
+    if (eventType === "message") {
+      if (str(event.bot_id) !== undefined) return null;
+      const subtype = str(event.subtype);
+      if (subtype !== undefined && subtype !== "file_share") return null;
+    }
+
     const deliveryId = str(body.event_id);
     if (!deliveryId) return null;
 

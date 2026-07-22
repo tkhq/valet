@@ -126,4 +126,22 @@ describe("verifySlackSignatureSync", () => {
   it("rejects missing headers", () => {
     expect(verifySlackSignatureSync({}, body, secret)).toBe(false);
   });
+
+  it("rejects (does not throw) a crafted multibyte signature of matching string length", () => {
+    // "v0=" + 63 hex chars + "é": string length equals a real signature (67)
+    // but encodes to 68 UTF-8 bytes — must return false, not throw a
+    // RangeError from timingSafeEqual (which, uncaught in the webhook route,
+    // would be an unauthenticated 500).
+    const crafted = "v0=" + "0".repeat(63) + "é";
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    let result: boolean | undefined;
+    expect(() => {
+      result = verifySlackSignatureSync(
+        { "x-slack-request-timestamp": timestamp, "x-slack-signature": crafted },
+        body,
+        secret,
+      );
+    }).not.toThrow();
+    expect(result).toBe(false);
+  });
 });

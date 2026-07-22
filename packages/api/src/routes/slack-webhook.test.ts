@@ -5,14 +5,19 @@
  * signatures, assertions against actual DB rows. The fan-out runs after the
  * 200 is returned, so DB assertions poll.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHmac } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
+import { __resetSlackWebhookThrottle } from "./slack-webhook.js";
 
 let api: TestApi | undefined;
+
+beforeEach(() => {
+  __resetSlackWebhookThrottle();
+});
 
 afterEach(async () => {
   await api?.cleanup();
@@ -54,6 +59,18 @@ function envelope(event: Record<string, unknown>, eventId: string, teamId = TEAM
 
 async function post(baseUrl: string, body: string, headers: Record<string, string>) {
   return fetch(`${baseUrl}/api/channels/slack/webhook`, { method: "POST", headers, body });
+}
+
+/** Scope every event assertion to THIS event's dedupeKey. The webhook route's
+ * fan-out is fire-and-forget, so a prior test's in-flight ingest can bleed a
+ * stray row into the next test's freshly-reset shared PGlite schema — a total
+ * row count would be flaky under load; a dedupeKey-scoped query is not. */
+async function eventCount(a: TestApi, dedupeKey: string): Promise<number> {
+  const rows = await a.providers.db
+    .select()
+    .from(events)
+    .where(and(eq(events.orgId, "local-org"), eq(events.dedupeKey, dedupeKey)));
+  return rows.length;
 }
 
 async function seedSubscription(a: TestApi, eventKeys: string[]): Promise<void> {
@@ -115,7 +132,7 @@ describe("POST /api/channels/slack/webhook", () => {
     const res = await post(api.baseUrl, body, { ...sign(body, Math.floor(Date.now() / 1000)), "x-slack-retry-num": "1" });
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 250));
-    expect(await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).toHaveLength(0);
+    expect(await eventCount(api, "Ev-retry")).toBe(0);
   });
 
   it("acks 200 + drop-logs unknown_org when no slack credential is configured", async () => {
@@ -135,7 +152,7 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(res.status).toBe(401);
     const drops = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
     expect(drops.some((d) => d.reason === "bad_signature")).toBe(true);
-    expect(await api.providers.db.select().from(events)).toHaveLength(0);
+    expect(await eventCount(api, "Ev-bad")).toBe(0);
   });
 
   it("ingests a signed reaction_added into events + delivery when subscribed", async () => {
@@ -147,15 +164,13 @@ describe("POST /api/channels/slack/webhook", () => {
     const res = await post(api.baseUrl, body, sign(body, Math.floor(Date.now() / 1000)));
     expect(res.status).toBe(200);
 
-    await expect
-      .poll(async () => (await api!.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).length, {
-        timeout: 5_000,
-      })
-      .toBe(1);
-    const [row] = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    await expect.poll(() => eventCount(api!, "Ev-react-1"), { timeout: 5_000 }).toBe(1);
+    const [row] = await api.providers.db
+      .select()
+      .from(events)
+      .where(and(eq(events.orgId, "local-org"), eq(events.dedupeKey, "Ev-react-1")));
     expect(row.service).toBe("slack");
     expect(row.eventKey).toBe("slack.reaction_added");
-    expect(row.dedupeKey).toBe("Ev-react-1");
     const deliveries = await api.providers.db.select().from(eventDeliveries).where(eq(eventDeliveries.eventId, row.id));
     expect(deliveries).toHaveLength(1);
   });
@@ -168,18 +183,17 @@ describe("POST /api/channels/slack/webhook", () => {
     const body1 = envelope(dmMessageEvent(), "Ev-msg-1");
     expect((await post(api.baseUrl, body1, sign(body1, Math.floor(Date.now() / 1000)))).status).toBe(200);
     await new Promise((r) => setTimeout(r, 300));
-    expect(await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).toHaveLength(0);
+    expect(await eventCount(api, "Ev-msg-1")).toBe(0);
 
     // Subscribe, redeliver a fresh event id — now it persists.
     await seedSubscription(api, ["slack.message"]);
     const body2 = envelope(dmMessageEvent(), "Ev-msg-2");
     expect((await post(api.baseUrl, body2, sign(body2, Math.floor(Date.now() / 1000)))).status).toBe(200);
-    await expect
-      .poll(async () => (await api!.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).length, {
-        timeout: 5_000,
-      })
-      .toBe(1);
-    const [row] = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    await expect.poll(() => eventCount(api!, "Ev-msg-2"), { timeout: 5_000 }).toBe(1);
+    const [row] = await api.providers.db
+      .select()
+      .from(events)
+      .where(and(eq(events.orgId, "local-org"), eq(events.dedupeKey, "Ev-msg-2")));
     expect(row.eventKey).toBe("slack.message");
   });
 
@@ -201,6 +215,30 @@ describe("POST /api/channels/slack/webhook", () => {
       .toBe(true);
   });
 
+  it("401s (not 500) a crafted multibyte signature header", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedSlackOrg(api);
+    const body = envelope(reactionEvent(), "Ev-crafted");
+    const ts = String(Math.floor(Date.now() / 1000));
+    const res = await post(api.baseUrl, body, {
+      "Content-Type": "application/json",
+      "X-Slack-Signature": "v0=" + "0".repeat(63) + "é",
+      "X-Slack-Request-Timestamp": ts,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("never ingests the bot's own message even when slack.message is subscribed", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedSlackOrg(api);
+    await seedSubscription(api, ["slack.message"]);
+    const botMsg = { ...dmMessageEvent(), bot_id: "B001", channel_type: "channel", channel: "C200" };
+    const body = envelope(botMsg, "Ev-botmsg");
+    expect((await post(api.baseUrl, body, sign(body, Math.floor(Date.now() / 1000)))).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await eventCount(api, "Ev-botmsg")).toBe(0);
+  });
+
   it("drop-logs unknown_org for a foreign team_id and ingests nothing", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedSlackOrg(api);
@@ -218,6 +256,6 @@ describe("POST /api/channels/slack/webhook", () => {
         { timeout: 5_000 },
       )
       .toBe(true);
-    expect(await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).toHaveLength(0);
+    expect(await eventCount(api, "Ev-foreign")).toBe(0);
   });
 });

@@ -48,10 +48,12 @@ export async function ingestEvent(
   // Match-gated persistence for high-volume keys: an `ephemeral` catalog
   // entry (e.g. slack.message) is matched against subscriptions BEFORE any
   // insert — zero matches means the event never touches the events table.
-  // Subscribing is what turns the firehose on. The subscription set is
-  // re-read inside the transaction below, so a subscription created between
-  // this check and the insert costs at most one skipped event, never a
-  // persisted-but-undelivered one.
+  // Subscribing is what turns the firehose on. The check and the in-tx match
+  // read the subscription set at different instants, so a concurrent change
+  // can produce at most one boundary artifact: a subscription created between
+  // the two reads costs one skipped event; a subscription disabled between
+  // them persists one event whose in-tx match finds nothing (an orphan row
+  // with zero deliveries). Both are benign and self-correct on the next event.
   const entry = catalog.find((e) => e.key === event.key);
   if (entry?.ephemeral) {
     const subs = await deps.db

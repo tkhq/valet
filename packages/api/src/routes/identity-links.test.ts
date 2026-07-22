@@ -4,10 +4,11 @@
  * router is mounted BEFORE `/api/me` so the longer, more specific prefix
  * wins under Hono's route matching (see `app.ts`'s comment).
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChannelTransport, OutboundChannelMessage, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { consumeLinkCode, linkIdentity } from "../channels/identity-links.js";
+import { __resetSlackStartCooldown } from "./identity-links.js";
 import type {
   IdentityLinkStatus,
   ListIdentityLinksResponse,
@@ -15,6 +16,10 @@ import type {
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
+
+beforeEach(() => {
+  __resetSlackStartCooldown();
+});
 
 afterEach(async () => {
   await api?.cleanup();

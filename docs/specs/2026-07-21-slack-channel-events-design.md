@@ -128,11 +128,18 @@ Add `transports: [slackTransportFactory]` to the existing manifest. Port from
 - **Gates**: `sendGatePrompt` → Block Kit `section` + `actions` buttons, button
   `value = g|{gateId}|{actionId}` (Slack's 2000-char value limit means we can embed
   the real gate id — unlike Telegram's 64-byte `callback_data`). The interactivity
-  branch produces `kind: "gate_callback"` with the gateId decoded from the value,
-  so Slack gates survive api restarts; the host prefers an explicit gateId when the
-  transport supplies one and falls back to the in-memory `gateRefs` map otherwise
-  (small additive change to `handleGateCallback`). `updateGatePrompt` →
-  `chat.update` with `parse: "none"` and the ✅/❌ resolution line.
+  branch produces `kind: "gate_callback"` with the gateId decoded from the value;
+  the host prefers an explicit gateId when the transport supplies one and falls
+  back to the in-memory `gateRefs` map otherwise (small additive change to
+  `handleGateCallback`). `updateGatePrompt` → `chat.update` with `parse: "none"`
+  and the ✅/❌ resolution line.
+  **Restart semantics:** the embedded gate id lets a user resolve their own gate
+  after an api restart (the decision is re-armed on session rehydrate), but the
+  prompt-message *edit* and the in-memory prompt text are lost with the restart,
+  so the Slack message keeps its (now inert-on-resolve) buttons until the next
+  interaction — resolution is correct, the visual state may lag. Resolution is
+  always attempted on the *clicker's own* orchestrator session, so a stale click
+  can only no-op, never resolve someone else's gate.
 - **`sendTyping`**: no-op outside DMs (Slack bots have no typing indicator);
   in assistant DM threads, `assistant.threads.setStatus` shimmer (decision 9).
 - No `registerWebhook` (Slack's URL is app-level config) — see decision 6.
@@ -168,8 +175,16 @@ the transport implements `poll` by opening `apps.connections.open` WebSocket,
 acking envelopes, and yielding the inner Events API payloads — so `make dev-local`
 gets a real Slack loop with no tunnel, exactly like Telegram's long-poll. Without
 `appToken`, Slack is webhook-only and requires `VALET_PUBLIC_URL`; the host logs a
-clear "slack: no public URL and no app token — channel not started" instead of
+clear "slack: no public URL and no poll support — inbound disabled" instead of
 starting a broken transport.
+
+**Known limitation (Socket Mode = channel-only for now):** the poll path runs
+through `ChannelHost` (`parseUpdate → handleUpdate`), which is the *channel*
+consumer only. The *event* pipeline (`ingestEvent` → subscriptions → workflows)
+is wired solely into the dedicated webhook route, so under Socket Mode DMs and
+mentions work but `slack.*` event subscriptions do not fire. Production runs in
+webhook mode (public URL) where both consumers see every event. Wiring the event
+fan-out into the poll path is the recorded follow-up.
 
 ### 6. ChannelHost refactors (the recorded pre-reqs for a second transport)
 
@@ -211,7 +226,11 @@ Both were flagged in the Telegram spec's deviations; they land in this pass:
 
 - `verify` implements the full signing-secret HMAC (contract completeness +
   testability against the generic ingress), even though the dedicated route
-  short-circuits with pre-verified events.
+  short-circuits with pre-verified events. The `slack.message` verify
+  additionally drops events carrying `bot_id` and non-`file_share` subtypes —
+  without this, a workflow subscribed to `slack.message` that also posts to
+  Slack would ingest its own output and self-trigger a loop (the channel
+  transport suppresses the same echo independently).
 - `dedupeKey = event_id`; `occurredAt` from `event.ts`/`event_ts` (seconds.decimal →
   ISO), wall-clock fallback; `refs` carry channel/user/team ids; `summary` is a
   one-liner ("reaction :tada: added in C0123 by U0456").

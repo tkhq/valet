@@ -581,7 +581,14 @@ export const slackTransportFactory: ChannelTransportFactory = {
     if (typeof webhookSecret !== "string" || webhookSecret === "") {
       throw new Error("slack transport requires metadata.webhookSecret (the app signing secret)");
     }
+    // teamId is load-bearing for outbound: conversation keys embed it, and an
+    // empty one makes every send/gate/attention key unparseable. Fail fast
+    // like webhookSecret rather than silently becoming inbound-only. The
+    // credential-save route populates it via auth.test.
     const teamId = typeof metadata.teamId === "string" ? metadata.teamId : "";
+    if (teamId === "") {
+      throw new Error("slack transport requires metadata.teamId (set via auth.test at connect time)");
+    }
     const botUserId = typeof metadata.botUserId === "string" ? metadata.botUserId : undefined;
     const appToken =
       typeof metadata.appToken === "string" && metadata.appToken !== "" ? metadata.appToken : undefined;

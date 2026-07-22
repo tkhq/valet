@@ -26,6 +26,29 @@ import { ingestEvent } from "../events/ingest.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
+/** Same rationale as ChannelHost.maybeLogVerifyFailed: this route is public
+ * and unauthenticated, so a burst of bad/half-configured posts must not flood
+ * `event_drop_log`. Throttle the write (not the response) per reason. */
+const DROPLOG_COOLDOWN_MS = 60_000;
+const droplogLoggedAt = new Map<string, number>();
+
+/** Test-only: clears the per-process drop-log throttle so suites can assert
+ * one row per reason without the 60s cooldown bleeding across cases. */
+export function __resetSlackWebhookThrottle(): void {
+  droplogLoggedAt.clear();
+}
+
+async function throttledDropLog(
+  db: Parameters<typeof writeDropLog>[0],
+  args: { orgId: string; reason: string; detail: string },
+): Promise<void> {
+  const now = Date.now();
+  const last = droplogLoggedAt.get(args.reason);
+  if (last !== undefined && now - last < DROPLOG_COOLDOWN_MS) return;
+  droplogLoggedAt.set(args.reason, now);
+  await writeDropLog(db, args);
+}
+
 function slackTriggerDefs(plugins: ValetPlugin[]): TriggerDef[] {
   return plugins.flatMap((p) => p.triggers ?? []).filter((t) => t.service === "slack");
 }
@@ -83,13 +106,21 @@ slackWebhookRouter.post("/webhook", async (c) => {
   const credTeamId = typeof cred?.metadata?.teamId === "string" ? cred.metadata.teamId : undefined;
   const transport = channelHost.transportFor("slack");
   if (!cred || !webhookSecret || !transport) {
-    await writeDropLog(db, { orgId, reason: "unknown_org", detail: "slack webhook: no credential/secret/transport" });
+    await throttledDropLog(db, { orgId, reason: "unknown_org", detail: "slack webhook: no credential/secret/transport" });
     return c.body(null, 200); // ack — never retry-loop Slack against a half-configured org
   }
 
-  const raws = transport.verifyWebhook({ headers, rawBody }, { webhookSecret });
+  // verifyWebhook is defensively wrapped: a malformed signature header must
+  // never surface as an unauthenticated 500 (or crash the fan-out) — treat any
+  // throw as a rejection.
+  let raws: ReturnType<typeof transport.verifyWebhook>;
+  try {
+    raws = transport.verifyWebhook({ headers, rawBody }, { webhookSecret });
+  } catch {
+    raws = null;
+  }
   if (raws === null) {
-    await writeDropLog(db, { orgId, reason: "bad_signature", detail: "slack webhook signature verification failed" });
+    await throttledDropLog(db, { orgId, reason: "bad_signature", detail: "slack webhook signature verification failed" });
     return c.body(null, 401);
   }
 
@@ -99,8 +130,16 @@ slackWebhookRouter.post("/webhook", async (c) => {
       const defs = slackTriggerDefs(plugins);
       for (const raw of raws) {
         const teamId = teamIdOf(raw);
-        if (credTeamId && teamId && teamId !== credTeamId) {
-          await writeDropLog(db, { orgId, reason: "unknown_org", detail: `slack webhook for foreign team ${teamId}` });
+        // When we know our workspace, require the update to name it. A shared
+        // Slack app signing secret is valid across every workspace that
+        // installs the app, so an absent team id is treated as a mismatch
+        // (drop) rather than defaulting to our own org.
+        if (credTeamId && teamId !== credTeamId) {
+          await throttledDropLog(db, {
+            orgId,
+            reason: "unknown_org",
+            detail: `slack webhook for foreign/absent team ${teamId ?? "(none)"}`,
+          });
           continue;
         }
         // Channel consumer.

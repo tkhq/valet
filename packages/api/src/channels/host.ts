@@ -617,8 +617,11 @@ export class ChannelHost {
     let text = event.text ?? "";
     // Shared-channel context header (Slack mentions): the orchestrator sees
     // where the message came from without the transport leaking prompt text.
+    // The channel label is a workspace-renameable name, so strip parens and
+    // newlines that could forge the provenance framing.
     if (event.context?.channelLabel) {
-      const via = `via ${channelType} ${event.context.channelLabel}${event.context.mention ? ", mention" : ""}`;
+      const label = event.context.channelLabel.replace(/[()\r\n]/g, " ").trim();
+      const via = `via ${channelType} ${label}${event.context.mention ? ", mention" : ""}`;
       text = text === "" ? `(${via})` : `(${via})\n\n${text}`;
     }
     const attachments: PromptAttachment[] = [];
@@ -693,17 +696,17 @@ export class ChannelHost {
       }
     }
 
-    // Resolution deliberately looks up the user's orchestrator session
-    // rather than reusing `mapped.sessionId` — the ownership check above
-    // only proved `mapped.sessionId` belongs to `userId`, not that it IS
-    // the orchestrator session. This relies on the invariant that
-    // channel-keyed threads (see `channelThreadFor`) exist only on
-    // orchestrator sessions: `handleMessage` always threads through
-    // `ensureOrchestratorSession`, so any gate whose ref maps back to a
-    // channel thread must have been raised on that same orchestrator
-    // session. If that invariant is ever violated, `resolveDecision` below
-    // throws on a gateId that doesn't exist on this session — caught by
-    // `handleUpdate`'s try/catch (fails safe, not silently wrong).
+    // Resolution deliberately looks up the user's OWN orchestrator session
+    // rather than trusting the callback's origin. This is the security
+    // boundary for the explicit-gateId path (post-restart, when `mapped` is
+    // null and the ref-map ownership check above was skipped): resolving on
+    // the clicker's own session means a user can only ever resolve a gate
+    // that is actually pending on their own orchestrator. A foreign gateId
+    // (user B clicking user A's gate) is NOT on B's session, so
+    // `resolveDecision` no-ops — safe, but silent: `answerCallback` (where
+    // the transport supports it) still acks, and Slack has no answerCallback
+    // at all, so the clicker gets no negative feedback. That's an accepted
+    // limitation of restart-surviving gates, not a wrong resolution.
     const session = await this.deps.engineHost.orchestratorSessionFor({ type: "user", id: userId }, {
       actorUserId: userId,
       orgId,
