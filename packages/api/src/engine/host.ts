@@ -27,7 +27,8 @@ import type { ValetPlugin } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { onePasswordMeta, type OnePasswordService } from "../services/onepassword.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { resolveUserCredentialRead } from "../services/credential-resolution.js";
 import { buildWorkspacePrep } from "./workspace-prep.js";
 import { resolvePrebuildImage, type PrebuildResolution } from "../prebuilds/resolve.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
@@ -646,22 +647,30 @@ export class EngineHost {
    *    `StoredCredential` the engine's `credentialProvider` maps to
    *    `{ accessToken }`.
    *  - every OTHER service (and `github` itself when `githubTokenDeps`/`db`
-   *    aren't wired) → the raw `engineCredentials.get(owner, service)` read,
-   *    THEN — when `onePassword` is wired and the row carries
-   *    `metadata.onepassword` (`onePasswordMeta`) — `onePassword.resolveCredential`
-   *    fills in the secret from the referenced 1Password item. An
+   *    aren't wired) → `resolveUserCredentialRead` (Task 6's shared
+   *    owner-precedence contract, `services/credential-resolution.ts`): a
+   *    `{ type: "user", id: userId }` row wins outright when present (any
+   *    kind); on a user-row MISS it falls back to the `{ type: "org", id:
+   *    orgId }` row for the same service — this is the only org-owned read
+   *    on the session path (the engine's `Session.credentialProvider()` is
+   *    user-owner-only — no generic read-union exists here otherwise). The
+   *    engine always hands this resolver `owner = { type: "user", id:
+   *    userId }` (session.ts:705), so `owner` itself is ignored below —
+   *    `userId`/`orgId` (captured by this closure) drive both halves.
+   *    Whichever row wins, when `onePassword` is wired and that row carries
+   *    `metadata.onepassword` (`onePasswordMeta`), `onePassword.resolveCredential`
+   *    fills in the secret from the referenced 1Password item; an
    *    `OnePasswordAuthError` (missing/disabled token, SDK failure)
    *    propagates unchanged, mirroring `GitHubAuthError`'s tool-error-result
-   *    behavior above. Rows without 1Password reference metadata pass
-   *    through unchanged (same object, no clone) — byte-identical to the
-   *    engine's default path.
-   *  - user-owner MISS + `onePassword` wired → one extra read of the
-   *    `{ type: "org", id: orgId }` row for the same service; if THAT row is
-   *    reference-carrying it resolves through the org's shared 1Password
-   *    token. This is the only org-owned read on the session path (the
-   *    engine's `Session.credentialProvider()` is user-owner-only — no
-   *    generic read-union exists), scoped to reference rows so plain
-   *    org-owned rows (ChannelHost bot tokens) remain session-invisible.
+   *    behavior above. Rows without 1Password reference metadata (or with no
+   *    `onePassword` wired) pass through unchanged (same object, no clone).
+   *
+   *    DELIBERATE BEHAVIOR CHANGE (Task 6): member sessions now gain read
+   *    access to PLAIN org-owned credential rows on a user-row miss, not
+   *    just 1Password reference rows — e.g. an admin-pasted org-wide Linear
+   *    API key is now session-visible. See `credential-resolution.ts`'s
+   *    module doc for the full rationale (same trust model as the org
+   *    1Password token; mirrors `github`'s user->org tiering precedent).
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -715,31 +724,10 @@ export class EngineHost {
         }
         return { type: "oauth2", accessToken: resolved.token };
       }
-      // Byte-identical to the engine's default store-backed read, unless
-      // `onePassword` is wired and the row carries reference metadata.
-      const stored = await credentials.get(owner, service);
-      if (stored && onePassword && onePasswordMeta(stored)) {
-        return onePassword.resolveCredential(stored, { orgId, userId });
-      }
-      if (stored) return stored;
-      // Org-scoped reference fallback: `Session.credentialProvider()` only
-      // ever reads `{ type: "user" }` owners (session.ts:705) — there is NO
-      // generic owner read-union on the session tool path, so an org-owned
-      // row would otherwise be unreachable from sessions entirely. Reference
-      // rows are the one org-owned kind DESIGNED to be session-consumed
-      // (admin creates an org-wide 1Password credential; members' sessions
-      // resolve it through the shared org token), so on a user-owner miss we
-      // consult the org row — but ONLY when it carries reference metadata.
-      // Plain org-owned rows (ChannelHost bot tokens, workflow-run
-      // credentials) stay invisible to sessions, exactly as before this
-      // branch existed.
-      if (onePassword && owner.type === "user") {
-        const orgRow = await credentials.get({ type: "org", id: orgId }, service);
-        if (orgRow && onePasswordMeta(orgRow)) {
-          return onePassword.resolveCredential(orgRow, { orgId, userId });
-        }
-      }
-      return stored;
+      // Shared owner-precedence + 1Password-reference-resolution contract
+      // (Task 6) — see this method's doc comment above for the full
+      // rationale and the deliberate behavior change it introduces.
+      return resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, service);
     };
   }
 

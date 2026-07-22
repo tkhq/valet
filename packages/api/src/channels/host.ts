@@ -27,6 +27,7 @@ import {
   type InboundChannelEvent,
   type PromptAttachment,
   type SessionStore,
+  type StoredCredential,
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
@@ -36,6 +37,8 @@ import { agentSessions } from "../schema/index.js";
 import { ensureOrchestratorSession } from "../orchestrator/ensure.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 
 export interface ChannelHostDeps {
@@ -50,6 +53,15 @@ export interface ChannelHostDeps {
   /** Resolves the single org id (single-org assumption, same as auth middleware). */
   resolveOrgId: () => Promise<string>;
   now?: () => number;
+  /**
+   * 1Password reference-credential resolver (owner-precedence contract,
+   * Task 6). Threaded into `resolveOrgCredentialRead` so an org-owned bot
+   * token row carrying `metadata.onepassword` resolves through the org's
+   * shared 1Password token instead of surfacing the raw reference string.
+   * Optional — omit for deployments/tests with no 1Password service wired;
+   * rows then pass through raw, byte-identical to before this task.
+   */
+  onePassword?: OnePasswordService;
 }
 
 const DEDUP_CAP = 2048;
@@ -174,7 +186,27 @@ export class ChannelHost {
     const orgId = this.orgId;
     for (const plugin of this.deps.plugins) {
       for (const factory of plugin.transports ?? []) {
-        const credential = await this.deps.engineCredentials.get({ type: "org", id: orgId }, factory.channelType);
+        // Owner-precedence contract (Task 6): org-row-only read + 1Password
+        // reference resolution, so an admin-configured reference-backed bot
+        // token (e.g. `metadata.onepassword` pointing at a shared vault
+        // item) resolves the same way a plain pasted token does. A failed
+        // resolution (missing/disabled 1Password token, SDK error) must NOT
+        // crash boot — logged and this transport simply doesn't start, same
+        // as the pre-existing "no bot token" branch below.
+        let credential: StoredCredential | null;
+        try {
+          credential = await resolveOrgCredentialRead(
+            { credentials: this.deps.engineCredentials, onePassword: this.deps.onePassword },
+            { orgId },
+            factory.channelType,
+          );
+        } catch (err) {
+          if (err instanceof OnePasswordAuthError) {
+            console.error(`[channels] ${factory.channelType}: bot token resolution failed: ${err.message}`);
+            continue;
+          }
+          throw err;
+        }
         if (!credential) {
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
           continue;

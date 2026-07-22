@@ -25,7 +25,25 @@ import { sessionRepos, githubInstallations } from "../schema/index.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
+import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword.js";
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
+
+/** Fake `OnePasswordService` — only `resolveCredential` is exercised by the invoker's credential providers. */
+function fakeOnePassword(
+  resolveCredential: OnePasswordService["resolveCredential"],
+): OnePasswordService {
+  const unused = () => {
+    throw new Error("not exercised by this suite");
+  };
+  return {
+    tokenConnected: unused,
+    listVaults: unused,
+    listItems: unused,
+    getItem: unused,
+    resolveReference: unused,
+    resolveCredential,
+  };
+}
 
 async function makeDb(): Promise<AppDb> {
   const { appDb } = await freshTestPgDb();
@@ -210,6 +228,54 @@ describe("buildActionInvoker", () => {
     );
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+  });
+
+  it("owner-precedence contract (Task 6): a user-owned run resolves a 1Password reference row through onePassword", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "u1" }, "demo", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
+    });
+    let sawCtx: OnePasswordCtx | undefined;
+    const onePassword = fakeOnePassword(async (row, ctx) => {
+      sawCtx = ctx;
+      return { type: row.type, metadata: row.metadata, apiKey: "resolved-user-secret" };
+    });
+    const fixture = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService, onePassword });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+      userOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+    expect(sawCtx).toEqual({ orgId: "org1", userId: "u1" });
+  });
+
+  it("owner-precedence contract (Task 6): an org-owned run resolves the org row's 1Password reference through onePassword", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "demo", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Acme/credential", tokenScope: "org" } },
+    });
+    let sawCtx: OnePasswordCtx | undefined;
+    const onePassword = fakeOnePassword(async (row, ctx) => {
+      sawCtx = ctx;
+      return { type: row.type, metadata: row.metadata, apiKey: "resolved-org-secret" };
+    });
+    const fixture = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService, onePassword });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+      { userId: "u1", orgId: "org1", owner: { type: "org", id: "org1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+    expect(sawCtx).toEqual({ orgId: "org1", userId: "u1" });
   });
 
   it("team-owned run: unsupported owner type returns a deterministic {ok:false} and never invokes execute", async () => {

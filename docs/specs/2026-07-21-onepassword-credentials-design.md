@@ -93,6 +93,56 @@ mint-cache pattern). SDK clients are cached per token.
 org). It propagates the same way `GitHubAuthError` does — surfaced as the
 tool's error result, never a session-level failure.
 
+## Owner-precedence contract
+
+**Credential reads follow user row → org row precedence for ALL credential
+kinds (not just 1Password reference rows), with 1Password reference
+resolution built into the read, implemented ONCE
+(`packages/api/src/services/credential-resolution.ts`'s
+`resolveUserCredentialRead`/`resolveOrgCredentialRead`) and consumed by all
+three readers: the session resolver (`engine/host.ts`), the workflow tool-node
+action invoker (`plugins/action-invoker.ts`), and `ChannelHost`.**
+
+`resolveUserCredentialRead(deps, { orgId, userId }, service)` — a
+`{ type: "user", id: userId }` row wins outright when present (any kind); on
+a user-row MISS it falls back to the `{ type: "org", id: orgId }` row for the
+same service. `resolveOrgCredentialRead(deps, { orgId, userId? }, service)`
+reads the org row only (no user row consulted) — for readers with no live
+user in scope. Both resolve a `metadata.onepassword`-carrying row through
+`OnePasswordService.resolveCredential` when `deps.onePassword` is wired; a
+non-reference row, or no `onePassword` wired at all, passes through raw
+(same object, no clone).
+
+**Deliberate behavior change:** member sessions gain read access to plain
+org-owned credential rows (e.g. an admin-pasted org-wide Linear key,
+Slack/Telegram bot tokens), not just 1Password reference rows. This is
+intended — same trust model the org's shared 1Password token already had (an
+admin opts a credential into org-wide sharing by creating the org-owned row
+at all), and it mirrors `github`'s existing user→org token-service tiering
+precedent.
+
+Consumers:
+
+- **Session resolver** (`EngineHost.buildCredentialResolver`'s non-github
+  branch): `resolveUserCredentialRead({ credentials, onePassword }, { orgId,
+  userId }, service)`. The engine always hands this resolver `owner = {
+  type: "user", id: userId }` — `owner` itself is ignored; `userId`/`orgId`
+  drive both halves of the precedence read.
+- **Workflow tool-node action invoker** (`buildActionInvoker`'s
+  `credentialOwnerFor`): a user-owned run resolves via
+  `resolveUserCredentialRead`; an org-owned run resolves via
+  `resolveOrgCredentialRead` with the run's actor `userId` threaded through
+  (for a personal-tokenScope reference to resolve against). An
+  `OnePasswordAuthError` propagates the same way `GitHubAuthError` already
+  does on this path — mapped to the action's `{ ok: false, error }` result.
+- **`ChannelHost.start()`'s bot-token read**: `resolveOrgCredentialRead({
+  credentials, onePassword }, { orgId }, channelType)` — so an
+  admin-configured reference-backed bot token resolves the same way a plain
+  pasted token does. An `OnePasswordAuthError` here is caught (not
+  propagated): logged as `[channels] <type>: bot token resolution failed:
+  <msg>`, that transport simply doesn't start — must NOT crash boot, same
+  failure mode as the pre-existing "no bot token" branch.
+
 ## API surface
 
 Picker backend (new routes, `/api/onepassword/…`):
@@ -225,47 +275,49 @@ code as of the implementing commits:
   are wired) — it never reaches the `onePasswordMeta` branch, so a stored
   1Password-reference row on `github` would silently never resolve. Reject
   at write time instead of persisting a credential nothing reads.
-- **Known gap (follow-up): reference credentials only resolve through the
-  session `credentialResolver` seam.** Two other readers of credential rows
-  bypass it and will treat a reference-carrying row as if it were simply
-  unconnected (no secret, no error surfaced) rather than resolving it:
-  - Workflow tool-node invocation (`packages/api/src/plugins/action-invoker.ts`,
-    `buildCredentialProvider`), which reads the credential store directly
-    rather than through `host.ts`'s `buildCredentialResolver`.
-  - `packages/api/src/channels/host.ts`'s `ChannelHost.start` org bot-token
-    reads (`engineCredentials.get({type:"org",...}, factory.channelType)`),
-    which also read the store directly.
-  Follow-up: route both through the same resolution helper `host.ts`'s
-  `buildCredentialResolver` uses (or extract it into a shared function both
-  call), so a reference-carrying row behaves identically no matter which
-  subsystem reads it.
+- **RESOLVED (Task 6): "Known gap (follow-up): reference credentials only
+  resolve through the session `credentialResolver` seam."** Originally, two
+  other readers of credential rows bypassed the session resolver's 1Password
+  handling and would treat a reference-carrying row as if it were simply
+  unconnected: the workflow tool-node invoker
+  (`packages/api/src/plugins/action-invoker.ts`'s `buildCredentialProvider`,
+  which read the credential store directly) and `ChannelHost.start`'s org
+  bot-token read (`packages/api/src/channels/host.ts`, same direct-read
+  pattern). Both now route through the shared owner-precedence contract
+  (`resolveUserCredentialRead`/`resolveOrgCredentialRead`, see "Owner-
+  precedence contract" above) — a reference-carrying row resolves
+  identically no matter which subsystem reads it.
 
   The real fix underneath this follow-up (decided with the user, 2026-07-21)
-  is an **explicit owner-precedence contract** for credential reads: "which
-  owner's credentials does a reader see" has never been stated first-class —
-  the engine's user-owner-only read is inherited behavior, not a decision,
-  and the org-row fallback in `buildCredentialResolver` (previous Deviations
-  entry) is a deliberate, temporary shim compensating from the host side. Its
-  reference-rows-only restriction is a scope guard to avoid silently widening
-  session access to plain org-owned rows, not a principled semantic. The
-  end-state: decide user→org precedence explicitly (all credential kinds vs
-  reference-only is a product call — note member sessions would gain access
-  to admin-pasted plain org credentials under the general form), implement it
-  ONCE in a shared resolution helper, and consume it from all three readers
-  (session resolver, workflow invoker, ChannelHost). Until then, credential
-  read semantics intentionally differ per reader as documented above.
-- **Org-scoped reference rows required a dedicated session-path fallback
-  (post-PR adversarial-review fix).** This doc originally claimed org-owned
-  rows would "ride the existing owner read-union" — no such union exists:
-  the engine's `Session.credentialProvider()` reads `{ type: "user" }`
-  owners only, and the raw store is exact-owner lookup, so org-owned
-  reference rows (the admin "org-wide credential" flow) were dead on the
-  session tool path — created, listed, badged as connected, never read.
-  Fixed in `buildCredentialResolver`: on a user-owner miss (and only then —
-  a user's own row always shadows the org row), the resolver reads the
-  `{ type: "org", id: orgId }` row for the service and resolves it iff it
-  carries `metadata.onepassword`. Plain org-owned rows (ChannelHost bot
-  tokens, workflow-run credentials) remain session-invisible, exactly as
-  before. Pinned by three tests in
-  `packages/api/src/engine/host.onepassword-credential.test.ts`
-  (org-fallback resolve, user-shadows-org, plain-org-invisible).
+  was an **explicit owner-precedence contract** for credential reads: "which
+  owner's credentials does a reader see" had never been stated first-class —
+  the engine's user-owner-only read was inherited behavior, not a decision,
+  and the org-row fallback in `buildCredentialResolver` (see the entry
+  below) was a deliberate, temporary shim compensating from the host side.
+  Its reference-rows-only restriction was a scope guard to avoid silently
+  widening session access to plain org-owned rows, not a principled
+  semantic. Task 6 implements the end-state: user→org precedence for ALL
+  credential kinds (not just references — member sessions now do gain access
+  to admin-pasted plain org credentials, a deliberate, documented behavior
+  change), implemented ONCE in `packages/api/src/services/credential-resolution.ts`,
+  consumed by all three readers (session resolver, workflow invoker,
+  ChannelHost). Credential read semantics are now uniform across all three.
+- **RESOLVED (Task 6): "Org-scoped reference rows required a dedicated
+  session-path fallback (post-PR adversarial-review fix)."** This doc
+  originally claimed org-owned rows would "ride the existing owner
+  read-union" — no such union exists: the engine's
+  `Session.credentialProvider()` reads `{ type: "user" }` owners only, and
+  the raw store is exact-owner lookup, so org-owned reference rows (the
+  admin "org-wide credential" flow) were dead on the session tool path —
+  created, listed, badged as connected, never read. First fixed with a
+  reference-rows-only fallback directly in `buildCredentialResolver` (on a
+  user-owner miss, read the `{ type: "org", id: orgId }` row and resolve it
+  iff it carried `metadata.onepassword`; plain org-owned rows stayed
+  session-invisible) — pinned at the time by three tests in
+  `packages/api/src/engine/host.onepassword-credential.test.ts` (org-fallback
+  resolve, user-shadows-org, plain-org-invisible). Task 6 replaced that
+  inline shim with the general owner-precedence contract
+  (`resolveUserCredentialRead`): the user-owner-miss org fallback now applies
+  to ANY row kind, not just references — the former "plain-org-invisible"
+  test was rewritten to pin the new "plain org row now resolves" contract
+  instead (same file, same test name updated).

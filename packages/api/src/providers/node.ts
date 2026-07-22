@@ -276,6 +276,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     publicUrl: publicUrlFromEnv(process.env),
     resolveOrgId: () => resolveOrgId(db),
+    onePassword,
   });
 
   // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
@@ -294,6 +295,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // `resolveGitHubToken` (same `key` `engineCredentials`/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
+    onePassword,
   });
 
   // Approval attention (decision 12): the FIRST park on an approval node

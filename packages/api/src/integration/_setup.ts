@@ -270,6 +270,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     plugins,
     publicUrl: opts.channelPublicUrl,
     resolveOrgId: () => resolveOrgId(db),
+    onePassword,
   });
   if (opts.startChannelHost) {
     await channelHost.start();
@@ -283,6 +284,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineStore,
     actionPluginByService,
     credentials: engineCredentials,
+    onePassword,
   });
   const realWorkflowRunHost = new LocalRunHost({
     store: workflowStore,

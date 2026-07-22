@@ -41,7 +41,9 @@ import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@v
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { actionInvocations } from "../schema/index.js";
+import { resolveOrgCredentialRead, resolveUserCredentialRead } from "../services/credential-resolution.js";
 import type { GitHubTokenDeps } from "../services/github-tokens.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
@@ -95,6 +97,16 @@ export interface ActionInvokerOpts {
     fetchImpl?: typeof fetch;
     now?: () => number;
   };
+  /**
+   * 1Password reference-credential resolver (owner-precedence contract,
+   * Task 6). Threaded into the shared `resolveUserCredentialRead`/
+   * `resolveOrgCredentialRead` helper's `CredentialReadDeps` so a workflow
+   * tool-node action can resolve a `metadata.onepassword`-carrying row the
+   * same way the session resolver and `ChannelHost` do. Optional — omit for
+   * deployments/tests with no 1Password service wired; rows then pass
+   * through raw, byte-identical to before this task.
+   */
+  onePassword?: OnePasswordService;
 }
 
 export type ActionInvoker = (
@@ -177,7 +189,7 @@ async function computeResult(
   const credentials =
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, ctx, owner)
-      : buildCredentialProvider(opts.credentials, owner, credentialService);
+      : buildCredentialProvider(opts, ctx, owner, credentialService);
 
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
@@ -230,10 +242,32 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
   return null;
 }
 
-function buildCredentialProvider(store: CredentialStore, owner: CredentialOwner, defaultService: string): CredentialProvider {
+/**
+ * Non-github `CredentialProvider` — routes through the shared
+ * owner-precedence contract (`services/credential-resolution.ts`, Task 6)
+ * instead of a raw `CredentialStore.get`. A user-owned run resolves via
+ * `resolveUserCredentialRead` (user row shadows org row, `owner.id` as the
+ * acting user); an org-owned run resolves via `resolveOrgCredentialRead`
+ * (org row only), with `ctx.userId` — the run's actor bookkeeping field —
+ * threaded through for a personal-tokenScope 1Password reference to resolve
+ * against. Either path fills a `metadata.onepassword` row's secret when
+ * `opts.onePassword` is wired; absent onePassword or a non-reference row
+ * passes through raw, byte-identical to before this task.
+ */
+function buildCredentialProvider(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  owner: CredentialOwner,
+  defaultService: string,
+): CredentialProvider {
+  const deps = { credentials: opts.credentials, onePassword: opts.onePassword };
   return {
     async get(service?: string): Promise<Credential | null> {
-      const stored = await store.get(owner, service ?? defaultService);
+      const svc = service ?? defaultService;
+      const stored =
+        owner.type === "user"
+          ? await resolveUserCredentialRead(deps, { orgId: ctx.orgId, userId: owner.id }, svc)
+          : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId }, svc);
       if (!stored) return null;
       const accessToken = stored.accessToken ?? stored.apiKey ?? "";
       if (accessToken === "") return null;
@@ -277,7 +311,7 @@ function buildGithubCredentialProvider(
       // no plugin known to this codebase does this today, but the contract
       // shouldn't silently reinterpret an unrelated service as "github".
       if (service !== undefined && service !== "github") {
-        return buildCredentialProvider(opts.credentials, owner, service).get(service);
+        return buildCredentialProvider(opts, ctx, owner, service).get(service);
       }
       const tokenDeps = opts.githubTokenDeps;
       if (!tokenDeps) {

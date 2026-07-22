@@ -63,6 +63,7 @@ import type {
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 import { orchestratorIdentities, workflowDefinitions } from "../schema/index.js";
 
 // Same compile-time-vs-runtime bridge `resolveModelId` solves in
@@ -88,6 +89,13 @@ export interface WorkflowEngineDepsOpts {
    * credential-store read. Optional; omit in tests/deployments with no
    * github plugin registered. */
   githubTokenDeps?: ActionInvokerOpts["githubTokenDeps"];
+  /**
+   * 1Password reference-credential resolver (owner-precedence contract,
+   * Task 6) — threaded straight to `buildActionInvoker`'s `onePassword`
+   * opt. Optional; omit in tests/deployments with no 1Password service
+   * wired.
+   */
+  onePassword?: OnePasswordService;
 }
 
 function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: string } {
@@ -226,6 +234,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     credentials: opts.credentials,
     actionPluginByService: opts.actionPluginByService,
     githubTokenDeps: opts.githubTokenDeps,
+    onePassword: opts.onePassword,
   });
 
   return {

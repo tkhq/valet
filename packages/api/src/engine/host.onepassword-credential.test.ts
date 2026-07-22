@@ -229,25 +229,27 @@ describe("EngineHost session 1Password credential resolution", () => {
     expect(cred?.accessToken).toBe("my-own-key");
   });
 
-  it("plain (non-reference) org-owned row stays invisible to sessions — fallback is reference-rows-only", async () => {
-    // ChannelHost bot tokens and workflow-run credentials live in org-owned
-    // rows that sessions have never been able to read; the fallback must not
-    // widen that. A user-owner miss with only a PLAIN org row present still
-    // reads as "not connected".
+  it("plain (non-reference) org-owned row NOW resolves in a session via the owner-precedence contract (Task 6)", async () => {
+    // Task 6 behavior change: the reference-rows-only org fallback is
+    // retired in favor of `resolveUserCredentialRead`'s shared
+    // owner-precedence contract, which falls back to the org row on a
+    // user-owner miss REGARDLESS of kind. A plain org-owned row (e.g. an
+    // admin-pasted org-wide bot token) is now session-visible — same trust
+    // model the org 1Password token already had. See
+    // `services/credential-resolution.ts`'s module doc for the full
+    // rationale.
     const credentials = fakeCredentialStore();
-    await credentials.save({ type: "org", id: orgId }, "telegram", {
-      type: "bot_token",
-      apiKey: "org-bot-token",
-    });
+    const orgRow: StoredCredential = { type: "bot_token", apiKey: "org-bot-token" };
+    await credentials.save({ type: "org", id: orgId }, "telegram", orgRow);
     const onePassword = fakeOnePassword(async () => {
       throw new Error("resolveCredential must not be called for a plain org row");
     });
     const h = makeHost(credentials, { onePassword });
 
-    const session = await h.sessionFor("sess-op-plain-org-invisible", { userId, orgId, workspace: "/tmp" });
+    const session = await h.sessionFor("sess-op-plain-org-fallback", { userId, orgId, workspace: "/tmp" });
     const cred = await session.credentialProvider().get("telegram");
 
-    expect(cred).toBeNull();
+    expect(cred?.accessToken).toBe("org-bot-token");
   });
 
   it("onePassword wired but no githubTokenDeps: resolver is defined, 1Password rows resolve, github falls through to the raw store", async () => {
