@@ -60,7 +60,12 @@ secret material:
 - `type` declares the synthesized shape: `api_key` fills `apiKey`, `oauth2`
   fills `accessToken`, on the resolved `StoredCredential`.
 - Org-scoped rows use `owner: { type: "org" }`; personal rows
-  `owner: { type: "user" }` — riding the existing owner read-union.
+  `owner: { type: "user" }`. NOTE (corrected post-review): there is NO
+  generic owner read-union on the session tool path — the engine's
+  `Session.credentialProvider()` reads user-owned rows only. Org-scoped
+  reference rows reach sessions via a dedicated fallback in
+  `buildCredentialResolver` (user-owner miss → org row, reference rows
+  only; see Deviations).
 - Service-account tokens are also ordinary encrypted credential rows under the
   **reserved service name `onepassword`** (`type: "service_account"`,
   `apiKey: <token>`): org-owned for the org token, user-owned for personal.
@@ -234,3 +239,18 @@ code as of the implementing commits:
   `buildCredentialResolver` uses (or extract it into a shared function both
   call), so a reference-carrying row behaves identically no matter which
   subsystem reads it.
+- **Org-scoped reference rows required a dedicated session-path fallback
+  (post-PR adversarial-review fix).** This doc originally claimed org-owned
+  rows would "ride the existing owner read-union" — no such union exists:
+  the engine's `Session.credentialProvider()` reads `{ type: "user" }`
+  owners only, and the raw store is exact-owner lookup, so org-owned
+  reference rows (the admin "org-wide credential" flow) were dead on the
+  session tool path — created, listed, badged as connected, never read.
+  Fixed in `buildCredentialResolver`: on a user-owner miss (and only then —
+  a user's own row always shadows the org row), the resolver reads the
+  `{ type: "org", id: orgId }` row for the service and resolves it iff it
+  carries `metadata.onepassword`. Plain org-owned rows (ChannelHost bot
+  tokens, workflow-run credentials) remain session-invisible, exactly as
+  before. Pinned by three tests in
+  `packages/api/src/engine/host.onepassword-credential.test.ts`
+  (org-fallback resolve, user-shadows-org, plain-org-invisible).

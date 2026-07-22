@@ -655,6 +655,13 @@ export class EngineHost {
    *    behavior above. Rows without 1Password reference metadata pass
    *    through unchanged (same object, no clone) — byte-identical to the
    *    engine's default path.
+   *  - user-owner MISS + `onePassword` wired → one extra read of the
+   *    `{ type: "org", id: orgId }` row for the same service; if THAT row is
+   *    reference-carrying it resolves through the org's shared 1Password
+   *    token. This is the only org-owned read on the session path (the
+   *    engine's `Session.credentialProvider()` is user-owner-only — no
+   *    generic read-union exists), scoped to reference rows so plain
+   *    org-owned rows (ChannelHost bot tokens) remain session-invisible.
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -713,6 +720,24 @@ export class EngineHost {
       const stored = await credentials.get(owner, service);
       if (stored && onePassword && onePasswordMeta(stored)) {
         return onePassword.resolveCredential(stored, { orgId, userId });
+      }
+      if (stored) return stored;
+      // Org-scoped reference fallback: `Session.credentialProvider()` only
+      // ever reads `{ type: "user" }` owners (session.ts:705) — there is NO
+      // generic owner read-union on the session tool path, so an org-owned
+      // row would otherwise be unreachable from sessions entirely. Reference
+      // rows are the one org-owned kind DESIGNED to be session-consumed
+      // (admin creates an org-wide 1Password credential; members' sessions
+      // resolve it through the shared org token), so on a user-owner miss we
+      // consult the org row — but ONLY when it carries reference metadata.
+      // Plain org-owned rows (ChannelHost bot tokens, workflow-run
+      // credentials) stay invisible to sessions, exactly as before this
+      // branch existed.
+      if (onePassword && owner.type === "user") {
+        const orgRow = await credentials.get({ type: "org", id: orgId }, service);
+        if (orgRow && onePasswordMeta(orgRow)) {
+          return onePassword.resolveCredential(orgRow, { orgId, userId });
+        }
       }
       return stored;
     };

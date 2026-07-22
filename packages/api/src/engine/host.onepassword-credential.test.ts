@@ -182,6 +182,74 @@ describe("EngineHost session 1Password credential resolution", () => {
     expect(cred?.accessToken).toBe("placeholder");
   });
 
+  it("org-owned reference row resolves in a session when the user has no row for the service (org fallback)", async () => {
+    // The flagship admin flow: an org admin creates an org-SCOPED 1Password
+    // reference credential; a member's session (which reads user-owner only,
+    // session.ts:705) must still resolve it. Pinned because the engine has NO
+    // generic owner read-union — this fallback in `buildCredentialResolver`
+    // is the only org-owned read on the session path.
+    const credentials = fakeCredentialStore();
+    const orgRow: StoredCredential = {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Acme/credential", tokenScope: "org" } },
+    };
+    await credentials.save({ type: "org", id: orgId }, "acme-service", orgRow);
+    let sawRow: StoredCredential | undefined;
+    const onePassword = fakeOnePassword(async (row, ctx: OnePasswordCtx) => {
+      sawRow = row;
+      return { type: row.type, metadata: row.metadata, apiKey: `org-secret-for-${ctx.userId}` };
+    });
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-org-fallback", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("acme-service");
+
+    expect(sawRow).toBe(orgRow);
+    expect(cred?.accessToken).toBe(`org-secret-for-${userId}`);
+  });
+
+  it("user-owned row shadows the org-owned reference row for the same service", async () => {
+    // Fallback fires only on a user-owner MISS: a member's own credential
+    // (reference or plain) always wins over the org-wide one.
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "acme-service", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Acme/credential", tokenScope: "org" } },
+    });
+    const userRow: StoredCredential = { type: "api_key", apiKey: "my-own-key" };
+    await credentials.save({ type: "user", id: userId }, "acme-service", userRow);
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("resolveCredential must not be called when the user row shadows the org row");
+    });
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-user-shadows", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("acme-service");
+
+    expect(cred?.accessToken).toBe("my-own-key");
+  });
+
+  it("plain (non-reference) org-owned row stays invisible to sessions — fallback is reference-rows-only", async () => {
+    // ChannelHost bot tokens and workflow-run credentials live in org-owned
+    // rows that sessions have never been able to read; the fallback must not
+    // widen that. A user-owner miss with only a PLAIN org row present still
+    // reads as "not connected".
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "telegram", {
+      type: "bot_token",
+      apiKey: "org-bot-token",
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("resolveCredential must not be called for a plain org row");
+    });
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-plain-org-invisible", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("telegram");
+
+    expect(cred).toBeNull();
+  });
+
   it("onePassword wired but no githubTokenDeps: resolver is defined, 1Password rows resolve, github falls through to the raw store", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "user", id: userId }, "github", {
