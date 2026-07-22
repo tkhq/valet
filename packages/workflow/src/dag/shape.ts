@@ -56,7 +56,7 @@ export interface WorkflowEdge {
 // ─── Runtime payloads ────────────────────────────────────────────────────────
 
 export interface WorkflowTriggerPayload {
-  type: 'manual' | 'schedule' | 'webhook';
+  type: 'manual' | 'schedule' | 'webhook' | 'event';
   triggerId?: string;
   timestamp: string;
   data: Record<string, unknown>;

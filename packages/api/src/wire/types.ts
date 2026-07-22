@@ -1351,6 +1351,104 @@ export interface GetPrebuildForRepoResponse {
   prebuild: { commitSha: string; finishedAt: number } | null;
 }
 
+// ── REST: events + subscriptions (event-system plan, Task 7) ─────────────
+//
+// `/api/events*` (catalog + org-scoped feed) and `/api/event-subscriptions`
+// (CRUD) — see `routes/events.ts`. Subscription bodies are validated against
+// the merged plugin catalog before any row is written.
+
+/** Mirrors the engine's `EventCatalogEntry` for the catalog endpoint. */
+export interface EventCatalogEntryWire {
+  key: string;
+  description: string;
+  filters: { field: string; path: string; description: string }[];
+}
+
+export interface GetEventCatalogResponse {
+  services: { service: string; entries: EventCatalogEntryWire[] }[];
+}
+
+/** Mirrors `events/match.ts`'s `SubscriptionFilter`. */
+export interface EventSubscriptionFilterWire {
+  field: string;
+  op: "eq" | "in" | "prefix" | "contains";
+  value: string | string[];
+}
+
+// `{ kind: "signal" }` (wake parked workflow runs) is intentionally absent:
+// no workflow node parks on the event-signal shape yet, so the CRUD
+// validator rejects it — see routes/events.ts TARGET_KINDS.
+export type EventSubscriptionTargetWire =
+  | { kind: "workflow"; workflowId: string }
+  | { kind: "orchestrator"; orchestrator?: "user" | "org" };
+
+export interface EventSubscriptionWire {
+  id: string;
+  name: string;
+  ownerType: "user" | "org";
+  ownerId: string;
+  eventKeys: string[];
+  filters: EventSubscriptionFilterWire[];
+  target: EventSubscriptionTargetWire;
+  enabled: boolean;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateEventSubscriptionRequest {
+  name: string;
+  eventKeys: string[];
+  filters?: EventSubscriptionFilterWire[];
+  target: EventSubscriptionTargetWire;
+  enabled?: boolean;
+}
+
+export type CreateEventSubscriptionResponse = EventSubscriptionWire;
+
+export interface ListEventSubscriptionsResponse {
+  subscriptions: EventSubscriptionWire[];
+}
+
+export interface PatchEventSubscriptionRequest {
+  name?: string;
+  eventKeys?: string[];
+  filters?: EventSubscriptionFilterWire[];
+  enabled?: boolean;
+}
+
+export type PatchEventSubscriptionResponse = EventSubscriptionWire;
+
+/** Feed item — payload deliberately excluded (fetch `/api/events/:id`). */
+export interface EventSummaryWire {
+  id: string;
+  service: string;
+  eventKey: string;
+  summary: string;
+  refs: Record<string, string>;
+  actor: { externalId: string; login?: string } | null;
+  occurredAt: number;
+  receivedAt: number;
+}
+
+export interface ListEventsResponse {
+  events: EventSummaryWire[];
+}
+
+export interface EventDeliveryWire {
+  id: string;
+  subscriptionId: string;
+  status: "pending" | "delivered" | "failed" | "dead";
+  attempts: number;
+  lastError: string | null;
+  deliveredAt: number | null;
+}
+
+export interface GetEventResponse {
+  event: EventSummaryWire & { payload: unknown };
+  deliveries: EventDeliveryWire[];
+}
+
 // ── REST: health (single-binary CLI, portable-runtime plan) ──────────────
 //
 // `GET /api/health` — public, unauthenticated. The API currently answers

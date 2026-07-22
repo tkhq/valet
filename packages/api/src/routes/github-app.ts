@@ -54,6 +54,8 @@ import {
   type GithubAppDeps,
 } from "../services/github-app.js";
 import type { AppQueryable } from "../lib/drizzle.js";
+import { ingestEvent } from "../events/ingest.js";
+import { writeDropLog } from "../orchestrator/signals.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import type {
   GetGithubAppResponse,
@@ -190,9 +192,22 @@ githubAppRouter.post("/manifest", async (c) => {
   }
   const target = typeof body.target === "string" ? body.target : undefined;
 
-  const { db, encryptionKey } = c.var.providers;
+  const { db, encryptionKey, plugins } = c.var.providers;
   const [orgRow] = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const slug = slugifyOrgName(orgRow?.name ?? orgId);
+
+  // Subscribe the App to every event family the github plugin can ingest
+  // (TriggerDef ids are "github.{event}"), so installed apps deliver the
+  // events the subscription catalog advertises. `ping` is excluded: GitHub
+  // sends it on webhook creation regardless of the subscription list.
+  const triggerEvents = [
+    ...new Set(
+      plugins
+        .flatMap((p) => p.triggers ?? [])
+        .filter((t) => t.service === "github" && t.id !== "github.ping")
+        .map((t) => t.id.slice("github.".length)),
+    ),
+  ];
 
   const githubUrl = resolveGithubUrl(process.env);
   const url = target?.startsWith("org:")
@@ -217,7 +232,7 @@ githubAppRouter.post("/manifest", async (c) => {
     redirect_url: `${apiBase}/api/org/github-app/setup`,
     hook_attributes: publicUrl ? { url: webhookUrl } : { url: webhookUrl, active: false },
     public: false,
-    default_events: publicUrl ? ["installation", "installation_repositories"] : [],
+    default_events: publicUrl ? ["installation", "installation_repositories", ...triggerEvents] : [],
     permissions: {
       contents: "write",
       metadata: "read",
@@ -225,6 +240,8 @@ githubAppRouter.post("/manifest", async (c) => {
       issues: "write",
       actions: "write",
       checks: "read",
+      // The `status` webhook event requires commit-status read access.
+      statuses: "read",
     },
   };
 
@@ -456,7 +473,37 @@ githubAppWebhookRouter.post("/", async (c) => {
     await handleInstallationEvent(deps, orgId, payload);
   } else if (event === "installation_repositories") {
     await handleInstallationRepositoriesEvent(db, orgId, payload);
+  } else if (event && event !== "ping") {
+    // Forward every other event family into the generic event pipeline.
+    // Signature + org are already verified above; build the VerifiedEvent
+    // directly instead of re-running TriggerDef.verify. NOTE this means two
+    // ingest paths with different invariants: any check added to the github
+    // TriggerDef.verify (payload sanity, dedupe policy) applies only to the
+    // generic `/webhooks/events/:service` ingress, not here — folding this
+    // path into the generic ingress (e.g. a `resolveInstall` hook on
+    // TriggerDef) is the recorded follow-up in the event-system spec.
+    const deliveryId = c.req.header("x-github-delivery");
+    const def = c.var.providers.plugins
+      .flatMap((p) => p.triggers ?? [])
+      .find((t) => t.service === "github" && t.id === `github.${event}`);
+    if (def && deliveryId) {
+      await ingestEvent(
+        { db, plugins: c.var.providers.plugins, onIngest: c.var.providers.eventDispatcher.nudge },
+        { orgId, service: "github", event: def.toEvent({ eventType: event, deliveryId, payload }) },
+      );
+    } else {
+      // GitHub is sending an event this deployment can't ingest (no matching
+      // TriggerDef, or a missing delivery id). Drop-log instead of a silent
+      // 204 so ops can see the gap.
+      await writeDropLog(db, {
+        orgId,
+        reason: "event_not_ingestable",
+        conversationKey: deliveryId ?? undefined,
+        detail: def
+          ? `github event ${event}: missing x-github-delivery header`
+          : `github event ${event}: no registered TriggerDef (github.${event})`,
+      });
+    }
   }
-  // Every other event type: acknowledged, ignored.
   return c.body(null, 204);
 });

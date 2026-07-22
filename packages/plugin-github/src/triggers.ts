@@ -1,4 +1,4 @@
-import type { TriggerDef, VerifiedEvent } from "@valet/engine";
+import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } from "@valet/engine";
 
 const GITHUB_EVENT_TYPES = [
   "push",
@@ -111,27 +111,109 @@ function makeVerify(eventFamily: string): TriggerDef["verify"] {
   };
 }
 
-const toSignal: TriggerDef["toSignal"] = (event: VerifiedEvent) => {
-  const payload = event.payload as Record<string, unknown>;
-  const action = typeof payload.action === "string" ? payload.action : undefined;
-  return {
-    signal: {
-      kind: "signal",
-      signalType: `github.${event.eventType}`,
-      body: JSON.stringify(event.payload),
-      attributes: {
-        deliveryId: event.deliveryId,
-        ...(action ? { action } : {}),
-      },
-    },
-    dispatchId: event.deliveryId,
-  };
+/** Actions GitHub documents per event family — drives the catalog. Families
+ * not listed here (push, create, delete, status, ping) have no `action`. */
+const EVENT_ACTIONS: Record<string, string[]> = {
+  pull_request: ["opened", "closed", "reopened", "synchronize", "edited", "ready_for_review", "labeled", "unlabeled"],
+  issues: ["opened", "closed", "reopened", "edited", "labeled", "unlabeled", "assigned", "unassigned"],
+  issue_comment: ["created", "edited", "deleted"],
+  release: ["published", "created", "edited", "deleted"],
+  workflow_run: ["completed", "requested", "in_progress"],
+  check_run: ["completed", "created", "rerequested"],
+  check_suite: ["completed", "requested", "rerequested"],
 };
+
+const COMMON_FILTERS: EventCatalogEntry["filters"] = [
+  { field: "repo", path: "repository.full_name", description: "Repository (owner/name)" },
+  { field: "sender", path: "sender.login", description: "GitHub login of the actor" },
+];
+
+function catalogFor(eventType: string): EventCatalogEntry[] {
+  // ping is the webhook-setup handshake, not a subscribable event; its payload
+  // has no `repository` so the repo filter would be non-functional anyway.
+  if (eventType === "ping") return [];
+
+  const actions = EVENT_ACTIONS[eventType];
+  if (!actions) {
+    return [{ key: `github.${eventType}`, description: `GitHub ${eventType} event`, filters: COMMON_FILTERS }];
+  }
+  return actions.map((action) => ({
+    key: `github.${eventType}.${action}`,
+    description: `GitHub ${eventType} ${action}`,
+    filters: COMMON_FILTERS,
+  }));
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === "string" ? v : typeof v === "number" ? String(v) : undefined;
+}
+
+/**
+ * Provider event time, not ingestion time: a redelivered webhook (outage
+ * replay, retry storm) must keep its original causality in `occurredAt`.
+ * GitHub has no single envelope timestamp, so probe the per-family payload
+ * objects in specificity order — comment events also carry `issue` /
+ * `pull_request`, so `comment` is checked first. Falls back to wall clock
+ * only when no candidate parses.
+ */
+const OCCURRED_AT_CANDIDATES: [string, string][] = [
+  ["comment", "updated_at"],
+  ["comment", "created_at"],
+  ["review", "submitted_at"],
+  ["pull_request", "updated_at"],
+  ["issue", "updated_at"],
+  ["head_commit", "timestamp"],
+  ["workflow_run", "updated_at"],
+  ["check_run", "completed_at"],
+  ["check_run", "started_at"],
+  ["check_suite", "updated_at"],
+  ["release", "published_at"],
+  ["release", "created_at"],
+];
+
+function extractOccurredAt(payload: Record<string, unknown>): string {
+  for (const [objKey, field] of OCCURRED_AT_CANDIDATES) {
+    const obj = payload[objKey];
+    if (typeof obj !== "object" || obj === null) continue;
+    const value = (obj as Record<string, unknown>)[field];
+    if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  }
+  return new Date().toISOString();
+}
+
+function toEvent(event: VerifiedEvent): NormalizedEvent {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const action = typeof payload.action === "string" ? payload.action : undefined;
+  const repository = payload.repository as Record<string, unknown> | undefined;
+  const installation = payload.installation as Record<string, unknown> | undefined;
+  const sender = payload.sender as Record<string, unknown> | undefined;
+
+  const refs: Record<string, string> = {};
+  const repo = str(repository?.full_name);
+  if (repo) refs.repo = repo;
+  const installationId = str(installation?.id);
+  if (installationId) refs.installation_id = installationId;
+
+  const senderId = str(sender?.id);
+  const senderLogin = str(sender?.login);
+
+  const summaryParts = [repo, `${event.eventType}${action ? ` ${action}` : ""}`, senderLogin ? `by ${senderLogin}` : undefined];
+  return {
+    key: action ? `github.${event.eventType}.${action}` : `github.${event.eventType}`,
+    dedupeKey: event.deliveryId,
+    occurredAt: extractOccurredAt(payload),
+    actor: senderId ? { externalId: senderId, login: senderLogin } : undefined,
+    refs,
+    summary: summaryParts.filter(Boolean).join(" — "),
+    payload: event.payload,
+  };
+}
 
 export const githubTriggerDefs: TriggerDef[] = GITHUB_EVENT_TYPES.map((eventType) => ({
   id: `github.${eventType}`,
   service: "github",
   description: `GitHub webhook event: ${eventType}`,
   verify: makeVerify(eventType),
-  toSignal,
+  toEvent,
+  catalog: catalogFor(eventType),
 }));

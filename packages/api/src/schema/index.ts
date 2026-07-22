@@ -960,6 +960,94 @@ export const prebuilds = pgTable(
   (t) => [index("prebuilds_config_status_created").on(t.configId, t.status, t.createdAt)],
 );
 
+// ─── Event system (event-system plan, Task 3) ───────────────────────────────
+//
+// Four tables: `events` (the canonical deduped event record), `event_subscriptions`
+// (org-owned subscriptions with pattern-matching + filters), `event_deliveries`
+// (per-subscription delivery tracking with retry state), `linear_installations`
+// (Linear workspace OAuth installs, analogous to `github_installations`).
+
+export const events = pgTable(
+  "events",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    service: text("service").notNull(),
+    eventKey: text("event_key").notNull(),
+    dedupeKey: text("dedupe_key").notNull(),
+    actor: jsonb("actor"),
+    refs: jsonb("refs").notNull().default({}),
+    summary: text("summary").notNull(),
+    payload: jsonb("payload").notNull(),
+    occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
+    receivedAt: bigint("received_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("events_service_dedupe").on(t.service, t.dedupeKey),
+    index("events_org_received").on(t.orgId, t.receivedAt),
+    index("events_org_key").on(t.orgId, t.eventKey),
+  ],
+);
+
+export const eventSubscriptions = pgTable(
+  "event_subscriptions",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    // "team" is intentionally excluded: subscription dispatch targets only user/org orchestrators.
+    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    name: text("name").notNull(),
+    /** Event key patterns; trailing `.*` wildcard supported (e.g. "github.pull_request.*"). */
+    eventKeys: jsonb("event_keys").notNull(),
+    /** `{ field, op: "eq"|"in"|"prefix"|"contains", value }[]` over catalog-declared fields. */
+    filters: jsonb("filters").notNull().default([]),
+    /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
+    target: jsonb("target").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("event_subscriptions_org_enabled").on(t.orgId, t.enabled)],
+);
+
+export const eventDeliveries = pgTable(
+  "event_deliveries",
+  {
+    id: text("id").primaryKey(),
+    eventId: text("event_id").notNull(),
+    subscriptionId: text("subscription_id").notNull(),
+    status: text("status", { enum: ["pending", "delivered", "failed", "dead"] })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+    lastError: text("last_error"),
+    deliveredAt: bigint("delivered_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("event_deliveries_due").on(t.status, t.nextAttemptAt),
+    index("event_deliveries_event").on(t.eventId),
+  ],
+);
+
+export const linearInstallations = pgTable(
+  "linear_installations",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    workspaceName: text("workspace_name").notNull(),
+    webhookId: text("webhook_id"),
+    connectedBy: text("connected_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("linear_installations_org_workspace").on(t.orgId, t.workspaceId)],
+);
+
 // ─── Inferred row types ─────────────────────────────────────────────────────
 
 export type OrgRow = typeof orgs.$inferSelect;
@@ -1001,3 +1089,7 @@ export type GithubInstallationRow = typeof githubInstallations.$inferSelect;
 export type ImageCatalogRow = typeof imageCatalog.$inferSelect;
 export type PrebuildConfigRow = typeof prebuildConfigs.$inferSelect;
 export type PrebuildRow = typeof prebuilds.$inferSelect;
+export type EventRow = typeof events.$inferSelect;
+export type EventSubscriptionRow = typeof eventSubscriptions.$inferSelect;
+export type EventDeliveryRow = typeof eventDeliveries.$inferSelect;
+export type LinearInstallationRow = typeof linearInstallations.$inferSelect;

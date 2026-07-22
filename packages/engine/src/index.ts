@@ -95,6 +95,8 @@ export {
   type OAuthDeclaration,
   type TriggerDef,
   type VerifiedEvent,
+  type NormalizedEvent,
+  type EventCatalogEntry,
   type PluginValidationIssue,
   type ChannelTransport,
   type ChannelTransportFactory,

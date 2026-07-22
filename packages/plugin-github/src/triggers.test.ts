@@ -122,31 +122,90 @@ describe("githubTriggerDefs", () => {
     expect(event).not.toBeNull();
     expect(event?.deliveryId).toBe("delivery-issue-3");
   });
+});
 
-  it("builds a signal from a VerifiedEvent via toSignal", () => {
-    const trigger = findTrigger("pull_request");
-    const { signal, dispatchId } = trigger.toSignal({
+const prDef = githubTriggerDefs.find((t) => t.id === "github.pull_request")!;
+
+describe("github toEvent", () => {
+  it("normalizes a pull_request.opened payload", () => {
+    const event = prDef.toEvent({
       eventType: "pull_request",
-      deliveryId: "delivery-pr-4",
-      payload: PULL_REQUEST_PAYLOAD,
+      deliveryId: "delivery-1",
+      payload: {
+        action: "opened",
+        repository: { full_name: "tkhq/valet" },
+        installation: { id: 42 },
+        sender: { id: 7, login: "conner" },
+        pull_request: { number: 5, title: "Add thing", html_url: "https://github.com/tkhq/valet/pull/5" },
+      },
     });
-
-    expect(dispatchId).toBe("delivery-pr-4");
-    expect(signal.kind).toBe("signal");
-    expect(signal.signalType).toBe("github.pull_request");
-    expect(signal.body).toBe(JSON.stringify(PULL_REQUEST_PAYLOAD));
-    expect(signal.attributes).toEqual({ deliveryId: "delivery-pr-4", action: "opened" });
+    expect(event.key).toBe("github.pull_request.opened");
+    expect(event.dedupeKey).toBe("delivery-1");
+    expect(event.refs.repo).toBe("tkhq/valet");
+    expect(event.refs.installation_id).toBe("42");
+    expect(event.actor).toEqual({ externalId: "7", login: "conner" });
+    expect(event.summary).toContain("tkhq/valet");
+    expect(event.summary).toContain("pull_request opened");
   });
 
-  it("omits the action attribute when the payload has none", () => {
-    const trigger = findTrigger("push");
-    const pushPayload = { ref: "refs/heads/main", repository: { full_name: "acme/widgets" } };
-    const { signal } = trigger.toSignal({
-      eventType: "push",
-      deliveryId: "delivery-push-1",
-      payload: pushPayload,
+  it("takes occurredAt from the payload's own timestamps, not ingestion time", () => {
+    const event = prDef.toEvent({
+      eventType: "pull_request",
+      deliveryId: "d3",
+      payload: {
+        action: "closed",
+        repository: { full_name: "a/b" },
+        pull_request: { number: 5, updated_at: "2026-07-01T12:00:00Z" },
+      },
     });
+    expect(event.occurredAt).toBe("2026-07-01T12:00:00Z");
 
-    expect(signal.attributes).toEqual({ deliveryId: "delivery-push-1" });
+    // Comment events also carry issue/pull_request — the comment's own
+    // timestamp wins.
+    const commentDef = githubTriggerDefs.find((t) => t.id === "github.issue_comment")!;
+    const comment = commentDef.toEvent({
+      eventType: "issue_comment",
+      deliveryId: "d4",
+      payload: {
+        action: "created",
+        comment: { created_at: "2026-07-02T08:30:00Z" },
+        issue: { updated_at: "2026-07-02T09:00:00Z" },
+      },
+    });
+    expect(comment.occurredAt).toBe("2026-07-02T08:30:00Z");
+
+    // push: head_commit.timestamp.
+    const pushDef = githubTriggerDefs.find((t) => t.id === "github.push")!;
+    const push = pushDef.toEvent({
+      eventType: "push",
+      deliveryId: "d5",
+      payload: { repository: { full_name: "a/b" }, head_commit: { timestamp: "2026-07-03T10:00:00-07:00" } },
+    });
+    expect(push.occurredAt).toBe("2026-07-03T10:00:00-07:00");
+  });
+
+  it("falls back to wall clock when no payload timestamp is present", () => {
+    const before = Date.now();
+    const pushDef = githubTriggerDefs.find((t) => t.id === "github.push")!;
+    const event = pushDef.toEvent({ eventType: "push", deliveryId: "d6", payload: { repository: { full_name: "a/b" } } });
+    const parsed = Date.parse(event.occurredAt);
+    expect(parsed).toBeGreaterThanOrEqual(before);
+    expect(parsed).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("uses the bare event key when the payload has no action", () => {
+    const pushDef = githubTriggerDefs.find((t) => t.id === "github.push")!;
+    const event = pushDef.toEvent({ eventType: "push", deliveryId: "d2", payload: { repository: { full_name: "a/b" } } });
+    expect(event.key).toBe("github.push");
+  });
+
+  it("declares a catalog with repo filter on every def (except ping)", () => {
+    const pingDef = githubTriggerDefs.find((t) => t.id === "github.ping")!;
+    expect(pingDef.catalog).toHaveLength(0);
+
+    for (const def of githubTriggerDefs.filter((t) => t.id !== "github.ping")) {
+      expect(def.catalog.length).toBeGreaterThan(0);
+      expect(def.catalog[0].filters.some((f) => f.field === "repo")).toBe(true);
+    }
   });
 });

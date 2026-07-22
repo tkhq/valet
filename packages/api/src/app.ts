@@ -39,6 +39,7 @@ import { orgInvitesRouter } from "./routes/org-invites.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
+import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { imageCatalogRouter } from "./routes/image-catalog.js";
 import { prebuildsRouter, prebuildsPublicRouter } from "./routes/prebuilds.js";
@@ -46,6 +47,8 @@ import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
+import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 
 export interface CreatedApp {
@@ -122,6 +125,12 @@ export function createApp(
   // itself, not the auth gate below. Mounted BEFORE `buildAuthMiddleware`
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
+
+  // PUBLIC generic event-webhook ingress — same reasoning as the mounts
+  // above: the caller is the provider (Linear etc.), not a logged-in Valet
+  // user; verification is signature-level (plugin `TriggerDef.verify` over
+  // the raw bytes) inside the router itself, not the auth gate below.
+  app.route("/webhooks/events", eventWebhooksRouter);
 
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
@@ -204,11 +213,16 @@ export function createApp(
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
   app.route("/api/org/github-app", githubAppRouter);
+  app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/image-catalog", imageCatalogRouter);
   app.route("/api/org/prebuilds", prebuildsRouter);
   app.route("/api/prebuilds", prebuildsPublicRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
+  // Mounted at /api (not /api/events) because the router carries both the
+  // /events* and /event-subscriptions* path families. Placed after every
+  // more-specific /api/* router above so nothing gets shadowed.
+  app.route("/api", eventsRouter);
 
   // WebSocket — must be registered against the same Hono instance the runtime
   // WS handler was constructed with. The adapter's `serve` (returned in
