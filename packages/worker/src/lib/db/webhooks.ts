@@ -34,6 +34,10 @@ export async function lookupWebhookTrigger(db: D1Database, webhookPath: string) 
  * Enabled `github-app` triggers scoped to a repo — the workflows that should
  * fire from the org GitHub App's event stream for owner/repo. Joins the
  * workflow so the caller has everything needed to dispatch an execution.
+ *
+ * Owner/repo are compared case-insensitively: GitHub logins and repo names are
+ * case-insensitive, so a trigger armed as `tkhq/Valet` must still match a
+ * delivery for the canonical `tkhq/valet`, or the automation is silently dead.
  */
 export async function findGithubAppTriggersForRepo(db: D1Database, owner: string, repo: string) {
   const result = await db.prepare(`
@@ -42,9 +46,9 @@ export async function findGithubAppTriggersForRepo(db: D1Database, owner: string
     JOIN workflows w ON t.workflow_id = w.id
     WHERE t.type = 'github-app'
       AND t.enabled = 1
-      AND json_extract(t.config, '$.owner') = ?
-      AND json_extract(t.config, '$.repo') = ?
-  `).bind(owner, repo).all<{
+      AND LOWER(json_extract(t.config, '$.owner')) = ?
+      AND LOWER(json_extract(t.config, '$.repo')) = ?
+  `).bind(owner.toLowerCase(), repo.toLowerCase()).all<{
     id: string;
     config: string;
     variable_mapping: string | null;

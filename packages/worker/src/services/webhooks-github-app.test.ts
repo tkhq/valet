@@ -225,6 +225,17 @@ describe('dispatchGithubAppReviews', () => {
     expect(arg.idempotencyKey).toBe('github-app:trig1:delivery-abc');
   });
 
+  it('matches the trigger regardless of owner/repo casing', async () => {
+    // A trigger armed with non-canonical casing must still fire when GitHub
+    // delivers the canonical casing, or the automation is silently dead.
+    db.update(triggers).set({
+      config: JSON.stringify({ type: 'github-app', owner: 'TKHQ', repo: 'Valet', events: ['pull_request'] }),
+    }).run();
+
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened', { number: 75 }), 'd-case');
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT dispatch for a draft PR or a push', async () => {
     await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened', { draft: true }), 'd-draft');
     await dispatchGithubAppReviews(env, 'pull_request', prEvent('synchronize'), 'd-sync');

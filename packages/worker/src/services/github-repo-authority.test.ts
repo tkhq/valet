@@ -8,6 +8,13 @@ vi.mock('../lib/db/github-installations.js', () => ({
   getGithubInstallationByLogin: getInstallationMock,
 }));
 
+const loadGitHubAppMock = vi.hoisted(() => vi.fn());
+const getOrMintInstallationTokenMock = vi.hoisted(() => vi.fn());
+vi.mock('./github-app.js', () => ({
+  loadGitHubApp: loadGitHubAppMock,
+  getOrMintInstallationToken: getOrMintInstallationTokenMock,
+}));
+
 import {
   assertCallerCanAdministerRepo,
   assertExecutionCanUseAppForRepo,
@@ -38,7 +45,18 @@ beforeEach(() => {
     ok: true,
     credential: { accessToken: 'gho_caller', credentialType: 'oauth2', refreshed: false },
   });
+  loadGitHubAppMock.mockReset();
+  getOrMintInstallationTokenMock.mockReset();
+  // App unconfigured by default: the public-repo shortcut stays inert unless a
+  // test opts in, so the existing cases still exercise the caller proof.
+  loadGitHubAppMock.mockResolvedValue(null);
 });
+
+/** Configure the App so the public-repo visibility check can run. */
+function stubAppConfigured() {
+  loadGitHubAppMock.mockResolvedValue({});
+  getOrMintInstallationTokenMock.mockResolvedValue({ token: 'ghs_install', expiresAt: Date.now() + 3_600_000 });
+}
 
 describe('assertCallerCanAdministerRepo', () => {
   it('accepts a caller with push access', async () => {
@@ -146,5 +164,51 @@ describe('assertExecutionCanUseAppForRepo (mint boundary)', () => {
 
     stubRepoResponse({ permissions: { push: true } });
     await expect(assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'valet')).resolves.toEqual({ ok: true });
+  });
+});
+
+describe('public repositories: anonymous App path needs no caller proof', () => {
+  it('authorizes a public repo at the mint boundary with no linked identity', async () => {
+    stubAppConfigured();
+    getCredentialMock.mockResolvedValue({ ok: false, error: { service: 'github', reason: 'not_found', message: 'none' } });
+    const fetchMock = stubRepoResponse({ private: false });
+
+    const verdict = await assertExecutionCanUseAppForRepo(db, env, 'anon', 'tkhq', 'valet');
+    expect(verdict).toEqual({ ok: true });
+    // Anonymity: the caller's own GitHub token is never consulted for a public repo.
+    expect(getCredentialMock).not.toHaveBeenCalled();
+    // The visibility check speaks to GitHub with the App's installation token.
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://api.github.com/repos/tkhq/valet');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer ghs_install');
+  });
+
+  it('lets arming a public repo through without caller push/admin', async () => {
+    stubAppConfigured();
+    getCredentialMock.mockResolvedValue({ ok: false, error: { service: 'github', reason: 'not_found', message: 'none' } });
+    stubRepoResponse({ private: false });
+    await expect(assertCallerCanAdministerRepo(db, env, 'anon', 'tkhq', 'valet')).resolves.toBeUndefined();
+  });
+
+  it('still requires caller proof for a private repo even when the App is configured', async () => {
+    stubAppConfigured();
+    // Visibility check (App token) says private; caller proof (own token) says push.
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      const body = auth === 'Bearer ghs_install' ? { private: true } : { permissions: { push: true } };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(assertExecutionCanUseAppForRepo(db, env, 'u1', 'tkhq', 'secret')).resolves.toEqual({ ok: true });
+    expect(getCredentialMock).toHaveBeenCalledWith(env, 'user', 'u1', 'github');
+  });
+
+  it('falls back to caller proof when repo visibility cannot be confirmed', async () => {
+    stubAppConfigured();
+    getCredentialMock.mockResolvedValue({ ok: false, error: { service: 'github', reason: 'not_found', message: 'none' } });
+    stubRepoResponse({ message: 'Not Found' }, 404);
+    const verdict = await assertExecutionCanUseAppForRepo(db, env, 'anon', 'tkhq', 'secret');
+    expect(verdict.ok).toBe(false);
   });
 });
