@@ -101,15 +101,35 @@ jobs:
         # Skipped when workflow_dispatch was called with force=true.
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.force) }}
         run: |
-          set +e
-          helm show chart "oci://$REGISTRY/${{ steps.chart.outputs.name }}" \
-            --version "${{ steps.chart.outputs.version }}" >/dev/null 2>&1
-          exists=$?
-          set -e
-          if [[ $exists -eq 0 ]]; then
-            echo "::error::Chart ${{ steps.chart.outputs.name }} version ${{ steps.chart.outputs.version }} is already published. Bump 'version' in $CHART_DIR/Chart.yaml (or dispatch with force=true to override)."
-            exit 1
-          fi
+          set -uo pipefail
+          name="${{ steps.chart.outputs.name }}"
+          version="${{ steps.chart.outputs.version }}"
+
+          # Distinguish "definitely not published" from "unknown error".
+          # A false positive here would silently overwrite a published
+          # chart (GHCR does not enforce OCI tag immutability by default).
+          stderr_file=$(mktemp)
+          attempts=0
+          while true; do
+            attempts=$((attempts + 1))
+            if helm show chart "oci://$REGISTRY/$name" --version "$version" >/dev/null 2>"$stderr_file"; then
+              echo "::error::Chart $name version $version is already published. Bump 'version' in $CHART_DIR/Chart.yaml (or dispatch with force=true to override)."
+              exit 1
+            fi
+            # helm/oras 404 wording varies by version — match the common markers.
+            if grep -qiE 'not found|manifest unknown|no such|404' "$stderr_file"; then
+              echo "Version $version not yet published — safe to release."
+              exit 0
+            fi
+            if [[ $attempts -ge 3 ]]; then
+              echo "::error::Could not determine whether $name:$version is published after $attempts attempts. Refusing to publish to avoid silent overwrite. Registry response:"
+              cat "$stderr_file" >&2
+              exit 1
+            fi
+            echo "Transient error from registry, retrying ($attempts/3)..."
+            cat "$stderr_file" >&2
+            sleep $((attempts * 2))
+          done
 
   release:
     needs: validate
