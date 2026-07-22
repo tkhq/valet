@@ -10,6 +10,9 @@
  */
 export function markdownToSlackMrkdwn(text: string): string {
   // Extract fenced code blocks first to protect them from formatting transforms
+  // AND from the escaping below — Slack renders code literally and does not
+  // interpret control sequences inside it, so escaping code content would just
+  // double-escape ampersands.
   const codeBlocks: string[] = [];
   let result = text.replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_, code: string) => {
     codeBlocks.push(code.trimEnd());
@@ -22,6 +25,17 @@ export function markdownToSlackMrkdwn(text: string): string {
     inlineCodes.push(code);
     return `\x00IC${inlineCodes.length - 1}\x00`;
   });
+
+  // Escape mrkdwn metacharacters in the remaining (non-code) literal text, so
+  // agent output can't inject control sequences — <!channel>/<!here> (mass
+  // ping), <@U…>/<#C…> (targeted ping / impersonation), or <url|label> (link
+  // spoofing). Every such token requires a literal `<`, so escaping `&` and
+  // `<` renders them all inert; `>` is deliberately left alone so Slack
+  // blockquotes (`> quote`) still render. The `text` field of chat.postMessage
+  // is parsed as mrkdwn by default, so this is load-bearing for security. The
+  // link transform below re-introduces the ONLY legitimate `<…>` sequences,
+  // built from controlled [text](url) markdown after this escape.
+  result = result.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
   // Convert bold to placeholders first (so italic pass doesn't re-match)
   // **bold** or __bold__ → placeholder

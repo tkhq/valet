@@ -166,6 +166,13 @@ credentialsRouter.put("/:service", async (c) => {
     if (auth.ok !== true) {
       return c.json({ error: `slack token rejected: ${typeof auth.error === "string" ? auth.error : "auth.test failed"}` }, 400);
     }
+    // Must be a BOT token: the channel posts as the app and echo-suppresses on
+    // its bot user id. auth.test succeeds for a user (xoxp) token too, but then
+    // botUserId would be a human and the transport would post as that person.
+    // Bot tokens carry a bot_id in the auth.test response; user tokens don't.
+    if (typeof auth.bot_id !== "string") {
+      return c.json({ error: "slack requires a bot token (xoxb-…), not a user token" }, 400);
+    }
     credential.metadata = {
       ...credential.metadata,
       teamId: typeof auth.team_id === "string" ? auth.team_id : undefined,

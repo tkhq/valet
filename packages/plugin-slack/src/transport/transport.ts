@@ -24,8 +24,10 @@ const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
 /** Cap the in-memory url_private / gate-text maps. */
 const MAX_TRACKED_ENTRIES = 500;
 
-/** Legacy SKIP_SUBTYPES, ported from origin/main `src/channels/transport.ts`. */
-const SKIP_SUBTYPES = new Set([
+/** Legacy SKIP_SUBTYPES, ported from origin/main `src/channels/transport.ts`.
+ * Exported so the events TriggerDef applies the exact same noise filter as the
+ * channel path (edits/deletes/system messages), rather than a blunter one. */
+export const SKIP_SUBTYPES = new Set([
   "message_changed",
   "message_deleted",
   "bot_message",
@@ -280,13 +282,19 @@ export class SlackTransport implements ChannelTransport {
   // ─── Socket Mode (local-dev ingress) ──────────────────────────────────
 
   private async *socketModePoll(appToken: string, signal: AbortSignal): AsyncIterable<RawChannelUpdate> {
+    // Reconnect backoff is only reset after a connection that STAYED UP for at
+    // least this long. Otherwise a connect→immediate-disconnect storm (Slack
+    // refusing/rotating the socket) would reset the backoff to the floor on
+    // every accept and spin at ~1 reconnect/sec against connections.open.
+    const MIN_HEALTHY_DWELL_MS = 30_000;
     let backoffMs = 1000;
     while (!signal.aborted) {
       let ws: WebSocket;
+      let connectedAt = 0;
       try {
         const url = await this.api.connectionsOpen(appToken);
         ws = await openWebSocket(url, signal);
-        backoffMs = 1000;
+        connectedAt = Date.now();
       } catch {
         if (signal.aborted) return;
         await sleep(backoffMs);
@@ -359,6 +367,9 @@ export class SlackTransport implements ChannelTransport {
       }
 
       if (signal.aborted) return;
+      // A connection that stayed up is healthy — reset so the next reconnect
+      // is prompt. A short-lived one keeps escalating the backoff.
+      if (Date.now() - connectedAt >= MIN_HEALTHY_DWELL_MS) backoffMs = 1000;
       await sleep(backoffMs);
       backoffMs = Math.min(backoffMs * 2, 60_000);
     }
@@ -482,7 +493,13 @@ export class SlackTransport implements ChannelTransport {
       return null;
     }
     if (data === null) return null;
-    return { data, mimeType: ref.mimeType, name: ref.name };
+    // When we served a Slack-generated thumbnail (images), the bytes are a
+    // JPEG/PNG derivative, not the original encoding — report a matching
+    // mimeType so a downstream decoder/vision API isn't handed e.g. image/heic
+    // bytes that are actually JPEG. Full-file downloads keep the real mime.
+    const servedThumb = isImage && ref.thumb !== undefined && url === ref.thumb;
+    const mimeType = servedThumb ? "image/jpeg" : ref.mimeType;
+    return { data, mimeType, name: ref.name };
   }
 
   // ─── Key mappings ─────────────────────────────────────────────────────
@@ -509,8 +526,15 @@ export class SlackTransport implements ChannelTransport {
     const q = query.trim().toLowerCase();
     const out: Array<{ id: string; name: string; realName?: string }> = [];
     let cursor: string | undefined;
+    // Bound the SCAN, not just the match count: a selective query that matches
+    // few/no members would otherwise page through the entire directory (~250
+    // users.list calls in a 50k-member workspace), hanging the typeahead and
+    // hammering rate limits. Cap pages regardless of how many matches accrue.
+    const MAX_PAGES = 10;
+    let pages = 0;
     do {
       const page = await this.api.listUsers(cursor);
+      pages += 1;
       for (const member of page.members) {
         if (member.isBot || member.deleted || member.id === "USLACKBOT") continue;
         if (
@@ -524,6 +548,7 @@ export class SlackTransport implements ChannelTransport {
         if (out.length >= 20) return out;
       }
       cursor = page.nextCursor;
+      if (pages >= MAX_PAGES) break;
     } while (cursor !== undefined);
     return out;
   }

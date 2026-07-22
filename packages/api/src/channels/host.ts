@@ -186,17 +186,27 @@ export class ChannelHost {
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
           continue;
         }
-        const transport = factory.create({ credential, config: {} });
-        this.transports.set(factory.channelType, transport);
-        if (hasGetMe(transport)) {
-          try {
-            const me = await transport.getMe();
-            if (me.username) this.botUsernames.set(factory.channelType, me.username);
-          } catch (err) {
-            console.error(`[channels] ${factory.channelType}: getMe probe failed`, err);
+        // Isolate per-transport setup: a factory that throws on a malformed
+        // credential (e.g. a Slack cred missing metadata.teamId) must skip
+        // only its own transport, never abort the loop or prevent
+        // startOutbound() below — that would silently kill egress for every
+        // other channel too.
+        try {
+          const transport = factory.create({ credential, config: {} });
+          this.transports.set(factory.channelType, transport);
+          if (hasGetMe(transport)) {
+            try {
+              const me = await transport.getMe();
+              if (me.username) this.botUsernames.set(factory.channelType, me.username);
+            } catch (err) {
+              console.error(`[channels] ${factory.channelType}: getMe probe failed`, err);
+            }
           }
+          await this.startIngress(factory, transport);
+        } catch (err) {
+          this.transports.delete(factory.channelType);
+          console.error(`[channels] ${factory.channelType}: transport setup failed, skipping`, err);
         }
-        await this.startIngress(factory, transport);
       }
     }
     this.startOutbound();

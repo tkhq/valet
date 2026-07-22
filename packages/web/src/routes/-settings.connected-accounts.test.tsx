@@ -275,6 +275,31 @@ describe("ConnectedAccountsPage", () => {
       expect(screen.getByLabelText("Link code")).toBeTruthy();
     });
 
+    it("'Use a different account' on the code step returns to the member search", async () => {
+      linksData = {
+        links: [{ provider: "slack", linked: false, channelReady: true }],
+      };
+      slackMembersData = { members: [{ id: "U1", name: "conner" }] };
+      startSlackMutateAsync.mockResolvedValue({ delivery: "dm_code", expiresInSeconds: 600 });
+      render(<ConnectedAccountsPage />);
+
+      fireEvent.change(screen.getByLabelText("Find your Slack account"), {
+        target: { value: "conner" },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "@conner" }));
+      fireEvent.click(screen.getByRole("button", { name: "Send link code" }));
+
+      // On the code step: code input present, search input gone.
+      expect(await screen.findByLabelText("Link code")).toBeTruthy();
+      expect(screen.queryByLabelText("Find your Slack account")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Use a different account" }));
+
+      // Back on the search step: search input visible again, code input gone.
+      expect(screen.getByLabelText("Find your Slack account")).toBeTruthy();
+      expect(screen.queryByLabelText("Link code")).toBeNull();
+    });
+
     it("linked state shows externalId, a notify switch, and disconnect wired to slack", () => {
       linksData = {
         links: [

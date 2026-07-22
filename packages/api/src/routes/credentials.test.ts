@@ -348,4 +348,36 @@ describe("PUT /api/credentials/slack — org connect validation (slack design de
       server.close();
     }
   });
+
+  it("400s a user token (auth.test ok but no bot_id), saving nothing", async () => {
+    const { serve } = await import("@hono/node-server");
+    const { Hono } = await import("hono");
+    const fake = new Hono();
+    // A user (xoxp) token: auth.test succeeds but carries no bot_id.
+    fake.post("/auth.test", (c) => c.json({ ok: true, team_id: "T1", team: "Acme", user_id: "UHUMAN" }));
+    const server = serve({ fetch: fake.fetch, port: 0 });
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const prev = process.env.VALET_SLACK_API_BASE;
+    process.env.VALET_SLACK_API_BASE = `http://127.0.0.1:${port}`;
+    try {
+      api = await bootTestApi();
+      const put = await fetch(`${api.baseUrl}/api/credentials/slack`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "bot_token",
+          accessToken: "xoxp-user",
+          scope: "org",
+          metadata: { webhookSecret: "sekrit" },
+        }),
+      });
+      expect(put.status).toBe(400);
+      expect(((await put.json()) as { error: string }).error).toContain("bot token");
+      expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "slack")).toBeFalsy();
+    } finally {
+      process.env.VALET_SLACK_API_BASE = prev;
+      server.close();
+    }
+  });
 });

@@ -115,7 +115,15 @@ identityLinksRouter.get("/slack/users", async (c) => {
   if (!transport || !hasSlackLinkExtras(transport)) {
     return c.json({ error: "slack bot not configured" }, 409);
   }
-  const q = c.req.query("q") ?? "";
+  // Require a real query server-side (not just in the UI): an empty/1-char q
+  // returns the first page of the directory, an unintended enumeration surface
+  // for any authenticated member. The user searches for their own handle, so a
+  // 2-char floor costs them nothing.
+  const q = (c.req.query("q") ?? "").trim();
+  if (q.length < 2) {
+    const empty: ListSlackWorkspaceMembersResponse = { members: [] };
+    return c.json(empty);
+  }
   const members = await transport.listWorkspaceMembers(q);
   const resp: ListSlackWorkspaceMembersResponse = { members };
   return c.json(resp);
@@ -145,13 +153,21 @@ identityLinksRouter.post("/slack/start", async (c) => {
   if (last !== undefined && now - last < SLACK_START_COOLDOWN_MS) {
     return c.json({ error: "slow down — wait a moment before requesting another Slack link code" }, 429);
   }
-  slackStartAt.set(user.id, now);
 
+  // Send the DM before recording the cooldown: a transient Slack failure
+  // should surface as a clean 502 the caller can retry immediately, not a 500
+  // that also locks them out for the cooldown window with no DM delivered.
   const code = await mintLinkCode(db, user.id, "slack", { externalId: body.externalId });
-  const conversationKey = await transport.openDirectConversation(body.externalId);
-  await transport.send(conversationKey, {
-    markdown: `Your Valet link code is **${code}** — enter it in Settings → Connected accounts. It expires in 10 minutes. If you didn't request this, ignore it.`,
-  });
+  try {
+    const conversationKey = await transport.openDirectConversation(body.externalId);
+    await transport.send(conversationKey, {
+      markdown: `Your Valet link code is **${code}** — enter it in Settings → Connected accounts. It expires in 10 minutes. If you didn't request this, ignore it.`,
+    });
+  } catch (err) {
+    console.error("[identity-links] slack link-code DM failed", err);
+    return c.json({ error: "couldn't DM the link code to that Slack account — try again" }, 502);
+  }
+  slackStartAt.set(user.id, now);
 
   const resp: StartIdentityLinkResponse = { delivery: "dm_code", expiresInSeconds: START_LINK_TTL_SECONDS };
   return c.json(resp);

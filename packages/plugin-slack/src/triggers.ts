@@ -10,6 +10,7 @@
  */
 import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } from "@valet/engine";
 import { verifySlackSignature } from "./transport/verify.js";
+import { SKIP_SUBTYPES } from "./transport/transport.js";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -55,17 +56,17 @@ function makeVerify(eventTypes: readonly string[]): TriggerDef["verify"] {
     const eventType = str(event?.type);
     if (!event || eventType === undefined || !eventTypes.includes(eventType)) return null;
 
-    // Message events only: suppress the app's own posts and non-post subtypes.
-    // Slack redelivers the bot's own chat.postMessage output as a `message`
-    // event; without this, a workflow subscribed to slack.message that also
-    // posts to Slack self-triggers into an unbounded loop. Mirrors the
-    // channel transport's echo/SKIP_SUBTYPES suppression. Edits/deletes also
-    // nest their real author under `message`/`previous_message`, so their
-    // `user`/`channel` refs wouldn't populate anyway.
+    // Message events only: suppress the app's own posts (bot_id) and the same
+    // set of noise subtypes the channel transport drops (edits, deletes,
+    // join/leave/topic system messages). Without the bot_id drop, a workflow
+    // subscribed to slack.message that also posts to Slack self-triggers into
+    // an unbounded loop. Using the shared SKIP_SUBTYPES — rather than
+    // "everything except file_share" — keeps fully-populated human events like
+    // thread_broadcast and me_message, which carry a real user/text/channel.
     if (eventType === "message") {
       if (str(event.bot_id) !== undefined) return null;
       const subtype = str(event.subtype);
-      if (subtype !== undefined && subtype !== "file_share") return null;
+      if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
     }
 
     const deliveryId = str(body.event_id);

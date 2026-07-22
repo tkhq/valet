@@ -126,4 +126,39 @@ describe("markdownToSlackMrkdwn", () => {
     expect(result).toContain("```second```");
     expect(result).toContain("text");
   });
+
+  describe("control-sequence escaping (injection safety)", () => {
+    it("neutralizes a mass-ping <!channel> in literal text", () => {
+      const result = markdownToSlackMrkdwn("Heads up <!channel> deploying now");
+      expect(result).not.toContain("<!channel>");
+      expect(result).toContain("&lt;!channel>");
+    });
+
+    it("neutralizes <!here> and user/channel mentions", () => {
+      expect(markdownToSlackMrkdwn("<!here>")).toBe("&lt;!here>");
+      expect(markdownToSlackMrkdwn("ping <@U0123>")).toBe("ping &lt;@U0123>");
+      expect(markdownToSlackMrkdwn("in <#C0456|general>")).toBe("in &lt;#C0456|general>");
+    });
+
+    it("escapes a raw link-spoof <url|label> but keeps real markdown links", () => {
+      expect(markdownToSlackMrkdwn("<https://evil.example|Slack Support>")).toBe(
+        "&lt;https://evil.example|Slack Support>",
+      );
+      // A genuine [text](url) still converts to a real Slack link.
+      expect(markdownToSlackMrkdwn("[docs](https://example.com)")).toBe("<https://example.com|docs>");
+    });
+
+    it("escapes ampersands in literal text", () => {
+      expect(markdownToSlackMrkdwn("Tom & Jerry")).toBe("Tom &amp; Jerry");
+    });
+
+    it("does not escape control sequences inside code (Slack renders code literally)", () => {
+      expect(markdownToSlackMrkdwn("`<@U0123>`")).toBe("`<@U0123>`");
+      expect(markdownToSlackMrkdwn("```\n<!channel>\n```")).toBe("```<!channel>```");
+    });
+
+    it("still renders blockquotes (> is not escaped)", () => {
+      expect(markdownToSlackMrkdwn("> quoted")).toBe("> quoted");
+    });
+  });
 });

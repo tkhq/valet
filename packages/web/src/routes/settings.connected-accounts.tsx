@@ -187,6 +187,16 @@ function SlackConnectFlow() {
   const searchEnabled = !codeSent && debouncedQuery.length >= 2;
   const membersQ = useSlackWorkspaceMembers(debouncedQuery, searchEnabled);
 
+  // Back out of the code step to the member search — the code was DMed to the
+  // picked account, so a wrong pick leaves the code with a stranger and the
+  // user stuck. Clear the picked member, the entered code, and any error.
+  function resetToSearch() {
+    setCodeSent(false);
+    setSelected(null);
+    setCode("");
+    setFlowError(null);
+  }
+
   if (codeSent && selected) {
     return (
       <FieldRow label="Slack" hint="Message your assistant from Slack.">
@@ -217,6 +227,14 @@ function SlackConnectFlow() {
               }}
             >
               {verifySlack.isPending ? "Verifying…" : "Verify"}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={verifySlack.isPending}
+              onClick={resetToSearch}
+            >
+              Use a different account
             </Button>
           </div>
           {flowError && (
