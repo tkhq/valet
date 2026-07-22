@@ -50,6 +50,46 @@ function fakeOnePassword(
   };
 }
 
+describe("reserved onepassword service guard", () => {
+  // The `onepassword` rows are the service-account TOKENS. Without this
+  // guard a user-row miss would hand back the org's raw 1Password token as
+  // an ordinary credential. Symmetric with the write path's reserved-name
+  // rejection in routes/credentials.ts.
+  it("resolveUserCredentialRead returns null for service 'onepassword' even when the org token row exists", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "onepassword", {
+      type: "service_account",
+      apiKey: "raw-org-service-account-token",
+    });
+    await credentials.save({ type: "user", id: userId }, "onepassword", {
+      type: "service_account",
+      apiKey: "raw-personal-service-account-token",
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve — reserved service");
+    });
+
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "onepassword");
+
+    expect(result).toBeNull();
+  });
+
+  it("resolveOrgCredentialRead returns null for service 'onepassword'", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "onepassword", {
+      type: "service_account",
+      apiKey: "raw-org-service-account-token",
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve — reserved service");
+    });
+
+    const result = await resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "onepassword");
+
+    expect(result).toBeNull();
+  });
+});
+
 describe("resolveUserCredentialRead", () => {
   it("user row (plain) shadows an org row for the same service", async () => {
     const credentials = fakeCredentialStore();

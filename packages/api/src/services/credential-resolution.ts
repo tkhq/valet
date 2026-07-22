@@ -27,7 +27,7 @@
  * `github`'s existing user->org token-service tiering precedent.
  */
 import type { CredentialStore, StoredCredential } from "@valet/engine";
-import { onePasswordMeta, type OnePasswordService } from "./onepassword.js";
+import { ONEPASSWORD_SERVICE, onePasswordMeta, type OnePasswordService } from "./onepassword.js";
 
 export interface CredentialReadDeps {
   credentials: CredentialStore;
@@ -72,6 +72,14 @@ export async function resolveUserCredentialRead(
   ctx: Required<CredentialReadCtx>,
   service: string,
 ): Promise<StoredCredential | null> {
+  // Reserved-service guard, symmetric with the write path's rejection
+  // (`routes/credentials.ts`): the `onepassword` rows hold the service-account
+  // TOKENS themselves. Without this guard, a user-row miss would fall back to
+  // the org row and hand back the org's raw 1Password token as an ordinary
+  // credential (`apiKey` -> `accessToken` in the engine mapping). No current
+  // caller reads this service name, but this helper is the single read path
+  // for three subsystems — fail closed here, not at each caller.
+  if (service === ONEPASSWORD_SERVICE) return null;
   const userRow = await deps.credentials.get({ type: "user", id: ctx.userId }, service);
   if (userRow) return resolveRow(deps, userRow, ctx);
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
@@ -92,6 +100,10 @@ export async function resolveOrgCredentialRead(
   ctx: CredentialReadCtx,
   service: string,
 ): Promise<StoredCredential | null> {
+  // Same reserved-service guard as `resolveUserCredentialRead` — the org
+  // `onepassword` row is the org's service-account token, never a readable
+  // credential.
+  if (service === ONEPASSWORD_SERVICE) return null;
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
   return resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "" });
 }

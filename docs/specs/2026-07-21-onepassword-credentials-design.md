@@ -60,12 +60,15 @@ secret material:
 - `type` declares the synthesized shape: `api_key` fills `apiKey`, `oauth2`
   fills `accessToken`, on the resolved `StoredCredential`.
 - Org-scoped rows use `owner: { type: "org" }`; personal rows
-  `owner: { type: "user" }`. NOTE (corrected post-review): there is NO
-  generic owner read-union on the session tool path — the engine's
-  `Session.credentialProvider()` reads user-owned rows only. Org-scoped
-  reference rows reach sessions via a dedicated fallback in
-  `buildCredentialResolver` (user-owner miss → org row, reference rows
-  only; see Deviations).
+  `owner: { type: "user" }`. NOTE: the engine's
+  `Session.credentialProvider()` reads user-owned rows only — org-scoped
+  rows reach sessions via the **Owner-precedence contract** below
+  (user-row miss → org row, ALL credential kinds, shared helper in
+  `services/credential-resolution.ts`). An earlier reference-rows-only
+  fallback in `buildCredentialResolver` was a temporary shim, since
+  retired — see Deviations. The reserved `onepassword` service is
+  excluded from the read path entirely (the tokens themselves are never
+  readable credentials).
 - Service-account tokens are also ordinary encrypted credential rows under the
   **reserved service name `onepassword`** (`type: "service_account"`,
   `apiKey: <token>`): org-owned for the org token, user-owned for personal.
