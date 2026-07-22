@@ -473,3 +473,95 @@ describe("GET /api/credentials — onepasswordRef summary", () => {
     expect(serialized).not.toContain('"accessToken"');
   });
 });
+
+describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard", () => {
+  it("plain PUT with metadata.onepassword (no body.onepassword) 400s, no row saved", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        apiKey: "inline-secret",
+        metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "metadata.onepassword is reserved; use the onepassword request field",
+    });
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    expect(stored).toBeNull();
+  });
+
+  it("body.onepassword present ALONGSIDE a metadata.onepassword key 400s (unambiguous — reject, don't merge)", async () => {
+    api = await bootTestApi();
+    const fake = new FakeOnePasswordService();
+    api.providers.onePassword = fake;
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+        metadata: { onepassword: { reference: "op://sneaky/other/field", tokenScope: "org" } },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "metadata.onepassword is reserved; use the onepassword request field",
+    });
+    expect(fake.resolveCalls).toEqual([]); // rejected before save-time resolution is ever attempted
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    expect(stored).toBeNull();
+  });
+
+  it("a legitimate body.onepassword request (no metadata.onepassword) still saves with metadata sourced from body.onepassword", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        metadata: { login: "someone" },
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(200);
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    expect(stored?.metadata).toEqual({
+      login: "someone",
+      onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+    });
+  });
+
+  it("reserved service + body.onepassword + personal toggle off → 400 (reserved-service name), not 403", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    await fetch(`${api.baseUrl}/api/onepassword/settings`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ allowPersonal: false }),
+    });
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "personal" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({ error: "onepassword is a reserved service name" });
+  });
+});

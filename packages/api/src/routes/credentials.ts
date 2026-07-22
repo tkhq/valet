@@ -125,17 +125,25 @@ credentialsRouter.put("/:service", async (c) => {
     return c.json({ error: `type must be one of ${CREDENTIAL_TYPES.join("|")}` }, 400);
   }
 
-  // Plain token write to the reserved `onepassword` service — the caller's
-  // own personal service-account token. Gated by the same org toggle a
-  // `onepassword`-reference credential's `tokenScope: "personal"` is.
-  if (service === ONEPASSWORD_SERVICE && scope === "user") {
-    const allowed = await getAllowPersonalOnePassword(db, user.orgId);
-    if (!allowed) {
-      return c.json(PERSONAL_DISABLED, 403);
-    }
+  // `metadata.onepassword` is a write-once-by-this-route field: the ONLY
+  // place a `{reference, tokenScope}` pair may land in a stored credential's
+  // metadata is the validated `body.onepassword` branch below, which runs
+  // save-time `resolveReference` + the type/mutual-exclusion checks before
+  // persisting it. `host.ts`'s resolver seam keys purely off
+  // `onePasswordMeta(stored)` reading `metadata.onepassword` — an
+  // unvalidated `metadata.onepassword` smuggled in through the plain path
+  // would get live-resolved at read time with none of those guarantees.
+  // Reject rather than silently strip, and unconditionally (regardless of
+  // whether `body.onepassword` is ALSO present) — a caller sending both is
+  // an ambiguous request, not a merge to resolve implicitly.
+  if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "onepassword" in body.metadata) {
+    return c.json({ error: "metadata.onepassword is reserved; use the onepassword request field" }, 400);
   }
 
   if (body.onepassword) {
+    // Structural validation (reserved service name) takes precedence over
+    // the personal-toggle policy check below — a request naming the
+    // reserved service is malformed regardless of the org's toggle state.
     if (service === ONEPASSWORD_SERVICE) {
       return c.json({ error: "onepassword is a reserved service name" }, 400);
     }
@@ -172,6 +180,18 @@ credentialsRouter.put("/:service", async (c) => {
     await engineCredentials.save(owner, service, credential);
     const resp: PutCredentialResponse = { ok: true };
     return c.json(resp);
+  }
+
+  // Plain token write to the reserved `onepassword` service — the caller's
+  // own personal service-account token. Gated by the same org toggle a
+  // `onepassword`-reference credential's `tokenScope: "personal"` is. Only
+  // reached when `body.onepassword` is absent — see the reserved-service
+  // 400 above, which takes precedence when it's present.
+  if (service === ONEPASSWORD_SERVICE && scope === "user") {
+    const allowed = await getAllowPersonalOnePassword(db, user.orgId);
+    if (!allowed) {
+      return c.json(PERSONAL_DISABLED, 403);
+    }
   }
 
   const accessToken = typeof body.accessToken === "string" && body.accessToken.length > 0 ? body.accessToken : undefined;
