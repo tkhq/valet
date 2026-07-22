@@ -586,9 +586,38 @@ const createReview: ActionDefinition = {
         .optional()
         .describe('Inline comments to attach to the review'),
     })
-    .refine((p) => !(p.event === 'COMMENT' || p.event === 'REQUEST_CHANGES') || !!p.body?.trim(), {
-      message: 'body is required when event is COMMENT or REQUEST_CHANGES',
-      path: ['body'],
+    .superRefine((p, ctx) => {
+      if ((p.event === 'COMMENT' || p.event === 'REQUEST_CHANGES') && !p.body?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'body is required when event is COMMENT or REQUEST_CHANGES',
+          path: ['body'],
+        });
+      }
+      // GitHub's review-comment anchors are mutually exclusive: a comment uses
+      // EITHER the legacy `position` (offset from the diff hunk) OR the line-based
+      // `line`/`side` (+ optional `startLine`/`startSide` for a multi-line range).
+      // Mixing them 422s, and `startLine`/`startSide` require `line` as the range
+      // end. Reject those combinations here rather than round-tripping to a 422.
+      p.comments?.forEach((c, i) => {
+        const hasPosition = c.position !== undefined;
+        const hasLineAnchor =
+          c.line !== undefined || c.side !== undefined || c.startLine !== undefined || c.startSide !== undefined;
+        if (hasPosition && hasLineAnchor) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'position cannot be combined with line/side/startLine/startSide — they are mutually exclusive',
+            path: ['comments', i, 'position'],
+          });
+        }
+        if ((c.startLine !== undefined || c.startSide !== undefined) && c.line === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'line (the end of the range) is required when startLine or startSide is set',
+            path: ['comments', i, 'line'],
+          });
+        }
+      });
     }),
   outputSchema: githubReviewSchema,
 };
@@ -1186,11 +1215,16 @@ async function executeAction(
       case 'github.create_review': {
         const p = createReview.params.parse(params);
         try {
+          // Attribute the review body like every other body-carrying write, so a
+          // review posted under a bot/App token is marked as machine-authored.
+          // Leave a bodyless review (a pending or bare APPROVE) untouched rather
+          // than forcing a suffix-only body onto it.
+          const reviewBody = p.body !== undefined ? p.body + attributionSuffix(ctx) : undefined;
           const { data } = await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
             owner: p.owner,
             repo: p.repo,
             pull_number: p.pullNumber,
-            body: p.body,
+            body: reviewBody,
             event: p.event,
             commit_id: p.commitId,
             comments: p.comments?.map((c: ReviewCommentInput) => ({

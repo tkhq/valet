@@ -39,6 +39,24 @@ describe('zodToJsonSchema', () => {
     expect(result.properties.sort).toEqual({ type: 'string', enum: ['asc', 'desc'] });
   });
 
+  it('treats a refine-wrapped optional field as not required', () => {
+    const schema = z.object({
+      name: z.string(),
+      slug: z
+        .string()
+        .optional()
+        .refine((v) => v === undefined || v.length > 0, 'must be non-empty'),
+    });
+    const result = zodToJsonSchema(schema) as {
+      required: string[];
+      properties: Record<string, { type?: string }>;
+    };
+    // The field-level .refine() wraps the optional; it must not make the field
+    // look required, and the inner type still converts.
+    expect(result.required).toEqual(['name']);
+    expect(result.properties.slug).toEqual({ type: 'string' });
+  });
+
   it('emits arrays with items', () => {
     const schema = z.object({
       labels: z.array(z.string()),

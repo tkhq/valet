@@ -151,6 +151,11 @@ function unwrap(node: ZodLike): { schema: ZodLike; required: boolean } {
       current = current._def.innerType!;
     } else if (tn === 'ZodNullable') {
       current = current._def.innerType!;
+    } else if (tn === 'ZodEffects') {
+      // A field-level `.refine()`/`.transform()` wraps its inner schema; step
+      // through it so an optional it wraps (e.g. `z.string().optional().refine()`)
+      // is still seen as optional rather than reported as required.
+      current = current._def.schema!;
     } else {
       break;
     }
