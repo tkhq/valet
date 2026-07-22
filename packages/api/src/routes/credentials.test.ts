@@ -6,7 +6,38 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
+
+const HEADERS = { "Content-Type": "application/json" };
+const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
+
+class FakeOnePasswordService implements OnePasswordService {
+  resolveCalls: { scope: OnePasswordScope; reference: string }[] = [];
+  /** Set to make `resolveReference` throw for the next/every call. */
+  failWith: OnePasswordAuthError | undefined;
+
+  async tokenConnected(): Promise<boolean> {
+    return true;
+  }
+  async listVaults() {
+    return [];
+  }
+  async listItems() {
+    return [];
+  }
+  async getItem(): Promise<never> {
+    throw new Error("not used in credentials.test.ts");
+  }
+  async resolveReference(scope: OnePasswordScope, _ctx: OnePasswordCtx, reference: string): Promise<string> {
+    this.resolveCalls.push({ scope, reference });
+    if (this.failWith) throw this.failWith;
+    return "resolved-secret";
+  }
+  async resolveCredential(row: Parameters<OnePasswordService["resolveCredential"]>[0]) {
+    return row;
+  }
+}
 
 let api: TestApi | undefined;
 
@@ -267,5 +298,178 @@ describe("GET /api/credentials", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+});
+
+describe("PUT /api/credentials/:service — onepassword reference extension", () => {
+  it("happy path: org-scoped by admin saves a reference row and calls resolveReference once", async () => {
+    api = await bootTestApi();
+    const fake = new FakeOnePasswordService();
+    api.providers.onePassword = fake;
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        scope: "org",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(200);
+    expect(fake.resolveCalls).toEqual([{ scope: "org", reference: "op://vault/item/field" }]);
+
+    const stored = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "github");
+    expect(stored).toMatchObject({
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
+    });
+    expect(stored?.apiKey).toBeUndefined();
+    expect(stored?.accessToken).toBeUndefined();
+  });
+
+  it("bad reference: fake throws OnePasswordAuthError → 400, no row saved", async () => {
+    api = await bootTestApi();
+    const fake = new FakeOnePasswordService();
+    fake.failWith = new OnePasswordAuthError("1Password resolution failed for op://vault/item/field: not found");
+    api.providers.onePassword = fake;
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "1Password resolution failed for op://vault/item/field: not found",
+    });
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    expect(stored).toBeNull();
+  });
+
+  it("reserved service name 'onepassword' 400s", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({ error: "onepassword is a reserved service name" });
+  });
+
+  it("inline secret + onepassword reference are mutually exclusive → 400", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        apiKey: "inline-secret",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "onepassword reference and inline secret are mutually exclusive",
+    });
+  });
+
+  it("member + tokenScope:\"personal\" with the toggle off 403s", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    await fetch(`${api.baseUrl}/api/onepassword/settings`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ allowPersonal: false }),
+    });
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "personal" },
+      }),
+    });
+    expect(put.status).toBe(403);
+    expect(await put.json()).toEqual({
+      error: "personal 1Password tokens are disabled by your organization",
+    });
+  });
+
+  it("member creating an org-scoped credential still 403s (re-pinned with onepassword body present)", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        scope: "org",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(403);
+    expect(await put.json()).toEqual({ error: "org admin required" });
+  });
+
+  it("plain token write to the reserved 'onepassword' service is 403'd when the personal toggle is off", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    await fetch(`${api.baseUrl}/api/onepassword/settings`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ allowPersonal: false }),
+    });
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "ops_sometoken" }),
+    });
+    expect(put.status).toBe(403);
+    expect(await put.json()).toEqual({
+      error: "personal 1Password tokens are disabled by your organization",
+    });
+  });
+});
+
+describe("GET /api/credentials — onepasswordRef summary", () => {
+  it("reports onepasswordRef and never leaks apiKey/accessToken", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+
+    const get = await fetch(`${api.baseUrl}/api/credentials`);
+    const { credentials } = (await get.json()) as ListCredentialsResponse;
+    const summary = credentials.find((c) => c.service === "github");
+    expect(summary).toMatchObject({ service: "github", type: "api_key", onepasswordRef: "op://vault/item/field" });
+
+    const serialized = JSON.stringify(credentials);
+    expect(serialized).not.toContain('"apiKey"');
+    expect(serialized).not.toContain('"accessToken"');
   });
 });

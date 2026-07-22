@@ -15,6 +15,11 @@ export type OrgRole = "admin" | "member";
 
 export interface OrgFeatures {
   organizations: boolean;
+  /** Whether personal (per-user) 1Password service-account tokens are
+   * allowed for this org. Absent-reads-as-`true` (opt-out, not opt-in) —
+   * see `getAllowPersonalOnePassword`, which reads the same underlying
+   * `orgs.features` key with the same default. */
+  allowPersonalOnePassword: boolean;
 }
 
 export interface OrgMemberSummary {
@@ -62,12 +67,19 @@ export async function isOrgAdmin(db: AppQueryable, orgId: string, userId: string
   return rows[0]?.role === "admin";
 }
 
-/** Reads `orgs.features` (jsonb); an absent `organizations` key reads as false. */
+/**
+ * Reads `orgs.features` (jsonb); an absent `organizations` key reads as
+ * false, an absent `allowPersonalOnePassword` key reads as true (opt-out).
+ */
 export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<OrgFeatures> {
   const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const row = rows[0];
-  if (!row?.features) return { organizations: false };
-  return { organizations: Boolean((row.features as Record<string, unknown>).organizations) };
+  if (!row?.features) return { organizations: false, allowPersonalOnePassword: true };
+  const features = row.features as Record<string, unknown>;
+  return {
+    organizations: Boolean(features.organizations),
+    allowPersonalOnePassword: features.allowPersonalOnePassword !== false,
+  };
 }
 
 /**

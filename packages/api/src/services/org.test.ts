@@ -48,12 +48,12 @@ describe("org service", () => {
 
   describe("getOrgFeatures / setOrgFeatures", () => {
     it("defaults organizations to false", async () => {
-      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: false });
+      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: false, allowPersonalOnePassword: true });
     });
 
     it("reflects setOrgFeatures", async () => {
       await setOrgFeatures(db, orgId, { organizations: true });
-      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: true });
+      expect(await getOrgFeatures(db, orgId)).toEqual({ organizations: true, allowPersonalOnePassword: true });
     });
   });
 

@@ -39,6 +39,8 @@
 import { Hono } from "hono";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../services/onepassword.js";
+import { getAllowPersonalOnePassword } from "../services/org.js";
 import type {
   CredentialSummary,
   DeleteCredentialResponse,
@@ -52,6 +54,8 @@ export const credentialsRouter = new Hono<AppEnv>();
 const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "bot_token", "service_account"];
 
 const ORG_ADMIN_REQUIRED = { error: "org admin required" } as const;
+const PERSONAL_DISABLED = { error: "personal 1Password tokens are disabled by your organization" } as const;
+const ONEPASSWORD_REFERENCE_TYPES: PutCredentialRequest["type"][] = ["api_key", "oauth2"];
 
 function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
   return scope === "org" ? { type: "org", id: user.orgId } : { type: "user", id: user.id };
@@ -91,6 +95,7 @@ credentialsRouter.get("/", async (c) => {
       login: typeof metadata?.login === "string" ? metadata.login : undefined,
       identityOnly: metadata?.identityOnly === true ? true : undefined,
       refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+      onepasswordRef: onePasswordMeta(stored)?.reference,
     });
   }
 
@@ -99,7 +104,7 @@ credentialsRouter.get("/", async (c) => {
 });
 
 credentialsRouter.put("/:service", async (c) => {
-  const { engineCredentials } = c.var.providers;
+  const { engineCredentials, onePassword, db } = c.var.providers;
   const user = c.var.user;
   const service = c.req.param("service");
 
@@ -118,6 +123,55 @@ credentialsRouter.put("/:service", async (c) => {
 
   if (!CREDENTIAL_TYPES.includes(body.type)) {
     return c.json({ error: `type must be one of ${CREDENTIAL_TYPES.join("|")}` }, 400);
+  }
+
+  // Plain token write to the reserved `onepassword` service — the caller's
+  // own personal service-account token. Gated by the same org toggle a
+  // `onepassword`-reference credential's `tokenScope: "personal"` is.
+  if (service === ONEPASSWORD_SERVICE && scope === "user") {
+    const allowed = await getAllowPersonalOnePassword(db, user.orgId);
+    if (!allowed) {
+      return c.json(PERSONAL_DISABLED, 403);
+    }
+  }
+
+  if (body.onepassword) {
+    if (service === ONEPASSWORD_SERVICE) {
+      return c.json({ error: "onepassword is a reserved service name" }, 400);
+    }
+    const hasInlineSecret =
+      (typeof body.accessToken === "string" && body.accessToken.length > 0) ||
+      (typeof body.apiKey === "string" && body.apiKey.length > 0);
+    if (hasInlineSecret) {
+      return c.json({ error: "onepassword reference and inline secret are mutually exclusive" }, 400);
+    }
+    if (!ONEPASSWORD_REFERENCE_TYPES.includes(body.type)) {
+      return c.json({ error: `type must be one of ${ONEPASSWORD_REFERENCE_TYPES.join("|")} for an onepassword reference` }, 400);
+    }
+    const { reference, tokenScope } = body.onepassword;
+    if (tokenScope === "personal") {
+      const allowed = await getAllowPersonalOnePassword(db, user.orgId);
+      if (!allowed) {
+        return c.json(PERSONAL_DISABLED, 403);
+      }
+    }
+
+    try {
+      await onePassword.resolveReference(tokenScope, { orgId: user.orgId, userId: user.id }, reference);
+    } catch (err) {
+      if (err instanceof OnePasswordAuthError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
+
+    const credential: StoredCredential = {
+      type: body.type,
+      metadata: { ...body.metadata, onepassword: body.onepassword },
+    };
+    await engineCredentials.save(owner, service, credential);
+    const resp: PutCredentialResponse = { ok: true };
+    return c.json(resp);
   }
 
   const accessToken = typeof body.accessToken === "string" && body.accessToken.length > 0 ? body.accessToken : undefined;
