@@ -1,0 +1,5 @@
+region            = "us-east-1"
+cluster_name      = "valet-dev"
+zone_id           = "Z0000000EXAMPLE"
+domain            = "valet-dev.example.com"
+api_allowed_cidrs = ["203.0.113.7/32"]
