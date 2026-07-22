@@ -5,8 +5,8 @@
 // person on whose behalf we are minting it may. Two kinds of caller need that
 // question answered:
 //
-//   • Arming paths (POST /api/templates/:id/enable-app, the github-app branch
-//     of POST/PATCH /api/triggers) prove it before the trigger exists, so a
+//   • Arming paths (POST /api/code-review/enable, the github-app branch of
+//     POST/PATCH /api/triggers) prove it before the trigger exists, so a
 //     trigger pointed at a repo the caller has no standing on never gets
 //     created. `assertCallerCanAdministerRepo` is that check and it throws.
 //

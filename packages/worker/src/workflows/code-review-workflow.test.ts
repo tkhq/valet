@@ -1,6 +1,6 @@
-// End-to-end run of the code-review template through the real interpreter.
+// End-to-end run of the code-review workflow through the real interpreter.
 //
-// The other template tests assert the DAG's literal strings, which cannot tell
+// Asserting the DAG's literal strings cannot tell
 // you whether the thing actually posts a review: rename the schema-less LLM
 // output wrapper key or the credential field and every one of them stays green
 // while the pipeline silently stops short of `github.create_review`. This test
@@ -77,11 +77,9 @@ vi.mock('../lib/llm/provider-env.js', () => ({
 
 import type { WorkflowStep, WorkflowStepConfig } from 'cloudflare:workers';
 import { runDag } from './runtime.js';
-import { githubTemplates } from '@valet/plugin-github/actions';
+import { CODE_REVIEW_WORKFLOW_DEFINITION } from '../services/code-review.js';
 import { noopTraceWriter, type WorkflowRunParams } from './types.js';
 import type { Env } from '../env.js';
-
-const codeReview = githubTemplates.find((t) => t.id === 'code-review')!;
 
 function makeStep(): WorkflowStep {
   return {
@@ -114,7 +112,7 @@ function params(): WorkflowRunParams {
       data: { owner: 'tkhq', repo: 'valet', pullNumber: 74 },
       metadata: { source: 'github-app' },
     },
-    definition: codeReview.definition,
+    definition: CODE_REVIEW_WORKFLOW_DEFINITION,
     mode: 'production',
   };
 }

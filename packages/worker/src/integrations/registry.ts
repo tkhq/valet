@@ -3,7 +3,6 @@ import type {
   IntegrationProvider,
   ActionSource,
   TriggerSource,
-  WorkflowTemplate,
 } from '@valet/sdk';
 import { McpActionSource } from '@valet/sdk';
 import type { Env } from '../env.js';
@@ -106,11 +105,6 @@ export class IntegrationRegistry {
 
   listPackages(): IntegrationPackage[] {
     return Array.from(this.packages.values());
-  }
-
-  /** Flatten every registered plugin's contributed workflow templates. */
-  listTemplates(): WorkflowTemplate[] {
-    return this.listPackages().flatMap((p) => p.templates ?? []);
   }
 
   isBuiltinService(service: string): boolean {

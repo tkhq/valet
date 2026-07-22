@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import type { Analytics } from '../analytics/index.js';
-import type { WorkflowDefinition } from '@valet/shared';
 
 // ─── Credentials ─────────────────────────────────────────────────────────────
 
@@ -132,59 +131,6 @@ export interface IntegrationProvider {
   refreshOAuthTokens?(oauth: OAuthConfig, refreshToken: string): Promise<IntegrationCredentials>;
 }
 
-// ─── Workflow Templates ──────────────────────────────────────────────────────
-
-/**
- * A webhook trigger to provision when a template is installed. `variableMapping`
- * maps the incoming webhook JSON payload onto `trigger.data` via `$.`-prefixed
- * dotted paths.
- */
-export interface TemplateWebhookTrigger {
-  name: string;
-  /** Base webhook path; install appends a unique suffix to keep it globally unique. */
-  path: string;
-  variableMapping: Record<string, string>;
-  /**
-   * The trigger acts on exactly one repository. Install pins owner/repo onto
-   * the trigger config after checking the installer's access to it, and the
-   * delivery path refuses payloads naming a different repository — a trigger
-   * token is then useless against any repo but the one it was armed for.
-   */
-  repoScoped?: boolean;
-}
-
-/**
- * A pre-built, publishable workflow a plugin contributes to the Templates
- * gallery. Co-located with the plugin whose actions it uses (e.g. the GitHub
- * code-review template ships in the github plugin), so enabling/disabling the
- * plugin adds/removes its templates.
- */
-export interface WorkflowTemplate {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  icon: string | null;
-  /**
-   * Ordered ids for the app-logo chain (trigger → … → action). Usually
-   * registered service ids, but non-service brand tokens (e.g. 'claude' for
-   * an LLM step) are allowed — the gallery only plugin-gates entries that are
-   * actually registered services. The "Run now" inputs are NOT declared here:
-   * they derive from the trigger node's dataSchema (one source of truth).
-   */
-  apps: string[];
-  /** Human-readable trigger → action steps, shown in the setup dialog. */
-  steps: string[];
-  /**
-   * Optional hint for a richer "test it now" form. 'github-pr' makes the setup
-   * dialog render a connected-repo + open-PR picker (populating owner/repo/
-   * pullNumber) instead of free-text fields. Absent = the generic input list.
-   */
-  runForm?: 'github-pr';
-  definition: WorkflowDefinition;
-  trigger?: TemplateWebhookTrigger;
-}
-
 // ─── Integration Package Manifest ────────────────────────────────────────────
 
 /** Complete integration package manifest — the unit of registration. */
@@ -195,6 +141,4 @@ export interface IntegrationPackage {
   provider: IntegrationProvider;
   actions?: ActionSource;
   triggers?: TriggerSource;
-  /** Workflow templates this plugin contributes to the Templates gallery. */
-  templates?: WorkflowTemplate[];
 }
