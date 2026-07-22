@@ -1032,23 +1032,28 @@ describe('SessionAgentDO', () => {
       expect((agent as any).sessionState.status).toBe('initializing');
     });
 
-    it('ensure-running on an errored session recovers without resetting the breaker', async () => {
-      const { agent } = await armRecovery('sess-regular');
+    it('ensure-running revives an errored session that is carrying a tripped breaker', async () => {
+      const { agent, spawnSandbox } = await armRecovery('sess-regular');
       vi.spyOn(Date, 'now').mockImplementation(() => 1_779_300_000_000);
+      const handleStop = vi.fn().mockResolvedValue(undefined);
+      (agent as any).handleStop = handleStop;
 
-      // Scoping check for the revival reset above. 'error' shares the dead-state
-      // branch with 'terminated' but is not a deliberate end of the lifecycle —
-      // it is where a flapping session lands — so the reset must not apply to it.
-      // Were it unconditional, repeated ensure-running calls on an errored
-      // session would defeat the breaker the way reset-on-ready did.
+      // 'error' shares the dead-state branch with 'terminated', and reviving from
+      // it is likewise a fresh lifecycle. A session that reached 'error' still
+      // carrying a tripped count must come back, not be one-shot re-terminated:
+      // without the reset, ensure-running advances the inherited 4 to 5, re-trips
+      // immediately, and stops the session on every revival attempt.
       (agent as any).sessionState.status = 'error';
-      (agent as any).sessionState.recoveryAttemptCount = 2;
+      (agent as any).sessionState.recoveryAttemptCount = 4;
 
-      await (agent as any).handleEnsureRunning();
+      const res = await (agent as any).handleEnsureRunning();
 
-      // The recovery this triggers advances the count from the inherited 2; a
-      // reset first would have it come back as 1.
-      expect((agent as any).sessionState.recoveryAttemptCount).toBe(3);
+      // The breaker resets, so recovery actually spawns (count back to 1) instead
+      // of re-tripping — and the exhausted-stop path is never taken.
+      expect(res.status).toBe(202);
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(1);
+      expect(spawnSandbox).toHaveBeenCalledOnce();
+      expect(handleStop).not.toHaveBeenCalled();
     });
 
     it('ensure-running on a live session leaves the breaker count alone', async () => {
@@ -1101,19 +1106,41 @@ describe('SessionAgentDO', () => {
       });
     });
 
-    it('a clean idle-hibernation clears a lingering breaker count', async () => {
+    it('a fast idle-hibernation on a still-flapping runner does NOT clear the breaker', async () => {
       const { agent } = await armRecovery();
       const clock = 1_779_300_000_000;
       vi.spyOn(Date, 'now').mockImplementation(() => clock);
       (agent as any).performHibernate = vi.fn().mockResolvedValue(undefined);
 
-      // Flapped up to 3 (not yet tripped), then went idle. The idle timeout is
-      // shorter than the stable interval, so idle-hibernate fires before the
-      // alarm cooldown that would otherwise clear the counter.
+      // Flapped up to 3 (not yet tripped) with a short idle timeout (60s) that
+      // fires before the 120s stable interval. The runner reached ready only 30s
+      // ago, so it has NOT proven stability — clearing the counter here would let
+      // a recover→ready→die flap zero itself every idle period and never trip.
       (agent as any).sessionState.status = 'running';
       (agent as any).sessionState.recoveryAttemptCount = 3;
       (agent as any).sessionState.idleTimeoutMs = 60_000;
       (agent as any).sessionState.lastUserActivityAt = clock - 120_000;
+      (agent as any).runnerLink.readyAt = clock - 30_000; // only 30s of uptime — not stable
+
+      await agent.alarm();
+
+      expect((agent as any).sessionState.status).toBe('hibernating');
+      expect((agent as any).sessionState.recoveryAttemptCount).toBe(3); // held, not cleared
+    });
+
+    it('an idle-hibernation clears the breaker once the runner has been stable', async () => {
+      const { agent } = await armRecovery();
+      const clock = 1_779_300_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      (agent as any).performHibernate = vi.fn().mockResolvedValue(undefined);
+
+      // Same idle-hibernate path, but the runner has now held ready past a full
+      // stable interval — genuine proof of health — so the lingering count clears.
+      (agent as any).sessionState.status = 'running';
+      (agent as any).sessionState.recoveryAttemptCount = 3;
+      (agent as any).sessionState.idleTimeoutMs = 60_000;
+      (agent as any).sessionState.lastUserActivityAt = clock - 120_000;
+      (agent as any).runnerLink.readyAt = clock - (2 * 60_000 + 1); // held ready past the stable interval
 
       await agent.alarm();
 

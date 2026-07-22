@@ -1314,12 +1314,19 @@ export class SessionAgentDO {
       && this.promptQueue.processingCount === 0
       && !this._activeWorkflowExecutionId;
     if (idleHibernateAllowed && this.lifecycle.checkIdleTimeout()) {
-      // A clean idle-hibernate is proof the runner stayed healthy long enough to
-      // go idle — clear any lingering breaker count so the next wake, or a reused
-      // DO, doesn't trip prematurely on a single loss. The alarm cooldown above
-      // only runs while 'running', which a shorter idle timeout can pre-empt (it
-      // fires before the runner holds ready for a full stable interval).
-      if (this.sessionState.recoveryAttemptCount > 0) this.sessionState.resetRecoveryState();
+      // Clear any lingering breaker count on idle-hibernate, but only under the
+      // same guard the alarm cooldown above uses: the runner has held ready for a
+      // full stable interval and is not inside its disconnect grace window. A
+      // shorter idleTimeoutMs can fire this branch before that interval elapses;
+      // clearing unconditionally there would let a recover→ready→die flap zero its
+      // counter every idle period and never cross the trip threshold (TKAI-180).
+      if (
+        this.sessionState.recoveryAttemptCount > 0 &&
+        !this.sessionState.runnerDisconnectedAt &&
+        isRecoveryStable(this.runnerLink.readyAt, now, SessionAgentDO.RECOVERY_STABLE_INTERVAL_MS)
+      ) {
+        this.sessionState.resetRecoveryState();
+      }
       // Set status immediately to prevent re-entrant hibernation from subsequent alarms.
       // performHibernate() checks this guard and skips if already in progress.
       this.sessionState.status = 'hibernating';
@@ -5757,15 +5764,15 @@ export class SessionAgentDO {
             { status: 500 },
           );
         }
-        // Reviving a terminated session is a new lifecycle, the same as a fresh
-        // start, so it starts from a clean breaker — otherwise a session that
-        // was terminated by a trip could never come back, since the inherited
-        // count is already past the threshold and re-trips on the first attempt.
-        // Deliberately narrow: resetting on every ensure_running would let
-        // repeated calls defeat the breaker the way reset-on-ready did.
-        if (status === 'terminated') {
-          this.sessionState.resetRecoveryState();
-        }
+        // Reviving a dead session is a new lifecycle, the same as a fresh start,
+        // so it starts from a clean breaker — otherwise a session the breaker
+        // terminated, or one that reached 'error' still carrying a tripped count,
+        // could never come back: the inherited count is already past the threshold
+        // and re-trips on the first attempt. The reset is gated by the enclosing
+        // dead-state case ('terminated' | 'error'), so a running/backoff session
+        // never reaches it and the breaker can't be defeated by repeated calls the
+        // way reset-on-ready could.
+        this.sessionState.resetRecoveryState();
         await this.performRecovery('ensure_running');
         return Response.json({ status: 'recovering' }, { status: 202 });
       }
