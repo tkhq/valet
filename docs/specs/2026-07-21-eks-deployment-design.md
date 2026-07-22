@@ -173,3 +173,16 @@ pod; node group scales to 4).
   variable are present in the `platform` state file. Accepted for
   dev/staging given a private encrypted bucket; production would move to
   Secrets Manager + External Secrets Operator.
+
+## Deviations (implementation, 2026-07-21)
+
+- The gp3 default StorageClass is a Kubernetes resource, so it lives in
+  the `platform` layer (`storage.tf`), not `infra` as originally listed —
+  including demoting EKS's shipped `gp2` class from default.
+- CR-shaped resources (ClusterIssuer, CNPG `Cluster`, the agent-sandbox
+  manifest) use the `gavinbunney/kubectl` provider's `kubectl_manifest`,
+  not `kubernetes_manifest` — the latter requires CRDs to exist at plan
+  time, which breaks first apply.
+- `make eks-push` auto-detects `terraform` vs `tofu` (`EKS_TF ?=`);
+  validation during implementation ran on OpenTofu 1.12.5 (same HCL,
+  supports the S3 `use_lockfile` backend option).

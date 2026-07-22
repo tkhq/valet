@@ -4,6 +4,10 @@ This is the top-level entry point for running Valet v2 on Kubernetes
 locally. See `docs/specs/2026-07-15-kubernetes-deployment-design.md` for the
 full design; this doc is the practical runbook.
 
+For the **AWS/EKS dev-staging environment** (Terraform-provisioned), see
+`deploy/terraform/README.md` — this document covers only the local
+Rancher Desktop reference environment.
+
 **Context safety (binding):** the developer machine's default kubectl
 context may point at a PRODUCTION cluster (verified on this machine — it's a
 GKE prod cluster). Every command below, and every `make k8s-*` target, pins
