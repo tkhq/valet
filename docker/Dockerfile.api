@@ -42,8 +42,12 @@ COPY . .
 RUN pnpm install --frozen-lockfile
 
 # Packages @valet/api consumes as compiled `dist/` output (not raw TS via
-# tsx) — must exist before `pnpm deploy` below.
-RUN pnpm --filter @valet/shared --filter "@valet/plugin-*" run build
+# tsx) — must exist before `pnpm deploy` below. Root `pnpm typecheck` is
+# `tsc --build` over the project-reference graph: the only command that
+# emits every workspace dist/ in dependency order (per-package plain `tsc`
+# can't — it doesn't build referenced projects, so e.g. sdk fails against
+# an unbuilt engine on a fresh checkout with no local build state).
+RUN pnpm typecheck
 
 # The web SPA baked into this image (decision 3).
 RUN pnpm --filter @valet/web run build
@@ -69,4 +73,4 @@ ENV VALET_WEB_DIST_DIR=/app/web/dist
 ENV PORT=8787
 EXPOSE 8787
 
-ENTRYPOINT ["node_modules/.bin/tsx", "src/main.ts"]
+ENTRYPOINT ["node_modules/.bin/tsx", "src/cli.ts", "serve"]

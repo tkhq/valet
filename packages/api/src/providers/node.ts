@@ -26,6 +26,7 @@ import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
+import { pgliteWasmOptions } from "../assets/base.js";
 import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { PrebuildService } from "../prebuilds/service.js";
@@ -149,7 +150,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     source = new Pool({ connectionString: opts.databaseUrl });
   } else {
     mkdirSync(opts.pgDataDir, { recursive: true });
-    source = new PGlite(opts.pgDataDir);
+    // Bundled single-binary: PGlite's default `import.meta.url`-relative wasm
+    // load resolves to the bundle's own dir, so hand it the sibling
+    // wasm/data assets explicitly. `undefined` in dev/tsx → default loading.
+    const wasmOpts = await pgliteWasmOptions();
+    source = wasmOpts ? new PGlite(opts.pgDataDir, wasmOpts) : new PGlite(opts.pgDataDir);
   }
 
   // Normalized query interface (decision 4) shared by the app's raw-SQL

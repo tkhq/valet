@@ -8,10 +8,23 @@ api:
   # election or shared engine state across pods.
   replicas: 1
 
+  # Defaults target the local reference env (`make k8s-build` images, visible
+  # to k3s via Rancher Desktop moby mode). CI publishes multi-arch images to
+  # GHCR on every dev-v2 merge (.github/workflows/docker-publish.yml) — for a
+  # remote cluster, point at those and pin the immutable sha tag:
+  #   repository: ghcr.io/<owner>/valet-api
+  #   tag: sha-<shortsha>
+  # (The moving `dev-v2` tag + `pullPolicy: IfNotPresent` is a stale-image
+  # trap: a node that already has the tag never re-pulls.)
   image:
     repository: valet-api
     tag: dev
     pullPolicy: IfNotPresent
+
+  # Names of existing `kubernetes.io/dockerconfigjson` Secrets (in the
+  # release namespace) for pulling the api image from a private registry.
+  # Unneeded for the public GHCR images.
+  imagePullSecrets: []
 
   port: 8787
 
@@ -62,6 +75,8 @@ sandbox:
   # stay narrowly scoped instead of granting pod access next to the api
   # pod itself.
   namespace: valet-sandboxes
+  # Same CI-publishing story as api.image: for remote clusters use
+  # ghcr.io/<owner>/valet-sandbox pinned to a sha-<shortsha> tag.
   image:
     repository: valet-sandbox
     tag: dev
