@@ -307,7 +307,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     const fake = new FakeOnePasswordService();
     api.providers.onePassword = fake;
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
       body: JSON.stringify({
@@ -319,7 +319,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     expect(put.status).toBe(200);
     expect(fake.resolveCalls).toEqual([{ scope: "org", reference: "op://vault/item/field" }]);
 
-    const stored = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "github");
+    const stored = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear");
     expect(stored).toMatchObject({
       type: "api_key",
       metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
@@ -334,7 +334,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     fake.failWith = new OnePasswordAuthError("1Password resolution failed for op://vault/item/field: not found");
     api.providers.onePassword = fake;
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
       body: JSON.stringify({
@@ -345,6 +345,27 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     expect(put.status).toBe(400);
     expect(await put.json()).toEqual({
       error: "1Password resolution failed for op://vault/item/field: not found",
+    });
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
+    expect(stored).toBeNull();
+  });
+
+  it("github service 400s: reference credentials are silently ignored by the session resolver", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "github credentials cannot be 1Password references; use the GitHub connect flow",
     });
 
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
@@ -371,7 +392,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
       body: JSON.stringify({
@@ -396,7 +417,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
       body: JSON.stringify({ allowPersonal: false }),
     });
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: MEMBER_HEADERS,
       body: JSON.stringify({
@@ -414,7 +435,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: MEMBER_HEADERS,
       body: JSON.stringify({
@@ -454,7 +475,7 @@ describe("GET /api/credentials — onepasswordRef summary", () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 
-    await fetch(`${api.baseUrl}/api/credentials/github`, {
+    await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
       body: JSON.stringify({
@@ -465,8 +486,8 @@ describe("GET /api/credentials — onepasswordRef summary", () => {
 
     const get = await fetch(`${api.baseUrl}/api/credentials`);
     const { credentials } = (await get.json()) as ListCredentialsResponse;
-    const summary = credentials.find((c) => c.service === "github");
-    expect(summary).toMatchObject({ service: "github", type: "api_key", onepasswordRef: "op://vault/item/field" });
+    const summary = credentials.find((c) => c.service === "linear");
+    expect(summary).toMatchObject({ service: "linear", type: "api_key", onepasswordRef: "op://vault/item/field" });
 
     const serialized = JSON.stringify(credentials);
     expect(serialized).not.toContain('"apiKey"');
@@ -479,7 +500,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
       body: JSON.stringify({
@@ -493,7 +514,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
       error: "metadata.onepassword is reserved; use the onepassword request field",
     });
 
-    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
     expect(stored).toBeNull();
   });
 
@@ -502,7 +523,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     const fake = new FakeOnePasswordService();
     api.providers.onePassword = fake;
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
       body: JSON.stringify({
@@ -517,7 +538,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     });
     expect(fake.resolveCalls).toEqual([]); // rejected before save-time resolution is ever attempted
 
-    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
     expect(stored).toBeNull();
   });
 
@@ -525,7 +546,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 
-    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
       body: JSON.stringify({
@@ -536,7 +557,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     });
     expect(put.status).toBe(200);
 
-    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
     expect(stored?.metadata).toEqual({
       login: "someone",
       onepassword: { reference: "op://vault/item/field", tokenScope: "org" },

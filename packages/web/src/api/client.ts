@@ -456,8 +456,9 @@ export const api = {
 
   // 1Password picker backend + settings (1Password credential provider
   // plan, Task 3/4). `scope` selects which service-account token to browse
-  // with — "org" (admin-only) or "personal" (gated server-side by the org's
-  // allowPersonal toggle).
+  // with — "org" (open to any org member once the org token is connected;
+  // the token is intentionally shared org-wide) or "personal" (gated
+  // server-side by the org's allowPersonal toggle).
   getOnePasswordSettings: () =>
     request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
   putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>

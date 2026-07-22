@@ -106,13 +106,27 @@ describe("GET/PUT /api/onepassword/settings", () => {
 });
 
 describe("GET /api/onepassword/vaults", () => {
-  it("scope=org as member 403s", async () => {
+  it("scope=org as member returns vaults from the fake service (org token is shared org-wide)", async () => {
+    api = await bootTestApi();
+    const fake = new FakeOnePasswordService();
+    fake.orgToken = true;
+    api.providers.onePassword = fake;
+
+    const res = await fetch(`${api.baseUrl}/api/onepassword/vaults?scope=org`, { headers: MEMBER_HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListOpVaultsResponse;
+    expect(body.vaults).toEqual([{ id: "vault1", title: "Engineering" }]);
+    expect(fake.vaultsCalls).toEqual(["org"]);
+  });
+
+  it("scope=org as member with no org token connected 400s with a hint", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 
     const res = await fetch(`${api.baseUrl}/api/onepassword/vaults?scope=org`, { headers: MEMBER_HEADERS });
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: "org admin required" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("organization 1Password service account token");
   });
 
   it("scope=org as admin returns vaults from the fake service", async () => {

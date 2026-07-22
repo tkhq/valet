@@ -147,6 +147,15 @@ credentialsRouter.put("/:service", async (c) => {
     if (service === ONEPASSWORD_SERVICE) {
       return c.json({ error: "onepassword is a reserved service name" }, 400);
     }
+    // `github` is resolved through `services/session-github-token.ts` at
+    // session-build time (`host.ts`'s `buildCredentialResolver`), which
+    // takes the `github`-service branch unconditionally when `githubTokenDeps`
+    // + `db` are wired — an onepassword-reference row stored here would be
+    // silently ignored, never resolved. Reject at write time instead of
+    // shipping a credential nothing reads.
+    if (service === "github") {
+      return c.json({ error: "github credentials cannot be 1Password references; use the GitHub connect flow" }, 400);
+    }
     const hasInlineSecret =
       (typeof body.accessToken === "string" && body.accessToken.length > 0) ||
       (typeof body.apiKey === "string" && body.apiKey.length > 0);

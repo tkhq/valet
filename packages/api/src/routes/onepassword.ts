@@ -5,11 +5,20 @@
  * param selects which service-account token to use (`org`|`personal`,
  * default `personal`).
  *
- * `scope=org` requires the caller to be an org admin (same `ORG_ADMIN_REQUIRED`
- * copy `routes/credentials.ts` uses). `scope=personal` requires the org's
- * `allowPersonalOnePassword` toggle to be on — checked here at the route
- * level (not left to `OnePasswordService`'s internal check) so the 403 copy
- * is consistent with the PUT-credential 403 in `routes/credentials.ts`.
+ * Trust model: `scope=org` browsing (`/vaults`, `/vaults/:vaultId/items`,
+ * `/vaults/:vaultId/items/:itemId`) is open to any authenticated org member
+ * once the org's 1Password service account token is connected — the org
+ * token is intentionally shared org-wide, giving members access to whatever
+ * vaults the service account itself can read (see the design doc's decision
+ * 2). Admins who want to restrict exposure should scope the service account
+ * to a dedicated vault in 1Password itself, not rely on this route to gate
+ * it. `PUT /settings` (which connects/rotates the org token and flips the
+ * personal-token toggle) and creating an **org-owned** credential row stay
+ * admin-only — those are the actual privileged actions. `scope=personal`
+ * requires the org's `allowPersonalOnePassword` toggle to be on — checked
+ * here at the route level (not left to `OnePasswordService`'s internal
+ * check) so the 403 copy is consistent with the PUT-credential 403 in
+ * `routes/credentials.ts`.
  *
  * `OnePasswordAuthError` thrown by the service (missing token, resolve
  * failure, etc.) maps to 400 with the error's own message — it never
@@ -41,16 +50,15 @@ function scopeFromQuery(c: Context<AppEnv>): OnePasswordScope {
 
 /**
  * Route-level gate shared by the vault/item browse endpoints: `scope=org`
- * requires admin, `scope=personal` requires the org toggle. Returns a Hono
- * response to short-circuit with, or `undefined` to proceed.
+ * is open to any authed org member (the org service-account token is
+ * intentionally shared — see this file's doc comment); `scope=personal`
+ * requires the org toggle. Returns a Hono response to short-circuit with,
+ * or `undefined` to proceed.
  */
 async function requireScopeAccess(c: Context<AppEnv>, scope: OnePasswordScope) {
   const { db } = c.var.providers;
   const user = c.var.user;
   if (scope === "org") {
-    if (user.role !== "admin") {
-      return c.json(ORG_ADMIN_REQUIRED, 403);
-    }
     return undefined;
   }
   const allowed = await getAllowPersonalOnePassword(db, user.orgId);

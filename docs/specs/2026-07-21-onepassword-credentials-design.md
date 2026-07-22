@@ -97,9 +97,14 @@ Picker backend (new routes, `/api/onepassword/…`):
 - `GET /api/onepassword/vaults/:vaultId/items/:itemId?scope=…` (item detail
   incl. fields, for the field step of the picker)
 
-Permission-checked per scope: `scope=org` requires org admin; `scope=personal`
-requires the caller's own token to exist and the org toggle to be on. Listing
-responses never include secret values.
+Permission-checked per scope: `scope=org` is open to any authed org member
+(once the org token is connected) — this matches decision 2's trust model:
+the org service-account token is meant to give every member access to
+whatever vaults the service account itself can read, so browsing with it
+carries no additional privilege beyond what resolving a reference already
+grants at session-run time. `scope=personal` requires the caller's own token
+to exist and the org toggle to be on. Listing responses never include secret
+values.
 
 Credential CRUD rides the **existing credentials routes**, extended to accept
 `metadata.onepassword` on create. **Save-time validation** performs one live
@@ -192,3 +197,40 @@ code as of the implementing commits:
   is deferred — no token was available in the implementation environment; the
   coordinator/user should run it before merge if live SDK verification is
   desired.
+- **`scope=org` browsing was relaxed from admin-only to any org member**
+  (fix-wave post-review, after this doc's "Permission-checked per scope" line
+  originally said `scope=org` requires org admin). Final review flagged that
+  as inconsistent with decision 2's stated trust model — the org
+  service-account token is meant to give org members access to whatever
+  vaults it can read, not to gate browsing behind admin while every member's
+  session resolves org-scoped references through that same token anyway.
+  `packages/api/src/routes/onepassword.ts`'s `requireScopeAccess` now lets
+  `scope=org` through for any authed member once the token is connected
+  (`OnePasswordAuthError`'s 400 "no organization 1Password service account
+  token" still applies when it isn't). `PUT /settings` (connecting/rotating
+  the org token, flipping the personal-toggle) and creating an org-**owned**
+  credential row are unaffected — those stay admin-only.
+- **`github` rejects `body.onepassword` unconditionally.**
+  `packages/api/src/routes/credentials.ts`'s `PUT /api/credentials/github`
+  now 400s with `"github credentials cannot be 1Password references; use the
+  GitHub connect flow"` whenever `body.onepassword` is present, checked
+  alongside the reserved-service-name structural check. `host.ts`'s
+  `buildCredentialResolver` routes `service === "github"` through
+  `resolveSessionGitHubToken` unconditionally (when `githubTokenDeps` + `db`
+  are wired) — it never reaches the `onePasswordMeta` branch, so a stored
+  1Password-reference row on `github` would silently never resolve. Reject
+  at write time instead of persisting a credential nothing reads.
+- **Known gap (follow-up): reference credentials only resolve through the
+  session `credentialResolver` seam.** Two other readers of credential rows
+  bypass it and will treat a reference-carrying row as if it were simply
+  unconnected (no secret, no error surfaced) rather than resolving it:
+  - Workflow tool-node invocation (`packages/api/src/plugins/action-invoker.ts`,
+    `buildCredentialProvider`), which reads the credential store directly
+    rather than through `host.ts`'s `buildCredentialResolver`.
+  - `packages/api/src/channels/host.ts`'s `ChannelHost.start` org bot-token
+    reads (`engineCredentials.get({type:"org",...}, factory.channelType)`),
+    which also read the store directly.
+  Follow-up: route both through the same resolution helper `host.ts`'s
+  `buildCredentialResolver` uses (or extract it into a shared function both
+  call), so a reference-carrying row behaves identically no matter which
+  subsystem reads it.
