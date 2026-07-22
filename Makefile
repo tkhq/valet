@@ -23,7 +23,8 @@
         secrets-set secrets-list \
         image-build image-push \
         destroy destroy-worker destroy-d1 destroy-r2 destroy-pages destroy-modal \
-        k8s-sandbox-install k8s-sandbox-uninstall k8s-build k8s-up k8s-down k8s-logs
+        k8s-sandbox-install k8s-sandbox-uninstall k8s-build k8s-up k8s-down k8s-logs \
+        eks-push
 
 # Configuration
 # =============
@@ -263,6 +264,27 @@ k8s-down: ## helm uninstall the valet release from Rancher Desktop (PVCs survive
 
 k8s-logs: ## Tail the valet api pod logs on Rancher Desktop
 	$(KUBECTL_RANCHER) -n $(K8S_NAMESPACE) logs -l app.kubernetes.io/instance=$(HELM_RELEASE),app.kubernetes.io/component=api -f --tail=200
+
+# EKS dev/staging environment (deploy/terraform/README.md)
+# ========================================================
+EKS_TF ?= $(shell command -v terraform >/dev/null 2>&1 && echo terraform || echo tofu)
+EKS_TF_INFRA_DIR ?= deploy/terraform/infra
+EKS_IMAGE_TAG ?= $(shell git rev-parse --short HEAD)
+
+eks-push: ## Build (native arm64) + push valet-api/valet-sandbox to ECR, tagged by git sha
+	@ECR_API=$$($(EKS_TF) -chdir=$(EKS_TF_INFRA_DIR) output -raw ecr_api_url); \
+	ECR_SANDBOX=$$($(EKS_TF) -chdir=$(EKS_TF_INFRA_DIR) output -raw ecr_sandbox_url); \
+	REGION=$$($(EKS_TF) -chdir=$(EKS_TF_INFRA_DIR) output -raw region); \
+	REGISTRY=$${ECR_API%%/*}; \
+	echo "$(GREEN)Logging in to $$REGISTRY$(NC)"; \
+	aws ecr get-login-password --region $$REGION | docker login --username AWS --password-stdin $$REGISTRY; \
+	echo "$(GREEN)Building $$ECR_API:$(EKS_IMAGE_TAG) from docker/Dockerfile.api$(NC)"; \
+	docker build -f docker/Dockerfile.api -t $$ECR_API:$(EKS_IMAGE_TAG) .; \
+	echo "$(GREEN)Building $$ECR_SANDBOX:$(EKS_IMAGE_TAG) from docker/Dockerfile.sandbox-k8s$(NC)"; \
+	docker build -f docker/Dockerfile.sandbox-k8s -t $$ECR_SANDBOX:$(EKS_IMAGE_TAG) .; \
+	docker push $$ECR_API:$(EKS_IMAGE_TAG); \
+	docker push $$ECR_SANDBOX:$(EKS_IMAGE_TAG); \
+	echo "$(GREEN)Pushed tag $(EKS_IMAGE_TAG) — apply with: terraform -chdir=deploy/terraform/platform apply -var image_tag=$(EKS_IMAGE_TAG)$(NC)"
 
 # Manual kill-mid-turn recovery proof (Engine v2 Phase 1 exit criterion).
 # The automated cross-process SIGKILL test lives at
