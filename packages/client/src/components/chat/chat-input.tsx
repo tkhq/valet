@@ -24,6 +24,13 @@ import {
   buildModelSelectorGroups,
   type FlatModel,
 } from '@/components/ui/model-selector-utils';
+import {
+  canRecallForward,
+  canRecallHistory,
+  recallNextIndex,
+  recallPrevIndex,
+  valueForRecallIndex,
+} from './message-history';
 
 interface ChatInputProps {
   onSend: (content: string, model?: string, attachments?: PromptAttachment[]) => void;
@@ -55,6 +62,8 @@ interface ChatInputProps {
   onFocusChange?: (focused: boolean) => void;
   /** Called when a slash command is executed (e.g. /diff, /stop) */
   onCommand?: (command: string, args?: string) => void;
+  /** Prompts the user has already sent in this thread, oldest first, for ArrowUp recall */
+  messageHistory?: string[];
   /** External value to inject into the textarea (e.g. from withdrawn pending followup) */
   externalValue?: string | null;
   /** Called after externalValue has been consumed */
@@ -62,6 +71,9 @@ interface ChatInputProps {
 }
 
 const MAX_IMAGE_ATTACHMENTS = 8;
+
+/** Stable identity so an absent messageHistory prop does not invalidate memos each render. */
+const EMPTY_HISTORY: string[] = [];
 
 /**
  * Given the current input value and cursor position, find an active @ mention query.
@@ -166,6 +178,7 @@ export function ChatInput({
   onOpenActions,
   onFocusChange,
   onCommand: _onCommand,
+  messageHistory = EMPTY_HISTORY,
   externalValue,
   onExternalValueConsumed,
 }: ChatInputProps) {
@@ -182,6 +195,10 @@ export function ChatInput({
   const [isCompressing, setIsCompressing] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [modelSelectorOpen, setModelSelectorOpen] = useState(false);
+  // Position in the sent-prompt history; null means the composer is on the
+  // user's own draft. The draft is parked here while they look through history.
+  const [recallIndex, setRecallIndex] = useState<number | null>(null);
+  const recallDraftRef = useRef('');
   const originalFilesRef = useRef<File[]>([]);
   const internalRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -192,6 +209,11 @@ export function ChatInput({
   useEffect(() => {
     if (externalValue != null && externalValue !== '') {
       setValue(externalValue);
+      // Injected content is a fresh draft, so abandon any in-progress history
+      // browse — otherwise the composer holds the new text while still parked at
+      // a recall position, and the next ArrowUp/Escape discards it.
+      setRecallIndex(null);
+      recallDraftRef.current = '';
       onExternalValueConsumed?.();
       // Focus the textarea after injecting value
       requestAnimationFrame(() => textareaRef.current?.focus());
@@ -216,6 +238,31 @@ export function ChatInput({
     const pos = textareaRef.current?.selectionStart ?? 0;
     setCursorPos(pos);
   }, [textareaRef]);
+
+  // Moves the composer to a position in the sent-prompt history, or back to the
+  // parked draft when the position is null.
+  const applyRecall = useCallback(
+    (nextIndex: number | null) => {
+      // Park whatever is in the composer the first time we step into the
+      // history, so Escape can put it back exactly as it was.
+      if (recallIndex === null && nextIndex !== null) {
+        recallDraftRef.current = value;
+      }
+
+      const nextValue = valueForRecallIndex(messageHistory, nextIndex, recallDraftRef.current);
+      setRecallIndex(nextIndex);
+      setValue(nextValue);
+      // Leave the caret at the end so the recalled prompt can be edited or sent
+      // straight away. Wait for the value to land before moving it.
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+        textarea.setSelectionRange(nextValue.length, nextValue.length);
+        setCursorPos(nextValue.length);
+      });
+    },
+    [messageHistory, textareaRef, recallIndex, value]
+  );
 
   // @ mention detection
   const atContext = useMemo(() => {
@@ -644,6 +691,9 @@ export function ChatInput({
     setValue('');
     setAttachments([]);
     originalFilesRef.current = [];
+    // A sent prompt leaves no draft behind and reopens history from the newest.
+    setRecallIndex(null);
+    recallDraftRef.current = '';
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -719,10 +769,41 @@ export function ChatInput({
       }
     }
 
+    // Sent-prompt recall. This sits below every overlay so their ArrowUp and
+    // ArrowDown selection keeps priority; it only sees keys they did not take.
+    // The same edge guards that gate entering recall keep applying once it is
+    // active, so arrowing within a multi-line recalled prompt moves the caret
+    // and history is only crossed from the composer's start (up) or end (down).
+    const caretPos = textareaRef.current?.selectionStart ?? cursorPos;
+
+    if (e.key === 'ArrowUp' && canRecallHistory(value, caretPos)) {
+      const nextIndex = recallPrevIndex(messageHistory, recallIndex);
+      if (nextIndex !== null && nextIndex !== recallIndex) {
+        e.preventDefault();
+        applyRecall(nextIndex);
+        return;
+      }
+    }
+
+    if (e.key === 'ArrowDown' && recallIndex !== null && canRecallForward(value, caretPos)) {
+      e.preventDefault();
+      applyRecall(recallNextIndex(messageHistory, recallIndex));
+      return;
+    }
+
     if (e.key === 'Escape') {
       if (isModelCommand) {
         e.preventDefault();
         setModelCommandDismissed(true);
+        return;
+      }
+      if (recallIndex !== null) {
+        // Leaving the history restores the draft. stopPropagation keeps this
+        // from also reaching the window-level Escape handler that aborts the
+        // agent — a second Escape can still do that.
+        e.preventDefault();
+        e.stopPropagation();
+        applyRecall(null);
         return;
       }
       if (isAgentActive && onAbort) {
@@ -986,6 +1067,9 @@ export function ChatInput({
             onChange={(e) => {
               setValue(e.target.value);
               updateCursorPos();
+              // Editing a recalled prompt makes it the working draft, so the
+              // arrow keys go back to moving the caret through it.
+              if (recallIndex !== null) setRecallIndex(null);
             }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}

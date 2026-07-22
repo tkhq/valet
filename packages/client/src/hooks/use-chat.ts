@@ -1471,7 +1471,13 @@ export function useChat(sessionId: string) {
     }
   }, []);
 
-  const { status: wsStatus, send, isConnected } = useWebSocket(wsUrl, {
+  const {
+    status: wsStatus,
+    send,
+    isConnected,
+    reconnect: reconnectWebSocket,
+    retriesExhausted: connectionRetriesExhausted,
+  } = useWebSocket(wsUrl, {
     onMessage: handleMessage,
   });
 
@@ -1901,6 +1907,8 @@ export function useChat(sessionId: string) {
     selectedModel,
     setSelectedModel: handleModelChange,
     connectionStatus: wsStatus,
+    connectionRetriesExhausted,
+    reconnectWebSocket,
     isConnected,
     sendMessage,
     answerQuestion,
