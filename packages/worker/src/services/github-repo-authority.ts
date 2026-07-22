@@ -22,11 +22,21 @@
 // The proof deliberately uses the identity's OWN linked GitHub OAuth token,
 // never the App installation token: an installation token can read every repo
 // the App covers, so using it here would answer the wrong question.
+//
+// One carve-out: a *public* repo has no contents to protect, so the anonymous
+// App path is allowed on it with no caller proof at all — the org installing
+// the App plus `allowAnonymousGitHubAccess` is the whole authorization. Whether
+// a repo is public is a property of the repo, not of who is asking, so that one
+// check does read it with the App installation token; the OAuth proof still
+// gates every private repo. (Private repos need a different anonymous story;
+// that is deliberately out of scope here.)
 
 import { ForbiddenError, ValidationError } from '@valet/shared';
 import type { AppDb } from '../lib/drizzle.js';
 import type { Env } from '../env.js';
+import type { GithubInstallation } from '../lib/schema/github-installations.js';
 import { getGithubInstallationByLogin } from '../lib/db/github-installations.js';
+import { loadGitHubApp, getOrMintInstallationToken } from './github-app.js';
 import { getCredential } from './credentials.js';
 
 /** GitHub repo permissions block returned by GET /repos/{owner}/{repo}. */
@@ -59,13 +69,62 @@ interface AuthorityVerdict {
 const ALLOWED: AuthorityVerdict = { outcome: 'allowed', message: '' };
 
 /**
- * The single evaluation: is the App installed on `owner`, and does `userId`
- * personally hold push or admin rights on `owner/repo`?
+ * Is `owner/repo` a public repository, read with the App's own installation
+ * token? Public repos carry nothing to protect, so the anonymous App path is
+ * allowed on them with no per-caller proof. Visibility is a property of the
+ * repo, not of who is asking, which is why using the installation token here is
+ * sound where using it for the access check would not be.
  *
- * Fails closed. No linked GitHub identity, a repo GitHub won't show the
- * identity (404), a refused read (403), an unexpected API status, or read-only
- * rights all deny. A 404 is indistinguishable from "private repo the caller
- * can't see", which is exactly the case this guards, so it is a refusal.
+ * Fails closed: if the App is unconfigured, the token cannot be minted, GitHub
+ * is unreachable, or it will not confirm the repo (e.g. the App does not cover
+ * it), we treat the repo as non-public and fall back to caller proof.
+ */
+async function isRepoPublic(
+  db: AppDb,
+  env: Env,
+  installation: GithubInstallation,
+  owner: string,
+  repo: string,
+): Promise<boolean> {
+  const app = await loadGitHubApp(env, db);
+  if (!app) return false;
+
+  let token: string;
+  try {
+    ({ token } = await getOrMintInstallationToken(app, db, env.ENCRYPTION_KEY, installation));
+  } catch {
+    return false;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'Valet',
+      },
+    });
+  } catch {
+    return false;
+  }
+  if (!res.ok) return false;
+
+  const body = (await res.json().catch(() => null)) as { private?: boolean } | null;
+  return body?.private === false;
+}
+
+/**
+ * The single evaluation: is the App installed on `owner`, and — for a private
+ * repo — does `userId` personally hold push or admin rights on `owner/repo`?
+ *
+ * A public repo short-circuits to allowed: its contents are already
+ * world-readable, so there is nothing for the caller proof to protect.
+ *
+ * Otherwise fails closed. No linked GitHub identity, a repo GitHub won't show
+ * the identity (404), a refused read (403), an unexpected API status, or
+ * read-only rights all deny. A 404 is indistinguishable from "private repo the
+ * caller can't see", which is exactly the case this guards, so it is a refusal.
  */
 async function evaluateRepoAuthority(
   db: AppDb,
@@ -82,6 +141,11 @@ async function evaluateRepoAuthority(
       outcome: 'no_installation',
       message: `The Valet GitHub App is not installed on "${owner}". Ask an admin to install it, then try again.`,
     };
+  }
+
+  // Public repos need no per-caller proof: the diff is already world-readable.
+  if (await isRepoPublic(db, env, installation, owner, repo)) {
+    return ALLOWED;
   }
 
   const credential = await getCredential(env, 'user', userId, 'github');
