@@ -1,7 +1,7 @@
 # 1Password Credential Provider — Design
 
 **Date:** 2026-07-21
-**Status:** Approved (brainstorm with user)
+**Status:** Implemented (feat/onepassword-credentials)
 **Branch:** `feat/onepassword-credentials` → PR against `dev-v2`
 
 ## Purpose
@@ -143,3 +143,52 @@ with the same admin/member split by owner type.
 
 No engine surface changes (the `credentialResolver` seam already exists and is
 api-owned) → standard review, no adversarial engine gate.
+
+## Deviations
+
+Facts that diverged from this doc during implementation, verified against the
+code as of the implementing commits:
+
+- **SDK version:** `@1password/sdk` is pinned `^0.4.0` in `packages/api/package.json`,
+  not the `^0.3.1` this doc originally floated (the legacy runner's pin). The
+  adapter in `packages/api/src/services/onepassword.ts` (`defaultCreateClient`)
+  was verified against 0.4.x's `.d.ts` — `client.vaults.list()`,
+  `client.items.list(vaultId)`, `client.items.get(vaultId, itemId)`, and
+  `client.secrets.resolve(reference)` all match the shapes this module adapts.
+- **`metadata.onepassword` is a reserved key on the plain credential PUT path.**
+  `packages/api/src/routes/credentials.ts`'s `PUT /api/credentials/:service`
+  rejects any request whose `body.metadata` contains an `onepassword` key with
+  400 `"metadata.onepassword is reserved; use the onepassword request field"`,
+  regardless of whether the validated `body.onepassword` field is also present.
+  This closes a smuggle path found in Task 3 review: without it, a caller could
+  hand-write `metadata.onepassword = {reference, tokenScope}` through the plain
+  path and skip the save-time `resolveReference` validation and reserved
+  service-name checks below, since the resolver seam (`onePasswordMeta`) reads
+  `metadata.onepassword` directly off whatever is stored.
+- **Ordering: reserved-service 400 precedes the personal-toggle 403.** When
+  `body.onepassword` is present and `service === ONEPASSWORD_SERVICE`, the
+  route 400s ("onepassword is a reserved service name") before it evaluates
+  `tokenScope === "personal"` against the org's `allowPersonalOnePassword`
+  toggle — a structurally malformed request (naming the reserved service as
+  the credential target) is rejected independent of policy state.
+- **Web: `apiErrorMessage` helper.** Error-message extraction for 1Password
+  UI surfaces was pulled into a shared `apiErrorMessage(err, fallback)` helper
+  in `packages/web/src/api/client.ts` (exported alongside `ApiError`) rather
+  than inlined per-component. `packages/web/src/api/integrations.ts`'s
+  `useCredentials`/`qkIntegrations.credentials` also gained a `scope: "user" |
+  "org"` parameter (default `"user"`) so the org settings page and the
+  personal connected-accounts page read independent cache entries; both
+  pre-existing call sites (`routes/settings.connected-accounts.tsx` and the
+  credentials list) were updated to pass it explicitly where non-default.
+- **Org settings page has a component-level admin check in addition to the
+  layout guard.** `packages/web/src/routes/settings.organization.onepassword.tsx`
+  re-checks `orgQ.data.callerRole !== "admin"` itself (showing the same "managed
+  by your org admins" copy as `OrgRouteGuard`) rather than relying solely on
+  the route-level guard, so a mid-session role change or direct navigation
+  can't render admin controls to a non-admin before the guard re-evaluates.
+- **`onepassword.live.test.ts`** (Task 5) uses the real default `createClient`
+  (no fake), gated on `OP_SERVICE_ACCOUNT_TOKEN` (skip-clean without it,
+  verified locally). Live execution against a real 1Password service account
+  is deferred — no token was available in the implementation environment; the
+  coordinator/user should run it before merge if live SDK verification is
+  desired.
