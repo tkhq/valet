@@ -17,8 +17,9 @@ export async function mintLinkCode(
   db: AppDb,
   userId: string,
   provider: string,
-  now = Date.now(),
+  opts: { now?: number; externalId?: string } = {},
 ): Promise<string> {
+  const now = opts.now ?? Date.now();
   const code = randomBytes(16).toString("base64url");
   await db
     .delete(identityLinkCodes)
@@ -28,6 +29,7 @@ export async function mintLinkCode(
     userId,
     provider,
     codeHash: hashCode(code),
+    externalId: opts.externalId ?? null,
     expiresAt: now + CODE_TTL_MS,
     createdAt: now,
   });
@@ -39,7 +41,7 @@ export async function consumeLinkCode(
   provider: string,
   code: string,
   now = Date.now(),
-): Promise<{ userId: string } | null> {
+): Promise<{ userId: string; externalId: string | null } | null> {
   const rows = await db
     .delete(identityLinkCodes)
     .where(
@@ -48,7 +50,7 @@ export async function consumeLinkCode(
     .returning();
   const row = rows[0];
   if (!row || row.expiresAt < now) return null;
-  return { userId: row.userId };
+  return { userId: row.userId, externalId: row.externalId ?? null };
 }
 
 /** Opportunistic GC — callers may invoke on mint; not required for correctness. */

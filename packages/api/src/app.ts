@@ -47,6 +47,7 @@ import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
+import { slackWebhookRouter } from "./routes/slack-webhook.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
@@ -117,6 +118,12 @@ export function createApp(
   // gate below, since the caller is the provider (Telegram etc.), not a
   // logged-in Valet user. Mounting BEFORE `buildAuthMiddleware` is what
   // makes this route public — do not move it below that line.
+  //
+  // Slack gets a dedicated ingress (mounted first so the more specific path
+  // wins): one app-level URL carries Events API + interactivity, verified
+  // once against the credential-metadata signing secret and fanned out to
+  // both the channel and the event pipeline (slack design decision 2).
+  app.route("/api/channels/slack", slackWebhookRouter);
   app.route("/api/channels", channelsRouter);
 
   // PUBLIC GitHub App webhook ingress — same reasoning as `channelsRouter`

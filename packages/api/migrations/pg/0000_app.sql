@@ -365,6 +365,7 @@ CREATE TABLE "identity_link_codes" (
 	"user_id" text NOT NULL,
 	"provider" text NOT NULL,
 	"code_hash" text NOT NULL,
+	"external_id" text,
 	"expires_at" bigint NOT NULL,
 	"created_at" bigint NOT NULL
 );

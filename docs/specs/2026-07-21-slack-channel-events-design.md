@@ -175,10 +175,15 @@ starting a broken transport.
 
 Both were flagged in the Telegram spec's deviations; they land in this pass:
 
-- **Conversation-key reconstruction moves behind the transport.**
-  `channelThreadFor` (`host.ts:333–341`) hardcodes `telegram:dm:{chatId}`. New
-  optional transport method `conversationKeyFromThreadKey(threadKey): string |
-  null`; Telegram and Slack both implement it; the hardcoded fallback is deleted.
+- **Conversation-key ↔ thread-key mapping moves behind the transport, both
+  directions.** `channelThreadFor` hardcoded `telegram:dm:{chatId}`, and the
+  host's forward derivation took the substring after the last `:` — which
+  would collapse Slack's `slack:{teamId}:{channelId}:{threadTs}` down to the
+  ts alone. New optional transport methods
+  `threadKeyFromConversationKey(conversationKey): string` and its inverse
+  `conversationKeyFromThreadKey(threadKey): string | null`; Telegram and
+  Slack implement both; the host's `:dm:` fallback remains only for stub
+  transports in tests.
 - **Per-transport webhook secret sourcing.** The host's webhook mode currently
   generates a per-boot secret and calls `registerWebhook`. The factory grows a
   discriminator (e.g. `ingress: "registered-webhook" | "external-webhook" |

@@ -78,6 +78,12 @@ export interface EventCatalogEntry {
   description: string;
   /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
   filters: { field: string; path: string; description: string }[];
+  /**
+   * High-volume keys (e.g. slack.message) opt into match-gated persistence:
+   * ingest matches subscriptions FIRST and skips the insert entirely when
+   * nothing matches. Default false = always persist.
+   */
+  ephemeral?: boolean;
 }
 
 export interface TriggerDef {
@@ -148,7 +154,20 @@ export interface InboundChannelEvent {
   command?: { name: string; args?: string };
   media?: InboundChannelMedia[];
   /** Set when kind === "gate_callback". `ref` identifies the gate-prompt message. */
-  gateCallback?: { actionId: string; callbackId: string; ref: GatePromptRef };
+  gateCallback?: {
+    actionId: string;
+    callbackId: string;
+    ref: GatePromptRef;
+    /**
+     * Explicit gate id when the transport can embed it in the callback
+     * (Slack Block Kit values). Lets gates survive host restarts; absent for
+     * transports with tiny callback payloads (Telegram), where the host falls
+     * back to its in-memory ref map.
+     */
+    gateId?: string;
+  };
+  /** Extra inbound context (shared-channel mentions, display labels). */
+  context?: { mention?: boolean; channelLabel?: string };
   raw: RawChannelUpdate;
 }
 
@@ -204,10 +223,30 @@ export interface ChannelTransport {
   answerCallback?(callbackId: string, text?: string): Promise<void>;
   /** Register the webhook endpoint with the provider (webhook mode only). */
   registerWebhook?(url: string, secretToken: string): Promise<void>;
+  /**
+   * Transport-owned engine-thread-key derivation, e.g. Slack's
+   * "slack:{channelId}:{threadTs}" from "slack:{teamId}:{channelId}:{threadTs}".
+   * Absent → host default: `${channelType}:${lastKeySegment}` (Telegram).
+   */
+  threadKeyFromConversationKey?(conversationKey: string): string;
+  /**
+   * Inverse of the thread-key mapping: rebuild the conversationKey the
+   * transport minted for an engine thread key (host.channelThreadFor). `null`
+   * = not one of this transport's keys.
+   */
+  conversationKeyFromThreadKey?(threadKey: string): string | null;
 }
 
 export interface ChannelTransportFactory {
   channelType: string;
+  /**
+   * How inbound reaches the host. "registered-webhook" (default): the host
+   * generates a per-boot secret and calls transport.registerWebhook.
+   * "external-webhook": the provider's webhook URL is app-level config and
+   * verification uses provider secrets (credential metadata) in a dedicated
+   * route — the host neither generates a secret nor registers anything.
+   */
+  ingress?: "registered-webhook" | "external-webhook";
   create(ctx: TransportContext): ChannelTransport;
 }
 

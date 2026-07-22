@@ -53,6 +53,7 @@ import type {
   ListModelsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
+  ListSlackWorkspaceMembersResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
@@ -99,6 +100,7 @@ import type {
   SendPromptResponse,
   SetNotificationPreferenceRequest,
   StartIdentityLinkResponse,
+  StartSlackIdentityLinkRequest,
   SetTeamMemberRoleRequest,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
@@ -106,6 +108,8 @@ import type {
   TestLlmProviderResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
+  VerifyIdentityLinkRequest,
+  VerifyIdentityLinkResponse,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
 import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
@@ -474,13 +478,22 @@ export const api = {
   connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
   disconnectGithub: () => request<undefined>("DELETE", "/me/github"),
 
-  // identity links (channel-link Phase 7): per-user Telegram account linking
+  // identity links (channel-link Phase 7, slack pass): per-user channel linking
   listIdentityLinks: () => request<ListIdentityLinksResponse>("GET", "/me/identity-links"),
   startIdentityLink: (provider: string) =>
     request<StartIdentityLinkResponse>(
       "POST",
       `/me/identity-links/${encodeURIComponent(provider)}/start`,
     ),
+  listSlackWorkspaceMembers: (q: string) =>
+    request<ListSlackWorkspaceMembersResponse>(
+      "GET",
+      `/me/identity-links/slack/users?q=${encodeURIComponent(q)}`,
+    ),
+  startSlackIdentityLink: (body: StartSlackIdentityLinkRequest) =>
+    request<StartIdentityLinkResponse>("POST", "/me/identity-links/slack/start", body),
+  verifySlackIdentityLink: (body: VerifyIdentityLinkRequest) =>
+    request<VerifyIdentityLinkResponse>("POST", "/me/identity-links/slack/verify", body),
   patchIdentityLink: (provider: string, body: PatchIdentityLinkRequest) =>
     request<{ ok: true }>("PATCH", `/me/identity-links/${encodeURIComponent(provider)}`, body),
   deleteIdentityLink: (provider: string) =>

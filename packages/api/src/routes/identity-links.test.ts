@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 class FakeTelegramTransport implements ChannelTransport {
-  readonly channelType = "telegram";
+  readonly channelType: string = "telegram";
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   verifyWebhook(): null {
     return null;
@@ -73,8 +73,11 @@ async function bootWithRunningTelegram(): Promise<TestApi> {
 }
 
 describe("GET /api/me/identity-links", () => {
-  it("reports linked:false, channelReady:false when no transport is running", async () => {
-    api = await bootTestApi();
+  it("reports linked:false, channelReady:false when the transport plugin is present but not running", async () => {
+    // The provider list derives from transport-declaring plugins (slack pass);
+    // an app booted with zero transport plugins reports zero links.
+    const { plugin } = telegramPlugin();
+    api = await bootTestApi({ plugins: [plugin] });
 
     const res = await fetch(`${api.baseUrl}/api/me/identity-links`);
     expect(res.status).toBe(200);
@@ -114,6 +117,8 @@ describe("POST /api/me/identity-links/telegram/start", () => {
     expect(body.expiresInSeconds).toBe(600);
     expect(body.deepLink).toMatch(/^https:\/\/t\.me\/valet_test_bot\?start=[A-Za-z0-9_-]{20,}$/);
 
+    expect(body.delivery).toBe("deep_link");
+    if (!body.deepLink) throw new Error("expected deepLink on delivery=deep_link");
     const code = body.deepLink.split("start=")[1] as string;
     const consumed = await consumeLinkCode(api.providers.db, "telegram", code);
     expect(consumed).toMatchObject({ userId: "local-user" });
@@ -141,6 +146,7 @@ describe("PATCH /api/me/identity-links/telegram", () => {
 
     const start = await fetch(`${api.baseUrl}/api/me/identity-links/telegram/start`, { method: "POST" });
     const { deepLink } = (await start.json()) as StartIdentityLinkResponse;
+    if (!deepLink) throw new Error("expected deepLink on delivery=deep_link");
     const code = deepLink.split("start=")[1] as string;
     const consumed = await consumeLinkCode(api.providers.db, "telegram", code);
     if (!consumed) throw new Error("expected code to be consumable");
@@ -203,5 +209,119 @@ describe("identity-links and /api/me coexist", () => {
     expect(meRes.status).toBe(200);
     const meBody = (await meRes.json()) as { id: string; email: string };
     expect(meBody).toMatchObject({ id: "local-user", email: "local@dev" });
+  });
+});
+
+class FakeSlackTransport extends FakeTelegramTransport {
+  // channelType is readonly on the base — shadow via declaration.
+  override readonly channelType: string = "slack";
+  async openDirectConversation(externalId: string): Promise<string> {
+    return `slack:T1:D-${externalId}`;
+  }
+  async listWorkspaceMembers(query: string): Promise<Array<{ id: string; name: string; realName?: string }>> {
+    const all = [
+      { id: "U100", name: "conner", realName: "Conner Swann" },
+      { id: "U200", name: "sam", realName: "Sam Doe" },
+    ];
+    return all.filter((m) => m.name.includes(query));
+  }
+}
+
+async function bootWithRunningSlack(): Promise<{ api: TestApi; transport: FakeSlackTransport }> {
+  const transport = new FakeSlackTransport();
+  const plugin: ValetPlugin = {
+    name: "slack",
+    version: "0",
+    transports: [{ channelType: "slack", ingress: "external-webhook", create: () => transport }],
+  };
+  const booted = await bootTestApi({ plugins: [plugin] });
+  await booted.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+    type: "bot_token",
+    accessToken: "xoxb-test",
+    metadata: { webhookSecret: "s", teamId: "T1" },
+  });
+  await booted.providers.channelHost.start();
+  return { api: booted, transport };
+}
+
+describe("slack identity linking (DM-code flow)", () => {
+  it("409s the typeahead and start when the slack transport isn't running", async () => {
+    api = await bootTestApi();
+    expect((await fetch(`${api.baseUrl}/api/me/identity-links/slack/users?q=co`)).status).toBe(409);
+    const start = await fetch(`${api.baseUrl}/api/me/identity-links/slack/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ externalId: "U100" }),
+    });
+    expect(start.status).toBe(409);
+  });
+
+  it("typeahead → start DMs a code to the chosen member → verify links the caller", async () => {
+    const booted = await bootWithRunningSlack();
+    api = booted.api;
+
+    const users = await fetch(`${api.baseUrl}/api/me/identity-links/slack/users?q=co`);
+    expect(users.status).toBe(200);
+    const { members } = (await users.json()) as { members: Array<{ id: string; name: string }> };
+    expect(members).toEqual([{ id: "U100", name: "conner", realName: "Conner Swann" }]);
+
+    const start = await fetch(`${api.baseUrl}/api/me/identity-links/slack/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ externalId: "U100" }),
+    });
+    expect(start.status).toBe(200);
+    const startBody = (await start.json()) as StartIdentityLinkResponse;
+    expect(startBody.delivery).toBe("dm_code");
+    expect(startBody.deepLink).toBeUndefined();
+
+    // The code went out via the transport DM, addressed to the IM channel.
+    expect(booted.transport.sent).toHaveLength(1);
+    expect(booted.transport.sent[0].conversationKey).toBe("slack:T1:D-U100");
+    const match = booted.transport.sent[0].message.markdown.match(/\*\*([A-Za-z0-9_-]{20,})\*\*/);
+    if (!match) throw new Error("expected the DM to carry the link code");
+    const code = match[1];
+
+    const verify = await fetch(`${api.baseUrl}/api/me/identity-links/slack/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    expect(verify.status).toBe(200);
+
+    const links = (await (await fetch(`${api.baseUrl}/api/me/identity-links`)).json()) as ListIdentityLinksResponse;
+    const slack = links.links.find((l: IdentityLinkStatus) => l.provider === "slack");
+    expect(slack).toMatchObject({ linked: true, externalId: "U100", channelReady: true });
+  });
+
+  it("400s an invalid or reused verify code", async () => {
+    const booted = await bootWithRunningSlack();
+    api = booted.api;
+
+    const bad = await fetch(`${api.baseUrl}/api/me/identity-links/slack/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "nope" }),
+    });
+    expect(bad.status).toBe(400);
+
+    await fetch(`${api.baseUrl}/api/me/identity-links/slack/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ externalId: "U100" }),
+    });
+    const match = booted.transport.sent[0].message.markdown.match(/\*\*([A-Za-z0-9_-]{20,})\*\*/);
+    const code = match ? match[1] : "";
+    expect((await fetch(`${api.baseUrl}/api/me/identity-links/slack/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    })).status).toBe(200);
+    // Single-use.
+    expect((await fetch(`${api.baseUrl}/api/me/identity-links/slack/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    })).status).toBe(400);
   });
 });

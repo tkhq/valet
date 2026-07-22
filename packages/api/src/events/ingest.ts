@@ -28,6 +28,8 @@ export interface IngestResult {
   eventId: string;
   duplicate: boolean;
   deliveries: number;
+  /** True when an `ephemeral` catalog key matched no subscription and the event was not persisted. */
+  skipped?: boolean;
 }
 
 export async function ingestEvent(
@@ -42,6 +44,27 @@ export async function ingestEvent(
   // falsy but valid — only an unparseable occurredAt falls back to receipt time.
   const parsedOccurredAt = Date.parse(event.occurredAt);
   const occurredAt = Number.isFinite(parsedOccurredAt) ? parsedOccurredAt : now;
+
+  // Match-gated persistence for high-volume keys: an `ephemeral` catalog
+  // entry (e.g. slack.message) is matched against subscriptions BEFORE any
+  // insert — zero matches means the event never touches the events table.
+  // Subscribing is what turns the firehose on. The subscription set is
+  // re-read inside the transaction below, so a subscription created between
+  // this check and the insert costs at most one skipped event, never a
+  // persisted-but-undelivered one.
+  const entry = catalog.find((e) => e.key === event.key);
+  if (entry?.ephemeral) {
+    const subs = await deps.db
+      .select()
+      .from(eventSubscriptions)
+      .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
+    const anyMatch = subs.some(
+      (sub) =>
+        eventKeyMatches(event.key, sub.eventKeys as string[]) &&
+        filtersMatch(event.payload, event.key, sub.filters as SubscriptionFilter[], catalog),
+    );
+    if (!anyMatch) return { eventId, duplicate: false, deliveries: 0, skipped: true };
+  }
 
   const result = await deps.db.transaction(async (tx) => {
     const inserted = await tx
