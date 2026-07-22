@@ -107,6 +107,9 @@ interface OnePasswordMeta {
 export function onePasswordMeta(row: StoredCredential): OnePasswordMeta | null {
   const meta = row.metadata?.onepassword;
   if (!meta || typeof meta !== "object") return null;
+  // `metadata` is `Record<string, unknown>`; narrowed to `object` above, so
+  // this only widens the index signature to read named properties — no
+  // shape is assumed until the `typeof`/enum checks below pass.
   const candidate = meta as Record<string, unknown>;
   const { reference, tokenScope } = candidate;
   if (typeof reference !== "string") return null;
@@ -158,6 +161,17 @@ function tokenOwner(scope: OnePasswordScope, ctx: OnePasswordCtx): CredentialOwn
   return scope === "org" ? { type: "org", id: ctx.orgId } : { type: "user", id: ctx.userId };
 }
 
+/**
+ * Wraps any SDK rejection as `OnePasswordAuthError`, prefixed with `context`.
+ * Already-typed errors (missing token, disabled toggle, a prior wrap) pass
+ * through unchanged — never double-wrapped.
+ */
+function wrapSdkError(err: unknown, context: string): OnePasswordAuthError {
+  if (err instanceof OnePasswordAuthError) return err;
+  const msg = err instanceof Error ? err.message : String(err);
+  return new OnePasswordAuthError(`${context}: ${msg}`);
+}
+
 export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordService {
   const createClient = deps.createClient ?? defaultCreateClient;
   const now = deps.now ?? Date.now;
@@ -191,7 +205,13 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     const token = await requireToken(scope, ctx);
     let pending = clientCache.get(token);
     if (!pending) {
-      pending = createClient(token);
+      pending = createClient(token).catch((err: unknown) => {
+        // Evict on rejection — a transient failure (network blip, momentary
+        // SDK hiccup) must not permanently poison this token's cache entry
+        // until process restart. The next call re-attempts construction.
+        clientCache.delete(token);
+        throw wrapSdkError(err, "1Password client initialization failed");
+      });
       clientCache.set(token, pending);
     }
     return pending;
@@ -215,8 +235,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       resolveCache.set(cacheKey, { value, at: nowMs });
       return value;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new OnePasswordAuthError(`1Password resolution failed for ${reference}: ${msg}`);
+      throw wrapSdkError(err, `1Password resolution failed for ${reference}`);
     }
   }
 
@@ -244,15 +263,27 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     },
     async listVaults(scope, ctx) {
       const client = await clientFor(scope, ctx);
-      return client.vaults.list();
+      try {
+        return await client.vaults.list();
+      } catch (err) {
+        throw wrapSdkError(err, "1Password vault listing failed");
+      }
     },
     async listItems(scope, ctx, vaultId) {
       const client = await clientFor(scope, ctx);
-      return client.items.list(vaultId);
+      try {
+        return await client.items.list(vaultId);
+      } catch (err) {
+        throw wrapSdkError(err, "1Password item listing failed");
+      }
     },
     async getItem(scope, ctx, vaultId, itemId) {
       const client = await clientFor(scope, ctx);
-      return client.items.get(vaultId, itemId);
+      try {
+        return await client.items.get(vaultId, itemId);
+      } catch (err) {
+        throw wrapSdkError(err, "1Password item lookup failed");
+      }
     },
     resolveReference,
     resolveCredential,

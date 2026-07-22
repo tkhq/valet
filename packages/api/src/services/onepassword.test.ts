@@ -281,4 +281,79 @@ describe("createOnePasswordService", () => {
       expect(message).not.toContain("secret-for-");
     }
   });
+
+  it("wraps a listing call's SDK failure (client construction) in OnePasswordAuthError", async () => {
+    const credentials = memStore();
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "org-token",
+    });
+    const svc = createOnePasswordService({
+      credentials,
+      getAllowPersonal: async () => true,
+      createClient: async () => {
+        throw new Error("token expired");
+      },
+    });
+    await expect(svc.listVaults("org", ctx)).rejects.toThrow(OnePasswordAuthError);
+    await expect(svc.listVaults("org", ctx)).rejects.toThrow(/token expired/);
+  });
+
+  it("wraps a listing call's SDK failure (client method) without double-wrapping an already-typed error", async () => {
+    const credentials = memStore();
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "org-token",
+    });
+    const svc = createOnePasswordService({
+      credentials,
+      getAllowPersonal: async () => true,
+      createClient: async () =>
+        fakeClient({
+          items: {
+            list: async () => {
+              throw new OnePasswordAuthError("already typed, do not wrap again");
+            },
+            get: async () => ({ id: "i1", title: "Item One", fields: [] }),
+          },
+        }),
+    });
+    try {
+      await svc.listItems("org", ctx, "v1");
+      expect.unreachable("expected listItems to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(OnePasswordAuthError);
+      expect((err as Error).message).toBe("already typed, do not wrap again");
+      // Not prefixed with any additional "1Password ... failed" wrapper text.
+      expect((err as Error).message).not.toMatch(/failed:/);
+    }
+  });
+
+  it("evicts a poisoned client cache entry so a subsequent call can succeed", async () => {
+    const credentials = memStore();
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "org-token",
+    });
+    let attempt = 0;
+    const createClient = vi.fn(async () => {
+      attempt += 1;
+      if (attempt === 1) {
+        throw new Error("transient network blip");
+      }
+      return fakeClient();
+    });
+    const svc = createOnePasswordService({
+      credentials,
+      getAllowPersonal: async () => true,
+      createClient,
+    });
+
+    await expect(svc.listVaults("org", ctx)).rejects.toThrow(OnePasswordAuthError);
+    expect(createClient).toHaveBeenCalledTimes(1);
+
+    const vaults = await svc.listVaults("org", ctx);
+    expect(vaults).toEqual([{ id: "v1", title: "Vault One" }]);
+    expect(createClient).toHaveBeenCalledTimes(2);
+  });
 });
