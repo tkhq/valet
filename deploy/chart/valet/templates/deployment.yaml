@@ -50,6 +50,9 @@ spec:
                 name: {{ include "valet.fullname" . }}-config
             - secretRef:
                 name: {{ include "valet.fullname" . }}-app
+            {{- with .Values.api.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
             - name: PORT
               value: {{ .Values.api.port | quote }}

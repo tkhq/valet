@@ -49,6 +49,15 @@ api:
     googleClientSecret: ""
     githubClientSecret: ""
 
+  # Additional envFrom entries appended to the api Deployment. Use this
+  # to load env vars from Secrets/ConfigMaps managed outside the chart
+  # (e.g. External Secrets Operator syncing from AWS Secrets Manager).
+  # Later entries override earlier ones on key collision — leave the
+  # matching chart-managed secrets in api.secrets blank to defer to them.
+  extraEnvFrom: []
+  # - secretRef:
+  #     name: valet-external-secrets
+
 serviceAccount:
   # ServiceAccount the api pod runs as. Bound (via RoleBinding, in the
   # sandbox namespace) to the Role granting Sandbox CR + pods/exec/log
