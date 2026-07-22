@@ -239,6 +239,21 @@ code as of the implementing commits:
   `buildCredentialResolver` uses (or extract it into a shared function both
   call), so a reference-carrying row behaves identically no matter which
   subsystem reads it.
+
+  The real fix underneath this follow-up (decided with the user, 2026-07-21)
+  is an **explicit owner-precedence contract** for credential reads: "which
+  owner's credentials does a reader see" has never been stated first-class —
+  the engine's user-owner-only read is inherited behavior, not a decision,
+  and the org-row fallback in `buildCredentialResolver` (previous Deviations
+  entry) is a deliberate, temporary shim compensating from the host side. Its
+  reference-rows-only restriction is a scope guard to avoid silently widening
+  session access to plain org-owned rows, not a principled semantic. The
+  end-state: decide user→org precedence explicitly (all credential kinds vs
+  reference-only is a product call — note member sessions would gain access
+  to admin-pasted plain org credentials under the general form), implement it
+  ONCE in a shared resolution helper, and consume it from all three readers
+  (session resolver, workflow invoker, ChannelHost). Until then, credential
+  read semantics intentionally differ per reader as documented above.
 - **Org-scoped reference rows required a dedicated session-path fallback
   (post-PR adversarial-review fix).** This doc originally claimed org-owned
   rows would "ride the existing owner read-union" — no such union exists:
