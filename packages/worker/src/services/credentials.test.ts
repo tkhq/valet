@@ -662,6 +662,64 @@ describe('getCredential — concurrent refresh', () => {
     expect(result).toMatchObject({ ok: false, error: { reason: 'refresh_failed' } });
   });
 
+  it('does NOT delete the credential when a status-less network error merely mentions "unauthorized"', async () => {
+    mockDb.getCredentialRow.mockResolvedValue(githubRow('stale-blob', EXPIRED));
+    // A rejected fetch carries no HTTP status, and its message wording proves
+    // nothing about the token — treating it as definitive would delete a
+    // credential that may still be good.
+    const refreshToken = vi.fn().mockRejectedValue(new Error('TypeError: fetch failed: unauthorized'));
+    mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
+
+    const result = await getCredential(fakeEnv, 'user', 'user-1', 'github');
+
+    expect(mockDb.deleteCredentialIfDataMatches).not.toHaveBeenCalled();
+    expect(mockDb.deleteCredential).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, error: { reason: 'refresh_failed' } });
+  });
+
+  it('still deletes on an OAuth error code thrown without an HTTP status', async () => {
+    mockDb.getCredentialRow.mockResolvedValue(githubRow('stale-blob', EXPIRED));
+    // Providers rethrow the OAuth error codes in plain Errors; the code itself
+    // is the definitive signal even when no status is attached.
+    const refreshToken = vi.fn().mockRejectedValue(new Error('invalid_grant: token has been revoked'));
+    mockLoadGitHubApp.mockResolvedValue({ oauth: { refreshToken } });
+
+    const result = await getCredential(fakeEnv, 'user', 'user-1', 'github');
+
+    expect(mockDb.deleteCredentialIfDataMatches).toHaveBeenCalledWith(
+      fakeDrizzleDb, 'user', 'user-1', 'github', 'oauth2', 'stale-blob',
+    );
+    expect(result).toMatchObject({ ok: false, error: { reason: 'refresh_failed' } });
+  });
+
+  it('a throwing refresh resolves to a structured failure for every joined caller', async () => {
+    // The google refresh path fetches directly, so a network-level rejection
+    // used to escape the in-flight attempt and reject every caller that had
+    // joined it. It must surface as an ok:false result instead.
+    mockDb.getCredentialRow.mockResolvedValue({
+      ...githubRow('stale-blob', EXPIRED),
+      provider: 'google',
+    });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+    try {
+      const results = await Promise.all([
+        getCredential(fakeEnv, 'user', 'user-1', 'google'),
+        getCredential(fakeEnv, 'user', 'user-1', 'google'),
+      ]);
+
+      // One shared attempt (the second caller joined it), one fetch.
+      expect(fetch).toHaveBeenCalledTimes(1);
+      for (const result of results) {
+        expect(result).toMatchObject({ ok: false, error: { reason: 'refresh_failed' } });
+      }
+      // A throw is not a definitive token failure — nothing gets deleted.
+      expect(mockDb.deleteCredentialIfDataMatches).not.toHaveBeenCalled();
+      expect(mockDb.deleteCredential).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('keeps the provider-reported expiry when refreshing through the generic path', async () => {
     mockDb.getCredentialRow.mockResolvedValue({
       id: 'cred-1',

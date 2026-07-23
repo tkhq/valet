@@ -162,7 +162,15 @@ function isDefinitiveRefreshFailure(err: unknown): boolean {
   const status = (err as { status?: unknown } | null | undefined)?.status;
   if (typeof status === 'number' && (status >= 500 || status === 429)) return false;
   const message = err instanceof Error ? err.message : String(err ?? '');
-  return /invalid_grant|bad_refresh_token|bad_verification_code|unauthorized|bad credentials/i.test(message);
+  // The OAuth refresh error codes are definitive wherever they surface —
+  // providers rethrow them in plain Errors with no HTTP status attached, and
+  // the strings do not occur in network-level failures.
+  if (/invalid_grant|bad_refresh_token|bad_verification_code/i.test(message)) return true;
+  // The generic phrases are only trustworthy on a real HTTP response. A thrown
+  // network error carries no status, and "unauthorized" appearing in its
+  // message must not delete a credential that may still be good.
+  if (typeof status !== 'number') return false;
+  return /unauthorized|bad credentials/i.test(message);
 }
 
 /**
@@ -694,20 +702,36 @@ async function refreshCredential(
   if (inflight) return inflight;
 
   const attempt = (async (): Promise<CredentialResult> => {
-    // Double-checked read: the credential may have been refreshed between the
-    // caller's read and this point — by a holder that has already finished, or
-    // by another isolate entirely. Spending our copy of the refresh token now
-    // would invalidate the token that replaced it, so return theirs instead.
-    const alreadyRotated = await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token);
-    if (alreadyRotated) return alreadyRotated;
+    try {
+      // Double-checked read: the credential may have been refreshed between the
+      // caller's read and this point — by a holder that has already finished, or
+      // by another isolate entirely. Spending our copy of the refresh token now
+      // would invalidate the token that replaced it, so return theirs instead.
+      const alreadyRotated = await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token);
+      if (alreadyRotated) return alreadyRotated;
 
-    const result = await attemptRefresh(env, ownerType, ownerId, provider, data);
-    if (result.ok) return result;
+      const result = await attemptRefresh(env, ownerType, ownerId, provider, data);
+      if (result.ok) return result;
 
-    // The refresh failed, which is also what losing a cross-isolate race looks
-    // like from here. If the stored token has moved on, the credential is fine
-    // and only this attempt failed.
-    return (await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token)) ?? result;
+      // The refresh failed, which is also what losing a cross-isolate race looks
+      // like from here. If the stored token has moved on, the credential is fine
+      // and only this attempt failed.
+      return (await readRotatedCredential(env, ownerType, ownerId, provider, data.refresh_token)) ?? result;
+    } catch (err) {
+      // A raw throw here — a rejecting fetch inside a provider refresh, for
+      // instance — would otherwise propagate to every caller that joined this
+      // in-flight attempt. Convert it to the structured failure the callers
+      // are written to handle; its status-less message also keeps it out of
+      // isDefinitiveRefreshFailure's delete path.
+      return {
+        ok: false,
+        error: {
+          service: provider,
+          reason: 'refresh_failed',
+          message: `Credential refresh threw: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
   })();
 
   const tracked = attempt.finally(() => {
