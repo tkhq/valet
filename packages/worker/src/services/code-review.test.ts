@@ -4,9 +4,11 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 // that one lookup so the tests exercise the real check (including its GitHub
 // permissions read, stubbed on fetch below) without a credential fixture.
 const getCredentialMock = vi.hoisted(() => vi.fn());
+const hasCredentialMock = vi.hoisted(() => vi.fn());
 vi.mock('./credentials.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./credentials.js')>()),
   getCredential: getCredentialMock,
+  hasCredential: hasCredentialMock,
 }));
 
 import { validateDefinition, validateAgainstEnvironment } from '../lib/workflow-dag/validator.js';
@@ -43,6 +45,8 @@ beforeEach(() => {
     ok: true,
     credential: { accessToken: 'gho_caller', credentialType: 'oauth2', refreshed: false },
   });
+  hasCredentialMock.mockReset();
+  hasCredentialMock.mockResolvedValue(true);
 });
 
 describe('code-review workflow definition', () => {
@@ -97,6 +101,16 @@ describe('enableCodeReview', () => {
       type: 'github-app', owner: 'tkhq', repo: 'valet', events: ['pull_request', 'issue_comment'],
     });
     expect(JSON.parse(appTriggers[0].variableMapping as string)).toHaveProperty('pullNumber', '$.pull_request.number');
+  });
+
+  it('refuses to enable when the caller has not connected GitHub — even on a public repo', async () => {
+    const { db, env } = await setup();
+    // Public repo: repo authority alone would pass. Personal gate still requires
+    // the connection, and nothing is created.
+    hasCredentialMock.mockResolvedValue(false);
+    await expect(enableCodeReview(db as never, env, 'u1', 'tkhq', 'valet')).rejects.toThrow(/Connect your GitHub account/i);
+    expect(db.select().from(workflows).all()).toEqual([]);
+    expect(db.select().from(triggers).all()).toEqual([]);
   });
 
   it('is idempotent — re-arming the same repo returns the existing trigger, no duplicate/500', async () => {

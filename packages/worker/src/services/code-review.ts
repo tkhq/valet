@@ -6,7 +6,7 @@
 // template registry behind this; the one workflow it installs is defined here.
 
 import { and, eq } from 'drizzle-orm';
-import { NotFoundError } from '@valet/shared';
+import { NotFoundError, ValidationError } from '@valet/shared';
 import type { WorkflowDefinition } from '@valet/shared';
 import { triggers } from '../lib/schema/workflows.js';
 import type { AppDb } from '../lib/drizzle.js';
@@ -17,6 +17,7 @@ import { resolveAvailableModels } from './model-catalog.js';
 import { assembleLlmProviderEnv } from '../lib/llm/provider-env.js';
 import { createTrigger } from '../lib/db/triggers.js';
 import { assertCallerCanAdministerRepo } from './github-repo-authority.js';
+import { hasCredential } from './credentials.js';
 
 // Model for the review step. Must be a catalog-available, vendor-prefixed id
 // whose provider key is configured in the worker env, or publishDraft rejects
@@ -209,6 +210,17 @@ export async function enableCodeReview(
   owner: string,
   repo: string,
 ): Promise<EnableCodeReviewResult> {
+  // Personal until shared workflows exist: the review runs as the arming user's
+  // GitHub identity, so require them to have connected it. This is stricter than
+  // repo authority alone — a public repo passes assertCallerCanAdministerRepo
+  // with no linked account (world-readable), but a personal automation still
+  // needs an identity to run as, so gate on the connection first.
+  if (!(await hasCredential(env, 'user', userId, 'github'))) {
+    throw new ValidationError(
+      'Connect your GitHub account in Settings → Integrations before enabling code review — reviews run as your GitHub identity.',
+    );
+  }
+
   // Coverage + authority, before anything is created: the App must reach the
   // owner and the caller must personally have write access to the repo.
   await assertCallerCanAdministerRepo(db, env, userId, owner, repo);

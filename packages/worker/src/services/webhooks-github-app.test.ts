@@ -31,6 +31,12 @@ vi.mock('../lib/db.js', async (orig) => ({
   getUserById: getUserByIdMock,
 }));
 
+const { hasCredentialMock } = vi.hoisted(() => ({ hasCredentialMock: vi.fn() }));
+vi.mock('./credentials.js', async (orig) => ({
+  ...(await orig<typeof import('./credentials.js')>()),
+  hasCredential: hasCredentialMock,
+}));
+
 import { createTestDb } from '../test-utils/db.js';
 import { users } from '../lib/schema/users.js';
 import { workflows, triggers } from '../lib/schema/workflows.js';
@@ -198,6 +204,8 @@ describe('dispatchGithubAppReviews', () => {
     // Default: org code review enabled+overridable, owner allows full review.
     getGitHubMetadataMock.mockResolvedValue({});
     getUserByIdMock.mockResolvedValue({ id: 'u1', codeReviewEnabled: true, codeReviewMentionOnly: false });
+    // Default: the arming user has a linked GitHub account (personal gate).
+    hasCredentialMock.mockResolvedValue(true);
     // App config resolves the bot slug for @-mention matching.
     getServiceConfigMock.mockResolvedValue({ config: { appSlug: 'valet-turnkey' }, metadata: {}, configuredBy: null, updatedAt: '' });
     const t = createTestDb();
@@ -234,6 +242,15 @@ describe('dispatchGithubAppReviews', () => {
 
     await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened', { number: 75 }), 'd-case');
     expect(dispatchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT dispatch when the arming user has no linked GitHub account', async () => {
+    // Personal: the review runs as the armer's identity, so a disconnected armer
+    // silences the trigger instead of falling back to the anonymous App path.
+    hasCredentialMock.mockResolvedValue(false);
+    await dispatchGithubAppReviews(env, 'pull_request', prEvent('opened', { number: 75 }), 'd-nolink');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(hasCredentialMock).toHaveBeenCalledWith(env, 'user', 'u1', 'github');
   });
 
   it('does NOT dispatch for a draft PR or a push', async () => {

@@ -9,6 +9,7 @@ import { sha256Hex } from '../lib/hash.js';
 import { constantTimeEqual } from '../lib/crypto.js';
 import { WEBHOOK_RATE_LIMIT_DEFAULT, bumpWebhookRateCount } from '../lib/db.js';
 import { resolveGithubAppSlug } from './github-app.js';
+import { hasCredential } from './credentials.js';
 import { getGitHubMetadata } from './github-config.js';
 import { getPublishedDefinition } from './workflow-versions.js';
 
@@ -865,6 +866,14 @@ export async function dispatchGithubAppReviews(
       // make review quieter for their own repos, never override the org.
       const ownerPrefs = await readCodeReviewOwnerPrefs(appDb, trigger.user_id, orgPolicy.enforced);
       if (!resolveCodeReviewGate(orgPolicy, ownerPrefs, reason)) continue;
+
+      // Personal: the review runs as the arming user's GitHub identity. If they
+      // have disconnected it, the trigger goes quiet rather than falling back to
+      // the anonymous App path — same requirement enforced at arm time.
+      if (!(await hasCredential(env, 'user', trigger.user_id, 'github'))) {
+        console.warn(`[github-app dispatch] trigger ${trigger.id} skipped — arming user has no linked GitHub account`);
+        continue;
+      }
 
       // Same per-trigger ceiling the generic webhook path enforces. An App
       // delivery is no cheaper than a manual one — each dispatch is an LLM run —
