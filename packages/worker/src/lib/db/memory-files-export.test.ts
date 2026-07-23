@@ -382,21 +382,21 @@ describe('import mechanics (size, cap, chunking)', () => {
     expect(getRow(h, USER, 'big/note.md')?.content).toBe(content);
   });
 
-  it('imports past the 200-file cap: prunes non-pinned excess and reports it', async () => {
+  it('imports past the file cap: prunes non-pinned excess and reports it', async () => {
     const h = makeHarness(USER);
     const files: Record<string, string> = {};
-    for (let i = 0; i < 250; i++) files[`notes/n-${i}.md`] = `# note ${i}`;
+    for (let i = 0; i < 550; i++) files[`notes/n-${i}.md`] = `# note ${i}`;
     for (let i = 0; i < 10; i++) files[`preferences/p-${i}.md`] = `# pref ${i}`;
 
     const result = await importMemoryFiles(h.rawDb, scope, files, true);
-    expect(result.imported).toBe(260);
+    expect(result.imported).toBe(560);
     expect(result.pruned).toBe(50);
 
     const count = (pinned: 0 | 1) =>
       (h.sqlite
         .prepare('SELECT COUNT(*) AS c FROM orchestrator_memory_files WHERE user_id = ? AND pinned = ?')
         .get(USER, pinned) as { c: number }).c;
-    expect(count(0)).toBe(200);
+    expect(count(0)).toBe(500);
     expect(count(1)).toBe(10);
   });
 
