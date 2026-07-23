@@ -85,6 +85,16 @@ export class TelegramTransport implements ChannelTransport {
 
   constructor(private readonly api: TelegramApi) {}
 
+  threadKeyFromConversationKey(conversationKey: string): string {
+    return `telegram:${chatIdFromConversationKey(conversationKey)}`;
+  }
+
+  conversationKeyFromThreadKey(threadKey: string): string | null {
+    if (!threadKey.startsWith("telegram:")) return null;
+    const chatId = threadKey.slice("telegram:".length);
+    return chatId === "" ? null : conversationKeyForChat(chatId);
+  }
+
   verifyWebhook(
     req: { headers: Record<string, string>; rawBody: Uint8Array },
     secrets: Record<string, string>,

@@ -22,6 +22,7 @@ import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListSessionsResponse,
+  ListSlackWorkspaceMembersResponse,
   ListThreadsResponse,
   PatchIdentityLinkRequest,
   PatchSessionResponse,
@@ -31,6 +32,9 @@ import type {
   SandboxJwtResponse,
   SetNotificationPreferenceRequest,
   StartIdentityLinkResponse,
+  StartSlackIdentityLinkRequest,
+  VerifyIdentityLinkRequest,
+  VerifyIdentityLinkResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
 
@@ -48,6 +52,7 @@ export const qk = {
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
+  slackMembers: (q: string) => ["identityLinks", "slack", "members", q] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -292,7 +297,8 @@ export function useSetNotificationPreference() {
   });
 }
 
-// ── Identity links (channel-link Phase 7) — per-user Telegram linking ───
+// ── Identity links (channel-link Phase 7, provider-parameterized in the
+// Slack pass) — per-user channel account linking ─────────────────────────
 
 export function useIdentityLinks(opts?: UseQueryOptions<ListIdentityLinksResponse>) {
   return useQuery<ListIdentityLinksResponse>({
@@ -314,8 +320,8 @@ export function useStartIdentityLink() {
 
 export function useSetLinkNotify() {
   const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, PatchIdentityLinkRequest>({
-    mutationFn: (body) => api.patchIdentityLink("telegram", body),
+  return useMutation<{ ok: true }, Error, { provider: string } & PatchIdentityLinkRequest>({
+    mutationFn: ({ provider, ...body }) => api.patchIdentityLink(provider, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
@@ -324,8 +330,34 @@ export function useSetLinkNotify() {
 
 export function useUnlinkIdentity() {
   const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, void>({
-    mutationFn: () => api.deleteIdentityLink("telegram"),
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (provider) => api.deleteIdentityLink(provider),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.identityLinks() });
+    },
+  });
+}
+
+/** Slack workspace-member typeahead — the caller gates via `enabled` (only
+ * once the debounced query is ≥2 chars). */
+export function useSlackWorkspaceMembers(q: string, enabled: boolean) {
+  return useQuery<ListSlackWorkspaceMembersResponse>({
+    queryKey: qk.slackMembers(q),
+    queryFn: () => api.listSlackWorkspaceMembers(q),
+    enabled,
+  });
+}
+
+export function useStartSlackLink() {
+  return useMutation<StartIdentityLinkResponse, Error, StartSlackIdentityLinkRequest>({
+    mutationFn: (body) => api.startSlackIdentityLink(body),
+  });
+}
+
+export function useVerifySlackLink() {
+  const qc = useQueryClient();
+  return useMutation<VerifyIdentityLinkResponse, Error, VerifyIdentityLinkRequest>({
+    mutationFn: (body) => api.verifySlackIdentityLink(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },

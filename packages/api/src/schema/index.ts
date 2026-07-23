@@ -567,6 +567,10 @@ export const identityLinkCodes = pgTable(
     userId: text("user_id").notNull(),
     provider: text("provider").notNull(),
     codeHash: text("code_hash").notNull(),
+    /** Pre-chosen external account id for providers where the code travels
+     * OUT to the account being linked (slack DM-code flow); null for
+     * deep-link providers (telegram), where the inbound /start reveals it. */
+    externalId: text("external_id"),
     expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },

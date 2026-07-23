@@ -104,6 +104,13 @@ function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & 
   return typeof (transport as { getMe?: unknown }).getMe === "function";
 }
 
+/** Feature-detects the slack-shaped IM-open extra (attention DMs, link codes). */
+function hasOpenDirectConversation(
+  transport: ChannelTransport,
+): transport is ChannelTransport & { openDirectConversation(externalId: string): Promise<string> } {
+  return typeof (transport as { openDirectConversation?: unknown }).openDirectConversation === "function";
+}
+
 /** Derives the host-side thread key from a conversationKey: the substring
  * after the LAST `:` — for telegram `telegram:dm:99` → chatId `99`. */
 function chatIdFromKey(conversationKey: string): string {
@@ -179,29 +186,59 @@ export class ChannelHost {
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
           continue;
         }
-        const transport = factory.create({ credential, config: {} });
-        this.transports.set(factory.channelType, transport);
-        if (hasGetMe(transport)) {
-          try {
-            const me = await transport.getMe();
-            if (me.username) this.botUsernames.set(factory.channelType, me.username);
-          } catch (err) {
-            console.error(`[channels] ${factory.channelType}: getMe probe failed`, err);
+        // Isolate per-transport setup: a factory that throws on a malformed
+        // credential (e.g. a Slack cred missing metadata.teamId) must skip
+        // only its own transport, never abort the loop or prevent
+        // startOutbound() below — that would silently kill egress for every
+        // other channel too.
+        try {
+          const transport = factory.create({ credential, config: {} });
+          this.transports.set(factory.channelType, transport);
+          if (hasGetMe(transport)) {
+            try {
+              const me = await transport.getMe();
+              if (me.username) this.botUsernames.set(factory.channelType, me.username);
+            } catch (err) {
+              console.error(`[channels] ${factory.channelType}: getMe probe failed`, err);
+            }
           }
+          await this.startIngress(factory, transport);
+        } catch (err) {
+          this.transports.delete(factory.channelType);
+          console.error(`[channels] ${factory.channelType}: transport setup failed, skipping`, err);
         }
-        await this.startIngress(factory.channelType, transport);
       }
     }
     this.startOutbound();
   }
 
   /**
-   * Mode selection (Task 8): webhook when `deps.publicUrl` is set, else
-   * long-poll when the transport implements `poll`. Neither → no inbound
-   * ingress for this transport (outbound-only, or a transport under test
-   * that implements neither).
+   * Mode selection (Task 8, extended for external-webhook transports):
+   * - "external-webhook" factories (Slack): the provider's webhook URL is
+   *   app-level config and verification uses provider secrets in a dedicated
+   *   route — the host neither generates a secret nor registers anything.
+   *   With no public URL, fall back to `poll` (Slack Socket Mode) when the
+   *   transport supports it; otherwise inbound is off and we say so loudly.
+   * - default ("registered-webhook", Telegram): webhook when
+   *   `deps.publicUrl` is set, else long-poll when the transport implements
+   *   `poll`. Neither → no inbound ingress (outbound-only).
    */
-  private async startIngress(channelType: string, transport: ChannelTransport): Promise<void> {
+  private async startIngress(
+    factory: { channelType: string; ingress?: "registered-webhook" | "external-webhook" },
+    transport: ChannelTransport,
+  ): Promise<void> {
+    const channelType = factory.channelType;
+    if (factory.ingress === "external-webhook") {
+      if (this.deps.publicUrl) return; // dedicated route (e.g. slack-webhook.ts) is the ingress
+      if (transport.poll) {
+        this.startPollLoop(channelType, transport);
+        return;
+      }
+      console.warn(
+        `[channels] ${channelType}: no public URL and no poll support — inbound disabled (set VALET_PUBLIC_URL or provide an app-level token)`,
+      );
+      return;
+    }
     if (this.deps.publicUrl) {
       const secret = randomBytes(24).toString("hex");
       this.webhookSecrets.set(channelType, secret);
@@ -213,6 +250,10 @@ export class ChannelHost {
       return;
     }
     if (!transport.poll) return;
+    this.startPollLoop(channelType, transport);
+  }
+
+  private startPollLoop(channelType: string, transport: ChannelTransport): void {
     const controller = new AbortController();
     this.pollControllers.set(channelType, controller);
     this.pollLoops.push(this.runPollLoop(channelType, transport, controller.signal));
@@ -330,13 +371,24 @@ export class ChannelHost {
     }
   }
 
-  /** Locked convention: split `key` on the FIRST `:`; the first segment must name a running transport. */
+  /**
+   * Locked convention: split `key` on the FIRST `:`; the first segment must
+   * name a running transport. Reconstruction of the conversationKey is
+   * transport-owned (`conversationKeyFromThreadKey`) — the `:dm:` fallback
+   * only remains for stub transports in tests that predate the method.
+   */
   channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
     const idx = key.indexOf(":");
     if (idx === -1) return null;
     const channelType = key.slice(0, idx);
     const rest = key.slice(idx + 1);
-    if (rest === "" || !this.isRunning(channelType)) return null;
+    if (rest === "") return null;
+    const transport = this.transports.get(channelType);
+    if (!transport) return null;
+    if (transport.conversationKeyFromThreadKey) {
+      const conversationKey = transport.conversationKeyFromThreadKey(key);
+      return conversationKey === null ? null : { channelType, conversationKey };
+    }
     return { channelType, conversationKey: `${channelType}:dm:${rest}` };
   }
 
@@ -567,10 +619,21 @@ export class ChannelHost {
       orgId,
     });
 
-    const chatId = chatIdFromKey(event.conversationKey);
-    const thread = session.thread(`${channelType}:${chatId}`);
+    const threadKey =
+      transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
+      `${channelType}:${chatIdFromKey(event.conversationKey)}`;
+    const thread = session.thread(threadKey);
 
     let text = event.text ?? "";
+    // Shared-channel context header (Slack mentions): the orchestrator sees
+    // where the message came from without the transport leaking prompt text.
+    // The channel label is a workspace-renameable name, so strip parens and
+    // newlines that could forge the provenance framing.
+    if (event.context?.channelLabel) {
+      const label = event.context.channelLabel.replace(/[()\r\n]/g, " ").trim();
+      const via = `via ${channelType} ${label}${event.context.mention ? ", mention" : ""}`;
+      text = text === "" ? `(${via})` : `(${via})\n\n${text}`;
+    }
     const attachments: PromptAttachment[] = [];
     for (const media of event.media ?? []) {
       const fetched = transport?.fetchMedia ? await transport.fetchMedia(media) : null;
@@ -614,42 +677,51 @@ export class ChannelHost {
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "gate_callback missing payload");
       return;
     }
+    // Transports that can embed the gate id in the callback payload (Slack
+    // Block Kit values) supply it explicitly — those gates survive host
+    // restarts, when the in-memory ref map is empty. Telegram's 64-byte
+    // callback_data can't, so it goes through `gateForRef`.
     const mapped = this.gateForRef(gateCallback.ref);
-    if (!mapped) {
+    const gateId = gateCallback.gateId ?? mapped?.gateId;
+    if (!gateId) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
       return;
     }
 
-    // User-ownership check: the agent_sessions row for the mapped session
-    // must belong to the linked user.
-    const rows = await this.deps.db
-      .select()
-      .from(agentSessions)
-      .where(and(eq(agentSessions.id, mapped.sessionId), eq(agentSessions.userId, userId)))
-      .limit(1);
-    if (!rows[0]) {
-      await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
-      await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
-      return;
+    if (mapped) {
+      // User-ownership check: the agent_sessions row for the mapped session
+      // must belong to the linked user. When only the explicit gateId is
+      // available (post-restart), this check is subsumed by resolving on the
+      // user's OWN orchestrator session below — a foreign gateId throws.
+      const rows = await this.deps.db
+        .select()
+        .from(agentSessions)
+        .where(and(eq(agentSessions.id, mapped.sessionId), eq(agentSessions.userId, userId)))
+        .limit(1);
+      if (!rows[0]) {
+        await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
+        await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
+        return;
+      }
     }
 
-    // Resolution deliberately looks up the user's orchestrator session
-    // rather than reusing `mapped.sessionId` — the ownership check above
-    // only proved `mapped.sessionId` belongs to `userId`, not that it IS
-    // the orchestrator session. This relies on the invariant that
-    // channel-keyed threads (see `channelThreadFor`) exist only on
-    // orchestrator sessions: `handleMessage` always threads through
-    // `ensureOrchestratorSession`, so any gate whose ref maps back to a
-    // channel thread must have been raised on that same orchestrator
-    // session. If that invariant is ever violated, `resolveDecision` below
-    // throws on a gateId that doesn't exist on this session — caught by
-    // `handleUpdate`'s try/catch (fails safe, not silently wrong).
+    // Resolution deliberately looks up the user's OWN orchestrator session
+    // rather than trusting the callback's origin. This is the security
+    // boundary for the explicit-gateId path (post-restart, when `mapped` is
+    // null and the ref-map ownership check above was skipped): resolving on
+    // the clicker's own session means a user can only ever resolve a gate
+    // that is actually pending on their own orchestrator. A foreign gateId
+    // (user B clicking user A's gate) is NOT on B's session, so
+    // `resolveDecision` no-ops — safe, but silent: `answerCallback` (where
+    // the transport supports it) still acks, and Slack has no answerCallback
+    // at all, so the clicker gets no negative feedback. That's an accepted
+    // limitation of restart-surviving gates, not a wrong resolution.
     const session = await this.deps.engineHost.orchestratorSessionFor({ type: "user", id: userId }, {
       actorUserId: userId,
       orgId,
     });
-    await session.resolveDecision(mapped.gateId, {
+    await session.resolveDecision(gateId, {
       actionId: gateCallback.actionId,
       resolvedBy: userId,
       resolvedAt: this.now(),
@@ -673,7 +745,14 @@ export class ChannelHost {
             if (!link || link.notifyAttention === false) continue;
             const transport = this.transports.get(channelType);
             if (!transport) continue;
-            await transport.send(`${channelType}:dm:${link.externalId}`, {
+            // Slack DMs live in an IM channel, not at the user id — the
+            // transport exposes openDirectConversation as a feature-detected
+            // extra (same pattern as getMe). Telegram falls through to the
+            // `:dm:` codec.
+            const conversationKey = hasOpenDirectConversation(transport)
+              ? await transport.openDirectConversation(link.externalId)
+              : `${channelType}:dm:${link.externalId}`;
+            await transport.send(conversationKey, {
               markdown: this.attentionMarkdown(event),
             });
           } catch (err) {

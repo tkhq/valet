@@ -17,6 +17,8 @@ const unlinkMutate = vi.fn();
 const connectGithubMutateAsync = vi.fn();
 const disconnectGithubMutate = vi.fn();
 const disconnectCredentialMutate = vi.fn();
+const startSlackMutateAsync = vi.fn();
+const verifySlackMutateAsync = vi.fn();
 
 let linksData: { links: IdentityLinkStatus[] } | undefined;
 let isLoading = false;
@@ -25,6 +27,8 @@ let credentialsData: { credentials: CredentialSummary[] } | undefined = { creden
 let credentialsLoading = false;
 let credentialsError = false;
 let githubAppData: GetGithubAppResponse | undefined;
+let slackMembersData: { members: Array<{ id: string; name: string; realName?: string }> } | undefined;
+let slackMembersError: Error | null = null;
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
@@ -35,6 +39,19 @@ vi.mock("~/api/queries", () => ({
   useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useSetLinkNotify: () => ({ mutate: setNotifyMutate }),
   useUnlinkIdentity: () => ({ mutate: unlinkMutate, isPending: false }),
+  useSlackWorkspaceMembers: (q: string, enabled: boolean) => ({
+    data: enabled ? slackMembersData : undefined,
+    isLoading: false,
+    error: enabled ? slackMembersError : null,
+  }),
+  useStartSlackLink: () => ({ mutateAsync: startSlackMutateAsync, isPending: false }),
+  useVerifySlackLink: () => ({ mutateAsync: verifySlackMutateAsync, isPending: false }),
+}));
+
+// Make the typeahead debounce synchronous — these tests assert on the flow,
+// not the 300ms trailing edge.
+vi.mock("~/hooks/use-debounced-value", () => ({
+  useDebouncedValue: <T,>(value: T) => value,
 }));
 
 vi.mock("~/api/repos", () => ({
@@ -67,6 +84,8 @@ describe("ConnectedAccountsPage", () => {
     credentialsLoading = false;
     credentialsError = false;
     githubAppData = undefined;
+    slackMembersData = undefined;
+    slackMembersError = null;
     vi.stubGlobal("confirm", vi.fn(() => true));
     // jsdom logs "Not implemented: navigation" when a real redirect happens;
     // route it through a plain assignable stub instead.
@@ -106,6 +125,7 @@ describe("ConnectedAccountsPage", () => {
       links: [{ provider: "telegram", linked: false, channelReady: true }],
     };
     startMutateAsync.mockResolvedValue({
+      delivery: "deep_link",
       deepLink: "https://t.me/valet_bot?start=abc123",
       expiresInSeconds: 600,
     });
@@ -154,12 +174,154 @@ describe("ConnectedAccountsPage", () => {
     render(<ConnectedAccountsPage />);
 
     expect(screen.getByText("123456789")).toBeTruthy();
-    const toggle = screen.getByRole("switch", { name: "Notify on attention" });
+    const toggle = screen.getByRole("switch", { name: "Notify on attention (Telegram)" });
     fireEvent.click(toggle);
-    expect(setNotifyMutate).toHaveBeenCalledWith({ notifyAttention: false });
+    expect(setNotifyMutate).toHaveBeenCalledWith({ provider: "telegram", notifyAttention: false });
 
-    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-    expect(unlinkMutate).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect Telegram" }));
+    expect(unlinkMutate).toHaveBeenCalledWith("telegram");
+  });
+
+  describe("Slack block", () => {
+    it("shows the unconfigured copy when channelReady is false", () => {
+      linksData = {
+        links: [{ provider: "slack", linked: false, channelReady: false }],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(
+        screen.getByText(
+          "Slack isn't configured for this organization yet. An admin can add a bot token under Integrations.",
+        ),
+      ).toBeTruthy();
+      expect(screen.queryByLabelText("Find your Slack account")).toBeNull();
+    });
+
+    it("typeahead → pick a member → send code → verify links the account", async () => {
+      linksData = {
+        links: [{ provider: "slack", linked: false, channelReady: true }],
+      };
+      slackMembersData = {
+        members: [
+          { id: "U1", name: "conner", realName: "Conner Swann" },
+          { id: "U2", name: "connerbot" },
+        ],
+      };
+      startSlackMutateAsync.mockResolvedValue({ delivery: "dm_code", expiresInSeconds: 600 });
+      verifySlackMutateAsync.mockResolvedValue({ ok: true });
+      render(<ConnectedAccountsPage />);
+
+      // <2 chars: no results yet.
+      const search = screen.getByLabelText("Find your Slack account");
+      fireEvent.change(search, { target: { value: "c" } });
+      expect(screen.queryByRole("button", { name: /@conner/ })).toBeNull();
+
+      fireEvent.change(search, { target: { value: "conner" } });
+      const option = await screen.findByRole("button", { name: /@conner Conner Swann/ });
+      expect(screen.getByRole("button", { name: "@connerbot" })).toBeTruthy();
+      fireEvent.click(option);
+
+      fireEvent.click(screen.getByRole("button", { name: "Send link code" }));
+      await waitFor(() =>
+        expect(startSlackMutateAsync).toHaveBeenCalledWith({ externalId: "U1" }),
+      );
+
+      expect(await screen.findByText("We DMed a code to @conner — enter it here.")).toBeTruthy();
+      fireEvent.change(screen.getByLabelText("Link code"), { target: { value: "424242" } });
+      fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+      await waitFor(() =>
+        expect(verifySlackMutateAsync).toHaveBeenCalledWith({ code: "424242" }),
+      );
+    });
+
+    it("Send link code is disabled until a member is selected", async () => {
+      linksData = {
+        links: [{ provider: "slack", linked: false, channelReady: true }],
+      };
+      slackMembersData = { members: [{ id: "U1", name: "conner" }] };
+      render(<ConnectedAccountsPage />);
+
+      const send = screen.getByRole("button", { name: "Send link code" });
+      expect(send).toHaveProperty("disabled", true);
+      fireEvent.change(screen.getByLabelText("Find your Slack account"), {
+        target: { value: "conner" },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "@conner" }));
+      expect(send).toHaveProperty("disabled", false);
+    });
+
+    it("shows the invalid-code error inline and stays on the code step", async () => {
+      linksData = {
+        links: [{ provider: "slack", linked: false, channelReady: true }],
+      };
+      slackMembersData = { members: [{ id: "U1", name: "conner" }] };
+      startSlackMutateAsync.mockResolvedValue({ delivery: "dm_code", expiresInSeconds: 600 });
+      verifySlackMutateAsync.mockRejectedValue(
+        new ApiError(400, "POST /me/identity-links/slack/verify → 400", {
+          error: "invalid or expired code",
+        }),
+      );
+      render(<ConnectedAccountsPage />);
+
+      fireEvent.change(screen.getByLabelText("Find your Slack account"), {
+        target: { value: "conner" },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "@conner" }));
+      fireEvent.click(screen.getByRole("button", { name: "Send link code" }));
+
+      fireEvent.change(await screen.findByLabelText("Link code"), { target: { value: "nope" } });
+      fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+
+      expect(await screen.findByText("invalid or expired code")).toBeTruthy();
+      expect(screen.getByLabelText("Link code")).toBeTruthy();
+    });
+
+    it("'Use a different account' on the code step returns to the member search", async () => {
+      linksData = {
+        links: [{ provider: "slack", linked: false, channelReady: true }],
+      };
+      slackMembersData = { members: [{ id: "U1", name: "conner" }] };
+      startSlackMutateAsync.mockResolvedValue({ delivery: "dm_code", expiresInSeconds: 600 });
+      render(<ConnectedAccountsPage />);
+
+      fireEvent.change(screen.getByLabelText("Find your Slack account"), {
+        target: { value: "conner" },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "@conner" }));
+      fireEvent.click(screen.getByRole("button", { name: "Send link code" }));
+
+      // On the code step: code input present, search input gone.
+      expect(await screen.findByLabelText("Link code")).toBeTruthy();
+      expect(screen.queryByLabelText("Find your Slack account")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Use a different account" }));
+
+      // Back on the search step: search input visible again, code input gone.
+      expect(screen.getByLabelText("Find your Slack account")).toBeTruthy();
+      expect(screen.queryByLabelText("Link code")).toBeNull();
+    });
+
+    it("linked state shows externalId, a notify switch, and disconnect wired to slack", () => {
+      linksData = {
+        links: [
+          {
+            provider: "slack",
+            linked: true,
+            channelReady: true,
+            externalId: "U12345",
+            notifyAttention: false,
+            createdAt: Date.parse("2026-02-01T00:00:00Z"),
+          },
+        ],
+      };
+      render(<ConnectedAccountsPage />);
+
+      expect(screen.getByText("U12345")).toBeTruthy();
+      fireEvent.click(screen.getByRole("switch", { name: "Notify on attention (Slack)" }));
+      expect(setNotifyMutate).toHaveBeenCalledWith({ provider: "slack", notifyAttention: true });
+
+      fireEvent.click(screen.getByRole("button", { name: "Disconnect Slack" }));
+      expect(unlinkMutate).toHaveBeenCalledWith("slack");
+    });
   });
 
   describe("GitHub row", () => {

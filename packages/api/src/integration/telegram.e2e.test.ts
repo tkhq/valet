@@ -74,7 +74,7 @@ describeIfCreds("telegram channel — live e2e (token-gated)", () => {
       // command), then link the identity to the test chat id.
       const code = await mintLinkCode(providers.db, USER_ID, "telegram");
       const consumed = await consumeLinkCode(providers.db, "telegram", code);
-      expect(consumed).toEqual({ userId: USER_ID });
+      expect(consumed).toEqual({ userId: USER_ID, externalId: null });
       await linkIdentity(providers.db, {
         provider: "telegram",
         externalId: CHAT_ID as string,

@@ -19,13 +19,13 @@ describe("identity link codes", () => {
   it("mints a code and consumes it exactly once", async () => {
     const code = await mintLinkCode(db.appDb, "u1", "telegram");
     expect(code.length).toBeGreaterThanOrEqual(20);
-    expect(await consumeLinkCode(db.appDb, "telegram", code)).toEqual({ userId: "u1" });
+    expect(await consumeLinkCode(db.appDb, "telegram", code)).toEqual({ userId: "u1", externalId: null });
     expect(await consumeLinkCode(db.appDb, "telegram", code)).toBeNull();
   });
 
   it("rejects expired codes", async () => {
     const t0 = 1_000_000;
-    const code = await mintLinkCode(db.appDb, "u1", "telegram", t0);
+    const code = await mintLinkCode(db.appDb, "u1", "telegram", { now: t0 });
     expect(await consumeLinkCode(db.appDb, "telegram", code, t0 + 11 * 60_000)).toBeNull();
   });
 
@@ -37,7 +37,12 @@ describe("identity link codes", () => {
     const first = await mintLinkCode(db.appDb, "u1", "telegram");
     const second = await mintLinkCode(db.appDb, "u1", "telegram");
     expect(await consumeLinkCode(db.appDb, "telegram", first)).toBeNull();
-    expect(await consumeLinkCode(db.appDb, "telegram", second)).toEqual({ userId: "u1" });
+    expect(await consumeLinkCode(db.appDb, "telegram", second)).toEqual({ userId: "u1", externalId: null });
+  });
+
+  it("carries the pre-chosen externalId through mint → consume (slack DM-code flow)", async () => {
+    const code = await mintLinkCode(db.appDb, "u1", "slack", { externalId: "U777" });
+    expect(await consumeLinkCode(db.appDb, "slack", code)).toEqual({ userId: "u1", externalId: "U777" });
   });
 });
 

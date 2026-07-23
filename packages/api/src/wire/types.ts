@@ -983,10 +983,12 @@ export interface RevokeInviteResponse {
   ok: true;
 }
 
-// ── REST: identity links (channel-link Phase 7) ───────────────────────────
+// ── REST: identity links (channel-link Phase 7, provider-parameterized in
+// the Slack pass) ──────────────────────────────────────────────────────────
 //
-// `/api/me/identity-links` — per-user Telegram (etc.) account linking.
-// Just `telegram` this pass (see `packages/api/src/routes/identity-links.ts`).
+// `/api/me/identity-links` — per-user channel account linking. Providers:
+// `telegram` (deep-link `/start` code) and `slack` (code DMed by the bot to
+// the chosen workspace member, verified back in the web UI).
 
 export interface IdentityLinkStatus {
   provider: string;
@@ -1003,8 +1005,35 @@ export interface ListIdentityLinksResponse {
 }
 
 export interface StartIdentityLinkResponse {
-  deepLink: string;
+  /** How the code travels: telegram → follow `deepLink`; slack → the bot DMed it ("dm_code"). */
+  delivery: "deep_link" | "dm_code";
+  deepLink?: string;
   expiresInSeconds: number;
+}
+
+/** POST /api/me/identity-links/slack/start — the chosen workspace member. */
+export interface StartSlackIdentityLinkRequest {
+  externalId: string;
+}
+
+/** POST /api/me/identity-links/slack/verify */
+export interface VerifyIdentityLinkRequest {
+  code: string;
+}
+
+export interface VerifyIdentityLinkResponse {
+  ok: true;
+}
+
+/** GET /api/me/identity-links/slack/users?q= — workspace-member typeahead. */
+export interface SlackWorkspaceMember {
+  id: string;
+  name: string;
+  realName?: string;
+}
+
+export interface ListSlackWorkspaceMembersResponse {
+  members: SlackWorkspaceMember[];
 }
 
 export interface PatchIdentityLinkRequest {

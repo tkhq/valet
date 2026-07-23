@@ -140,6 +140,47 @@ credentialsRouter.put("/:service", async (c) => {
     metadata: body.metadata,
   };
 
+  // Slack org connect (slack design decision 1): the bot token + signing
+  // secret pair is validated at save time — a bad signing secret otherwise
+  // fails silently as 403s on every webhook — and `auth.test` populates the
+  // workspace identity the transport and webhook route rely on
+  // (`metadata.teamId` for the conversation-key codec and foreign-team
+  // rejection, `botUserId` for echo suppression).
+  if (service === "slack" && scope === "org") {
+    const token = accessToken ?? apiKey;
+    const webhookSecret = credential.metadata?.webhookSecret;
+    if (typeof webhookSecret !== "string" || webhookSecret === "") {
+      return c.json({ error: "slack requires metadata.webhookSecret (the app signing secret)" }, 400);
+    }
+    const apiBase = process.env.VALET_SLACK_API_BASE ?? "https://slack.com/api";
+    let auth: Record<string, unknown>;
+    try {
+      const res = await fetch(`${apiBase}/auth.test`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      auth = (await res.json()) as Record<string, unknown>;
+    } catch (err) {
+      return c.json({ error: `slack token validation failed: ${err instanceof Error ? err.message : String(err)}` }, 400);
+    }
+    if (auth.ok !== true) {
+      return c.json({ error: `slack token rejected: ${typeof auth.error === "string" ? auth.error : "auth.test failed"}` }, 400);
+    }
+    // Must be a BOT token: the channel posts as the app and echo-suppresses on
+    // its bot user id. auth.test succeeds for a user (xoxp) token too, but then
+    // botUserId would be a human and the transport would post as that person.
+    // Bot tokens carry a bot_id in the auth.test response; user tokens don't.
+    if (typeof auth.bot_id !== "string") {
+      return c.json({ error: "slack requires a bot token (xoxb-…), not a user token" }, 400);
+    }
+    credential.metadata = {
+      ...credential.metadata,
+      teamId: typeof auth.team_id === "string" ? auth.team_id : undefined,
+      teamName: typeof auth.team === "string" ? auth.team : undefined,
+      botUserId: typeof auth.user_id === "string" ? auth.user_id : undefined,
+    };
+  }
+
   await engineCredentials.save(owner, service, credential);
 
   const resp: PutCredentialResponse = { ok: true };

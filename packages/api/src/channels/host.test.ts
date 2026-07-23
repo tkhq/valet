@@ -194,3 +194,70 @@ describe("ChannelHost.handleUpdate", () => {
     expect(drops.some((d) => d.reason === "unsupported_kind" && d.detail.includes("unknown_gate_ref"))).toBe(true);
   });
 });
+
+describe("ChannelHost.start transport isolation", () => {
+  let testDb: TestPgDb;
+
+  beforeEach(async () => {
+    testDb = await freshTestPgDb();
+  });
+
+  it("a transport factory that throws is skipped without aborting others or startOutbound", async () => {
+    const { pgdb, appDb } = testDb;
+    const engineStore = new PgSessionStore(pgdb);
+    const eventStream = new PgEventStream(pgdb);
+    const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    const sandboxProvider = new VirtualSandboxProvider();
+
+    const good = new FakeTransport();
+    // "boom" throws in create (mirrors the Slack factory rejecting a
+    // teamId-less credential); "fake" must still come up and startOutbound
+    // must still run.
+    const plugins: ValetPlugin[] = [
+      {
+        name: "boom",
+        version: "0",
+        transports: [
+          {
+            channelType: "boom",
+            create: () => {
+              throw new Error("bad credential");
+            },
+          },
+        ],
+      },
+      { name: "fake", version: "0", transports: [{ channelType: "fake", create: () => good }] },
+    ];
+
+    for (const svc of ["boom", "fake"]) {
+      await engineCredentials.save({ type: "org", id: ORG_ID }, svc, { type: "bot_token", accessToken: "t" });
+    }
+
+    const engineHost = new EngineHost({
+      engineStore,
+      sandboxProvider,
+      eventStream,
+      engineCredentials,
+      db: appDb,
+      apiBaseUrl: "http://127.0.0.1:1",
+      plugins,
+    });
+    const host = new ChannelHost({
+      db: appDb,
+      engineHost,
+      engineStore,
+      eventStream,
+      engineCredentials,
+      plugins,
+      resolveOrgId: async () => ORG_ID,
+    });
+
+    await expect(host.start()).resolves.toBeUndefined();
+    expect(host.isRunning("boom")).toBe(false);
+    expect(host.isRunning("fake")).toBe(true);
+    // startOutbound ran: a second start() is a no-op (idempotent guard), and
+    // the outbound subscription is live — stop() tears it down cleanly.
+    await host.stop();
+    await engineHost.destroyAll();
+  });
+});
