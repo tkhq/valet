@@ -12,7 +12,7 @@ import { triggers } from '../lib/schema/workflows.js';
 import type { AppDb } from '../lib/drizzle.js';
 import type { Env } from '../env.js';
 import { createWorkflow, deleteWorkflow } from './workflows.js';
-import { saveDraft, publishDraft } from './workflow-versions.js';
+import { saveDraft, publishDraft, getPublishedDefinition } from './workflow-versions.js';
 import { resolveAvailableModels } from './model-catalog.js';
 import { assembleLlmProviderEnv } from '../lib/llm/provider-env.js';
 import { createTrigger } from '../lib/db/triggers.js';
@@ -187,6 +187,8 @@ export interface EnableCodeReviewResult {
   owner: string;
   repo: string;
   alreadyArmed: boolean;
+  /** Set on re-arm when the installed workflow was outdated and got republished. */
+  refreshed?: boolean;
 }
 
 /**
@@ -221,7 +223,26 @@ export async function enableCodeReview(
     .where(and(eq(triggers.userId, userId), eq(triggers.type, 'github-app'), eq(triggers.name, triggerName)))
     .get();
   if (existing) {
-    return { workflowId: existing.workflowId, triggerId: existing.id, owner, repo, alreadyArmed: true };
+    // An armed repo snapshots the workflow definition it was installed with, so
+    // a re-arm is the supported way to pick up a newer definition (prompt,
+    // post behaviour) without touching the trigger. Republishing runs the same
+    // validation gate as a fresh install; when the published definition already
+    // matches, this is a read and nothing else.
+    const published = await getPublishedDefinition(db, existing.workflowId).catch(() => null);
+    const outdated = JSON.stringify(published) !== JSON.stringify(CODE_REVIEW_WORKFLOW_DEFINITION);
+    if (outdated) {
+      await saveDraft(db, existing.workflowId, CODE_REVIEW_WORKFLOW_DEFINITION);
+      const providerEnv = await assembleLlmProviderEnv(db, env);
+      const validationEnv = { ...env, ...providerEnv } as Env;
+      const availableModels = await resolveAvailableModels(db, validationEnv);
+      await publishDraft(db, existing.workflowId, {
+        userId,
+        env: validationEnv,
+        availableModels,
+        publishNote: 'Refreshed by code review re-arm',
+      });
+    }
+    return { workflowId: existing.workflowId, triggerId: existing.id, owner, repo, alreadyArmed: true, refreshed: outdated };
   }
 
   // 1. Create the workflow (blank draft). Everything after is wrapped so a later

@@ -792,7 +792,9 @@ function EnableRepoReview() {
       {enable.isSuccess && (
         <p className="mt-2 text-sm text-green-600 dark:text-green-400">
           {enable.data.alreadyArmed
-            ? `Already armed for ${enable.data.owner}/${enable.data.repo}.`
+            ? enable.data.refreshed
+              ? `Already armed for ${enable.data.owner}/${enable.data.repo} — review workflow updated to the latest version.`
+              : `Already armed for ${enable.data.owner}/${enable.data.repo}.`
             : `Armed ${enable.data.owner}/${enable.data.repo} — Claude will review its pull requests.`}
         </p>
       )}
