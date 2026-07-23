@@ -31,7 +31,7 @@ import { ensureLinksIndexed } from './memory-link-backfill.js';
 
 export type { MemoryScope };
 
-const MEMORY_CAP = 200;
+const MEMORY_CAP = 500;
 
 /** One file-size limit, enforced identically on every write channel. */
 export const MAX_MEMORY_FILE_SIZE = 262144;
@@ -430,7 +430,12 @@ export async function writeMemoryFile(
     content: body,
   };
 
+  // Track the row id we're writing so we can exclude it from cap-eviction
+  // candidates below. For updates we already know the id; for inserts we mint
+  // it here.
+  let writtenId: string;
   if (existingRow) {
+    writtenId = existingRow.id;
     const upsert = rawDb
       .prepare(
         `UPDATE orchestrator_memory_files SET
@@ -448,7 +453,7 @@ export async function writeMemoryFile(
       );
     await rawDb.batch([upsert, ...syncDerivedStores(rawDb, scope, [derived])]);
   } else {
-    const id = crypto.randomUUID();
+    writtenId = crypto.randomUUID();
     const insert = rawDb
       .prepare(
         `INSERT INTO orchestrator_memory_files
@@ -457,7 +462,7 @@ export async function writeMemoryFile(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        id, scope.userId, normalized, body, finalTitle, finalType, finalDescription, tagsJson, finalResource, extrasJson,
+        writtenId, scope.userId, normalized, body, finalTitle, finalType, finalDescription, tagsJson, finalResource, extrasJson,
         finalSensitivity, finalOrigin, sourceSessionId, finalExpires, pinned,
       );
     await rawDb.batch([insert, ...syncDerivedStores(rawDb, scope, [derived])]);
@@ -468,7 +473,18 @@ export async function writeMemoryFile(
     .bind(scope.userId, normalized)
     .first<RawMemRow>();
 
-  if (!existingRow && enforceCap) await enforceMemoryCap(rawDb, scope);
+  if (!existingRow && enforceCap) {
+    // Pass the just-written id so it can't be picked as an eviction victim —
+    // the reason this fix exists (see enforceMemoryCap comment).
+    const evicted = await enforceMemoryCap(rawDb, scope, writtenId);
+    if (evicted.count > 0) {
+      const preview = evicted.paths.slice(0, 3).join(', ');
+      const suffix = evicted.paths.length > 3 ? `, +${evicted.paths.length - 3} more` : '';
+      warnings.push(
+        `⚠ memory cap reached — ${evicted.count} file(s) evicted to stay under the cap${preview ? ` (${preview}${suffix})` : ''}`,
+      );
+    }
+  }
 
   // savedRow is always present (we just wrote it); the throw satisfies the type
   // narrowing without an unsafe assertion.
@@ -1559,7 +1575,8 @@ export async function importMemoryFiles(
 
   let pruned = 0;
   try {
-    pruned = await enforceMemoryCap(rawDb, scope);
+    const evicted = await enforceMemoryCap(rawDb, scope);
+    pruned = evicted.count;
   } catch {
     // A prune failure must not lose the import tally; the cap self-heals on the next write.
   }
@@ -1653,7 +1670,11 @@ export async function pruneEmptyJournals(rawDb: D1Database, scope: MemoryScope):
  * with ≥3 inbound links (a keep signal); if that pass can't cover the excess it
  * falls back to plain order (hubs included).
  */
-async function enforceMemoryCap(rawDb: D1Database, scope: MemoryScope): Promise<number> {
+async function enforceMemoryCap(
+  rawDb: D1Database,
+  scope: MemoryScope,
+  excludeId?: string,
+): Promise<{ count: number; paths: string[] }> {
   // Prune's keep-signal (inbound-link count) and expired-first ordering read the
   // link table — backfill it first so a hub is never treated as unlinked.
   await ensureLinksIndexed(rawDb, scope);
@@ -1663,19 +1684,27 @@ async function enforceMemoryCap(rawDb: D1Database, scope: MemoryScope): Promise<
     .bind(scope.userId)
     .first<{ cnt: number }>();
 
-  if (!countResult || countResult.cnt <= MEMORY_CAP) return 0;
+  if (!countResult || countResult.cnt <= MEMORY_CAP) return { count: 0, paths: [] };
   const excess = countResult.cnt - MEMORY_CAP;
 
   const ORDER = `ORDER BY (expires IS NOT NULL AND expires <= datetime('now')) DESC, relevance ASC, last_accessed_at ASC`;
+
+  // When called from a single-file write, exclude the just-written row from
+  // victim selection — otherwise a fresh row at the schema default relevance
+  // (1.0) sorts as the unique minimum vs. any read-boosted neighbors and gets
+  // deterministically self-evicted, silently losing the write.
+  const excludeClause = excludeId ? 'AND id != ?' : '';
+  const excludeBind = excludeId ? [excludeId] : [];
 
   const firstPass = await rawDb
     .prepare(
       `SELECT id, path FROM orchestrator_memory_files
        WHERE user_id = ? AND pinned = 0
+         ${excludeClause}
          AND path NOT IN (SELECT to_path FROM memory_links WHERE user_id = ? GROUP BY to_path HAVING COUNT(*) >= 3)
        ${ORDER} LIMIT ?`,
     )
-    .bind(scope.userId, scope.userId, excess)
+    .bind(scope.userId, ...excludeBind, scope.userId, excess)
     .all<{ id: string; path: string }>();
 
   let victims = firstPass.results ?? [];
@@ -1683,14 +1712,16 @@ async function enforceMemoryCap(rawDb: D1Database, scope: MemoryScope): Promise<
     // Keep-signal pass couldn't cover the excess — fall back to plain order.
     const plain = await rawDb
       .prepare(
-        `SELECT id, path FROM orchestrator_memory_files WHERE user_id = ? AND pinned = 0 ${ORDER} LIMIT ?`,
+        `SELECT id, path FROM orchestrator_memory_files
+         WHERE user_id = ? AND pinned = 0 ${excludeClause}
+         ${ORDER} LIMIT ?`,
       )
-      .bind(scope.userId, excess)
+      .bind(scope.userId, ...excludeBind, excess)
       .all<{ id: string; path: string }>();
     victims = plain.results ?? [];
   }
 
-  if (victims.length === 0) return 0;
+  if (victims.length === 0) return { count: 0, paths: [] };
 
   const ids = victims.map((v) => v.id);
   const paths = victims.map((v) => v.path);
@@ -1727,5 +1758,5 @@ async function enforceMemoryCap(rawDb: D1Database, scope: MemoryScope): Promise<
   }
 
   await rawDb.batch(stmts);
-  return victims.length;
+  return { count: victims.length, paths };
 }
