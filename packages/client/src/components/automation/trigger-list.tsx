@@ -5,6 +5,7 @@ import {
   type TriggerConfig,
   type WebhookConfig,
   type ScheduleConfig,
+  type GithubAppConfig,
   type CreateTriggerRequest,
   useTriggers,
   useCreateTrigger,
@@ -105,6 +106,10 @@ function isWebhookConfig(config: TriggerConfig): config is WebhookConfig {
 
 function isScheduleConfig(config: TriggerConfig): config is ScheduleConfig {
   return config.type === 'schedule';
+}
+
+function isGithubAppConfig(config: TriggerConfig): config is GithubAppConfig {
+  return config.type === 'github-app';
 }
 
 function formFromTrigger(trigger: Trigger): TriggerFormState {
@@ -220,6 +225,9 @@ function validateForm(form: TriggerFormState): string | null {
 
 function describeTrigger(trigger: Trigger): string {
   if (trigger.type === 'manual') return 'Manual run only';
+  if (trigger.type === 'github-app' && isGithubAppConfig(trigger.config)) {
+    return `GitHub App • ${trigger.config.owner}/${trigger.config.repo} • ${trigger.config.events.join(', ')}`;
+  }
   if (trigger.type === 'webhook' && isWebhookConfig(trigger.config)) {
     const method = trigger.config.method || 'POST';
     return `${method} /api/triggers/${trigger.id}/webhook`;
@@ -687,9 +695,14 @@ export function TriggerList() {
                         <Button size="sm" variant="ghost" onClick={() => onToggleEnabled(trigger)} disabled={busy} className="min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0">
                           {trigger.enabled ? <PauseIcon className="size-3.5" /> : <PlayCircleIcon className="size-3.5" />}
                         </Button>
-                        <Button size="sm" variant="ghost" onClick={() => openEditDialog(trigger)} disabled={busy} className="min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0">
-                          <EditIcon className="size-3.5" />
-                        </Button>
+                        {/* github-app triggers are managed by the code-review setup
+                            flow; the generic edit form would rewrite one as a plain
+                            manual trigger and drop its config, so it is read-only. */}
+                        {trigger.type !== 'github-app' && (
+                          <Button size="sm" variant="ghost" onClick={() => openEditDialog(trigger)} disabled={busy} className="min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0">
+                            <EditIcon className="size-3.5" />
+                          </Button>
+                        )}
                         <Button size="sm" variant="ghost" onClick={() => onDelete(trigger)} disabled={busy} className="min-h-[44px] min-w-[44px] text-red-500 hover:text-red-600 md:min-h-0 md:min-w-0">
                           <TrashIcon className="size-3.5" />
                         </Button>

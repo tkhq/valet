@@ -18,7 +18,37 @@ vi.mock('octokit', () => {
 
 const ENCRYPTION_KEY = 'test-encryption-key-for-github-app';
 
+vi.mock('../lib/db/service-configs.js', () => ({
+  getServiceConfig: vi.fn(),
+}));
+
+const { getServiceConfig } = await import('../lib/db/service-configs.js');
+const { resolveGithubAppSlug } = await import('./github-app.js');
+
 describe('github-app service', () => {
+
+  describe('resolveGithubAppSlug', () => {
+    const env = { ENCRYPTION_KEY: 'k' } as any;
+    const db = {} as any;
+
+    it('prefers the slug stored in the encrypted config at App creation', async () => {
+      (getServiceConfig as any).mockResolvedValueOnce({ config: { appSlug: 'from-config' }, metadata: { appSlug: 'from-metadata' } });
+      expect(await resolveGithubAppSlug(env, db)).toBe('from-config');
+    });
+
+    it('falls back to the plain metadata for Apps created before the field existed', async () => {
+      (getServiceConfig as any).mockResolvedValueOnce({ config: {}, metadata: { appSlug: 'from-metadata' } });
+      expect(await resolveGithubAppSlug(env, db)).toBe('from-metadata');
+    });
+
+    it('returns null when neither carries a slug, or the config is unreadable', async () => {
+      (getServiceConfig as any).mockResolvedValueOnce({ config: {}, metadata: {} });
+      expect(await resolveGithubAppSlug(env, db)).toBeNull();
+      (getServiceConfig as any).mockRejectedValueOnce(new Error('decrypt failed'));
+      expect(await resolveGithubAppSlug(env, db)).toBeNull();
+    });
+  });
+
   // ── createGitHubApp ────────────────────────────────────────────
 
   describe('createGitHubApp', () => {

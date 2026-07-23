@@ -567,6 +567,12 @@ const createReview: ActionDefinition = {
         .string()
         .optional()
         .describe('SHA the review applies to (defaults to the most recent commit)'),
+      updateExisting: z
+        .boolean()
+        .optional()
+        .describe(
+          "Update this bot's most recent review on the pull request in place instead of adding a new one; falls back to creating when none exists. Inline comments are only attached when creating.",
+        ),
       comments: z
         .array(
           z.object({
@@ -1220,6 +1226,33 @@ async function executeAction(
           // Leave a bodyless review (a pending or bare APPROVE) untouched rather
           // than forcing a suffix-only body onto it.
           const reviewBody = p.body !== undefined ? p.body + attributionSuffix(ctx) : undefined;
+          if (p.updateExisting && ctx.botLogin && reviewBody !== undefined) {
+            // A re-review refreshes the existing write-up in place rather than
+            // stacking a new review on the thread. Only this bot's own latest
+            // review is eligible — ctx.botLogin names the account the token
+            // acts as, since the token itself carries no queryable identity.
+            // GitHub's update endpoint replaces the body only, so the body has
+            // to carry the full line-level detail; one unpaginated page (100)
+            // is deliberate — a busier thread degrades to creating, not to
+            // updating someone else's review.
+            const { data: reviews } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
+              owner: p.owner,
+              repo: p.repo,
+              pull_number: p.pullNumber,
+              per_page: 100,
+            });
+            const own = [...reviews].reverse().find((r) => r.user?.login === ctx.botLogin);
+            if (own) {
+              const { data } = await octokit.request('PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}', {
+                owner: p.owner,
+                repo: p.repo,
+                pull_number: p.pullNumber,
+                review_id: own.id,
+                body: reviewBody,
+              });
+              return { success: true, data };
+            }
+          }
           const { data } = await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
             owner: p.owner,
             repo: p.repo,

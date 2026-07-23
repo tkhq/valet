@@ -7,7 +7,7 @@ import {
   getGithubInstallationByLogin,
   listGithubInstallationsByAccountType,
 } from '../../lib/db/github-installations.js';
-import { loadGitHubApp, getOrMintInstallationToken } from '../../services/github-app.js';
+import { loadGitHubApp, getOrMintInstallationToken, resolveGithubAppSlug } from '../../services/github-app.js';
 import { assertExecutionCanUseAppForRepo } from '../../services/github-repo-authority.js';
 import { users } from '../../lib/schema/users.js';
 import type { Env } from '../../env.js';
@@ -195,6 +195,10 @@ async function mintBotCredential(
     ? { name: user.name || user.email, email: user.email }
     : undefined;
 
+  // The token carries no queryable identity, so name the bot account here —
+  // actions use it to recognise their own earlier writes (review upserts).
+  const slug = await resolveGithubAppSlug(env, db);
+
   return {
     ok: true as const,
     credential: {
@@ -203,6 +207,7 @@ async function mintBotCredential(
       credentialType: 'app_install' as const,
       refreshed: false,
       attribution,
+      ...(slug ? { botLogin: `${slug}[bot]` } : {}),
     },
   };
 }

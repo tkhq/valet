@@ -8,6 +8,7 @@ export interface EnableCodeReviewResult {
   owner: string;
   repo: string;
   alreadyArmed: boolean;
+  refreshed?: boolean;
 }
 
 /**

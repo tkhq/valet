@@ -4,9 +4,11 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 // that one lookup so the tests exercise the real check (including its GitHub
 // permissions read, stubbed on fetch below) without a credential fixture.
 const getCredentialMock = vi.hoisted(() => vi.fn());
+const hasCredentialMock = vi.hoisted(() => vi.fn());
 vi.mock('./credentials.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./credentials.js')>()),
   getCredential: getCredentialMock,
+  hasCredential: hasCredentialMock,
 }));
 
 import { validateDefinition, validateAgainstEnvironment } from '../lib/workflow-dag/validator.js';
@@ -16,6 +18,7 @@ import { users } from '../lib/schema/users.js';
 import { workflows, triggers } from '../lib/schema/workflows.js';
 import { workflowDefinitionVersions } from '../lib/schema/workflow-definition-versions.js';
 import { CODE_REVIEW_WORKFLOW_DEFINITION, enableCodeReview } from './code-review.js';
+import { getPublishedDefinition } from './workflow-versions.js';
 import { upsertGithubInstallation } from '../lib/db/github-installations.js';
 
 // llm_maxoutput_warning is a non-blocking advisory; the publish gate filters it too.
@@ -42,6 +45,8 @@ beforeEach(() => {
     ok: true,
     credential: { accessToken: 'gho_caller', credentialType: 'oauth2', refreshed: false },
   });
+  hasCredentialMock.mockReset();
+  hasCredentialMock.mockResolvedValue(true);
 });
 
 describe('code-review workflow definition', () => {
@@ -98,6 +103,16 @@ describe('enableCodeReview', () => {
     expect(JSON.parse(appTriggers[0].variableMapping as string)).toHaveProperty('pullNumber', '$.pull_request.number');
   });
 
+  it('refuses to enable when the caller has not connected GitHub — even on a public repo', async () => {
+    const { db, env } = await setup();
+    // Public repo: repo authority alone would pass. Personal gate still requires
+    // the connection, and nothing is created.
+    hasCredentialMock.mockResolvedValue(false);
+    await expect(enableCodeReview(db as never, env, 'u1', 'tkhq', 'valet')).rejects.toThrow(/Connect your GitHub account/i);
+    expect(db.select().from(workflows).all()).toEqual([]);
+    expect(db.select().from(triggers).all()).toEqual([]);
+  });
+
   it('is idempotent — re-arming the same repo returns the existing trigger, no duplicate/500', async () => {
     const { db, env } = await setup();
     const first = await enableCodeReview(db as never, env, 'u1', 'tkhq', 'valet');
@@ -110,6 +125,40 @@ describe('enableCodeReview', () => {
     // No duplicate trigger, and no second workflow installed.
     expect(db.select().from(triggers).all().filter((t) => t.type === 'github-app')).toHaveLength(1);
     expect(db.select().from(workflows).all()).toHaveLength(1);
+  });
+
+  it('re-arm republishes the workflow when the installed definition is outdated', async () => {
+    const { db, env } = await setup();
+    const first = await enableCodeReview(db as never, env, 'u1', 'tkhq', 'valet');
+
+    // An older install: hand-age the published definition so it no longer
+    // matches the current constant.
+    db.update(workflowDefinitionVersions)
+      .set({ definition: JSON.stringify({ version: 'dag/v1', nodes: [], edges: [] }) })
+      .run();
+
+    const second = await enableCodeReview(db as never, env, 'u1', 'tkhq', 'valet');
+
+    expect(second.alreadyArmed).toBe(true);
+    expect(second.refreshed).toBe(true);
+    expect(second.triggerId).toBe(first.triggerId);
+    // The published definition is current again, via a new version — the
+    // trigger itself was never touched.
+    expect(await getPublishedDefinition(db as never, first.workflowId)).toEqual(CODE_REVIEW_WORKFLOW_DEFINITION);
+    expect(db.select().from(workflowDefinitionVersions).all().length).toBe(2);
+    expect(db.select().from(triggers).all().filter((t) => t.type === 'github-app')).toHaveLength(1);
+  });
+
+  it('re-arm leaves a current installation untouched', async () => {
+    const { db, env } = await setup();
+    await enableCodeReview(db as never, env, 'u1', 'tkhq', 'valet');
+
+    const second = await enableCodeReview(db as never, env, 'u1', 'tkhq', 'valet');
+
+    expect(second.alreadyArmed).toBe(true);
+    expect(second.refreshed).toBe(false);
+    // No pointless version churn when nothing changed.
+    expect(db.select().from(workflowDefinitionVersions).all().length).toBe(1);
   });
 
   it('rolls the workflow back when the publish env/model gate rejects', async () => {

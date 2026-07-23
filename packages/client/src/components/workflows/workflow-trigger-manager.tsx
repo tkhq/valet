@@ -4,6 +4,7 @@ import {
   type TriggerConfig,
   type WebhookConfig,
   type ScheduleConfig,
+  type GithubAppConfig,
   useCreateTrigger,
   useDeleteTrigger,
   useDisableTrigger,
@@ -90,6 +91,10 @@ function isWebhookConfig(config: TriggerConfig): config is WebhookConfig {
 
 function isScheduleConfig(config: TriggerConfig): config is ScheduleConfig {
   return config.type === 'schedule';
+}
+
+function isGithubAppConfig(config: TriggerConfig): config is GithubAppConfig {
+  return config.type === 'github-app';
 }
 
 function formFromTrigger(trigger: Trigger): TriggerFormState {
@@ -190,6 +195,9 @@ function validateForm(form: TriggerFormState): string | null {
 
 function describeTrigger(trigger: Trigger): string {
   if (trigger.type === 'manual') return 'Manual run only';
+  if (trigger.type === 'github-app' && isGithubAppConfig(trigger.config)) {
+    return `GitHub App • ${trigger.config.owner}/${trigger.config.repo} • ${trigger.config.events.join(', ')}`;
+  }
   if (trigger.type === 'webhook' && isWebhookConfig(trigger.config)) {
     const method = trigger.config.method || 'POST';
     return `${method} /api/triggers/${trigger.id}/webhook`;
@@ -478,9 +486,15 @@ export function WorkflowTriggerManager({ workflowId, triggers }: WorkflowTrigger
                       <Button size="sm" variant="secondary" onClick={() => onToggleEnabled(trigger)} disabled={busy}>
                         {trigger.enabled ? 'Disable' : 'Enable'}
                       </Button>
-                      <Button size="sm" variant="secondary" onClick={() => openEditDialog(trigger)} disabled={busy}>
-                        Edit
-                      </Button>
+                      {/* github-app triggers are provisioned and configured by the
+                          code-review setup flow — editing one through the generic
+                          form would rewrite it as a plain manual trigger and drop
+                          its repo/events config, so it is read-only here. */}
+                      {trigger.type !== 'github-app' && (
+                        <Button size="sm" variant="secondary" onClick={() => openEditDialog(trigger)} disabled={busy}>
+                          Edit
+                        </Button>
+                      )}
                       <Button size="sm" variant="destructive" onClick={() => onDelete(trigger)} disabled={busy}>
                         Delete
                       </Button>

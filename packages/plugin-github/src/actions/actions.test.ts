@@ -205,6 +205,66 @@ describe('github.create_review', () => {
     expect(requestMock).not.toHaveBeenCalled();
   });
 
+  it('updates its own most recent review in place when updateExisting is set', async () => {
+    requestMock
+      // The lookup: another bot's review, our older review, our latest, a human's.
+      .mockResolvedValueOnce({
+        data: [
+          { id: 10, user: { login: 'other-bot[bot]' } },
+          { id: 11, user: { login: 'valet-bot[bot]' } },
+          { id: 12, user: { login: 'valet-bot[bot]' } },
+          { id: 13, user: { login: 'a-human' } },
+        ],
+      })
+      .mockResolvedValueOnce({ data: { id: 12, state: 'COMMENTED' } });
+
+    const result = await githubActions.execute(
+      'github.create_review',
+      { owner: 'tkhq', repo: 'valet', pullNumber: 42, event: 'COMMENT', body: 'Refreshed take.', updateExisting: true },
+      { ...botCtx(), botLogin: 'valet-bot[bot]' },
+    );
+
+    expect(result.success).toBe(true);
+    const routes = requestMock.mock.calls.map((c) => c[0]);
+    expect(routes[0]).toBe('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews');
+    expect(routes[1]).toBe('PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}');
+    // The LATEST of our own reviews, never another bot's or a human's.
+    expect(requestMock.mock.calls[1][1]).toMatchObject({ review_id: 12 });
+    expect(String(requestMock.mock.calls[1][1].body)).toContain('Refreshed take.');
+    expect(routes).not.toContain('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews');
+  });
+
+  it('falls back to creating when the bot has no prior review on the PR', async () => {
+    requestMock
+      .mockResolvedValueOnce({ data: [{ id: 10, user: { login: 'a-human' } }] })
+      .mockResolvedValueOnce({ data: { id: 20, state: 'COMMENTED' } });
+
+    const result = await githubActions.execute(
+      'github.create_review',
+      { owner: 'tkhq', repo: 'valet', pullNumber: 42, event: 'COMMENT', body: 'First take.', updateExisting: true },
+      { ...botCtx(), botLogin: 'valet-bot[bot]' },
+    );
+
+    expect(result.success).toBe(true);
+    const routes = requestMock.mock.calls.map((c) => c[0]);
+    expect(routes[1]).toBe('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews');
+  });
+
+  it('creates directly when the context carries no bot identity', async () => {
+    requestMock.mockResolvedValueOnce({ data: { id: 30, state: 'COMMENTED' } });
+
+    const result = await githubActions.execute(
+      'github.create_review',
+      { owner: 'tkhq', repo: 'valet', pullNumber: 42, event: 'COMMENT', body: 'Take.', updateExisting: true },
+      ctx(),
+    );
+
+    expect(result.success).toBe(true);
+    // No lookup without an identity to match against — a plain create.
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(requestMock.mock.calls[0][0]).toBe('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews');
+  });
+
   it('routes an API error through handleOctokitError', async () => {
     requestMock.mockRejectedValueOnce(
       Object.assign(new Error('Resource not accessible by integration'), { status: 403 }),
