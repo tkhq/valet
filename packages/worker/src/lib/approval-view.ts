@@ -7,6 +7,7 @@
  * helper here so the field-derivation logic — explicit vs tool-policy
  * detection, prompt synthesis from params, etc. — lives in one place.
  */
+import { qualifyActionId } from './action-id.js';
 
 export interface ApprovalViewInput {
   id: string;
@@ -68,7 +69,7 @@ export function mapApprovalView(a: ApprovalViewInput): ApprovalView {
     nodeId: a.nodeId,
     kind: explicit ? 'explicit' : 'tool_policy',
     status: a.status,
-    prompt: explicit ? ((p.prompt as string | null | undefined) ?? null) : `Approve ${a.service}.${a.actionId}?`,
+    prompt: explicit ? ((p.prompt as string | null | undefined) ?? null) : `Approve ${qualifyActionId(a.service, a.actionId)}?`,
     summary: explicit ? ((p.summary as string | null | undefined) ?? null) : null,
     details: explicit ? (p.details ?? null) : parsedParams,
     timeoutAt: a.expiresAt,

@@ -15,6 +15,12 @@ export type TriggerConfig =
       // Per-trigger rate limit override (requests per 60s window).
       // Defaults to WEBHOOK_RATE_LIMIT_DEFAULT when unset.
       rateLimit?: number;
+      // Repository pin written when a repo-scoped template (code review) is
+      // installed. The delivery path refuses a payload naming any other
+      // repository, so this is a security control, not decoration: it is a
+      // declared part of the config precisely so ordinary edits round-trip it
+      // instead of silently dropping it.
+      github?: { codeReview: true; owner: string; repo: string };
     }
   | {
       type: 'schedule';
@@ -29,6 +35,15 @@ export type TriggerConfig =
       // Static trigger payload for each scheduled workflow run. Validated
       // against the workflow trigger node's dataSchema before execution.
       triggerData?: Record<string, unknown>;
+    }
+  | {
+      // Fires from the org's GitHub App event stream (no per-repo webhook to
+      // configure). Scoped to one repo so App deliveries can be matched to it;
+      // `events` are the GitHub event names to react to (e.g. 'pull_request').
+      type: 'github-app';
+      owner: string;
+      repo: string;
+      events: string[];
     }
   | { type: 'manual' };
 

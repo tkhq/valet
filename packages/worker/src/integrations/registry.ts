@@ -21,6 +21,13 @@ export type { CustomMcpConnectorContext } from '../services/custom-mcp-connector
 export interface CredentialResolverContext {
   params?: Record<string, unknown>;
   forceRefresh?: boolean;
+  /**
+   * Requested auth identity. 'app' asks a provider to act as the org's
+   * installed app/bot (skipping the caller's personal credential); 'user'
+   * (default) is the caller's own linked credential. Advisory: providers that
+   * don't support app auth (only GitHub does today) ignore it.
+   */
+  credentialMode?: 'user' | 'app';
 }
 
 /**

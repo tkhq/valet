@@ -121,7 +121,7 @@ webhooksRouter.post('/github', async (c) => {
     }
   }
 
-  // Pull request events — session state management
+  // Pull request events — session state management + App-driven workflows
   if (event === 'pull_request') {
     try {
       await webhookService.handlePullRequestWebhook(c.env, payload);
@@ -129,6 +129,22 @@ webhooksRouter.post('/github', async (c) => {
     } catch (error) {
       handlerError = error;
       console.error('[github webhook] pull_request handler error:', error);
+    }
+    // Fan the event out to any github-app triggers scoped to this repo (the
+    // "wire it up via the App" alternative to a per-workflow webhook).
+    try {
+      await webhookService.dispatchGithubAppReviews(c.env, event, payload, deliveryId);
+    } catch (error) {
+      console.error('[github webhook] github-app dispatch error:', error);
+    }
+  }
+
+  // Issue-comment events — App-driven re-review on an @Valet mention.
+  if (event === 'issue_comment') {
+    try {
+      await webhookService.dispatchGithubAppReviews(c.env, event, payload, deliveryId);
+    } catch (error) {
+      console.error('[github webhook] issue_comment dispatch error:', error);
     }
   }
 
@@ -144,7 +160,7 @@ webhooksRouter.post('/github', async (c) => {
   }
 
   // TODO: route unhandled events to org orchestrator for automation rules
-  const handled = new Set(['installation', 'pull_request', 'push']);
+  const handled = new Set(['installation', 'pull_request', 'push', 'issue_comment']);
   if (!handled.has(event)) {
     console.log(`[github webhook] unhandled event: ${event}.${payload.action ?? ''}`);
   }

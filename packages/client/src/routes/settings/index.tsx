@@ -3,6 +3,7 @@ import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
 import { PageContainer, PageHeader } from '@/components/layout/page-container';
 import { useAuthStore } from '@/stores/auth';
 import { useLogout, useUpdateProfile } from '@/api/auth';
+import { useEnableCodeReview } from '@/api/code-review';
 import { useOrchestratorInfo, useUpdateOrchestratorIdentity, useCheckHandle, useNotificationPreferences, useUpdateNotificationPreferences, useIdentityLinks, useDeleteIdentityLink, useUploadAvatar, useDeleteAvatar } from '@/api/orchestrator';
 import { useAvailableModels } from '@/api/sessions';
 import type { ProviderModels } from '@/api/sessions';
@@ -204,6 +205,7 @@ function AgentTab() {
 
       <ModelPreferencesSection />
       <ActionPolicyOverridesSection />
+      <CodeReviewSection />
       <RuntimeGrantsSection />
       <TimezoneSection />
       <IdleTimeoutSection />
@@ -682,6 +684,124 @@ function SandboxResourcesSection() {
         </div>
       </div>
     </SettingsSection>
+  );
+}
+
+function CodeReviewSection() {
+  const user = useAuthStore((s) => s.user);
+  const updateProfile = useUpdateProfile();
+  const [saved, setSaved] = React.useState(false);
+  const enabled = user?.codeReviewEnabled ?? true;
+  const mentionOnly = user?.codeReviewMentionOnly ?? false;
+
+  function save(patch: { codeReviewEnabled?: boolean; codeReviewMentionOnly?: boolean }) {
+    updateProfile.mutate(patch, {
+      onSuccess: () => {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+      },
+    });
+  }
+
+  return (
+    <SettingsSection title="Code review">
+      <div className="space-y-4">
+        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          Controls how Valet reviews pull requests on repos where you&apos;ve armed the automation.
+          Your organization&apos;s admins may enforce these settings, in which case your choices here are ignored.
+        </p>
+
+        <EnableRepoReview />
+
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">Review my pull requests</p>
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              Turn off to opt your own repos out of automated review entirely.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={enabled}
+            disabled={updateProfile.isPending}
+            onChange={(value) => save({ codeReviewEnabled: value })}
+          />
+        </div>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">Only when I @mention the bot</p>
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              Skip the automatic review when a PR opens; review only when you @mention the bot.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={mentionOnly}
+            disabled={updateProfile.isPending || !enabled}
+            onChange={(value) => save({ codeReviewMentionOnly: value })}
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          {saved && <span className="text-sm text-green-600 dark:text-green-400">Saved</span>}
+          {updateProfile.isError && (
+            <span className="text-sm text-red-600 dark:text-red-400">Failed to save.</span>
+          )}
+        </div>
+      </div>
+    </SettingsSection>
+  );
+}
+
+/**
+ * Arm a repository for Claude PR reviews via the org GitHub App. Installs the
+ * review workflow + a github-app trigger scoped to the repo (idempotent). The
+ * caller must have write access to the repo and the App must be installed on
+ * the owner — both checked server-side.
+ */
+function EnableRepoReview() {
+  const [value, setValue] = React.useState('');
+  const enable = useEnableCodeReview();
+
+  const parsed = React.useMemo(() => {
+    const [owner, repo] = value.trim().split('/');
+    return owner && repo ? { owner, repo } : null;
+  }, [value]);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!parsed || enable.isPending) return;
+    enable.mutate(parsed);
+  }
+
+  return (
+    <div className="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
+      <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">Enable on a repository</p>
+      <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+        Claude reviews every new or updated pull request there and posts the review as the GitHub App.
+      </p>
+      <form onSubmit={submit} className="mt-3 flex items-center gap-2">
+        <input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="owner/repo"
+          spellCheck={false}
+          className="flex-1 rounded-md border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-violet-400 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-100"
+        />
+        <Button type="submit" disabled={!parsed || enable.isPending}>
+          {enable.isPending ? 'Enabling…' : 'Enable'}
+        </Button>
+      </form>
+      {enable.isSuccess && (
+        <p className="mt-2 text-sm text-green-600 dark:text-green-400">
+          {enable.data.alreadyArmed
+            ? `Already armed for ${enable.data.owner}/${enable.data.repo}.`
+            : `Armed ${enable.data.owner}/${enable.data.repo} — Claude will review its pull requests.`}
+        </p>
+      )}
+      {enable.isError && (
+        <p className="mt-2 text-sm text-red-600 dark:text-red-400">
+          {enable.error instanceof Error ? enable.error.message : 'Failed to enable code review.'}
+        </p>
+      )}
+    </div>
   );
 }
 

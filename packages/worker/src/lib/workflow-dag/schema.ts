@@ -178,6 +178,11 @@ export const toolNodeSchema = z.object({
   summary: z.string().optional(),
   onPolicyDeny: z.enum(['fail', 'skip']).optional(),
   retries: z.number().int().min(0).max(10).optional(),
+  // Which identity the call acts as. Enumerated rather than free-form so a typo
+  // ('App', 'bot') is rejected at save time instead of silently falling through
+  // to the workflow owner's personal token — the identity a node declares it
+  // does NOT post as.
+  credential: z.enum(['user', 'app']).optional(),
   // Per-node override of the tool action's output shape. Feeds the
   // validator's typed-array derivation for foreach sources. When
   // present, this beats any service-level schema registered via

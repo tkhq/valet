@@ -825,6 +825,14 @@ function countOutgoingEdges(edges: WorkflowEdge[]): Map<string, number> {
   return counts;
 }
 
+/** dag/v1 stores node.action as the full service-prefixed id
+ *  ("github.inspect_pull_request"), so composing service + action
+ *  double-prefixes. Keep the compose only as a fallback for hand-typed
+ *  custom actions that may be unprefixed. */
+export function toolCallName(n: { service: string; action: string }): string {
+  return n.action.startsWith(`${n.service}.`) ? n.action : `${n.service}.${n.action}`;
+}
+
 function summarizeNode(node: WorkflowNode): string {
   switch (node.type) {
     case 'llm':
@@ -832,7 +840,9 @@ function summarizeNode(node: WorkflowNode): string {
     case 'trigger':
       return 'Where the workflow starts and what data it receives';
     case 'tool':
-      return trimSummary(node.service && node.action ? `${node.service}.${node.action}` : 'No action configured');
+      return trimSummary(
+        node.service && node.action ? toolCallName(node) : 'No action configured',
+      );
     case 'if':
       return `${node.conditions.length} condition${node.conditions.length === 1 ? '' : 's'}`;
     case 'foreach':

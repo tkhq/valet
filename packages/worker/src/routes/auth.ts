@@ -61,6 +61,8 @@ const updateProfileSchema = z.object({
   modelPreferences: z.array(z.string().max(255)).max(20).optional(),
   uiQueueMode: z.enum(['followup', 'collect', 'steer']).optional(),
   timezone: z.string().max(50).optional(),
+  codeReviewEnabled: z.boolean().optional(),
+  codeReviewMentionOnly: z.boolean().optional(),
 });
 
 /**

@@ -368,6 +368,31 @@ function SettingsPanel({ config }: { config: NonNullable<ReturnType<typeof useAd
           onChange={(value) => updateSettings.mutate({ allowAnonymousGitHubAccess: value })}
         />
       </div>
+
+      <h3 className="text-sm font-medium text-neutral-800 dark:text-neutral-200">AI code review</h3>
+      <div className="space-y-4 rounded-md border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-700 dark:bg-neutral-800/50">
+        <ToggleRow
+          label="Enable AI code review"
+          description="Let Valet review pull requests on repos where members have armed the automation. Off disables it org-wide."
+          checked={settings.codeReviewEnabled}
+          disabled={updateSettings.isPending}
+          onChange={(value) => updateSettings.mutate({ codeReviewEnabled: value })}
+        />
+        <ToggleRow
+          label="Enforce for all members"
+          description="Members cannot opt their own repos out or reduce review frequency."
+          checked={settings.codeReviewEnforced}
+          disabled={updateSettings.isPending || !settings.codeReviewEnabled}
+          onChange={(value) => updateSettings.mutate({ codeReviewEnforced: value })}
+        />
+        <ToggleRow
+          label="Mention-only (quiet mode)"
+          description="Skip the automatic review when a PR opens; only review when someone @mentions the bot."
+          checked={settings.codeReviewMentionOnly}
+          disabled={updateSettings.isPending || !settings.codeReviewEnabled}
+          onChange={(value) => updateSettings.mutate({ codeReviewMentionOnly: value })}
+        />
+      </div>
     </div>
   );
 }

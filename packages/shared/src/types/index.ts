@@ -301,6 +301,10 @@ export interface User {
   modelPreferences?: string[];
   uiQueueMode?: QueueMode;
   timezone?: string;
+  /** Owner opt-out for the AI code-review automation on their own repos. Default true. */
+  codeReviewEnabled?: boolean;
+  /** Owner opts their repos down to @mention-only review (skip the on-open review). Default false. */
+  codeReviewMentionOnly?: boolean;
   role: UserRole;
   createdAt: Date;
   updatedAt: Date;

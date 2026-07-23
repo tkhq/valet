@@ -10,6 +10,12 @@ export interface ToolNode {
   onPolicyDeny?: 'fail' | 'skip';
   retries?: number;
   /**
+   * Which identity to act as. 'app' resolves the org's app/bot credential
+   * instead of the workflow owner's personal one (GitHub only today — e.g. so
+   * a code-review workflow posts as the bot). Defaults to the owner's credential.
+   */
+  credential?: 'user' | 'app';
+  /**
    * Optional JSON-schema description of the shape the action returns
    * under `nodes.<id>.data`. Consumed by the validator's typed-array
    * derivation, so a tool node can act as a `foreach.items` source
@@ -56,6 +62,9 @@ UI (or the configured \`onPolicyDeny\` behavior kicks in).`,
     },
     retries: {
       help: 'How many times to retry transient failures. 0 disables retries; default is 3 retries with backoff.',
+    },
+    credential: {
+      help: "Which identity the call acts as. 'user' (the default) uses the workflow owner's connected account; 'app' uses the org's app/bot credential — GitHub only today — and fails rather than falling back to a person.",
     },
   },
   gotchas: [

@@ -17,8 +17,8 @@ export interface Trigger {
   workflowName: string | null;
   name: string;
   enabled: boolean;
-  type: 'webhook' | 'schedule' | 'manual';
-  config: WebhookConfig | ScheduleConfig | ManualConfig;
+  type: 'webhook' | 'schedule' | 'manual' | 'github-app';
+  config: WebhookConfig | ScheduleConfig | ManualConfig | GithubAppConfig;
   variableMapping: Record<string, string> | null;
   webhookUrl?: string;
   lastRunAt: string | null;
@@ -37,6 +37,11 @@ export interface WebhookConfig {
   // an API-set value doesn't get silently wiped when a user edits the
   // trigger from the form.
   rateLimit?: number;
+  // Repository pin written when a repo-scoped template (code review) is
+  // installed. It is what confines the trigger to one repository, so the
+  // trigger form must round-trip it rather than rebuild the config without
+  // it — dropping it is a privilege change, not a cosmetic edit.
+  github?: { codeReview: true; owner: string; repo: string };
 }
 
 export interface ScheduleConfig {
@@ -55,7 +60,14 @@ export interface ManualConfig {
   type: 'manual';
 }
 
-export type TriggerConfig = WebhookConfig | ScheduleConfig | ManualConfig;
+export interface GithubAppConfig {
+  type: 'github-app';
+  owner: string;
+  repo: string;
+  events: string[];
+}
+
+export type TriggerConfig = WebhookConfig | ScheduleConfig | ManualConfig | GithubAppConfig;
 
 export interface CreateTriggerRequest {
   workflowId?: string;

@@ -23,6 +23,7 @@ import { renderJsonTemplates, renderTemplate } from '../../lib/workflow-dag/expr
 import { buildTemplateContext } from '../context.js';
 import { integrationRegistry } from '../../integrations/registry.js';
 import { isActionDisabled } from '../../lib/db/disabled-actions.js';
+import { qualifyActionId } from '../../lib/action-id.js';
 import { loadCustomMcpConnectorContext } from '../../services/custom-mcp-connectors.js';
 import { getDb } from '../../lib/drizzle.js';
 import { invokeWorkflowAction, markExecuted, markFailed } from '../../services/actions.js';
@@ -68,7 +69,8 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   // stall the node for minutes before writing `failed`.
   const preflightJson = await step.do(`tool:${node.id}${iSuffix}:preflight`, { retries: { ...NO_RETRY } }, async () => {
     if (await isActionDisabled(db, node.service, node.action)) {
-      throw new Error(`tool node "${node.id}": action ${node.service}.${node.action} is disabled`);
+      const actionLabel = qualifyActionId(node.service, node.action);
+      throw new Error(`tool node "${node.id}": action "${actionLabel}" is disabled`);
     }
     const customCtx = await loadCustomMcpConnectorContext(env, db);
     const source = integrationRegistry.getActions(node.service, customCtx);
@@ -274,6 +276,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       const credResult = await integrationRegistry.resolveCredentials(node.service, env, runParams.userId, {
         params: renderedParams,
         forceRefresh: false,
+        ...(node.credential ? { credentialMode: node.credential } : {}),
       });
       if (!credResult.ok) {
         // Allow-mode rows enter as 'pending' and are flipped to
@@ -343,6 +346,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       const refreshed = await integrationRegistry.resolveCredentials(node.service, env, runParams.userId, {
         params: renderedParams,
         forceRefresh: true,
+        ...(node.credential ? { credentialMode: node.credential } : {}),
       });
       if (!refreshed.ok) {
         return JSON.stringify({ ok: false, error: refreshed.error.message });

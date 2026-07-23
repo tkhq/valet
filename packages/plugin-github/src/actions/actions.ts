@@ -129,6 +129,20 @@ const githubCommentSchema = {
   additionalProperties: true,
 } satisfies Record<string, unknown>;
 
+const githubReviewSchema = {
+  type: 'object',
+  properties: {
+    id: { type: 'number' },
+    state: { type: 'string' },
+    body: { type: ['string', 'null'] },
+    html_url: { type: 'string' },
+    user: { type: ['object', 'null'], additionalProperties: true },
+    commit_id: { type: ['string', 'null'] },
+    submitted_at: { type: ['string', 'null'] },
+  },
+  additionalProperties: true,
+} satisfies Record<string, unknown>;
+
 const githubIssueMutationSchema = {
   type: 'object',
   properties: {
@@ -196,6 +210,10 @@ const githubPullRequestInspectionSchema = {
           status: { type: 'string' },
           additions: { type: 'number' },
           deletions: { type: 'number' },
+          // Unified-diff hunks for this file. Only present when the caller
+          // passes includePatch: true; omitted otherwise (and omitted by
+          // GitHub for binary/oversized files).
+          patch: { type: ['string', 'null'] },
         },
       },
     },
@@ -515,6 +533,95 @@ const createComment: ActionDefinition = {
   outputSchema: githubCommentSchema,
 };
 
+/** Shape of one inline comment after params parsing, mirrored from the schema below. */
+interface ReviewCommentInput {
+  path: string;
+  body: string;
+  line?: number;
+  side?: 'LEFT' | 'RIGHT';
+  startLine?: number;
+  startSide?: 'LEFT' | 'RIGHT';
+  position?: number;
+}
+
+const createReview: ActionDefinition = {
+  id: 'github.create_review',
+  name: 'Create Review',
+  description:
+    'Submit a review on a pull request, optionally with inline comments anchored to lines in the diff',
+  riskLevel: 'medium',
+  params: z
+    .object({
+      owner: z.string().describe('Repository owner'),
+      repo: z.string().describe('Repository name'),
+      pullNumber: z.number().int().describe('Pull request number'),
+      body: z
+        .string()
+        .optional()
+        .describe('Review summary (markdown). Required when event is COMMENT or REQUEST_CHANGES'),
+      event: z
+        .enum(['APPROVE', 'REQUEST_CHANGES', 'COMMENT'])
+        .optional()
+        .describe('Review action. Omit to leave the review pending'),
+      commitId: z
+        .string()
+        .optional()
+        .describe('SHA the review applies to (defaults to the most recent commit)'),
+      comments: z
+        .array(
+          z.object({
+            path: z.string().describe('File path relative to the repository root'),
+            body: z.string().describe('Comment text'),
+            line: z.number().int().optional().describe('Line in the diff the comment applies to'),
+            side: z.enum(['LEFT', 'RIGHT']).optional().describe('Diff side for `line`'),
+            startLine: z.number().int().optional().describe('First line of a multi-line comment'),
+            startSide: z.enum(['LEFT', 'RIGHT']).optional().describe('Diff side for `startLine`'),
+            position: z
+              .number()
+              .int()
+              .optional()
+              .describe('Legacy offset from the first @@ hunk header'),
+          }),
+        )
+        .optional()
+        .describe('Inline comments to attach to the review'),
+    })
+    .superRefine((p, ctx) => {
+      if ((p.event === 'COMMENT' || p.event === 'REQUEST_CHANGES') && !p.body?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'body is required when event is COMMENT or REQUEST_CHANGES',
+          path: ['body'],
+        });
+      }
+      // GitHub's review-comment anchors are mutually exclusive: a comment uses
+      // EITHER the legacy `position` (offset from the diff hunk) OR the line-based
+      // `line`/`side` (+ optional `startLine`/`startSide` for a multi-line range).
+      // Mixing them 422s, and `startLine`/`startSide` require `line` as the range
+      // end. Reject those combinations here rather than round-tripping to a 422.
+      p.comments?.forEach((c, i) => {
+        const hasPosition = c.position !== undefined;
+        const hasLineAnchor =
+          c.line !== undefined || c.side !== undefined || c.startLine !== undefined || c.startSide !== undefined;
+        if (hasPosition && hasLineAnchor) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'position cannot be combined with line/side/startLine/startSide — they are mutually exclusive',
+            path: ['comments', i, 'position'],
+          });
+        }
+        if ((c.startLine !== undefined || c.startSide !== undefined) && c.line === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'line (the end of the range) is required when startLine or startSide is set',
+            path: ['comments', i, 'line'],
+          });
+        }
+      });
+    }),
+  outputSchema: githubReviewSchema,
+};
+
 const listPullRequests: ActionDefinition = {
   id: 'github.list_pull_requests',
   name: 'List Pull Requests',
@@ -543,6 +650,7 @@ const inspectPullRequest: ActionDefinition = {
     pullNumber: z.number().int().describe('Pull request number'),
     filesLimit: z.number().int().min(1).max(300).optional().describe('Max files to return (default: 100)'),
     commentsLimit: z.number().int().min(1).max(300).optional().describe('Max review comments (default: 100)'),
+    includePatch: z.boolean().optional().describe('Include the per-file unified-diff patch text (default: false). Needed for code review.'),
   }),
   outputSchema: githubPullRequestInspectionSchema,
 };
@@ -947,6 +1055,7 @@ const allActions: ActionDefinition[] = [
   updateIssue,
   getPullRequest,
   createComment,
+  createReview,
   listPullRequests,
   inspectPullRequest,
   updatePullRequest,
@@ -985,6 +1094,7 @@ const PERMISSION_HINTS: Record<string, string> = {
   'github.create_issue': 'issues:write',
   'github.update_issue': 'issues:write',
   'github.create_comment': 'issues:write',
+  'github.create_review': 'pull_requests:write',
   'github.create_pull_request': 'pull_requests:write',
   'github.update_pull_request': 'pull_requests:write',
   'github.merge_pull_request': 'pull_requests:write + contents:write',
@@ -1090,12 +1200,46 @@ async function executeAction(
       case 'github.create_comment': {
         const { owner, repo, issueNumber, body } = createComment.params.parse(params);
         try {
+          // Label the comment as app-authored under a bot token, like create_issue
+          // etc. (attributionSuffix is '' when there's no bot attribution).
+          const commentBody = body + attributionSuffix(ctx);
           const { data } = await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-            owner, repo, issue_number: issueNumber, body,
+            owner, repo, issue_number: issueNumber, body: commentBody,
           });
           return { success: true, data };
         } catch (err: any) {
           return handleOctokitError(err, actionId, 'Create comment');
+        }
+      }
+
+      case 'github.create_review': {
+        const p = createReview.params.parse(params);
+        try {
+          // Attribute the review body like every other body-carrying write, so a
+          // review posted under a bot/App token is marked as machine-authored.
+          // Leave a bodyless review (a pending or bare APPROVE) untouched rather
+          // than forcing a suffix-only body onto it.
+          const reviewBody = p.body !== undefined ? p.body + attributionSuffix(ctx) : undefined;
+          const { data } = await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
+            owner: p.owner,
+            repo: p.repo,
+            pull_number: p.pullNumber,
+            body: reviewBody,
+            event: p.event,
+            commit_id: p.commitId,
+            comments: p.comments?.map((c: ReviewCommentInput) => ({
+              path: c.path,
+              body: c.body,
+              line: c.line,
+              side: c.side,
+              start_line: c.startLine,
+              start_side: c.startSide,
+              position: c.position,
+            })),
+          });
+          return { success: true, data };
+        } catch (err: any) {
+          return handleOctokitError(err, actionId, 'Create review');
         }
       }
 
@@ -1190,6 +1334,10 @@ async function executeAction(
                 status: f.status,
                 additions: f.additions,
                 deletions: f.deletions,
+                // Only surface the diff hunks when explicitly requested — the
+                // default output stays lean/backward-compatible. GitHub omits
+                // `patch` for binary or oversized files, so it may be null.
+                ...(p.includePatch ? { patch: f.patch ?? null } : {}),
               })),
               reviews: reviews.filter((r: any) => r.state !== 'DISMISSED').map((r: any) => ({
                 user: r.user?.login,

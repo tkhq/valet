@@ -2,11 +2,15 @@ import type { Env } from '../env.js';
 import type { PRState } from '@valet/shared';
 import * as db from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
+import type { AppDb } from '../lib/drizzle.js';
 import { checkWorkflowConcurrency } from './executions.js';
 import { dispatchWorkflowExecution } from './workflow-dispatch.js';
 import { sha256Hex } from '../lib/hash.js';
 import { constantTimeEqual } from '../lib/crypto.js';
 import { WEBHOOK_RATE_LIMIT_DEFAULT, bumpWebhookRateCount } from '../lib/db.js';
+import { getServiceConfig } from '../lib/db/service-configs.js';
+import { getGitHubMetadata } from './github-config.js';
+import { getPublishedDefinition } from './workflow-versions.js';
 
 // Row shape shared by the id-based lookup (getWebhookTriggerById, used
 // by /api/triggers/:id/webhook with token auth) and the path-based
@@ -281,9 +285,74 @@ export async function dispatchWebhookForTrigger(
       extractedTriggerData[varName] = value;
     }
   }
-  const workflowTriggerData = Object.keys(extractedTriggerData).length > 0
+  let workflowTriggerData = Object.keys(extractedTriggerData).length > 0
     ? extractedTriggerData
     : normalizedPayload;
+
+  // Repo-pinned code-review triggers (installed from the code-review template)
+  // carry the repository they were armed for on their config. Everything the
+  // App-delivery path decides — is this the right repo, is the author trusted,
+  // does org/owner policy still want reviews — has to hold here too, or the
+  // manual-webhook install is simply a way around it.
+  const triggerConfig = JSON.parse(trigger.config as string) as {
+    github?: { codeReview?: boolean; owner?: string; repo?: string };
+  };
+  const pin = triggerConfig.github;
+  const pinIsComplete = Boolean(pin?.codeReview && pin.owner && pin.repo);
+
+  // An absent or half-written pin must not read as "unpinned, therefore
+  // unrestricted". A workflow that can post as the org's App is armed for one
+  // repository or for none at all, so a delivery to such a workflow without a
+  // usable pin is refused outright rather than let through to whatever
+  // repository the payload happens to name.
+  if (!pinIsComplete && (pin !== undefined || deliveryLooksLikeGithubEvent(cleanHeaders, parsedBody))) {
+    if (await workflowCanActAsGithubApp(appDb, trigger.workflow_id)) {
+      return {
+        result: {
+          received: true,
+          queued: false,
+          error: 'repo_not_allowed',
+          reason: 'repo_not_allowed',
+          message:
+            'This trigger runs a workflow that posts as the GitHub App but is not pinned to a repository. Re-install it from the template to arm it for one repo.',
+        },
+        statusCode: 403,
+      };
+    }
+  }
+
+  if (pin?.codeReview && pin.owner && pin.repo) {
+    const gate = await gateCodeReviewDelivery(env, appDb, {
+      event: headers['x-github-event'] ?? 'pull_request',
+      payload: (parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+        ? parsedBody as Record<string, unknown>
+        : {}),
+      pinnedOwner: pin.owner,
+      pinnedRepo: pin.repo,
+      triggerUserId: trigger.user_id,
+    });
+    if (gate.outcome === 'wrong_repo') {
+      return {
+        result: {
+          received: true,
+          queued: false,
+          error: 'repo_not_allowed',
+          reason: 'repo_not_allowed',
+          message: `This trigger is armed for ${pin.owner}/${pin.repo} only.`,
+        },
+        statusCode: 403,
+      };
+    }
+    if (gate.outcome === 'skip') {
+      return {
+        result: { received: true, dispatched: false, message: 'Webhook received. No review warranted.' },
+        statusCode: 200,
+      };
+    }
+    // Take the review scope from the gate, not from the raw body: the pinned
+    // owner/repo win, and the PR number is the one the policy just approved.
+    workflowTriggerData = { owner: pin.owner, repo: pin.repo, pullNumber: gate.decision.pullNumber };
+  }
 
   const deliveryId = headers['x-github-delivery']
     || headers['x-request-id']
@@ -388,6 +457,41 @@ export async function dispatchWebhookForTrigger(
   };
 }
 
+// ─── Repo-pin integrity ─────────────────────────────────────────────────────
+
+/**
+ * Whether this delivery is shaped like a GitHub repository event. Used only to
+ * decide whether an unpinned trigger is worth inspecting further, so it looks
+ * at the payload as well as the header — an attacker probing an unpinned
+ * trigger would simply omit `X-GitHub-Event`.
+ */
+function deliveryLooksLikeGithubEvent(
+  headers: Record<string, string>,
+  parsedBody: unknown,
+): boolean {
+  if (headers['x-github-event']) return true;
+  if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) return false;
+  const body = parsedBody as Record<string, unknown>;
+  if (!body.repository) return false;
+  return Boolean(body.pull_request || body.issue);
+}
+
+/**
+ * Whether the workflow behind a trigger contains any node that acts as the
+ * org's GitHub App (`credential: 'app'`).
+ *
+ * This is read from the PUBLISHED definition rather than the trigger config on
+ * purpose: the config is what an attacker edits, so it cannot also be the thing
+ * that decides whether the config needed a pin.
+ */
+async function workflowCanActAsGithubApp(appDb: AppDb, workflowId: string): Promise<boolean> {
+  const definition = await getPublishedDefinition(appDb, workflowId).catch(() => null);
+  if (!definition) return false;
+  return definition.nodes.some(
+    (n) => (n as { credential?: string }).credential === 'app',
+  );
+}
+
 // ─── Pull Request Webhook Handler ───────────────────────────────────────────
 
 export async function handlePullRequestWebhook(env: Env, payload: any): Promise<void> {
@@ -469,6 +573,327 @@ export async function handlePullRequestWebhook(env: Env, payload: any): Promise<
       }));
     } catch (err) {
       console.error(`Failed to notify DO for session ${sessionId}:`, err);
+    }
+  }
+}
+
+// ─── GitHub App → Workflow Dispatch ─────────────────────────────────────────
+
+/** What warrants a review for a delivered GitHub App event, or null to skip. */
+export interface ReviewDecision {
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  /** 'initial' = first review on open/ready; 'mention' = re-review on @Valet. */
+  reason: 'initial' | 'mention';
+}
+
+/**
+ * Author associations that count as "somebody who belongs to this repository".
+ * GitHub reports this per PR and per comment; anything else (CONTRIBUTOR,
+ * FIRST_TIME_CONTRIBUTOR, NONE, …) is an outsider.
+ */
+const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+/**
+ * Whether a pull request comes from somebody the repository already trusts —
+ * the branch lives in the repository itself (not a fork), or the author is an
+ * owner/member/collaborator.
+ *
+ * A review run spends money on an LLM call and publishes a review under the
+ * org's App identity, so an unaffiliated fork PR must not be able to summon
+ * one. This is the safe default; loosening it is an org-level product decision.
+ */
+function isTrustedPullRequest(
+  pr: {
+    head?: { repo?: { full_name?: string | null } | null };
+    author_association?: string;
+  } | undefined,
+  owner: string,
+  repo: string,
+): boolean {
+  if (!pr) return false;
+  const headRepo = pr.head?.repo?.full_name;
+  if (typeof headRepo === 'string' && headRepo.toLowerCase() === `${owner}/${repo}`.toLowerCase()) {
+    return true;
+  }
+  return TRUSTED_ASSOCIATIONS.has(String(pr.author_association ?? '').toUpperCase());
+}
+
+/** Whether a comment's author belongs to the repository. */
+function isTrustedCommenter(comment: { author_association?: string } | undefined): boolean {
+  return TRUSTED_ASSOCIATIONS.has(String(comment?.author_association ?? '').toUpperCase());
+}
+
+/**
+ * Greptile-style review policy. Decides whether a delivered GitHub App event
+ * should trigger a PR review:
+ *   • pull_request opened/reopened/ready_for_review, NOT draft, from someone
+ *     the repo trusts → initial review.
+ *   • pull_request synchronize (a push) and drafts → SKIP (no auto re-review).
+ *   • issue_comment on a PR that @-mentions "@Valet", from a trusted human
+ *     (not a bot) → re-review.
+ * Everything else is skipped. Returned null means "do nothing".
+ */
+export function decideReview(
+  event: string,
+  payload: Record<string, unknown>,
+  botSlug: string | null,
+): ReviewDecision | null {
+  const repository = payload.repository as { name?: string; owner?: { login?: string } } | undefined;
+  const owner = repository?.owner?.login;
+  const repo = repository?.name;
+  if (!owner || !repo) return null;
+
+  if (event === 'pull_request') {
+    const pr = payload.pull_request as {
+      number?: number;
+      draft?: boolean;
+      user?: { type?: string };
+      head?: { repo?: { full_name?: string | null } | null };
+      author_association?: string;
+    } | undefined;
+    if (!pr?.number) return null;
+    // Never review a draft PR.
+    if (pr.draft === true) return null;
+    // Loop guard, the same one the issue_comment branch applies: a PR opened by
+    // a bot — including this App itself — must not summon a review, or the App
+    // can trigger its own paid run.
+    if (pr.user?.type === 'Bot') return null;
+    // Never review on behalf of an outsider: a fork PR from someone with no
+    // standing in the repo would otherwise buy an LLM run and an App-authored
+    // review from anyone on GitHub.
+    if (!isTrustedPullRequest(pr, owner, repo)) return null;
+    // Review once — on open, reopen, or the draft→ready transition. Deliberately
+    // NOT on 'synchronize' (a push): like Greptile, re-review only on @-mention.
+    const action = payload.action;
+    if (action === 'opened' || action === 'reopened' || action === 'ready_for_review') {
+      return { owner, repo, pullNumber: pr.number, reason: 'initial' };
+    }
+    return null;
+  }
+
+  if (event === 'issue_comment') {
+    if (payload.action !== 'created') return null;
+    // issue_comment fires for issues AND PRs; only PRs carry issue.pull_request.
+    const issue = payload.issue as { number?: number; pull_request?: unknown } | undefined;
+    if (!issue?.number || !issue.pull_request) return null;
+    const comment = payload.comment as {
+      body?: string;
+      user?: { type?: string };
+      author_association?: string;
+    } | undefined;
+    // Loop guard: never react to a bot's own comment (incl. our own reviews).
+    if (comment?.user?.type === 'Bot') return null;
+    // Only somebody who belongs to the repository can summon a re-review;
+    // otherwise a drive-by comment triggers a paid run and an App-signed review.
+    if (!isTrustedCommenter(comment)) return null;
+    // Re-review only when the comment @-mentions THIS App's bot handle — the
+    // installed App's slug, e.g. `@valet-turnkey` or the bot login
+    // `@valet-turnkey[bot]`. Matching the generic word "valet" would ping an
+    // unrelated GitHub user (github.com/valet is a real account). Without a
+    // configured slug there's no bot to mention, so never match.
+    if (!botSlug) return null;
+    if (!mentionsBot(String(comment?.body ?? ''), botSlug)) return null;
+    return { owner, repo, pullNumber: issue.number, reason: 'mention' };
+  }
+
+  return null;
+}
+
+/** True when the comment @-mentions the App by its slug or `<slug>[bot]` login. */
+export function mentionsBot(body: string, botSlug: string): boolean {
+  const slug = botSlug.replace(/\[bot\]$/i, '');
+  const esc = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // @<slug> or @<slug>[bot], case-insensitive, not part of a longer handle.
+  return new RegExp(`@${esc}(\\[bot\\])?(?![a-z0-9-])`, 'i').test(body);
+}
+
+/** ORG-scoped code-review policy (from GitHubServiceMetadata.codeReview*). */
+export interface CodeReviewOrgPolicy {
+  enabled: boolean;
+  enforced: boolean;
+  mentionOnly: boolean;
+}
+/** Per-owner code-review prefs (from users.code_review_*). */
+export interface CodeReviewOwnerPrefs {
+  enabled: boolean;
+  mentionOnly: boolean;
+}
+
+/**
+ * Decide whether a code-review dispatch should proceed for one armed trigger,
+ * given the ORG policy, the repo OWNER's preferences, and why review fired
+ * (`initial` = PR opened/reopened/ready; `mention` = @bot re-review request).
+ *
+ * Precedence mirrors `resolveEffectiveActionPolicy`: the org value is a hard
+ * ceiling and the owner may only LOOSEN (make it quieter) within it — never
+ * tighten past the org, never override an org OFF.
+ *  - Org disabled  → absolute OFF          (analog: admin `deny` short-circuit)
+ *  - Org enforced  → owner prefs ignored    (analog: userGrantBehavior 'blocked')
+ *  - Owner opt-out → OFF for their repos    (a loosening: they want none)
+ *  - Mention-only  → skip `initial`, keep `mention`; org OR owner may set it
+ */
+export function resolveCodeReviewGate(
+  org: CodeReviewOrgPolicy,
+  owner: CodeReviewOwnerPrefs | null,
+  reason: 'initial' | 'mention',
+): boolean {
+  if (!org.enabled) return false;
+  if (org.enforced) {
+    return !(org.mentionOnly && reason === 'initial');
+  }
+  if (owner?.enabled === false) return false;
+  const mentionOnly = org.mentionOnly || owner?.mentionOnly === true;
+  if (mentionOnly && reason === 'initial') return false;
+  return true;
+}
+
+/** ORG code-review policy, read from GitHub service metadata. */
+async function readCodeReviewOrgPolicy(appDb: AppDb): Promise<CodeReviewOrgPolicy> {
+  const meta = await getGitHubMetadata(appDb) ?? {};
+  return {
+    enabled: meta.codeReviewEnabled !== false, // default true
+    enforced: meta.codeReviewEnforced === true, // default false
+    mentionOnly: meta.codeReviewMentionOnly === true, // default false
+  };
+}
+
+/**
+ * The repo owner's own preferences. Skipped when the org enforces — the owner
+ * can only loosen within the org ceiling, so their row cannot change the result.
+ */
+async function readCodeReviewOwnerPrefs(
+  appDb: AppDb,
+  userId: string,
+  orgEnforced: boolean,
+): Promise<CodeReviewOwnerPrefs | null> {
+  if (orgEnforced) return null;
+  const row = await db.getUserById(appDb, userId);
+  if (!row) return null;
+  return { enabled: row.codeReviewEnabled ?? true, mentionOnly: row.codeReviewMentionOnly ?? false };
+}
+
+/** This App's bot handle, needed only to match an @-mention re-review request. */
+async function resolveBotSlug(env: Env, appDb: AppDb, event: string): Promise<string | null> {
+  if (event !== 'issue_comment') return null;
+  const svc = await getServiceConfig<{ appSlug?: string }>(appDb, env.ENCRYPTION_KEY, 'github').catch(() => null);
+  return svc?.config.appSlug ?? null;
+}
+
+/**
+ * The code-review admission decision for one delivery on a repo-pinned webhook
+ * trigger: the same repo check, author-trust check and org/owner policy the
+ * GitHub App delivery path applies, so neither entry point is the soft one.
+ */
+async function gateCodeReviewDelivery(
+  env: Env,
+  appDb: AppDb,
+  input: {
+    event: string;
+    payload: Record<string, unknown>;
+    pinnedOwner: string;
+    pinnedRepo: string;
+    triggerUserId: string;
+  },
+): Promise<{ outcome: 'wrong_repo' } | { outcome: 'skip' } | { outcome: 'review'; decision: ReviewDecision }> {
+  const repository = input.payload.repository as { name?: string; owner?: { login?: string } } | undefined;
+  const deliveredOwner = repository?.owner?.login;
+  const deliveredRepo = repository?.name;
+  // A trigger armed for one repository must refuse a payload naming another —
+  // the token is otherwise a universal read of any repo the App can reach.
+  if (
+    typeof deliveredOwner !== 'string' ||
+    typeof deliveredRepo !== 'string' ||
+    deliveredOwner.toLowerCase() !== input.pinnedOwner.toLowerCase() ||
+    deliveredRepo.toLowerCase() !== input.pinnedRepo.toLowerCase()
+  ) {
+    return { outcome: 'wrong_repo' };
+  }
+
+  const orgPolicy = await readCodeReviewOrgPolicy(appDb);
+  if (!orgPolicy.enabled) return { outcome: 'skip' };
+
+  const botSlug = await resolveBotSlug(env, appDb, input.event);
+  const decision = decideReview(input.event, input.payload, botSlug);
+  if (!decision) return { outcome: 'skip' };
+
+  const ownerPrefs = await readCodeReviewOwnerPrefs(appDb, input.triggerUserId, orgPolicy.enforced);
+  if (!resolveCodeReviewGate(orgPolicy, ownerPrefs, decision.reason)) return { outcome: 'skip' };
+
+  return { outcome: 'review', decision };
+}
+
+/**
+ * Fan a GitHub App event out to every matching `github-app` trigger, gated by
+ * decideReview + the org/owner code-review policy. Best-effort: one trigger
+ * failure never blocks the webhook 200.
+ */
+export async function dispatchGithubAppReviews(
+  env: Env,
+  event: string,
+  payload: Record<string, unknown>,
+  deliveryId: string,
+): Promise<void> {
+  const appDb = getDb(env.DB);
+
+  // ORG CEILING — read once, up front. An org master-switch OFF is absolute:
+  // no per-owner setting can turn review back on, so short-circuit before any
+  // further work (analog: an admin `deny` in resolveEffectiveActionPolicy).
+  const orgPolicy = await readCodeReviewOrgPolicy(appDb);
+  if (!orgPolicy.enabled) return;
+
+  // Resolve the App's own slug so an @-mention re-review matches THIS bot's
+  // handle (`@<slug>` / `@<slug>[bot]`), not the generic word "valet". Only
+  // needed for issue_comment; skip the config read for pull_request events.
+  const botSlug = await resolveBotSlug(env, appDb, event);
+
+  const decision = decideReview(event, payload, botSlug);
+  if (!decision) return;
+  const { owner, repo, pullNumber, reason } = decision;
+
+  const triggers = await db.findGithubAppTriggersForRepo(env.DB, owner, repo);
+  if (triggers.length === 0) return;
+
+  for (const trigger of triggers) {
+    try {
+      const config = JSON.parse(trigger.config) as { events?: string[]; rateLimit?: number };
+      // Only fire triggers subscribed to this GitHub event.
+      if (config.events && !config.events.includes(event)) continue;
+
+      // PER-OWNER LOOSENING PASS. trigger.user_id is the person who ARMED this
+      // automation on the repo (the owner), not the PR author. They may only
+      // make review quieter for their own repos, never override the org.
+      const ownerPrefs = await readCodeReviewOwnerPrefs(appDb, trigger.user_id, orgPolicy.enforced);
+      if (!resolveCodeReviewGate(orgPolicy, ownerPrefs, reason)) continue;
+
+      // Same per-trigger ceiling the generic webhook path enforces. An App
+      // delivery is no cheaper than a manual one — each dispatch is an LLM run —
+      // so a burst of events on one repo must not bypass the limit.
+      const rate = await checkWebhookRateLimit(env, trigger.id, config);
+      if (!rate.allowed) {
+        console.warn(`[github-app dispatch] trigger ${trigger.id} rate limited (${rate.count}/${rate.limit} per 60s)`);
+        continue;
+      }
+
+      await dispatchWorkflowExecution(env, {
+        workflowId: trigger.workflow_id,
+        user: { id: trigger.user_id },
+        trigger: {
+          type: 'webhook',
+          triggerId: trigger.id,
+          timestamp: new Date().toISOString(),
+          // No `action` → the template's gate passes via its isEmpty arm; the
+          // review-vs-skip decision has already been made above.
+          data: { owner, repo, pullNumber },
+          metadata: { source: 'github-app', event, deliveryId, reason },
+        },
+        // One execution per delivery per trigger — GitHub retries redeliver the
+        // same X-GitHub-Delivery, so this dedupes at the executions unique index.
+        idempotencyKey: `github-app:${trigger.id}:${deliveryId}`,
+      });
+    } catch (err) {
+      console.error(`[github-app dispatch] trigger ${trigger.id} failed:`, err);
     }
   }
 }

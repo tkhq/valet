@@ -22,6 +22,7 @@ import {
 } from '../lib/db.js';
 import * as triggerService from '../services/triggers.js';
 import * as webhookService from '../services/webhooks.js';
+import { assertCallerCanAdministerRepo } from '../services/github-repo-authority.js';
 
 export const triggersRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -35,6 +36,19 @@ const webhookConfigSchema = z.object({
   // Per-trigger rate limit override (requests per 60s window). Defaults
   // to 60 (WEBHOOK_RATE_LIMIT_DEFAULT) when unset.
   rateLimit: z.number().int().positive().max(10000).optional(),
+  // The repo pin a repo-scoped template install writes onto its webhook
+  // trigger. Declared here (rather than left as an unknown key) because a
+  // plain z.object STRIPS what it doesn't declare: without this, every PATCH
+  // that carried a config would quietly delete the pin and unscope an armed
+  // code-review trigger. Changing or adding a pin is authority-checked in the
+  // PATCH handler; omitting it preserves whatever is already stored.
+  github: z
+    .object({
+      codeReview: z.literal(true),
+      owner: z.string().min(1),
+      repo: z.string().min(1),
+    })
+    .optional(),
 });
 
 const scheduleConfigSchema = z.object({
@@ -53,10 +67,18 @@ const manualConfigSchema = z.object({
   type: z.literal('manual'),
 });
 
+const githubAppConfigSchema = z.object({
+  type: z.literal('github-app'),
+  owner: z.string().min(1),
+  repo: z.string().min(1),
+  events: z.array(z.string().min(1)).min(1),
+});
+
 const triggerConfigSchema = z.discriminatedUnion('type', [
   webhookConfigSchema,
   scheduleConfigSchema,
   manualConfigSchema,
+  githubAppConfigSchema,
 ]);
 
 const createTriggerSchema = z.object({
@@ -356,6 +378,19 @@ triggersRouter.post('/', zValidator('json', createTriggerSchema), async (c) => {
     }
   }
 
+  // A github-app trigger only fires if the org's GitHub App is installed on the
+  // repo owner, and it must not be armable by someone with no standing on the
+  // repository — the App's reach is org-wide, the caller's is not.
+  if (body.config.type === 'github-app') {
+    await assertCallerCanAdministerRepo(
+      c.get('db'),
+      c.env,
+      user.id,
+      body.config.owner,
+      body.config.repo,
+    );
+  }
+
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
@@ -419,7 +454,17 @@ triggersRouter.patch('/:id', zValidator('json', updateTriggerSchema), async (c) 
   }
 
   const currentConfig = JSON.parse(existing.config) as TriggerConfig;
-  const nextConfig = body.config ?? currentConfig;
+  // A PATCH that carries a webhook config but no `github` block is an ordinary
+  // edit (the trigger form rebuilds path/method/secret and nothing else), not a
+  // request to unpin the repository. Carry the stored pin forward so editing a
+  // code-review trigger's name or path cannot silently unscope it.
+  const nextConfig: TriggerConfig =
+    body.config?.type === 'webhook'
+    && body.config.github === undefined
+    && currentConfig.type === 'webhook'
+    && currentConfig.github
+      ? { ...body.config, github: currentConfig.github }
+      : body.config ?? currentConfig;
   let nextWorkflowId = body.workflowId !== undefined ? body.workflowId : existing.workflow_id;
 
   if (nextConfig.type === 'schedule' && scheduleTarget(nextConfig) === 'orchestrator' && !nextConfig.prompt?.trim()) {
@@ -448,6 +493,38 @@ triggersRouter.patch('/:id', zValidator('json', updateTriggerSchema), async (c) 
     }
   }
 
+  // Editing a trigger is a way of arming one. Creating a benign trigger and
+  // then PATCHing it into a `github-app` trigger for an arbitrary repository
+  // would otherwise reach exactly the state POST refuses, so the same proof of
+  // authority is required here — on the transition into github-app and on any
+  // later move to a different repository.
+  if (nextConfig.type === 'github-app') {
+    const movedRepo =
+      currentConfig.type !== 'github-app'
+      || currentConfig.owner !== nextConfig.owner
+      || currentConfig.repo !== nextConfig.repo;
+    if (movedRepo) {
+      await assertCallerCanAdministerRepo(
+        c.get('db'),
+        c.env,
+        user.id,
+        nextConfig.owner,
+        nextConfig.repo,
+      );
+    }
+  }
+
+  // Same rule for the webhook repo pin: it decides which repository's payloads
+  // an armed code-review trigger will act on, so re-pointing it (or pinning a
+  // previously unpinned trigger) has to be proven the same way.
+  if (nextConfig.type === 'webhook' && nextConfig.github) {
+    const pin = nextConfig.github;
+    const currentPin = currentConfig.type === 'webhook' ? currentConfig.github : undefined;
+    if (!currentPin || currentPin.owner !== pin.owner || currentPin.repo !== pin.repo) {
+      await assertCallerCanAdministerRepo(c.get('db'), c.env, user.id, pin.owner, pin.repo);
+    }
+  }
+
   const now = new Date().toISOString();
   const updates: string[] = [];
   const values: unknown[] = [];
@@ -467,8 +544,9 @@ triggersRouter.patch('/:id', zValidator('json', updateTriggerSchema), async (c) 
   if (body.config !== undefined) {
     updates.push('type = ?');
     updates.push('config = ?');
-    values.push(body.config.type);
-    values.push(JSON.stringify(body.config));
+    // nextConfig, not body.config — it is body.config plus any preserved pin.
+    values.push(nextConfig.type);
+    values.push(JSON.stringify(nextConfig));
   }
   if (body.variableMapping !== undefined) {
     updates.push('variable_mapping = ?');

@@ -14,8 +14,8 @@ export const Route = createFileRoute('/automation/')({
  * Landing for the Automation section: a hero copilot prompt up top
  * (submitting creates a new workflow and jumps into the editor with
  * the copilot open, seeded with what the user typed), plus navigation
- * cards for Triggers / Workflows / Runs so people can drill into any
- * of the individual primitives.
+ * cards for Triggers / Workflows / Runs so people can
+ * drill into any of the individual primitives.
  */
 function AutomationLanding() {
   const user = useAuthStore((s) => s.user);
@@ -115,9 +115,9 @@ function AutomationLanding() {
 
       <section>
         <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
-          Inspect
+          Explore
         </h2>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <NavCard
             to="/automation/triggers"
             title="Triggers"

@@ -17,6 +17,11 @@ export interface GitHubServiceMetadata {
   appName?: string;
   allowPersonalInstallations?: boolean;
   allowAnonymousGitHubAccess?: boolean;
+  // AI code review — ORG policy. Precedence (org ceiling; owner may only loosen)
+  // is defined + enforced in resolveCodeReviewGate (webhooks.ts).
+  codeReviewEnabled?: boolean;     // master switch (default true; OFF is absolute)
+  codeReviewEnforced?: boolean;    // lock the per-user knobs (default false)
+  codeReviewMentionOnly?: boolean; // org-wide mention-only (default false)
 }
 
 export interface GitHubConfig {

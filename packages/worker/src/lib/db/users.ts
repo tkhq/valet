@@ -21,6 +21,8 @@ function rowToUser(row: typeof users.$inferSelect): User {
     modelPreferences: row.modelPreferences || undefined,
     uiQueueMode: (row.uiQueueMode as QueueMode) || 'followup',
     timezone: row.timezone || undefined,
+    codeReviewEnabled: row.codeReviewEnabled ?? true,
+    codeReviewMentionOnly: row.codeReviewMentionOnly ?? false,
     role: (row.role as UserRole) || 'member',
     createdAt: toDate(row.createdAt),
     updatedAt: toDate(row.updatedAt),
@@ -101,6 +103,8 @@ export async function updateUserProfile(
     modelPreferences?: string[];
     uiQueueMode?: QueueMode;
     timezone?: string;
+    codeReviewEnabled?: boolean;
+    codeReviewMentionOnly?: boolean;
   },
 ): Promise<User | null> {
   const setValues: Record<string, unknown> = { updatedAt: sql`datetime('now')` };
@@ -115,6 +119,8 @@ export async function updateUserProfile(
   if (data.modelPreferences !== undefined) setValues.modelPreferences = sql`COALESCE(${JSON.stringify(data.modelPreferences)}, ${users.modelPreferences})`;
   if (data.uiQueueMode !== undefined) setValues.uiQueueMode = sql`COALESCE(${data.uiQueueMode}, ${users.uiQueueMode})`;
   if (data.timezone !== undefined) setValues.timezone = data.timezone || null;
+  if (data.codeReviewEnabled !== undefined) setValues.codeReviewEnabled = data.codeReviewEnabled;
+  if (data.codeReviewMentionOnly !== undefined) setValues.codeReviewMentionOnly = data.codeReviewMentionOnly;
 
   await db
     .update(users)

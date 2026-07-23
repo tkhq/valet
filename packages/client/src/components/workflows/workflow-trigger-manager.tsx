@@ -59,6 +59,9 @@ interface TriggerFormState {
   // config wholesale, so stash + re-emit to avoid wiping an API-set
   // override.
   webhookRateLimit?: number;
+  // Round-trip-only, and load-bearing: the repository the trigger is confined
+  // to. Re-emitted on save so an ordinary edit cannot unscope it.
+  webhookGithubPin?: { codeReview: true; owner: string; repo: string };
   scheduleCron: string;
   scheduleTimezone: string;
   scheduleTarget: ScheduleTarget;
@@ -99,6 +102,7 @@ function formFromTrigger(trigger: Trigger): TriggerFormState {
       webhookMethod: trigger.config.method || 'POST',
       webhookSecret: trigger.config.secret || '',
       webhookRateLimit: trigger.config.rateLimit,
+      webhookGithubPin: trigger.config.github,
       scheduleCron: '',
       scheduleTimezone: 'UTC',
       scheduleTarget: 'workflow',
@@ -140,6 +144,8 @@ function toConfig(form: TriggerFormState): TriggerConfig {
       // Round-trip an API-set rateLimit so editing the trigger doesn't
       // silently wipe it.
       ...(typeof form.webhookRateLimit === 'number' ? { rateLimit: form.webhookRateLimit } : {}),
+      // Re-emit the repo pin — see WebhookConfig.github.
+      ...(form.webhookGithubPin ? { github: form.webhookGithubPin } : {}),
     };
   }
 
