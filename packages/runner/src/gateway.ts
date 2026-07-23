@@ -1036,8 +1036,8 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
     try {
       const body = await c.req.json() as Record<string, unknown>;
-      if (!body.name || !body.slug) {
-        return c.json({ error: "Missing required fields: name, slug" }, 400);
+      if (!body.name) {
+        return c.json({ error: "Missing required field: name" }, 400);
       }
       const result = await callbacks.onPersonaApi("create", body);
       if (result.error) return c.json({ error: result.error }, (result.statusCode ?? 500) as ContentfulStatusCode);
