@@ -13,6 +13,7 @@ import {
   getUsageByModel,
 } from '../lib/db/analytics.js';
 import { getCronHeartbeats, getWebhookDeliveryStats } from '../lib/db/observability.js';
+import { adminMiddleware } from '../middleware/admin.js';
 import {
   getWorkflowResolutionStats,
   getSessionResolutionStats,
@@ -43,13 +44,10 @@ import { getDb } from '../lib/drizzle.js';
 
 export const analyticsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+analyticsRouter.use('*', adminMiddleware);
+
 // GET /api/analytics/performance?period=720
 analyticsRouter.get('/performance', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const rawPeriod = parseInt(c.req.query('period') || '720', 10);
   const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
   const periodStart = new Date(Date.now() - periodHours * 60 * 60 * 1000).toISOString();
@@ -95,11 +93,6 @@ analyticsRouter.get('/performance', async (c) => {
 
 // GET /api/analytics/events?period=720&type=github.&limit=50&offset=0
 analyticsRouter.get('/events', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const rawPeriod = parseInt(c.req.query('period') || '720', 10);
   const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
   const periodStart = new Date(Date.now() - periodHours * 60 * 60 * 1000).toISOString();
@@ -218,11 +211,6 @@ async function computeValueWindow(
 
 // GET /api/analytics/value?period=720
 analyticsRouter.get('/value', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const rawPeriod = parseInt(c.req.query('period') || '720', 10);
   const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
   const windows = computeWindowBounds(new Date(), periodHours);
@@ -250,11 +238,6 @@ analyticsRouter.get('/value', async (c) => {
 // resolved_by IS NOT NULL (status alone cannot distinguish policy
 // auto-allows and cancel-cleanup flips from real approvals).
 analyticsRouter.get('/adoption', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const rawPeriod = parseInt(c.req.query('period') || '720', 10);
   const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
   const windows = computeWindowBounds(new Date(), periodHours);
@@ -370,11 +353,6 @@ export function isJobStale(jobName: string, lastSuccessAt: string | null, now: n
 
 // GET /api/analytics/health — cron heartbeat + webhook delivery health
 analyticsRouter.get('/health', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const db = c.env.DB;
   // cron_heartbeats stores UTC datetime('now') strings ("YYYY-MM-DD HH:MM:SS"),
   // which Date.parse reads as UTC; compare against Date.now() (also UTC epoch).

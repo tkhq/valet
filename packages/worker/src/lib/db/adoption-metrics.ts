@@ -1,4 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
+import { WORKFLOW_TERMINAL_WHERE, quantileVia } from './analytics-predicates.js';
 
 // Windowed queries for the admin "Adoption" tab: who is using Valet, how
 // embedded recurring automation is, and how autonomously workflows run.
@@ -10,26 +11,6 @@ import type { D1Database } from '@cloudflare/workers-types';
 // Drizzle-written ISO strings, so window comparisons normalise through
 // `datetime()`. analytics_events is written exclusively as ISO by the DO
 // flush, so its window compares the raw indexed column.
-
-// valueSql must select the same rows as countSql, ordered ascending, and end
-// with `LIMIT 1 OFFSET ?` — the computed offset is bound after `binds`.
-// Nearest-rank quantile, no interpolation: q=0.5 takes the lower-middle
-// value on even-sized sets (matching value-metrics medianVia), q=0.95 the
-// smallest value with at least 95% of rows at or below it.
-async function quantileVia(
-  db: D1Database,
-  countSql: string,
-  valueSql: string,
-  binds: (string | number)[],
-  q: number,
-): Promise<number | null> {
-  const countRow = await db.prepare(countSql).bind(...binds).first<{ cnt: number }>();
-  const count = countRow?.cnt ?? 0;
-  if (count === 0) return null;
-  const offset = Math.max(0, Math.ceil(q * count) - 1);
-  const row = await db.prepare(valueSql).bind(...binds, offset).first<{ v: number }>();
-  return row?.v ?? null;
-}
 
 // ─── Active users ───────────────────────────────────────────────────────────
 
@@ -231,23 +212,19 @@ export async function getServiceBreadth(
 
 // ─── Workflow autonomy ──────────────────────────────────────────────────────
 
-// Same terminal-time windowing as value-metrics.ts: a run belongs to the
-// window in which it REACHED a terminal state, and test-mode runs never
-// count. Aliased to `we` so callers can join.
-const WORKFLOW_TERMINAL_WHERE = `
-  we.mode = 'production'
-  AND we.status IN ('completed', 'failed', 'cancelled')
-  AND datetime(COALESCE(we.completed_at, we.cancelled_at, we.started_at)) >= datetime(?)
-  AND datetime(COALESCE(we.completed_at, we.cancelled_at, we.started_at)) < datetime(?)`;
-
 // A human decision is resolved_by IS NOT NULL — never a status value.
 // status='executed' includes policy auto-allows (inserted with no resolver)
 // and cancel-cleanup flips pending gates to 'failed' without a resolver, so
 // status cannot distinguish attended from unattended runs.
-const HUMAN_DECISION_EXISTS = `EXISTS (
-  SELECT 1 FROM action_invocations ai
-  WHERE ai.workflow_execution_id = we.id AND ai.resolved_by IS NOT NULL
-)`;
+//
+// Joined (not a correlated EXISTS) so the human-decision check is evaluated
+// once per run rather than once per CASE branch that references it.
+const HUMAN_DECISION_JOIN = `LEFT JOIN (
+  SELECT workflow_execution_id, 1 AS human
+  FROM action_invocations
+  WHERE resolved_by IS NOT NULL
+  GROUP BY workflow_execution_id
+) hd ON hd.workflow_execution_id = we.id`;
 
 export interface WorkflowAutonomyStats {
   /** Production runs that reached completed/failed/cancelled in the window. */
@@ -275,9 +252,10 @@ export async function getWorkflowAutonomyStats(
         COALESCE(SUM(CASE WHEN we.status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
         COALESCE(SUM(CASE WHEN we.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
         COALESCE(SUM(CASE WHEN we.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled,
-        COALESCE(SUM(CASE WHEN we.status = 'completed' AND NOT ${HUMAN_DECISION_EXISTS} THEN 1 ELSE 0 END), 0) AS unattended_completed,
-        COALESCE(SUM(CASE WHEN ${HUMAN_DECISION_EXISTS} THEN 1 ELSE 0 END), 0) AS attended
+        COALESCE(SUM(CASE WHEN we.status = 'completed' AND hd.human IS NULL THEN 1 ELSE 0 END), 0) AS unattended_completed,
+        COALESCE(SUM(CASE WHEN hd.human IS NOT NULL THEN 1 ELSE 0 END), 0) AS attended
       FROM workflow_executions we
+      ${HUMAN_DECISION_JOIN}
       WHERE ${WORKFLOW_TERMINAL_WHERE}
     `)
     .bind(startIso, endIso)

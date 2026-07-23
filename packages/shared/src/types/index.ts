@@ -401,7 +401,7 @@ export interface DashboardHeroStats {
    * estimate.
    */
   linesChanged: number;
-  /** Distinct changed files recorded for the period's sessions. */
+  /** Distinct (session, file) changes recorded across the period's sessions. */
   filesChanged: number;
   sessionHours: number;
 }
