@@ -512,6 +512,7 @@ export async function executeAction(
   const provider = integrationRegistry.getProvider(service, customContext);
   let credentials: Record<string, string>;
   let attribution: { name: string; email: string } | undefined;
+  let botLogin: string | undefined;
 
   if (!requiresUserCredential(provider)) {
     credentials = {};
@@ -528,6 +529,7 @@ export async function executeAction(
 
     credentials = buildActionCredentials(credResult);
     attribution = credResult.credential.attribution;
+    botLogin = credResult.credential.botLogin;
 
     // Inject service-specific extras
     if (service === 'slack') {
@@ -560,6 +562,7 @@ export async function executeAction(
       userId,
       orgId,
       attribution,
+      botLogin,
       callerIdentity,
       analytics: actionAnalytics,
       guardConfig: opts.guardConfig,
@@ -582,11 +585,12 @@ export async function executeAction(
       if (refreshed.ok) {
         const refreshedCredentials = buildActionCredentials(refreshed);
         attribution = refreshed.credential.attribution;
+        botLogin = refreshed.credential.botLogin;
         if (service === 'slack' && credentials.owner_slack_user_id) {
           refreshedCredentials.owner_slack_user_id = credentials.owner_slack_user_id;
         }
         actionResult = await actionSource.execute(actionId, params, {
-          credentials: refreshedCredentials, userId, attribution, callerIdentity, analytics: actionAnalytics, guardConfig: opts.guardConfig,
+          credentials: refreshedCredentials, userId, attribution, botLogin, callerIdentity, analytics: actionAnalytics, guardConfig: opts.guardConfig,
           orgId,
           appDb,
           env,

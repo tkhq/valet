@@ -116,6 +116,23 @@ export async function loadGitHubApp(env: Env, db: AppDb): Promise<App | null> {
   });
 }
 
+/**
+ * The App's slug (the bit before `[bot]` in its bot login). Written into the
+ * encrypted config by the manifest callback, but Apps created before that
+ * field existed have nothing there — for those the plain-JSON metadata is the
+ * admin-settable fallback, so an @-mention handle can be added to an existing
+ * App without recreating it.
+ */
+export async function resolveGithubAppSlug(env: Env, db: AppDb): Promise<string | null> {
+  const svc = await getServiceConfig<GitHubServiceConfig, { appSlug?: string }>(
+    db,
+    env.ENCRYPTION_KEY,
+    'github',
+  ).catch(() => null);
+  if (!svc) return null;
+  return (svc.config as { appSlug?: string }).appSlug ?? svc.metadata.appSlug ?? null;
+}
+
 export interface InstallationTokenResult {
   token: string;
   /** Milliseconds since epoch when the token expires. */

@@ -271,6 +271,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
   const provider = integrationRegistry.getProvider(node.service, customContext);
   let credentials: Record<string, string> = {};
   let attribution: { name: string; email: string } | undefined;
+  let botLogin: string | undefined;
   if (provider && providerRequiresUserCredential(provider)) {
     const credJson = await step.do(`tool:${node.id}${iSuffix}:credentials`, { retries: { ...NO_RETRY } }, async () => {
       const credResult = await integrationRegistry.resolveCredentials(node.service, env, runParams.userId, {
@@ -302,11 +303,13 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
       return JSON.stringify({
         credentials: built,
         attribution: credResult.credential.attribution,
+        botLogin: credResult.credential.botLogin,
       });
     });
-    const credParsed = JSON.parse(credJson) as { credentials: Record<string, string>; attribution?: { name: string; email: string } };
+    const credParsed = JSON.parse(credJson) as { credentials: Record<string, string>; attribution?: { name: string; email: string }; botLogin?: string };
     credentials = credParsed.credentials;
     attribution = credParsed.attribution;
+    botLogin = credParsed.botLogin;
   }
 
   // 6. Invoke the action. This is the actual external side effect —
@@ -318,6 +321,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
     credentials,
     userId: runParams.userId,
     ...(attribution ? { attribution } : {}),
+    ...(botLogin ? { botLogin } : {}),
     analytics: { emit: () => { /* TODO: wire into analytics_events */ } },
   } satisfies ActionContext;
 
@@ -355,19 +359,22 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<unk
         ok: true,
         credentials: buildActionCredentials(refreshed),
         attribution: refreshed.credential.attribution,
+        botLogin: refreshed.credential.botLogin,
       });
     });
     const refreshed = JSON.parse(refreshedJson) as
-      | { ok: true; credentials: Record<string, string>; attribution?: { name: string; email: string } }
+      | { ok: true; credentials: Record<string, string>; attribution?: { name: string; email: string }; botLogin?: string }
       | { ok: false; error: string };
 
     if (refreshed.ok) {
       credentials = refreshed.credentials;
       attribution = refreshed.attribution;
+      botLogin = refreshed.botLogin;
       actionContext = {
         credentials,
         userId: runParams.userId,
         ...(attribution ? { attribution } : {}),
+        ...(botLogin ? { botLogin } : {}),
         analytics: { emit: () => { /* TODO: wire into analytics_events */ } },
       } satisfies ActionContext;
       const retryJson = await step.do(`tool:${node.id}${iSuffix}:execute:auth-retry`, { retries: { ...NO_RETRY } }, async () => {

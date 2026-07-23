@@ -8,7 +8,7 @@ import { dispatchWorkflowExecution } from './workflow-dispatch.js';
 import { sha256Hex } from '../lib/hash.js';
 import { constantTimeEqual } from '../lib/crypto.js';
 import { WEBHOOK_RATE_LIMIT_DEFAULT, bumpWebhookRateCount } from '../lib/db.js';
-import { getServiceConfig } from '../lib/db/service-configs.js';
+import { resolveGithubAppSlug } from './github-app.js';
 import { getGitHubMetadata } from './github-config.js';
 import { getPublishedDefinition } from './workflow-versions.js';
 
@@ -777,8 +777,7 @@ async function readCodeReviewOwnerPrefs(
 /** This App's bot handle, needed only to match an @-mention re-review request. */
 async function resolveBotSlug(env: Env, appDb: AppDb, event: string): Promise<string | null> {
   if (event !== 'issue_comment') return null;
-  const svc = await getServiceConfig<{ appSlug?: string }>(appDb, env.ENCRYPTION_KEY, 'github').catch(() => null);
-  return svc?.config.appSlug ?? null;
+  return resolveGithubAppSlug(env, appDb);
 }
 
 /**

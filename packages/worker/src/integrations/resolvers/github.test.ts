@@ -14,6 +14,7 @@ vi.mock('../../services/credentials.js', () => ({
 vi.mock('../../services/github-app.js', () => ({
   loadGitHubApp: vi.fn(),
   getOrMintInstallationToken: vi.fn(),
+  resolveGithubAppSlug: vi.fn(),
 }));
 
 vi.mock('../../lib/db/service-configs.js', () => ({
@@ -35,7 +36,7 @@ vi.mock('../../lib/drizzle.js', () => ({
 // ── Imports (after mocks) ──────────────────────────────────────────────────
 
 const { getCredential } = await import('../../services/credentials.js');
-const { loadGitHubApp, getOrMintInstallationToken } = await import('../../services/github-app.js');
+const { loadGitHubApp, getOrMintInstallationToken, resolveGithubAppSlug } = await import('../../services/github-app.js');
 const { getServiceMetadata } = await import('../../lib/db/service-configs.js');
 const { assertExecutionCanUseAppForRepo } = await import('../../services/github-repo-authority.js');
 const { githubCredentialResolver } = await import('./github.js');
@@ -196,6 +197,34 @@ describe('githubCredentialResolver', () => {
 
   // ── 3b. credentialMode='app' — prefer the bot over the user's token ────
 
+
+  it('names the bot account on the minted credential when the App slug is known', async () => {
+    seedUser({ name: 'Alice Dev', email: 'alice@example.com' });
+    (getCredential as Mock).mockResolvedValueOnce({
+      ok: false,
+      error: { service: 'github', reason: 'not_found', message: 'No credentials' },
+    });
+    (getServiceMetadata as Mock).mockResolvedValueOnce({ allowAnonymousGitHubAccess: true });
+    await upsertGithubInstallation(db as any, {
+      githubInstallationId: '42',
+      accountLogin: 'my-org',
+      accountId: 'acct-1',
+      accountType: 'Organization',
+      repositorySelection: 'all',
+    });
+    (loadGitHubApp as Mock).mockResolvedValueOnce({ appId: '99' });
+    (getOrMintInstallationToken as Mock).mockResolvedValueOnce({ token: 'ghs_bot_token', expiresAt: Date.now() + 3600_000 });
+    (resolveGithubAppSlug as Mock).mockResolvedValueOnce('my-app');
+
+    const result = await githubCredentialResolver('github', makeEnv(db), USER_ID, { params: { owner: 'my-org' } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // The token carries no queryable identity, so the resolver names the bot
+      // account — actions use it to recognise their own earlier writes.
+      expect(result.credential.botLogin).toBe('my-app[bot]');
+    }
+  });
   it("credentialMode='app' uses the bot token even when the user HAS a personal token", async () => {
     seedUser({ name: 'Bot Runner', email: 'bot@example.com' });
 

@@ -22,6 +22,12 @@ export interface ResolvedCredential {
   refreshed: boolean;
   /** Present when this credential is a bot token being used on behalf of a user. */
   attribution?: { name: string; email: string };
+  /**
+   * The bot account this credential acts as (e.g. `my-app[bot]`), when known.
+   * Lets an action recognise its own earlier writes — the GitHub App token
+   * itself carries no queryable identity.
+   */
+  botLogin?: string;
 }
 
 export interface CredentialResolutionError {

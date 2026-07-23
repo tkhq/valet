@@ -165,6 +165,9 @@ describe('code-review template — full interpreter run', () => {
       repo: 'valet',
       pullNumber: 74,
       event: 'COMMENT',
+      // The post is an upsert: a re-review refreshes the existing bot review
+      // in place; the first pass finds nothing to update and creates.
+      updateExisting: true,
       body: 'Looks good. One note on src/queue.ts.',
     });
 
