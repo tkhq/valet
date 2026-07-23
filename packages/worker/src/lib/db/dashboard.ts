@@ -48,7 +48,43 @@ export type ActiveSessionRow = {
   lastActiveAt: string;
 };
 
+export type FileChangeTotalsRow = {
+  files_changed: number;
+  lines_changed: number;
+};
+
 // ─── Queries ────────────────────────────────────────────────────────────────
+
+/**
+ * Real file-change totals for the period's sessions, from
+ * session_files_changed (written by upsertSessionFileChanged as the runner
+ * reports diffs). Session population mirrors the session aggregates above:
+ * created in the period, workflow-purpose excluded. Returns zeros when no
+ * file changes were recorded — never an estimate.
+ */
+export async function getFileChangeTotals(
+  db: D1Database,
+  periodStart: string,
+  userId?: string
+): Promise<FileChangeTotalsRow> {
+  const userFilter = userId !== undefined ? 'AND s.user_id = ?' : '';
+  const binds = userId !== undefined ? [periodStart, userId] : [periodStart];
+  const row = await db
+    .prepare(`
+      SELECT
+        COUNT(*) as files_changed,
+        COALESCE(SUM(COALESCE(f.additions, 0) + COALESCE(f.deletions, 0)), 0) as lines_changed
+      FROM session_files_changed f
+      INNER JOIN sessions s ON s.id = f.session_id
+      WHERE s.created_at >= ?
+        AND COALESCE(s.purpose, 'interactive') != 'workflow'
+        ${userFilter}
+    `)
+    .bind(...binds)
+    .first<FileChangeTotalsRow>();
+
+  return row ?? { files_changed: 0, lines_changed: 0 };
+}
 
 export async function getOrgSessionAggregate(
   db: D1Database,

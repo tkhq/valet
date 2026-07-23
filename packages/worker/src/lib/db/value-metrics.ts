@@ -1,5 +1,6 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import { SQL_BILLABLE_INPUT_EXPR, SQL_BILLABLE_OUTPUT_EXPR } from './analytics.js';
+import { WORKFLOW_TERMINAL_WHERE, quantileVia } from './analytics-predicates.js';
 
 // Windowed queries for the admin "Value metrics" panel. Every function takes
 // an [startIso, endIso) window so the route can compute the prior window for
@@ -12,24 +13,6 @@ import { SQL_BILLABLE_INPUT_EXPR, SQL_BILLABLE_OUTPUT_EXPR } from './analytics.j
 // exception: it is written exclusively as ISO by the DO flush, and its
 // indexes cover the raw column).
 
-// valueSql must select the same rows as countSql, ordered ascending, and end
-// with `LIMIT 1 OFFSET ?` — the computed offset is bound after `binds`. A
-// population mismatch fails silently with a wrong median. Even-sized sets
-// take the lower-middle value (no interpolation).
-async function medianVia(
-  db: D1Database,
-  countSql: string,
-  valueSql: string,
-  binds: (string | number)[],
-): Promise<number | null> {
-  const countRow = await db.prepare(countSql).bind(...binds).first<{ cnt: number }>();
-  const count = countRow?.cnt ?? 0;
-  if (count === 0) return null;
-  const offset = Math.floor((count - 1) * 0.5);
-  const row = await db.prepare(valueSql).bind(...binds, offset).first<{ v: number }>();
-  return row?.v ?? null;
-}
-
 // ─── Workflow runs ──────────────────────────────────────────────────────────
 
 export interface WorkflowResolutionStats {
@@ -40,16 +23,6 @@ export interface WorkflowResolutionStats {
   medianCompletedMinutes: number | null;
 }
 
-// Runs are windowed by when they REACHED a terminal state, not when they
-// started — otherwise the current window is systematically incomplete
-// (recent runs still executing) and the prior window's numbers drift as its
-// stragglers finish.
-const WORKFLOW_WINDOW_WHERE = `
-  mode = 'production'
-  AND status IN ('completed', 'failed', 'cancelled')
-  AND datetime(COALESCE(completed_at, cancelled_at, started_at)) >= datetime(?)
-  AND datetime(COALESCE(completed_at, cancelled_at, started_at)) < datetime(?)`;
-
 export async function getWorkflowResolutionStats(
   db: D1Database,
   startIso: string,
@@ -58,24 +31,25 @@ export async function getWorkflowResolutionStats(
   const row = await db
     .prepare(`
       SELECT
-        COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
-        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+        COALESCE(SUM(CASE WHEN we.status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+        COALESCE(SUM(CASE WHEN we.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
         COUNT(*) AS terminal
-      FROM workflow_executions
-      WHERE ${WORKFLOW_WINDOW_WHERE}
+      FROM workflow_executions we
+      WHERE ${WORKFLOW_TERMINAL_WHERE}
     `)
     .bind(startIso, endIso)
     .first<{ completed: number; failed: number; terminal: number }>();
 
-  const medianCompletedMinutes = await medianVia(
+  const medianCompletedMinutes = await quantileVia(
     db,
-    `SELECT COUNT(*) AS cnt FROM workflow_executions
-     WHERE ${WORKFLOW_WINDOW_WHERE} AND status = 'completed' AND completed_at IS NOT NULL`,
-    `SELECT (julianday(completed_at) - julianday(started_at)) * 1440.0 AS v
-     FROM workflow_executions
-     WHERE ${WORKFLOW_WINDOW_WHERE} AND status = 'completed' AND completed_at IS NOT NULL
+    `SELECT COUNT(*) AS cnt FROM workflow_executions we
+     WHERE ${WORKFLOW_TERMINAL_WHERE} AND we.status = 'completed' AND we.completed_at IS NOT NULL`,
+    `SELECT (julianday(we.completed_at) - julianday(we.started_at)) * 1440.0 AS v
+     FROM workflow_executions we
+     WHERE ${WORKFLOW_TERMINAL_WHERE} AND we.status = 'completed' AND we.completed_at IS NOT NULL
      ORDER BY v ASC LIMIT 1 OFFSET ?`,
     [startIso, endIso],
+    0.5,
   );
 
   return {
@@ -136,7 +110,7 @@ export async function getSessionResolutionStats(
     .bind(startIso, endIso)
     .first<{ resolved: number; errored: number; ended: number }>();
 
-  const medianResolvedMinutes = await medianVia(
+  const medianResolvedMinutes = await quantileVia(
     db,
     `SELECT COUNT(*) AS cnt FROM sessions
      WHERE ${SESSION_WINDOW_WHERE} AND ${SESSION_RESOLVED_COND}`,
@@ -145,6 +119,7 @@ export async function getSessionResolutionStats(
      WHERE ${SESSION_WINDOW_WHERE} AND ${SESSION_RESOLVED_COND}
      ORDER BY v ASC LIMIT 1 OFFSET ?`,
     [startIso, endIso],
+    0.5,
   );
 
   return {
@@ -271,7 +246,7 @@ export async function getAgentPrStats(
     .bind(startIso, endIso)
     .first<{ opened: number; merged: number; closed_unmerged: number; still_open: number }>();
 
-  const medianHoursToMerge = await medianVia(
+  const medianHoursToMerge = await quantileVia(
     db,
     `SELECT COUNT(*) AS cnt FROM session_git_state
      WHERE ${PR_WINDOW_WHERE} AND pr_state = 'merged' AND pr_merged_at IS NOT NULL`,
@@ -280,6 +255,7 @@ export async function getAgentPrStats(
      WHERE ${PR_WINDOW_WHERE} AND pr_state = 'merged' AND pr_merged_at IS NOT NULL
      ORDER BY v ASC LIMIT 1 OFFSET ?`,
     [startIso, endIso],
+    0.5,
   );
 
   return {

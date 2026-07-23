@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { D1Database } from '@cloudflare/workers-types';
 import type { Env, Variables } from '../env.js';
-import type { AnalyticsPerformanceResponse, AnalyticsEventsResponse, AnalyticsValueResponse, AnalyticsHealthResponse, ValueMetricsWindow } from '@valet/shared';
+import type { AnalyticsPerformanceResponse, AnalyticsEventsResponse, AnalyticsValueResponse, AnalyticsAdoptionResponse, AnalyticsHealthResponse, ValueMetricsWindow } from '@valet/shared';
 import {
   getPercentiles,
   getPerfTrend,
@@ -13,6 +13,7 @@ import {
   getUsageByModel,
 } from '../lib/db/analytics.js';
 import { getCronHeartbeats, getWebhookDeliveryStats } from '../lib/db/observability.js';
+import { adminMiddleware } from '../middleware/admin.js';
 import {
   getWorkflowResolutionStats,
   getSessionResolutionStats,
@@ -22,6 +23,20 @@ import {
   getSandboxSecondsInWindow,
   getSessionSourceStats,
 } from '../lib/db/value-metrics.js';
+import {
+  getActiveUsersByDay,
+  getActiveUsersByWeek,
+  getReturningUserStats,
+  getEnabledTriggerCounts,
+  getWorkflowRunsByDay,
+  getChannelBreadth,
+  getServiceBreadth,
+  getWorkflowAutonomyStats,
+  getWorkflowOutcomesByWorkflow,
+  getWorkflowOutcomesByTriggerType,
+  getWorkflowFailureReasons,
+  getWorkflowDurationStats,
+} from '../lib/db/adoption-metrics.js';
 import { classifyModelTier, safeRate, computeWindowBounds } from '../lib/value-metrics.js';
 import { getModelPricing, computeCost, type ModelPricing } from '../services/model-catalog.js';
 import { computeSandboxCost } from '../services/sandbox-pricing.js';
@@ -29,13 +44,10 @@ import { getDb } from '../lib/drizzle.js';
 
 export const analyticsRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+analyticsRouter.use('*', adminMiddleware);
+
 // GET /api/analytics/performance?period=720
 analyticsRouter.get('/performance', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const rawPeriod = parseInt(c.req.query('period') || '720', 10);
   const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
   const periodStart = new Date(Date.now() - periodHours * 60 * 60 * 1000).toISOString();
@@ -81,11 +93,6 @@ analyticsRouter.get('/performance', async (c) => {
 
 // GET /api/analytics/events?period=720&type=github.&limit=50&offset=0
 analyticsRouter.get('/events', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const rawPeriod = parseInt(c.req.query('period') || '720', 10);
   const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
   const periodStart = new Date(Date.now() - periodHours * 60 * 60 * 1000).toISOString();
@@ -204,11 +211,6 @@ async function computeValueWindow(
 
 // GET /api/analytics/value?period=720
 analyticsRouter.get('/value', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const rawPeriod = parseInt(c.req.query('period') || '720', 10);
   const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
   const windows = computeWindowBounds(new Date(), periodHours);
@@ -224,6 +226,84 @@ analyticsRouter.get('/value', async (c) => {
   const response: AnalyticsValueResponse = {
     current,
     previous,
+    period: periodHours,
+  };
+
+  return c.json(response);
+});
+
+// GET /api/analytics/adoption?period=720 — activity + workflow-autonomy
+// metrics. Aggregation only over already-written tables; every workflow
+// number excludes mode='test' runs, and "human decision" means
+// resolved_by IS NOT NULL (status alone cannot distinguish policy
+// auto-allows and cancel-cleanup flips from real approvals).
+analyticsRouter.get('/adoption', async (c) => {
+  const rawPeriod = parseInt(c.req.query('period') || '720', 10);
+  const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
+  const windows = computeWindowBounds(new Date(), periodHours);
+  const startIso = windows.currentStart;
+  const endIso = windows.currentEnd;
+
+  const db = c.env.DB;
+
+  const [
+    activeUsersByDay,
+    activeUsersByWeek,
+    returning,
+    enabledTriggers,
+    workflowRunsByDay,
+    channels,
+    services,
+    autonomy,
+    outcomesByWorkflow,
+    outcomesByTriggerType,
+    failureReasons,
+    durations,
+  ] = await Promise.all([
+    getActiveUsersByDay(db, startIso, endIso),
+    getActiveUsersByWeek(db, startIso, endIso),
+    getReturningUserStats(db, startIso, endIso),
+    getEnabledTriggerCounts(db),
+    getWorkflowRunsByDay(db, startIso, endIso),
+    getChannelBreadth(db, startIso, endIso),
+    getServiceBreadth(db, startIso, endIso),
+    getWorkflowAutonomyStats(db, startIso, endIso),
+    getWorkflowOutcomesByWorkflow(db, startIso, endIso),
+    getWorkflowOutcomesByTriggerType(db, startIso, endIso),
+    getWorkflowFailureReasons(db, startIso, endIso),
+    getWorkflowDurationStats(db, startIso, endIso),
+  ]);
+
+  const response: AnalyticsAdoptionResponse = {
+    adoption: {
+      activeUsersByDay,
+      activeUsersByWeek,
+      activeUsers: returning.activeUsers,
+      returningUsers: returning.returningUsers,
+      returningUserRate: safeRate(returning.returningUsers, returning.activeUsers),
+      enabledTriggers,
+      workflowRunsByDay,
+      channels,
+      services,
+    },
+    autonomy: {
+      terminalRuns: autonomy.terminalRuns,
+      completedRuns: autonomy.completedRuns,
+      failedRuns: autonomy.failedRuns,
+      cancelledRuns: autonomy.cancelledRuns,
+      successRate: safeRate(autonomy.completedRuns, autonomy.terminalRuns),
+      unattendedCompletedRuns: autonomy.unattendedCompletedRuns,
+      unattendedCompletionRate: safeRate(autonomy.unattendedCompletedRuns, autonomy.terminalRuns),
+      attendedRuns: autonomy.attendedRuns,
+      interventionRate: safeRate(autonomy.attendedRuns, autonomy.terminalRuns),
+      medianBlockedMinutes: autonomy.medianBlockedMinutes,
+      outcomesByWorkflow,
+      outcomesByTriggerType,
+      failureReasons,
+      medianRunMinutes: durations.medianRunMinutes,
+      p95RunMinutes: durations.p95RunMinutes,
+      measuredRuns: durations.measuredRuns,
+    },
     period: periodHours,
   };
 
@@ -273,11 +353,6 @@ export function isJobStale(jobName: string, lastSuccessAt: string | null, now: n
 
 // GET /api/analytics/health — cron heartbeat + webhook delivery health
 analyticsRouter.get('/health', async (c) => {
-  const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
-  }
-
   const db = c.env.DB;
   // cron_heartbeats stores UTC datetime('now') strings ("YYYY-MM-DD HH:MM:SS"),
   // which Date.parse reads as UTC; compare against Date.now() (also UTC epoch).
