@@ -23,16 +23,29 @@ export type { ThreadOriginBucketId };
 export interface ThreadOriginBucket {
   id: ThreadOriginBucketId;
   label: string;
+  /**
+   * Compact, already-uppercased label for width-constrained tab bars (the chat
+   * sidebar is ~248px, so four tabs get ~62px each). Capped at 5 characters so
+   * label + count pill fits WITHOUT truncation at the design width — see the
+   * width math in `ThreadOriginTabs` (thread-sidebar.tsx). Wider surfaces (the
+   * thread-history page) use `label` instead.
+   *
+   * If you add a bucket, keep `shortLabel` <= 5 chars or re-do that math.
+   */
+  shortLabel: string;
   /** Long-form label for a11y (used as tab title attribute). */
   description: string;
 }
 
 export const THREAD_ORIGIN_BUCKETS: readonly ThreadOriginBucket[] = [
-  { id: 'ui', label: 'UI', description: 'Threads started from the web UI' },
-  { id: 'slack', label: 'Slack', description: 'Threads started from Slack' },
-  { id: 'automation', label: 'Automation', description: 'Threads started by scheduled triggers or workflows' },
-  { id: 'other', label: 'Other', description: 'Telegram, GitHub, API, and other origins' },
+  { id: 'ui', label: 'UI', shortLabel: 'UI', description: 'Threads started from the web UI' },
+  { id: 'slack', label: 'Slack', shortLabel: 'SLACK', description: 'Threads started from Slack' },
+  { id: 'automation', label: 'Automation', shortLabel: 'AUTO', description: 'Threads started by scheduled triggers or workflows' },
+  { id: 'other', label: 'Other', shortLabel: 'OTHER', description: 'Telegram, GitHub, API, and other origins' },
 ] as const;
+
+/** Max characters any `shortLabel` may use — enforced by test. */
+export const THREAD_ORIGIN_SHORT_LABEL_MAX_CHARS = 5;
 
 export const DEFAULT_THREAD_ORIGIN_BUCKET: ThreadOriginBucketId = 'ui';
 
@@ -173,9 +186,17 @@ export function attentionBucketFromPrompt(prompt: {
 /**
  * Filter threads to a single bucket. Preserves input order.
  *
- * With server-side bucket filtering (see `useThreads` `bucket` option), this
- * is mostly a no-op for the sidebar. Kept for the history page's
- * within-page filtering fallback and for tests.
+ * DEFENSE-IN-DEPTH — this is NOT redundant with the server-side `originBucket`
+ * filter (see `useThreads` `bucket` option). A worker build that predates
+ * `originBucket` support silently IGNORES the param and returns every bucket;
+ * a client that trusts the server then renders all origins under whichever tab
+ * is selected (the round-2 regression Conner hit: the UI tab listed WEB +
+ * AUTOMATIONS + SLACK DM groups at once).
+ *
+ * Callers rendering a bucket-scoped list MUST apply this to the fetched page,
+ * so the UI is correct under frontend/worker version skew. The server-side
+ * filter stays for efficiency (it keeps per-bucket pagination honest once the
+ * worker is deployed); this keeps it CORRECT in the meantime.
  */
 export function filterThreadsByBucket(
   threads: readonly SessionThread[],

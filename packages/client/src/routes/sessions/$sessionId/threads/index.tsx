@@ -4,6 +4,7 @@ import { formatRelativeTime } from '@/lib/format';
 import { getThreadHistoryPages } from '../../-thread-history-pagination';
 import {
   DEFAULT_THREAD_ORIGIN_BUCKET,
+  filterThreadsByBucket,
   THREAD_ORIGIN_BUCKETS,
   type ThreadOriginBucketId,
 } from '@/components/chat/thread-origin-buckets';
@@ -46,8 +47,16 @@ function ThreadHistoryPage() {
   const pages = getThreadHistoryPages(safePage, totalPages);
   const originCounts = data?.originCounts ?? EMPTY_ORIGIN_COUNTS;
 
-  // Server already filtered by bucket — no client-side filtering needed.
-  const filteredThreads = threads;
+  // Re-apply the bucket filter client-side on top of the server's
+  // `originBucket` filter. Not redundant: a worker build without `originBucket`
+  // support ignores the param and returns every bucket, which would list
+  // Slack/Automation threads under the UI tab. See `filterThreadsByBucket`.
+  //
+  // Under that skew the page can render fewer than `pageSize` rows while
+  // `totalCount`/`totalPages` still describe the unfiltered set. Showing a
+  // short page beats showing threads from the wrong bucket; it self-corrects
+  // as soon as the worker ships.
+  const filteredThreads = filterThreadsByBucket(threads, bucket);
   const bucketHasNoResults = !isLoading && !isError && filteredThreads.length === 0;
   const hasAnyThreadsInBucket = originCounts[bucket] > 0;
 
@@ -116,8 +125,9 @@ function ThreadHistoryPage() {
         })}
       </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto px-5 py-4">
+      {/* Content — `scrollbar-none` matches the chat sidebar's thread list
+          (no painted scrollbar, scrolling still works). */}
+      <div className="scrollbar-none flex-1 overflow-y-auto px-5 py-4">
         {isLoading && (
           <div className="flex items-center gap-2 py-8">
             <div className="h-3 w-3 animate-spin rounded-full border border-neutral-300 border-t-transparent dark:border-neutral-600 dark:border-t-transparent" />

@@ -77,6 +77,29 @@
   }
 }
 
+@layer utilities {
+  /* Scroll without painting a scrollbar. Scrolling itself is untouched —
+     wheel, trackpad, touch, and keyboard all still work; only the track/thumb
+     are hidden. Used by the chat thread sidebar list.
+
+     All three declarations are required for cross-browser coverage:
+       - `scrollbar-width: none`     -> Firefox
+       - `-ms-overflow-style: none`  -> legacy Edge / IE
+       - `::-webkit-scrollbar`       -> Chrome / Safari / other WebKit+Blink
+     The WebKit rule must also override the global 6px `::-webkit-scrollbar`
+     styling declared in @layer base above. */
+  .scrollbar-none {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+}
+
 @layer components {
   /* Monospace label used for status indicators and chrome */
   .label-mono {

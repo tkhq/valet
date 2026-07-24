@@ -930,7 +930,9 @@ function ChatSkeleton() {
 
 function ThreadSidebarFallback() {
   return (
-    <div className="flex w-[210px] shrink-0 flex-col border-r border-neutral-200 bg-surface-0 dark:border-neutral-800 dark:bg-surface-0">
+    // Width MUST match ThreadSidebar's `w-[248px]` (thread-sidebar.tsx) —
+    // a mismatch makes the transcript jump sideways when the lazy chunk lands.
+    <div className="flex w-[248px] shrink-0 flex-col border-r border-neutral-200 bg-surface-0 dark:border-neutral-800 dark:bg-surface-0">
       <div className="border-b border-neutral-100 px-3 py-2 dark:border-neutral-800/50">
         <Skeleton className="h-4 w-16" />
       </div>

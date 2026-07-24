@@ -8,6 +8,7 @@ import type { SessionThread } from '@/api/types';
 import { cn } from '@/lib/cn';
 import {
   DEFAULT_THREAD_ORIGIN_BUCKET,
+  filterThreadsByBucket,
   getThreadOriginBucket,
   mergeBucketCounts,
   THREAD_ORIGIN_BUCKETS,
@@ -166,6 +167,36 @@ export function groupThreadsByChannel(
   });
 }
 
+// ─── Fetched-Page Selection ───────────────────────────────────────────────────
+
+/**
+ * Non-archived threads from a fetched page, across ALL buckets present in the
+ * payload. Used for tab COUNTS and attention badges — deliberately not
+ * bucket-scoped, so that when the worker returns every bucket (either because
+ * no `originBucket` filter was sent, or because it's an older build that
+ * ignores the param) the other tabs still get real counts instead of zeroes.
+ */
+export function selectActiveThreads(
+  fetched: readonly SessionThread[],
+): SessionThread[] {
+  return fetched.filter((t) => t.status === 'active');
+}
+
+/**
+ * The threads the sidebar actually RENDERS for `bucket`.
+ *
+ * Applies the bucket filter client-side on top of the server's `originBucket`
+ * filter. See `filterThreadsByBucket` for why that redundancy is load-bearing:
+ * without it, a worker that predates `originBucket` support returns every
+ * bucket and the sidebar renders all origins under the selected tab.
+ */
+export function selectVisibleBucketThreads(
+  fetched: readonly SessionThread[],
+  bucket: ThreadOriginBucketId,
+): SessionThread[] {
+  return filterThreadsByBucket(selectActiveThreads(fetched), bucket);
+}
+
 // ─── Thread Item ──────────────────────────────────────────────────────────────
 
 function ThreadItem({
@@ -284,6 +315,15 @@ function ThreadItem({
 
 // ─── Thread Origin Tabs ───────────────────────────────────────────────────────
 
+/**
+ * Bound the count pill to at most 3 glyphs ("99+"). Keeps the tab-bar width
+ * math deterministic no matter how many threads a bucket accumulates — an
+ * unbounded 4-digit count is what would push a label back into truncating.
+ */
+export function formatTabCount(total: number): string {
+  return total > 99 ? '99+' : String(total);
+}
+
 function ThreadOriginTabs({
   activeBucket,
   bucketCounts,
@@ -293,18 +333,31 @@ function ThreadOriginTabs({
   bucketCounts: ReturnType<typeof mergeBucketCounts>;
   onSelectBucket: (bucket: ThreadOriginBucketId) => void;
 }) {
-  // Layout notes (fixing Conner's "UI 9   SLACK 2   AUTOMATION 9   OTHER"
-  // cramped/uneven feedback):
-  //   - Each tab is flex-1 with `min-w-0` so long labels ("Automation") don't
-  //     force one tab to eat sibling space.
-  //   - Label + count are one grouped unit (`inline-flex gap-1`), then the
-  //     tab centers that unit — so the label+count pair reads as one thing
-  //     instead of two spaced-out tokens.
-  //   - Count is always a pill (never inline text) so the visual rhythm is
-  //     the same across active/inactive/attention states — just the color
-  //     changes.
-  //   - `px-1` per tab is tight because the sidebar is 210px wide and we
-  //     have to fit 4 tabs.
+  // Layout notes — round 3 fixes Conner's "UI 12 | SL… 2 | AU… 16 | OTHER"
+  // truncation. Truncating a 5-char label to "SL…" costs more width in
+  // ellipsis than it saves, so the fix is to make labels that FIT rather than
+  // to let them shrink.
+  //
+  // Width budget at the 248px sidebar:
+  //   248px container / 4 tabs           = 62.0px per tab
+  //   - px-0.5 both sides (2+2)          = 58.0px content box
+  //   worst-case content ("SLACK"/"OTHER" + 2-digit pill):
+  //     5 chars x ~6.6px (10px semibold, normal tracking) = 33.0px
+  //     + gap-1                                           =  4.0px
+  //     + pill (min-w-[16px], px-1, 2-digit cap)          = 16.0px
+  //                                                   total 53.0px  <= 58.0 ✓
+  //
+  // Levers used to get there, in order of impact:
+  //   - `tracking-wider` DROPPED. At 0.05em it added ~0.5px/char — ~5px across
+  //     "AUTOMATION" — for no legibility gain at 10px.
+  //   - `shortLabel` (<=5 chars: UI / SLACK / AUTO / OTHER) instead of `label`.
+  //     "AUTOMATION" is 10 chars ≈ 72px and cannot fit at any sane sidebar
+  //     width; the full name stays in the `title` tooltip + aria-label.
+  //   - Counts >99 render as "99+" so the pill width is bounded and the math
+  //     above stays true for any thread volume.
+  //   - `truncate`/`min-w-0` REMOVED from the label. Since labels are sized to
+  //     fit, shrinking is unnecessary — and removing it makes a mid-word
+  //     ellipsis structurally impossible rather than merely unlikely.
   return (
     <div
       role="tablist"
@@ -327,20 +380,21 @@ function ThreadOriginTabs({
                 ? `${bucket.description} — ${counts.attentionNeeded} needs response`
                 : bucket.description
             }
+            aria-label={bucket.description}
             onClick={() => onSelectBucket(bucket.id)}
             className={cn(
-              'group flex min-w-0 flex-1 items-center justify-center px-1 py-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors',
+              'group flex flex-1 items-center justify-center px-0.5 py-1.5 text-[10px] font-semibold transition-colors',
               isActive
                 ? 'border-b-2 border-violet-500 text-neutral-800 dark:text-neutral-100'
                 : 'border-b-2 border-transparent text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300',
             )}
           >
-            <span className="inline-flex min-w-0 items-center gap-1">
-              <span className="truncate">{bucket.label}</span>
+            <span className="inline-flex items-center gap-1">
+              <span className="whitespace-nowrap">{bucket.shortLabel}</span>
               {counts.total > 0 && (
                 <span
                   className={cn(
-                    'inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full px-1 text-[9px] font-semibold tabular-nums',
+                    'inline-flex h-3.5 min-w-[16px] shrink-0 items-center justify-center rounded-full px-1 text-[9px] font-semibold tabular-nums',
                     showAttentionBadge
                       ? 'bg-amber-500 text-white dark:bg-amber-400 dark:text-neutral-900'
                       : isActive
@@ -348,7 +402,7 @@ function ThreadOriginTabs({
                         : 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400',
                   )}
                 >
-                  {counts.total}
+                  {formatTabCount(counts.total)}
                 </span>
               )}
             </span>
@@ -431,10 +485,17 @@ export function ThreadSidebar({
     pageSize: SIDEBAR_PAGE_SIZE,
   });
 
-  const bucketedThreads = threadData?.threads ?? [];
+  const fetchedThreads = threadData?.threads ?? [];
+  // Everything active in the fetched page (all buckets it happens to contain) —
+  // feeds tab counts / attention badges.
+  const activeThreads = useMemo(() => selectActiveThreads(fetchedThreads), [fetchedThreads]);
+  // What we RENDER: re-filtered to the active bucket client-side so a worker
+  // without `originBucket` support can't leak other origins into this tab.
+  // Uses `selectVisibleBucketThreads` (not `filterThreadsByBucket` directly) so
+  // the unit tests in thread-sidebar.test.ts cover this exact render path.
   const activeBucketThreads = useMemo(
-    () => bucketedThreads.filter((t) => t.status === 'active'),
-    [bucketedThreads],
+    () => selectVisibleBucketThreads(fetchedThreads, activeBucket),
+    [fetchedThreads, activeBucket],
   );
   const dismissedThreads = useMemo(
     () => (dismissedData?.threads ?? []).filter((t) => t.status === 'archived'),
@@ -446,11 +507,11 @@ export function ThreadSidebar({
     () =>
       mergeBucketCounts(
         threadData?.originCounts,
-        activeBucketThreads,
+        activeThreads,
         responseRequiredThreadIds,
         attentionBucketHint,
       ),
-    [threadData?.originCounts, activeBucketThreads, responseRequiredThreadIds, attentionBucketHint],
+    [threadData?.originCounts, activeThreads, responseRequiredThreadIds, attentionBucketHint],
   );
 
   const resolvedLabels = useResolvedChannelLabels(activeBucketThreads);
@@ -472,12 +533,19 @@ export function ThreadSidebar({
   // If the active thread lives in a bucket other than the currently selected
   // one (e.g. because the user just picked a thread from search or a link),
   // switch the tab so the selection is visible instead of silently hidden.
-  // Only fires when the active thread is loaded in the current bucket page —
-  // when it isn't, the caller (chat-container) is expected to have already
-  // pointed the sidebar at the right bucket via localStorage on select.
+  //
+  // Resolve against `activeThreads` (the raw fetched page) and NOT the
+  // bucket-filtered list: the filtered list only ever contains `activeBucket`
+  // threads, so looking there could never detect a mismatch — it would make
+  // this effect dead code.
+  //
+  // Intentionally keyed on `activeThreadId` alone. Re-running on every
+  // `activeThreads` change would fight the user: when the fetched page happens
+  // to contain other buckets, manually clicking a tab would immediately snap
+  // back to the active thread's bucket.
   useEffect(() => {
     if (!activeThreadId) return;
-    const activeThread = activeBucketThreads.find((t) => t.id === activeThreadId);
+    const activeThread = activeThreads.find((t) => t.id === activeThreadId);
     if (!activeThread) return;
     const desired = getThreadOriginBucket(activeThread);
     if (desired !== activeBucket) {
@@ -537,7 +605,11 @@ export function ThreadSidebar({
   }
 
   return (
-    <div className="flex w-[210px] shrink-0 flex-col border-r border-neutral-200 bg-surface-0 dark:border-neutral-800 dark:bg-surface-0">
+    // 248px (was 210px, +18%): the modest widening Conner asked for. Enough to
+    // fit four non-truncating origin tabs (see the width math in
+    // `ThreadOriginTabs`) without stealing meaningful room from the transcript.
+    // Keep in sync with `ThreadSidebarFallback` in chat-container.tsx.
+    <div className="flex w-[248px] shrink-0 flex-col border-r border-neutral-200 bg-surface-0 dark:border-neutral-800 dark:bg-surface-0">
       <div className="flex items-center justify-between border-b border-neutral-100 px-3 py-2 dark:border-neutral-800/50">
         <span className="text-[11px] font-semibold text-neutral-500 dark:text-neutral-400">
           Threads
@@ -568,7 +640,10 @@ export function ThreadSidebar({
         onSelectBucket={handleSelectBucket}
       />
 
-      <div className="flex-1 overflow-y-auto px-1 py-1">
+      {/* `scrollbar-none` — Conner asked for no visible scrollbar here; the
+          list still scrolls (wheel/trackpad/keyboard/touch), the track is just
+          not painted. See the utility in styles/globals.css. */}
+      <div className="scrollbar-none flex-1 overflow-y-auto px-1 py-1">
         {groups.map((group) => (
           <div key={group.channelKey}>
             <ThreadGroupHeader group={group} />

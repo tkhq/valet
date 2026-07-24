@@ -6,6 +6,7 @@ import {
   getThreadOriginBucket,
   mergeBucketCounts,
   THREAD_ORIGIN_BUCKETS,
+  THREAD_ORIGIN_SHORT_LABEL_MAX_CHARS,
   type ThreadOriginBucketId,
 } from './thread-origin-buckets';
 import type { SessionThread } from '@/api/types';
@@ -223,5 +224,42 @@ describe('attentionBucketFromPrompt', () => {
     expect(attentionBucketFromPrompt({ channelType: 'thread' })).toBe('ui');
     expect(attentionBucketFromPrompt({ channelType: 'web' })).toBe('ui');
     expect(attentionBucketFromPrompt({})).toBe('ui');
+  });
+});
+
+describe('THREAD_ORIGIN_BUCKETS labels', () => {
+  // Round-3 guard: the sidebar tab bar renders `shortLabel` at a fixed 248px
+  // width with no `truncate` class, so an over-long label would OVERFLOW rather
+  // than ellipsize. The width math in `ThreadOriginTabs` assumes <=5 chars.
+  it('keeps every shortLabel within the sidebar width budget', () => {
+    for (const bucket of THREAD_ORIGIN_BUCKETS) {
+      expect(bucket.shortLabel.length).toBeLessThanOrEqual(
+        THREAD_ORIGIN_SHORT_LABEL_MAX_CHARS,
+      );
+      expect(bucket.shortLabel.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('uses already-uppercased shortLabels (the tab bar no longer applies uppercase)', () => {
+    for (const bucket of THREAD_ORIGIN_BUCKETS) {
+      expect(bucket.shortLabel).toBe(bucket.shortLabel.toUpperCase());
+    }
+  });
+
+  it('has no leading/trailing whitespace that would skew the width math', () => {
+    for (const bucket of THREAD_ORIGIN_BUCKETS) {
+      expect(bucket.shortLabel).toBe(bucket.shortLabel.trim());
+    }
+  });
+
+  it('keeps shortLabels distinct so tabs stay distinguishable', () => {
+    const shortLabels = THREAD_ORIGIN_BUCKETS.map((b) => b.shortLabel);
+    expect(new Set(shortLabels).size).toBe(shortLabels.length);
+  });
+
+  it('keeps a full-length label for wider surfaces (thread-history page)', () => {
+    const automation = THREAD_ORIGIN_BUCKETS.find((b) => b.id === 'automation');
+    expect(automation?.label).toBe('Automation');
+    expect(automation?.shortLabel).toBe('AUTO');
   });
 });
