@@ -2,7 +2,7 @@
 
 **Author:** Jarvis (via Conner)
 **Date:** 2026-07-24
-**Status:** Implemented (round 3) — PR #173, branch `feat/orchestrator-thread-tabs`
+**Status:** Implemented (round 4) — PR #173, branch `feat/orchestrator-thread-tabs`
 
 > **Revision history**
 > - **Round 1** — client-side bucketing of one flat page. No backend changes.
@@ -12,8 +12,11 @@
 > - **Round 3** — re-added client-side bucket filtering as defense-in-depth
 >   (round 2 had a version-skew bug), fixed tab-bar truncation, hid the thread
 >   list scrollbar.
+> - **Round 4** — skew *compensation*: detect a bucket-filter-ignoring worker at
+>   runtime and overfetch + cap so each tab still loads up to 30 threads by
+>   default in both worlds. Self-retires on deploy.
 >
-> This doc describes the CURRENT (round 3) design. Where round 1's design was
+> This doc describes the CURRENT (round 4) design. Where round 1's design was
 > replaced, the rationale for the change is recorded rather than deleted.
 
 ## Problem
@@ -155,11 +158,56 @@ Regression tests: `thread-sidebar.test.ts` feeds a deliberately mixed-origin
 page (simulating a worker that ignores the param) and asserts no foreign
 thread — and no foreign group *header* — renders for any selected bucket.
 
-The same defense applies on the history page
-(`routes/sessions/$sessionId/threads/index.tsx`). There it can render fewer
-than `pageSize` rows while `totalCount`/`totalPages` still describe the
-unfiltered set. Showing a short page beats showing threads from the wrong
-bucket; it self-corrects once the worker ships.
+#### Skew compensation (round 4) — keeping "30 per tab" true in both worlds
+
+The client re-filter fixes correctness but leaves a **capacity** gap: under
+skew a `pageSize=30` request returns 30 *mixed* threads, so after filtering a
+tab renders only its share (~7-12 rows). Tabs under-fill until the worker
+deploys.
+
+Round 4 closes it with a runtime probe. A worker that understands
+`originBucket` **always** returns `originCounts` when counts are requested
+(`wantsCounts = !!originBucket || !!includeOriginCounts`,
+`packages/worker/src/lib/db/threads.ts:386`); one that predates the feature
+never does. So *the absence of `originCounts` on a response that asked for it
+proves the bucket filter was ignored* — `backendIgnoredBucketFilter`.
+
+On that signal, `planBucketFetch` overfetches: request
+`SIDEBAR_PAGE_SIZE * 4` rows **without** the (ignored) `originBucket` param,
+then filter and **cap** the render at `SIDEBAR_PAGE_SIZE * pagesForActiveBucket`
+via `selectVisibleBucketPage`. The render cap is identical in both worlds —
+that's the point. `Load more` still adds exactly 30 per click, and reveals
+already-overfetched rows with no round-trip.
+
+Three details that matter:
+
+- **The flag is latched in React state, not derived inline.** Deriving it from
+  the current response would oscillate: flipping it changes the react-query
+  key, so `data` goes `undefined` for the new key, which reads as "not skewed"
+  and flips it straight back.
+- **Overfetch is clamped to `MAX_THREADS_PER_REQUEST = 100`**, mirroring the
+  route's own `Math.min(..., 100)` clamp (`routes/threads.ts:84`) — which
+  predates this branch and therefore also applies to the old deployed worker.
+  Requesting past it would silently truncate and make `hasMore` lie.
+- **`hasMore` is no longer just the server's flag.** It's true when we hold
+  more bucket rows than we render, and false once `pageSize` has hit the
+  request cap with everything shown — otherwise `Load more` becomes a no-op
+  button.
+
+This path **self-retires**: the first response carrying `originCounts` flips
+the flag off and restores precise per-bucket fetching, permanently and at
+runtime. Nothing needs to be removed when the worker ships.
+
+The history page (`routes/sessions/$sessionId/threads/index.tsx`) has the same
+under-fill, but can't simply overfetch in place: `page` counts offsets in the
+*mixed* stream, so filtering page N and capping it at 30 would silently skip
+bucket rows that fell past page N-1's cap. Under skew it therefore switches to
+the sidebar's cumulative-window model (`planBucketHistoryFetch`) — request one
+`page: 1` window big enough to cover pages 1..N, slice it client-side, and
+derive `totalPages` from the *filtered* window so the pager doesn't advertise
+pages that render empty. Cost while skewed: history reaches only the newest
+`MAX_THREADS_PER_REQUEST` threads. Lossless within that window, and it
+self-corrects on deploy.
 
 ### 2. Tab counts — TRUE totals, independent of the active filter
 
@@ -187,11 +235,13 @@ Automation bucket (10+ threads) starved Slack (2 threads) of visible rows.
 Because each bucket is now its own query, each paginates independently —
 starvation is structurally impossible.
 
-- Sidebar: `SIDEBAR_PAGE_SIZE = 30` (`thread-sidebar.tsx:450`), grown by a
-  `Load more` button (`pagesForActiveBucket` counter). Switching tabs resets
-  the counter so a bucket can't inherit another's deep scroll.
-- History page: standard `page`/`pageSize` pagination, bucket in the URL
-  (`?bucket=`), page reset to 1 on tab switch.
+- Sidebar: `SIDEBAR_PAGE_SIZE = 30`, grown by a `Load more` button
+  (`pagesForActiveBucket` counter). Switching tabs resets the counter so a
+  bucket can't inherit another's deep scroll. **30 is a render cap, not just a
+  fetch size** — under backend skew the fetch is deliberately larger than the
+  cap (see "Skew compensation" above).
+- History page: standard `page`/`pageSize` pagination (`HISTORY_PAGE_SIZE = 30`),
+  bucket in the URL (`?bucket=`), page reset to 1 on tab switch.
 
 **Open question (deferred):** `Load more` button vs. scroll-triggered
 infinite pagination in the sidebar. Button shipped because it's predictable and
@@ -299,11 +349,20 @@ filter is opt-in.
 - `thread-origin-buckets.test.ts` — `getThreadOriginBucket` (each bucket +
   legacy fallback), `computeBucketCounts`, `mergeBucketCounts` (server-total
   precedence, hint-map attribution, no double-count),
-  `attentionBucketFromPrompt`, and the `shortLabel` width invariants.
+  `attentionBucketFromPrompt`, and the `shortLabel` width invariants. Round 4
+  adds `backendIgnoredBucketFilter` (skew probe, incl. all-zero counts still
+  meaning "supported" and no-response meaning "assume healthy"),
+  `planBucketFetch` (identical `visibleLimit` in both worlds, bucket param
+  dropped under skew, request cap never exceeded) and
+  `planBucketHistoryFetch` (cumulative window, contiguous non-skipping slices).
 - `thread-sidebar.test.ts` — `groupThreadsByChannel` (unchanged), plus the
   round-3 defense-in-depth guard: a mixed-origin page must never leak a
   foreign thread or group header into a bucket, exact page partitioning,
   archived-thread exclusion, order preservation, and `formatTabCount` bounds.
+  Round 4 adds `selectVisibleBucketPage`: fills a tab to 30 from an
+  overfetched mixed page, caps at `visibleLimit` while preserving newest-first
+  order, per-bucket independence, and the `hasMore` rules (reveal held rows,
+  suppress the no-op button at the request cap).
 - `packages/worker/src/lib/db/threads.test.ts` — real in-memory D1
   (better-sqlite3): `originCounts` independence from the bucket filter,
   bucket-fill independence (busy Automation must not starve Slack),

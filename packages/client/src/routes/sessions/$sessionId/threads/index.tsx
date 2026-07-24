@@ -1,10 +1,13 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
+import { useEffect, useState } from 'react';
 import { useThreads } from '@/api/threads';
 import { formatRelativeTime } from '@/lib/format';
 import { getThreadHistoryPages } from '../../-thread-history-pagination';
 import {
+  backendIgnoredBucketFilter,
   DEFAULT_THREAD_ORIGIN_BUCKET,
   filterThreadsByBucket,
+  planBucketHistoryFetch,
   THREAD_ORIGIN_BUCKETS,
   type ThreadOriginBucketId,
 } from '@/components/chat/thread-origin-buckets';
@@ -28,35 +31,66 @@ export const Route = createFileRoute('/sessions/$sessionId/threads/')({
 
 const EMPTY_ORIGIN_COUNTS = { ui: 0, slack: 0, automation: 0, other: 0 };
 
+/** Threads rendered per history page, per bucket. */
+const HISTORY_PAGE_SIZE = 30;
+
 function ThreadHistoryPage() {
   const { sessionId } = Route.useParams();
   const { page, bucket: bucketParam } = Route.useSearch();
   const bucket: ThreadOriginBucketId = bucketParam ?? DEFAULT_THREAD_ORIGIN_BUCKET;
   const safePage = typeof page === 'number' && Number.isFinite(page) && page > 0 ? page : 1;
+  // Whether the backend ignores `originBucket` (frontend/worker deploy skew).
+  // Latched in state — see the same pattern (and the oscillation it avoids) in
+  // thread-sidebar.tsx.
+  const [backendIgnoresBucket, setBackendIgnoresBucket] = useState(false);
+
   // Server-side bucket filter — each bucket paginates independently and the
   // response's `originCounts` gives TRUE per-bucket totals for tab labels.
-  const { data, isLoading, isError } = useThreads(sessionId, {
+  // Under skew this switches to a single overfetched cumulative window that we
+  // slice client-side, so a page still fills to HISTORY_PAGE_SIZE.
+  const plan = planBucketHistoryFetch({
     page: safePage,
-    pageSize: 30,
+    pageSize: HISTORY_PAGE_SIZE,
     bucket,
+    skewed: backendIgnoresBucket,
+  });
+
+  const { data, isLoading, isError } = useThreads(sessionId, {
+    page: plan.requestPage,
+    pageSize: plan.requestPageSize,
+    bucket: plan.bucket,
     includeOriginCounts: true,
   });
 
+  // `originCounts` presence is the skew probe. Latch both directions so this
+  // self-heals as soon as the new worker is deployed.
+  useEffect(() => {
+    if (!data) return;
+    setBackendIgnoresBucket(backendIgnoredBucketFilter(data));
+  }, [data]);
+
   const threads = data?.threads ?? [];
-  const totalPages = data?.totalPages ?? 1;
-  const pages = getThreadHistoryPages(safePage, totalPages);
   const originCounts = data?.originCounts ?? EMPTY_ORIGIN_COUNTS;
 
   // Re-apply the bucket filter client-side on top of the server's
   // `originBucket` filter. Not redundant: a worker build without `originBucket`
   // support ignores the param and returns every bucket, which would list
   // Slack/Automation threads under the UI tab. See `filterThreadsByBucket`.
-  //
-  // Under that skew the page can render fewer than `pageSize` rows while
-  // `totalCount`/`totalPages` still describe the unfiltered set. Showing a
-  // short page beats showing threads from the wrong bucket; it self-corrects
-  // as soon as the worker ships.
-  const filteredThreads = filterThreadsByBucket(threads, bucket);
+  const bucketThreads = filterThreadsByBucket(threads, bucket);
+  // Then slice to this page. In the happy path the server already paginated, so
+  // the slice is a no-op cap at HISTORY_PAGE_SIZE. Under skew `plan` fetched one
+  // cumulative window covering pages 1..N, and the slice is what actually
+  // paginates — see `planBucketHistoryFetch` for why offset paging over a
+  // client-filtered stream would otherwise skip rows.
+  const filteredThreads = bucketThreads.slice(plan.sliceStart, plan.sliceEnd);
+  // Under skew, `totalCount`/`totalPages` from the server describe the
+  // UNFILTERED stream, so they'd advertise pages that render empty. Derive them
+  // from the filtered window instead. (Cost while skewed: history reaches only
+  // the newest MAX_THREADS_PER_REQUEST threads. Self-corrects on worker deploy.)
+  const totalPages = plan.windowed
+    ? Math.max(1, Math.ceil(bucketThreads.length / HISTORY_PAGE_SIZE))
+    : (data?.totalPages ?? 1);
+  const pages = getThreadHistoryPages(safePage, totalPages);
   const bucketHasNoResults = !isLoading && !isError && filteredThreads.length === 0;
   const hasAnyThreadsInBucket = originCounts[bucket] > 0;
 

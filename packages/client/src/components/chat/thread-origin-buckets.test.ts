@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   attentionBucketFromPrompt,
+  backendIgnoredBucketFilter,
   computeBucketCounts,
   filterThreadsByBucket,
   getThreadOriginBucket,
+  MAX_THREADS_PER_REQUEST,
   mergeBucketCounts,
+  planBucketFetch,
+  planBucketHistoryFetch,
   THREAD_ORIGIN_BUCKETS,
   THREAD_ORIGIN_SHORT_LABEL_MAX_CHARS,
   type ThreadOriginBucketId,
@@ -261,5 +265,156 @@ describe('THREAD_ORIGIN_BUCKETS labels', () => {
     const automation = THREAD_ORIGIN_BUCKETS.find((b) => b.id === 'automation');
     expect(automation?.label).toBe('Automation');
     expect(automation?.shortLabel).toBe('AUTO');
+  });
+});
+
+describe('backendIgnoredBucketFilter', () => {
+  it('reports skew when a counts-requesting response comes back WITHOUT originCounts', () => {
+    // An old worker ignores both `originBucket` and `includeOriginCounts`.
+    expect(backendIgnoredBucketFilter({ threads: [], hasMore: false })).toBe(true);
+  });
+
+  it('reports no skew when the response carries originCounts', () => {
+    expect(
+      backendIgnoredBucketFilter({
+        threads: [],
+        hasMore: false,
+        originCounts: { ui: 1, slack: 2, automation: 3, other: 0 },
+      }),
+    ).toBe(false);
+  });
+
+  it('assumes the happy path before any response is observed', () => {
+    // First paint must not overfetch on speculation.
+    expect(backendIgnoredBucketFilter(undefined)).toBe(false);
+    expect(backendIgnoredBucketFilter(null)).toBe(false);
+  });
+
+  it('treats zeroed counts as support, not absence', () => {
+    // A brand-new session legitimately has all-zero counts; that still proves
+    // the worker understands the param.
+    expect(
+      backendIgnoredBucketFilter({
+        threads: [],
+        hasMore: false,
+        originCounts: { ui: 0, slack: 0, automation: 0, other: 0 },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('planBucketFetch', () => {
+  it('asks the server for exactly the rows it will render when the backend filters', () => {
+    const plan = planBucketFetch({
+      bucket: 'slack',
+      pages: 1,
+      basePageSize: 30,
+      skewed: false,
+    });
+
+    expect(plan).toEqual({
+      bucket: 'slack',
+      pageSize: 30,
+      visibleLimit: 30,
+      overfetching: false,
+    });
+  });
+
+  it('overfetches a MIXED page and drops the ignored bucket param under skew', () => {
+    const plan = planBucketFetch({
+      bucket: 'slack',
+      pages: 1,
+      basePageSize: 30,
+      skewed: true,
+    });
+
+    // 30 * 4 = 120, clamped to the worker's 100-row request cap.
+    expect(plan.pageSize).toBe(MAX_THREADS_PER_REQUEST);
+    expect(plan.bucket).toBeUndefined();
+    expect(plan.overfetching).toBe(true);
+    // The render cap is IDENTICAL to the happy path — that's the whole point.
+    expect(plan.visibleLimit).toBe(30);
+  });
+
+  it('keeps visibleLimit at 30 per Load-more page in BOTH worlds', () => {
+    for (const pages of [1, 2, 3]) {
+      const healthy = planBucketFetch({ bucket: 'ui', pages, basePageSize: 30, skewed: false });
+      const skewed = planBucketFetch({ bucket: 'ui', pages, basePageSize: 30, skewed: true });
+
+      expect(healthy.visibleLimit).toBe(30 * pages);
+      expect(skewed.visibleLimit).toBe(30 * pages);
+    }
+  });
+
+  it('never requests more than the worker will return', () => {
+    for (const pages of [1, 2, 4, 10]) {
+      for (const skewed of [true, false]) {
+        const plan = planBucketFetch({ bucket: 'automation', pages, basePageSize: 30, skewed });
+        expect(plan.pageSize).toBeLessThanOrEqual(MAX_THREADS_PER_REQUEST);
+        expect(plan.pageSize).toBeGreaterThanOrEqual(1);
+      }
+    }
+  });
+
+  it('treats a zero/negative Load-more counter as the first page', () => {
+    expect(planBucketFetch({ bucket: 'ui', pages: 0, basePageSize: 30, skewed: false }).visibleLimit)
+      .toBe(30);
+  });
+});
+
+describe('planBucketHistoryFetch', () => {
+  it('passes offset pagination straight through when the backend filters', () => {
+    const plan = planBucketHistoryFetch({ page: 2, pageSize: 30, bucket: 'ui', skewed: false });
+
+    expect(plan).toEqual({
+      requestPage: 2,
+      requestPageSize: 30,
+      bucket: 'ui',
+      sliceStart: 0,
+      sliceEnd: 30,
+      windowed: false,
+    });
+  });
+
+  it('switches to ONE cumulative window sliced client-side under skew', () => {
+    const plan = planBucketHistoryFetch({ page: 2, pageSize: 30, bucket: 'ui', skewed: true });
+
+    // Page 1 of a big window — NOT page 2 of a small one. Offset-paging a
+    // client-filtered stream would skip bucket rows that fell past page 1's cap.
+    expect(plan.requestPage).toBe(1);
+    expect(plan.bucket).toBeUndefined();
+    expect(plan.windowed).toBe(true);
+    // The slice is what paginates.
+    expect(plan.sliceStart).toBe(30);
+    expect(plan.sliceEnd).toBe(60);
+  });
+
+  it('grows the window with the page number, bounded by the request cap', () => {
+    const p1 = planBucketHistoryFetch({ page: 1, pageSize: 10, bucket: 'ui', skewed: true });
+    const p2 = planBucketHistoryFetch({ page: 2, pageSize: 10, bucket: 'ui', skewed: true });
+
+    expect(p1.requestPageSize).toBe(40);
+    expect(p2.requestPageSize).toBe(80);
+    expect(
+      planBucketHistoryFetch({ page: 9, pageSize: 30, bucket: 'ui', skewed: true }).requestPageSize,
+    ).toBe(MAX_THREADS_PER_REQUEST);
+  });
+
+  it('slices contiguously so no bucket row can be skipped between pages', () => {
+    const pageSize = 30;
+    const plans = [1, 2, 3].map((page) =>
+      planBucketHistoryFetch({ page, pageSize, bucket: 'ui', skewed: true }),
+    );
+
+    for (let i = 1; i < plans.length; i++) {
+      expect(plans[i].sliceStart).toBe(plans[i - 1].sliceEnd);
+    }
+  });
+
+  it('clamps a bogus page number to 1', () => {
+    expect(planBucketHistoryFetch({ page: 0, pageSize: 30, bucket: 'ui', skewed: true }).sliceStart)
+      .toBe(0);
+    expect(planBucketHistoryFetch({ page: -3, pageSize: 30, bucket: 'ui', skewed: false }).requestPage)
+      .toBe(1);
   });
 });

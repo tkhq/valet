@@ -1,5 +1,5 @@
 import type { SessionThread } from '@/api/types';
-import type { OriginBucketCounts, ThreadOriginBucketId } from '@valet/shared';
+import type { ListThreadsResponse, OriginBucketCounts, ThreadOriginBucketId } from '@valet/shared';
 
 // ─── Thread Origin Buckets ────────────────────────────────────────────────────
 //
@@ -203,4 +203,187 @@ export function filterThreadsByBucket(
   bucket: ThreadOriginBucketId,
 ): SessionThread[] {
   return threads.filter((t) => getThreadOriginBucket(t) === bucket);
+}
+
+// ─── Bucket-filter version skew ───────────────────────────────────────────────
+//
+// TEMPORARY (but self-retiring) compensation for frontend/worker deploy skew.
+//
+// A worker that supports `originBucket` filtering ALSO returns `originCounts`
+// whenever counts are requested (see packages/worker/src/lib/db/threads.ts:386
+// — `wantsCounts = !!originBucket || !!options.includeOriginCounts`). A worker
+// that PREDATES the feature ignores both unknown query params and never
+// returns the field. So the presence of `originCounts` on a response where we
+// explicitly asked for it is a reliable runtime probe for "does this backend
+// honor `originBucket`?".
+//
+// Why we need the probe at all: under skew the server returns a page of MIXED
+// origins, the client re-filters it (`filterThreadsByBucket`), and each tab
+// ends up rendering only its share of that page — e.g. 12 rows out of a
+// 30-thread page. Tabs silently under-fill. To keep "up to 30 per tab" true in
+// BOTH worlds we overfetch a bigger mixed page when skew is detected, then
+// filter and cap client-side.
+//
+// This path costs nothing once the new worker is deployed: the probe flips to
+// "not skewed" on the first response that carries `originCounts` and we go
+// back to precise per-bucket fetches. It can keep detecting correctly forever.
+
+/**
+ * Maximum number of threads a single list-threads request can return.
+ *
+ * Mirrors the worker route's clamp (`Math.min(Math.max(parsedLimit, 1), 100)`
+ * at packages/worker/src/routes/threads.ts:84). That clamp predates this
+ * branch, so it applies to the OLD deployed worker too — overfetching past it
+ * is silently truncated, which would make `hasMore` lie. Respect it here
+ * instead of relying on server-side clamping.
+ */
+export const MAX_THREADS_PER_REQUEST = 100;
+
+/**
+ * How much bigger a mixed-origin page we request when the backend ignores
+ * `originBucket`. 4x is a heuristic: it fills a 30-row tab as long as the
+ * selected bucket is at least ~25% of recent thread traffic. Bounded by
+ * `MAX_THREADS_PER_REQUEST` regardless.
+ */
+export const SKEW_OVERFETCH_FACTOR = 4;
+
+/**
+ * Did the backend ignore our `originBucket` filter?
+ *
+ * Call with a response that was fetched with `includeOriginCounts: true`.
+ * Returns false for a missing response (nothing observed yet — assume the
+ * happy path rather than overfetching on first paint).
+ */
+export function backendIgnoredBucketFilter(
+  response: Pick<ListThreadsResponse, 'threads' | 'hasMore' | 'originCounts'> | undefined | null,
+): boolean {
+  if (!response) return false;
+  return response.originCounts === undefined;
+}
+
+export interface BucketFetchPlan {
+  /**
+   * Bucket to send as the server-side `originBucket` filter, or undefined to
+   * omit it. Omitted under skew — the backend ignores it anyway, and omitting
+   * it keeps the request (and its react-query cache key) honest about the
+   * mixed-origin page we're actually getting back.
+   */
+  bucket: ThreadOriginBucketId | undefined;
+  /** `pageSize` to request. Already clamped to `MAX_THREADS_PER_REQUEST`. */
+  pageSize: number;
+  /** Max rows to RENDER for this bucket — 30 per "page" of Load more. */
+  visibleLimit: number;
+  /** True when we're deliberately overfetching to compensate for skew. */
+  overfetching: boolean;
+}
+
+/**
+ * Decide what to fetch for a bucket-scoped thread list.
+ *
+ * Happy path (worker honors `originBucket`): ask the server for exactly the
+ * rows we intend to render.
+ * Skewed path: ask for `SKEW_OVERFETCH_FACTOR`x as many MIXED rows without the
+ * (ignored) bucket param, and let `selectVisibleBucketPage` filter + cap.
+ *
+ * `visibleLimit` is identical in both cases — that's the point. "Up to
+ * `basePageSize` per tab, +`basePageSize` per Load more" holds either way.
+ */
+export function planBucketFetch({
+  bucket,
+  pages,
+  basePageSize,
+  skewed,
+}: {
+  bucket: ThreadOriginBucketId;
+  /** Load-more counter, in units of `basePageSize`. 1 = default first page. */
+  pages: number;
+  basePageSize: number;
+  skewed: boolean;
+}): BucketFetchPlan {
+  const visibleLimit = basePageSize * Math.max(1, pages);
+  if (!skewed) {
+    return {
+      bucket,
+      pageSize: Math.min(visibleLimit, MAX_THREADS_PER_REQUEST),
+      visibleLimit,
+      overfetching: false,
+    };
+  }
+  return {
+    bucket: undefined,
+    pageSize: Math.min(visibleLimit * SKEW_OVERFETCH_FACTOR, MAX_THREADS_PER_REQUEST),
+    visibleLimit,
+    overfetching: true,
+  };
+}
+
+// NOTE: the sidebar's capping counterpart to `planBucketFetch` lives next to
+// its filter primitive as `selectVisibleBucketPage` in thread-sidebar.tsx — it
+// composes `selectVisibleBucketThreads` rather than re-implementing the
+// active+bucket filter here.
+
+export interface BucketHistoryPlan {
+  /** `page` to request. Pinned to 1 under skew (see below). */
+  requestPage: number;
+  /** `pageSize` to request. Already clamped to `MAX_THREADS_PER_REQUEST`. */
+  requestPageSize: number;
+  /** Server-side `originBucket` filter, or undefined to omit it. */
+  bucket: ThreadOriginBucketId | undefined;
+  /** Client-side slice bounds applied to the bucket-filtered rows. */
+  sliceStart: number;
+  sliceEnd: number;
+  /** True when paginating client-side over one overfetched window. */
+  windowed: boolean;
+}
+
+/**
+ * Same idea as `planBucketFetch`, for the OFFSET-paginated thread history page.
+ *
+ * The history page can't just overfetch-in-place the way the sidebar does:
+ * under skew, `page` counts offsets in the MIXED stream, so filtering page N
+ * client-side and capping it at 30 would silently skip bucket rows that fell
+ * past the cap on page N-1.
+ *
+ * So under skew we switch to the sidebar's cumulative-window model: request a
+ * single window from the newest thread (`page: 1`) big enough to cover every
+ * page up to the requested one, then slice it client-side. That's lossless and
+ * keeps page numbers meaningful; the cost is that history is limited to the
+ * newest `MAX_THREADS_PER_REQUEST` threads while skew lasts. Callers should
+ * derive `totalPages` from the filtered window when `windowed` is true so the
+ * pager doesn't advertise pages that would render empty.
+ */
+export function planBucketHistoryFetch({
+  page,
+  pageSize,
+  bucket,
+  skewed,
+}: {
+  /** 1-based page number from the URL. */
+  page: number;
+  pageSize: number;
+  bucket: ThreadOriginBucketId;
+  skewed: boolean;
+}): BucketHistoryPlan {
+  const safePage = Math.max(1, page);
+  if (!skewed) {
+    return {
+      requestPage: safePage,
+      requestPageSize: Math.min(pageSize, MAX_THREADS_PER_REQUEST),
+      bucket,
+      sliceStart: 0,
+      sliceEnd: pageSize,
+      windowed: false,
+    };
+  }
+  return {
+    requestPage: 1,
+    requestPageSize: Math.min(
+      safePage * pageSize * SKEW_OVERFETCH_FACTOR,
+      MAX_THREADS_PER_REQUEST,
+    ),
+    bucket: undefined,
+    sliceStart: (safePage - 1) * pageSize,
+    sliceEnd: safePage * pageSize,
+    windowed: true,
+  };
 }

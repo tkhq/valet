@@ -7,10 +7,13 @@ import { getChannelIcon } from '@valet/sdk/ui';
 import type { SessionThread } from '@/api/types';
 import { cn } from '@/lib/cn';
 import {
+  backendIgnoredBucketFilter,
   DEFAULT_THREAD_ORIGIN_BUCKET,
   filterThreadsByBucket,
   getThreadOriginBucket,
+  MAX_THREADS_PER_REQUEST,
   mergeBucketCounts,
+  planBucketFetch,
   THREAD_ORIGIN_BUCKETS,
   type ThreadOriginBucketId,
 } from './thread-origin-buckets';
@@ -195,6 +198,42 @@ export function selectVisibleBucketThreads(
   bucket: ThreadOriginBucketId,
 ): SessionThread[] {
   return filterThreadsByBucket(selectActiveThreads(fetched), bucket);
+}
+
+export interface VisibleBucketPage {
+  /** Active threads in `bucket`, capped at `plan.visibleLimit`. */
+  threads: SessionThread[];
+  /** Whether a `Load more` affordance should be offered. */
+  hasMore: boolean;
+}
+
+/**
+ * Bucket-filter (via `selectVisibleBucketThreads`), then CAP the fetched page
+ * to what the tab should actually render.
+ *
+ * The cap is what makes "max 30 threads per tab by default" hold under
+ * backend skew, where `planBucketFetch` deliberately requests up to
+ * `SKEW_OVERFETCH_FACTOR`x more MIXED rows than we intend to show so that the
+ * client-side filter has enough material to fill the tab.
+ *
+ * `hasMore` is deliberately NOT just the server's flag:
+ *  - we may already hold more rows for this bucket than we're rendering
+ *    (overfetched) — Load more should reveal them with no network round-trip;
+ *  - once `plan.pageSize` has hit `MAX_THREADS_PER_REQUEST` we cannot ask the
+ *    server for a bigger page, so offering Load more would be a no-op button.
+ */
+export function selectVisibleBucketPage(
+  fetched: readonly SessionThread[],
+  bucket: ThreadOriginBucketId,
+  plan: { pageSize: number; visibleLimit: number },
+  serverHasMore: boolean,
+): VisibleBucketPage {
+  const all = selectVisibleBucketThreads(fetched, bucket);
+  const threads = all.slice(0, plan.visibleLimit);
+  const hasMore =
+    all.length > threads.length ||
+    (serverHasMore && plan.pageSize < MAX_THREADS_PER_REQUEST);
+  return { threads, hasMore };
 }
 
 // ─── Thread Item ──────────────────────────────────────────────────────────────
@@ -464,16 +503,45 @@ export function ThreadSidebar({
   // switching buckets so a bucket doesn't inherit a stale deep-scroll from
   // another bucket.
   const [pagesForActiveBucket, setPagesForActiveBucket] = useState(1);
+  // Whether the backend ignores our `originBucket` filter (frontend/worker
+  // deploy skew). LATCHED in state rather than derived inline from the current
+  // response — deriving it would oscillate: flipping the flag changes the
+  // react-query key, so `threadData` goes undefined for the new key, which
+  // would read as "not skewed" and flip us straight back. See
+  // `backendIgnoredBucketFilter`.
+  const [backendIgnoresBucket, setBackendIgnoresBucket] = useState(false);
 
   // Fetch ONLY the active bucket — each bucket paginates independently so a
   // busy Automation bucket can't starve Slack/UI/Other of visible threads.
+  // Under skew we instead overfetch a bigger MIXED page (no bucket param) and
+  // filter + cap client-side, so a tab still fills to SIDEBAR_PAGE_SIZE.
+  const fetchPlan = useMemo(
+    () =>
+      planBucketFetch({
+        bucket: activeBucket,
+        pages: pagesForActiveBucket,
+        basePageSize: SIDEBAR_PAGE_SIZE,
+        skewed: backendIgnoresBucket,
+      }),
+    [activeBucket, pagesForActiveBucket, backendIgnoresBucket],
+  );
+
   // `includeOriginCounts` is implicitly true when `bucket` is set (worker
-  // computes it either way in that case), but pass explicitly to be safe.
+  // computes it either way in that case), but pass explicitly — it's also our
+  // skew probe, and under skew we omit `bucket` entirely.
   const { data: threadData } = useThreads(sessionId, {
-    bucket: activeBucket,
-    pageSize: SIDEBAR_PAGE_SIZE * pagesForActiveBucket,
+    bucket: fetchPlan.bucket,
+    pageSize: fetchPlan.pageSize,
     includeOriginCounts: true,
   });
+
+  // A response that carries `originCounts` proves the worker understands
+  // `originBucket`; one that doesn't proves it doesn't. Latch both directions
+  // so this self-heals the moment the new worker is deployed.
+  useEffect(() => {
+    if (!threadData) return;
+    setBackendIgnoresBucket(backendIgnoredBucketFilter(threadData));
+  }, [threadData]);
   const dismissThread = useDismissThread(sessionId);
   const reactivateThread = useReactivateThread(sessionId);
 
@@ -490,18 +558,22 @@ export function ThreadSidebar({
   // feeds tab counts / attention badges.
   const activeThreads = useMemo(() => selectActiveThreads(fetchedThreads), [fetchedThreads]);
   // What we RENDER: re-filtered to the active bucket client-side so a worker
-  // without `originBucket` support can't leak other origins into this tab.
-  // Uses `selectVisibleBucketThreads` (not `filterThreadsByBucket` directly) so
+  // without `originBucket` support can't leak other origins into this tab, then
+  // CAPPED at `fetchPlan.visibleLimit` (30 per Load-more page) so an
+  // overfetched mixed page doesn't blow past the per-tab default.
+  // Uses `selectVisibleBucketPage` (not `filterThreadsByBucket` directly) so
   // the unit tests in thread-sidebar.test.ts cover this exact render path.
-  const activeBucketThreads = useMemo(
-    () => selectVisibleBucketThreads(fetchedThreads, activeBucket),
-    [fetchedThreads, activeBucket],
+  const visibleBucketPage = useMemo(
+    () =>
+      selectVisibleBucketPage(fetchedThreads, activeBucket, fetchPlan, !!threadData?.hasMore),
+    [fetchedThreads, activeBucket, fetchPlan, threadData?.hasMore],
   );
+  const activeBucketThreads = visibleBucketPage.threads;
   const dismissedThreads = useMemo(
     () => (dismissedData?.threads ?? []).filter((t) => t.status === 'archived'),
     [dismissedData],
   );
-  const hasMoreInBucket = !!threadData?.hasMore;
+  const hasMoreInBucket = visibleBucketPage.hasMore;
 
   const bucketCounts = useMemo(
     () =>
