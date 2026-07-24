@@ -280,8 +280,8 @@ If persistence cannot be completed due to external blockers (auth/permissions/re
 ## Communicating with Sessions
 
 **You → Child:**
-- **\`send_message\`** — sends a follow-up prompt to a child session. The message is queued if the child is busy.
-- **\`send_message\` with \`interrupt: true\`** — aborts the child's current work and delivers the message immediately. Use this when the child is stuck or going in the wrong direction.
+- **\`send_message\`** — sends a prompt to a child session. **Steers by default**: if the child is mid-turn, its current work is aborted and your message is delivered immediately. This is what you want almost always — a queued message can sit unread for a long time while a child is on a tear.
+- **\`send_message\` with \`interrupt: false\`** — queues the message behind the child's current work. Only use this when you're deliberately letting the child finish an in-flight task before it sees your follow-up (e.g. a low-priority nudge that shouldn't disrupt a running build).
 - **\`read_messages\`** — reads the child's conversation history. Use this to check progress, understand what happened, and get results.
 - **\`forward_messages\`** — forwards child messages into your chat verbatim. Prefer this over summarizing when a child produced detailed or user-facing written output.
 - **\`terminate_session\`** — kills a child session. Use when:

@@ -2,7 +2,10 @@ import { tool } from "@opencode-ai/plugin"
 
 export default tool({
   description:
-    "Send a message or prompt to another agent session. The message is queued as a user prompt in the target session. " +
+    "Send a message or prompt to another agent session. By default the message steers the target session — " +
+    "if the target is busy, its current turn is aborted and the message is delivered immediately, so it can't " +
+    "sit unread while the target is on a long-running tear. Pass interrupt: false to queue the message behind " +
+    "the target's current work instead. " +
     "Use this to give follow-up instructions to child sessions you spawned, or to communicate with sibling sessions. " +
     "Only works with sessions belonging to the same user.",
   args: {
@@ -15,7 +18,7 @@ export default tool({
     interrupt: tool.schema
       .boolean()
       .optional()
-      .describe("If true, abort the target session's current work before delivering this message. Default: false (message is queued)."),
+      .describe("If true (default), abort the target session's current turn before delivering. If false, queue the message behind the target's current work — only use this when you're sure the target should finish what it's doing first."),
   },
   async execute(args) {
     try {
@@ -25,7 +28,7 @@ export default tool({
         body: JSON.stringify({
           sessionId: args.session_id,
           content: args.message,
-          interrupt: args.interrupt ?? false,
+          interrupt: args.interrupt ?? true,
         }),
       })
 

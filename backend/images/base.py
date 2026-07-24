@@ -181,7 +181,7 @@ def get_base_image() -> modal.Image:
                 "OPENCODE_RUNTIME_DIR": "/tmp/valet-opencode",
                 "VALET_PERSONA_DIR": "/tmp/valet-opencode/persona",
                 # Force image rebuild on deploy (change this value to trigger rebuild)
-                "IMAGE_BUILD_VERSION": "2026-07-20-v61-persona-create-no-slug",
+                "IMAGE_BUILD_VERSION": "2026-07-24-v62-send-message-steer-default",
                 "AGENT_BROWSER_HOME": "/tmp/valet-agent-browser",
                 "AGENT_BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium",
                 "AGENT_BROWSER_PROFILE": "/workspace/.agent-browser-profile",
