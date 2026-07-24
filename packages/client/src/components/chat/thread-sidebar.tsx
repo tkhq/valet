@@ -7,10 +7,9 @@ import { getChannelIcon } from '@valet/sdk/ui';
 import type { SessionThread } from '@/api/types';
 import { cn } from '@/lib/cn';
 import {
-  computeBucketCounts,
   DEFAULT_THREAD_ORIGIN_BUCKET,
-  filterThreadsByBucket,
   getThreadOriginBucket,
+  mergeBucketCounts,
   THREAD_ORIGIN_BUCKETS,
   type ThreadOriginBucketId,
 } from './thread-origin-buckets';
@@ -291,9 +290,21 @@ function ThreadOriginTabs({
   onSelectBucket,
 }: {
   activeBucket: ThreadOriginBucketId;
-  bucketCounts: ReturnType<typeof computeBucketCounts>;
+  bucketCounts: ReturnType<typeof mergeBucketCounts>;
   onSelectBucket: (bucket: ThreadOriginBucketId) => void;
 }) {
+  // Layout notes (fixing Conner's "UI 9   SLACK 2   AUTOMATION 9   OTHER"
+  // cramped/uneven feedback):
+  //   - Each tab is flex-1 with `min-w-0` so long labels ("Automation") don't
+  //     force one tab to eat sibling space.
+  //   - Label + count are one grouped unit (`inline-flex gap-1`), then the
+  //     tab centers that unit — so the label+count pair reads as one thing
+  //     instead of two spaced-out tokens.
+  //   - Count is always a pill (never inline text) so the visual rhythm is
+  //     the same across active/inactive/attention states — just the color
+  //     changes.
+  //   - `px-1` per tab is tight because the sidebar is 210px wide and we
+  //     have to fit 4 tabs.
   return (
     <div
       role="tablist"
@@ -303,35 +314,44 @@ function ThreadOriginTabs({
       {THREAD_ORIGIN_BUCKETS.map((bucket) => {
         const counts = bucketCounts[bucket.id];
         const isActive = bucket.id === activeBucket;
-        const showAttention = !isActive && counts.attentionNeeded > 0;
+        const hasAttention = counts.attentionNeeded > 0;
+        const showAttentionBadge = hasAttention && !isActive;
         return (
           <button
             key={bucket.id}
             role="tab"
             type="button"
             aria-selected={isActive}
-            title={bucket.description}
+            title={
+              showAttentionBadge
+                ? `${bucket.description} — ${counts.attentionNeeded} needs response`
+                : bucket.description
+            }
             onClick={() => onSelectBucket(bucket.id)}
             className={cn(
-              'flex flex-1 items-center justify-center gap-1 px-1.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors',
+              'group flex min-w-0 flex-1 items-center justify-center px-1 py-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors',
               isActive
                 ? 'border-b-2 border-violet-500 text-neutral-800 dark:text-neutral-100'
                 : 'border-b-2 border-transparent text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300',
             )}
           >
-            <span>{bucket.label}</span>
-            {showAttention ? (
-              <span
-                className="inline-flex min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-semibold text-white tabular-nums dark:bg-amber-400 dark:text-neutral-900"
-                title={`${counts.attentionNeeded} thread${counts.attentionNeeded === 1 ? '' : 's'} need response`}
-              >
-                {counts.attentionNeeded}
-              </span>
-            ) : counts.total > 0 && !isActive ? (
-              <span className="text-[9px] font-normal text-neutral-400 tabular-nums dark:text-neutral-500">
-                {counts.total}
-              </span>
-            ) : null}
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <span className="truncate">{bucket.label}</span>
+              {counts.total > 0 && (
+                <span
+                  className={cn(
+                    'inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full px-1 text-[9px] font-semibold tabular-nums',
+                    showAttentionBadge
+                      ? 'bg-amber-500 text-white dark:bg-amber-400 dark:text-neutral-900'
+                      : isActive
+                        ? 'bg-neutral-200 text-neutral-700 dark:bg-neutral-700 dark:text-neutral-200'
+                        : 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400',
+                  )}
+                >
+                  {counts.total}
+                </span>
+              )}
+            </span>
           </button>
         );
       })}
@@ -357,57 +377,113 @@ interface ThreadSidebarProps {
   sessionId: string;
   activeThreadId: string | null;
   responseRequiredThreadIds?: ReadonlySet<string>;
+  /**
+   * Optional best-effort map from a response-required threadId to the origin
+   * bucket its interactive prompt came from (see `attentionBucketFromPrompt`).
+   * Only used for threads NOT in the currently-loaded bucket page, so the
+   * amber "needs response" badge still lights up the right tab across
+   * unfetched buckets. When the thread IS loaded the authoritative bucket
+   * comes from the thread row itself.
+   */
+  attentionBucketHint?: ReadonlyMap<string, ThreadOriginBucketId>;
   onSelectThread: (threadId: string) => void;
   onNewThread: () => void;
 }
+
+// How many threads to fetch at once for a given bucket. Sized to fill the
+// visible sidebar height on a normal display (each thread row is ~24px + group
+// headers) with headroom for `Load more`.
+const SIDEBAR_PAGE_SIZE = 30;
 
 export function ThreadSidebar({
   sessionId,
   activeThreadId,
   responseRequiredThreadIds,
+  attentionBucketHint,
   onSelectThread,
   onNewThread,
 }: ThreadSidebarProps) {
   const [collapsed, setCollapsed] = useState(getSidebarCollapsed);
   const [showDismissed, setShowDismissed] = useState(false);
   const [activeBucket, setActiveBucket] = useState<ThreadOriginBucketId>(getStoredActiveBucket);
+  // Load-more state — measured in units of `SIDEBAR_PAGE_SIZE`. Reset when
+  // switching buckets so a bucket doesn't inherit a stale deep-scroll from
+  // another bucket.
+  const [pagesForActiveBucket, setPagesForActiveBucket] = useState(1);
 
-  const { data: threadData } = useThreads(sessionId);
+  // Fetch ONLY the active bucket — each bucket paginates independently so a
+  // busy Automation bucket can't starve Slack/UI/Other of visible threads.
+  // `includeOriginCounts` is implicitly true when `bucket` is set (worker
+  // computes it either way in that case), but pass explicitly to be safe.
+  const { data: threadData } = useThreads(sessionId, {
+    bucket: activeBucket,
+    pageSize: SIDEBAR_PAGE_SIZE * pagesForActiveBucket,
+    includeOriginCounts: true,
+  });
   const dismissThread = useDismissThread(sessionId);
   const reactivateThread = useReactivateThread(sessionId);
 
-  const allThreads = threadData?.threads ?? [];
-  const activeThreads = useMemo(() => allThreads.filter((t) => t.status === 'active'), [allThreads]);
-  const dismissedThreads = useMemo(() => allThreads.filter((t) => t.status === 'archived'), [allThreads]);
+  // ALSO fetch dismissed threads (archived) unfiltered by bucket — the
+  // "Dismissed" section at the bottom shows an aggregate count and list
+  // across all origins, matching pre-existing behavior. Skip the bucket
+  // filter here so the dismissed count is authoritative.
+  const { data: dismissedData } = useThreads(sessionId, {
+    pageSize: SIDEBAR_PAGE_SIZE,
+  });
+
+  const bucketedThreads = threadData?.threads ?? [];
+  const activeBucketThreads = useMemo(
+    () => bucketedThreads.filter((t) => t.status === 'active'),
+    [bucketedThreads],
+  );
+  const dismissedThreads = useMemo(
+    () => (dismissedData?.threads ?? []).filter((t) => t.status === 'archived'),
+    [dismissedData],
+  );
+  const hasMoreInBucket = !!threadData?.hasMore;
 
   const bucketCounts = useMemo(
-    () => computeBucketCounts(activeThreads, responseRequiredThreadIds),
-    [activeThreads, responseRequiredThreadIds],
-  );
-  const bucketedThreads = useMemo(
-    () => filterThreadsByBucket(activeThreads, activeBucket),
-    [activeThreads, activeBucket],
+    () =>
+      mergeBucketCounts(
+        threadData?.originCounts,
+        activeBucketThreads,
+        responseRequiredThreadIds,
+        attentionBucketHint,
+      ),
+    [threadData?.originCounts, activeBucketThreads, responseRequiredThreadIds, attentionBucketHint],
   );
 
-  const resolvedLabels = useResolvedChannelLabels(bucketedThreads);
-  const groups = useMemo(() => groupThreadsByChannel(bucketedThreads, resolvedLabels), [bucketedThreads, resolvedLabels]);
+  const resolvedLabels = useResolvedChannelLabels(activeBucketThreads);
+  const groups = useMemo(
+    () => groupThreadsByChannel(activeBucketThreads, resolvedLabels),
+    [activeBucketThreads, resolvedLabels],
+  );
 
   const handleSelectBucket = useCallback((bucket: ThreadOriginBucketId) => {
     setActiveBucket(bucket);
     setStoredActiveBucket(bucket);
+    setPagesForActiveBucket(1);
+  }, []);
+
+  const handleLoadMore = useCallback(() => {
+    setPagesForActiveBucket((n) => n + 1);
   }, []);
 
   // If the active thread lives in a bucket other than the currently selected
   // one (e.g. because the user just picked a thread from search or a link),
   // switch the tab so the selection is visible instead of silently hidden.
+  // Only fires when the active thread is loaded in the current bucket page —
+  // when it isn't, the caller (chat-container) is expected to have already
+  // pointed the sidebar at the right bucket via localStorage on select.
   useEffect(() => {
     if (!activeThreadId) return;
-    const activeThread = activeThreads.find((t) => t.id === activeThreadId);
+    const activeThread = activeBucketThreads.find((t) => t.id === activeThreadId);
     if (!activeThread) return;
     const desired = getThreadOriginBucket(activeThread);
     if (desired !== activeBucket) {
       setActiveBucket(desired);
       setStoredActiveBucket(desired);
+      setPagesForActiveBucket(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId]);
@@ -420,13 +496,13 @@ export function ThreadSidebar({
     (threadId: string) => {
       dismissThread.mutate(threadId);
       if (threadId === activeThreadId) {
-        const remaining = activeThreads.filter((t) => t.id !== threadId);
+        const remaining = activeBucketThreads.filter((t) => t.id !== threadId);
         if (remaining.length > 0) {
           onSelectThread(remaining[0].id);
         }
       }
     },
-    [dismissThread, activeThreadId, activeThreads, onSelectThread]
+    [dismissThread, activeThreadId, activeBucketThreads, onSelectThread]
   );
 
   const handleReactivate = useCallback(
@@ -509,12 +585,21 @@ export function ThreadSidebar({
             ))}
           </div>
         ))}
-        {bucketedThreads.length === 0 && (
+        {activeBucketThreads.length === 0 && (
           <div className="px-2 py-4 text-center text-[11px] text-neutral-400 dark:text-neutral-500">
-            {activeThreads.length === 0
-              ? 'No active threads'
-              : `No ${activeBucket === 'ui' ? 'UI' : activeBucket === 'other' ? 'other' : activeBucket} threads`}
+            {bucketCounts[activeBucket].total === 0
+              ? `No ${activeBucket === 'ui' ? 'UI' : activeBucket === 'other' ? 'other' : activeBucket} threads`
+              : 'Loading…'}
           </div>
+        )}
+        {hasMoreInBucket && activeBucketThreads.length > 0 && (
+          <button
+            type="button"
+            onClick={handleLoadMore}
+            className="mt-1 flex w-full items-center justify-center px-2 py-1.5 text-[10px] font-medium text-neutral-500 transition-colors hover:bg-surface-1 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-surface-2 dark:hover:text-neutral-200"
+          >
+            Load more
+          </button>
         )}
       </div>
 

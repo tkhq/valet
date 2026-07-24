@@ -254,3 +254,142 @@ describe('threads db helpers', () => {
     });
   });
 });
+
+describe('listThreads per-origin bucket filter + counts', () => {
+  let d1: D1Database;
+  const sessionId = 'orchestrator:user-1';
+
+  beforeEach(async () => {
+    d1 = createD1Db();
+    // Seed a heterogeneous set that mirrors what Conner sees in production:
+    //   3 UI threads, 2 Slack threads (one via origin_type, one via legacy
+    //   channel_thread_mappings), 4 Automation threads, 1 other (telegram).
+    await createThread(d1, { id: 'ui-1', sessionId, originType: 'web' });
+    await createThread(d1, { id: 'ui-2', sessionId, originType: 'web' });
+    await createThread(d1, { id: 'ui-3', sessionId, originType: 'web' });
+
+    await createThread(d1, {
+      id: 'slack-1',
+      sessionId,
+      originType: 'slack',
+      originChannelType: 'slack',
+      originChannelId: 'C1',
+    });
+    // Legacy: no origin_* metadata, only a channel_thread_mappings row.
+    await createThread(d1, { id: 'slack-legacy', sessionId, originType: undefined });
+    await registerChannelThread(d1, {
+      channelType: 'slack',
+      channelId: 'C2',
+      externalThreadId: '1700000000.000001',
+      userId: 'user-1',
+      sessionId,
+      threadId: 'slack-legacy',
+    });
+    // Clear origin_type so the legacy fallback branch of the CASE fires.
+    await d1
+      .prepare("UPDATE session_threads SET origin_type = NULL, origin_channel_type = NULL WHERE id = 'slack-legacy'")
+      .run();
+
+    for (const id of ['auto-1', 'auto-2', 'auto-3', 'auto-4']) {
+      await createThread(d1, { id, sessionId, originType: 'automation' });
+    }
+
+    await createThread(d1, { id: 'telegram-1', sessionId, originType: 'telegram' });
+  });
+
+  it('returns TRUE per-bucket totals in originCounts (independent of the bucket filter)', async () => {
+    // Viewing the UI bucket — but originCounts must still show totals for
+    // every bucket, including the non-viewed ones (this is the whole point).
+    const result = await listThreads(d1, sessionId, {
+      originBucket: 'ui',
+    });
+    expect(result.originCounts).toEqual({
+      ui: 3,
+      slack: 2, // 1 origin_type=slack + 1 legacy channel_thread_mappings=slack
+      automation: 4,
+      other: 1,
+    });
+    // Filtered list has exactly the 3 UI threads.
+    expect(result.threads.map((t) => t.id).sort()).toEqual(['ui-1', 'ui-2', 'ui-3']);
+  });
+
+  it('applies each bucket filter independently — busy Automation does not starve Slack', async () => {
+    // Fetch with a tiny limit. Under the OLD design, a single flat page with
+    // limit=3 would return 3 threads across ALL buckets — a busy Automation
+    // bucket (4 threads) could evict every Slack thread. Per-bucket filtering
+    // means each bucket fills its own page cap independently.
+    const uiResult = await listThreads(d1, sessionId, { originBucket: 'ui', limit: 3 });
+    const slackResult = await listThreads(d1, sessionId, { originBucket: 'slack', limit: 3 });
+    const autoResult = await listThreads(d1, sessionId, { originBucket: 'automation', limit: 3 });
+    const otherResult = await listThreads(d1, sessionId, { originBucket: 'other', limit: 3 });
+
+    expect(uiResult.threads.length).toBe(3);
+    expect(slackResult.threads.length).toBe(2);
+    expect(slackResult.threads.map((t) => t.id).sort()).toEqual(['slack-1', 'slack-legacy']);
+    // Automation has 4 total but limit=3 so we get 3 + hasMore=true.
+    expect(autoResult.threads.length).toBe(3);
+    expect(autoResult.hasMore).toBe(true);
+    expect(otherResult.threads.map((t) => t.id)).toEqual(['telegram-1']);
+  });
+
+  it('paginates within a single bucket via limit and returns hasMore', async () => {
+    const first = await listThreads(d1, sessionId, { originBucket: 'automation', limit: 2 });
+    expect(first.threads.length).toBe(2);
+    expect(first.hasMore).toBe(true);
+
+    // Load more by expanding the limit (matches the sidebar's Load-more UX
+    // where `pagesForActiveBucket` grows the requested pageSize).
+    const bigger = await listThreads(d1, sessionId, { originBucket: 'automation', limit: 10 });
+    expect(bigger.threads.length).toBe(4);
+    expect(bigger.hasMore).toBe(false);
+  });
+
+  it('page-mode: totalCount reflects the bucket-filtered set and originCounts stay global', async () => {
+    const result = await listThreads(d1, sessionId, {
+      originBucket: 'automation',
+      page: 1,
+      pageSize: 2,
+    });
+    // Filtered page: 2 automation threads out of a bucket-total of 4.
+    expect(result.threads.length).toBe(2);
+    expect(result.totalCount).toBe(4);
+    expect(result.totalPages).toBe(2);
+    expect(result.hasMore).toBe(true);
+    // originCounts still show ALL buckets — unaffected by the filter.
+    expect(result.originCounts).toEqual({
+      ui: 3,
+      slack: 2,
+      automation: 4,
+      other: 1,
+    });
+  });
+
+  it('includeOriginCounts=true without a bucket filter returns global totals', async () => {
+    const result = await listThreads(d1, sessionId, {
+      includeOriginCounts: true,
+      limit: 100,
+    });
+    expect(result.threads.length).toBe(10);
+    expect(result.originCounts).toEqual({
+      ui: 3,
+      slack: 2,
+      automation: 4,
+      other: 1,
+    });
+  });
+
+  it('omits originCounts when neither bucket nor includeOriginCounts is requested (backward compat)', async () => {
+    const result = await listThreads(d1, sessionId, { limit: 100 });
+    expect(result.threads.length).toBe(10);
+    expect(result.originCounts).toBeUndefined();
+  });
+
+  it('classifies legacy threads via channel_thread_mappings.channel_type when origin_* is NULL', async () => {
+    // The Slack legacy thread has no origin_* metadata — the SQL CASE must
+    // fall back to `ctm.channel_type='slack'` to bucket it as slack, matching
+    // the client's `getThreadOriginBucket` fallback in
+    // components/chat/thread-origin-buckets.ts.
+    const result = await listThreads(d1, sessionId, { originBucket: 'slack', limit: 10 });
+    expect(result.threads.map((t) => t.id).sort()).toContain('slack-legacy');
+  });
+});

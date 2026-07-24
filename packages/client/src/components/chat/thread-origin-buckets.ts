@@ -1,4 +1,5 @@
 import type { SessionThread } from '@/api/types';
+import type { OriginBucketCounts, ThreadOriginBucketId } from '@valet/shared';
 
 // ─── Thread Origin Buckets ────────────────────────────────────────────────────
 //
@@ -11,8 +12,13 @@ import type { SessionThread } from '@/api/types';
 //
 // Legacy threads with no origin_* metadata fall back to the thread row's
 // channelType/channelId (matches thread-sidebar.tsx:getThreadGroupTarget).
+//
+// The bucket id set (`ThreadOriginBucketId`) lives in `@valet/shared` so the
+// worker's SQL filter (packages/worker/src/lib/db/threads.ts
+// `originBucketCaseSql`) uses the exact same taxonomy. Update BOTH when
+// changing the bucket rules.
 
-export type ThreadOriginBucketId = 'ui' | 'slack' | 'automation' | 'other';
+export type { ThreadOriginBucketId };
 
 export interface ThreadOriginBucket {
   id: ThreadOriginBucketId;
@@ -63,6 +69,12 @@ export interface BucketCounts {
  * Compute per-bucket totals and attention-needed counts. `attentionNeeded` is
  * the number of threads in the bucket whose id is present in
  * `responseRequiredThreadIds` — the same set the ThreadItem bell icon uses.
+ *
+ * NOTE: this is a pure client-side computation over the passed `threads`. When
+ * the sidebar fetches only a single bucket at a time (see `useThreads`
+ * `bucket` option), the totals it produces reflect only what's loaded — for
+ * TRUE per-bucket totals across all threads (independent of the current tab)
+ * use `originCounts` returned by the server on `ListThreadsResponse`.
  */
 export function computeBucketCounts(
   threads: readonly SessionThread[],
@@ -87,7 +99,83 @@ export function computeBucketCounts(
 }
 
 /**
+ * Merge SERVER-side per-bucket totals with the currently-loaded threads' worth
+ * of attention-needed counts. Server-side totals take precedence for `total`;
+ * `attentionNeeded` is still computed client-side against loaded threads
+ * because "requires response" is a runtime client signal (interactivePrompts),
+ * not a persisted server field.
+ *
+ * If the pending-prompt thread doesn't happen to be in `loadedThreads`
+ * (because it lives in a different bucket than the currently-selected tab),
+ * we fall back to `attentionBucketHint` per-id (see
+ * `attentionBucketFromPrompt`) so the "needs response" badge still lights up
+ * the right tab even when its threads aren't loaded.
+ */
+export function mergeBucketCounts(
+  serverCounts: OriginBucketCounts | undefined,
+  loadedThreads: readonly SessionThread[],
+  responseRequiredThreadIds: ReadonlySet<string> | undefined,
+  attentionBucketHint?: ReadonlyMap<string, ThreadOriginBucketId>,
+): Record<ThreadOriginBucketId, BucketCounts> {
+  const clientCounts = computeBucketCounts(loadedThreads, responseRequiredThreadIds);
+
+  const totals: OriginBucketCounts = serverCounts ?? {
+    ui: clientCounts.ui.total,
+    slack: clientCounts.slack.total,
+    automation: clientCounts.automation.total,
+    other: clientCounts.other.total,
+  };
+
+  // Attention: start from loaded-thread attention. Then for any pending-
+  // response thread whose id we DIDN'T see in loaded threads, count it via
+  // the hint map (best-effort — usually derived from prompt.channelType).
+  const attention: Record<ThreadOriginBucketId, number> = {
+    ui: clientCounts.ui.attentionNeeded,
+    slack: clientCounts.slack.attentionNeeded,
+    automation: clientCounts.automation.attentionNeeded,
+    other: clientCounts.other.attentionNeeded,
+  };
+  if (responseRequiredThreadIds && attentionBucketHint) {
+    const loadedIds = new Set(loadedThreads.map((t) => t.id));
+    for (const id of responseRequiredThreadIds) {
+      if (loadedIds.has(id)) continue;
+      const bucket = attentionBucketHint.get(id);
+      if (bucket) attention[bucket] += 1;
+    }
+  }
+
+  return {
+    ui: { total: totals.ui, attentionNeeded: attention.ui },
+    slack: { total: totals.slack, attentionNeeded: attention.slack },
+    automation: { total: totals.automation, attentionNeeded: attention.automation },
+    other: { total: totals.other, attentionNeeded: attention.other },
+  };
+}
+
+/**
+ * Best-effort mapping from an interactive prompt's channel metadata to an
+ * origin bucket. Used to light up the "attention needed" badge on tabs whose
+ * threads aren't currently loaded (see `mergeBucketCounts`). NOT authoritative
+ * — the ONLY authoritative bucket comes from a loaded SessionThread row and
+ * `getThreadOriginBucket`. Prefer that when available.
+ */
+export function attentionBucketFromPrompt(prompt: {
+  channelType?: string;
+}): ThreadOriginBucketId {
+  const t = prompt.channelType;
+  if (t === 'slack') return 'slack';
+  if (t === 'automation') return 'automation';
+  if (t === 'telegram' || t === 'github' || t === 'api') return 'other';
+  // 'thread' / 'web' / undefined => UI (the default web-origin bucket).
+  return 'ui';
+}
+
+/**
  * Filter threads to a single bucket. Preserves input order.
+ *
+ * With server-side bucket filtering (see `useThreads` `bucket` option), this
+ * is mostly a no-op for the sidebar. Kept for the history page's
+ * within-page filtering fallback and for tests.
  */
 export function filterThreadsByBucket(
   threads: readonly SessionThread[],

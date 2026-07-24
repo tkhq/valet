@@ -21,7 +21,9 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { useAutoRestartOrchestrator } from '@/hooks/use-auto-restart-orchestrator';
 import { filterChildSessionEventsForThread, getEffectiveActiveThreadId } from './thread-selection';
 import { getUserMessageHistory } from './message-history';
-import { getPendingResponseRequiredThreadIds, selectVisibleInteractivePrompts } from '@/lib/approval-prompts';
+import { getPendingResponseRequiredThreadIds, getInteractivePromptThreadId, selectVisibleInteractivePrompts } from '@/lib/approval-prompts';
+import { attentionBucketFromPrompt } from './thread-origin-buckets';
+import type { ThreadOriginBucketId } from '@valet/shared';
 import { getBuildChrome } from '@/lib/build-info';
 import { cn } from '@/lib/cn';
 import { BuildBadge } from '@/components/layout/build-badge';
@@ -282,6 +284,21 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
     () => getPendingResponseRequiredThreadIds(interactivePrompts),
     [interactivePrompts],
   );
+
+  // Best-effort bucket hint per response-required threadId derived from the
+  // prompt's channelType. The sidebar uses this only for threadIds NOT in
+  // the currently-loaded bucket page, so tabs that need attention still
+  // light up when their threads aren't fetched.
+  const attentionBucketHint = useMemo(() => {
+    const map = new Map<string, ThreadOriginBucketId>();
+    for (const prompt of interactivePrompts) {
+      if (prompt.status !== 'pending') continue;
+      const threadId = getInteractivePromptThreadId(prompt);
+      if (!threadId) continue;
+      map.set(threadId, attentionBucketFromPrompt(prompt));
+    }
+    return map;
+  }, [interactivePrompts]);
 
   const handleSendMessage = useCallback(
     async (content: string, model?: string, attachments?: Parameters<typeof sendMessage>[2]) => {
@@ -589,6 +606,7 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
                 sessionId={sessionId}
                 activeThreadId={activeThreadId}
                 responseRequiredThreadIds={responseRequiredThreadIds}
+                attentionBucketHint={attentionBucketHint}
                 onSelectThread={selectThread}
                 onNewThread={handleNewThread}
               />

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  attentionBucketFromPrompt,
   computeBucketCounts,
   filterThreadsByBucket,
   getThreadOriginBucket,
+  mergeBucketCounts,
   THREAD_ORIGIN_BUCKETS,
+  type ThreadOriginBucketId,
 } from './thread-origin-buckets';
 import type { SessionThread } from '@/api/types';
 
@@ -109,5 +112,116 @@ describe('filterThreadsByBucket', () => {
     expect(filterThreadsByBucket(threads, 'automation').map((t) => t.id)).toEqual(['b']);
     expect(filterThreadsByBucket(threads, 'slack').map((t) => t.id)).toEqual(['d']);
     expect(filterThreadsByBucket(threads, 'other').map((t) => t.id)).toEqual([]);
+  });
+});
+
+describe('mergeBucketCounts', () => {
+  it('prefers server-side totals over loaded-thread counts', () => {
+    // Only 2 automation threads are loaded, but the server says there are 23.
+    // Tab label must show the true total (23), not "loaded so far" (2).
+    const loaded = [
+      baseThread({ id: 'auto-a', originType: 'automation' }),
+      baseThread({ id: 'auto-b', originType: 'automation' }),
+    ];
+    const counts = mergeBucketCounts(
+      { ui: 5, slack: 12, automation: 23, other: 1 },
+      loaded,
+      undefined,
+      undefined,
+    );
+    expect(counts.ui.total).toBe(5);
+    expect(counts.slack.total).toBe(12);
+    expect(counts.automation.total).toBe(23);
+    expect(counts.other.total).toBe(1);
+    for (const b of THREAD_ORIGIN_BUCKETS) {
+      expect(counts[b.id].attentionNeeded).toBe(0);
+    }
+  });
+
+  it('falls back to loaded-thread totals when server did not send counts', () => {
+    const loaded = [
+      baseThread({ id: 'a', originType: 'web' }),
+      baseThread({ id: 'b', originType: 'slack' }),
+      baseThread({ id: 'c', originType: 'slack' }),
+    ];
+    const counts = mergeBucketCounts(undefined, loaded, undefined, undefined);
+    expect(counts.ui.total).toBe(1);
+    expect(counts.slack.total).toBe(2);
+    expect(counts.automation.total).toBe(0);
+    expect(counts.other.total).toBe(0);
+  });
+
+  it('counts attention from loaded threads using their authoritative bucket', () => {
+    const loaded = [
+      baseThread({ id: 'ui-1', originType: 'web' }),
+      baseThread({ id: 'slack-1', originType: 'slack' }),
+      baseThread({ id: 'auto-1', originType: 'automation' }),
+    ];
+    const attention = new Set(['ui-1', 'slack-1', 'auto-1']);
+    const counts = mergeBucketCounts(
+      { ui: 10, slack: 10, automation: 10, other: 10 },
+      loaded,
+      attention,
+      undefined,
+    );
+    expect(counts.ui.attentionNeeded).toBe(1);
+    expect(counts.slack.attentionNeeded).toBe(1);
+    expect(counts.automation.attentionNeeded).toBe(1);
+    expect(counts.other.attentionNeeded).toBe(0);
+  });
+
+  it('uses the hint map to attribute attention to buckets whose threads are NOT loaded', () => {
+    // The user is on the UI tab so only UI threads are loaded, but two other
+    // threads (one automation, one slack) require response — their bell must
+    // still light up their respective tabs.
+    const loaded = [baseThread({ id: 'ui-1', originType: 'web' })];
+    const attention = new Set(['ui-1', 'auto-not-loaded', 'slack-not-loaded']);
+    const hint = new Map<string, ThreadOriginBucketId>([
+      ['auto-not-loaded', 'automation'],
+      ['slack-not-loaded', 'slack'],
+    ]);
+    const counts = mergeBucketCounts(
+      { ui: 3, slack: 8, automation: 12, other: 0 },
+      loaded,
+      attention,
+      hint,
+    );
+    expect(counts.ui.attentionNeeded).toBe(1);
+    expect(counts.slack.attentionNeeded).toBe(1);
+    expect(counts.automation.attentionNeeded).toBe(1);
+    expect(counts.other.attentionNeeded).toBe(0);
+  });
+
+  it('does not double-count when the loaded thread is also in the hint map', () => {
+    // Attention for a loaded thread is attributed via `getThreadOriginBucket`
+    // — the hint is only consulted for threads NOT present in the loaded set.
+    const loaded = [baseThread({ id: 'slack-1', originType: 'slack' })];
+    const attention = new Set(['slack-1']);
+    const hint = new Map<string, ThreadOriginBucketId>([['slack-1', 'other']]);
+    const counts = mergeBucketCounts(undefined, loaded, attention, hint);
+    expect(counts.slack.attentionNeeded).toBe(1);
+    expect(counts.other.attentionNeeded).toBe(0);
+  });
+});
+
+describe('attentionBucketFromPrompt', () => {
+  it('maps slack channelType to slack', () => {
+    expect(attentionBucketFromPrompt({ channelType: 'slack' })).toBe('slack');
+  });
+
+  it('maps automation channelType to automation', () => {
+    expect(attentionBucketFromPrompt({ channelType: 'automation' })).toBe('automation');
+  });
+
+  it('maps external non-slack, non-automation channels to other', () => {
+    expect(attentionBucketFromPrompt({ channelType: 'telegram' })).toBe('other');
+    expect(attentionBucketFromPrompt({ channelType: 'github' })).toBe('other');
+    expect(attentionBucketFromPrompt({ channelType: 'api' })).toBe('other');
+  });
+
+  it('maps thread/web/missing channels to ui (web-origin default)', () => {
+    expect(attentionBucketFromPrompt({ channelType: 'thread' })).toBe('ui');
+    expect(attentionBucketFromPrompt({ channelType: 'web' })).toBe('ui');
+    expect(attentionBucketFromPrompt({})).toBe('ui');
   });
 });

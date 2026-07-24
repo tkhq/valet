@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
 import type { SessionThread, ListThreadsResponse, Message } from './types';
+import type { ThreadOriginBucketId } from '@valet/shared';
 
 export type PaginatedThreadsResponse = ListThreadsResponse & {
   page?: number;
@@ -12,20 +13,71 @@ export type PaginatedThreadsResponse = ListThreadsResponse & {
 export const threadKeys = {
   all: ['threads'] as const,
   lists: () => [...threadKeys.all, 'list'] as const,
-  list: (sessionId: string, page?: number, pageSize?: number) => [...threadKeys.lists(), sessionId, page ?? null, pageSize ?? null] as const,
+  list: (
+    sessionId: string,
+    page?: number,
+    pageSize?: number,
+    bucket?: ThreadOriginBucketId,
+    includeOriginCounts?: boolean,
+  ) =>
+    [
+      ...threadKeys.lists(),
+      sessionId,
+      page ?? null,
+      pageSize ?? null,
+      bucket ?? null,
+      !!includeOriginCounts,
+    ] as const,
   details: () => [...threadKeys.all, 'detail'] as const,
   detail: (sessionId: string, threadId: string) =>
     [...threadKeys.details(), sessionId, threadId] as const,
   active: (sessionId: string) => [...threadKeys.all, 'active', sessionId] as const,
 };
 
-export function useThreads(sessionId: string, options?: { page?: number; pageSize?: number }) {
+export interface UseThreadsOptions {
+  page?: number;
+  pageSize?: number;
+  /**
+   * If set, the server filters the returned threads to this origin bucket.
+   * Each bucket paginates INDEPENDENTLY — a busy Automation bucket can no
+   * longer starve Slack/UI/Other of visible threads.
+   */
+  bucket?: ThreadOriginBucketId;
+  /**
+   * If true, response includes per-bucket TRUE totals (`originCounts`)
+   * computed across all threads matching (session|user, status) regardless of
+   * the `bucket` filter. Used to render tab-bar labels with real totals.
+   *
+   * NOTE: this is implicitly true when `bucket` is set. Set explicitly when
+   * you want counts but no filter (e.g. an "all buckets" view).
+   */
+  includeOriginCounts?: boolean;
+}
+
+function buildThreadsUrl(sessionId: string, options?: UseThreadsOptions): string {
+  const params = new URLSearchParams();
+  if (options?.page) {
+    params.set('page', String(options.page));
+    params.set('pageSize', String(options.pageSize ?? 30));
+  } else if (options?.pageSize) {
+    params.set('limit', String(options.pageSize));
+  }
+  if (options?.bucket) params.set('originBucket', options.bucket);
+  if (options?.includeOriginCounts) params.set('includeOriginCounts', '1');
+  const qs = params.toString();
+  return `/sessions/${sessionId}/threads${qs ? `?${qs}` : ''}`;
+}
+
+export function useThreads(sessionId: string, options?: UseThreadsOptions) {
   return useQuery({
-    queryKey: threadKeys.list(sessionId, options?.page, options?.pageSize),
-    queryFn: () =>
-      api.get<PaginatedThreadsResponse>(
-        `/sessions/${sessionId}/threads${options?.page ? `?page=${options.page}&pageSize=${options.pageSize ?? 30}` : ''}`
-      ),
+    queryKey: threadKeys.list(
+      sessionId,
+      options?.page,
+      options?.pageSize,
+      options?.bucket,
+      options?.includeOriginCounts,
+    ),
+    queryFn: () => api.get<PaginatedThreadsResponse>(buildThreadsUrl(sessionId, options)),
     enabled: !!sessionId,
   });
 }
