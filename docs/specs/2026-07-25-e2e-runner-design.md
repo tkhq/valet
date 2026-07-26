@@ -86,6 +86,7 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 | `workspace-prep-docker` | `packages/api/src/engine/workspace-prep*.docker.test.ts` — git checkout, credential helper, prebuilt-image fetch against a real sandbox | Docker |
 | `prebuilds-docker` | `packages/api/src/integration/prebuilds.e2e.test.ts` — real `docker build` → fetch-on-start | Docker |
 | `k8s-builder-cluster` | `packages/api/src/prebuilds/k8s-builder.cluster.test.ts` — in-cluster image build via bundled registry | context + registry present |
+| `keycloak-oidc` | **new** `packages/api/src/integration/oidc-keycloak.e2e.test.ts` — real authorization-code flow against dockerized Keycloak | Docker |
 
 **Full stack:**
 
@@ -125,6 +126,30 @@ landed on the bind mount. Renames ripple to: package script `dogfood` →
 `smoke:session`, Makefile `dogfood-api` → `smoke-session` (old target removed,
 no alias — pre-1.0), and every doc that mentions `dogfood` (CLAUDE.md,
 deploy/README.md, Makefile comments).
+
+### `oidc-keycloak.e2e.test.ts` (packages/api/src/integration/)
+
+Automates the SSO path that today is manual-only via `make dev-keycloak`. The
+compose `keycloak` profile already boots Keycloak 26.2 with an auto-imported
+`valet` realm — fixed client `valet`/`valet-dev-secret`, seeded user
+`alice@valet.test`/`password` — so the flow is deterministic. The test boots
+the API via `bootTestApi({ auth: true })` with `AUTH_OIDC_*` pointed at
+`http://localhost:8081/realms/valet`, then drives the real authorization-code
+flow headlessly with `fetch` + a cookie jar (Keycloak's login page is a plain
+HTML form — no browser):
+
+1. better-auth sign-in endpoint → Keycloak authorize redirect
+2. GET authorize URL, parse the form `action`, POST the seeded credentials
+3. follow the 302 back to the API callback with the code
+4. assert a valid API session and that domain-based org provisioning ran
+
+This covers issuer discovery, token exchange, claim mapping, and user
+provisioning — the exact wiring with zero automated coverage today. Gated on
+the Keycloak container being reachable; the runner starts it via the compose
+profile (health-gated on the realm's `.well-known`, same as the Make target)
+and leaves it running between runs since cold boot is ~30–60s. Known
+fragility: a Keycloak major upgrade could change the login-form markup, but
+the image is version-pinned in compose, so that's a controlled event.
 
 ### `fullstack-scenario.ts` (scripts/e2e/)
 
@@ -203,8 +228,6 @@ later iterations, recorded here so the scorecard's green doesn't overstate:
 
 - Sandbox tunnels (`plugin-sandbox-tunnels`) and personas
   (`plugin-personas`) — no test files.
-- better-auth OIDC/Keycloak — unit-tested config only; the live SSO path is
-  manual via `make dev-keycloak`.
 - The `valet mcp` server actually serving tools to an MCP client — only unit
   tests around the pieces.
 - Web browser e2e — 60 jsdom component tests exist, zero browser-driven.
