@@ -69,7 +69,9 @@ async function main(): Promise<number> {
     "k8s-up",
     `HELM_RELEASE=${RELEASE}`,
     `K8S_NAMESPACE=${NS}`,
-    `HELM_EXTRA_ARGS=--set sandbox.namespace=${NS}-sandboxes`,
+    // registry.bundled=false: the dev release already claims NodePort 30500,
+    // and the e2e scenario never builds prebuilt images.
+    `HELM_EXTRA_ARGS=--set sandbox.namespace=${NS}-sandboxes --set registry.bundled=false`,
   ], 10 * 60_000);
   run("rollout", "kubectl", [
     "--context", CTX, "-n", NS,

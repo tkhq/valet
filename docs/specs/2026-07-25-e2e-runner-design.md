@@ -1,7 +1,7 @@
 # Unified e2e entrypoint (`make e2e`) — design
 
 **Date:** 2026-07-25
-**Status:** Approved design, not yet implemented
+**Status:** Implemented — `scripts/e2e.ts` + `scripts/e2e/` (see Deviations)
 
 ## Purpose
 
@@ -220,6 +220,40 @@ durationMs, skipReason? }], passed, failed, skipped, exitCode }`.
   scorecard.
 - The runner refuses to start if `.env.e2e` exists but is unreadable/harbors
   parse errors, rather than silently running a weaker tier.
+
+## Deviations (as implemented)
+
+- `integration-core` / `integration-agent` run explicit file lists (held in
+  `scripts/e2e/lib.ts`), not whole-directory globs — keeps the two rows
+  disjoint from the dedicated rows (cli, telegram, github-live, openai,
+  prebuilds, keycloak). A new integration test file must be added to one of
+  those lists to be covered.
+- The Keycloak test needs `AUTH_TRUSTED_ORIGINS=http://localhost:8081` —
+  better-auth rejects OIDC discovery against origins outside `trustedOrigins`
+  (`discovery_untrusted_origin`). The `make dev-keycloak` hint now includes
+  it.
+- `fullstack-k8s` deploys a dedicated `valet-e2e` release/namespace instead
+  of reusing the dev `valet` release: the dev release's retained DB requires
+  invites for signups, and it owns cluster-scoped resources (the
+  `valet-sandboxes` namespace, the registry NodePort 30500). The e2e release
+  sets `sandbox.namespace=valet-e2e-sandboxes` and `registry.bundled=false`
+  via a new `HELM_EXTRA_ARGS` passthrough on `make k8s-up`, and
+  authenticates by signing up a deterministic first-admin user (sign-in
+  fallback on re-runs). Remove it with
+  `make k8s-down HELM_RELEASE=valet-e2e K8S_NAMESPACE=valet-e2e`.
+- The fullstack scenario uses the `ws` package (root devDependency, with
+  `@types/ws` + `@types/node` per the CLAUDE.md rule) so the session cookie
+  can ride the WS upgrade headers against real-auth deployments.
+- The runner library is unit-tested via a new `scripts` project in the root
+  vitest config.
+- Baseline failure surfaced during implementation (pre-existing on `dev-v2`,
+  verified on an untouched checkout): `cli.e2e.test.ts` "send --json drives a
+  turn to completed" fails — the CLI exits 0 via the `turn_end` fallback but
+  no `submission.settled` frame reaches the stream (the send-then-attach race
+  documented in `send.ts`). The `cli` row stays red until that's fixed.
+- `sandbox-local`'s "inherits PATH" test was env-sensitive (pnpm exports
+  `FORCE_COLOR=1`, ANSI-wrapping child output); fixed by pinning
+  `FORCE_COLOR=0` in the exec call.
 
 ## Known blind spots (no tests exist to wrap)
 
