@@ -135,6 +135,7 @@ dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO p
 	@echo "$(GREEN)Keycloak ready.$(NC) Add to .env, then run 'make dev-local':"
 	@echo "  BETTER_AUTH_SECRET=dev-only-secret-change-me"
 	@echo "  AUTH_OIDC_ISSUER=http://localhost:8081/realms/valet"
+	@echo "  AUTH_TRUSTED_ORIGINS=http://localhost:8081"
 	@echo "  AUTH_OIDC_CLIENT_ID=valet"
 	@echo "  AUTH_OIDC_CLIENT_SECRET=valet-dev-secret"
 	@echo "  AUTH_OIDC_DOMAIN=valet.test"
