@@ -82,6 +82,20 @@ const INTEGRATION_AGENT_FILES = [
   "src/integration/workflow-run.e2e.test.ts",
 ];
 
+/** Plugin packages that HAVE test files. Content-only plugins ship a bare
+ * `vitest run` script with no config/tests, which explodes resolving the
+ * ROOT workspace config from the wrong cwd — enumerate instead of globbing.
+ * A new plugin gaining tests must be added here (guarded by lib.test.ts). */
+const TESTED_PLUGINS = [
+  "@valet/plugin-github",
+  "@valet/plugin-gmail",
+  "@valet/plugin-google-calendar",
+  "@valet/plugin-google-workspace",
+  "@valet/plugin-linear",
+  "@valet/plugin-slack",
+  "@valet/plugin-telegram",
+];
+
 const apiTest = (...files: string[]): string[] => [
   "pnpm",
   "--filter",
@@ -93,14 +107,14 @@ const apiTest = (...files: string[]): string[] => [
 
 export const STEPS: StepDef[] = [
   // ── static + unit ────────────────────────────────────────────────────────
-  { id: "typecheck", group: "static", title: "root typecheck (all packages)", command: ["pnpm", "typecheck"], needs: [], timeoutMs: 10 * MIN },
-  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], timeoutMs: 15 * MIN },
-  { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], timeoutMs: 10 * MIN },
-  { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], timeoutMs: 10 * MIN },
-  { id: "gateway-unit", group: "static", title: "sandbox gateway (JWT, WS proxy)", command: ["pnpm", "--filter", "@valet/sandbox-gateway", "test"], needs: [], timeoutMs: 10 * MIN },
-  { id: "runner-unit", group: "static", title: "runner suite", command: ["pnpm", "--filter", "@valet/runner", "test"], needs: [], timeoutMs: 10 * MIN },
-  { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", "--filter", "./packages/plugin-*", "test"], needs: [], timeoutMs: 15 * MIN },
-  { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], timeoutMs: 10 * MIN },
+  { id: "typecheck", group: "static", title: "root typecheck (all packages)", command: ["pnpm", "typecheck"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
+  { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "gateway-unit", group: "static", title: "sandbox gateway (JWT, WS proxy)", command: ["pnpm", "--filter", "@valet/sandbox-gateway", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "runner-unit", group: "static", title: "runner suite", command: ["pnpm", "--filter", "@valet/runner", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
+  { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
 
   // ── integration + smoke ──────────────────────────────────────────────────
   { id: "integration-core", group: "integration", title: "keyless api integration", command: apiTest(...INTEGRATION_CORE_FILES), needs: [], scrubKeys: true, timeoutMs: 15 * MIN },

@@ -1,3 +1,6 @@
+import { readdirSync, existsSync, readFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   missingNeeds,
@@ -43,6 +46,34 @@ describe("STEPS", () => {
 
   it("never sets CI in step env", () => {
     for (const s of STEPS) expect(Object.keys(s.env ?? {})).not.toContain("CI");
+  });
+
+  it("plugins-unit filter list matches the plugin packages that have tests", () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+    const pkgs = join(root, "packages");
+    const withTests: string[] = [];
+    for (const dir of readdirSync(pkgs)) {
+      if (!dir.startsWith("plugin-")) continue;
+      const hasTest = ["src", "test"].some((sub) => {
+        const p = join(pkgs, dir, sub);
+        if (!existsSync(p)) return false;
+        const walk = (d: string): boolean =>
+          readdirSync(d, { withFileTypes: true }).some((e) =>
+            e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".test.ts"),
+          );
+        return walk(p);
+      });
+      if (hasTest) {
+        const pkgJson = JSON.parse(readFileSync(join(pkgs, dir, "package.json"), "utf8")) as {
+          name: string;
+        };
+        withTests.push(pkgJson.name);
+      }
+    }
+    const step = STEPS.find((s) => s.id === "plugins-unit");
+    if (!step) throw new Error("plugins-unit step missing");
+    const filters = step.command.filter((_, i) => step.command[i - 1] === "--filter").sort();
+    expect(filters).toEqual(withTests.sort());
   });
 });
 

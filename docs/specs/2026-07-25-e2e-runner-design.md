@@ -254,6 +254,24 @@ durationMs, skipReason? }], passed, failed, skipped, exitCode }`.
 - `sandbox-local`'s "inherits PATH" test was env-sensitive (pnpm exports
   `FORCE_COLOR=1`, ANSI-wrapping child output); fixed by pinning
   `FORCE_COLOR=0` in the exec call.
+- ALL static-group rows scrub credential vars from the child env, not just
+  `integration-core` — with ambient keys present, the root `unit` sweep
+  otherwise runs a LIVE OpenAI turn (`llm-providers.e2e`) and fails the
+  "no key anywhere" model-resolution tests.
+- `plugins-unit` enumerates the plugin packages that have tests
+  (`TESTED_PLUGINS` in `lib.ts`, guarded by a lib test that diffs the list
+  against the filesystem) — content-only plugins ship a bare `vitest run`
+  script that explodes resolving the root workspace config from the wrong
+  cwd.
+- Fixed while verifying: `plugin-google-workspace`'s `docs.find_text_index`
+  was never classified in `labels-guard.ts` (fail-closed guard denied it at
+  runtime; completeness test red on `dev-v2` baseline) — added to
+  `READ_GET_ACTIONS`.
+- Known flakes observed (not runner bugs): `unit` can hit a `getFreePort`
+  EADDRINUSE race in `bootTestApi` under full parallelism; `store-postgres`'s
+  "stopHost gates out late wakes" is timing-sensitive when other suites
+  saturate Docker (the runner's sequential execution avoids this; it failed
+  only when two batches were run concurrently during verification).
 
 ## Known blind spots (no tests exist to wrap)
 
