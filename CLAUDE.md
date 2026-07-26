@@ -227,7 +227,7 @@ cd packages/client && pnpm dev  # Legacy frontend on :5173 (conflicts with web!)
 make dev-all
 
 # Dogfood the new API end-to-end (real Anthropic + Docker round-trip)
-make dogfood-api
+make smoke-session
 
 # Kubernetes (local k3s, Rancher Desktop) — full runbook: deploy/README.md
 make k8s-sandbox-install # Install vendored agent-sandbox CRD/controller (idempotent, run first)

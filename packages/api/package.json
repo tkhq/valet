@@ -25,7 +25,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
-    "dogfood": "tsx scripts/dogfood.ts"
+    "smoke:session": "tsx scripts/smoke-session.ts",
+    "smoke:orchestrator": "tsx scripts/smoke-orchestrator.ts"
   },
   "dependencies": {
     "@better-auth/api-key": "1.6.23",
