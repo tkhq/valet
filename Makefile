@@ -150,6 +150,11 @@ smoke-session: ## Full-stack session smoke: real Anthropic + Docker sandbox roun
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	$(PNPM) --filter @valet/api smoke:session
 
+smoke-orchestrator: ## Orchestrator smoke: ensure + one real Anthropic turn (no Docker)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (set it in .env or the environment)$(NC)"; exit 1; fi; \
+	$(PNPM) --filter @valet/api smoke:orchestrator
+
 # ==========================================
 # agent-sandbox (vendored, Rancher Desktop only)
 # ==========================================
