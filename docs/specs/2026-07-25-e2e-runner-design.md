@@ -44,23 +44,68 @@ a shared full-stack scenario driver.
 
 ## Steps (the scorecard rows)
 
+A coverage audit (2026-07-25) found that root `pnpm test` runs only four vitest
+projects (`shared`, `sdk`, `api`, `web`); `engine`, `workflow`,
+`store-postgres`, `sandbox-gateway`, `runner`, and all `plugin-*` packages are
+reachable only via `pnpm --filter <pkg> test`, and several Docker/cluster-gated
+suites live outside `src/integration`. The scorecard therefore includes them
+explicitly — the goal is that anything that could break during a v2 change has
+a row, so `make e2e` is sufficient validation on its own (it does not assume
+`pnpm test` was run separately).
+
+**Static + unit (always armed, no external deps):**
+
+| Step | Wraps |
+|---|---|
+| `typecheck` | root `pnpm typecheck` (all packages except frozen `worker`) |
+| `unit` | root `pnpm test` (`shared`, `sdk`, `api`, `web` projects) |
+| `engine-unit` | `pnpm --filter @valet/engine test` — store contract, compaction, gates, signals, kill-mid-turn, model switching |
+| `workflow-unit` | `pnpm --filter @valet/workflow test` — DAG interpreter, node executors, expression eval, checkpoints |
+| `gateway-unit` | `pnpm --filter @valet/sandbox-gateway test` — sandbox JWT mint/verify, WS proxy |
+| `runner-unit` | `pnpm --filter @valet/runner test` |
+| `plugins-unit` | `pnpm --filter './packages/plugin-*' test` — telegram/slack/github/google-* action + transport tests |
+| `sandbox-local` | `packages/sandbox-local` test suite |
+
+**Integration + smoke:**
+
 | Step | Wraps | Armed when |
 |---|---|---|
-| `integration-core` | keyless tests in `packages/api/src/integration` (auth, memory routes, session filters, GitHub-fixture loop) | always |
+| `integration-core` | keyless tests in `packages/api/src/integration` (auth, memory routes, session filters, GitHub-fixture loop, events webhook) | always |
 | `orchestrator-smoke` | **new** `packages/api/scripts/smoke-orchestrator.ts` | `ANTHROPIC_API_KEY` |
 | `session-smoke` | `packages/api/scripts/smoke-session.ts` (renamed from `dogfood.ts`) | key + Docker |
 | `integration-agent` | key-gated integration suites (orchestrator lifecycle/loop, cross-thread, plugins, workflow-run) | key (+ Docker for workflow-run) |
 | `cli` | T9 `cli.e2e.test.ts` with `VALET_CLI_E2E=1` | always; real-turn subtests need key |
-| `sandbox-local` | `packages/sandbox-local` test suite | always |
+
+**Docker / cluster-gated suites:**
+
+| Step | Wraps | Armed when |
+|---|---|---|
 | `sandbox-docker` | `packages/sandbox-docker` test suite | Docker |
-| `sandbox-k8s` | `packages/sandbox-kubernetes` `*.cluster.test.ts` | `rancher-desktop` context |
+| `sandbox-k8s` | `packages/sandbox-kubernetes` `*.cluster.test.ts` (conformance, provider, exec) | `rancher-desktop` context |
+| `store-postgres` | `make test-pg` — real `postgres:17` conformance + api `pg-store`/`credential-store` suites | Docker |
+| `workspace-prep-docker` | `packages/api/src/engine/workspace-prep*.docker.test.ts` — git checkout, credential helper, prebuilt-image fetch against a real sandbox | Docker |
+| `prebuilds-docker` | `packages/api/src/integration/prebuilds.e2e.test.ts` — real `docker build` → fetch-on-start | Docker |
+| `k8s-builder-cluster` | `packages/api/src/prebuilds/k8s-builder.cluster.test.ts` — in-cluster image build via bundled registry | context + registry present |
+
+**Full stack:**
+
+| Step | Wraps | Armed when |
+|---|---|---|
 | `fullstack-docker` | **new** full-stack scenario against a spawned `valet serve` (docker backend) | key + Docker |
 | `fullstack-k8s` | **new** full-stack scenario against the helm deployment on rancher-desktop | key + context + `VALET_E2E_K8S=1` |
+
+**Live external integrations:**
+
+| Step | Wraps | Armed when |
+|---|---|---|
 | `telegram` | live outbound `telegram.e2e.test.ts` | `TELEGRAM_TEST_BOT_TOKEN` + `TELEGRAM_TEST_CHAT_ID` |
 | `github-live` | live GitHub App block in `github-repo.e2e.test.ts` | `VALET_GITHUB_LIVE_TEST=1` + app id + private key PEM |
 | `openai` | `llm-providers.e2e.test.ts` | `OPENAI_API_KEY` |
 
 Step names are stable identifiers (used by `--only` and the JSON output).
+Note: several docker-gated suites self-skip when `CI` is set
+(`workspace-prep.docker`, `prebuilds.e2e`) — the runner is local-first, so this
+is fine, but it must not set `CI` itself.
 
 ## New test code
 
@@ -150,6 +195,24 @@ durationMs, skipReason? }], passed, failed, skipped, exitCode }`.
   scorecard.
 - The runner refuses to start if `.env.e2e` exists but is unreadable/harbors
   parse errors, rather than silently running a weaker tier.
+
+## Known blind spots (no tests exist to wrap)
+
+Subsystems with zero automated coverage today — candidates for new test code in
+later iterations, recorded here so the scorecard's green doesn't overstate:
+
+- Sandbox tunnels (`plugin-sandbox-tunnels`) and personas
+  (`plugin-personas`) — no test files.
+- better-auth OIDC/Keycloak — unit-tested config only; the live SSO path is
+  manual via `make dev-keycloak`.
+- The `valet mcp` server actually serving tools to an MCP client — only unit
+  tests around the pieces.
+- Web browser e2e — 60 jsdom component tests exist, zero browser-driven.
+- Most content-only / thin plugin packages (`plugin-browser`, `plugin-notion`,
+  `plugin-sentry`, `plugin-stripe`, …) — no test files.
+- Worker (`packages/worker`) is frozen and excluded from root typecheck; if a
+  change touches `shared`/`sdk`, `cd packages/worker && pnpm typecheck` is a
+  manual follow-up (CLAUDE.md rule), not a scorecard row.
 
 ## Out of scope (v1)
 
