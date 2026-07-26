@@ -29,7 +29,9 @@ if (!ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
-const PORT = Number.parseInt(process.env.PORT ?? "8788", 10);
+// PORT=0 (default): bind an ephemeral port so the smoke NEVER collides with
+// a running `make dev-local` on :8788 (which it could otherwise write into).
+const PORT = Number.parseInt(process.env.PORT ?? "0", 10);
 const ROOT = process.env.VALET_SMOKE_ROOT ?? "/tmp/valet-smoke-session";
 const DATA_DIR = process.env.VALET_DATA_DIR ?? `${ROOT}/data`;
 const WORKSPACE = process.env.VALET_WORKSPACE ?? `${ROOT}/ws`;
@@ -51,16 +53,22 @@ const providers = await buildNodeProviders({
 
 process.env.VALET_LOCAL_AUTH = "1"; // auth stub
 const { startServer } = createApp(providers);
-const server = startServer({
-  port: PORT,
-  onListen: (boundPort) => {
-    console.log(`[smoke-session] server listening on http://localhost:${boundPort}`);
-  },
+let server!: ReturnType<typeof startServer>;
+// Await the listen callback BEFORE any request — otherwise an early fetch can
+// hit whatever process already owns the port.
+const port = await new Promise<number>((resolveListen) => {
+  server = startServer({
+    port: PORT,
+    onListen: (boundPort) => {
+      console.log(`[smoke-session] server listening on http://localhost:${boundPort}`);
+      resolveListen(boundPort);
+    },
+  });
 });
 
 // ── Step 1: create session.
 
-const createRes = await fetch(`http://localhost:${PORT}/api/sessions`, {
+const createRes = await fetch(`http://localhost:${port}/api/sessions`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ workspace: WORKSPACE }),
@@ -75,7 +83,7 @@ console.log(`[smoke-session] session: ${sessionId}, workspace: ${WORKSPACE}`);
 // ── Step 2: open WS, drive the prompt.
 
 const events: WireEvent[] = [];
-const ws = new WebSocket(`ws://localhost:${PORT}/api/sessions/${sessionId}/ws`);
+const ws = new WebSocket(`ws://localhost:${port}/api/sessions/${sessionId}/ws`);
 
 const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
   const t = setTimeout(() => rejectTurn(new Error("timeout waiting for turn_end")), 120_000);
@@ -86,7 +94,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
     summarize(e);
     if (e.type === "init") {
       // Send the prompt once we're subscribed.
-      const r = await fetch(`http://localhost:${PORT}/api/sessions/${sessionId}/messages`, {
+      const r = await fetch(`http://localhost:${port}/api/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: PROMPT }),
@@ -102,7 +110,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
   };
   ws.onerror = (err) => {
     clearTimeout(t);
-    const message = (err as { message?: string }).message ?? "unknown";
+    const message = err instanceof Error ? err.message : "unknown";
     rejectTurn(new Error(`ws error: ${message}`));
   };
 });
@@ -110,7 +118,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
 try {
   await turnEnded;
 } catch (err) {
-  console.error("[smoke-session] FAILED:", (err as Error).message);
+  console.error("[smoke-session] FAILED:", err instanceof Error ? err.message : String(err));
   await shutdown(2);
 }
 

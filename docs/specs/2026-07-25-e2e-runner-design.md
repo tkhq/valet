@@ -65,6 +65,11 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 | `runner-unit` | `pnpm --filter @valet/runner test` |
 | `plugins-unit` | `pnpm --filter './packages/plugin-*' test` — telegram/slack/github/google-* action + transport tests |
 | `sandbox-local` | `packages/sandbox-local` test suite |
+| `sandbox-k8s-unit` | `packages/sandbox-kubernetes` non-cluster tests (manifest, lifecycle, provider, framing) |
+| `store-postgres-unit` | `packages/store-postgres` PGlite-backed tests (migration runners; real-pg suites self-skip) |
+| `web-build` | `pnpm --filter @valet/web build` — the vite production build |
+| `api-bundle` | `pnpm --filter @valet/api build` + `bundle-guard` suite (which self-skips when `dist/` is absent) |
+| `helm-golden` | `deploy/chart/valet/test/golden.sh` — helm lint + template goldens (needs `helm`, no cluster) |
 
 **Integration + smoke:**
 
@@ -267,6 +272,27 @@ durationMs, skipReason? }], passed, failed, skipped, exitCode }`.
   was never classified in `labels-guard.ts` (fail-closed guard denied it at
   runtime; completeness test red on `dev-v2` baseline) — added to
   `READ_GET_ACTIONS`.
+- Adversarial-review round (2026-07-26): interrupted runs (Ctrl-C) now record
+  the in-flight step as failed and exit nonzero (130) — previously a partial
+  run could exit 0; both fullstack variants DELETE their session after the
+  scenario so sandbox containers / Sandbox CRs no longer leak one per run;
+  the smoke scripts bind ephemeral ports and await listen before any request
+  (previously :8788 could collide with — and write into — a running
+  `make dev-local`); `parseEnvFile` accepts `export KEY=V` and CRLF, strips
+  unquoted inline comments, and throws on whitespace-containing keys;
+  empty-string ambient env vars no longer shadow `.env.e2e` values;
+  `CRED_VARS` gained `GEMINI_API_KEY` + `ANTHROPIC_OAUTH_TOKEN` (the api's
+  own vitest.setup scrub is not applied by the flattened root run); the wire
+  `error` event fails the fullstack scenario fast instead of burning the
+  turn timeout; five rows added (`sandbox-k8s-unit`, `store-postgres-unit`,
+  `web-build`, `api-bundle`, `helm-golden` — 30 rows total) and a lib test
+  now asserts core+agent+dedicated cover the whole integration dir.
+- Remaining documented-not-fixed from that review: registry-generation drift
+  (`registry.gen.ts` vs `plugin.yaml`) has no row; `fullstack-k8s` skips
+  image rebuilds when `:dev` images exist, so Dockerfile drift escapes the
+  opt-in run unless images are removed first; `sandbox-docker`'s pure-unit
+  `run-args.test.ts` stays docker-gated; `packages/client` (frozen legacy
+  SPA, 7 test files) is not covered by any row.
 - Known flakes observed (not runner bugs): `unit` can hit a `getFreePort`
   EADDRINUSE race in `bootTestApi` under full parallelism; `store-postgres`'s
   "stopHost gates out late wakes" is timing-sensitive when other suites

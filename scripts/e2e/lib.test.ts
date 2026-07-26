@@ -3,6 +3,8 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  DEDICATED_INTEGRATION_FILES,
+  INTEGRATION_LIST_FILES,
   missingNeeds,
   needHint,
   parseEnvFile,
@@ -17,6 +19,7 @@ import {
 const ALL_TRUE: Probes = {
   key: true,
   docker: true,
+  helm: true,
   k8sContext: true,
   e2eK8sOptIn: true,
   telegram: true,
@@ -25,16 +28,18 @@ const ALL_TRUE: Probes = {
 };
 
 describe("STEPS", () => {
-  it("has the spec's 25 unique rows", () => {
-    expect(STEPS).toHaveLength(25);
-    expect(new Set(STEPS.map((s) => s.id)).size).toBe(25);
+  it("has the spec's 30 unique rows", () => {
+    expect(STEPS).toHaveLength(30);
+    expect(new Set(STEPS.map((s) => s.id)).size).toBe(30);
   });
 
   it("includes every spec row id", () => {
     const ids = STEPS.map((s) => s.id);
     for (const id of [
       "typecheck", "unit", "engine-unit", "workflow-unit", "gateway-unit",
-      "runner-unit", "plugins-unit", "sandbox-local", "integration-core",
+      "runner-unit", "plugins-unit", "sandbox-local", "sandbox-k8s-unit",
+      "store-postgres-unit", "web-build", "api-bundle", "helm-golden",
+      "integration-core",
       "orchestrator-smoke", "session-smoke", "integration-agent", "cli",
       "sandbox-docker", "sandbox-k8s", "store-postgres", "workspace-prep-docker",
       "prebuilds-docker", "k8s-builder-cluster", "keycloak-oidc",
@@ -100,6 +105,34 @@ describe("needHint", () => {
   });
 });
 
+describe("integration file lists", () => {
+  it("core + agent + dedicated rows cover every file in src/integration", () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+    const dir = join(root, "packages/api/src/integration");
+    const actual = readdirSync(dir)
+      .filter((f) => f.endsWith(".test.ts"))
+      .map((f) => `src/integration/${f}`)
+      .sort();
+    const covered = [
+      ...new Set([
+        ...INTEGRATION_LIST_FILES.core,
+        ...INTEGRATION_LIST_FILES.agent,
+        ...DEDICATED_INTEGRATION_FILES,
+      ]),
+    ].sort();
+    // A new integration test file MUST be added to a list (or get its own
+    // row) — otherwise its key-gated suites would never run in any row.
+    expect(covered).toEqual(actual);
+  });
+
+  it("core and agent lists don't overlap each other", () => {
+    const overlap = INTEGRATION_LIST_FILES.core.filter((f) =>
+      INTEGRATION_LIST_FILES.agent.includes(f),
+    );
+    expect(overlap).toEqual([]);
+  });
+});
+
 describe("parseEnvFile", () => {
   it("parses values, comments, blanks, and quotes", () => {
     expect(parseEnvFile('# tier\nA=1\n\nB="two"\nC=\'three\'\nD=a=b\n')).toEqual({
@@ -113,6 +146,18 @@ describe("parseEnvFile", () => {
   it("throws on malformed lines", () => {
     expect(() => parseEnvFile("NOVALUE\n")).toThrow(/line 1/);
     expect(() => parseEnvFile("=x\n")).toThrow(/line 1/);
+  });
+
+  it("accepts the shell-profile paste form (export KEY=VALUE, CRLF)", () => {
+    expect(parseEnvFile("export A=1\r\nB=2\r\n")).toEqual({ A: "1", B: "2" });
+  });
+
+  it("throws on keys containing whitespace instead of silently mis-keying", () => {
+    expect(() => parseEnvFile("SOME KEY=1\n")).toThrow(/whitespace/);
+  });
+
+  it("strips trailing inline comments from unquoted values only", () => {
+    expect(parseEnvFile('A=v1  # note\nB="v2  # kept"\n')).toEqual({ A: "v1", B: "v2  # kept" });
   });
 });
 
@@ -150,7 +195,7 @@ describe("selectSteps", () => {
   });
 
   it("returns all steps without --only", () => {
-    expect(selectSteps(STEPS)).toHaveLength(25);
+    expect(selectSteps(STEPS)).toHaveLength(30);
   });
 
   it("throws on unknown ids", () => {

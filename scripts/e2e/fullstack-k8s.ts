@@ -142,12 +142,19 @@ async function main(): Promise<number> {
 
     // 5. The shared scenario; in-cluster sessions use the image's workspace
     // convention and get a generous turn budget (pod scheduling + image pull).
-    await runScenario({
+    const { sessionId } = await runScenario({
       baseUrl: base,
       headers: { cookie },
       workspace: "/workspace/e2e",
       turnTimeoutMs: 10 * 60_000,
     });
+    // Delete the session so its Sandbox CR + pod don't accumulate in the
+    // retained e2e release across runs.
+    const del = await fetch(`${base}/api/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: { cookie },
+    });
+    console.log(`[fullstack-k8s] session cleanup: ${del.status}`);
     console.log("[fullstack-k8s] PASS (release left installed; remove with `make k8s-down HELM_RELEASE=valet-e2e K8S_NAMESPACE=valet-e2e`)");
     return 0;
   } catch (err) {

@@ -8,6 +8,7 @@
  * write a marker file → wait for turn_end → assert a non-empty assistant
  * reply via GET /messages. Throws on any failure.
  */
+import { WebSocket as WsWebSocket, type RawData } from "ws";
 
 export interface ScenarioOpts {
   baseUrl: string;
@@ -19,14 +20,12 @@ export interface ScenarioOpts {
   turnTimeoutMs?: number;
 }
 
-import { WebSocket as WsWebSocket, type RawData } from "ws";
-
 interface WireEventish {
   type: string;
   [key: string]: unknown;
 }
 
-export async function runScenario(opts: ScenarioOpts): Promise<void> {
+export async function runScenario(opts: ScenarioOpts): Promise<{ sessionId: string }> {
   const base = opts.baseUrl.replace(/\/$/, "");
   const headers = { "Content-Type": "application/json", ...opts.headers };
   const workspace = opts.workspace ?? "/tmp/valet-e2e-fullstack/ws";
@@ -78,7 +77,14 @@ export async function runScenario(opts: ScenarioOpts): Promise<void> {
         console.log(`[fullstack] prompt posted (${r.status})`);
       }
       if (e.type === "tool_end") console.log(`[fullstack] tool_end isError=${String(e.isError)}`);
-      if (e.type === "error") console.error(`[fullstack] wire error: ${String(e.message)}`);
+      // Fail fast on engine errors: a turn that errors without a turn_end
+      // would otherwise burn the whole timeout and report a generic timeout.
+      if (e.type === "error") {
+        clearTimeout(t);
+        ws.close();
+        reject(new Error(`wire error: ${String(e.message)}`));
+        return;
+      }
       if (e.type === "turn_end") {
         clearTimeout(t);
         ws.close();
@@ -124,4 +130,5 @@ export async function runScenario(opts: ScenarioOpts): Promise<void> {
     throw new Error(`no assistant text in GET /messages; payload: ${sample}`);
   }
   console.log(`[fullstack] assistant reply length: ${assistantText.length}`);
+  return { sessionId };
 }

@@ -67,7 +67,12 @@ async function waitForHealth(deadlineMs: number): Promise<void> {
 async function main(): Promise<number> {
   try {
     await waitForHealth(90_000);
-    await runScenario({ baseUrl: BASE, workspace: WORKSPACE });
+    const { sessionId } = await runScenario({ baseUrl: BASE, workspace: WORKSPACE });
+    // Delete the session BEFORE killing the server: teardown is SIGKILL, so
+    // this is the only chance to destroy the session's Docker sandbox
+    // container — otherwise one orphan container leaks per run.
+    const del = await fetch(`${BASE}/api/sessions/${sessionId}`, { method: "DELETE" });
+    console.log(`[fullstack-docker] session cleanup: ${del.status}`);
     console.log("[fullstack-docker] PASS");
     return 0;
   } catch (err) {

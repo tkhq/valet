@@ -65,7 +65,10 @@ if (existsSync(envFile)) {
     process.exit(2);
   }
   for (const [k, v] of Object.entries(fileVars)) {
-    if (process.env[k] === undefined && v !== "") process.env[k] = v;
+    // Empty ambient values count as unset — an exported-but-blank var must
+    // not shadow a real value from the file.
+    const ambient = process.env[k];
+    if ((ambient === undefined || ambient === "") && v !== "") process.env[k] = v;
   }
 }
 
@@ -79,6 +82,7 @@ function probeCmd(cmd: string, args: string[]): boolean {
 const probes: Probes = {
   key: Boolean(process.env.ANTHROPIC_API_KEY),
   docker: probeCmd("docker", ["info"]),
+  helm: probeCmd("helm", ["version"]),
   k8sContext: probeCmd("kubectl", ["--context", "rancher-desktop", "config", "get-contexts", "rancher-desktop"]),
   e2eK8sOptIn: process.env.VALET_E2E_K8S === "1",
   telegram: Boolean(process.env.TELEGRAM_TEST_BOT_TOKEN && process.env.TELEGRAM_TEST_CHAT_ID),
@@ -145,24 +149,30 @@ async function ensureKeycloak(): Promise<string | undefined> {
 let current: ChildProcess | undefined;
 const results: StepResult[] = [];
 
-function finish(): never {
+function finish(extraExit = 0): never {
   const report = toJsonReport(results);
   if (JSON_OUT) {
     console.log(JSON.stringify(report, null, 2));
   } else {
     console.log(`\n${renderScorecard(results)}`);
   }
-  process.exit(report.exitCode);
+  process.exit(report.exitCode || extraExit);
 }
 
+let currentStepId: string | undefined;
 process.on("SIGINT", () => {
   if (current?.pid) {
     try {
       process.kill(-current.pid, "SIGKILL");
     } catch {}
   }
+  // The in-flight step did not finish — record it as failed so an
+  // interrupted run can NEVER exit 0 and read as green downstream.
+  if (currentStepId !== undefined) {
+    results.push({ id: currentStepId, status: "failed", durationMs: 0, skipReason: undefined });
+  }
   console.error("\ninterrupted — partial scorecard:");
-  finish();
+  finish(130);
 });
 
 function runStep(step: StepDef): Promise<StepResult> {
@@ -170,6 +180,7 @@ function runStep(step: StepDef): Promise<StepResult> {
   const env: NodeJS.ProcessEnv = { ...process.env, ...step.env };
   if (step.scrubKeys) for (const k of CRED_VARS) delete env[k];
 
+  currentStepId = step.id;
   return new Promise((resolveStep) => {
     const child = spawn(step.command[0], step.command.slice(1), {
       cwd: step.cwd ? resolve(ROOT, step.cwd) : ROOT,
@@ -195,6 +206,7 @@ function runStep(step: StepDef): Promise<StepResult> {
     child.on("close", (code) => {
       clearTimeout(timer);
       current = undefined;
+      currentStepId = undefined;
       const durationMs = Date.now() - started;
       const ok = code === 0 && !timedOut;
       if (!ok && !VERBOSE) process.stderr.write(`\n── ${step.id} output ──\n${output}\n`);
@@ -204,6 +216,7 @@ function runStep(step: StepDef): Promise<StepResult> {
     child.on("error", (err) => {
       clearTimeout(timer);
       current = undefined;
+      currentStepId = undefined;
       process.stderr.write(`── ${step.id} spawn error: ${err.message} ──\n`);
       resolveStep({ id: step.id, status: "failed", durationMs: Date.now() - started });
     });

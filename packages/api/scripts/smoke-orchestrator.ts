@@ -16,6 +16,7 @@
  * Exit codes: 0 ok · 1 boot/config failure · 2 turn error/timeout · 3 empty reply.
  */
 import { mkdirSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createApp } from "../src/app.js";
@@ -28,7 +29,27 @@ if (!ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
-const PORT = Number.parseInt(process.env.PORT ?? "8789", 10);
+// Default: pre-allocate a free ephemeral port so the smoke NEVER collides
+// with a running `make dev-local` on :8788 (which it could otherwise write
+// into). Pre-allocated (not port 0) because `apiBaseUrl` must be known
+// before the server binds.
+const PORT = process.env.PORT !== undefined ? Number.parseInt(process.env.PORT, 10) : await getFreePort();
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolvePort, rejectPort) => {
+    const srv = createServer();
+    srv.listen(0, () => {
+      const addr = srv.address();
+      if (addr === null || typeof addr === "string") {
+        srv.close();
+        rejectPort(new Error("could not allocate a port"));
+        return;
+      }
+      srv.close(() => resolvePort(addr.port));
+    });
+    srv.on("error", rejectPort);
+  });
+}
 const ROOT = process.env.VALET_SMOKE_ROOT ?? "/tmp/valet-smoke-orchestrator";
 const PROMPT = process.env.VALET_PROMPT ?? "reply with the single word pong";
 
@@ -46,16 +67,22 @@ const providers = await buildNodeProviders({
 
 process.env.VALET_LOCAL_AUTH = "1"; // auth stub
 const { startServer } = createApp(providers);
-const server = startServer({
-  port: PORT,
-  onListen: (boundPort) => {
-    console.log(`[smoke-orchestrator] server listening on http://localhost:${boundPort}`);
-  },
+let server!: ReturnType<typeof startServer>;
+// Await the listen callback BEFORE any request — otherwise an early fetch can
+// hit whatever process already owns the port.
+const port = await new Promise<number>((resolveListen) => {
+  server = startServer({
+    port: PORT,
+    onListen: (boundPort) => {
+      console.log(`[smoke-orchestrator] server listening on http://localhost:${boundPort}`);
+      resolveListen(boundPort);
+    },
+  });
 });
 
 // ── Step 1: ensure the orchestrator session.
 
-const ensureRes = await fetch(`http://localhost:${PORT}/api/orchestrator`, { method: "POST" });
+const ensureRes = await fetch(`http://localhost:${port}/api/orchestrator`, { method: "POST" });
 if (!ensureRes.ok) {
   console.error("ensure orchestrator failed:", ensureRes.status, await ensureRes.text());
   await shutdown(1);
@@ -66,7 +93,7 @@ console.log(`[smoke-orchestrator] orchestrator session: ${sessionId}`);
 // ── Step 2: open WS, drive the prompt, collect the reply.
 
 let reply = "";
-const ws = new WebSocket(`ws://localhost:${PORT}/api/sessions/${sessionId}/ws`);
+const ws = new WebSocket(`ws://localhost:${port}/api/sessions/${sessionId}/ws`);
 
 const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
   const t = setTimeout(() => rejectTurn(new Error("timeout waiting for turn_end")), 120_000);
@@ -74,7 +101,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
   ws.onmessage = async (ev) => {
     const e = JSON.parse(typeof ev.data === "string" ? ev.data : ev.data.toString()) as WireEvent;
     if (e.type === "init") {
-      const r = await fetch(`http://localhost:${PORT}/api/sessions/${sessionId}/messages`, {
+      const r = await fetch(`http://localhost:${port}/api/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: PROMPT }),
@@ -94,7 +121,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
   };
   ws.onerror = (err) => {
     clearTimeout(t);
-    const message = (err as { message?: string }).message ?? "unknown";
+    const message = err instanceof Error ? err.message : "unknown";
     rejectTurn(new Error(`ws error: ${message}`));
   };
 });
@@ -102,7 +129,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
 try {
   await turnEnded;
 } catch (err) {
-  console.error("\n[smoke-orchestrator] FAILED:", (err as Error).message);
+  console.error("\n[smoke-orchestrator] FAILED:", err instanceof Error ? err.message : String(err));
   await shutdown(2);
 }
 

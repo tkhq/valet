@@ -9,6 +9,7 @@
 export type Need =
   | "key"
   | "docker"
+  | "helm"
   | "k8sContext"
   | "e2eK8sOptIn"
   | "telegram"
@@ -37,6 +38,7 @@ export interface StepDef {
 export interface Probes {
   key: boolean;
   docker: boolean;
+  helm: boolean;
   k8sContext: boolean;
   e2eK8sOptIn: boolean;
   telegram: boolean;
@@ -47,6 +49,8 @@ export interface Probes {
 /** Env vars scrubbed from `scrubKeys` steps and probed for cred tiers. */
 export const CRED_VARS = [
   "ANTHROPIC_API_KEY",
+  "ANTHROPIC_OAUTH_TOKEN",
+  "GEMINI_API_KEY",
   "OPENAI_API_KEY",
   "TELEGRAM_TEST_BOT_TOKEN",
   "TELEGRAM_TEST_CHAT_ID",
@@ -58,9 +62,12 @@ export const CRED_VARS = [
 const MIN = 60_000;
 
 /** Integration files run keyless in `integration-core` (key-gated suites in
- * these files self-skip via describe.skip). Explicit lists so the two
- * integration rows stay disjoint from the dedicated rows (cli, telegram,
- * github-live, openai, prebuilds, keycloak). */
+ * these files self-skip via describe.skip). Explicit lists keep the two
+ * integration rows off the dedicated rows' files (cli, telegram, openai,
+ * prebuilds, keycloak) — with one deliberate overlap: `github-repo.e2e` is in
+ * core (its GitHub-fixture loop is keyless) AND is the `github-live` row's
+ * file (the live block self-gates). lib.test.ts asserts the union of these
+ * lists + dedicated rows covers the whole integration dir. */
 const INTEGRATION_CORE_FILES = [
   "src/integration/auth.e2e.test.ts",
   "src/integration/memory-routes.test.ts",
@@ -81,6 +88,17 @@ const INTEGRATION_AGENT_FILES = [
   "src/integration/plugins.e2e.test.ts",
   "src/integration/workflow-run.e2e.test.ts",
 ];
+
+/** Integration files owned by dedicated rows (see lists above). */
+export const DEDICATED_INTEGRATION_FILES = [
+  "src/integration/cli.e2e.test.ts",
+  "src/integration/telegram.e2e.test.ts",
+  "src/integration/github-repo.e2e.test.ts",
+  "src/integration/llm-providers.e2e.test.ts",
+  "src/integration/prebuilds.e2e.test.ts",
+  "src/integration/oidc-keycloak.e2e.test.ts",
+];
+export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INTEGRATION_AGENT_FILES };
 
 /** Plugin packages that HAVE test files. Content-only plugins ship a bare
  * `vitest run` script with no config/tests, which explodes resolving the
@@ -115,6 +133,11 @@ export const STEPS: StepDef[] = [
   { id: "runner-unit", group: "static", title: "runner suite", command: ["pnpm", "--filter", "@valet/runner", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
   { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
   { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "sandbox-k8s-unit", group: "static", title: "sandbox-kubernetes unit tests (no cluster)", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", "--", "--exclude", "test/**/*.cluster.test.ts"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "store-postgres-unit", group: "static", title: "store-postgres PGlite tests (no docker)", command: ["pnpm", "--filter", "@valet/store-postgres", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "web-build", group: "static", title: "web production build (vite)", command: ["pnpm", "--filter", "@valet/web", "build"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "api-bundle", group: "static", title: "api production bundle + bundle-guard", command: ["bash", "-c", "pnpm --filter @valet/api build && pnpm --filter @valet/api test -- src/bundle-guard"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
+  { id: "helm-golden", group: "static", title: "helm chart lint + golden templates", command: ["bash", "deploy/chart/valet/test/golden.sh"], needs: ["helm"], scrubKeys: true, timeoutMs: 5 * MIN },
 
   // ── integration + smoke ──────────────────────────────────────────────────
   { id: "integration-core", group: "integration", title: "keyless api integration", command: apiTest(...INTEGRATION_CORE_FILES), needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
@@ -174,16 +197,25 @@ export function needHint(n: Need): string {
  */
 export function parseEnvFile(content: string): Record<string, string> {
   const out: Record<string, string> = {};
-  const lines = content.split("\n");
+  const lines = content.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
+    let line = lines[i].trim();
     if (line === "" || line.startsWith("#")) continue;
+    // Accept the natural shell-profile paste form.
+    if (line.startsWith("export ")) line = line.slice("export ".length).trimStart();
     const eq = line.indexOf("=");
     if (eq <= 0) throw new Error(`.env.e2e line ${i + 1}: expected KEY=VALUE, got "${line}"`);
     const key = line.slice(0, eq).trim();
+    if (/\s/.test(key)) {
+      throw new Error(`.env.e2e line ${i + 1}: key "${key}" contains whitespace — expected KEY=VALUE`);
+    }
     let value = line.slice(eq + 1).trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
+    } else {
+      // Unquoted values: strip trailing inline comments ("KEY=v  # note").
+      const hash = value.search(/\s#/);
+      if (hash !== -1) value = value.slice(0, hash).trimEnd();
     }
     out[key] = value;
   }
