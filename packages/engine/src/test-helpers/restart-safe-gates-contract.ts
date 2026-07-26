@@ -171,6 +171,14 @@ export function runRestartSafeGatesContract(
         expect(item?.outcome).toEqual({ outcome: "completed" });
       }
 
+      // Tear down session2 BEFORE the caller's afterAll closes the db/pool:
+      // restore-time bookkeeping (replayBlocked → emitQueueState → store
+      // reads) runs as background work, and without this await it can race
+      // past the test and hit a closed pool — an unhandled rejection that
+      // fails the run with all tests green. session1 stays un-destroyed on
+      // purpose (it IS the simulated crash) but is quiescent on the gate.
+      await session2.destroy();
+
       faux2.unregister();
     });
   });
