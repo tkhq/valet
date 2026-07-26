@@ -70,6 +70,8 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 | `web-build` | `pnpm --filter @valet/web build` — the vite production build |
 | `api-bundle` | `pnpm --filter @valet/api build` + `bundle-guard` suite (which self-skips when `dist/` is absent) |
 | `helm-golden` | `deploy/chart/valet/test/golden.sh` — helm lint + template goldens (needs `helm`, no cluster) |
+| `sandbox-docker-unit` | `packages/sandbox-docker` `run-args.test.ts` (pure unit, no daemon) |
+| `registry-drift` | regenerate `registry.gen.ts`, fail on diff vs committed (tree restored on failure) |
 
 **Integration + smoke:**
 
@@ -287,12 +289,12 @@ durationMs, skipReason? }], passed, failed, skipped, exitCode }`.
   turn timeout; five rows added (`sandbox-k8s-unit`, `store-postgres-unit`,
   `web-build`, `api-bundle`, `helm-golden` — 30 rows total) and a lib test
   now asserts core+agent+dedicated cover the whole integration dir.
-- Remaining documented-not-fixed from that review: registry-generation drift
-  (`registry.gen.ts` vs `plugin.yaml`) has no row; `fullstack-k8s` skips
-  image rebuilds when `:dev` images exist, so Dockerfile drift escapes the
-  opt-in run unless images are removed first; `sandbox-docker`'s pure-unit
-  `run-args.test.ts` stays docker-gated; `packages/client` (frozen legacy
-  SPA, 7 test files) is not covered by any row.
+- Follow-up round: `registry-drift` and `sandbox-docker-unit` rows added
+  (32 rows total; the drift row was negative-tested by flipping a
+  `plugin.yaml` to `enabled: false`), and `VALET_E2E_K8S_REBUILD=1` forces
+  the k8s image build so Dockerfile drift can't hide behind stale `:dev`
+  images. Legacy packages (`client`, `worker`) are intentionally uncovered —
+  they are slated for deletion.
 - Known flakes observed (not runner bugs): `unit` can hit a `getFreePort`
   EADDRINUSE race in `bootTestApi` under full parallelism; `store-postgres`'s
   "stopHost gates out late wakes" is timing-sensitive when other suites
@@ -311,9 +313,6 @@ later iterations, recorded here so the scorecard's green doesn't overstate:
 - Web browser e2e — 60 jsdom component tests exist, zero browser-driven.
 - Most content-only / thin plugin packages (`plugin-browser`, `plugin-notion`,
   `plugin-sentry`, `plugin-stripe`, …) — no test files.
-- Worker (`packages/worker`) is frozen and excluded from root typecheck; if a
-  change touches `shared`/`sdk`, `cd packages/worker && pnpm typecheck` is a
-  manual follow-up (CLAUDE.md rule), not a scorecard row.
 
 ## Out of scope (v1)
 

@@ -56,7 +56,9 @@ async function main(): Promise<number> {
   run("sandbox controller", "make", ["k8s-sandbox-install"], 5 * 60_000);
 
   // 2. Images (cold build is 15-20 min; skip when both exist).
-  if (imagesPresent()) {
+  // VALET_E2E_K8S_REBUILD=1 forces the build — otherwise Dockerfile drift
+  // hides behind stale :dev images.
+  if (imagesPresent() && process.env.VALET_E2E_K8S_REBUILD !== "1") {
     console.log("[fullstack-k8s] images valet-api:dev + valet-sandbox:dev present — skipping k8s-build");
   } else {
     run("image build", "make", ["k8s-build"], 40 * 60_000);
