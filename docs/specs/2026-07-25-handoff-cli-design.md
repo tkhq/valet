@@ -1,7 +1,7 @@
 # `valet handoff` — CLI design
 
 **Date:** 2026-07-25
-**Status:** Approved design, not yet implemented
+**Status:** Implemented — `packages/api/src/cli/commands/handoff.ts` (see Deviations)
 
 ## Purpose
 
@@ -112,6 +112,19 @@ Colocated `handoff.test.ts` following the existing command-test pattern (mocked
 
 `--wait` is tested at whatever level `send`'s streaming behavior is already
 tested.
+
+## Deviations (as implemented)
+
+- The provenance header is `[Handoff from <host>:<cwd>]` — the calling agent's
+  name is dropped (nothing reliable to read it from; the doc itself can say).
+- A `--wait` timeout exits **0**, not nonzero: by then the handoff was already
+  delivered, so the command succeeded — it prints a note that it stopped
+  waiting. Turn outcomes still map like `send` (failed/aborted → exit 4).
+- `--new-session` sessions are created with `workspace: /workspace/<repo-name>`
+  and `profile: "full"`, matching the web client's repo-session convention.
+- `--repo` also accepts being combined with a doc positional in any order; a
+  value greedily consumed by the boolean flags (`--new-session doc.md`) is
+  reclaimed as the doc path.
 
 ## Out of scope (v1)
 
