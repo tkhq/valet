@@ -255,6 +255,7 @@ k8s-up: ## Install agent-sandbox (if needed) + helm upgrade --install the valet 
 	$(HELM_RANCHER) upgrade --install $(HELM_RELEASE) deploy/chart/valet \
 	  --namespace $(K8S_NAMESPACE) --create-namespace \
 	  --set api.secrets.anthropicApiKey="$$ANTHROPIC_API_KEY" \
+	  $(HELM_EXTRA_ARGS) \
 	  --wait --timeout 5m
 	@echo "$(GREEN)Deployed. Port-forward with:$(NC) kubectl --context rancher-desktop -n $(K8S_NAMESPACE) port-forward svc/$(HELM_RELEASE)-api 8080:80"
 	@echo "  or add '127.0.0.1 valet.localdev' to /etc/hosts and open https://valet.localdev (self-signed cert)."

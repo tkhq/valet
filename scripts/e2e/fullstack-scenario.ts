@@ -19,6 +19,8 @@ export interface ScenarioOpts {
   turnTimeoutMs?: number;
 }
 
+import { WebSocket as WsWebSocket, type RawData } from "ws";
+
 interface WireEventish {
   type: string;
   [key: string]: unknown;
@@ -49,7 +51,9 @@ export async function runScenario(opts: ScenarioOpts): Promise<void> {
 
   // 3-4. WS subscribe, prompt on init, wait for turn_end.
   const wsUrl = `${base.replace(/^http/, "ws")}/api/sessions/${sessionId}/ws`;
-  const ws = new WebSocket(wsUrl);
+  // `ws` (not the global WebSocket): the deployed stacks use real auth, and
+  // the session cookie / api key must ride the upgrade request's headers.
+  const ws = new WsWebSocket(wsUrl, opts.headers ? { headers: opts.headers } : undefined);
   const prompt = "use bash to write fullstack.txt with contents ok then read it back";
 
   await new Promise<void>((resolve, reject) => {
@@ -57,8 +61,8 @@ export async function runScenario(opts: ScenarioOpts): Promise<void> {
       ws.close();
       reject(new Error(`timeout: no turn_end within ${turnTimeoutMs / 1000}s`));
     }, turnTimeoutMs);
-    ws.onmessage = async (ev) => {
-      const e = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data)) as WireEventish;
+    ws.on("message", async (data: RawData) => {
+      const e = JSON.parse(String(data)) as WireEventish;
       if (e.type === "init") {
         const r = await fetch(`${base}/api/sessions/${sessionId}/messages`, {
           method: "POST",
@@ -80,11 +84,11 @@ export async function runScenario(opts: ScenarioOpts): Promise<void> {
         ws.close();
         resolve();
       }
-    };
-    ws.onerror = () => {
+    });
+    ws.on("error", (err: Error) => {
       clearTimeout(t);
-      reject(new Error("ws error"));
-    };
+      reject(new Error(`ws error: ${err.message}`));
+    });
   });
   console.log("[fullstack] turn ended");
 
