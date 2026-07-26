@@ -95,25 +95,58 @@ interface ConsumeCtx {
   /** The turn's thread; filters deltas/gates to our turn. */
   threadId: string;
   json: boolean;
+  /** How long to keep consuming after `turn_end` for the trailing settle
+   * frame before falling back to OK. Tests inject a small value. */
+  settleGraceMs?: number;
 }
 
 /**
  * Consume the WS stream, rendering the turn, until our submission settles or a
  * decision gate blocks it. Pure over `(deps.stream, ctx)` — exported for tests.
  *
- * Ordering note: we `sendPrompt` first and connect the stream after. A fresh
- * connect (no `fromOffset`) begins at the live edge, so a turn that settles in
- * the sub-millisecond window before the socket attaches could be missed — the
- * loop would then end when the stream closes and we return `TurnError`. Durable
- * frames only replay on RECONNECT (`?fromOffset=`), and `streamSession` exposes
- * no "connected" signal to send-after, so this stays simple; the real
- * round-trip is validated by the T9 integration suite. In practice a real LLM
- * turn takes far longer than the connect window, so the race is theoretical.
+ * Ordering note: the engine emits `submission.settled` AFTER `turn_end` —
+ * settlement is post-turn bookkeeping (reserve → repair → finalize, several
+ * store round-trips), so on the wire the settle frame always trails the
+ * turn_end frame by a few milliseconds. `turn_end` therefore must NOT be
+ * treated as terminal: we keep consuming for a short grace window so the
+ * settle's real outcome (completed vs failed/aborted) decides the exit code.
+ * The OK fallback only fires when the settle frame never arrives (stream
+ * close or grace expiry) — turns are sequential per thread, so a turn_end on
+ * our thread does mean our turn ended.
  */
 export async function consumeSend(deps: SendDeps, ctx: ConsumeCtx): Promise<number> {
   const stream = deps.stream({ url: deps.url, apiKey: deps.apiKey, sessionId: ctx.sessionId });
+  const graceMs = ctx.settleGraceMs ?? 3_000;
+  const iter = stream[Symbol.asyncIterator]();
+  let turnEnded = false;
 
-  for await (const ev of stream) {
+  const endTurnOutput = (): void => {
+    if (!ctx.json) printLine("");
+  };
+
+  for (;;) {
+    let result: IteratorResult<WireEvent>;
+    if (!turnEnded) {
+      result = await iter.next();
+    } else {
+      // Post-turn grace: wait briefly for the trailing settle frame.
+      const raced = await Promise.race([
+        iter.next().then((r) => ({ kind: "event" as const, r })),
+        new Promise<{ kind: "timeout" }>((resolveTimeout) => {
+          const t = setTimeout(() => resolveTimeout({ kind: "timeout" }), graceMs);
+          t.unref();
+        }),
+      ]);
+      if (raced.kind === "timeout") return ExitCode.OK;
+      result = raced.r;
+    }
+
+    if (result.done) {
+      if (turnEnded) return ExitCode.OK; // turn ended; settle frame dropped
+      printErr("valet send: stream ended before the turn settled");
+      return ExitCode.TurnError;
+    }
+    const ev = result.value;
     if (ctx.json) emitNdjson(ev);
 
     if (!ctx.json) {
@@ -137,7 +170,7 @@ export async function consumeSend(deps: SendDeps, ctx: ConsumeCtx): Promise<numb
 
     // Terminal: our submission settled → map outcome to an exit code.
     if (ev.type === "submission.settled" && ev.queueItemId === ctx.messageId) {
-      if (!ctx.json) printLine("");
+      if (!turnEnded) endTurnOutput();
       return outcomeToExit(ev.outcome);
     }
 
@@ -147,19 +180,12 @@ export async function consumeSend(deps: SendDeps, ctx: ConsumeCtx): Promise<numb
       return ExitCode.GatePending;
     }
 
-    // Fallback terminal (mirrors chatTurn): turns are sequential per thread,
-    // so a turn_end on our thread ends our turn even if the settle frame is
-    // missed — without this a dropped settle leaves the command hanging.
-    if (ev.type === "turn_end" && ev.threadId === ctx.threadId) {
-      if (!ctx.json) printLine("");
-      return ExitCode.OK;
+    // Our turn ended: not terminal — enter the settle grace window.
+    if (ev.type === "turn_end" && ev.threadId === ctx.threadId && !turnEnded) {
+      turnEnded = true;
+      endTurnOutput();
     }
   }
-
-  // Stream ended without a matching settle (unexpected close after retries, or
-  // a missed instant-settle per the ordering note above).
-  printErr("valet send: stream ended before the turn settled");
-  return ExitCode.TurnError;
 }
 
 /** Pure entry: resolve target + prompt, send, then follow the turn. */
