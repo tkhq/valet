@@ -31,6 +31,7 @@ const COMMANDS: Record<string, CommandImporter> = {
   serve: () => import("./cli/commands/serve.js"),
   sessions: () => import("./cli/commands/sessions.js"),
   send: () => import("./cli/commands/send.js"),
+  handoff: () => import("./cli/commands/handoff.js"),
   gates: () => import("./cli/commands/gates.js"),
   status: () => import("./cli/commands/status.js"),
   login: () => import("./cli/commands/login.js"),
@@ -48,6 +49,7 @@ Commands:
   serve       Boot the Valet server (the full product)
   sessions    List and inspect sessions on an instance
   send        Send a prompt to a session
+  handoff     Hand off work from a local agent to Valet
   gates       List and resolve decision gates
   status      Show instance / session status
   login       Add or authenticate an instance profile
