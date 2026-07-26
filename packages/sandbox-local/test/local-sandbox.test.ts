@@ -71,7 +71,9 @@ describe("LocalSandbox: exec", () => {
 
   it("inherits PATH so common tools work", async () => {
     const sb = new LocalSandbox("test", tmp);
-    const res = await sb.exec("node -e \"console.log(2+2)\"");
+    // FORCE_COLOR=0: pnpm exports FORCE_COLOR=1 to scripts, which makes the
+    // child node ANSI-wrap console.log output and break the exact match.
+    const res = await sb.exec("node -e \"console.log(2+2)\"", { env: { FORCE_COLOR: "0" } });
     expect(res.exitCode).toBe(0);
     expect(res.stdout.trim()).toBe("4");
   });

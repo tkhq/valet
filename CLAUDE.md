@@ -226,8 +226,16 @@ cd packages/client && pnpm dev  # Legacy frontend on :5173 (conflicts with web!)
 # Or all at once (legacy):
 make dev-all
 
-# Dogfood the new API end-to-end (real Anthropic + Docker round-trip)
-make dogfood-api
+# Unified e2e scorecard — THE way to validate v2 changes. Loads .env.e2e
+# (copy .env.e2e.example), probes Docker/k8s/creds, runs every suite it can,
+# prints ✓/✗/⊘ per feature. See docs/specs/2026-07-25-e2e-runner-design.md.
+make e2e                          # everything armed by your creds/daemons
+make e2e E2E_ARGS="--list"        # show steps + what each needs
+make e2e E2E_ARGS="--only cli,typecheck --json"
+
+# Quick smokes (also rows in make e2e)
+make smoke-orchestrator  # fastest agent-loop-alive check (real Anthropic, no Docker)
+make smoke-session       # full session round-trip (real Anthropic + Docker)
 
 # Kubernetes (local k3s, Rancher Desktop) — full runbook: deploy/README.md
 make k8s-sandbox-install # Install vendored agent-sandbox CRD/controller (idempotent, run first)

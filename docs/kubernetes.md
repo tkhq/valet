@@ -169,7 +169,7 @@ distinguishes two teardown paths:
 Operational consequences:
 
 - `kubectl delete pod` on a backing pod is **safe** — the controller heals
-  it and the workspace survives (the deployment dogfood verifies exactly
+  it and the workspace survives (the deployment smoke test verifies exactly
   this).
 - `kubectl delete sandbox` is **data loss** for that session's workspace.
 - `helm uninstall` leaves both StatefulSet PVCs (Kubernetes design —

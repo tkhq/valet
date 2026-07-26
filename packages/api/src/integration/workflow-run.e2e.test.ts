@@ -35,7 +35,7 @@
  * Key-gated: skipped without `ANTHROPIC_API_KEY`. Requires a running Docker
  * daemon (the session node provisions a real `DockerSandboxProvider`
  * container per session) — not separately gated, matching this repo's other
- * Docker-dependent integration tests (e.g. `scripts/dogfood.ts`).
+ * Docker-dependent integration tests (e.g. `scripts/smoke-session.ts`).
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";

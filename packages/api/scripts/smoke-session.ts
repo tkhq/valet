@@ -1,5 +1,5 @@
 /**
- * End-to-end dogfood script for `@valet/api`.
+ * Session smoke script for `@valet/api` — full-stack session round-trip.
  *
  * Boots the server in-process (so we own its lifecycle), creates a session,
  * opens the WebSocket, posts a prompt, and prints every wire event in order
@@ -7,13 +7,13 @@
  * landed on the host via the Docker bind mount.
  *
  * Usage:
- *   ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @valet/api dogfood
+ *   ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @valet/api smoke:session
  *
  * Env knobs:
  *   PORT=8788                     server port
- *   VALET_DATA_DIR=/tmp/valet-dogfood/data  per-run data dir (auto-cleaned)
- *   VALET_WORKSPACE=/tmp/valet-dogfood/ws   workspace for the agent
- *   VALET_PROMPT="..."           override the dogfood prompt
+ *   VALET_DATA_DIR=/tmp/valet-smoke-session/data  per-run data dir (auto-cleaned)
+ *   VALET_WORKSPACE=/tmp/valet-smoke-session/ws   workspace for the agent
+ *   VALET_PROMPT="..."           override the smoke prompt
  */
 import { homedir } from "node:os";
 import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
@@ -29,8 +29,10 @@ if (!ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
-const PORT = Number.parseInt(process.env.PORT ?? "8788", 10);
-const ROOT = process.env.VALET_DOGFOOD_ROOT ?? "/tmp/valet-dogfood";
+// PORT=0 (default): bind an ephemeral port so the smoke NEVER collides with
+// a running `make dev-local` on :8788 (which it could otherwise write into).
+const PORT = Number.parseInt(process.env.PORT ?? "0", 10);
+const ROOT = process.env.VALET_SMOKE_ROOT ?? "/tmp/valet-smoke-session";
 const DATA_DIR = process.env.VALET_DATA_DIR ?? `${ROOT}/data`;
 const WORKSPACE = process.env.VALET_WORKSPACE ?? `${ROOT}/ws`;
 const PROMPT =
@@ -51,16 +53,22 @@ const providers = await buildNodeProviders({
 
 process.env.VALET_LOCAL_AUTH = "1"; // auth stub
 const { startServer } = createApp(providers);
-const server = startServer({
-  port: PORT,
-  onListen: (boundPort) => {
-    console.log(`[dogfood] server listening on http://localhost:${boundPort}`);
-  },
+let server!: ReturnType<typeof startServer>;
+// Await the listen callback BEFORE any request — otherwise an early fetch can
+// hit whatever process already owns the port.
+const port = await new Promise<number>((resolveListen) => {
+  server = startServer({
+    port: PORT,
+    onListen: (boundPort) => {
+      console.log(`[smoke-session] server listening on http://localhost:${boundPort}`);
+      resolveListen(boundPort);
+    },
+  });
 });
 
 // ── Step 1: create session.
 
-const createRes = await fetch(`http://localhost:${PORT}/api/sessions`, {
+const createRes = await fetch(`http://localhost:${port}/api/sessions`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ workspace: WORKSPACE }),
@@ -70,28 +78,28 @@ if (!createRes.ok) {
   await shutdown(1);
 }
 const { id: sessionId } = (await createRes.json()) as { id: string };
-console.log(`[dogfood] session: ${sessionId}, workspace: ${WORKSPACE}`);
+console.log(`[smoke-session] session: ${sessionId}, workspace: ${WORKSPACE}`);
 
 // ── Step 2: open WS, drive the prompt.
 
 const events: WireEvent[] = [];
-const ws = new WebSocket(`ws://localhost:${PORT}/api/sessions/${sessionId}/ws`);
+const ws = new WebSocket(`ws://localhost:${port}/api/sessions/${sessionId}/ws`);
 
 const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
   const t = setTimeout(() => rejectTurn(new Error("timeout waiting for turn_end")), 120_000);
-  ws.onopen = () => console.log("[dogfood] ws connected");
+  ws.onopen = () => console.log("[smoke-session] ws connected");
   ws.onmessage = async (ev) => {
     const e = JSON.parse(typeof ev.data === "string" ? ev.data : ev.data.toString()) as WireEvent;
     events.push(e);
     summarize(e);
     if (e.type === "init") {
       // Send the prompt once we're subscribed.
-      const r = await fetch(`http://localhost:${PORT}/api/sessions/${sessionId}/messages`, {
+      const r = await fetch(`http://localhost:${port}/api/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: PROMPT }),
       });
-      console.log(`[dogfood] post: ${r.status}`);
+      console.log(`[smoke-session] post: ${r.status}`);
     }
     if (e.type === "turn_end") {
       clearTimeout(t);
@@ -102,7 +110,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
   };
   ws.onerror = (err) => {
     clearTimeout(t);
-    const message = (err as { message?: string }).message ?? "unknown";
+    const message = err instanceof Error ? err.message : "unknown";
     rejectTurn(new Error(`ws error: ${message}`));
   };
 });
@@ -110,7 +118,7 @@ const turnEnded = new Promise<void>((resolveTurn, rejectTurn) => {
 try {
   await turnEnded;
 } catch (err) {
-  console.error("[dogfood] FAILED:", (err as Error).message);
+  console.error("[smoke-session] FAILED:", err instanceof Error ? err.message : String(err));
   await shutdown(2);
 }
 
@@ -120,9 +128,9 @@ const filePath = resolve(WORKSPACE, FILE_NAME);
 const ok = existsSync(filePath);
 const contents = ok ? readFileSync(filePath, "utf8") : null;
 console.log("");
-console.log(`[dogfood] expect file at: ${filePath}`);
-console.log(`[dogfood] file exists:    ${ok}`);
-if (contents !== null) console.log(`[dogfood] file contents:  ${JSON.stringify(contents)}`);
+console.log(`[smoke-session] expect file at: ${filePath}`);
+console.log(`[smoke-session] file exists:    ${ok}`);
+if (contents !== null) console.log(`[smoke-session] file contents:  ${JSON.stringify(contents)}`);
 
 const summary = {
   events: events.length,
@@ -132,7 +140,7 @@ const summary = {
   }, {}),
   fileWritten: ok,
 };
-console.log("[dogfood] summary:", JSON.stringify(summary, null, 2));
+console.log("[smoke-session] summary:", JSON.stringify(summary, null, 2));
 
 await shutdown(ok ? 0 : 3);
 

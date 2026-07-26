@@ -7,7 +7,7 @@
 
 .PHONY: help install setup clean \
         dev dev-worker dev-opencode dev-client dev-all \
-        dev-api-node dev-web dev-local dev-keycloak dev-keycloak-down dogfood-api \
+        dev-api-node dev-web dev-local dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator e2e \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
         test test-unit test-integration test-e2e test-pg \
@@ -135,6 +135,7 @@ dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO p
 	@echo "$(GREEN)Keycloak ready.$(NC) Add to .env, then run 'make dev-local':"
 	@echo "  BETTER_AUTH_SECRET=dev-only-secret-change-me"
 	@echo "  AUTH_OIDC_ISSUER=http://localhost:8081/realms/valet"
+	@echo "  AUTH_TRUSTED_ORIGINS=http://localhost:8081"
 	@echo "  AUTH_OIDC_CLIENT_ID=valet"
 	@echo "  AUTH_OIDC_CLIENT_SECRET=valet-dev-secret"
 	@echo "  AUTH_OIDC_DOMAIN=valet.test"
@@ -145,10 +146,18 @@ dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO p
 dev-keycloak-down: ## Stop the local Keycloak container
 	$(DOCKER_COMPOSE) --profile keycloak down keycloak
 
-dogfood-api: ## Run the api end-to-end script (real Anthropic + Docker)
+smoke-session: ## Full-stack session smoke: real Anthropic + Docker sandbox round-trip
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
-	$(PNPM) --filter @valet/api dogfood
+	$(PNPM) --filter @valet/api smoke:session
+
+smoke-orchestrator: ## Orchestrator smoke: ensure + one real Anthropic turn (no Docker)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (set it in .env or the environment)$(NC)"; exit 1; fi; \
+	$(PNPM) --filter @valet/api smoke:orchestrator
+
+e2e: ## Unified e2e scorecard (see docs/specs/2026-07-25-e2e-runner-design.md). E2E_ARGS="--list|--only <ids>|--json|--verbose"
+	$(PNPM) exec tsx scripts/e2e.ts $(E2E_ARGS)
 
 # ==========================================
 # agent-sandbox (vendored, Rancher Desktop only)
@@ -191,7 +200,7 @@ k8s-build: ## Build the api (+ bundled web) and sandbox images for the local k3s
 	@echo "$(YELLOW)Full-profile smoke check (manual, after 'make k8s-up' with a full-profile"
 	@echo "  session):$(NC) exec into the sandbox pod and run 'ps aux' — expect code-server,"
 	@echo "  ttyd, and 'node /gateway/dist/bin.js' all present. A headless-profile pod should"
-	@echo "  show none of the three. Full end-to-end coverage lands in Task 8's dogfood."
+	@echo "  show none of the three. Full end-to-end coverage: make e2e (fullstack-k8s step)."
 	@echo "$(YELLOW)Docker-backend gateway testing:$(NC) 'make dev-local' defaults to a plain"
 	@echo "  sandbox image with no gateway/ttyd/code-server. To exercise the gateway against"
 	@echo "  the docker backend, point VALET_SANDBOX_IMAGE at $(K8S_SANDBOX_IMAGE) (or an"
@@ -246,6 +255,7 @@ k8s-up: ## Install agent-sandbox (if needed) + helm upgrade --install the valet 
 	$(HELM_RANCHER) upgrade --install $(HELM_RELEASE) deploy/chart/valet \
 	  --namespace $(K8S_NAMESPACE) --create-namespace \
 	  --set api.secrets.anthropicApiKey="$$ANTHROPIC_API_KEY" \
+	  $(HELM_EXTRA_ARGS) \
 	  --wait --timeout 5m
 	@echo "$(GREEN)Deployed. Port-forward with:$(NC) kubectl --context rancher-desktop -n $(K8S_NAMESPACE) port-forward svc/$(HELM_RELEASE)-api 8080:80"
 	@echo "  or add '127.0.0.1 valet.localdev' to /etc/hosts and open https://valet.localdev (self-signed cert)."

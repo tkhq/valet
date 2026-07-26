@@ -78,9 +78,9 @@ The bridge in `src/engine/bridge.ts` maps engine `BusEvent`s onto these. Decisio
 ## Dogfood
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @valet/api dogfood
+ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @valet/api smoke:session
 # or
-make dogfood-api
+make smoke-session
 ```
 
 Boots the server in-process, creates a session, opens the WS, posts a prompt, and asserts the agent ran `bash`, wrote `hello.txt` on the host via the Docker bind mount, and streamed all expected wire events.

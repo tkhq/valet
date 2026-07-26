@@ -14,6 +14,13 @@ export default defineConfig({
       'packages/sdk',
       'packages/api',
       'packages/web',
+      // The `make e2e` runner's pure library (step table, scorecard).
+      {
+        test: {
+          name: 'scripts',
+          include: ['scripts/e2e/*.test.ts'],
+        },
+      },
     ],
   },
 });
