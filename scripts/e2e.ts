@@ -21,6 +21,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CRED_VARS,
+  truncateOutput,
   missingNeeds,
   needHint,
   parseEnvFile,
@@ -34,6 +35,18 @@ import {
 } from "./e2e/lib.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// ── preflight: Node >= 22 ──────────────────────────────────────────────────
+// Several suites and the smoke scripts use the global `WebSocket`, which
+// landed in Node 22. Under Node 20 they fail 15 minutes in with a cryptic
+// "WebSocket is not defined" — fail fast here instead.
+const nodeMajor = Number(process.versions.node.split(".")[0]);
+if (nodeMajor < 22) {
+  console.error(
+    `make e2e requires Node >= 22 (found ${process.versions.node}). Run \`nvm use 22\` (or \`nvm alias default 22\`) and retry.`,
+  );
+  process.exit(2);
+}
 
 // ── flags ──────────────────────────────────────────────────────────────────
 
@@ -209,7 +222,9 @@ function runStep(step: StepDef): Promise<StepResult> {
       currentStepId = undefined;
       const durationMs = Date.now() - started;
       const ok = code === 0 && !timedOut;
-      if (!ok && !VERBOSE) process.stderr.write(`\n── ${step.id} output ──\n${output}\n`);
+      if (!ok && !VERBOSE) {
+        process.stderr.write(`\n── ${step.id} output ──\n${truncateOutput(output)}\n`);
+      }
       if (timedOut) process.stderr.write(`── ${step.id} timed out after ${step.timeoutMs / 1000}s ──\n`);
       resolveStep({ id: step.id, status: ok ? "passed" : "failed", durationMs });
     });
