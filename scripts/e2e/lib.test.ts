@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   DEDICATED_INTEGRATION_FILES,
+  truncateOutput,
   INTEGRATION_LIST_FILES,
   missingNeeds,
   needHint,
@@ -186,6 +187,20 @@ describe("scorecard", () => {
     expect(rep.passed).toBe(1);
     expect(rep.failed).toBe(1);
     expect(rep.skipped).toBe(1);
+  });
+});
+
+describe("truncateOutput", () => {
+  it("passes short output through untouched", () => {
+    expect(truncateOutput("a\nb\nc")).toBe("a\nb\nc");
+  });
+
+  it("keeps only the tail of long output with a truncation note", () => {
+    const long = Array.from({ length: 500 }, (_, i) => `line${i}`).join("\n");
+    const out = truncateOutput(long, 100);
+    expect(out).toContain("400 lines truncated");
+    expect(out).toContain("line499");
+    expect(out).not.toContain("line10\n");
   });
 });
 

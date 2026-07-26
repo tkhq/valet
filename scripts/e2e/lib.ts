@@ -226,6 +226,16 @@ export function parseEnvFile(content: string): Record<string, string> {
   return out;
 }
 
+/** Cap replayed child output to the last `maxLines` lines — failure replays
+ * of big vitest runs are otherwise thousands of lines of passing-test noise.
+ * The tail is where vitest puts its failure summary. */
+export function truncateOutput(output: string, maxLines = 120): string {
+  const lines = output.split("\n");
+  if (lines.length <= maxLines) return output;
+  const tail = lines.slice(-maxLines).join("\n");
+  return `[… ${lines.length - maxLines} lines truncated — rerun with --verbose or --only <step> for full output …]\n${tail}`;
+}
+
 export interface StepResult {
   id: string;
   status: "passed" | "failed" | "skipped";
