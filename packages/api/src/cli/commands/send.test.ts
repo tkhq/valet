@@ -182,6 +182,32 @@ describe("consumeSend", () => {
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
   });
 
+  it("waits past turn_end for the settle frame and maps its outcome", async () => {
+    // The engine settles AFTER turn_end (settlement is post-turn bookkeeping),
+    // so the settle frame trails turn_end on the stream. A failed settle after
+    // turn_end must surface as TurnError, not be preempted by the fallback.
+    const { deps } = stubDeps([textDelta("hi"), turnEnd(), settled("failed")]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.TurnError);
+  });
+
+  it("maps a completed settle that trails turn_end", async () => {
+    const { deps } = stubDeps([textDelta("hi"), turnEnd(), settled("completed")]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+  });
+
+  it("falls back to OK when no settle arrives within the grace window", async () => {
+    // Stream hangs (never ends, never settles) after turn_end.
+    const hang = new Promise<never>(() => {});
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield turnEnd();
+        await hang;
+      })();
+    const { deps } = stubDeps([]);
+    const code = await consumeSend({ ...deps, stream }, { ...ctx, settleGraceMs: 50 });
+    expect(code).toBe(ExitCode.OK);
+  });
+
   it("keeps consuming past a turn_end on another thread", async () => {
     const { deps } = stubDeps([turnEnd("other-t"), settled("failed")]);
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.TurnError);
