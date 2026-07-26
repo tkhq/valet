@@ -155,6 +155,9 @@ smoke-orchestrator: ## Orchestrator smoke: ensure + one real Anthropic turn (no 
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (set it in .env or the environment)$(NC)"; exit 1; fi; \
 	$(PNPM) --filter @valet/api smoke:orchestrator
 
+e2e: ## Unified e2e scorecard (see docs/specs/2026-07-25-e2e-runner-design.md). E2E_ARGS="--list|--only <ids>|--json|--verbose"
+	$(PNPM) exec tsx scripts/e2e.ts $(E2E_ARGS)
+
 # ==========================================
 # agent-sandbox (vendored, Rancher Desktop only)
 # ==========================================
