@@ -20,8 +20,8 @@ The one section of that dashboard we explicitly do NOT copy is "Estimated time s
 |---|---|---|
 | Summary hero row | Active users (adoption-metrics), sessions + PRs merged (value-metrics), spend (value route) | Existing |
 | "Who's using Valet" — active trend | `getActiveUsersByDay` | Existing |
-| "Who's using Valet" — top users by spend | New: per-user cost, grouped from `analytics_events` token columns + model pricing | New query |
-| "How are they using it" — adoption levels | New: `COUNT(*) FROM users` vs monthly/weekly/daily active counts | New query |
+| "Who's using Valet" — top users by spend | Existing: `/api/usage/stats`'s `byUser`/`byUserModel` (the Billing tab's data), rendered via the existing `UserBreakdownTable` | Existing (reused) |
+| "How are they using it" — adoption levels | New: `COUNT(*) FROM users` for the "All members" baseline; Monthly/Weekly/Daily reuse the already-fetched `activeUsersByDay`/`activeUsersByWeek`/`activeUsers` arrays | New query (one, trivial) |
 | "How are they using it" — stickiness by channel | New: DAU/MAU ratio per `channel`, reusing `getChannelBreadth`'s grouping | New query |
 | "How are they using it" — connectors (users, reads, writes) | Extends `getServiceBreadth`: adds `COUNT(DISTINCT user_id)` and a read/write split via keyword match on `action_id` (`read_`/`get_`/`list_` vs `write_`/`update_`/`append_`/`create_`) | Extends existing |
 | "How agentic is their work" | New: `tool_exec` count ÷ `turn_complete` count, per channel per day | New query |
@@ -35,7 +35,7 @@ The one section of that dashboard we explicitly do NOT copy is "Estimated time s
 ## Component structure
 
 - `packages/client/src/components/analytics/overview-tab.tsx` — replaces `adoption-tab.tsx`, assembles the six sections below as sibling `Card`s (reusing the existing `Card`/`SimpleTable`/`Icon` primitives from the current Adoption tab).
-- Backend: new query functions added to `packages/worker/src/lib/db/adoption-metrics.ts` (adoption levels, channel stickiness, actions-per-prompt, connector read/write split) and one new function in `value-metrics.ts` (per-user spend). Route: extend `GET /api/analytics/adoption` response shape (or add fields — exact shape decided in the implementation plan) rather than adding a new endpoint, since it's windowed the same way and gated by the same `adminMiddleware`.
+- Backend: four new/changed query functions in `packages/worker/src/lib/db/adoption-metrics.ts` (total user count, channel stickiness, actions-per-prompt, connector read/write split — replacing `getServiceBreadth`). No new work in `value-metrics.ts`: per-user spend and spend-by-model both turn out to already exist via `/api/usage/stats` (`byUser`, `byUserModel`, `byModel`), so Overview reuses that endpoint client-side instead of duplicating cost-computation logic. Route: extend `GET /api/analytics/adoption`'s response shape rather than adding a new endpoint, since it's windowed the same way and gated by the same `adminMiddleware`.
 - Human Intervention Rate hero card is removed. Its underlying data (median minutes blocked on a human decision) stays available in the existing Outcomes tables lower on the page — it's just no longer a hero metric.
 
 ## Sections in detail
@@ -45,7 +45,7 @@ Four cards: Weekly Active Users, Sessions Started, PRs Merged, Total Spend — e
 
 ### 2. "Who's using Valet"
 - Active-users trend chart: daily active users, 30-day window (reuses `getActiveUsersByDay`).
-- "Top users by spend" table: user, spend, session count — new query joining `analytics_events` (model + token columns) to model pricing, grouped by `user_id`, same cost formula the Value tab already uses at the aggregate level.
+- "Top users by spend" table: reuses the existing `useUsageStats` hook's `byUser`/`byUserModel` data (the same data the Billing tab already fetches) via the existing `UserBreakdownTable` component — no new backend work.
 
 ### 3. "How are they using it"
 - Adoption-level bars: All members / Monthly active / Weekly active / Daily active, as a simple 4-bar comparison.
@@ -59,13 +59,13 @@ Hero card: org-wide "Actions Per Prompt" average (`tool_exec` count ÷ `turn_com
 Stat row: PRs merged, sessions, file operations (lines/files changed), conversations (turn count). No time-saved or efficiency figure.
 
 ### 6. "What it costs"
-Summary card: current-window total spend, spend-by-model breakdown — sourced from the same computation the Value tab uses (not duplicated query logic; the Overview route calls the same `computeValueWindow` helper and surfaces a subset), with a link to the full Value tab for the spend-concentration and MTD/QTD views.
+Spend-by-model breakdown, reusing `useUsageStats`'s `byModel` data via the existing `ModelBreakdownTable` component — the same data and component the Billing tab already uses, not a duplicate query.
 
 ## Testing
 
-Unit tests for every new query function against the in-memory migrated SQLite fixture (same pattern as the existing `adoption-metrics.test.ts`), pinning: the read/write keyword classification on real `action_id` values seen in production data (e.g. `sheets.read_spreadsheet` vs `sheets.write_spreadsheet`, `updateSobjectRecord`), adoption-level bar counts against a fixture with a known mix of never-active/monthly-only/weekly/daily users, and actions-per-prompt division-by-zero handling when a channel has zero `turn_complete` events in the window.
+Unit tests for every new query function against the in-memory migrated SQLite fixture (same pattern as the existing `adoption-metrics.test.ts`), pinning: the read/write keyword classification on real `action_id` values seen in production data (e.g. `github.create_pr` vs `github.get_pull_request`), DAU-vs-MAU per channel on a fixture with a known mix of single-day and multi-day users, and actions-per-prompt division-by-zero handling when a channel has zero `turn_complete` events in the window. `getTotalUserCount` gets a trivial count-assertion test; Monthly/Weekly/Daily adoption levels are derived client-side from data already covered by the existing `getActiveUsersByDay`/`getActiveUsersByWeek`/`getReturningUserStats` tests, so they need no new backend test.
 
-## Open questions for the implementation plan
+## Resolved during implementation planning
 
-- Exact keyword list for the read/write action_id classifier (needs a full pass over the distinct `action_id` values across all plugins, not just the ones sampled during design).
-- Whether "Top users by spend" needs any redaction/anonymization given it surfaces individual spend by name to any admin.
+- Read/write keyword classifier: built from a full pass over the 485 distinct `action_id` values in the dev database (not just the sampled ones above) — see the implementation plan for the exact list.
+- "Top users by spend" redaction: none added. Reusing `UserBreakdownTable` means Overview shows individual spend by name to exactly the same admin audience the Billing tab already shows it to today — not a new exposure.
