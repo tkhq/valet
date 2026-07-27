@@ -27,6 +27,20 @@ function formatDateLabel(dateStr: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+function CustomLegend({ payload }: { payload?: Array<{ value: string; color: string }> }) {
+  if (!payload?.length) return null;
+  return (
+    <div className="flex items-center justify-end gap-4 pt-2">
+      {payload.map((entry) => (
+        <div key={entry.value} className="flex items-center gap-1.5">
+          <span className="h-[3px] w-3 rounded-full" style={{ backgroundColor: entry.color }} />
+          <span className="font-mono text-2xs text-neutral-400">{entry.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CustomTooltip({
   active,
   payload,
@@ -71,12 +85,15 @@ export function ChannelTrendChart({ title, data, seriesKeys, emptyLabel, valueFo
       <ResponsiveContainer width="100%" height={260}>
         <AreaChart data={data} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
           <defs>
-            {seriesKeys.map((key, i) => (
-              <linearGradient key={key} id={`grad-${key}`} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={SERIES_COLORS[i % SERIES_COLORS.length]} stopOpacity={0.12} />
-                <stop offset="100%" stopColor={SERIES_COLORS[i % SERIES_COLORS.length]} stopOpacity={0} />
-              </linearGradient>
-            ))}
+            {seriesKeys.map((key, i) => {
+              const slug = key.replace(/[^a-zA-Z0-9_-]/g, '_');
+              return (
+                <linearGradient key={key} id={`grad-${slug}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={SERIES_COLORS[i % SERIES_COLORS.length]} stopOpacity={0.12} />
+                  <stop offset="100%" stopColor={SERIES_COLORS[i % SERIES_COLORS.length]} stopOpacity={0} />
+                </linearGradient>
+              );
+            })}
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="rgb(245 245 245)" vertical={false} />
           <XAxis
@@ -94,21 +111,24 @@ export function ChannelTrendChart({ title, data, seriesKeys, emptyLabel, valueFo
             width={45}
           />
           <Tooltip content={<CustomTooltip valueFormatter={valueFormatter} />} />
-          <Legend />
-          {seriesKeys.map((key, i) => (
-            <Area
-              key={key}
-              type="monotone"
-              dataKey={key}
-              name={key}
-              stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
-              strokeWidth={1.5}
-              fill={`url(#grad-${key})`}
-              dot={false}
-              activeDot={{ r: 3.5, strokeWidth: 2, fill: 'white', stroke: SERIES_COLORS[i % SERIES_COLORS.length] }}
-              connectNulls
-            />
-          ))}
+          <Legend content={<CustomLegend />} />
+          {seriesKeys.map((key, i) => {
+            const slug = key.replace(/[^a-zA-Z0-9_-]/g, '_');
+            return (
+              <Area
+                key={key}
+                type="monotone"
+                dataKey={key}
+                name={key}
+                stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
+                strokeWidth={1.5}
+                fill={`url(#grad-${slug})`}
+                dot={false}
+                activeDot={{ r: 3.5, strokeWidth: 2, fill: 'white', stroke: SERIES_COLORS[i % SERIES_COLORS.length] }}
+                connectNulls
+              />
+            );
+          })}
         </AreaChart>
       </ResponsiveContainer>
     </div>

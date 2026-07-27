@@ -304,10 +304,10 @@ export async function getChannelStickiness(
         SELECT channel, COUNT(DISTINCT user_id) AS dau
         FROM analytics_events
         WHERE event_type = 'turn_complete' AND channel IS NOT NULL AND user_id IS NOT NULL
-          AND date(created_at) = ?
+          AND date(created_at) = ? AND created_at < ?
         GROUP BY channel
       `)
-      .bind(latestDay)
+      .bind(latestDay, endIso)
       .all<{ channel: string; dau: number }>();
     for (const row of dauResult.results ?? []) {
       dauMap.set(row.channel, row.dau);

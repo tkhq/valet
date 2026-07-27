@@ -5,6 +5,12 @@ import { ChannelTrendChart } from './channel-trend-chart';
 import { UserBreakdownTable } from '@/components/usage/user-breakdown-table';
 import { ModelBreakdownTable } from '@/components/usage/model-breakdown-table';
 
+const TRIGGER_LABELS: Record<string, string> = {
+  schedule: 'Schedule (recurring)',
+  webhook: 'Webhook (event-driven)',
+  manual: 'Manual',
+};
+
 function formatPercent(rate: number | null): string {
   if (rate === null) return 'N/A';
   return `${Math.round(rate * 1000) / 10}%`;
@@ -197,10 +203,58 @@ export function OverviewTab({ period }: { period: number }) {
     <div className="space-y-6">
       {/* Summary hero row */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <HeroMetricCard icon={<UsersIcon />} label="Weekly Active Users" value={weeklyActiveUsers.toLocaleString()} index={0} />
-        <HeroMetricCard icon={<BoxIcon />} label="Sessions Started" value={valueData.current.resolvedSessions.toLocaleString()} index={1} />
-        <HeroMetricCard icon={<GitPullRequestIcon />} label="PRs Merged" value={valueData.current.prsMerged.toLocaleString()} index={2} />
-        <HeroMetricCard icon={<DollarIcon />} label="Total Spend" value={formatCost(usageData.hero.totalCost)} index={3} />
+        <HeroMetricCard
+          icon={<UsersIcon />}
+          label="Weekly Active Users"
+          value={weeklyActiveUsers.toLocaleString()}
+          tooltip={
+            <MetricHelp
+              formula="distinct analytics_events users in the most recent week bucket"
+              numbers={`${weeklyActiveUsers} users this week of ${adoption.activeUsers} distinct across the full window`}
+              caveat="Any attributed event counts as activity, including events from automations the user owns."
+            />
+          }
+          index={0}
+        />
+        <HeroMetricCard
+          icon={<BoxIcon />}
+          label="Sessions Started"
+          value={valueData.current.resolvedSessions.toLocaleString()}
+          tooltip={
+            <MetricHelp
+              formula="resolvedSessions from the Value tab's current window"
+              numbers={`${valueData.current.resolvedSessions} sessions ended in this window`}
+              caveat="Same figure the Value tab shows — not recomputed here."
+            />
+          }
+          index={1}
+        />
+        <HeroMetricCard
+          icon={<GitPullRequestIcon />}
+          label="PRs Merged"
+          value={valueData.current.prsMerged.toLocaleString()}
+          tooltip={
+            <MetricHelp
+              formula="agent-authored PRs merged in this window"
+              numbers={`${valueData.current.prsMerged} merged of ${valueData.current.prsMerged + valueData.current.prsClosedUnmerged} resolved`}
+              caveat="Reused from the Value tab, not recomputed."
+            />
+          }
+          index={2}
+        />
+        <HeroMetricCard
+          icon={<DollarIcon />}
+          label="Total Spend"
+          value={formatCost(usageData.hero.totalCost)}
+          tooltip={
+            <MetricHelp
+              formula="LLM + sandbox cost for this window"
+              numbers={`${formatCost(usageData.hero.totalCost)} total across ${usageData.hero.totalSessions} sessions`}
+              caveat="Same total the Billing tab shows — not recomputed here."
+            />
+          }
+          index={3}
+        />
       </div>
 
       {/* Who's using Valet */}
@@ -245,7 +299,7 @@ export function OverviewTab({ period }: { period: number }) {
         <Card title="Enabled Automations">
           <SimpleTable
             columns={['Trigger type', 'Enabled']}
-            rows={adoption.enabledTriggers.map((t) => [t.type, t.count])}
+            rows={adoption.enabledTriggers.map((t) => [TRIGGER_LABELS[t.type] ?? t.type, t.count])}
             empty="No enabled triggers"
           />
         </Card>
@@ -275,10 +329,58 @@ export function OverviewTab({ period }: { period: number }) {
 
       {/* What are the results */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <HeroMetricCard icon={<GitPullRequestIcon />} label="PRs Merged" value={valueData.current.prsMerged.toLocaleString()} index={0} />
-        <HeroMetricCard icon={<BoxIcon />} label="Sessions" value={valueData.current.resolvedSessions.toLocaleString()} index={1} />
-        <HeroMetricCard icon={<BoxIcon />} label="File Operations" value={adoption.filesChanged.toLocaleString()} index={2} />
-        <HeroMetricCard icon={<UsersIcon />} label="Conversations" value={conversations.toLocaleString()} index={3} />
+        <HeroMetricCard
+          icon={<GitPullRequestIcon />}
+          label="PRs Merged"
+          value={valueData.current.prsMerged.toLocaleString()}
+          tooltip={
+            <MetricHelp
+              formula="agent-authored PRs merged in this window"
+              numbers={`${valueData.current.prsMerged} merged of ${valueData.current.prsMerged + valueData.current.prsClosedUnmerged} resolved`}
+              caveat="Reused from the Value tab, not recomputed."
+            />
+          }
+          index={0}
+        />
+        <HeroMetricCard
+          icon={<BoxIcon />}
+          label="Sessions"
+          value={valueData.current.resolvedSessions.toLocaleString()}
+          tooltip={
+            <MetricHelp
+              formula="resolvedSessions from the Value tab's current window"
+              numbers={`${valueData.current.resolvedSessions} sessions ended in this window`}
+              caveat="Same figure the Value tab shows — not recomputed here."
+            />
+          }
+          index={1}
+        />
+        <HeroMetricCard
+          icon={<BoxIcon />}
+          label="File Operations"
+          value={adoption.filesChanged.toLocaleString()}
+          tooltip={
+            <MetricHelp
+              formula="COUNT(*) over session_files_changed, org-wide for this window"
+              numbers={`${adoption.filesChanged} distinct (session, file) changes; ${adoption.linesChanged.toLocaleString()} total lines added+deleted`}
+              caveat="Real diff totals, not an estimate."
+            />
+          }
+          index={2}
+        />
+        <HeroMetricCard
+          icon={<UsersIcon />}
+          label="Conversations"
+          value={conversations.toLocaleString()}
+          tooltip={
+            <MetricHelp
+              formula="SUM(turns) across all channels"
+              numbers={`${conversations} turns across ${adoption.channels.length} channel(s)`}
+              caveat="A turn is one full user↔agent exchange (turn_complete event)."
+            />
+          }
+          index={3}
+        />
       </div>
 
       {/* What it costs */}
@@ -299,7 +401,7 @@ export function OverviewTab({ period }: { period: number }) {
         <Card title="Outcomes by Trigger Type">
           <SimpleTable
             columns={['Trigger type', 'Completed', 'Failed', 'Cancelled']}
-            rows={autonomy.outcomesByTriggerType.map((t) => [t.triggerType, t.completed, t.failed, t.cancelled])}
+            rows={autonomy.outcomesByTriggerType.map((t) => [TRIGGER_LABELS[t.triggerType] ?? t.triggerType, t.completed, t.failed, t.cancelled])}
             empty="No terminal production runs in this window"
           />
         </Card>

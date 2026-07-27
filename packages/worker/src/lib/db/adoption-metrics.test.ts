@@ -278,6 +278,20 @@ describe('adoption-metrics db helpers', () => {
       ]);
     });
 
+    it('excludes events on the latest day that fall at or after the window end from DAU', async () => {
+      // windowEnd lands mid-day on 07-03 (the day that will resolve as "latest day").
+      // u1's event is before windowEnd and sets latestDay to 07-03. u2's event is on the
+      // same calendar date but chronologically at/after windowEnd, so it must not count
+      // toward that day's DAU even though the DAU subquery only bucketed by date().
+      const windowEnd = '2026-07-03T12:00:00.000Z';
+      seedEvent(sqlite, { id: 'stb1', userId: 'u1', channel: 'slack', createdAt: '2026-07-03T08:00:00.000Z' });
+      seedEvent(sqlite, { id: 'stb2', userId: 'u2', channel: 'slack', createdAt: '2026-07-03T18:00:00.000Z' });
+
+      const rows = await getChannelStickiness(db, START, windowEnd);
+      const slack = rows.find((r) => r.channel === 'slack');
+      expect(slack?.dau).toBe(1);
+    });
+
     it('returns an empty array when there is no channel activity', async () => {
       expect(await getChannelStickiness(db, START, END)).toEqual([]);
     });
