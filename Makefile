@@ -7,7 +7,7 @@
 
 .PHONY: help install setup clean \
         dev dev-worker dev-opencode dev-client dev-all \
-        dev-api-node dev-web dev-local dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator e2e \
+        dev-api-node dev-web dev-local dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator e2e e2e-clean \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
         test test-unit test-integration test-e2e test-pg \
@@ -156,8 +156,22 @@ smoke-orchestrator: ## Orchestrator smoke: ensure + one real Anthropic turn (no 
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (set it in .env or the environment)$(NC)"; exit 1; fi; \
 	$(PNPM) --filter @valet/api smoke:orchestrator
 
-e2e: ## Unified e2e scorecard (see docs/specs/2026-07-25-e2e-runner-design.md). E2E_ARGS="--list|--only <ids>|--json|--verbose"
+e2e: ## Unified e2e scorecard (see docs/specs/2026-07-25-e2e-runner-design.md). E2E_ARGS="--list|--doctor|--only <ids>|--json|--verbose"
 	$(PNPM) exec tsx scripts/e2e.ts $(E2E_ARGS)
+
+e2e-clean: ## Sweep state leaked by crashed e2e runs. Idempotent. NOTE: removes ALL local valet-sandbox-* containers, including dev-local session sandboxes (they are recreated on demand).
+	@echo "$(YELLOW)Removing valet sandbox containers…$(NC)"
+	@for c in $$(docker ps -aq --filter "name=valet-sandbox-" 2>/dev/null); do docker rm -f $$c; done
+	@echo "$(YELLOW)Stopping e2e keycloak…$(NC)"
+	-@$(DOCKER_COMPOSE) --profile keycloak rm -sf keycloak 2>/dev/null || true
+	@echo "$(YELLOW)Removing fullstack scratch dir…$(NC)"
+	rm -rf /tmp/valet-e2e-fullstack
+	@echo "$(YELLOW)Removing the valet-e2e helm release + namespaces (rancher-desktop only)…$(NC)"
+	-@if command -v helm >/dev/null && kubectl --context rancher-desktop config get-contexts rancher-desktop >/dev/null 2>&1; then \
+		helm --kube-context rancher-desktop -n valet-e2e uninstall valet-e2e 2>/dev/null || true; \
+		kubectl --context rancher-desktop delete namespace valet-e2e valet-e2e-sandboxes --ignore-not-found --wait=false; \
+	else echo "  (no rancher-desktop context — skipping k8s cleanup)"; fi
+	@echo "$(GREEN)e2e state clean.$(NC)"
 
 # ==========================================
 # agent-sandbox (vendored, Rancher Desktop only)

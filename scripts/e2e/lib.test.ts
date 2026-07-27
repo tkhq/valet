@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   DEDICATED_INTEGRATION_FILES,
+  doctorExitCode,
+  renderDoctor,
   truncateOutput,
   INTEGRATION_LIST_FILES,
   missingNeeds,
@@ -13,6 +15,7 @@ import {
   selectSteps,
   toJsonReport,
   STEPS,
+  type DoctorCheck,
   type Probes,
   type StepResult,
 } from "./lib.js";
@@ -29,15 +32,15 @@ const ALL_TRUE: Probes = {
 };
 
 describe("STEPS", () => {
-  it("has the spec's 32 unique rows", () => {
-    expect(STEPS).toHaveLength(32);
-    expect(new Set(STEPS.map((s) => s.id)).size).toBe(32);
+  it("has the spec's 33 unique rows", () => {
+    expect(STEPS).toHaveLength(33);
+    expect(new Set(STEPS.map((s) => s.id)).size).toBe(33);
   });
 
   it("includes every spec row id", () => {
     const ids = STEPS.map((s) => s.id);
     for (const id of [
-      "typecheck", "unit", "engine-unit", "workflow-unit", "gateway-unit",
+      "typecheck", "conventions", "unit", "engine-unit", "workflow-unit", "gateway-unit",
       "runner-unit", "plugins-unit", "sandbox-local", "sandbox-k8s-unit",
       "store-postgres-unit", "web-build", "api-bundle", "helm-golden",
       "sandbox-docker-unit", "registry-drift",
@@ -190,6 +193,33 @@ describe("scorecard", () => {
   });
 });
 
+describe("doctor", () => {
+  const checks: DoctorCheck[] = [
+    { id: "node", label: "Node >= 22", ok: true, required: true, detail: "v22.1.0" },
+    { id: "sdk", label: "@valet/sdk built", ok: false, required: true, hint: "run `pnpm --filter @valet/sdk build`" },
+    { id: "key", label: "Anthropic key", ok: false, required: false, hint: "set ANTHROPIC_API_KEY" },
+  ];
+
+  it("renders ✓ with detail, ✗ for required misses, ⊘ for optional ones", () => {
+    const out = renderDoctor(checks, 15, 33);
+    expect(out).toContain("✓ Node >= 22 — v22.1.0");
+    expect(out).toContain("✗ @valet/sdk built — run `pnpm --filter @valet/sdk build`");
+    expect(out).toContain("⊘ Anthropic key — set ANTHROPIC_API_KEY");
+    expect(out).toContain("1 required check(s) failing");
+  });
+
+  it("reports ready + armed count when all required checks pass", () => {
+    const ready = checks.filter((c) => c.id !== "sdk");
+    const out = renderDoctor(ready, 15, 33);
+    expect(out).toContain("ready — 15/33 steps armed");
+  });
+
+  it("doctorExitCode: 1 only for required failures", () => {
+    expect(doctorExitCode(checks)).toBe(1);
+    expect(doctorExitCode(checks.filter((c) => c.id !== "sdk"))).toBe(0);
+  });
+});
+
 describe("truncateOutput", () => {
   it("passes short output through untouched", () => {
     expect(truncateOutput("a\nb\nc")).toBe("a\nb\nc");
@@ -211,7 +241,7 @@ describe("selectSteps", () => {
   });
 
   it("returns all steps without --only", () => {
-    expect(selectSteps(STEPS)).toHaveLength(32);
+    expect(selectSteps(STEPS)).toHaveLength(33);
   });
 
   it("throws on unknown ids", () => {

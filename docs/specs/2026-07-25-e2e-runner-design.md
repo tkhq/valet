@@ -38,9 +38,41 @@ a shared full-stack scenario driver.
   and replayed only on failure (or with `--verbose`).
 - **Flags:** `--json` (machine-readable scorecard, mirrors the CLI
   convention), `--only <step>[,<step>…]` (run a subset), `--list` (print steps
-  + armed state without running), `--verbose`.
+  + armed state without running), `--doctor` (environment readiness checklist
+  without running suites — see below), `--verbose`.
 - **Exit code:** nonzero iff any *armed* step failed. Skipped steps never fail
   the run.
+
+### `--doctor` — environment readiness
+
+The initialization-phase check for a fresh machine or agent: prints a ✓/✗/⊘
+checklist in seconds instead of failing suites 15 minutes in. *Required*
+checks (✗ fails, exit 1) gate every run: Node ≥ 22, `pnpm install` done,
+`@valet/shared` + `@valet/sdk` dists built (the only two workspace packages
+consumed via built output). *Optional* checks (⊘, exit 0) widen coverage:
+`.env.e2e` present, cred tiers, Docker/helm/kubectl. Every miss prints its
+repair command. Pure rendering (`renderDoctor`/`doctorExitCode`) lives in
+`lib.ts` and is unit-tested; the fs/probe wiring lives in `e2e.ts`.
+
+### `make e2e-clean` — leaked-state sweep
+
+Crashed runs can leak state the happy path cleans up: docker sandbox
+containers (`valet-sandbox-*` — teardown is SIGKILL, so a crash between
+session-create and session-delete orphans the container), the `valet-e2e`
+helm release + `valet-e2e`/`valet-e2e-sandboxes` namespaces, the
+`/tmp/valet-e2e-fullstack` scratch dir, and the warm keycloak container.
+`make e2e-clean` sweeps all of them, idempotently, with kubectl/helm pinned
+to the `rancher-desktop` context (skipped when that context is absent).
+Caveat: the container sweep matches ALL `valet-sandbox-*` containers,
+including dev-local session sandboxes — acceptable pre-1.0 (they are
+recreated on demand) and stated in the target's help text.
+
+### Node version enforcement (layered)
+
+Three layers catch the Node-20 trap (`WebSocket is not defined`, 15 minutes
+into a run): root `package.json` `engines.node >= 22` + `.npmrc
+engine-strict=true` fail `pnpm install`/`pnpm run` immediately; the runner's
+preflight exits 2 with the `nvm use 22` hint; `--doctor` reports the version.
 
 ## Steps (the scorecard rows)
 
@@ -58,6 +90,7 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 | Step | Wraps |
 |---|---|
 | `typecheck` | root `pnpm typecheck` (all packages except frozen `worker`) |
+| `conventions` | `scripts/check-conventions.ts` — recurring review rules as executable checks: `@ts-ignore`/`@ts-expect-error` banned, `as unknown as` ratcheted via allowlist (`scripts/e2e/conventions.ts`), every `ws`-consuming package declares both `@types/ws` and `@types/node`. Legacy packages (worker, client, runner) excluded. |
 | `unit` | root `pnpm test` (`shared`, `sdk`, `api`, `web` projects) |
 | `engine-unit` | `pnpm --filter @valet/engine test` — store contract, compaction, gates, signals, kill-mid-turn, model switching |
 | `workflow-unit` | `pnpm --filter @valet/workflow test` — DAG interpreter, node executors, expression eval, checkpoints |
