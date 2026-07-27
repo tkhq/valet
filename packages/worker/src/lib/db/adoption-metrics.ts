@@ -290,6 +290,49 @@ export async function getChannelStickiness(
   }));
 }
 
+export interface ActionsPerPromptRow {
+  day: string;
+  channel: string;
+  toolExecs: number;
+  turns: number;
+}
+
+/**
+ * Raw daily tool_exec / turn_complete counts per channel — the "how agentic
+ * is their work" trend. Division into a ratio (and null-on-zero-turns
+ * handling) is a presentation concern left to callers, since a 0-turn day
+ * is meaningfully different from a 0-tool-call day.
+ */
+export async function getActionsPerPromptByChannel(
+  db: D1Database,
+  startIso: string,
+  endIso: string,
+): Promise<ActionsPerPromptRow[]> {
+  const result = await db
+    .prepare(`
+      SELECT
+        date(created_at) AS day,
+        channel,
+        COALESCE(SUM(CASE WHEN event_type = 'tool_exec' THEN 1 ELSE 0 END), 0) AS tool_execs,
+        COALESCE(SUM(CASE WHEN event_type = 'turn_complete' THEN 1 ELSE 0 END), 0) AS turns
+      FROM analytics_events
+      WHERE channel IS NOT NULL
+        AND event_type IN ('tool_exec', 'turn_complete')
+        AND created_at >= ? AND created_at < ?
+      GROUP BY day, channel
+      ORDER BY day, channel
+    `)
+    .bind(startIso, endIso)
+    .all<{ day: string; channel: string; tool_execs: number; turns: number }>();
+
+  return (result.results ?? []).map((r) => ({
+    day: r.day,
+    channel: r.channel,
+    toolExecs: r.tool_execs,
+    turns: r.turns,
+  }));
+}
+
 // ─── Workflow autonomy ──────────────────────────────────────────────────────
 
 // A human decision is resolved_by IS NOT NULL — never a status value.

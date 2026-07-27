@@ -13,6 +13,8 @@ import {
   getServiceBreadth,
   getChannelStickiness,
   type ChannelStickinessRow,
+  getActionsPerPromptByChannel,
+  type ActionsPerPromptRow,
   getWorkflowAutonomyStats,
   getWorkflowOutcomesByWorkflow,
   getWorkflowOutcomesByTriggerType,
@@ -266,6 +268,29 @@ describe('adoption-metrics db helpers', () => {
 
     it('returns an empty array when there is no channel activity', async () => {
       expect(await getChannelStickiness(db, START, END)).toEqual([]);
+    });
+  });
+
+  describe('getActionsPerPromptByChannel', () => {
+    it('buckets tool_exec and turn_complete counts per day and channel', async () => {
+      seedEvent(sqlite, { id: 'ap1', type: 'tool_exec', channel: 'slack', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap2', type: 'tool_exec', channel: 'slack', createdAt: '2026-07-02T10:01:00.000Z' });
+      seedEvent(sqlite, { id: 'ap3', type: 'tool_exec', channel: 'slack', createdAt: '2026-07-02T10:02:00.000Z' });
+      seedEvent(sqlite, { id: 'ap4', type: 'turn_complete', channel: 'slack', createdAt: '2026-07-02T10:03:00.000Z' });
+      // A channel with turns but zero tool calls that day — division-by-zero
+      // is a frontend concern (backend just reports the raw counts).
+      seedEvent(sqlite, { id: 'ap5', type: 'turn_complete', channel: 'web', createdAt: '2026-07-02T11:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap6', type: 'turn_complete', channel: 'web', createdAt: '2026-07-02T11:05:00.000Z' });
+      // Excluded: null channel, unrelated event type, out-of-window.
+      seedEvent(sqlite, { id: 'ap7', type: 'tool_exec', channel: null, createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap8', type: 'llm_call', channel: 'slack', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap9', type: 'tool_exec', channel: 'slack', createdAt: '2026-06-01T10:00:00.000Z' });
+
+      const rows = await getActionsPerPromptByChannel(db, START, END);
+      expect(rows).toEqual([
+        { day: '2026-07-02', channel: 'slack', toolExecs: 3, turns: 1 },
+        { day: '2026-07-02', channel: 'web', toolExecs: 0, turns: 2 },
+      ]);
     });
   });
 
