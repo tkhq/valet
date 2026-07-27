@@ -349,6 +349,61 @@ describeE2E("CLI e2e against a real `valet serve`", () => {
     }
   }, 30_000);
 
+  // ── handoff (keyless: delivery is HTTP + DB; no turn is awaited) ───────────
+  // The --new-session path is NOT driven here: with a repo binding the serve
+  // would try a real `git clone` during workspace prep. It's covered by the
+  // stub-deps unit suite (handoff.test.ts).
+  describe("handoff", () => {
+    it("handoff <file> --session delivers the doc with a provenance header", async () => {
+      const workspace = mkdtempSync(join(tmpdir(), "valet-cli-e2e-ho-ws-"));
+      const docDir = mkdtempSync(join(tmpdir(), "valet-cli-e2e-ho-doc-"));
+      const docPath = join(docDir, "handoff.md");
+      writeFileSync(docPath, "# Fix the flaky test\n\nDetails of the handoff.\n");
+      try {
+        const created = await runCli(["sessions", "new", "--workspace", workspace, "--json"], dataEnv());
+        expect(created.code, `stderr: ${created.stderr}`).toBe(0);
+        const session = JSON.parse(created.stdout) as SessionDetail;
+
+        const r = await runCli(["handoff", docPath, "--session", session.id, "--json"], dataEnv());
+        expect(r.code, `stderr: ${r.stderr}`).toBe(0);
+        const receipt = JSON.parse(r.stdout) as {
+          sessionId: string;
+          threadId: string;
+          messageId: string;
+          url: string;
+        };
+        expect(receipt.sessionId).toBe(session.id);
+        expect(receipt.messageId).not.toBe("");
+        expect(receipt.url).toContain(session.id);
+
+        // The doc must be persisted as a user message carrying the provenance
+        // header — read it back over the same REST surface the web UI uses.
+        const res = await fetch(
+          `${serve.url}/api/sessions/${session.id}/messages?threadId=${encodeURIComponent(receipt.threadId)}`,
+        );
+        expect(res.status).toBe(200);
+        const bodyText = JSON.stringify(await res.json());
+        expect(bodyText).toContain("[Handoff from ");
+        expect(bodyText).toContain("Fix the flaky test");
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+        rmSync(docDir, { recursive: true, force: true });
+      }
+    }, 60_000);
+
+    it("handoff without a doc → exit 2 (Usage)", async () => {
+      const r = await runCli(["handoff"], dataEnv());
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("handoff doc is required");
+    }, 20_000);
+
+    it("handoff --session and --new-session together → exit 2 (Usage)", async () => {
+      const r = await runCli(["handoff", "doc.md", "--session", "s1", "--new-session"], dataEnv());
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("mutually exclusive");
+    }, 20_000);
+  });
+
   // ── Turn-dependent: needs a REAL ANTHROPIC_API_KEY. SKIPS without one. ──────
   describeIfKey("turn-dependent (real ANTHROPIC_API_KEY)", () => {
     it("send --json drives a turn to completed → NDJSON wire events, exit 0", async () => {
@@ -365,6 +420,33 @@ describeE2E("CLI e2e against a real `valet serve`", () => {
       expect(settled.length).toBeGreaterThan(0);
       expect(settled.some((e) => e.type === "submission.settled" && e.outcome === "completed")).toBe(true);
     }, 120_000);
+
+    it("handoff to the orchestrator with --wait follows the turn to exit 0", async () => {
+      const docDir = mkdtempSync(join(tmpdir(), "valet-cli-e2e-ho-wait-"));
+      const docPath = join(docDir, "handoff.md");
+      writeFileSync(docPath, "# Quick check\n\nReply with the single word: done.\n");
+      try {
+        const r = await runCli(["handoff", docPath, "--wait", "--json"], dataEnv(), 150_000);
+        expect(r.code, `stderr: ${r.stderr}`).toBe(0);
+        // Output is the pretty-printed receipt (multi-line JSON) followed by
+        // one NDJSON wire event per line (--wait streams the turn).
+        expect(r.stdout).toMatch(/"sessionId":\s*"[^"]+"/);
+        const events = r.stdout
+          .split("\n")
+          .filter((l) => l.startsWith("{") && l.trimEnd().endsWith("}"))
+          .flatMap((l) => {
+            try {
+              const parsed = JSON.parse(l) as WireEvent;
+              return "type" in parsed ? [parsed] : [];
+            } catch {
+              return [];
+            }
+          });
+        expect(events.length).toBeGreaterThan(0);
+      } finally {
+        rmSync(docDir, { recursive: true, force: true });
+      }
+    }, 180_000);
 
     it("gates list --json → exit 0 (empty list is fine)", async () => {
       const r = await runCli(["gates", "list", "--json"], dataEnv());
