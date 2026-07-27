@@ -10,7 +10,7 @@ import {
   getEnabledTriggerCounts,
   getWorkflowRunsByDay,
   getChannelBreadth,
-  getServiceBreadth,
+  getConnectorBreadth,
   getChannelStickiness,
   type ChannelStickinessRow,
   getActionsPerPromptByChannel,
@@ -106,6 +106,8 @@ function seedInvocation(
     executionId?: string | null;
     sessionId?: string | null;
     service?: string;
+    actionId?: string;
+    userId?: string;
     status?: string;
     resolvedBy?: string | null;
     resolvedAt?: string | null;
@@ -115,11 +117,13 @@ function seedInvocation(
   exec(
     sqlite,
     `INSERT INTO action_invocations (id, session_id, workflow_execution_id, user_id, service, action_id, risk_level, resolved_mode, status, resolved_by, resolved_at, created_at)
-     VALUES (?, ?, ?, 'u1', ?, 'act', 'high', 'require_approval', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 'high', 'require_approval', ?, ?, ?, ?)`,
     opts.id,
     opts.sessionId ?? null,
     opts.executionId ?? null,
+    opts.userId ?? 'u1',
     opts.service ?? 'github',
+    opts.actionId ?? 'act',
     opts.status ?? 'executed',
     opts.resolvedBy ?? null,
     opts.resolvedAt ?? null,
@@ -232,19 +236,27 @@ describe('adoption-metrics db helpers', () => {
       ]);
     });
 
-    it('counts services from action_invocations, excluding test-mode workflow rows', async () => {
-      seedExecution(sqlite, { id: 'wx-t', status: 'completed', mode: 'test', startedAt: '2026-07-02 00:00:00', completedAt: '2026-07-02 00:10:00' });
-      seedInvocation(sqlite, { id: 'i1', sessionId: 's1', service: 'github', createdAt: '2026-07-02T10:00:00.000Z' });
-      seedInvocation(sqlite, { id: 'i2', sessionId: 's1', service: 'github', createdAt: '2026-07-03 10:00:00' });
-      seedInvocation(sqlite, { id: 'i3', sessionId: 's1', service: 'slack', createdAt: '2026-07-03T11:00:00.000Z' });
-      seedInvocation(sqlite, { id: 'i4', executionId: 'wx-t', service: 'linear', createdAt: '2026-07-02T10:00:00.000Z' });
-      seedInvocation(sqlite, { id: 'i5', sessionId: 's1', service: 'notion', createdAt: '2026-06-01T10:00:00.000Z' });
+    it('classifies reads vs writes by action_id keyword and counts distinct users', async () => {
+      seedInvocation(sqlite, { id: 'i1', sessionId: 's1', service: 'github', actionId: 'github.get_pull_request', userId: 'u1', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i2', sessionId: 's1', service: 'github', actionId: 'github.get_pull_request', userId: 'u1', createdAt: '2026-07-03T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i3', sessionId: 's1', service: 'github', actionId: 'github.create_pr', userId: 'u2', createdAt: '2026-07-03T11:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i4', sessionId: 's1', service: 'slack', actionId: 'slack.send_message', userId: 'u3', createdAt: '2026-07-03T12:00:00.000Z' });
 
-      const rows = await getServiceBreadth(db, START, END);
+      const rows = await getConnectorBreadth(db, START, END);
       expect(rows).toEqual([
-        { service: 'github', invocations: 2 },
-        { service: 'slack', invocations: 1 },
+        { service: 'github', users: 2, reads: 2, writes: 1 },
+        { service: 'slack', users: 1, reads: 0, writes: 1 },
       ]);
+    });
+
+    it('excludes invocations from mode=test workflow runs', async () => {
+      seedExecution(sqlite, { id: 'wx-t', status: 'completed', mode: 'test', startedAt: '2026-07-02 00:00:00', completedAt: '2026-07-02 00:10:00' });
+      seedInvocation(sqlite, { id: 'i5', sessionId: 's1', service: 'github', actionId: 'github.get_pull_request', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i6', executionId: 'wx-t', service: 'linear', actionId: 'linear.get_issue', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i7', sessionId: 's1', service: 'notion', actionId: 'notion.get_page', createdAt: '2026-06-01T10:00:00.000Z' });
+
+      const rows = await getConnectorBreadth(db, START, END);
+      expect(rows).toEqual([{ service: 'github', users: 1, reads: 1, writes: 0 }]);
     });
 
     it('computes DAU (latest day in window) and MAU (whole window) per channel', async () => {

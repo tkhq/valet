@@ -185,38 +185,69 @@ export async function getChannelBreadth(
   return (result.results ?? []).map((r) => ({ channel: r.channel, turns: r.turns }));
 }
 
-export interface ServiceBreadthRow {
+export interface ConnectorBreadthRow {
   service: string;
-  invocations: number;
+  users: number;
+  reads: number;
+  writes: number;
 }
 
+// Coarse keyword classifier over action_id, same spirit as
+// getWorkflowFailureReasons' keyword buckets: approximate, not exhaustive.
+// Verbs were chosen from the actual action_id catalog across all plugins
+// (github, slack, linear, google_workspace, salesforce, etc.) — ambiguous
+// verbs ('run', 'search', 'query') are deliberately NOT matched here, since
+// they cover both reads (query_prometheus, runSoqlQuery) and writes
+// (workflows.run) and a false-positive miscounts a read as a write more
+// often than the reverse. Unmatched action_ids default to reads.
+const WRITE_ACTION_ID_LIKE = `(
+  ai.action_id LIKE '%create%' OR ai.action_id LIKE '%update%' OR ai.action_id LIKE '%delete%' OR
+  ai.action_id LIKE '%insert%' OR ai.action_id LIKE '%append%' OR ai.action_id LIKE '%send%' OR
+  ai.action_id LIKE '%post%' OR ai.action_id LIKE '%write%' OR ai.action_id LIKE '%replace%' OR
+  ai.action_id LIKE '%remove%' OR ai.action_id LIKE '%modify%' OR ai.action_id LIKE '%merge%' OR
+  ai.action_id LIKE '%move_%' OR ai.action_id LIKE '%rename%' OR ai.action_id LIKE '%format%' OR
+  ai.action_id LIKE '%protect%' OR ai.action_id LIKE '%resize%' OR ai.action_id LIKE '%freeze%' OR
+  ai.action_id LIKE '%duplicate%' OR ai.action_id LIKE '%upload%' OR ai.action_id LIKE '%save%' OR
+  ai.action_id LIKE '%reply%' OR ai.action_id LIKE '%resolve_comment%' OR ai.action_id LIKE '%apply_%' OR
+  ai.action_id LIKE '%dm_%' OR ai.action_id LIKE '%disable%' OR ai.action_id LIKE '%enable%' OR
+  ai.action_id LIKE '%set_%' OR ai.action_id LIKE '%add_%' OR ai.action_id LIKE '%add-%' OR
+  ai.action_id LIKE '%clear_%' OR ai.action_id LIKE '%batch_%' OR ai.action_id LIKE '%push_files%' OR
+  ai.action_id IN ('workflows.run', 'triggers.run', 'triggers.disable')
+)`;
+
 /**
- * Integration services exercised in the window. action_invocations.service
- * is NOT NULL at the write site (every gated tool action inserts a row, and
- * policy auto-allows insert directly as executed), which makes it the
- * populated service column — tool_exec events carry only tool_name.
- * Invocations from mode='test' workflow runs are excluded like every other
- * workflow metric.
+ * Integration services exercised in the window, with a distinct-user count
+ * and a coarse read/write split (see WRITE_ACTION_ID_LIKE). Invocations from
+ * mode='test' workflow runs are excluded like every other workflow metric.
  */
-export async function getServiceBreadth(
+export async function getConnectorBreadth(
   db: D1Database,
   startIso: string,
   endIso: string,
-): Promise<ServiceBreadthRow[]> {
+): Promise<ConnectorBreadthRow[]> {
   const result = await db
     .prepare(`
-      SELECT ai.service AS service, COUNT(*) AS invocations
+      SELECT
+        ai.service AS service,
+        COUNT(DISTINCT ai.user_id) AS users,
+        COALESCE(SUM(CASE WHEN NOT ${WRITE_ACTION_ID_LIKE} THEN 1 ELSE 0 END), 0) AS reads,
+        COALESCE(SUM(CASE WHEN ${WRITE_ACTION_ID_LIKE} THEN 1 ELSE 0 END), 0) AS writes
       FROM action_invocations ai
       LEFT JOIN workflow_executions we ON ai.workflow_execution_id = we.id
       WHERE (we.id IS NULL OR we.mode != 'test')
         AND datetime(ai.created_at) >= datetime(?) AND datetime(ai.created_at) < datetime(?)
       GROUP BY ai.service
-      ORDER BY invocations DESC
+      ORDER BY (reads + writes) DESC
     `)
     .bind(startIso, endIso)
-    .all<{ service: string; invocations: number }>();
+    .all<{ service: string; users: number; reads: number; writes: number }>();
 
-  return (result.results ?? []).map((r) => ({ service: r.service, invocations: r.invocations }));
+  return (result.results ?? []).map((r) => ({
+    service: r.service,
+    users: r.users,
+    reads: r.reads,
+    writes: r.writes,
+  }));
 }
 
 export interface ChannelStickinessRow {
