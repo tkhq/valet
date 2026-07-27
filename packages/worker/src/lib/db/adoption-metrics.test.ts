@@ -6,6 +6,7 @@ import {
   getActiveUsersByDay,
   getActiveUsersByWeek,
   getReturningUserStats,
+  getTotalUserCount,
   getEnabledTriggerCounts,
   getWorkflowRunsByDay,
   getChannelBreadth,
@@ -166,6 +167,15 @@ describe('adoption-metrics db helpers', () => {
       const stats = await getReturningUserStats(db, START, END);
       expect(stats.activeUsers).toBe(2); // u1 + u2 (null user and out-of-window u3 excluded)
       expect(stats.returningUsers).toBe(1); // only u1 spans two weeks
+    });
+  });
+
+  describe('getTotalUserCount', () => {
+    it('counts all registered users, not just active ones', async () => {
+      // beforeEach already seeded u1, u2, u3 with no activity.
+      expect(await getTotalUserCount(db)).toBe(3);
+      seedUser(sqlite, 'u4');
+      expect(await getTotalUserCount(db)).toBe(4);
     });
   });
 

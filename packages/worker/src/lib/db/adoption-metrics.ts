@@ -95,6 +95,15 @@ export async function getReturningUserStats(
   };
 }
 
+/** All registered users, regardless of activity — the "All members" baseline. */
+export async function getTotalUserCount(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS count FROM users`)
+    .bind()
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
 // ─── Recurring-automation embeddedness ──────────────────────────────────────
 
 export interface EnabledTriggerRow {
