@@ -936,6 +936,14 @@ function ThreadSidebarFallback() {
       <div className="border-b border-neutral-100 px-3 py-2 dark:border-neutral-800/50">
         <Skeleton className="h-4 w-16" />
       </div>
+      {/* Placeholder for the tab bar + search row so the thread list doesn't
+          shift vertically when the real sidebar mounts. */}
+      <div className="border-b border-neutral-100 px-2 py-1.5 dark:border-neutral-800/50">
+        <Skeleton className="h-4 w-full" />
+      </div>
+      <div className="border-b border-neutral-100 px-2 py-1.5 dark:border-neutral-800/50">
+        <Skeleton className="h-3 w-2/3" />
+      </div>
       <div className="space-y-2 px-3 py-3">
         <Skeleton className="h-7 w-full" />
         <Skeleton className="h-7 w-full" />

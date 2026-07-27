@@ -269,9 +269,18 @@ export interface BucketFetchPlan {
    * mixed-origin page we're actually getting back.
    */
   bucket: ThreadOriginBucketId | undefined;
-  /** `pageSize` to request. Already clamped to `MAX_THREADS_PER_REQUEST`. */
-  pageSize: number;
-  /** Max rows to RENDER for this bucket — 30 per "page" of Load more. */
+  /**
+   * 1-based OFFSET page numbers to request, ascending and contiguous from 1.
+   * One request per `Load more` page. This is what makes the sidebar's
+   * pagination UNBOUNDED — see the note on `planBucketFetch` below.
+   */
+  requestPages: number[];
+  /**
+   * `pageSize` used for EVERY request in `requestPages`. Constant across pages
+   * so `page` offsets line up. Already clamped to `MAX_THREADS_PER_REQUEST`.
+   */
+  requestPageSize: number;
+  /** Max rows to RENDER for this bucket — `basePageSize` per Load-more page. */
   visibleLimit: number;
   /** True when we're deliberately overfetching to compensate for skew. */
   overfetching: boolean;
@@ -280,10 +289,35 @@ export interface BucketFetchPlan {
 /**
  * Decide what to fetch for a bucket-scoped thread list.
  *
- * Happy path (worker honors `originBucket`): ask the server for exactly the
- * rows we intend to render.
- * Skewed path: ask for `SKEW_OVERFETCH_FACTOR`x as many MIXED rows without the
- * (ignored) bucket param, and let `selectVisibleBucketPage` filter + cap.
+ * ROUND 5 — this used to plan ONE request whose `pageSize` grew with the
+ * Load-more counter (`pageSize: basePageSize * pages`). That capped the sidebar
+ * dead at `MAX_THREADS_PER_REQUEST`, because a "cumulative window" cannot grow
+ * past the worker's per-request row clamp:
+ *
+ *   - happy path: pages 1..3 asked for 30/60/90 rows, page 4+ all asked for
+ *     100 — so `Load more` stopped adding anything past 100 threads;
+ *   - skewed path: `pageSize` was ALREADY 100 on the first page
+ *     (`30 * SKEW_OVERFETCH_FACTOR`, clamped), so the very first render was
+ *     also the last one. When the selected bucket happened to hold exactly
+ *     `visibleLimit` rows within that window, `hasMore` evaluated false and the
+ *     `Load more` button never even appeared — Conner's "exactly 30 threads and
+ *     no more".
+ *
+ * The fix is to stop growing one request and instead ACCUMULATE offset pages:
+ * request `page: 1..pages` at a CONSTANT `requestPageSize`, and merge the
+ * responses (`mergeThreadPages`). Offsets have no ceiling, so `Load more` is
+ * genuinely infinite in both worlds. `page`/`pageSize` are honored by the old
+ * deployed worker too — they predate this branch — so this works under skew.
+ *
+ * Happy path (worker honors `originBucket`): each page is `basePageSize` rows
+ * of the bucket, so page N adds exactly `basePageSize` renderable threads.
+ * Skewed path: drop the (ignored) bucket param and request
+ * `SKEW_OVERFETCH_FACTOR`x bigger MIXED pages so client-side filtering has
+ * enough material to fill a tab, then filter + cap in
+ * `selectVisibleBucketPage`. A Load-more click there may reveal FEWER than
+ * `basePageSize` new rows (it buys the next mixed page, whose bucket share is
+ * whatever it is) — but it always makes progress and never dead-ends while the
+ * server still has rows.
  *
  * `visibleLimit` is identical in both cases — that's the point. "Up to
  * `basePageSize` per tab, +`basePageSize` per Load more" holds either way.
@@ -300,27 +334,107 @@ export function planBucketFetch({
   basePageSize: number;
   skewed: boolean;
 }): BucketFetchPlan {
-  const visibleLimit = basePageSize * Math.max(1, pages);
+  const safePages = Number.isFinite(pages) ? Math.max(1, Math.floor(pages)) : 1;
+  const requestPages = Array.from({ length: safePages }, (_, i) => i + 1);
+  const visibleLimit = basePageSize * safePages;
   if (!skewed) {
     return {
       bucket,
-      pageSize: Math.min(visibleLimit, MAX_THREADS_PER_REQUEST),
+      requestPages,
+      requestPageSize: Math.min(basePageSize, MAX_THREADS_PER_REQUEST),
       visibleLimit,
       overfetching: false,
     };
   }
   return {
     bucket: undefined,
-    pageSize: Math.min(visibleLimit * SKEW_OVERFETCH_FACTOR, MAX_THREADS_PER_REQUEST),
+    requestPages,
+    requestPageSize: Math.min(basePageSize * SKEW_OVERFETCH_FACTOR, MAX_THREADS_PER_REQUEST),
     visibleLimit,
     overfetching: true,
   };
+}
+
+/**
+ * Flatten the accumulated Load-more pages into one newest-first list,
+ * de-duplicating by thread id and keeping the FIRST occurrence.
+ *
+ * Dedupe is load-bearing, not paranoia:
+ *  - offset pagination over a list ordered by `last_active_at DESC` shifts as
+ *    threads receive messages, so a row can appear on two adjacent pages;
+ *  - the worker clamps `page` to `totalPages`
+ *    (packages/worker/src/lib/db/threads.ts:402), so requesting one page past
+ *    the end re-serves the LAST page verbatim.
+ *
+ * Missing pages (still loading) are skipped, so already-loaded pages keep
+ * rendering while a newly-requested one is in flight.
+ */
+export function mergeThreadPages(
+  pages: readonly (readonly SessionThread[] | undefined)[],
+): SessionThread[] {
+  const seen = new Set<string>();
+  const merged: SessionThread[] = [];
+  for (const page of pages) {
+    if (!page) continue;
+    for (const thread of page) {
+      if (seen.has(thread.id)) continue;
+      seen.add(thread.id);
+      merged.push(thread);
+    }
+  }
+  return merged;
 }
 
 // NOTE: the sidebar's capping counterpart to `planBucketFetch` lives next to
 // its filter primitive as `selectVisibleBucketPage` in thread-sidebar.tsx — it
 // composes `selectVisibleBucketThreads` rather than re-implementing the
 // active+bucket filter here.
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+//
+// The authoritative search is server-side (`search` query param -> title +
+// message-contents LIKE, see packages/worker/src/lib/db/threads.ts). The client
+// helpers below exist for exactly one reason: an old worker ignores unknown
+// query params, so under the SAME deploy skew that `backendIgnoredBucketFilter`
+// detects, `search` is silently dropped and every thread comes back.
+//
+// They are DEGRADED on purpose: only the fields the client actually holds
+// (title + `firstMessagePreview`) can be matched, so message contents beyond
+// the 120-char preview are not searchable while skewed. That's the accepted
+// trade-off — the alternative (no client filter) shows an unfiltered list,
+// which is strictly worse.
+//
+// CRITICAL: apply these ONLY when skew is detected. Against a NEW worker the
+// server may legitimately match on message contents that appear in neither the
+// title nor the preview; filtering those rows out client-side would silently
+// drop real hits.
+
+/** Trim + collapse a raw search input. Empty/whitespace-only => undefined. */
+export function normalizeSearchTerm(value: string | undefined | null): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Case-insensitive substring match over the fields the client has loaded. */
+export function threadMatchesSearch(thread: SessionThread, term: string): boolean {
+  const needle = term.trim().toLowerCase();
+  if (!needle) return true;
+  const title = thread.title?.toLowerCase();
+  if (title && title.includes(needle)) return true;
+  const preview = thread.firstMessagePreview?.toLowerCase();
+  return !!preview && preview.includes(needle);
+}
+
+/** Filter threads by `term`. An empty/undefined term is a no-op. */
+export function filterThreadsBySearch(
+  threads: readonly SessionThread[],
+  term: string | undefined,
+): SessionThread[] {
+  const needle = normalizeSearchTerm(term);
+  if (!needle) return [...threads];
+  return threads.filter((t) => threadMatchesSearch(t, needle));
+}
 
 export interface BucketHistoryPlan {
   /** `page` to request. Pinned to 1 under skew (see below). */

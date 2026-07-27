@@ -54,6 +54,71 @@ export function isThreadOriginBucketId(value: unknown): value is ThreadOriginBuc
   return typeof value === 'string' && THREAD_ORIGIN_BUCKET_IDS.includes(value as ThreadOriginBucketId);
 }
 
+// ─── Thread Search ──────────────────────────────────────────────────────────
+//
+// `listThreads({ search })` matches a free-text term against BOTH the thread
+// title AND the contents of the thread's messages. Contents matching is why
+// this has to be server-side at all: the client only ever holds titles and a
+// 120-char first-message preview, so it cannot search what it hasn't loaded.
+//
+// Implementation notes:
+//  - `LIKE` in SQLite is case-insensitive for ASCII by default (no `LOWER()`
+//    wrapping needed, and wrapping it would only defeat future indexes).
+//  - The messages side is an `EXISTS` correlated subquery on
+//    `messages.thread_id` (indexed: `idx_messages_thread`, migration 0001) and
+//    NOT a JOIN — a JOIN would multiply thread rows by matching messages and
+//    silently break both `LIMIT` paging and the `COUNT(*)` totals.
+//  - Bound params only, plus explicit `ESCAPE` so a user typing `%` or `_`
+//    searches for those literal characters instead of turning the query into a
+//    match-everything wildcard.
+
+/** Longest search term we'll act on. Anything past this is truncated. */
+export const THREAD_SEARCH_MAX_LENGTH = 200;
+
+/** The `ESCAPE` character used by every thread-search LIKE clause. */
+const LIKE_ESCAPE_CHAR = '\\';
+
+/**
+ * Escape LIKE metacharacters (`%`, `_`) and the escape character itself so the
+ * term is matched literally. Must be paired with `ESCAPE '\'` in the SQL.
+ */
+export function escapeLikeTerm(term: string): string {
+  return term.replace(/[\\%_]/g, (char) => `${LIKE_ESCAPE_CHAR}${char}`);
+}
+
+/** Wrap an escaped term in `%…%` for a substring match. */
+export function buildThreadSearchPattern(term: string): string {
+  return `%${escapeLikeTerm(term)}%`;
+}
+
+/**
+ * Trim + length-cap a raw search input. Returns undefined for anything that
+ * shouldn't produce a filter (missing, non-string, empty, whitespace-only) so
+ * callers can spread it conditionally.
+ */
+export function normalizeThreadSearch(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  return trimmed.slice(0, THREAD_SEARCH_MAX_LENGTH);
+}
+
+/**
+ * SQL fragment matching `t.title` OR any message in the thread. Takes TWO bound
+ * params, both the same pattern (title, then message contents).
+ */
+function threadSearchSql(threadAlias: string): string {
+  const t = threadAlias;
+  return `(
+      ${t}.title LIKE ? ESCAPE '${LIKE_ESCAPE_CHAR}'
+      OR EXISTS (
+        SELECT 1 FROM messages ms
+        WHERE ms.thread_id = ${t}.id
+          AND ms.content LIKE ? ESCAPE '${LIKE_ESCAPE_CHAR}'
+      )
+    )`;
+}
+
 export interface ThreadOriginInput {
   originType?: string;
   originChannelType?: string;
@@ -265,6 +330,14 @@ export interface ListThreadsOptions {
    * When `originBucket` is set, counts are always computed.
    */
   includeOriginCounts?: boolean;
+  /**
+   * Free-text filter matched case-insensitively against the thread title AND
+   * the contents of the thread's messages. Applied to `baseWhere`, so it also
+   * narrows `originCounts` — while a search is active, per-bucket totals are
+   * per-bucket MATCH counts. That's deliberate: it tells the user which tab
+   * holds their hits. Empty/whitespace-only terms are ignored.
+   */
+  search?: string;
 }
 
 export interface ListThreadsResult {
@@ -373,6 +446,15 @@ export async function listThreads(
   if (options.status) {
     baseWhere += ' AND t.status = ?';
     baseParams.push(options.status);
+  }
+
+  // Search narrows `baseWhere`, so it applies to the rows AND to `originCounts`
+  // (which become per-bucket match counts). Bucket-independence is preserved.
+  const search = normalizeThreadSearch(options.search);
+  if (search) {
+    baseWhere += ` AND ${threadSearchSql('t')}`;
+    const pattern = buildThreadSearchPattern(search);
+    baseParams.push(pattern, pattern);
   }
 
   const originBucket = options.originBucket;

@@ -1,7 +1,14 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import { useThreads, useDismissThread, useReactivateThread, useRenameThread } from '@/api/threads';
+import {
+  useThreadPages,
+  useThreads,
+  useDismissThread,
+  useReactivateThread,
+  useRenameThread,
+} from '@/api/threads';
 import { useQueries } from '@tanstack/react-query';
 import { api } from '@/api/client';
+import { useDebounced } from '@/hooks/use-debounced';
 import { formatChannelLabel } from '@valet/sdk';
 import { getChannelIcon } from '@valet/sdk/ui';
 import type { SessionThread } from '@/api/types';
@@ -10,9 +17,10 @@ import {
   backendIgnoredBucketFilter,
   DEFAULT_THREAD_ORIGIN_BUCKET,
   filterThreadsByBucket,
+  filterThreadsBySearch,
   getThreadOriginBucket,
-  MAX_THREADS_PER_REQUEST,
   mergeBucketCounts,
+  normalizeSearchTerm,
   planBucketFetch,
   THREAD_ORIGIN_BUCKETS,
   type ThreadOriginBucketId,
@@ -208,32 +216,101 @@ export interface VisibleBucketPage {
 }
 
 /**
- * Bucket-filter (via `selectVisibleBucketThreads`), then CAP the fetched page
- * to what the tab should actually render.
+ * Bucket-filter (via `selectVisibleBucketThreads`), optionally apply the
+ * skew-only client-side search filter, then CAP the accumulated pages to what
+ * the tab should actually render.
  *
  * The cap is what makes "max 30 threads per tab by default" hold under
- * backend skew, where `planBucketFetch` deliberately requests up to
- * `SKEW_OVERFETCH_FACTOR`x more MIXED rows than we intend to show so that the
- * client-side filter has enough material to fill the tab.
+ * backend skew, where `planBucketFetch` deliberately requests
+ * `SKEW_OVERFETCH_FACTOR`x bigger MIXED pages than we intend to show so that
+ * the client-side filter has enough material to fill the tab.
  *
- * `hasMore` is deliberately NOT just the server's flag:
- *  - we may already hold more rows for this bucket than we're rendering
- *    (overfetched) — Load more should reveal them with no network round-trip;
- *  - once `plan.pageSize` has hit `MAX_THREADS_PER_REQUEST` we cannot ask the
- *    server for a bigger page, so offering Load more would be a no-op button.
+ * `hasMore` — ROUND 5. This is the site of the "exactly 30 threads and no
+ * more" bug. The old derivation was:
+ *
+ *     all.length > threads.length || (serverHasMore && plan.pageSize < MAX_THREADS_PER_REQUEST)
+ *
+ * Both clauses go false as soon as the request has saturated the worker's
+ * 100-row per-request clamp with everything held rendered — which under skew is
+ * the FIRST page (`planBucketFetch` asks for `30 * 4` -> clamped to 100). A
+ * bucket holding exactly `visibleLimit` rows in that window therefore rendered
+ * 30 threads and hid `Load more` entirely, even with hundreds of threads left
+ * server-side. The second clause existed because a bigger single request was
+ * the only way to get more rows; now that `Load more` advances OFFSET pages
+ * instead of growing one request, there is no ceiling and no reason to suppress
+ * the affordance.
+ *
+ * So `hasMore` is true when EITHER:
+ *  - we already hold more rows for this bucket than we render (overfetched, or
+ *    a later page arrived) — `Load more` reveals them with no round-trip; or
+ *  - the last loaded page reported `hasMore` — more rows exist server-side and
+ *    the next offset page will fetch them.
+ *
+ * `serverHasMore` MUST be the flag from the HIGHEST-numbered loaded page (see
+ * `useThreadPages`), not page 1's — page 1 says "more exist after page 1",
+ * which stays true forever and would make `Load more` immortal.
  */
 export function selectVisibleBucketPage(
   fetched: readonly SessionThread[],
   bucket: ThreadOriginBucketId,
-  plan: { pageSize: number; visibleLimit: number },
+  plan: { visibleLimit: number },
   serverHasMore: boolean,
+  /**
+   * Search term to apply CLIENT-SIDE, or undefined to skip. Pass this ONLY
+   * when backend skew is detected — see `filterThreadsBySearch` for why
+   * applying it against a new worker would drop legitimate contents matches.
+   * Applied BEFORE the cap so a filtered tab still fills to `visibleLimit`.
+   */
+  clientSearch?: string,
 ): VisibleBucketPage {
-  const all = selectVisibleBucketThreads(fetched, bucket);
+  const inBucket = selectVisibleBucketThreads(fetched, bucket);
+  const all = clientSearch ? filterThreadsBySearch(inBucket, clientSearch) : inBucket;
   const threads = all.slice(0, plan.visibleLimit);
-  const hasMore =
-    all.length > threads.length ||
-    (serverHasMore && plan.pageSize < MAX_THREADS_PER_REQUEST);
+  const hasMore = all.length > threads.length || serverHasMore;
   return { threads, hasMore };
+}
+
+/** Human label for a bucket used in the sidebar's empty states. */
+function bucketNoun(bucket: ThreadOriginBucketId): string {
+  if (bucket === 'ui') return 'UI';
+  if (bucket === 'other') return 'other';
+  return bucket;
+}
+
+/**
+ * Which message the thread list shows when it renders zero rows.
+ *
+ * Four genuinely different situations, and conflating them is how a sidebar
+ * lies to you:
+ *  - still fetching -> "Loading…";
+ *  - searching, nothing matched, nothing left to fetch -> "No threads match";
+ *  - nothing rendered but more pages exist (a MIXED page under skew can contain
+ *    none of the active bucket) -> say so, and keep `Load more` available;
+ *  - the bucket is genuinely empty -> "No X threads".
+ */
+export function threadListEmptyMessage({
+  isLoading,
+  hasMore,
+  searching,
+  bucket,
+  bucketTotal,
+}: {
+  isLoading: boolean;
+  hasMore: boolean;
+  searching: boolean;
+  bucket: ThreadOriginBucketId;
+  /** Server-reported total for the bucket (already search-scoped when searching). */
+  bucketTotal: number;
+}): string {
+  if (isLoading) return 'Loading…';
+  if (hasMore) {
+    return searching ? 'No matches on these threads yet' : 'None on these threads yet';
+  }
+  if (searching) return 'No threads match';
+  if (bucketTotal === 0) return `No ${bucketNoun(bucket)} threads`;
+  // Counts say the bucket is non-empty but we hold nothing and there's nothing
+  // more to fetch — a transient between an invalidation and the refetch.
+  return 'Loading…';
 }
 
 // ─── Thread Item ──────────────────────────────────────────────────────────────
@@ -452,6 +529,59 @@ function ThreadOriginTabs({
   );
 }
 
+// ─── Thread Search Field ──────────────────────────────────────────────────────
+
+/**
+ * Compact search input for the thread list, styled to sit under the tab bar
+ * without competing with it: no border box, a single hairline separator, 11px
+ * text matching `ThreadItem`, and the same muted neutral palette as the tabs.
+ * The shared `components/ui/search-input` is deliberately not reused — it's
+ * sized for full-width pages (text-sm, py-2, rounded border) and looks like a
+ * form control dropped into a 248px sidebar.
+ *
+ * Debouncing lives in the parent (`useDebounced`) so the *query key* is what's
+ * debounced, not the keystrokes — the input itself stays fully controlled and
+ * therefore never lags behind typing.
+ */
+function ThreadSearchField({
+  value,
+  onChange,
+  activeBucketLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  activeBucketLabel: string;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-neutral-100 px-2 py-1.5 dark:border-neutral-800/50">
+      <SearchIcon className="h-3 w-3 shrink-0 text-neutral-400 dark:text-neutral-500" />
+      <input
+        type="search"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onChange('');
+        }}
+        placeholder={`Search ${activeBucketLabel}`}
+        aria-label={`Search ${activeBucketLabel} threads by title or message contents`}
+        maxLength={200}
+        className="min-w-0 flex-1 border-none bg-transparent p-0 text-[11px] text-neutral-700 outline-none placeholder:text-neutral-400 focus:ring-0 dark:text-neutral-200 dark:placeholder:text-neutral-500 [&::-webkit-search-cancel-button]:hidden"
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          title="Clear search"
+          className="shrink-0 rounded p-0.5 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
+        >
+          <XIcon className="h-2.5 w-2.5" />
+          <span className="sr-only">Clear search</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── Thread Group Header ──────────────────────────────────────────────────────
 
 function ThreadGroupHeader({ group }: { group: ThreadGroup }) {
@@ -488,6 +618,11 @@ interface ThreadSidebarProps {
 // headers) with headroom for `Load more`.
 const SIDEBAR_PAGE_SIZE = 30;
 
+// Debounce for the search field. 250ms is short enough to feel live while
+// typing and long enough that a normal typing burst is one request, not one per
+// keystroke (each request is a D1 query with a messages-content LIKE).
+const SEARCH_DEBOUNCE_MS = 250;
+
 export function ThreadSidebar({
   sessionId,
   activeThreadId,
@@ -510,10 +645,16 @@ export function ThreadSidebar({
   // would read as "not skewed" and flip us straight back. See
   // `backendIgnoredBucketFilter`.
   const [backendIgnoresBucket, setBackendIgnoresBucket] = useState(false);
+  // Search field. `searchInput` is the raw keystroke state (so the input stays
+  // responsive); `searchTerm` is the debounced value that actually drives the
+  // query key.
+  const [searchInput, setSearchInput] = useState('');
+  const debouncedSearch = useDebounced(searchInput, SEARCH_DEBOUNCE_MS);
+  const searchTerm = normalizeSearchTerm(debouncedSearch);
 
   // Fetch ONLY the active bucket — each bucket paginates independently so a
   // busy Automation bucket can't starve Slack/UI/Other of visible threads.
-  // Under skew we instead overfetch a bigger MIXED page (no bucket param) and
+  // Under skew we instead overfetch bigger MIXED pages (no bucket param) and
   // filter + cap client-side, so a tab still fills to SIDEBAR_PAGE_SIZE.
   const fetchPlan = useMemo(
     () =>
@@ -529,19 +670,35 @@ export function ThreadSidebar({
   // `includeOriginCounts` is implicitly true when `bucket` is set (worker
   // computes it either way in that case), but pass explicitly — it's also our
   // skew probe, and under skew we omit `bucket` entirely.
-  const { data: threadData } = useThreads(sessionId, {
+  //
+  // `useThreadPages` holds pages 1..N loaded at once and merges them. Load more
+  // appends a page number rather than growing one request's `pageSize`, which is
+  // what makes it unbounded — see `planBucketFetch` for the ceiling that used to
+  // stop it dead at MAX_THREADS_PER_REQUEST.
+  const threadPages = useThreadPages(sessionId, {
     bucket: fetchPlan.bucket,
-    pageSize: fetchPlan.pageSize,
+    pages: fetchPlan.requestPages,
+    pageSize: fetchPlan.requestPageSize,
     includeOriginCounts: true,
+    search: searchTerm,
   });
+  const threadData = threadPages.firstPage;
 
   // A response that carries `originCounts` proves the worker understands
-  // `originBucket`; one that doesn't proves it doesn't. Latch both directions
-  // so this self-heals the moment the new worker is deployed.
+  // `originBucket` (and therefore `search`); one that doesn't proves it doesn't.
+  // Latch both directions so this self-heals the moment the new worker is
+  // deployed.
   useEffect(() => {
     if (!threadData) return;
     setBackendIgnoresBucket(backendIgnoredBucketFilter(threadData));
   }, [threadData]);
+
+  // A new search is a different result set — restart pagination at page 1 so we
+  // don't hold offset pages computed against the previous filter.
+  useEffect(() => {
+    setPagesForActiveBucket(1);
+  }, [searchTerm]);
+
   const dismissThread = useDismissThread(sessionId);
   const reactivateThread = useReactivateThread(sessionId);
 
@@ -553,20 +710,30 @@ export function ThreadSidebar({
     pageSize: SIDEBAR_PAGE_SIZE,
   });
 
-  const fetchedThreads = threadData?.threads ?? [];
-  // Everything active in the fetched page (all buckets it happens to contain) —
-  // feeds tab counts / attention badges.
+  const fetchedThreads = threadPages.threads;
+  // Everything active in the fetched pages (all buckets they happen to contain)
+  // — feeds tab counts / attention badges.
   const activeThreads = useMemo(() => selectActiveThreads(fetchedThreads), [fetchedThreads]);
+  // Under skew the worker ignores `search` too, so filter by title/preview
+  // client-side. Against a NEW worker we must NOT — it can legitimately match
+  // message contents that appear in neither field. See `filterThreadsBySearch`.
+  const clientSearch = backendIgnoresBucket ? searchTerm : undefined;
   // What we RENDER: re-filtered to the active bucket client-side so a worker
   // without `originBucket` support can't leak other origins into this tab, then
-  // CAPPED at `fetchPlan.visibleLimit` (30 per Load-more page) so an
-  // overfetched mixed page doesn't blow past the per-tab default.
+  // CAPPED at `fetchPlan.visibleLimit` (30 per Load-more page) so overfetched
+  // mixed pages don't blow past the per-tab default.
   // Uses `selectVisibleBucketPage` (not `filterThreadsByBucket` directly) so
   // the unit tests in thread-sidebar.test.ts cover this exact render path.
   const visibleBucketPage = useMemo(
     () =>
-      selectVisibleBucketPage(fetchedThreads, activeBucket, fetchPlan, !!threadData?.hasMore),
-    [fetchedThreads, activeBucket, fetchPlan, threadData?.hasMore],
+      selectVisibleBucketPage(
+        fetchedThreads,
+        activeBucket,
+        fetchPlan,
+        threadPages.hasMore,
+        clientSearch,
+      ),
+    [fetchedThreads, activeBucket, fetchPlan, threadPages.hasMore, clientSearch],
   );
   const activeBucketThreads = visibleBucketPage.threads;
   const dismissedThreads = useMemo(
@@ -590,6 +757,24 @@ export function ThreadSidebar({
   const groups = useMemo(
     () => groupThreadsByChannel(activeBucketThreads, resolvedLabels),
     [activeBucketThreads, resolvedLabels],
+  );
+
+  const emptyStateMessage = useMemo(
+    () =>
+      threadListEmptyMessage({
+        isLoading: threadPages.isLoading,
+        hasMore: hasMoreInBucket,
+        searching: !!searchTerm,
+        bucket: activeBucket,
+        bucketTotal: bucketCounts[activeBucket].total,
+      }),
+    [threadPages.isLoading, hasMoreInBucket, searchTerm, activeBucket, bucketCounts],
+  );
+
+  // Search is scoped to the active tab, so say which tab in the placeholder.
+  const activeBucketLabel = useMemo(
+    () => THREAD_ORIGIN_BUCKETS.find((b) => b.id === activeBucket)?.label ?? 'threads',
+    [activeBucket],
   );
 
   const handleSelectBucket = useCallback((bucket: ThreadOriginBucketId) => {
@@ -712,6 +897,12 @@ export function ThreadSidebar({
         onSelectBucket={handleSelectBucket}
       />
 
+      <ThreadSearchField
+        value={searchInput}
+        onChange={setSearchInput}
+        activeBucketLabel={activeBucketLabel}
+      />
+
       {/* `scrollbar-none` — Conner asked for no visible scrollbar here; the
           list still scrolls (wheel/trackpad/keyboard/touch), the track is just
           not painted. See the utility in styles/globals.css. */}
@@ -734,12 +925,15 @@ export function ThreadSidebar({
         ))}
         {activeBucketThreads.length === 0 && (
           <div className="px-2 py-4 text-center text-[11px] text-neutral-400 dark:text-neutral-500">
-            {bucketCounts[activeBucket].total === 0
-              ? `No ${activeBucket === 'ui' ? 'UI' : activeBucket === 'other' ? 'other' : activeBucket} threads`
-              : 'Loading…'}
+            {emptyStateMessage}
           </div>
         )}
-        {hasMoreInBucket && activeBucketThreads.length > 0 && (
+        {/* NOT gated on `activeBucketThreads.length > 0`. Under skew a page of
+            MIXED rows can contain none of the active bucket (or none matching
+            the search) while later pages do — gating the button on a non-empty
+            render would dead-end the list at the first barren page, which is the
+            same class of bug as the `hasMore` one. */}
+        {hasMoreInBucket && !threadPages.isLoading && (
           <button
             type="button"
             onClick={handleLoadMore}
@@ -818,6 +1012,14 @@ function PencilIcon({ className }: { className?: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
       <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" />
+    </svg>
+  );
+}
+
+function SearchIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
     </svg>
   );
 }

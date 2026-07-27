@@ -4,11 +4,15 @@ import {
   backendIgnoredBucketFilter,
   computeBucketCounts,
   filterThreadsByBucket,
+  filterThreadsBySearch,
   getThreadOriginBucket,
   MAX_THREADS_PER_REQUEST,
   mergeBucketCounts,
+  mergeThreadPages,
+  normalizeSearchTerm,
   planBucketFetch,
   planBucketHistoryFetch,
+  threadMatchesSearch,
   THREAD_ORIGIN_BUCKETS,
   THREAD_ORIGIN_SHORT_LABEL_MAX_CHARS,
   type ThreadOriginBucketId,
@@ -314,7 +318,8 @@ describe('planBucketFetch', () => {
 
     expect(plan).toEqual({
       bucket: 'slack',
-      pageSize: 30,
+      requestPages: [1],
+      requestPageSize: 30,
       visibleLimit: 30,
       overfetching: false,
     });
@@ -329,7 +334,7 @@ describe('planBucketFetch', () => {
     });
 
     // 30 * 4 = 120, clamped to the worker's 100-row request cap.
-    expect(plan.pageSize).toBe(MAX_THREADS_PER_REQUEST);
+    expect(plan.requestPageSize).toBe(MAX_THREADS_PER_REQUEST);
     expect(plan.bucket).toBeUndefined();
     expect(plan.overfetching).toBe(true);
     // The render cap is IDENTICAL to the happy path — that's the whole point.
@@ -350,8 +355,8 @@ describe('planBucketFetch', () => {
     for (const pages of [1, 2, 4, 10]) {
       for (const skewed of [true, false]) {
         const plan = planBucketFetch({ bucket: 'automation', pages, basePageSize: 30, skewed });
-        expect(plan.pageSize).toBeLessThanOrEqual(MAX_THREADS_PER_REQUEST);
-        expect(plan.pageSize).toBeGreaterThanOrEqual(1);
+        expect(plan.requestPageSize).toBeLessThanOrEqual(MAX_THREADS_PER_REQUEST);
+        expect(plan.requestPageSize).toBeGreaterThanOrEqual(1);
       }
     }
   });
@@ -359,6 +364,132 @@ describe('planBucketFetch', () => {
   it('treats a zero/negative Load-more counter as the first page', () => {
     expect(planBucketFetch({ bucket: 'ui', pages: 0, basePageSize: 30, skewed: false }).visibleLimit)
       .toBe(30);
+    expect(planBucketFetch({ bucket: 'ui', pages: -4, basePageSize: 30, skewed: true }).requestPages)
+      .toEqual([1]);
+  });
+
+  // ── Round-5 regression: Load more must be UNBOUNDED ──────────────────────
+  //
+  // Round 4 grew ONE request's pageSize with the Load-more counter, so paging
+  // died at MAX_THREADS_PER_REQUEST: `pageSize` saturated at 100 and every
+  // further click re-requested the same 100 rows. Under skew it saturated on
+  // the FIRST page (30 * SKEW_OVERFETCH_FACTOR -> clamped to 100), which is why
+  // the sidebar topped out at ~30 threads with no way forward.
+
+  it('adds one OFFSET page per Load more instead of growing a single request', () => {
+    for (const skewed of [false, true]) {
+      const first = planBucketFetch({ bucket: 'ui', pages: 1, basePageSize: 30, skewed });
+      const fifth = planBucketFetch({ bucket: 'ui', pages: 5, basePageSize: 30, skewed });
+
+      expect(first.requestPages).toEqual([1]);
+      expect(fifth.requestPages).toEqual([1, 2, 3, 4, 5]);
+      // pageSize is CONSTANT across Load-more pages — offsets must line up.
+      expect(fifth.requestPageSize).toBe(first.requestPageSize);
+    }
+  });
+
+  it('keeps growing reachable rows past the per-request cap (the 30/100-thread dead end)', () => {
+    // Reachable rows = pages * pageSize. Round 4 flatlined at 100 here.
+    const reachable = (pages: number, skewed: boolean) => {
+      const plan = planBucketFetch({ bucket: 'ui', pages, basePageSize: 30, skewed });
+      return plan.requestPages.length * plan.requestPageSize;
+    };
+
+    for (const skewed of [false, true]) {
+      expect(reachable(4, skewed)).toBeGreaterThan(MAX_THREADS_PER_REQUEST);
+      expect(reachable(10, skewed)).toBeGreaterThan(reachable(4, skewed));
+      expect(reachable(40, skewed)).toBeGreaterThan(reachable(10, skewed));
+    }
+  });
+
+  it('requests contiguous pages from 1 so no rows are skipped', () => {
+    const plan = planBucketFetch({ bucket: 'other', pages: 7, basePageSize: 30, skewed: true });
+    expect(plan.requestPages[0]).toBe(1);
+    for (let i = 1; i < plan.requestPages.length; i++) {
+      expect(plan.requestPages[i]).toBe(plan.requestPages[i - 1] + 1);
+    }
+  });
+});
+
+describe('mergeThreadPages', () => {
+  it('concatenates pages in order', () => {
+    const merged = mergeThreadPages([
+      [baseThread({ id: 'a' }), baseThread({ id: 'b' })],
+      [baseThread({ id: 'c' })],
+    ]);
+
+    expect(merged.map((t) => t.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('de-duplicates by id, keeping the first occurrence', () => {
+    // The worker clamps `page` to `totalPages`, so asking for one page past the
+    // end re-serves the last page verbatim.
+    const merged = mergeThreadPages([
+      [baseThread({ id: 'a' }), baseThread({ id: 'b' })],
+      [baseThread({ id: 'b' }), baseThread({ id: 'c' })],
+      [baseThread({ id: 'b' }), baseThread({ id: 'c' })],
+    ]);
+
+    expect(merged.map((t) => t.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('skips pages that are still loading instead of dropping loaded ones', () => {
+    const merged = mergeThreadPages([
+      [baseThread({ id: 'a' })],
+      undefined,
+      [baseThread({ id: 'c' })],
+    ]);
+
+    expect(merged.map((t) => t.id)).toEqual(['a', 'c']);
+  });
+
+  it('returns an empty list when nothing has loaded', () => {
+    expect(mergeThreadPages([undefined, undefined])).toEqual([]);
+  });
+});
+
+describe('thread search helpers', () => {
+  it('normalizes blank input to undefined so it never becomes a filter', () => {
+    expect(normalizeSearchTerm('  deploy  ')).toBe('deploy');
+    expect(normalizeSearchTerm('   ')).toBeUndefined();
+    expect(normalizeSearchTerm('')).toBeUndefined();
+    expect(normalizeSearchTerm(undefined)).toBeUndefined();
+    expect(normalizeSearchTerm(null)).toBeUndefined();
+  });
+
+  it('matches titles case-insensitively', () => {
+    const thread = baseThread({ id: 'a', title: 'Deploy the Worker' });
+    expect(threadMatchesSearch(thread, 'deploy')).toBe(true);
+    expect(threadMatchesSearch(thread, 'WORKER')).toBe(true);
+    expect(threadMatchesSearch(thread, 'kubernetes')).toBe(false);
+  });
+
+  it('matches the first-message preview — the only contents the client holds', () => {
+    const thread = baseThread({ id: 'a', firstMessagePreview: 'please fix the LIKE query' });
+    expect(threadMatchesSearch(thread, 'like query')).toBe(true);
+  });
+
+  it('treats an untitled thread with no preview as a non-match', () => {
+    expect(threadMatchesSearch(baseThread({ id: 'a' }), 'anything')).toBe(false);
+  });
+
+  it('is a no-op for an empty term (never hides threads when not searching)', () => {
+    const threads = [baseThread({ id: 'a' }), baseThread({ id: 'b', title: 'x' })];
+    expect(filterThreadsBySearch(threads, undefined).map((t) => t.id)).toEqual(['a', 'b']);
+    expect(filterThreadsBySearch(threads, '   ').map((t) => t.id)).toEqual(['a', 'b']);
+  });
+
+  it('filters a list down to matches, preserving order', () => {
+    const filtered = filterThreadsBySearch(
+      [
+        baseThread({ id: 'newer', title: 'Orb sync failure' }),
+        baseThread({ id: 'noise', title: 'Unrelated' }),
+        baseThread({ id: 'older', firstMessagePreview: 'the orb webhook is down' }),
+      ],
+      'orb',
+    );
+
+    expect(filtered.map((t) => t.id)).toEqual(['newer', 'older']);
   });
 });
 

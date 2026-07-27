@@ -209,6 +209,69 @@ pages that render empty. Cost while skewed: history reaches only the newest
 `MAX_THREADS_PER_REQUEST` threads. Lossless within that window, and it
 self-corrects on deploy.
 
+#### Round 5 — `Load more` was never infinite (the 30-thread dead end)
+
+Conner: *"Load more is not infinite; the UI loads exactly 30 threads and no
+more."* Correct, and it was broken in **both** worlds, for the same underlying
+reason: rounds 2-4 paginated by **growing one request's `pageSize`**
+(`pageSize: SIDEBAR_PAGE_SIZE * pagesForActiveBucket`). A single request cannot
+exceed the route's `Math.min(..., 100)` clamp, so a "cumulative window" model has
+a hard ceiling built into it:
+
+| World | `pageSize` by Load-more page | Ceiling |
+|---|---|---|
+| Worker honors `originBucket` | 30 / 60 / 90 / **100** / 100 / … | 100 threads, then every click re-requests the same rows |
+| Skewed (param ignored) | **100** on page 1 (`30 * SKEW_OVERFETCH_FACTOR`, clamped) | whatever share of the newest 100 *mixed* rows the bucket owns |
+
+Round 4's `hasMore` then turned that ceiling into a *disappearing button*:
+
+```ts
+// thread-sidebar.tsx, round 4
+all.length > threads.length || (serverHasMore && plan.pageSize < MAX_THREADS_PER_REQUEST)
+```
+
+Under skew `plan.pageSize` is already `MAX_THREADS_PER_REQUEST` on first paint,
+so the second clause is dead on arrival. If the active bucket happened to hold
+*exactly* `visibleLimit` rows in that 100-row window, the first clause is false
+too (nothing held back) — `hasMore === false`, **`Load more` is not rendered at
+all**, at exactly 30 threads, with hundreds of threads still in D1. That is the
+reported symptom, precisely.
+
+The fix stops growing one request and **accumulates offset pages** instead:
+
+- `planBucketFetch` returns `requestPages: [1..n]` at a **constant**
+  `requestPageSize` (30 normally; `30 * SKEW_OVERFETCH_FACTOR` -> 100 under
+  skew). Offsets have no ceiling, so `Load more` is genuinely unbounded.
+- `useThreadPages` (`packages/client/src/api/threads.ts`) holds those pages as
+  independent react-query entries and merges them via `mergeThreadPages`
+  (dedupe by id, first occurrence wins). A `Load more` click therefore fetches
+  **only** the new page; already-rendered rows never flicker.
+- `hasMore` becomes `heldMoreThanRendered || lastLoadedPageHasMore`. The
+  request-cap clause is gone — there is no cap to respect any more.
+- `serverHasMore` must come from the **highest-numbered loaded page**, not page
+  1. Page 1's flag means "more exist after page 1", which stays true forever and
+  would make `Load more` immortal.
+- The `Load more` button is no longer gated on a non-empty render, because under
+  skew a mixed page can legitimately contain zero rows of the active bucket while
+  later pages contain plenty. `threadListEmptyMessage` distinguishes "nothing
+  here yet, keep going" from "genuinely empty" / "no search matches" so the
+  empty state doesn't lie while the button is still offered.
+
+Why offset (`page`) and not cursor (`cursor`)? Both predate this branch, so both
+survive skew. `cursor` compares `last_active_at < ?`, and `last_active_at` is
+written by `datetime('now')` — **second** granularity. Threads sharing a second
+(bulk automation runs do this) would be silently skipped at the page boundary.
+Offset can duplicate a row when the ordering shifts mid-session, which
+`mergeThreadPages` absorbs; skipping is unrecoverable. The cost of offset is one
+extra `COUNT(*)` per request (page mode computes `totalCount`/`totalPages`), which
+buys exact `hasMore` in return.
+
+Deploy-skew trade-off that **remains**: under skew, one `Load more` click buys
+the next 100 *mixed* rows, whose bucket share may be far below 30. The click
+always makes progress and never dead-ends, but "+30 per click" degrades to "+the
+bucket's share of the next 100". It self-retires with the worker deploy, same as
+the rest of the skew path.
+
 ### 2. Tab counts — TRUE totals, independent of the active filter
 
 A tab label must show the real size of its bucket even when that bucket isn't
@@ -250,6 +313,63 @@ doesn't fight the scroll-position restore; Conner hasn't picked a preference.
 Alternative considered and rejected: **just raise the flat fetch limit.**
 It only moves the starvation threshold instead of removing it, and it fetches
 strictly more data than any one tab can display.
+
+### 4. Search (round 5)
+
+A compact search field sits directly under the tab bar and filters the
+**active tab** by **thread title AND message contents**.
+
+**Why it has to be server-side.** The client only ever holds titles and a
+120-char `first_message_preview`. Contents search over threads the client hasn't
+loaded is impossible client-side by construction, so `listThreads` gained a
+`search` option and the route a `search` query param.
+
+```sql
+AND (
+  t.title LIKE ? ESCAPE '\'
+  OR EXISTS (
+    SELECT 1 FROM messages ms
+    WHERE ms.thread_id = t.id AND ms.content LIKE ? ESCAPE '\'
+  )
+)
+```
+
+Four deliberate choices in that fragment:
+
+- **`EXISTS`, not a `JOIN`.** A join emits one row per matching message, which
+  would duplicate threads and quietly corrupt both `LIMIT` paging and the
+  `COUNT(*)` totals that `hasMore` is derived from. `messages.thread_id` is
+  indexed (`idx_messages_thread`, migration `0001`).
+- **Bound params + explicit `ESCAPE`.** `escapeLikeTerm` escapes `%`, `_`, and
+  `\` so a user typing `%` searches for a literal percent sign instead of
+  matching every thread. Nothing is interpolated into SQL.
+- **No `LOWER()` wrapping.** SQLite's `LIKE` is already ASCII-case-insensitive,
+  and wrapping the column would defeat any future index.
+- **Applied to `baseWhere`, not `filterWhere`.** So the term narrows
+  `originCounts` too: while searching, tab pills show per-bucket **match**
+  counts, which is how you find which tab holds your hits. Bucket-independence
+  (the round-2 invariant) is preserved — every bucket is still reported.
+
+Terms are trimmed and capped at `THREAD_SEARCH_MAX_LENGTH = 200`
+(`normalizeThreadSearch`); blank/whitespace-only terms produce **no filter** at
+all rather than an empty result set.
+
+**Client side.** The input is fully controlled (never lags typing) while the
+*query key* is debounced by 250ms via the existing `useDebounced` hook — one
+request per typing burst, not per keystroke. A new term resets
+`pagesForActiveBucket` to 1, since it's a different result set. The shared
+`components/ui/search-input` is deliberately not reused: it's sized for
+full-width pages (`text-sm`, `py-2`, bordered box) and reads as a form control
+when dropped into a 248px sidebar.
+
+**Under deploy skew** an old worker ignores `search` exactly as it ignores
+`originBucket`, so the same `backendIgnoredBucketFilter` probe gates a
+client-side fallback filter (`filterThreadsBySearch`, title + preview only).
+This is *degraded on purpose* and must be applied **only** when skew is
+detected: against a new worker the server can legitimately match message
+contents that appear in neither the title nor the 120-char preview, and
+re-filtering those rows client-side would silently drop real hits. The filter
+runs **before** the `visibleLimit` cap so a searched tab still fills to 30.
 
 ## Layout decisions
 
@@ -327,8 +447,20 @@ Round 1 needed none. **Round 2 added:**
   than 400ing, so a stale frontend degrades to an unfiltered list instead of a
   broken one.
 
-Both additions are backward-compatible: `originCounts` is optional and the
-filter is opt-in.
+**Round 5 added:**
+
+- `packages/worker/src/lib/db/threads.ts` — `normalizeThreadSearch`,
+  `escapeLikeTerm`, `buildThreadSearchPattern`, `THREAD_SEARCH_MAX_LENGTH`, the
+  internal `threadSearchSql` fragment, and `listThreads({ search })`.
+- `packages/worker/src/routes/threads.ts` — parses the `search` query param and
+  forwards it verbatim (trimming/capping/escaping all live in the db layer, so
+  there's one source of truth).
+
+No migration, no schema change: search reads existing `session_threads.title`
+and `messages.content` through the already-present `idx_messages_thread` index.
+
+Every addition is backward-compatible: `originCounts` is optional, and both the
+bucket filter and `search` are opt-in.
 
 ## Preserved behavior
 
@@ -355,21 +487,41 @@ filter is opt-in.
   `planBucketFetch` (identical `visibleLimit` in both worlds, bucket param
   dropped under skew, request cap never exceeded) and
   `planBucketHistoryFetch` (cumulative window, contiguous non-skipping slices).
+  Round 5 adds the unbounded-pagination invariants (`planBucketFetch` returns
+  contiguous `requestPages` from 1 at a constant page size, and reachable rows
+  keep growing past `MAX_THREADS_PER_REQUEST`), `mergeThreadPages` (ordering,
+  dedupe against the worker's `page`-clamp replay, still-loading pages skipped),
+  and the client search helpers (`normalizeSearchTerm`, `threadMatchesSearch`
+  over title + preview, `filterThreadsBySearch` no-op on a blank term).
 - `thread-sidebar.test.ts` — `groupThreadsByChannel` (unchanged), plus the
   round-3 defense-in-depth guard: a mixed-origin page must never leak a
   foreign thread or group header into a bucket, exact page partitioning,
   archived-thread exclusion, order preservation, and `formatTabCount` bounds.
   Round 4 adds `selectVisibleBucketPage`: fills a tab to 30 from an
   overfetched mixed page, caps at `visibleLimit` while preserving newest-first
-  order, per-bucket independence, and the `hasMore` rules (reveal held rows,
-  suppress the no-op button at the request cap).
+  order, and per-bucket independence. Round 5 replaces the round-4 `hasMore`
+  assertions (which pinned the 30-thread dead end as intended behavior) with the
+  infinite-pagination contract: exactly-`visibleLimit` rows + server `hasMore`
+  -> `Load more` offered; saturated overfetch + server `hasMore` -> offered;
+  offered page after page past 100 threads; hidden only when the bucket is
+  genuinely exhausted; rendered count grows 30 -> 60 -> 90 across clicks. Plus
+  `clientSearch` (search applied before the cap, no foreign-bucket leakage,
+  no-op when undefined) and `threadListEmptyMessage`.
 - `packages/worker/src/lib/db/threads.test.ts` — real in-memory D1
   (better-sqlite3): `originCounts` independence from the bucket filter,
   bucket-fill independence (busy Automation must not starve Slack),
   within-bucket pagination, page-mode counts, backward-compat omission, and
-  legacy `channel_thread_mappings` bucketing parity with the client.
+  legacy `channel_thread_mappings` bucketing parity with the client. Round 5
+  adds real search coverage against SQLite: title match, **contents-only** match
+  (the case that can't be done client-side), case-insensitivity, one row per
+  thread with several matching messages, `%`/`_` treated literally, blank terms
+  ignored, offset pagination over the filtered set with non-overlapping pages,
+  interaction with the status filter, search × bucket combination, and
+  search-scoped `originCounts`.
 - `packages/worker/src/routes/threads.test.ts` — param forwarding, unknown
-  bucket defensive drop, `includeOriginCounts=1` parsing.
+  bucket defensive drop, `includeOriginCounts=1` parsing. Round 5 adds `search`
+  forwarding (combined with `originBucket`), empty-`search` omission, and
+  verbatim pass-through of LIKE/quote metacharacters.
 
 ## Known non-issues
 

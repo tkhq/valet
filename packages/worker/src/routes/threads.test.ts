@@ -196,6 +196,95 @@ describe('threadsRouter POST /:sessionId/threads/:threadId/continue', () => {
     });
   });
 
+  it('forwards a search term to listThreads, combined with the bucket filter', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request('http://localhost/orchestrator/threads?originBucket=slack&search=orb%20billing&limit=30'),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 30,
+      userId: 'user-1',
+      originBucket: 'slack',
+      search: 'orb billing',
+    });
+  });
+
+  it('omits an empty search param instead of passing a no-op filter down', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request('http://localhost/orchestrator/threads?search='),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 20,
+      userId: 'user-1',
+    });
+  });
+
+  it('preserves LIKE metacharacters verbatim — escaping is the db layer’s job', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request("http://localhost/orchestrator/threads?search=100%25%20'%20OR%201%3D1"),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    // The route must not mangle or pre-escape the term; `listThreads` binds it
+    // as a parameter and adds `ESCAPE '\'`.
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 20,
+      userId: 'user-1',
+      search: "100% ' OR 1=1",
+    });
+  });
+
   it('returns numbered thread-history pagination metadata when page params are provided', async () => {
     getCurrentOrchestratorSessionMock.mockResolvedValue({
       id: 'orchestrator:user-1:new',

@@ -5,6 +5,7 @@ import {
   selectActiveThreads,
   selectVisibleBucketPage,
   selectVisibleBucketThreads,
+  threadListEmptyMessage,
 } from './thread-sidebar';
 import type { SessionThread } from '@/api/types';
 
@@ -262,11 +263,15 @@ describe('selectVisibleBucketPage', () => {
     return page;
   };
 
+  /** `n` UI-bucket threads, as a bucket-filtered worker would return them. */
+  const uiPage = (n: number, offset = 0): SessionThread[] =>
+    Array.from({ length: n }, (_, i) => baseThread({ id: `web-${offset + i}`, originType: 'web' }));
+
   it('fills the tab to 30 from an overfetched mixed page (the under-fill bug)', () => {
     // 100 mixed rows -> 25 per bucket. Before overfetching, a pageSize=30
     // request yielded only ~7 UI rows.
     const page = skewedPage(25);
-    const visible = selectVisibleBucketPage(page, 'ui', { pageSize: 100, visibleLimit: 30 }, true);
+    const visible = selectVisibleBucketPage(page, 'ui', { visibleLimit: 30 }, true);
 
     expect(visible.threads).toHaveLength(25);
     expect(visible.threads.every((t) => t.originType === 'web')).toBe(true);
@@ -275,7 +280,7 @@ describe('selectVisibleBucketPage', () => {
   it('CAPS the rendered list at visibleLimit even when more are already fetched', () => {
     // 40 UI rows present in the overfetched page; only 30 may render.
     const page = skewedPage(40);
-    const visible = selectVisibleBucketPage(page, 'ui', { pageSize: 100, visibleLimit: 30 }, false);
+    const visible = selectVisibleBucketPage(page, 'ui', { visibleLimit: 30 }, false);
 
     expect(visible.threads).toHaveLength(30);
     // Newest-first order preserved — we cap the tail, not a random subset.
@@ -285,41 +290,17 @@ describe('selectVisibleBucketPage', () => {
 
   it('offers Load more when it holds more bucket rows than it renders', () => {
     // No server hasMore, but 40 fetched vs 30 rendered -> reveal locally.
-    const visible = selectVisibleBucketPage(
-      skewedPage(40), 'ui', { pageSize: 100, visibleLimit: 30 }, false,
-    );
+    const visible = selectVisibleBucketPage(skewedPage(40), 'ui', { visibleLimit: 30 }, false);
 
     expect(visible.hasMore).toBe(true);
   });
 
   it('reveals the held-back rows on the next Load more page with no refetch', () => {
     const page = skewedPage(40);
-    const second = selectVisibleBucketPage(page, 'ui', { pageSize: 100, visibleLimit: 60 }, false);
+    const second = selectVisibleBucketPage(page, 'ui', { visibleLimit: 60 }, false);
 
     expect(second.threads).toHaveLength(40);
     expect(second.hasMore).toBe(false);
-  });
-
-  it('offers Load more when the server has more and we can still ask for a bigger page', () => {
-    const visible = selectVisibleBucketPage(
-      [baseThread({ id: 'web-1', originType: 'web' })],
-      'ui',
-      { pageSize: 30, visibleLimit: 30 },
-      true,
-    );
-
-    expect(visible.hasMore).toBe(true);
-  });
-
-  it('hides Load more once the request cap is reached and everything held is shown', () => {
-    // pageSize is already at the worker's 100-row cap, so a bigger request is
-    // impossible — a Load more button here would be a no-op.
-    const visible = selectVisibleBucketPage(
-      skewedPage(5), 'ui', { pageSize: 100, visibleLimit: 30 }, true,
-    );
-
-    expect(visible.threads).toHaveLength(5);
-    expect(visible.hasMore).toBe(false);
   });
 
   it('still excludes foreign buckets and archived threads', () => {
@@ -330,7 +311,7 @@ describe('selectVisibleBucketPage', () => {
         baseThread({ id: 'web-archived', originType: 'web', status: 'archived' }),
       ],
       'ui',
-      { pageSize: 100, visibleLimit: 30 },
+      { visibleLimit: 30 },
       false,
     );
 
@@ -340,8 +321,181 @@ describe('selectVisibleBucketPage', () => {
   it('caps every bucket independently at 30', () => {
     const page = skewedPage(40);
     for (const bucket of ['ui', 'slack', 'automation', 'other'] as const) {
-      const visible = selectVisibleBucketPage(page, bucket, { pageSize: 100, visibleLimit: 30 }, false);
+      const visible = selectVisibleBucketPage(page, bucket, { visibleLimit: 30 }, false);
       expect(visible.threads).toHaveLength(30);
     }
+  });
+
+  // ── Round-5 regression: "exactly 30 threads load and no more" ─────────────
+  //
+  // The old derivation was
+  //   all.length > threads.length || (serverHasMore && plan.pageSize < MAX_THREADS_PER_REQUEST)
+  // which goes false as soon as a saturated request (pageSize === 100, i.e. the
+  // FIRST page under skew) has everything it holds rendered. A bucket holding
+  // exactly `visibleLimit` rows in that window rendered 30 threads and hid the
+  // `Load more` button outright — with hundreds of threads still server-side.
+
+  it('offers Load more when it fetched EXACTLY visibleLimit rows and the server has more', () => {
+    // The reported bug, minimal form: a full page of 30 bucket rows and the
+    // server saying there are more. Nothing is held back, so the ONLY signal is
+    // the server flag — it must be honored on its own.
+    const visible = selectVisibleBucketPage(uiPage(30), 'ui', { visibleLimit: 30 }, true);
+
+    expect(visible.threads).toHaveLength(30);
+    expect(visible.hasMore).toBe(true);
+  });
+
+  it('offers Load more from a SATURATED overfetch when the server has more', () => {
+    // Under skew page 1 already requests MAX_THREADS_PER_REQUEST rows, of which
+    // exactly 30 are UI. Round 4 hid the button here; the next OFFSET page is
+    // reachable, so it must not.
+    const visible = selectVisibleBucketPage(skewedPage(30), 'ui', { visibleLimit: 30 }, true);
+
+    expect(visible.threads).toHaveLength(30);
+    expect(visible.hasMore).toBe(true);
+  });
+
+  it('keeps offering Load more page after page while the server has more', () => {
+    // Simulate accumulating offset pages: 30 rows per Load more, server still
+    // reporting more each time. Load more must survive well past 100 threads.
+    for (const pages of [1, 2, 3, 4, 5, 10]) {
+      const merged = uiPage(30 * pages);
+      const visible = selectVisibleBucketPage(merged, 'ui', { visibleLimit: 30 * pages }, true);
+
+      expect(visible.threads).toHaveLength(30 * pages);
+      expect(visible.hasMore).toBe(true);
+    }
+  });
+
+  it('hides Load more only when the bucket is genuinely exhausted', () => {
+    // Last loaded page reported hasMore=false and nothing is held back.
+    const visible = selectVisibleBucketPage(uiPage(42), 'ui', { visibleLimit: 60 }, false);
+
+    expect(visible.threads).toHaveLength(42);
+    expect(visible.hasMore).toBe(false);
+  });
+
+  it('hides Load more for an empty exhausted bucket', () => {
+    const visible = selectVisibleBucketPage([], 'slack', { visibleLimit: 30 }, false);
+
+    expect(visible.threads).toEqual([]);
+    expect(visible.hasMore).toBe(false);
+  });
+
+  it('increases the rendered count on each Load more click', () => {
+    // What the user experiences: click -> page 2 arrives -> 60 rows rendered.
+    const afterFirstPage = selectVisibleBucketPage(uiPage(30), 'ui', { visibleLimit: 30 }, true);
+    const afterSecondPage = selectVisibleBucketPage(uiPage(60), 'ui', { visibleLimit: 60 }, true);
+    const afterThirdPage = selectVisibleBucketPage(uiPage(90), 'ui', { visibleLimit: 90 }, true);
+
+    expect(afterFirstPage.threads).toHaveLength(30);
+    expect(afterSecondPage.threads).toHaveLength(60);
+    expect(afterThirdPage.threads).toHaveLength(90);
+    // And every one of them still offers another click.
+    expect([afterFirstPage, afterSecondPage, afterThirdPage].map((p) => p.hasMore))
+      .toEqual([true, true, true]);
+  });
+
+  it('renders newly-arrived rows even before the render cap is reached', () => {
+    // Under skew a Load-more click buys the next MIXED page, whose bucket share
+    // may be well under 30. Progress must still be visible.
+    const page1 = skewedPage(8);
+    const page2 = skewedPage(6).map((t) => baseThread({ ...t, id: `${t.id}-p2` }));
+    const merged = selectVisibleBucketPage(
+      [...page1, ...page2], 'ui', { visibleLimit: 60 }, true,
+    );
+
+    expect(merged.threads).toHaveLength(14);
+    expect(merged.hasMore).toBe(true);
+  });
+});
+
+// ─── Client-side search fallback (skew only) ──────────────────────────────────
+
+describe('selectVisibleBucketPage — clientSearch', () => {
+  const page = (): SessionThread[] => [
+    baseThread({ id: 'web-orb', originType: 'web', title: 'Orb billing cutover' }),
+    baseThread({ id: 'web-other', originType: 'web', title: 'Unrelated thread' }),
+    baseThread({ id: 'web-preview', originType: 'web', firstMessagePreview: 'check the orb webhook' }),
+    baseThread({ id: 'slack-orb', originType: 'slack', title: 'Orb in Slack' }),
+  ];
+
+  it('filters the tab by title or preview when a client search is supplied', () => {
+    const visible = selectVisibleBucketPage(page(), 'ui', { visibleLimit: 30 }, false, 'orb');
+
+    expect(visible.threads.map((t) => t.id)).toEqual(['web-orb', 'web-preview']);
+  });
+
+  it('does not leak foreign buckets that match the term', () => {
+    const visible = selectVisibleBucketPage(page(), 'ui', { visibleLimit: 30 }, false, 'orb');
+
+    expect(visible.threads.some((t) => t.id === 'slack-orb')).toBe(false);
+  });
+
+  it('is a no-op when no client search is supplied (new worker already filtered)', () => {
+    // Against a NEW worker the server may match message CONTENTS that appear in
+    // neither the title nor the 120-char preview. Filtering client-side there
+    // would drop real hits, so the sidebar passes undefined.
+    const visible = selectVisibleBucketPage(page(), 'ui', { visibleLimit: 30 }, false);
+
+    expect(visible.threads).toHaveLength(3);
+  });
+
+  it('applies the search BEFORE the cap so a filtered tab still fills to 30', () => {
+    const matches = Array.from({ length: 40 }, (_, i) =>
+      baseThread({ id: `hit-${i}`, originType: 'web', title: `deploy ${i}` }),
+    );
+    const noise = Array.from({ length: 40 }, (_, i) =>
+      baseThread({ id: `miss-${i}`, originType: 'web', title: `unrelated ${i}` }),
+    );
+    // Interleave so a cap-then-filter implementation would render ~15 rows.
+    const interleaved = matches.flatMap((hit, i) => [noise[i], hit]);
+
+    const visible = selectVisibleBucketPage(interleaved, 'ui', { visibleLimit: 30 }, false, 'deploy');
+
+    expect(visible.threads).toHaveLength(30);
+    expect(visible.threads.every((t) => t.id.startsWith('hit-'))).toBe(true);
+    expect(visible.hasMore).toBe(true);
+  });
+});
+
+describe('threadListEmptyMessage', () => {
+  const base = {
+    isLoading: false,
+    hasMore: false,
+    searching: false,
+    bucket: 'ui' as const,
+    bucketTotal: 0,
+  };
+
+  it('says Loading while any page is in flight', () => {
+    expect(threadListEmptyMessage({ ...base, isLoading: true, bucketTotal: 12 }))
+      .toBe('Loading…');
+  });
+
+  it('reports no search matches once there is nothing left to fetch', () => {
+    expect(threadListEmptyMessage({ ...base, searching: true, bucketTotal: 0 }))
+      .toBe('No threads match');
+  });
+
+  it('does NOT claim "no match" while more pages are still reachable', () => {
+    // Under skew a MIXED page can hold zero rows of the active bucket while
+    // later pages hold plenty — claiming "no match" there would be a lie, and
+    // `Load more` stays on screen next to this message.
+    expect(threadListEmptyMessage({ ...base, hasMore: true, searching: true }))
+      .toBe('No matches on these threads yet');
+    expect(threadListEmptyMessage({ ...base, hasMore: true, searching: false }))
+      .toBe('None on these threads yet');
+  });
+
+  it('names the bucket when it is genuinely empty', () => {
+    expect(threadListEmptyMessage({ ...base, bucket: 'ui' })).toBe('No UI threads');
+    expect(threadListEmptyMessage({ ...base, bucket: 'other' })).toBe('No other threads');
+    expect(threadListEmptyMessage({ ...base, bucket: 'slack' })).toBe('No slack threads');
+    expect(threadListEmptyMessage({ ...base, bucket: 'automation' })).toBe('No automation threads');
+  });
+
+  it('falls back to Loading when counts disagree with an empty render', () => {
+    expect(threadListEmptyMessage({ ...base, bucketTotal: 7 })).toBe('Loading…');
   });
 });
