@@ -66,6 +66,13 @@ import {
   sessionNodeDocs,
 } from './session.js';
 import {
+  type LoopNode,
+  type LoopBodyNode,
+  type LoopUntil,
+  createDefaultLoopNode,
+  loopNodeDocs,
+} from './loop.js';
+import {
   type ProjectNode,
   type ProjectColumn,
   createDefaultProjectNode,
@@ -82,6 +89,9 @@ export type {
   IfCondition,
   ForeachNode,
   ForeachBodyNode,
+  LoopNode,
+  LoopBodyNode,
+  LoopUntil,
   ApprovalNode,
   WaitNode,
   SetNode,
@@ -101,6 +111,7 @@ export type WorkflowNode =
   | LlmNode
   | IfNode
   | ForeachNode
+  | LoopNode
   | ApprovalNode
   | WaitNode
   | SetNode
@@ -129,6 +140,7 @@ export const NODE_DOCS: NodeDocsRegistry = {
   tool: toolNodeDocs,
   if: ifNodeDocs,
   foreach: foreachNodeDocs,
+  loop: loopNodeDocs,
   approval: approvalNodeDocs,
   wait: waitNodeDocs,
   set: setNodeDocs,
@@ -146,6 +158,7 @@ const NODE_DEFAULT_FACTORIES: { [K in DagNodeType]: (id: string) => Extract<Work
   tool: createDefaultToolNode,
   if: createDefaultIfNode,
   foreach: createDefaultForeachNode,
+  loop: createDefaultLoopNode,
   approval: createDefaultApprovalNode,
   wait: createDefaultWaitNode,
   set: createDefaultSetNode,

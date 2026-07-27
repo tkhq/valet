@@ -657,6 +657,9 @@ export function createWorkflowInputPatchForNode(
         : null;
     case 'wait':
     case 'trigger':
+    case 'loop':
+      // A loop has no single template field of its own — inputs are
+      // wired inside its body steps.
       return null;
     default: {
       const _exhaustive: never = node;
@@ -847,6 +850,8 @@ function summarizeNode(node: WorkflowNode): string {
       return `${node.conditions.length} condition${node.conditions.length === 1 ? '' : 's'}`;
     case 'foreach':
       return trimSummary(node.items || 'No item expression configured');
+    case 'loop':
+      return `${node.body.length} step${node.body.length === 1 ? '' : 's'} · up to ${node.maxIterations} iteration${node.maxIterations === 1 ? '' : 's'}`;
     case 'approval':
       return trimSummary(node.summary || node.prompt || 'No prompt configured');
     case 'wait':

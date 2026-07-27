@@ -5,6 +5,7 @@ import type {
   ForeachNode,
   IfCondition,
   IfNode,
+  LoopNode,
   LlmNode,
   OrchestratorNode,
   ProjectColumn,
@@ -1262,6 +1263,9 @@ function getNodeTemplateValues(node: WorkflowNode): string[] {
     case 'trigger':
     case 'if':
     case 'wait':
+    case 'loop':
+      // Loop body templates reference steps/prev roots the editor's
+      // source list can't verify — validated server-side instead.
       return [];
     default: {
       // Exhaustiveness guard — a new node type added to the shared
@@ -1643,6 +1647,7 @@ const INSPECTOR_QUICK_ADD_TYPES: Array<{
   { type: 'if', label: 'If', icon: 'flow', title: 'Add conditional branch downstream' },
   { type: 'set', label: 'Set', icon: 'data', title: 'Add set/derive step downstream' },
   { type: 'foreach', label: 'For each', icon: 'flow', title: 'Add for-each loop downstream' },
+  { type: 'loop', label: 'Loop', icon: 'flow', title: 'Add until-condition loop downstream' },
   { type: 'stop', label: 'Stop', icon: 'flow', title: 'Add stop step downstream' },
 ];
 
@@ -1698,6 +1703,8 @@ function NodeParameterFields({
       return <IfFields node={node} templateSources={templateSources} onUpdate={onUpdate} />;
     case 'foreach':
       return <ForeachFields definition={definition} node={node} templateSources={templateSources} onUpdate={onUpdate} />;
+    case 'loop':
+      return <LoopFields node={node} templateSources={templateSources} onUpdate={onUpdate} />;
     case 'approval':
       return <ApprovalFields node={node} templateSources={templateSources} onUpdate={onUpdate} />;
     case 'wait':
@@ -2438,14 +2445,6 @@ function ToolPickerItemText({ children }: { children: React.ReactNode }) {
 }
 
 function IfFields({ node, onUpdate, templateSources }: NodeFieldProps<IfNode>) {
-  function updateCondition(index: number, patch: Partial<IfCondition>) {
-    onUpdate({
-      conditions: node.conditions.map((condition, currentIndex) =>
-        currentIndex === index ? { ...condition, ...patch } : condition,
-      ),
-    });
-  }
-
   return (
     <>
       <SelectField
@@ -2455,64 +2454,95 @@ function IfFields({ node, onUpdate, templateSources }: NodeFieldProps<IfNode>) {
         onChange={(combinator) => onUpdate({ combinator })}
         help={NODE_DOCS.if.fields?.combinator?.help}
       />
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <LabelText help={NODE_DOCS.if.fields?.conditions?.help}>Conditions</LabelText>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() =>
-              onUpdate({
-                conditions: [
-                  ...node.conditions,
-                  { left: '', dataType: 'string', operation: 'equals', right: '' },
-                ],
-              })
-            }
-          >
-            Add
-          </Button>
-        </div>
-        {node.conditions.length === 0 ? (
-          <p className="rounded-md border border-dashed border-neutral-200 p-3 text-xs text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-            Add a condition to route true/false edges.
-          </p>
-        ) : (
-          node.conditions.map((condition, index) => (
-            <div key={index} className="space-y-2 rounded-md border border-neutral-200 p-2 dark:border-neutral-700">
-              <TemplateTextInput
-                value={condition.left}
-                templateSources={templateSources}
-                onChange={(left) => updateCondition(index, { left })}
-                placeholder="{{nodes.start.data.value}}"
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <NativeSelect
-                  value={condition.dataType}
-                  onChange={(value) => updateCondition(index, { dataType: value as IfCondition['dataType'] })}
-                  options={['string', 'number', 'date', 'boolean', 'array', 'object']}
-                />
-                <Input value={condition.operation} onChange={(event) => updateCondition(index, { operation: event.target.value })} placeholder="equals" />
-              </div>
-              <Input
-                value={stringifyPrimitive(condition.right)}
-                onChange={(event) => updateCondition(index, { right: parseConditionRight(event.target.value, condition.dataType) })}
-                placeholder="Comparison value"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => onUpdate({ conditions: node.conditions.filter((_, currentIndex) => currentIndex !== index) })}
-              >
-                Remove
-              </Button>
-            </div>
-          ))
-        )}
-      </div>
+      <ConditionListEditor
+        conditions={node.conditions}
+        templateSources={templateSources}
+        emptyHint="Add a condition to route true/false edges."
+        help={NODE_DOCS.if.fields?.conditions?.help}
+        leftPlaceholder="{{nodes.start.data.value}}"
+        onChange={(conditions) => onUpdate({ conditions })}
+      />
     </>
+  );
+}
+
+function ConditionListEditor({
+  conditions,
+  templateSources,
+  emptyHint,
+  help,
+  leftPlaceholder,
+  onChange,
+}: {
+  conditions: IfCondition[];
+  templateSources: WorkflowOutputSource[];
+  emptyHint: string;
+  help?: string;
+  leftPlaceholder: string;
+  onChange: (conditions: IfCondition[]) => void;
+}) {
+  function updateCondition(index: number, patch: Partial<IfCondition>) {
+    onChange(conditions.map((condition, currentIndex) =>
+      currentIndex === index ? { ...condition, ...patch } : condition,
+    ));
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <LabelText help={help}>Conditions</LabelText>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() =>
+            onChange([
+              ...conditions,
+              { left: '', dataType: 'string', operation: 'equals', right: '' },
+            ])
+          }
+        >
+          Add
+        </Button>
+      </div>
+      {conditions.length === 0 ? (
+        <p className="rounded-md border border-dashed border-neutral-200 p-3 text-xs text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+          {emptyHint}
+        </p>
+      ) : (
+        conditions.map((condition, index) => (
+          <div key={index} className="space-y-2 rounded-md border border-neutral-200 p-2 dark:border-neutral-700">
+            <TemplateTextInput
+              value={condition.left}
+              templateSources={templateSources}
+              onChange={(left) => updateCondition(index, { left })}
+              placeholder={leftPlaceholder}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <NativeSelect
+                value={condition.dataType}
+                onChange={(value) => updateCondition(index, { dataType: value as IfCondition['dataType'] })}
+                options={['string', 'number', 'date', 'boolean', 'array', 'object']}
+              />
+              <Input value={condition.operation} onChange={(event) => updateCondition(index, { operation: event.target.value })} placeholder="equals" />
+            </div>
+            <Input
+              value={stringifyPrimitive(condition.right)}
+              onChange={(event) => updateCondition(index, { right: parseConditionRight(event.target.value, condition.dataType) })}
+              placeholder="Comparison value"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => onChange(conditions.filter((_, currentIndex) => currentIndex !== index))}
+            >
+              Remove
+            </Button>
+          </div>
+        ))
+      )}
+    </div>
   );
 }
 
@@ -2579,6 +2609,100 @@ function ForeachFields({
           options={['fail', 'skip', 'collect']}
           onChange={(onItemError) => onUpdate({ onItemError })}
           help={NODE_DOCS.foreach.fields?.onItemError?.help}
+        />
+      </DisclosureSection>
+    </>
+  );
+}
+
+function LoopFields({ node, onUpdate, templateSources }: NodeFieldProps<LoopNode>) {
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
+
+  function updateStep(index: number, step: ForeachBodyNode) {
+    onUpdate({ body: node.body.map((current, i) => (i === index ? step : current)) });
+  }
+
+  function addStep() {
+    const taken = new Set(node.body.map((step) => step.id));
+    let i = node.body.length + 1;
+    while (taken.has(`${node.id}-step-${i}`)) i += 1;
+    onUpdate({ body: [...node.body, createDefaultWorkflowNode('set', `${node.id}-step-${i}`) as ForeachBodyNode] });
+  }
+
+  return (
+    <>
+      <NumberField
+        label="Max iterations"
+        value={node.maxIterations}
+        min={1}
+        step={1}
+        onChange={(maxIterations) => onUpdate({ maxIterations: maxIterations ?? 1 })}
+        help={NODE_DOCS.loop.fields?.maxIterations?.help}
+      />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <LabelText help={NODE_DOCS.loop.fields?.body?.help}>Body steps</LabelText>
+          <Button type="button" variant="secondary" size="sm" onClick={addStep}>Add step</Button>
+        </div>
+        {node.body.map((step, index) => (
+          <ForeachBodyField
+            key={step.id || index}
+            value={step}
+            label={`Step ${index + 1}`}
+            onChange={(next) => updateStep(index, next)}
+            actions={node.body.length > 1 ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => onUpdate({ body: node.body.filter((_, i) => i !== index) })}
+              >
+                Remove
+              </Button>
+            ) : undefined}
+          />
+        ))}
+      </div>
+      <div className="space-y-2">
+        <SelectField
+          label="Exit condition"
+          value={node.until ? 'until' : 'fixed-count'}
+          options={['until', 'fixed-count']}
+          onChange={(mode) =>
+            onUpdate({
+              until: mode === 'until'
+                ? node.until ?? { conditions: [{ left: '', dataType: 'boolean', operation: 'isTrue' }] }
+                : undefined,
+            })
+          }
+          help={NODE_DOCS.loop.fields?.until?.help}
+        />
+        {node.until && (
+          <>
+            <SelectField
+              label="Combinator"
+              value={node.until.combinator ?? 'and'}
+              options={['and', 'or']}
+              onChange={(combinator) => onUpdate({ until: { ...node.until!, combinator } })}
+            />
+            <ConditionListEditor
+              conditions={node.until.conditions}
+              templateSources={templateSources}
+              emptyHint="Add a condition; the loop exits when it holds after an iteration."
+              help={NODE_DOCS.loop.fields?.until?.help}
+              leftPlaceholder="steps.review.approved"
+              onChange={(conditions) => onUpdate({ until: { ...node.until!, conditions } })}
+            />
+          </>
+        )}
+      </div>
+      <DisclosureSection open={advancedOpen} title="Advanced" onOpenChange={setAdvancedOpen}>
+        <SelectField
+          label="Iteration error"
+          value={node.onIterationError ?? 'fail'}
+          options={['fail', 'break']}
+          onChange={(onIterationError) => onUpdate({ onIterationError })}
+          help={NODE_DOCS.loop.fields?.onIterationError?.help}
         />
       </DisclosureSection>
     </>
@@ -3400,10 +3524,14 @@ function ForeachBodyField({
   value,
   onChange,
   help,
+  label = 'Step to run for each item',
+  actions,
 }: {
   value: ForeachBodyNode;
   onChange: (value: ForeachBodyNode) => void;
   help?: string;
+  label?: string;
+  actions?: React.ReactNode;
 }) {
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const [text, setText] = React.useState(JSON.stringify(value, null, 2));
@@ -3446,8 +3574,11 @@ function ForeachBodyField({
   return (
     <div className="space-y-3 rounded-md border border-neutral-200 p-2 dark:border-neutral-700">
       <div className="flex items-center justify-between gap-2">
-        <LabelText help={help}>Step to run for each item</LabelText>
-        <Badge variant="secondary">{value.type}</Badge>
+        <LabelText help={help}>{label}</LabelText>
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary">{value.type}</Badge>
+          {actions}
+        </div>
       </div>
       <SelectField
         label="Step type"

@@ -20,6 +20,7 @@ export const WORKFLOW_NODE_TYPES = [
   'wait',
   'approval',
   'foreach',
+  'loop',
   'orchestrator',
   'session',
   'stop',
@@ -41,7 +42,6 @@ export const LEGACY_NODE_TYPE_ALIASES = {
   prompt: 'llm',
   http: 'tool',
   action: 'tool',
-  loop: 'foreach',
   sleep: 'wait',
   start: 'trigger',
 } as const satisfies Record<string, (typeof WORKFLOW_NODE_TYPES)[number]>;
@@ -263,6 +263,25 @@ export const foreachBodySchema = z.union([
   projectNodeSchema,
 ]);
 
+// loop — bounded condition-driven iteration. Body steps share the foreach
+// allowlist; `until` reuses the if-node condition shape. maxIterations is
+// REQUIRED: an LLM-judged exit never provably terminates, so the bound is
+// part of the node's contract, not a tunable.
+export const MAX_LOOP_ITERATIONS = 25;
+export const MAX_LOOP_BODY_STEPS = 10;
+
+export const loopNodeSchema = z.object({
+  id: idSchema,
+  type: z.literal('loop'),
+  body: z.array(foreachBodySchema).min(1).max(MAX_LOOP_BODY_STEPS),
+  maxIterations: z.number().int().min(1).max(MAX_LOOP_ITERATIONS),
+  until: z.object({
+    combinator: z.enum(['and', 'or']).optional(),
+    conditions: z.array(ifConditionSchema).min(1),
+  }).optional(),
+  onIterationError: z.enum(['fail', 'break']).optional(),
+});
+
 export const foreachNodeSchema = z.object({
   id: idSchema,
   type: z.literal('foreach'),
@@ -282,6 +301,7 @@ export const workflowNodeSchema = z.union([
   llmNodeSchema,
   ifNodeSchema,
   foreachNodeSchema,
+  loopNodeSchema,
   approvalNodeSchema,
   waitNodeSchema,
   setNodeSchema,
@@ -313,6 +333,7 @@ export const NODE_SCHEMAS_BY_TYPE = {
   wait: waitNodeSchema,
   approval: approvalNodeSchema,
   foreach: foreachNodeSchema,
+  loop: loopNodeSchema,
   orchestrator: orchestratorNodeSchema,
   session: startSessionNodeSchema,
   stop: stopNodeSchema,

@@ -162,6 +162,23 @@ export function getWorkflowSchemaReference() {
         description: 'Pause until a human approves or denies. `prompt` is the human-facing question — it is REQUIRED; do not put it in `summary`.',
       },
       {
+        type: 'loop',
+        required: ['id', 'type', 'body', 'maxIterations'],
+        optional: ['until', 'onIterationError'],
+        description: 'Repeat an ordered list of body steps until an if-shaped `until` condition holds, or exactly maxIterations times when `until` is omitted. Where foreach fans out over an existing list, a loop iterates toward a state — draft/review cycles, retry-until-clean.',
+        constraints: {
+          bodyTypes: FOREACH_BODY_NODE_TYPES,
+          bodyNote: 'Body steps share the foreach allowlist — no nested if, wait, approval, trigger, foreach, or loop. maxIterations is REQUIRED (1..25): an LLM-judged exit never provably terminates, so the bound is part of the contract. Every body-step execution draws from the same cumulative 5000-iteration budget as foreach.',
+          contextNote: 'Inside body steps and `until` conditions: `steps.<bodyId>` = current iteration outputs so far (raw data, no .data wrapper), `prev.<bodyId>` = previous iteration (undefined on the first pass), `iteration` = 0-based counter. Later steps see earlier steps of the same iteration.',
+          untilNote: 'until = { combinator?, conditions: [...] } with the exact if-node condition shape. Evaluated after each full iteration. The canonical drafter/reviewer loop: reviewer llm step declares outputSchema { approved: boolean, feedback: string }, until checks `steps.<reviewerId>.approved` isTrue.',
+        },
+        resultShape: {
+          shape: '{{nodes.<loop-id>.data}} = { iterations: number, satisfied: boolean, steps: { <bodyId>: <that step\'s output> }, stoppedEarly?: string }',
+          itemAccess: 'Downstream nodes read the FINAL iteration\'s outputs at `nodes.<id>.data.steps.<bodyId>`. `satisfied` is false when the cap was hit before `until` fired — branch on it with an if node when the unapproved case needs different handling.',
+          example: 'loop `refine` with body [draft (llm), review (llm w/ outputSchema {approved,feedback})] → downstream posts `{{nodes.refine.data.steps.draft.response}}`, gated on `{{nodes.refine.data.satisfied}}`.',
+        },
+      },
+      {
         type: 'foreach',
         required: ['id', 'type', 'items', 'body'],
         optional: ['itemAlias', 'indexAlias', 'maxItems', 'concurrency', 'onItemError'],

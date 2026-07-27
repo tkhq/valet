@@ -56,7 +56,7 @@ All actions still flow through action policy resolution and invocation audit row
 
 `llm_maxoutput_warning` is advisory and does not block publish; structural errors, invalid environment references, malformed templates, missing provider keys, unavailable LLM models, and graph errors are blocking. LLM provider-key validation resolves built-in provider keys from `org_api_keys` first and Worker env fallback secrets second, matching session env assembly. LLM model IDs are checked against the same resolved model catalog used by settings pages and model pickers; workflow definitions use `provider:model`, while the picker catalog stores `provider/model`, so validation normalizes between those forms. LLM nodes without `outputSchema` use text generation and return `{ response: string }`; LLM nodes with `outputSchema` use text generation plus the shared structured-output parser/repair pipeline and return the validated JSON object. `workflows.save_draft` requires a structurally valid `WorkflowDefinition`, rejects blocking semantic graph errors such as `foreach` items that do not point at typed array outputs, and rejects known-unavailable LLM models before writing the draft; pass `validate: true` to return the same grouped semantic/environment validation result after saving.
 
-The validator fails fast on unknown node types before per-node discriminator validation. Errors enumerate valid node types (`trigger`, `llm`, `tool`, `set`, `if`, `wait`, `approval`, `foreach`, `orchestrator`, `session`, `stop`) and include migration hints for old or incorrect names such as `agent_prompt` → `llm`, `http`/`action` → `tool`, `loop` → `foreach`, and `sleep` → `wait`. `bash` is not a dag/v1 node type.
+The validator fails fast on unknown node types before per-node discriminator validation. Errors enumerate valid node types (`trigger`, `llm`, `tool`, `set`, `if`, `wait`, `approval`, `foreach`, `loop`, `orchestrator`, `session`, `stop`, `project`) and include migration hints for old or incorrect names such as `agent_prompt` → `llm`, `http`/`action` → `tool`, and `sleep` → `wait` (`loop` is a first-class node type, no longer an alias for `foreach`). `bash` is not a dag/v1 node type.
 
 Node IDs may include hyphens for compatibility with the visual editor. Dot notation only works for identifier-safe IDs, so references to hyphenated IDs must use bracket notation: `{{nodes["tool-1"].data.result}}`.
 
@@ -404,6 +404,7 @@ For editor typeahead and edge inspection, `foreach` nodes expose their runtime r
 | `wait` | Durable pause via `step.sleep` for a compact duration string (`'5s'`, `'1h'`). |
 | `approval` | Human approval gate via `workflow_approvals` + `step.waitForEvent`. |
 | `foreach` | Iterates over a typed array output. Body is a single node of a permitted subtype (`llm`, `tool`, `set`, `stop`, `orchestrator`, `session`). Optional `maxItems` truncates the input array before execution; when omitted the runtime processes up to 100 items by default. Explicit `maxItems` may be raised up to the workflow policy ceiling, which defaults to the 5000-iteration execution cap. |
+| `loop` | Bounded condition-driven iteration. Runs an ordered list of body steps (same allowlist as foreach bodies) once per iteration until an if-shaped `until` condition holds; `maxIterations` (1–25) is a required field because a model- or data-judged exit is unbounded by construction. Omitting `until` runs exactly `maxIterations` times. Body and `until` templates see `steps.<bodyId>` (current iteration, raw data), `prev.<bodyId>` (previous iteration; undefined on the first), and `iteration` (0-based). Output: `{ iterations, satisfied, steps: { <bodyId>: <output> }, stoppedEarly? }` — `satisfied` is false when the cap fired before `until`. `onIterationError: 'fail'` (default) fails the node; `'break'` completes it with the last full iteration's steps. Every body-step execution draws from the same cumulative 5000-iteration budget as foreach. Each body step runs in its own `step.do` (`node:<loopId>:i:<iter>:<bodyId>`), non-step-driven steps under NO_RETRY. |
 | `orchestrator` | Dispatch a prompt to the user's orchestrator in a fresh automation-origin thread. With `wait.mode: 'until_idle'`, the executor polls that created thread's prompt queue until it has no queued or processing prompts; it does not wait for the long-lived orchestrator session lifecycle to become idle. Waited nodes output the thread's raw final assistant text as `response`, message metadata as `lastMessage`, schema-validated structured data as `output` when `outputSchema` is set, and can opt into `resultMode: 'transcript'`. |
 | `session` | Start or resume a session and run a prompt. With `wait.mode: 'until_idle'`, the executor first honors terminal D1 lifecycle states (`idle`, `hibernated`, `terminated`), then polls `SessionAgentDO /status` for active sessions and resolves when a runner is connected, `runnerBusy` is false, and no prompts are queued. Waited nodes read the session transcript after idle and output the final assistant reply as `response`, plus schema-validated structured data as `output` when `outputSchema` is set. |
 | `stop` | Terminate the workflow with an outcome envelope. |
@@ -415,6 +416,7 @@ For editor typeahead and edge inspection, `foreach` nodes expose their runtime r
 - Per-node duplicate id detection (top-level ids share namespace with foreach body ids — the runtime keys `step.do` cache, action invocations, approval ids, and trace rows on `${nodeId}:i:${iter}` with no parent scoping). `trigger` is a reserved source-node id in visual-editor-authored workflows.
 - Edge endpoints MUST reference top-level node ids — edges into/out of foreach body ids are rejected because the runtime's wave loop only registers top-level nodes.
 - foreach body type allowlist + alias shadowing + concurrency ceilings + typed-array source validation for `items`.
+- loop body type allowlist (same as foreach), per-loop body-step id uniqueness (plus the global id namespace above), `maxIterations` bounds, and if-shaped static checks on `until` conditions.
 - Template parse for every author-supplied template field.
 - Per-node env checks for llm model availability (provider key configured).
 
@@ -431,7 +433,7 @@ The runtime entrypoint is `ValetWorkflowInterpreter` in `packages/worker/src/wor
 3. Repeat until no more runnable nodes:
    - `pickRunnable` — every unsettled node whose every incoming edge is satisfied by a settled parent.
    - Run up to `policy.maxConcurrentNodes` nodes via `Promise.allSettled`.
-   - For step-driven types (`wait`, `approval`, `tool`, `foreach`, `session`, `orchestrator`) the executor owns its own `step.do` / `step.sleep` / `step.waitForEvent` primitives. For pure/source types (`trigger`, `llm`, `set`, `if`, `stop`) the runtime wraps the executor in a single outer `step.do`.
+   - For step-driven types (`wait`, `approval`, `tool`, `foreach`, `loop`, `session`, `orchestrator`) the executor owns its own `step.do` / `step.sleep` / `step.waitForEvent` primitives. For pure/source types (`trigger`, `llm`, `set`, `if`, `stop`) the runtime wraps the executor in a single outer `step.do`.
    - Each node writes `running` / `waiting_*` / terminal trace rows via `traceWriter.recordTransition`, cached behind `step.do`.
 4. When no nodes remain, mark unreachable children as `skipped` (with the parent's edge-error reason when available), then write the terminal status.
 
@@ -483,7 +485,7 @@ The path-based `/webhooks/:path` endpoint constant-time-compares against `config
 - Draft + published-version workflow lifecycle with restore
 - Three trigger types (webhook, schedule, manual) with one-time-token webhook auth
 - Cron schedule dispatch with timezone support, tick dedupe, and a catch-up pass
-- dag/v1 runtime on Cloudflare Workflows with the full node-type set (llm / tool / set / if / wait / approval / foreach / orchestrator / session / stop)
+- dag/v1 runtime on Cloudflare Workflows with the full node-type set (llm / tool / set / if / wait / approval / foreach / loop / orchestrator / session / stop / project)
 - Approval gates via `workflow_approvals` + `step.waitForEvent`; flat and nested approve/deny endpoints
 - Cancellation pipeline with `cleanup_completed_at` gate, cron sweeps for stuck `cancelling` rows and stuck approvals
 - Per-execution trace rows in `workflow_execution_nodes` with retention TTL

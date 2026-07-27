@@ -62,8 +62,9 @@ export interface WorkflowDagState {
    * skip rows can surface the underlying cause instead of a generic
    * "no inbound edge satisfied" string. */
   edgeErrors?: Record<string, string>;
-  /** Cumulative foreach iteration count across the entire execution.
-   * Per spec the 5001st iteration aborts the workflow. */
+  /** Cumulative foreach + loop body-step iteration count across the
+   * entire execution. Per spec the 5001st iteration aborts the workflow;
+   * loop nodes draw from the same budget. */
   foreachIterationCount?: number;
 }
 

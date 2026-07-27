@@ -21,6 +21,8 @@ import type {
   WorkflowValidationError,
   WorkflowInputDefinition,
   ForeachNode,
+  LoopNode,
+  IfCondition,
   PromptSessionNode,
   LlmNode,
 } from '@valet/shared';
@@ -100,6 +102,20 @@ function validateRawNodeTypes(input: unknown): WorkflowValidationError[] {
         errors.push(unknownForeachBodyTypeError(bodyType, `nodes.${index}.body.type`, bodyRecord.id));
       }
     }
+
+    if (type === 'loop') {
+      const body = record.body;
+      if (!Array.isArray(body)) continue;
+      for (let step = 0; step < body.length; step++) {
+        const raw = body[step];
+        if (!raw || typeof raw !== 'object') continue;
+        const stepRecord = raw as Record<string, unknown>;
+        const stepType = stepRecord.type;
+        if (typeof stepType === 'string' && !FOREACH_BODY_TYPES.has(stepType)) {
+          errors.push(unknownLoopBodyTypeError(stepType, `nodes.${index}.body.${step}.type`, stepRecord.id));
+        }
+      }
+    }
   }
   return errors;
 }
@@ -136,6 +152,22 @@ function unknownForeachBodyTypeError(type: string, path: string, rawId: unknown)
     path,
     code: 'unknown_foreach_body_type',
     message: `foreach body type "${type}" is not allowed. Allowed foreach body types are: ${FOREACH_BODY_NODE_TYPES.join(', ')}.${suffix}`,
+  };
+}
+
+function unknownLoopBodyTypeError(type: string, path: string, rawId: unknown): WorkflowValidationError {
+  const suggestion = Object.prototype.hasOwnProperty.call(LEGACY_NODE_TYPE_ALIASES, type)
+    ? LEGACY_NODE_TYPE_ALIASES[type as keyof typeof LEGACY_NODE_TYPE_ALIASES]
+    : undefined;
+  const suffix = suggestion && FOREACH_BODY_TYPES.has(suggestion)
+    ? ` Did you mean "${suggestion}"?`
+    : ' Control-flow node types cannot be nested in a loop body.';
+  return {
+    scope: 'workflow',
+    ...(typeof rawId === 'string' ? { nodeId: rawId } : {}),
+    path,
+    code: 'unknown_loop_body_type',
+    message: `loop body step type "${type}" is not allowed. Allowed loop body types are: ${FOREACH_BODY_NODE_TYPES.join(', ')}.${suffix}`,
   };
 }
 
@@ -309,6 +341,21 @@ export function validateDefinitionWithContext(
         // executable inside the foreach iteration loop.
       }
     }
+    if (node.type === 'loop') {
+      for (const bodyNode of node.body) {
+        if (allIds.has(bodyNode.id)) {
+          errors.push({
+            scope: 'node',
+            nodeId: bodyNode.id,
+            code: 'duplicate_id',
+            message: `Duplicate node ID: ${bodyNode.id} (loop "${node.id}" body conflicts with another node)`,
+          });
+        } else {
+          allIds.add(bodyNode.id);
+          // NOT in edgeTargetIds — body steps only run inside the loop.
+        }
+      }
+    }
 
     validateNode(node, errors, { foreachMaxItems, foreachMaxConcurrency });
   }
@@ -424,6 +471,7 @@ export const VALIDATION_CODES = {
   duplicate_id: 'error',
   unknown_node_type: 'error',
   unknown_foreach_body_type: 'error',
+  unknown_loop_body_type: 'error',
   max_nodes_exceeded: 'error',
   edge_from_stop: 'error',
   edge_from_unknown: 'error',
@@ -563,35 +611,13 @@ function validateNode(
     case 'if':
       // Conditions are pure values; no templates here. left fields use
       // path syntax which we validate as expressions.
-      for (const cond of node.conditions) {
-        tryParseExpression(node.id, 'left', cond.left, errors);
-        const operation = normalizeIfOperation(cond.operation);
-        if (!isIfOperationSupported(cond.dataType, cond.operation)) {
-          errors.push({
-            scope: 'field',
-            nodeId: node.id,
-            path: 'conditions.operation',
-            code: 'if_operation_unsupported',
-            message: `Unsupported ${cond.dataType} operation "${cond.operation}". Allowed operations: ${allowedIfOperations(cond.dataType).join(', ')}`,
-          });
-        }
-        if (operation === 'matchesRegex' && typeof cond.right === 'string') {
-          try {
-            new RegExp(cond.right);
-          } catch (err) {
-            errors.push({
-              scope: 'field',
-              nodeId: node.id,
-              path: 'conditions.right',
-              code: 'invalid_regex',
-              message: `matchesRegex pattern is not a valid regular expression: ${err instanceof Error ? err.message : String(err)}`,
-            });
-          }
-        }
-      }
+      validateIfShapedConditions(node.id, node.conditions, 'conditions', errors);
       break;
     case 'foreach':
       validateForeach(node, errors, limits);
+      break;
+    case 'loop':
+      validateLoop(node, errors, limits);
       break;
     case 'approval':
       validateNodeTemplates(node, ['prompt', 'summary'], errors);
@@ -667,6 +693,77 @@ function validateLlm(node: LlmNode, errors: WorkflowValidationError[]): void {
       code: 'llm_maxoutput_warning',
       message: `llm node "${node.id}" has no maxOutputTokens; oversize outputs will fail at runtime`,
     });
+  }
+}
+
+/**
+ * Validate an if-shaped condition list (an if node's `conditions` or a
+ * loop's `until.conditions`): left-side expression parse, operation
+ * support for the declared dataType, and regex compilability.
+ */
+function validateIfShapedConditions(
+  nodeId: string,
+  conditions: IfCondition[],
+  pathPrefix: string,
+  errors: WorkflowValidationError[],
+): void {
+  for (const cond of conditions) {
+    tryParseExpression(nodeId, `${pathPrefix}.left`, cond.left, errors);
+    const operation = normalizeIfOperation(cond.operation);
+    if (!isIfOperationSupported(cond.dataType, cond.operation)) {
+      errors.push({
+        scope: 'field',
+        nodeId,
+        path: `${pathPrefix}.operation`,
+        code: 'if_operation_unsupported',
+        message: `Unsupported ${cond.dataType} operation "${cond.operation}". Allowed operations: ${allowedIfOperations(cond.dataType).join(', ')}`,
+      });
+    }
+    if (operation === 'matchesRegex' && typeof cond.right === 'string') {
+      try {
+        new RegExp(cond.right);
+      } catch (err) {
+        errors.push({
+          scope: 'field',
+          nodeId,
+          path: `${pathPrefix}.right`,
+          code: 'invalid_regex',
+          message: `matchesRegex pattern is not a valid regular expression: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+  }
+}
+
+function validateLoop(node: LoopNode, errors: WorkflowValidationError[], limits: ForeachLimits): void {
+  // Body steps recurse through the same per-type rules as top-level
+  // nodes (the allowlist itself is enforced by validateRawNodeTypes +
+  // the zod schema before this point).
+  for (const bodyNode of node.body) {
+    validateNode(bodyNode, errors, limits);
+  }
+
+  // Body step ids must be unique WITHIN the loop too — the cross-graph
+  // sweep in validateDefinitionWithContext catches collisions against
+  // other nodes, but two steps of the same loop sharing an id would
+  // silently overwrite each other's `steps.<id>` slot.
+  const seen = new Set<string>();
+  for (const bodyNode of node.body) {
+    if (seen.has(bodyNode.id)) {
+      errors.push({
+        scope: 'node',
+        nodeId: node.id,
+        code: 'duplicate_id',
+        message: `Duplicate node ID: ${bodyNode.id} (two steps of loop "${node.id}" share an id)`,
+      });
+    }
+    seen.add(bodyNode.id);
+  }
+
+  // A loop with no exit condition is legal ("repeat N times"); an until
+  // with conditions gets the same static checks as an if node.
+  if (node.until) {
+    validateIfShapedConditions(node.id, node.until.conditions, 'until.conditions', errors);
   }
 }
 

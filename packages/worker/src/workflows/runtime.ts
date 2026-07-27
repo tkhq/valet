@@ -45,6 +45,7 @@ import { executeApproval } from './nodes/approval.js';
 import { executeForeach } from './nodes/foreach.js';
 import { executeIf } from './nodes/if.js';
 import { executeLlm } from './nodes/llm.js';
+import { executeLoop } from './nodes/loop.js';
 import { executeOrchestrator } from './nodes/orchestrator.js';
 import { executeSession } from './nodes/session.js';
 import { executeSet } from './nodes/set.js';
@@ -460,6 +461,7 @@ const STEP_DRIVEN_NODE_TYPES = new Set<WorkflowNode['type']>([
   'wait',
   'approval',
   'foreach',
+  'loop',
   'session',
   'orchestrator',
   // tool is step-driven so its own internal step.do calls (invocation
@@ -672,6 +674,8 @@ export async function dispatchNode(node: WorkflowNode, args: NodeExecutorArgs): 
       return executeLlm({ ...args, node });
     case 'foreach':
       return executeForeach({ ...args, node });
+    case 'loop':
+      return executeLoop({ ...args, node });
     case 'tool':
       return executeTool({ ...args, node });
     case 'orchestrator':

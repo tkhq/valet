@@ -1075,6 +1075,15 @@ function describeNodeOutcome(node: ExecutionNode, output: unknown, defNode: Work
       }
       return 'Denied';
     }
+    case 'loop': {
+      if (!o) return null;
+      const iterations = typeof o.iterations === 'number' ? o.iterations : null;
+      if (iterations === null) return null;
+      const base = `${iterations} iteration${iterations === 1 ? '' : 's'}`;
+      if (o.satisfied === true) return `${base}, condition met`;
+      if (o.satisfied === false) return `${base}, stopped at cap`;
+      return base;
+    }
     case 'foreach': {
       if (!o) return null;
       const completed = typeof o.completedCount === 'number' ? o.completedCount : null;

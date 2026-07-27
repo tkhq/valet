@@ -25,21 +25,34 @@ export interface IfResult {
 }
 
 export async function executeIf(args: NodeExecutorArgs<IfNode>): Promise<IfResult> {
-  const combinator = args.node.combinator ?? 'and';
   const ctx = buildTemplateContext(args.state, args.aliases);
+  return evaluateIfConditions(args.node.conditions, args.node.combinator, ctx);
+}
 
+/**
+ * Evaluate an if-shaped condition list against a prepared context.
+ * Shared with the loop executor, whose `until` clause reuses the exact
+ * condition semantics but supplies its own per-iteration context
+ * (steps/prev/iteration aliases).
+ */
+export function evaluateIfConditions(
+  conditions: IfCondition[],
+  combinator: 'and' | 'or' | undefined,
+  ctx: TemplateContext,
+): IfResult {
+  const effective = combinator ?? 'and';
   const matched: number[] = [];
-  for (let i = 0; i < args.node.conditions.length; i++) {
-    if (evaluateCondition(args.node.conditions[i]!, ctx)) {
+  for (let i = 0; i < conditions.length; i++) {
+    if (evaluateCondition(conditions[i]!, ctx)) {
       matched.push(i);
     }
   }
 
-  const result = combinator === 'and'
-    ? matched.length === args.node.conditions.length
+  const result = effective === 'and'
+    ? matched.length === conditions.length
     : matched.length > 0;
 
-  return { result, matched, combinator };
+  return { result, matched, combinator: effective };
 }
 
 function evaluateCondition(cond: IfCondition, ctx: TemplateContext): boolean {

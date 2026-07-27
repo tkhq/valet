@@ -143,7 +143,7 @@ describe('validateDefinition', () => {
         message: expect.stringContaining('Unknown node type "bash"'),
       }),
     ]);
-    expect(errs[0]!.message).toContain('trigger, llm, tool, set, if, wait, approval, foreach, orchestrator, session, stop');
+    expect(errs[0]!.message).toContain('trigger, llm, tool, set, if, wait, approval, foreach, loop, orchestrator, session, stop');
     expect(errs[0]!.message).not.toContain('mode');
   });
 

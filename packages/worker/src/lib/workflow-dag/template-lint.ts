@@ -96,6 +96,11 @@ export function lintTemplateReferences(
     if (node.type === 'foreach') {
       lintNode(node.body, known, errors);
     }
+    if (node.type === 'loop') {
+      for (const bodyNode of node.body) {
+        lintNode(bodyNode, known, errors);
+      }
+    }
   }
 
   return errors;
@@ -108,7 +113,10 @@ function buildKnownOutputs(
   const paths = new Set<string>();
   const opaqueNodes = new Set<string>();
   const opaquePathPrefixes = new Set<string>();
-  const foreachAliases = new Set<string>(['item', 'index']);
+  // `steps`/`prev`/`iteration` are the loop-body context roots, valid
+  // for the same reason item/index are: the parser can't tell which
+  // template lives inside which body.
+  const foreachAliases = new Set<string>(['item', 'index', 'steps', 'prev', 'iteration']);
   let triggerDataOpaque = false;
 
   // Static trigger shape — always available.
@@ -180,6 +188,19 @@ function buildKnownOutputs(
           if (withWait.resultMode === 'transcript') {
             paths.add(`nodes.${node.id}.data.transcript`);
           }
+        }
+        break;
+      }
+      case 'loop': {
+        // Stable result envelope; steps.* fan out per body id.
+        paths.add(`nodes.${node.id}.data.iterations`);
+        paths.add(`nodes.${node.id}.data.satisfied`);
+        paths.add(`nodes.${node.id}.data.steps`);
+        for (const bodyNode of node.body) {
+          paths.add(`nodes.${node.id}.data.steps.${bodyNode.id}`);
+          // Step data shape depends on the body node type; treat the
+          // subtree as opaque rather than warn on every deeper ref.
+          opaquePathPrefixes.add(`nodes.${node.id}.data.steps.${bodyNode.id}`);
         }
         break;
       }
@@ -338,6 +359,11 @@ function* iterateTemplatedFields(node: WorkflowNode | ForeachNode['body']): Iter
       return;
     case 'foreach':
       yield* emit('items', node.items);
+      return;
+    case 'loop':
+      // No template fields of its own; body steps are linted by the
+      // caller's per-body walk, and until.left uses expression syntax
+      // (validated by tryParseExpression), not template syntax.
       return;
     case 'if':
       // if.left uses expression syntax (not template syntax) so it's
