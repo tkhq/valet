@@ -8,7 +8,7 @@
  * build output, declaration files, and node_modules.
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   checkBannedPatterns,
@@ -28,23 +28,33 @@ const SELF = new Set([
   "scripts/e2e/conventions.test.ts",
 ]);
 
-function toPosix(p: string): string {
-  return p.split(sep).join("/");
+// Manual walk, NOT `readdirSync({recursive:true})`: the recursive flag
+// FOLLOWS symlinked directories, so it descends through every workspace
+// package's node_modules symlink farm into pnpm's store (with cross-package
+// cycles like packages/api/node_modules/@valet/engine → ../../engine) and
+// never returns. Prune during traversal and skip symlinks entirely.
+const SKIP_DIRS = new Set(["node_modules", "dist", ".git"]);
+
+function walk(relDir: string, files: SourceFile[]): void {
+  for (const entry of readdirSync(join(ROOT, relDir), { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const rel = `${relDir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const pkg = rel.match(/^packages\/([^/]+)$/)?.[1];
+      if (pkg !== undefined && LEGACY_PACKAGES.has(pkg)) continue;
+      walk(rel, files);
+    } else if (entry.isFile()) {
+      if (!/\.(ts|tsx)$/.test(entry.name) || entry.name.endsWith(".d.ts")) continue;
+      if (SELF.has(rel)) continue;
+      files.push({ path: rel, content: readFileSync(join(ROOT, rel), "utf8") });
+    }
+  }
 }
 
 function collectSources(): SourceFile[] {
   const files: SourceFile[] = [];
-  for (const base of ["packages", "scripts"]) {
-    for (const entry of readdirSync(join(ROOT, base), { recursive: true, withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      const rel = toPosix(relative(ROOT, join(entry.parentPath, entry.name)));
-      if (!/\.(ts|tsx)$/.test(entry.name) || entry.name.endsWith(".d.ts")) continue;
-      if (rel.includes("/node_modules/") || rel.includes("/dist/") || SELF.has(rel)) continue;
-      const pkg = rel.match(/^packages\/([^/]+)\//)?.[1];
-      if (pkg !== undefined && LEGACY_PACKAGES.has(pkg)) continue;
-      files.push({ path: rel, content: readFileSync(join(ROOT, rel), "utf8") });
-    }
-  }
+  for (const base of ["packages", "scripts"]) walk(base, files);
   return files;
 }
 
