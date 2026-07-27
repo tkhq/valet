@@ -219,6 +219,77 @@ export async function getServiceBreadth(
   return (result.results ?? []).map((r) => ({ service: r.service, invocations: r.invocations }));
 }
 
+export interface ChannelStickinessRow {
+  channel: string;
+  /** Distinct users active on this channel on the latest UTC day present in the window. */
+  dau: number;
+  /** Distinct users active on this channel anywhere in the window. */
+  mau: number;
+}
+
+/**
+ * DAU/MAU per channel — the "product stickiness" proxy. MAU is distinct
+ * users per channel across the whole window; DAU is distinct users per
+ * channel on the latest UTC day that actually has turn_complete activity in
+ * the window (not necessarily "today" — the window may not reach the
+ * present). A channel with MAU but zero activity on that specific day still
+ * appears, with dau: 0.
+ */
+export async function getChannelStickiness(
+  db: D1Database,
+  startIso: string,
+  endIso: string,
+): Promise<ChannelStickinessRow[]> {
+  const mauResult = await db
+    .prepare(`
+      SELECT channel, COUNT(DISTINCT user_id) AS mau
+      FROM analytics_events
+      WHERE event_type = 'turn_complete' AND channel IS NOT NULL AND user_id IS NOT NULL
+        AND created_at >= ? AND created_at < ?
+      GROUP BY channel
+      ORDER BY mau DESC
+    `)
+    .bind(startIso, endIso)
+    .all<{ channel: string; mau: number }>();
+
+  const mauRows = mauResult.results ?? [];
+  if (mauRows.length === 0) return [];
+
+  const latestDayRow = await db
+    .prepare(`
+      SELECT MAX(date(created_at)) AS latest_day
+      FROM analytics_events
+      WHERE event_type = 'turn_complete' AND channel IS NOT NULL
+        AND created_at >= ? AND created_at < ?
+    `)
+    .bind(startIso, endIso)
+    .first<{ latest_day: string | null }>();
+  const latestDay = latestDayRow?.latest_day ?? null;
+
+  const dauMap = new Map<string, number>();
+  if (latestDay !== null) {
+    const dauResult = await db
+      .prepare(`
+        SELECT channel, COUNT(DISTINCT user_id) AS dau
+        FROM analytics_events
+        WHERE event_type = 'turn_complete' AND channel IS NOT NULL AND user_id IS NOT NULL
+          AND date(created_at) = ?
+        GROUP BY channel
+      `)
+      .bind(latestDay)
+      .all<{ channel: string; dau: number }>();
+    for (const row of dauResult.results ?? []) {
+      dauMap.set(row.channel, row.dau);
+    }
+  }
+
+  return mauRows.map((row) => ({
+    channel: row.channel,
+    dau: dauMap.get(row.channel) ?? 0,
+    mau: row.mau,
+  }));
+}
+
 // ─── Workflow autonomy ──────────────────────────────────────────────────────
 
 // A human decision is resolved_by IS NOT NULL — never a status value.

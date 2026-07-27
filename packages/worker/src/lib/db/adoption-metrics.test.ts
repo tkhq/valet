@@ -11,6 +11,8 @@ import {
   getWorkflowRunsByDay,
   getChannelBreadth,
   getServiceBreadth,
+  getChannelStickiness,
+  type ChannelStickinessRow,
   getWorkflowAutonomyStats,
   getWorkflowOutcomesByWorkflow,
   getWorkflowOutcomesByTriggerType,
@@ -241,6 +243,29 @@ describe('adoption-metrics db helpers', () => {
         { service: 'github', invocations: 2 },
         { service: 'slack', invocations: 1 },
       ]);
+    });
+
+    it('computes DAU (latest day in window) and MAU (whole window) per channel', async () => {
+      // Latest day in this window is 07-03. slack: u1 active both days, u2 only day 1.
+      // telegram: u3 only on day 1 — present in MAU, absent from the latest-day DAU.
+      seedEvent(sqlite, { id: 'st1', userId: 'u1', channel: 'slack', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st2', userId: 'u1', channel: 'slack', createdAt: '2026-07-03T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st3', userId: 'u2', channel: 'slack', createdAt: '2026-07-02T11:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st4', userId: 'u3', channel: 'telegram', createdAt: '2026-07-02T12:00:00.000Z' });
+      // Excluded: non-turn_complete event, null channel, out-of-window event.
+      seedEvent(sqlite, { id: 'st5', type: 'llm_call', userId: 'u1', channel: 'slack', createdAt: '2026-07-03T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st6', userId: 'u2', channel: null, createdAt: '2026-07-03T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st7', userId: 'u3', channel: 'telegram', createdAt: '2026-06-01T10:00:00.000Z' });
+
+      const rows = await getChannelStickiness(db, START, END);
+      expect(rows).toEqual([
+        { channel: 'slack', dau: 1, mau: 2 },
+        { channel: 'telegram', dau: 0, mau: 1 },
+      ]);
+    });
+
+    it('returns an empty array when there is no channel activity', async () => {
+      expect(await getChannelStickiness(db, START, END)).toEqual([]);
     });
   });
 
