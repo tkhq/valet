@@ -796,7 +796,7 @@ git commit -m "Wire adoption-level, stickiness, connector, and actions-per-promp
   ```typescript
   interface ChannelTrendChartProps {
     title: string;
-    data: Array<{ date: string } & Record<string, number | null>>;
+    data: Array<{ date: string; [seriesKey: string]: string | number | null }>;
     seriesKeys: string[];
     emptyLabel: string;
     valueFormatter?: (v: number) => string;
@@ -832,7 +832,7 @@ const SERIES_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#
 interface ChannelTrendChartProps {
   title: string;
   /** Each row must have a `date` key plus one numeric (or null) key per entry in seriesKeys. */
-  data: Array<{ date: string } & Record<string, number | null>>;
+  data: Array<{ date: string; [seriesKey: string]: string | number | null }>;
   seriesKeys: string[];
   emptyLabel: string;
   valueFormatter?: (v: number) => string;
@@ -1152,7 +1152,7 @@ export function OverviewTab({ period }: { period: number }) {
 
   const apDayMap = new Map<string, Record<string, number | null>>();
   for (const row of adoption.actionsPerPromptByChannel) {
-    const bucket = apDayMap.get(row.day) ?? {};
+    const bucket: Record<string, number | null> = apDayMap.get(row.day) ?? {};
     bucket[row.channel] = row.turns > 0 ? Math.round((row.toolExecs / row.turns) * 10) / 10 : null;
     apDayMap.set(row.day, bucket);
   }
