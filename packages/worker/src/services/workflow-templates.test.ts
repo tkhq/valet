@@ -23,6 +23,7 @@ import {
   enableTemplateGithubApp,
 } from './workflow-templates.js';
 import { upsertGithubInstallation } from '../lib/db/github-installations.js';
+import { getPublishedDefinition } from './workflow-versions.js';
 
 // llm_maxoutput_warning is a non-blocking advisory; the publish gate filters it too.
 function blockingErrors(errs: ReturnType<typeof validateDefinition>) {
@@ -192,7 +193,7 @@ describe('installWorkflowTemplate', () => {
     return { db, env };
   }
 
-  it('installs a real published workflow with a suffixed webhook trigger', async () => {
+  it('installs a real published workflow', async () => {
     const { db, env } = await setup();
     const result = await installWorkflowTemplate(db as never, env, 'u1', 'code-review', PIN);
 
@@ -201,11 +202,17 @@ describe('installWorkflowTemplate', () => {
     expect(wf[0].id).toBe(result.workflowId);
     expect(wf[0].publishedVersionId).toBeTruthy();
     expect(db.select().from(workflowDefinitionVersions).all()).toHaveLength(1);
+  });
 
-    expect(result.trigger).not.toBeNull();
-    expect(result.trigger!.path).toMatch(/-[0-9a-f]{8}$/);
-    expect(result.trigger!.name).toMatch(/\([0-9a-f]{8}\)$/);
-    expect(result.trigger!.webhookToken).toBeTruthy();
+  it('does not mint a webhook trigger for a github-pr runForm template', async () => {
+    // code-review's gallery dialog only ever shows the GitHub App arming path
+    // (enableTemplateGithubApp) — a webhook trigger minted here would be a
+    // live, unused, token-bearing row on every install.
+    const { db, env } = await setup();
+    const result = await installWorkflowTemplate(db as never, env, 'u1', 'code-review', PIN);
+
+    expect(result.trigger).toBeNull();
+    expect(db.select().from(triggers).all()).toEqual([]);
   });
 
   it('rolls the workflow back when the publish env/model gate rejects', async () => {
@@ -218,22 +225,12 @@ describe('installWorkflowTemplate', () => {
     expect(db.select().from(triggers).all()).toEqual([]);
   });
 
-  it('repeat installs do not collide on trigger path or name', async () => {
+  it('repeat installs do not collide, creating independent workflows', async () => {
     const { db, env } = await setup();
     const a = await installWorkflowTemplate(db as never, env, 'u1', 'code-review', PIN);
     const b = await installWorkflowTemplate(db as never, env, 'u1', 'code-review', PIN);
-    expect(a.trigger!.path).not.toBe(b.trigger!.path);
-    expect(a.trigger!.name).not.toBe(b.trigger!.name);
-  });
-
-  it('pins the installed webhook trigger to the repository it was armed for', async () => {
-    const { db, env } = await setup();
-    await installWorkflowTemplate(db as never, env, 'u1', 'code-review', PIN);
-
-    const row = db.select().from(triggers).all()[0];
-    expect(JSON.parse(row.config as string).github).toEqual({
-      codeReview: true, owner: 'tkhq', repo: 'valet',
-    });
+    expect(a.workflowId).not.toBe(b.workflowId);
+    expect(db.select().from(workflows).all()).toHaveLength(2);
   });
 
   it('refuses to install a repo-scoped template without a repository', async () => {
@@ -319,6 +316,45 @@ describe('enableTemplateGithubApp', () => {
     expect(second.triggerId).toBe(first.triggerId);
     // No duplicate row (the unique name index would otherwise throw).
     expect(db.select().from(triggers).all().filter((t) => t.type === 'github-app')).toHaveLength(1);
+  });
+
+  it('re-arm republishes the workflow when the installed definition is outdated', async () => {
+    const { db, env, workflowId } = await installed();
+    await upsertGithubInstallation(db as never, {
+      githubInstallationId: '1', accountLogin: 'tkhq', accountId: 'a1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+    const first = await enableTemplateGithubApp(db as never, env, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
+
+    // An older install: hand-age the published definition so it no longer
+    // matches the template's current definition.
+    db.update(workflowDefinitionVersions)
+      .set({ definition: JSON.stringify({ version: 'dag/v1', nodes: [], edges: [] }) })
+      .run();
+
+    const second = await enableTemplateGithubApp(db as never, env, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
+
+    expect(second.alreadyArmed).toBe(true);
+    expect(second.refreshed).toBe(true);
+    expect(second.triggerId).toBe(first.triggerId);
+    expect(await getPublishedDefinition(db as never, workflowId)).toEqual(getWorkflowTemplate('code-review')!.definition);
+    expect(db.select().from(workflowDefinitionVersions).all().length).toBe(2);
+    expect(db.select().from(triggers).all().filter((t) => t.type === 'github-app')).toHaveLength(1);
+  });
+
+  it('re-arm leaves a current installation untouched', async () => {
+    const { db, env, workflowId } = await installed();
+    await upsertGithubInstallation(db as never, {
+      githubInstallationId: '1', accountLogin: 'tkhq', accountId: 'a1',
+      accountType: 'Organization', repositorySelection: 'all',
+    });
+    await enableTemplateGithubApp(db as never, env, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
+
+    const second = await enableTemplateGithubApp(db as never, env, 'u1', 'code-review', workflowId, 'tkhq', 'valet');
+
+    expect(second.refreshed).toBe(false);
+    // No pointless version churn when nothing changed.
+    expect(db.select().from(workflowDefinitionVersions).all().length).toBe(1);
   });
 
   it('rejects when the App is not installed on the owner (no dead trigger)', async () => {

@@ -20,7 +20,7 @@ import type { AppDb } from '../lib/drizzle.js';
 import type { Env } from '../env.js';
 import { integrationRegistry } from '../integrations/registry.js';
 import { createWorkflow, deleteWorkflow } from './workflows.js';
-import { saveDraft, publishDraft } from './workflow-versions.js';
+import { saveDraft, publishDraft, getPublishedDefinition } from './workflow-versions.js';
 import { resolveAvailableModels } from './model-catalog.js';
 import { assembleLlmProviderEnv } from '../lib/llm/provider-env.js';
 import { createTrigger, generateWebhookToken, getWorkflowForTrigger } from '../lib/db/triggers.js';
@@ -75,7 +75,7 @@ export async function enableTemplateGithubApp(
   workflowId: string,
   owner: string,
   repo: string,
-): Promise<{ triggerId: string; owner: string; repo: string; alreadyArmed: boolean }> {
+): Promise<{ triggerId: string; owner: string; repo: string; alreadyArmed: boolean; refreshed?: boolean }> {
   const template = getWorkflowTemplate(templateId);
   if (!template) throw new NotFoundError('WorkflowTemplate', templateId);
   if (!template.trigger) {
@@ -98,12 +98,30 @@ export async function enableTemplateGithubApp(
   // instead of throwing a raw constraint error (500).
   const name = `GitHub App: ${owner}/${repo}`;
   const existing = await db
-    .select({ id: triggers.id })
+    .select({ id: triggers.id, workflowId: triggers.workflowId })
     .from(triggers)
     .where(and(eq(triggers.userId, userId), eq(triggers.type, 'github-app'), eq(triggers.name, name)))
     .get();
   if (existing) {
-    return { triggerId: existing.id, owner, repo, alreadyArmed: true };
+    // An armed repo snapshots the definition it was installed with, same as
+    // enableCodeReview's re-arm path — without this, re-arming a plugin
+    // template whose canonical definition has since changed would silently
+    // keep running the stale version forever.
+    const published = await getPublishedDefinition(db, existing.workflowId).catch(() => null);
+    const outdated = JSON.stringify(published) !== JSON.stringify(template.definition);
+    if (outdated) {
+      await saveDraft(db, existing.workflowId, template.definition);
+      const providerEnv = await assembleLlmProviderEnv(db, env);
+      const validationEnv = { ...env, ...providerEnv } as Env;
+      const availableModels = await resolveAvailableModels(db, validationEnv);
+      await publishDraft(db, existing.workflowId, {
+        userId,
+        env: validationEnv,
+        availableModels,
+        publishNote: 'Refreshed by GitHub App re-arm',
+      });
+    }
+    return { triggerId: existing.id, owner, repo, alreadyArmed: true, refreshed: outdated };
   }
 
   const id = crypto.randomUUID();
@@ -176,9 +194,13 @@ export async function installWorkflowTemplate(
     });
 
     // 4. Optionally provision the webhook trigger. The token is minted once here
-    // and surfaced by the route exactly once in the install response.
+    // and surfaced by the route exactly once in the install response. Skipped
+    // for runForm: 'github-pr' templates — their gallery dialog shows the
+    // GitHub App path (enableTemplateGithubApp) as the only arming option and
+    // never renders the webhook block, so minting one here would just leave a
+    // live, unused token-bearing trigger behind on every install.
     let trigger: InstallTemplateResult['trigger'] = null;
-    if (template.trigger) {
+    if (template.trigger && template.runForm !== 'github-pr') {
       const id = crypto.randomUUID();
       const suffix = id.slice(0, 8);
       const webhookToken = generateWebhookToken();
