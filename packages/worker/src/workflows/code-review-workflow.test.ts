@@ -147,7 +147,13 @@ beforeEach(() => {
 
 describe('code-review template — full interpreter run', () => {
   it('reaches github.create_review with the trigger scope, a COMMENT event and the model write-up', async () => {
-    generateStructuredMock.mockResolvedValue({ value: { response: 'Looks good. One note on src/queue.ts.' }, attempts: 1 });
+    // Stage-aware mock: the investigate call (the one holding the PR
+    // payload) returns the structured report; the draft call returns the
+    // finished write-up. This is what proves the report → draft handoff.
+    generateStructuredMock.mockImplementation(async (opts: { prompt: string }) =>
+      String(opts.prompt).includes('<pull_request>')
+        ? { value: { solid: false, summary: 'One note.', findings: [{ reference: 'src/queue.ts:42', issue: 'missing retry backoff' }] }, attempts: 1 }
+        : { value: { response: 'Looks good. One note on src/queue.ts.' }, attempts: 1 });
 
     const result = await runDag({ DB: {} } as Env, params(), makeStep(), noopTraceWriter);
 
@@ -176,16 +182,26 @@ describe('code-review template — full interpreter run', () => {
     const credentialCall = resolveCredentialsMock.mock.calls.at(-1);
     expect(credentialCall?.[3]).toMatchObject({ credentialMode: 'app' });
 
-    // The PR body reaches the model wrapped in the untrusted-data delimiters.
+    // The PR body reaches the investigator wrapped in the untrusted-data
+    // delimiters.
     const prompt = String(generateStructuredMock.mock.calls[0][0].prompt);
     expect(prompt).toContain('<pull_request>');
     expect(prompt).toContain('</pull_request>');
     expect(prompt).toContain('Add retry to the queue consumer');
     expect(String(generateStructuredMock.mock.calls[0][0].system)).toContain('UNTRUSTED INPUT');
+
+    // The drafter receives the investigator's report — not the raw PR.
+    const draftPrompt = String(generateStructuredMock.mock.calls[1][0].prompt);
+    expect(draftPrompt).toContain('src/queue.ts:42');
+    expect(draftPrompt).toContain('missing retry backoff');
+    expect(draftPrompt).not.toContain('<pull_request>');
   });
 
   it('posts nothing when the model returns only whitespace', async () => {
-    generateStructuredMock.mockResolvedValue({ value: { response: '   \n\t ' }, attempts: 1 });
+    generateStructuredMock.mockImplementation(async (opts: { prompt: string }) =>
+      String(opts.prompt).includes('<pull_request>')
+        ? { value: { solid: true, summary: 'Solid.', findings: [] }, attempts: 1 }
+        : { value: { response: '   \n\t ' }, attempts: 1 });
 
     const result = await runDag({ DB: {} } as Env, params(), makeStep(), noopTraceWriter);
 
