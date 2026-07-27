@@ -19,6 +19,17 @@ export interface WorkflowInputDefinition {
   default?: unknown;
   description?: string;
   enum?: unknown[];
+  /** Display label for input forms (falls back to the field name). Advisory, like the rest of the schema. */
+  label?: string;
+  /** Placeholder for input forms. Advisory. */
+  placeholder?: string;
+  /**
+   * Field is populated by the trigger (e.g. a webhook variableMapping), not by
+   * a human on a manual run — so it's part of the invocation contract but must
+   * not surface as a "Run now" form field. Advisory; the manual-run input
+   * deriver (templateRunInputs) skips it.
+   */
+  hidden?: boolean;
 }
 
 export interface WorkflowPolicy {
