@@ -8,6 +8,7 @@
  *
  * Flags:
  *   --list            print steps + armed state, run nothing
+ *   --doctor          environment readiness checklist, run nothing
  *   --only a,b,c      run a subset (step ids)
  *   --json            machine-readable report on stdout
  *   --verbose         stream child output live (default: replay on failure)
@@ -21,14 +22,17 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CRED_VARS,
+  doctorExitCode,
   truncateOutput,
   missingNeeds,
   needHint,
   parseEnvFile,
+  renderDoctor,
   renderScorecard,
   selectSteps,
   toJsonReport,
   STEPS,
+  type DoctorCheck,
   type Probes,
   type StepDef,
   type StepResult,
@@ -106,6 +110,65 @@ const probes: Probes = {
   ),
   openai: Boolean(process.env.OPENAI_API_KEY),
 };
+
+// ── doctor: environment readiness checklist, no suites ─────────────────────
+// The "initialization phase" for a fresh machine/agent: everything a run
+// needs, checked in seconds, each miss with its repair command.
+
+if (flag("doctor")) {
+  const dist = (pkg: string): boolean => existsSync(resolve(ROOT, `packages/${pkg}/dist/index.js`));
+  const checks: DoctorCheck[] = [
+    {
+      id: "node",
+      label: "Node >= 22",
+      ok: true, // the preflight above already exited if not
+      required: true,
+      detail: `v${process.versions.node}`,
+    },
+    {
+      id: "deps",
+      label: "dependencies installed",
+      ok: existsSync(resolve(ROOT, "node_modules")) && existsSync(resolve(ROOT, "packages/api/node_modules")),
+      required: true,
+      hint: "run `pnpm install`",
+    },
+    // @valet/shared and @valet/sdk are the only workspace packages consumed
+    // via built dist (their package.json exports point at dist/); everything
+    // else resolves TS sources directly.
+    {
+      id: "shared-dist",
+      label: "@valet/shared built",
+      ok: dist("shared"),
+      required: true,
+      hint: "run `pnpm --filter @valet/shared build`",
+    },
+    {
+      id: "sdk-dist",
+      label: "@valet/sdk built",
+      ok: dist("sdk"),
+      required: true,
+      hint: "run `pnpm --filter @valet/sdk build`",
+    },
+    {
+      id: "env-file",
+      label: ".env.e2e present",
+      ok: existsSync(envFile),
+      required: false,
+      hint: "cp .env.e2e.example .env.e2e and fill in credentials (keyless tiers still run)",
+    },
+    { id: "key", label: "Anthropic key", ok: probes.key, required: false, hint: needHint("key") },
+    { id: "docker", label: "Docker daemon", ok: probes.docker, required: false, hint: needHint("docker") },
+    { id: "helm", label: "helm CLI", ok: probes.helm, required: false, hint: "install helm (brew install helm)" },
+    { id: "k8s", label: "kubectl context rancher-desktop", ok: probes.k8sContext, required: false, hint: needHint("k8sContext") },
+    { id: "k8s-opt-in", label: "k8s fullstack opt-in", ok: probes.e2eK8sOptIn, required: false, hint: needHint("e2eK8sOptIn") },
+    { id: "telegram", label: "Telegram creds", ok: probes.telegram, required: false, hint: needHint("telegram") },
+    { id: "github-live", label: "GitHub live-App creds", ok: probes.githubLive, required: false, hint: needHint("githubLive") },
+    { id: "openai", label: "OpenAI key", ok: probes.openai, required: false, hint: needHint("openai") },
+  ];
+  const armed = STEPS.filter((s) => missingNeeds(s, probes).length === 0).length;
+  console.log(renderDoctor(checks, armed, STEPS.length));
+  process.exit(doctorExitCode(checks));
+}
 
 // ── step selection ─────────────────────────────────────────────────────────
 

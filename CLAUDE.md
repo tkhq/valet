@@ -97,7 +97,9 @@ Adding a workspace dependency edge between two packages that both depend on a pe
 
 ## What This Project Is
 
-Valet is a hosted background coding agent platform. Users interact with an AI coding agent through a web UI, Slack, or Telegram. Each session runs in an isolated Modal sandbox with a full dev environment (VS Code, browser via VNC, terminal, and an OpenCode agent with 73 custom tools). A per-user orchestrator ("Jarvis") manages sessions, routes messages across channels, and maintains long-term memory. The architecture is modeled after Ramp's Inspect system.
+Valet is a hosted background coding agent platform. Users interact with an AI coding agent through a web UI or chat channels (Telegram today). The current (v2) stack is the `dev-v2` branch: `packages/api` (Hono on Node) drives `@valet/engine` (a portable agent loop over pi-agent-core), sessions run in isolated sandboxes via pluggable providers (`sandbox-docker` for dev, `sandbox-kubernetes` for the helm deploy, `sandbox-local`/virtual for tests), state lives in Postgres (`store-postgres`; embedded PGlite in dev), and `packages/web` is the client. A per-user orchestrator is itself a full agent session that spawns and manages child sessions. The architecture is modeled after Ramp's Inspect system.
+
+The original stack — Cloudflare Worker + Durable Objects, Modal sandboxes, the OpenCode runner — is frozen (kept only for the existing prod deploy) and is slated for deletion; don't build on it.
 
 ## Project Structure
 
@@ -110,9 +112,12 @@ valet/
 │   ├── client/              # LEGACY React SPA — kept for prod CF deploy, frozen
 │   ├── worker/              # LEGACY Cloudflare Worker — kept for prod CF deploy, frozen
 │   ├── engine/              # @valet/engine — portable agent loop (pi-agent-core)
+│   ├── workflow/            # Workflow DAG interpreter (nodes, expressions, checkpoints)
 │   ├── store-postgres/      # SessionStore impl over Postgres (PGlite dev/test, node-postgres prod)
 │   ├── sandbox-docker/      # Sandbox provider over Docker (long-running container, bind mount)
+│   ├── sandbox-kubernetes/  # Sandbox provider over agent-sandbox CRs (helm deploy)
 │   ├── sandbox-local/       # Sandbox provider over the host fs/process
+│   ├── sandbox-gateway/     # In-sandbox JWT gateway (terminal/VS Code tabs)
 │   ├── shared/              # Shared TypeScript types & errors
 │   ├── runner/              # Bun/TS runner for inside legacy sandboxes
 │   ├── sdk/                 # Integration & channel SDK contracts, MCP client, UI components
@@ -130,19 +135,18 @@ valet/
 │   ├── plugin-browser/      # Browser skill (content-only)
 │   ├── plugin-workflows/    # Workflow skill (content-only)
 │   ├── plugin-sandbox-tunnels/  # Tunnel skill (content-only)
-│   └── plugin-memory-compaction/ # Memory compaction tool (content-only)
-├── backend/                 # Modal Python backend
-├── docker/
-│   ├── Dockerfile.sandbox   # Sandbox container image
-│   ├── start.sh             # Sandbox startup script
-│   └── opencode/            # OpenCode config: tools/
+│   └── plugin-*/            # …and more — one package per integration/skill
+├── backend/                 # LEGACY Modal Python backend
+├── deploy/                  # Helm chart + vendored agent-sandbox controller (k8s)
+├── docker/                  # Sandbox container images (incl. Dockerfile.sandbox-k8s)
+├── scripts/                 # e2e runner (scripts/e2e.ts), registry codegen, deploy
 ├── docs/
-│   └── specs/               # Subsystem specs (source of truth per domain)
-├── V1.md                    # Original architecture spec (may be outdated)
+│   ├── specs/               # Subsystem specs (source of truth per domain)
+│   └── plans/               # Implementation plans
+├── V1.md                    # Original architecture spec (outdated)
 ├── V2.md                    # Orchestration layer spec (orchestrators, channels, personas)
 ├── Makefile                 # Dev, test, deploy commands
-├── docker-compose.yml       # Local dev (OpenCode container)
-└── .beans/                  # Task tracking (beans)
+└── docker-compose.yml       # Local dev services (keycloak profile, legacy OpenCode)
 ```
 
 ## Tech Stack Quick Reference
@@ -157,15 +161,20 @@ valet/
 | Sandbox-docker | dockerode, long-running container, bind-mounted workspace | `packages/sandbox-docker/src/` |
 | Shared | TypeScript types, error classes, scope keys | `packages/shared/src/` |
 | SDK | Integration contracts, channel contracts, MCP client/OAuth, UI components | `packages/sdk/src/` |
-| Runner | Bun, TypeScript, `@opencode-ai/sdk`, Hono gateway | `packages/runner/src/` |
-| Backend | Python 3.12, Modal SDK | `backend/` |
-| Sandbox | OpenCode serve (73 tools, 3 skills, 1 plugin), code-server, Xvfb+VNC, TTYD | `docker/` |
+| Runner (legacy) | Bun, TypeScript, `@opencode-ai/sdk`, Hono gateway | `packages/runner/src/` |
+| Backend (legacy) | Python 3.12, Modal SDK | `backend/` |
+| Sandbox (legacy) | OpenCode serve, code-server, Xvfb+VNC, TTYD | `docker/` |
 
 ## Subsystem Specs
 
 Detailed per-subsystem specifications live in `docs/specs/`. These are the source of truth for each domain's behavior, boundaries, data model, and contracts. When modifying a subsystem, update its spec in the same commit.
 
-| Spec | Covers |
+Two generations coexist there:
+
+- **Dated `YYYY-MM-DD-<topic>-design.md` files are the v2 stack's designs** (auth v2, telegram channel, e2e runner, handoff CLI, …). These are current — trust and maintain them.
+- **The undated specs below describe the LEGACY stack** (Durable Objects, Modal, Runner/OpenCode). They remain accurate for the frozen code but do NOT describe `packages/api`/`@valet/engine` — don't apply their contracts to v2 work.
+
+| Spec (legacy stack) | Covers |
 |------|--------|
 | [`docs/specs/sessions.md`](docs/specs/sessions.md) | Session lifecycle, state machine, sandbox orchestration, prompt queue, message streaming, hibernation/restore, access control, multiplayer |
 | [`docs/specs/sandbox-runtime.md`](docs/specs/sandbox-runtime.md) | Sandbox boot sequence, service ports, auth gateway, Runner process, OpenCode lifecycle, Runner↔DO WebSocket protocol, Modal backend |
@@ -185,19 +194,16 @@ When using superpowers skills (brainstorming → writing-plans → executing-pla
 - **Design specs** → `docs/specs/YYYY-MM-DD-<topic>-design.md`
 - **Implementation plans** → `docs/plans/YYYY-MM-DD-<topic>.md`
 
-## Key Architectural Decisions
+## Key Architectural Decisions (v2)
 
 These are decided and locked in. Do not revisit:
 
-1. **WebSocket only** between Runner and SessionAgent DO. No HTTP callbacks.
-2. **Single merged SessionAgent DO** for session orchestration. Three DOs total: `SessionAgentDO`, `EventBusDO`, `WorkflowExecutorDO`.
-3. **Single Modal App** for the Python backend (structured for future split).
-4. **Repo-specific images** from day one. Base image fallback for unconfigured repos.
-5. **iframes** for VNC (websockify noVNC web UI) and Terminal (TTYD web UI). No embedded JS clients.
-6. **Single auth gateway proxy** on port 9000 in sandbox. Routes `/vscode/*`, `/vnc/*`, `/ttyd/*` to internal services. JWT validation.
-7. **Unified plugin system** — all extensions (actions, channels, skills, personas, tools) live in `packages/plugin-*/`. Code plugins (actions/channels) are compiled into the worker via generated registries (`make generate-registries`). Content plugins (skills/personas/tools) are synced to D1 at startup and delivered to sandboxes via the Runner WebSocket.
-8. **User orchestrator is a full agent session** — SessionAgent DO + sandbox + Runner + OpenCode with orchestrator persona and tools. Uses well-known session ID `orchestrator:{userId}`.
-9. **Org orchestrator is also a full agent session** — org's "chief of staff", admin-configured identity/handle, handles unattributed events + automation rules. Uses well-known session ID `orchestrator:org:{orgId}`.
+1. **The engine is portable** — `@valet/engine` owns the agent loop (pi-agent-core), sessions, threads, queue, gates, and persistence contracts. `packages/api` hosts it; nothing in the engine imports Hono or knows about HTTP.
+2. **Pluggable providers** — `SessionStore` (store-postgres: PGlite dev/test, node-postgres prod) and `SandboxProvider` (docker dev-default, kubernetes for the helm deploy, local/virtual for tests) are swappable behind engine contracts with shared conformance suites.
+3. **REST is authoritative for thread history** — `GET /api/sessions/:id/messages` serves persisted entries; the WS `init` event is metadata-only. Never add messages back to init.
+4. **Plugins self-describe** — each `packages/plugin-*` exports one `ValetPlugin` manifest from `./plugin`; `make generate-registries` scans `plugin.yaml` (`v2: true`) into `packages/api/src/plugins/registry.gen.ts`. No per-capability registries.
+5. **Orchestrators are full agent sessions** — per-user (well-known session ID `orchestrator:{userId}`) with orchestrator role/tools, spawning child sessions through the same engine APIs.
+6. **Auth is better-auth** — email/password + optional OIDC/social (Keycloak-ready); `VALET_LOCAL_AUTH=1` is the dev stub. See `docs/specs/2026-07-14-auth-v2-design.md`.
 
 ## Development Commands
 
@@ -230,8 +236,10 @@ make dev-all
 # (copy .env.e2e.example), probes Docker/k8s/creds, runs every suite it can,
 # prints ✓/✗/⊘ per feature. See docs/specs/2026-07-25-e2e-runner-design.md.
 make e2e                          # everything armed by your creds/daemons
+make e2e E2E_ARGS="--doctor"      # environment readiness checklist (fresh machine/agent)
 make e2e E2E_ARGS="--list"        # show steps + what each needs
 make e2e E2E_ARGS="--only cli,typecheck --json"
+make e2e-clean                    # sweep state leaked by crashed runs (idempotent)
 
 # Quick smokes (also rows in make e2e)
 make smoke-orchestrator  # fastest agent-loop-alive check (real Anthropic, no Docker)
@@ -245,32 +253,21 @@ kubectl --context rancher-desktop -n valet port-forward svc/valet-api 8080:80  #
 make k8s-logs            # tail the api pod
 make k8s-down            # helm uninstall (PVCs + Sandbox CRs survive by design — see deploy/README.md for a full reset)
 
-# Database
-make db-migrate         # Run D1 migrations locally
-make db-seed            # Seed test data
-make db-reset           # Reset database (drop and recreate)
-
 # Typecheck
 pnpm typecheck          # All packages except packages/worker (see note below)
 cd packages/worker && pnpm typecheck  # Single package
 
 # Tests
-pnpm test               # Run all vitest tests
-make test               # Unit + integration tests
-make test-workflow       # Test workflow CRUD
-make test-triggers       # Test trigger CRUD
-make test-webhooks       # Test webhook trigger execution
+pnpm test               # Root vitest sweep (shared, sdk, api, web + scripts projects)
+                        # make e2e is the canonical full validation — see above
 
 # Code generation
-make generate-registries # Regenerate action/channel plugin registries
+make generate-registries # Regenerate packages/api/src/plugins/registry.gen.ts from plugin.yaml manifests
 
-# Logs
-make logs-cloudflare     # Tail deployed Cloudflare Worker logs
-
-# Deploy
-make deploy              # Deploy worker + modal + client (includes migrations)
+# Legacy stack only (D1 database, Cloudflare/Modal deploy)
+make db-migrate          # D1 migrations (legacy worker)
+make deploy              # Deploy worker + modal + client (legacy prod)
 make deploy-migrate      # Apply D1 migrations to production only
-make release             # Full idempotent release: install, build, push image, deploy
 ```
 
 **Kubernetes context safety (binding).** The developer machine's default/ambient `kubectl` context may point at a PRODUCTION cluster (verified — a GKE prod cluster). Every `make k8s-*` target and every command in `deploy/README.md` pins `--context rancher-desktop` (`--kube-context rancher-desktop` for `helm`) explicitly. Never run a bare `kubectl`/`helm` command against this workflow — go through the `make` targets or add the context flag yourself. `VALET_SANDBOX_BACKEND=kubernetes` is what the chart sets to switch the api off the `docker` default onto `packages/sandbox-kubernetes` (session sandboxes become `Sandbox` CRs + pods instead of local Docker containers); `make dev-local` stays on `docker`.
@@ -327,102 +324,22 @@ The sandbox image is cached. To force a rebuild after changing `docker/start.sh`
 2. Redeploy: `make deploy-modal`
 3. Create a new session (existing sandboxes won't update)
 
-## Developing Inside a Sandbox
-
-When working on the valet codebase from inside a Modal sandbox (e.g. via an Valet session), the environment has specific constraints. The sandbox is a Debian container (Trixie/13, GLIBC 2.40) — not a full VM — so some tools are unavailable.
-
-### What's available
-
-The sandbox comes with a full dev environment already running:
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| **OpenCode server** | 4096 | AI coding agent (HTTP + SSE) with 73 custom tools, 3 skills, 1 plugin |
-| **VS Code (code-server)** | 8080 | Web IDE |
-| **noVNC** | 6080 | Virtual display GUI (Xvfb on :99) |
-| **TTYD** | 7681 | Web terminal |
-| **Auth gateway** | 9000 | JWT proxy that routes to all services above |
-| **Runner** | — | Bridges OpenCode ↔ SessionAgent DO via WebSocket |
-
-```bash
-pnpm install                          # Install all dependencies
-cd packages/client && pnpm dev        # React frontend on http://localhost:5173
-pnpm typecheck                        # TypeScript checking across all packages
-cd packages/worker && pnpm typecheck  # Single-package typecheck
-git clone / commit / push / pull      # Git credentials are pre-configured
-```
-
-Node.js, Bun, and all standard build tools (build-essential, ripgrep, jq, etc.) are available.
-
-### Running OpenCode
-
-OpenCode (`opencode-ai`) is installed globally in the sandbox. The system instance runs on port 4096 (managed by `start.sh`), but you can run your own instance on a different port for testing:
-
-```bash
-opencode serve --port 4097
-```
-
-This is useful when testing changes to OpenCode configuration, custom tools, or debugging agent behavior independently of the managed session.
-
-The system OpenCode instance is configured via `docker/opencode/opencode.json` and `docker/opencode/tools/`. Provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) are available in the environment.
-
-### What does NOT work
-
-- **`wrangler d1 migrations apply --local`** — Write and review migration SQL directly; it gets applied during deployment.
-- **Docker** — Not available. Modal sandboxes are already containers; nested Docker (DinD) is not supported.
-- **`modal deploy`** — The Modal Python backend must be deployed from outside the sandbox (requires `uv` on the host).
-
-### Recommended workflow
-
-1. **Frontend**: Run `cd packages/client && pnpm dev`, open `http://localhost:5173` in the VNC browser (port 6080) to preview changes live.
-2. **Worker**: Run `cd packages/worker && pnpm dev` to start the worker locally with `wrangler dev` on `:8787`. You can also point the frontend at it: `VITE_API_URL=http://localhost:8787/api pnpm dev`. Use `pnpm typecheck` to catch type errors.
-3. **Shared types**: Edit `packages/shared/src/`, then `pnpm typecheck` from root to verify all consumers compile.
-4. **SDK**: Edit `packages/sdk/src/`, then `pnpm typecheck` from root. SDK exports are consumed by plugin packages and the worker.
-5. **Plugin packages**: Edit `packages/plugin-*/`. Run `make generate-registries` if adding a new plugin with actions or channels. Run `pnpm typecheck` to verify.
-6. **Runner**: Edit `packages/runner/src/`, run `cd packages/runner && pnpm typecheck`. The live runner instance is managed by `start.sh` — don't restart it manually.
-7. **Migrations**: Write SQL in `packages/worker/migrations/NNNN_name.sql` and add the corresponding Drizzle schema in `packages/worker/src/lib/schema/`. Migrations are applied via `wrangler d1 migrations apply` from outside the sandbox or during `make deploy`.
-
-### Testing against the deployed worker
-
-The production worker URL is configured in `.env.deploy` as `WORKER_PROD_URL`. To run the frontend against it:
-
-```bash
-cd packages/client
-VITE_API_URL=<your-worker-url>/api pnpm dev
-```
-
-You can also `curl` the deployed API directly for testing routes.
-
 ## Code Conventions
 
-### Worker (Hono)
+### API (`packages/api`, Hono on Node)
 
-- Routes go in `packages/worker/src/routes/<name>.ts`
-- Each route file exports a Hono router: `export const fooRouter = new Hono<{ Bindings: Env; Variables: Variables }>()`
-- Route is mounted in `index.ts`: `app.route('/api/foo', fooRouter)`
-- Database uses **Drizzle ORM**: schema in `src/lib/schema/`, query helpers in `src/lib/db/`, Drizzle instance via `src/lib/drizzle.ts`. Barrel re-export at `src/lib/db.ts`.
-- Three Durable Objects in `src/durable-objects/`: `SessionAgentDO` (session-agent.ts), `EventBusDO` (event-bus.ts), `WorkflowExecutorDO` (workflow-executor.ts). All re-exported from `index.ts`.
-- Services go in `packages/worker/src/services/<name>.ts`
-- Middleware: `auth.ts` (OAuth + API keys), `db.ts` (Drizzle setup), `admin.ts` (role-based access), `error-handler.ts` (global error handling). Auth sets `c.get('user')` with `{ id, email, role }`.
-- Plugin registries: `src/integrations/packages.ts` (actions), `src/channels/packages.ts` (channels), `src/plugins/content-registry.ts` (skills/personas/tools). All auto-generated by `make generate-registries` from `packages/plugin-*/`.
-- Env types in `packages/worker/src/env.ts` — `Env` interface (bindings) and `Variables` interface (request context)
-- Errors use classes from `@valet/shared`: `UnauthorizedError`, `NotFoundError`, `ValidationError`
-- All API responses are JSON. Error format: `{ error, code, requestId }`
-- Wrangler config in `packages/worker/wrangler.toml` — DO bindings, D1, R2, cron triggers
-- Migrations in `packages/worker/migrations/` — numbered `0001_name.sql` through `0055_name.sql` (and growing)
+- Routes in `packages/api/src/routes/<name>.ts`, mounted in `src/app.ts`; wire types in `src/wire/types.ts`
+- Engine wiring in `src/engine/` (`EngineHost`, wire bridge); plugin registry generated at `src/plugins/registry.gen.ts`
+- Drizzle schema for app tables in `src/schema/index.ts`; engine tables are raw SQL in `packages/store-postgres/migrations/`
+- CLI (`valet`) in `src/cli/` — command modules export pure `run*` functions unit-tested with stub clients
 
-### Frontend (React)
+### Web (`packages/web`)
 
-- File-based routing via TanStack Router: `packages/client/src/routes/`
-- API layer in `packages/client/src/api/` — one file per resource with query key factories
-- API client at `packages/client/src/api/client.ts` — centralized fetch with auth header injection
-- Components at `packages/client/src/components/<feature>/`
-- Hooks at `packages/client/src/hooks/`
-- Stores (Zustand) at `packages/client/src/stores/`
-- UI primitives at `packages/client/src/components/ui/` — Radix-based
-- Pattern: query key factories per resource (`sessionKeys.all`, `sessionKeys.detail(id)`, etc.)
-- Pattern: `PageContainer` + `PageHeader` for page layout
-- Pattern: Skeleton loaders for every list component
+- File-based routing via TanStack Router: `packages/web/src/routes/`
+- Components at `packages/web/src/components/<feature>/`; session tool renderers are a registry (see gotchas above)
+- TanStack Query + Zustand; Radix primitives; Tailwind 3
+
+(The frozen legacy `packages/worker`/`packages/client`/`packages/runner`/`backend` keep their old internal conventions — don't extend them, they're slated for deletion.)
 
 ### Shared Types
 
@@ -430,7 +347,7 @@ You can also `curl` the deployed API directly for testing routes.
 - Message part types in `packages/shared/src/types/message-parts.ts`
 - Scope key utilities in `packages/shared/src/scope-key.ts`
 - Errors in `packages/shared/src/errors.ts`
-- When adding a new entity, add types here first, then use in both worker and client
+- When adding a new entity shared across packages, add types here first
 
 ### SDK
 
@@ -443,43 +360,7 @@ You can also `curl` the deployed API directly for testing routes.
 
 ### Plugin Packages (`packages/plugin-*`)
 
-Each plugin lives in `packages/plugin-<name>/` with a `plugin.yaml` manifest. Plugins can provide any combination of:
-
-**Code capabilities** (compiled into worker):
-- `src/actions/` — tool definitions the agent can invoke (provider, actions, triggers)
-- `src/channels/` — channel transport implementation (send/receive messages)
-
-**Content capabilities** (delivered to sandbox via Runner WebSocket):
-- `skills/*.md` — OpenCode skill files
-- `personas/*.md` — persona files
-- `tools/*.ts` — OpenCode plugin/tool files
-
-Code plugins have `package.json`, `tsconfig.json`, and export via `@valet/plugin-<name>/actions` and/or `@valet/plugin-<name>/channels`. Content-only plugins need just `plugin.yaml` and content files.
-
-Auto-discovered by `make generate-registries` which scans `packages/plugin-*/` and generates:
-- `src/integrations/packages.ts` — action plugin registry
-- `src/channels/packages.ts` — channel plugin registry
-- `src/plugins/content-registry.ts` — inlined content artifacts for D1 sync
-
-### Runner
-
-- Runtime: Bun
-- Entry: `packages/runner/src/bin.ts`
-- WebSocket to DO: `packages/runner/src/agent-client.ts`
-- OpenCode interaction: `packages/runner/src/prompt.ts`
-- OpenCode lifecycle: `packages/runner/src/opencode-manager.ts`
-- Auth gateway: `packages/runner/src/gateway.ts` (Hono on port 9000)
-- Workflow engine: `packages/runner/src/workflow-engine.ts`, `workflow-compiler.ts`, `workflow-cli.ts`
-- Secrets: `packages/runner/src/secrets.ts`, `onepassword-provider.ts`
-
-### Backend
-
-- Python 3.12, Modal SDK
-- Entry: `backend/app.py` (Modal App with web endpoints)
-- Configuration: `backend/config.py`
-- Session management: `backend/session.py`
-- Sandbox lifecycle: `backend/sandboxes.py`
-- Image definition: `backend/images/base.py`
+Each plugin lives in `packages/plugin-<name>/` with a `plugin.yaml` manifest and (for code plugins) a single `ValetPlugin` manifest exported from `./plugin`. Content-only plugins ship just `plugin.yaml` + skill/persona markdown. The full recipe is under "Adding a new plugin (v2)" below; `make generate-registries` regenerates `packages/api/src/plugins/registry.gen.ts`.
 
 ### Type Safety
 
@@ -499,20 +380,9 @@ This codebase has accumulated `any`, `unknown`, and type assertions (`as`) as sh
 
 ### Git Conventions
 
-- Commit code upon completion of each bean.
+- Commit upon completion of each discrete task; keep subjects ≤72 chars.
 
 ## Common Patterns
-
-### Adding a new D1 table
-
-1. Create migration: `packages/worker/migrations/NNNN_name.sql`
-2. Add Drizzle schema: `packages/worker/src/lib/schema/<name>.ts` and re-export from `schema/index.ts`
-3. Add types to `packages/shared/src/types/index.ts`
-4. Add DB query helpers to `packages/worker/src/lib/db/<name>.ts` and re-export from `lib/db.ts`
-5. Add API routes to `packages/worker/src/routes/<name>.ts`
-6. Mount in `packages/worker/src/index.ts`
-7. Add React Query hooks in `packages/client/src/api/<name>.ts`
-8. Run `make db-migrate` (local) or apply to production via the deploy migration workflow above
 
 ### Adding a new plugin (v2)
 
@@ -535,16 +405,7 @@ Plugins are self-describing: a package exports a single `ValetPlugin` manifest (
 8. Run `make generate-registries` — scans `packages/plugin-*/plugin.yaml` for `v2: true` (skipping `enabled: false`) and regenerates `packages/api/src/plugins/registry.gen.ts`
 9. Run `pnpm typecheck` to verify
 
-### Adding a new Durable Object
+### Adding a web route
 
-1. Create class in `packages/worker/src/durable-objects/<name>.ts`
-2. Re-export from `packages/worker/src/index.ts`
-3. Add binding to `packages/worker/wrangler.toml` (durable_objects.bindings + migrations)
-4. Add type to `packages/worker/src/env.ts` Env interface
-5. Use in routes via `c.env.BINDING_NAME.idFromName(...)`
-
-### Adding a frontend route
-
-1. Create route file at `packages/client/src/routes/<path>.tsx`
-2. TanStack Router auto-generates route tree on dev server restart
-3. Add navigation link to sidebar at `packages/client/src/components/layout/sidebar.tsx`
+1. Create route file at `packages/web/src/routes/<path>.tsx` (TanStack Router regenerates the route tree on dev restart)
+2. Add navigation in `packages/web/src/components/layout/` if it needs a sidebar entry

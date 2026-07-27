@@ -126,6 +126,9 @@ const apiTest = (...files: string[]): string[] => [
 export const STEPS: StepDef[] = [
   // ── static + unit ────────────────────────────────────────────────────────
   { id: "typecheck", group: "static", title: "root typecheck (all packages)", command: ["pnpm", "typecheck"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  // Recurring review rules as executable checks (CLAUDE.md type-safety +
+  // ws-types gotchas) — see scripts/e2e/conventions.ts.
+  { id: "conventions", group: "static", title: "code conventions (banned casts, ws @types)", command: ["pnpm", "exec", "tsx", "scripts/check-conventions.ts"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
   { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
   { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
   { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
@@ -234,6 +237,44 @@ export function truncateOutput(output: string, maxLines = 120): string {
   if (lines.length <= maxLines) return output;
   const tail = lines.slice(-maxLines).join("\n");
   return `[… ${lines.length - maxLines} lines truncated — rerun with --verbose or --only <step> for full output …]\n${tail}`;
+}
+
+// ── doctor mode (`make e2e E2E_ARGS="--doctor"`) ──────────────────────────
+
+export interface DoctorCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  /** Required checks gate ALL runs (wrong Node, missing builds); optional
+   * ones just widen coverage (creds, daemons). */
+  required: boolean;
+  /** Shown when ok (version, var count, …). */
+  detail?: string;
+  /** Repair hint shown when not ok. */
+  hint?: string;
+}
+
+/** Render the readiness checklist: ✓ ok, ✗ required-missing, ⊘ optional-
+ * missing, plus an armed-step summary. */
+export function renderDoctor(checks: DoctorCheck[], armed: number, total: number): string {
+  const lines = checks.map((c) => {
+    const icon = c.ok ? "✓" : c.required ? "✗" : "⊘";
+    const tail = c.ok ? (c.detail ? ` — ${c.detail}` : "") : c.hint ? ` — ${c.hint}` : "";
+    return `${icon} ${c.label}${tail}`;
+  });
+  lines.push("");
+  const requiredFailed = checks.filter((c) => c.required && !c.ok).length;
+  lines.push(
+    requiredFailed > 0
+      ? `${requiredFailed} required check(s) failing — fix before running \`make e2e\``
+      : `ready — ${armed}/${total} steps armed (run \`make e2e\`, or \`make e2e E2E_ARGS="--list"\` for what the skips need)`,
+  );
+  return lines.join("\n");
+}
+
+/** Exit 1 iff a required check fails; optional gaps are informational. */
+export function doctorExitCode(checks: DoctorCheck[]): number {
+  return checks.some((c) => c.required && !c.ok) ? 1 : 0;
 }
 
 export interface StepResult {
