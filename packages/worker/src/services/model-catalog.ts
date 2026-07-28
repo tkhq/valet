@@ -9,6 +9,7 @@ import type { AvailableModels, ProviderModels, CustomProviderModel } from '@vale
 import type { AppDb } from '../lib/drizzle.js';
 import type { Env } from '../env.js';
 import { listOrgApiKeys, getAllCustomProvidersWithKeys, getCatalogCache, setCatalogCache } from '../lib/db/org.js';
+import type { LlmTokenSums } from '../lib/db/analytics.js';
 import { decryptString } from '../lib/crypto.js';
 
 const CACHE_TTL_SECONDS = 3600; // 1 hour
@@ -36,6 +37,8 @@ interface CatalogModel {
   cost?: {
     input?: number;
     output?: number;
+    cache_read?: number;
+    cache_write?: number;
   };
   [key: string]: unknown;
 }
@@ -44,21 +47,35 @@ interface CatalogModel {
 export interface ModelPricing {
   inputCostPerMillion: number;
   outputCostPerMillion: number;
+  // Per-million rates for prompt-cache tiers. null = the catalog publishes no
+  // rate for this model; computeCost then falls back to the full input rate.
+  cacheReadCostPerMillion: number | null;
+  cacheWriteCostPerMillion: number | null;
 }
 
 /**
- * Compute cost in dollars for a given token count using the pricing map.
+ * Compute cost in dollars for a token breakdown using the pricing map.
+ * Each cache tier is billed at its own published rate (Anthropic: reads 0.1x
+ * input, writes 1.25x — the 5-minute-TTL rate, which is the TTL OpenCode's
+ * cache policy requests). Models without a published cache rate fall back to
+ * the full input rate. Reasoning is billed as output.
  * Returns null if no pricing data is available for the model.
  */
 export function computeCost(
   model: string,
-  inputTokens: number,
-  outputTokens: number,
+  tokens: LlmTokenSums,
   pricingMap: Map<string, ModelPricing>,
 ): number | null {
   const pricing = pricingMap.get(model);
   if (!pricing) return null;
-  return (inputTokens * pricing.inputCostPerMillion + outputTokens * pricing.outputCostPerMillion) / 1_000_000;
+  const cacheReadRate = pricing.cacheReadCostPerMillion ?? pricing.inputCostPerMillion;
+  const cacheWriteRate = pricing.cacheWriteCostPerMillion ?? pricing.inputCostPerMillion;
+  return (
+    tokens.inputTokens * pricing.inputCostPerMillion +
+    tokens.cacheReadTokens * cacheReadRate +
+    tokens.cacheWriteTokens * cacheWriteRate +
+    (tokens.outputTokens + tokens.reasoningTokens) * pricing.outputCostPerMillion
+  ) / 1_000_000;
 }
 
 /**
@@ -123,6 +140,8 @@ export async function getModelPricing(
         pricingMap.set(key, {
           inputCostPerMillion: model.cost.input ?? 0,
           outputCostPerMillion: model.cost.output ?? 0,
+          cacheReadCostPerMillion: typeof model.cost.cache_read === 'number' ? model.cost.cache_read : null,
+          cacheWriteCostPerMillion: typeof model.cost.cache_write === 'number' ? model.cost.cache_write : null,
         });
       }
     }

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, Variables } from '../env.js';
 import type { UsageStatsResponse } from '@valet/shared';
-import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getUsageByUserModel, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxHeroStats, getSandboxByDay, getSandboxByUser } from '../lib/db/analytics.js';
+import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getUsageByUserModel, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxHeroStats, getSandboxByDay, getSandboxByUser, billableInputTokens, billableOutputTokens } from '../lib/db/analytics.js';
 import { getModelPricing, computeCost } from '../services/model-catalog.js';
 import { computeSandboxCost, DEFAULT_CPU_CORES, DEFAULT_MEMORY_GIB } from '../services/sandbox-pricing.js';
 import { getDb } from '../lib/drizzle.js';
@@ -40,7 +40,7 @@ usageRouter.get('/stats', async (c) => {
   // Compute hero LLM total cost
   let heroLlmCost: number | null = null;
   for (const modelRow of byModelRaw) {
-    const cost = computeCost(modelRow.model, modelRow.inputTokens, modelRow.outputTokens, pricingMap);
+    const cost = computeCost(modelRow.model, modelRow, pricingMap);
     if (cost !== null) {
       heroLlmCost = (heroLlmCost ?? 0) + cost;
     }
@@ -60,9 +60,9 @@ usageRouter.get('/stats', async (c) => {
   const dayMap = new Map<string, { cost: number | null; inputTokens: number; outputTokens: number; sandboxCost: number; sandboxActiveSeconds: number }>();
   for (const row of byDayRaw) {
     const existing = dayMap.get(row.date) ?? { cost: null, inputTokens: 0, outputTokens: 0, sandboxCost: 0, sandboxActiveSeconds: 0 };
-    existing.inputTokens += row.inputTokens;
-    existing.outputTokens += row.outputTokens;
-    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    existing.inputTokens += billableInputTokens(row);
+    existing.outputTokens += billableOutputTokens(row);
+    const cost = computeCost(row.model, row, pricingMap);
     if (cost !== null) {
       existing.cost = (existing.cost ?? 0) + cost;
     }
@@ -84,15 +84,15 @@ usageRouter.get('/stats', async (c) => {
   // which models. Ordered by tokens desc (from the query).
   const userCostMap = new Map<string, number | null>();
   const byUserModel = byUserModelRaw.map((row) => {
-    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    const cost = computeCost(row.model, row, pricingMap);
     if (cost !== null) {
       userCostMap.set(row.userId, (userCostMap.get(row.userId) ?? 0) + cost);
     }
     return {
       userId: row.userId,
       model: row.model,
-      inputTokens: row.inputTokens,
-      outputTokens: row.outputTokens,
+      inputTokens: billableInputTokens(row),
+      outputTokens: billableOutputTokens(row),
       cost,
       callCount: row.callCount,
     };
@@ -128,16 +128,17 @@ usageRouter.get('/stats', async (c) => {
   });
 
   // Cost by model
-  const totalTokens = byModelRaw.reduce((sum, r) => sum + r.inputTokens + r.outputTokens, 0);
+  const totalTokens = byModelRaw.reduce((sum, r) => sum + billableInputTokens(r) + billableOutputTokens(r), 0);
   const byModel = byModelRaw.map((row) => {
-    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    const cost = computeCost(row.model, row, pricingMap);
+    const rowTokens = billableInputTokens(row) + billableOutputTokens(row);
     const percentage = totalTokens > 0
-      ? Math.round(((row.inputTokens + row.outputTokens) / totalTokens) * 1000) / 10
+      ? Math.round((rowTokens / totalTokens) * 1000) / 10
       : 0;
     return {
       model: row.model,
-      inputTokens: row.inputTokens,
-      outputTokens: row.outputTokens,
+      inputTokens: billableInputTokens(row),
+      outputTokens: billableOutputTokens(row),
       cost,
       callCount: row.callCount,
       percentage,
@@ -148,10 +149,10 @@ usageRouter.get('/stats', async (c) => {
   // origin×model rows first, then sum to the origin. Percentage is share of total tokens.
   const purposeMap = new Map<string, { inputTokens: number; outputTokens: number; cost: number | null; callCount: number }>();
   for (const row of byPurposeModelRaw) {
-    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    const cost = computeCost(row.model, row, pricingMap);
     const e = purposeMap.get(row.purpose) ?? { inputTokens: 0, outputTokens: 0, cost: null, callCount: 0 };
-    e.inputTokens += row.inputTokens;
-    e.outputTokens += row.outputTokens;
+    e.inputTokens += billableInputTokens(row);
+    e.outputTokens += billableOutputTokens(row);
     e.callCount += row.callCount;
     if (cost !== null) e.cost = (e.cost ?? 0) + cost;
     purposeMap.set(row.purpose, e);
@@ -174,10 +175,10 @@ usageRouter.get('/stats', async (c) => {
   const workflowMap = new Map<string, { workflowId: string | null; workflowName: string; triggerType: string; inputTokens: number; outputTokens: number; cost: number | null; callCount: number }>();
   for (const row of byWorkflowRaw) {
     const key = `${row.workflowId ?? 'null'}::${row.triggerType}`;
-    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    const cost = computeCost(row.model, row, pricingMap);
     const e = workflowMap.get(key) ?? { workflowId: row.workflowId, workflowName: row.workflowName, triggerType: row.triggerType, inputTokens: 0, outputTokens: 0, cost: null, callCount: 0 };
-    e.inputTokens += row.inputTokens;
-    e.outputTokens += row.outputTokens;
+    e.inputTokens += billableInputTokens(row);
+    e.outputTokens += billableOutputTokens(row);
     e.callCount += row.callCount;
     if (cost !== null) e.cost = (e.cost ?? 0) + cost;
     workflowMap.set(key, e);

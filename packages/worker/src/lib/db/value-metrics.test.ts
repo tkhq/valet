@@ -225,12 +225,13 @@ describe('value-metrics db helpers', () => {
       exec(sqlite, insert, 'e6', 'llm_call', 's2', 'anthropic/claude-opus-4', null, null, null, '2026-07-02T04:00:00.000Z'); // zero tokens
     });
 
-    it('aggregates billable tokens per model within the window', async () => {
+    it('aggregates raw per-tier tokens per model within the window', async () => {
       const rows = await getUsageByModel(db, START, END);
       const byModel = new Map(rows.map((r) => [r.model, r]));
-      // Billable input includes cache reads: 2000 + 1000 + 500.
-      expect(byModel.get('anthropic/claude-haiku-4-5')).toMatchObject({ inputTokens: 3500, outputTokens: 1500 });
-      expect(byModel.get('anthropic/claude-opus-4')).toMatchObject({ inputTokens: 1000, outputTokens: 500 });
+      // Raw tiers stay separate so cost math can price cache reads at their
+      // own (cheaper) rate: uncached input 2000 + 500, cache reads 1000.
+      expect(byModel.get('anthropic/claude-haiku-4-5')).toMatchObject({ inputTokens: 2500, outputTokens: 1500, cacheReadTokens: 1000, cacheWriteTokens: 0, reasoningTokens: 0 });
+      expect(byModel.get('anthropic/claude-opus-4')).toMatchObject({ inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 });
       expect(rows).toHaveLength(2);
     });
 
