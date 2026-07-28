@@ -76,7 +76,7 @@ describe('workflow templates', () => {
   it('code-review card shows the github → claude → github app chain', () => {
     const t = getWorkflowTemplate('code-review');
     expect(t?.apps).toEqual(['github', 'claude', 'github']);
-    expect(t?.steps).toHaveLength(3);
+    expect(t?.steps).toHaveLength(4);
   });
 
   it('code-review template wires the expected PR-review pipeline', () => {
@@ -105,18 +105,26 @@ describe('workflow templates', () => {
     expect(byId.fetch_pr.action).toBe('github.inspect_pull_request');
     expect(byId.fetch_pr.params.includePatch).toBe(true);
 
-    // The reviewer is an LLM node with an explicit model (publish requires one).
-    expect(byId.review.type).toBe('llm');
-    expect(typeof byId.review.model).toBe('string');
-    expect(byId.review.model.length).toBeGreaterThan(0);
+    // Stage 1: the investigator is an LLM node with an explicit model
+    // (publish requires one) and a structured report as its ONLY output —
+    // reasoning artifacts can't reach the posted review.
+    expect(byId.investigate.type).toBe('llm');
+    expect(typeof byId.investigate.model).toBe('string');
+    expect(byId.investigate.model.length).toBeGreaterThan(0);
+    expect(byId.investigate.outputSchema.required).toEqual(['solid', 'summary', 'findings']);
     // References upstream output as `.data` (not the stale `.output`).
-    expect(byId.review.prompt).toContain('{{ nodes.fetch_pr.data }}');
+    expect(byId.investigate.prompt).toContain('{{ nodes.fetch_pr.data }}');
+
+    // Stage 2: the drafter composes the posted comment from the report alone.
+    expect(byId.draft.type).toBe('llm');
+    expect(byId.draft.outputSchema).toBeUndefined();
+    expect(byId.draft.prompt).toContain('{{ nodes.investigate.data }}');
 
     // An empty or whitespace-only write-up must not reach create_review, whose
     // schema requires a non-empty body when event is COMMENT.
     expect(byId.has_review.type).toBe('if');
     expect(byId.has_review.conditions).toEqual([
-      { left: 'nodes.review.data.response', dataType: 'string', operation: 'matchesRegex', right: '\\S' },
+      { left: 'nodes.draft.data.response', dataType: 'string', operation: 'matchesRegex', right: '\\S' },
     ]);
 
     // Post a real pull-request review, not an issue comment: create_review
@@ -126,13 +134,14 @@ describe('workflow templates', () => {
     expect(byId.post.params.issueNumber).toBeUndefined();
     expect(byId.post.params.event).toBe('COMMENT');
     // Schema-less LLM output is wrapped as { response }, so the body reads `.response`.
-    expect(byId.post.params.body).toBe('{{ nodes.review.data.response }}');
+    expect(byId.post.params.body).toBe('{{ nodes.draft.data.response }}');
 
     expect(def.edges).toEqual([
       { from: 'trigger', to: 'gate' },
       { from: 'gate', to: 'fetch_pr', fromOutput: 'true' },
-      { from: 'fetch_pr', to: 'review' },
-      { from: 'review', to: 'has_review' },
+      { from: 'fetch_pr', to: 'investigate' },
+      { from: 'investigate', to: 'draft' },
+      { from: 'draft', to: 'has_review' },
       { from: 'has_review', to: 'post', fromOutput: 'true' },
     ]);
   });
