@@ -95,6 +95,15 @@ export async function getReturningUserStats(
   };
 }
 
+/** All registered users, regardless of activity — the "All members" baseline. */
+export async function getTotalUserCount(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS count FROM users`)
+    .bind()
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
 // ─── Recurring-automation embeddedness ──────────────────────────────────────
 
 export interface EnabledTriggerRow {
@@ -176,38 +185,183 @@ export async function getChannelBreadth(
   return (result.results ?? []).map((r) => ({ channel: r.channel, turns: r.turns }));
 }
 
-export interface ServiceBreadthRow {
+export interface ConnectorBreadthRow {
   service: string;
-  invocations: number;
+  users: number;
+  reads: number;
+  writes: number;
 }
 
+// Coarse keyword classifier over action_id, same spirit as
+// getWorkflowFailureReasons' keyword buckets: approximate, not exhaustive.
+// Verbs were chosen from the actual action_id catalog across all plugins
+// (github, slack, linear, google_workspace, salesforce, etc.) — ambiguous
+// verbs ('run', 'search', 'query') are deliberately NOT matched here, since
+// they cover both reads (query_prometheus, runSoqlQuery) and writes
+// (workflows.run) and a false-positive miscounts a read as a write more
+// often than the reverse. Unmatched action_ids default to reads.
+const WRITE_ACTION_ID_LIKE = `(
+  ai.action_id LIKE '%create%' OR ai.action_id LIKE '%update%' OR ai.action_id LIKE '%delete%' OR
+  ai.action_id LIKE '%insert%' OR ai.action_id LIKE '%append%' OR ai.action_id LIKE '%send%' OR
+  ai.action_id LIKE '%post%' OR ai.action_id LIKE '%write%' OR ai.action_id LIKE '%replace%' OR
+  ai.action_id LIKE '%remove%' OR ai.action_id LIKE '%modify%' OR ai.action_id LIKE '%merge%' OR
+  ai.action_id LIKE '%move_%' OR ai.action_id LIKE '%rename%' OR ai.action_id LIKE '%format%' OR
+  ai.action_id LIKE '%protect%' OR ai.action_id LIKE '%resize%' OR ai.action_id LIKE '%freeze%' OR
+  ai.action_id LIKE '%duplicate%' OR ai.action_id LIKE '%upload%' OR ai.action_id LIKE '%save%' OR
+  ai.action_id LIKE '%reply%' OR ai.action_id LIKE '%resolve_comment%' OR ai.action_id LIKE '%apply_%' OR
+  ai.action_id LIKE '%dm_%' OR ai.action_id LIKE '%disable%' OR ai.action_id LIKE '%enable%' OR
+  ai.action_id LIKE '%set_%' OR ai.action_id LIKE '%add_%' OR ai.action_id LIKE '%add-%' OR
+  ai.action_id LIKE '%clear_%' OR ai.action_id LIKE '%batch_%' OR ai.action_id LIKE '%push_files%' OR
+  ai.action_id IN ('workflows.run', 'triggers.run', 'triggers.disable')
+)`;
+
 /**
- * Integration services exercised in the window. action_invocations.service
- * is NOT NULL at the write site (every gated tool action inserts a row, and
- * policy auto-allows insert directly as executed), which makes it the
- * populated service column — tool_exec events carry only tool_name.
- * Invocations from mode='test' workflow runs are excluded like every other
- * workflow metric.
+ * Integration services exercised in the window, with a distinct-user count
+ * and a coarse read/write split (see WRITE_ACTION_ID_LIKE). Invocations from
+ * mode='test' workflow runs are excluded like every other workflow metric.
  */
-export async function getServiceBreadth(
+export async function getConnectorBreadth(
   db: D1Database,
   startIso: string,
   endIso: string,
-): Promise<ServiceBreadthRow[]> {
+): Promise<ConnectorBreadthRow[]> {
   const result = await db
     .prepare(`
-      SELECT ai.service AS service, COUNT(*) AS invocations
+      SELECT
+        ai.service AS service,
+        COUNT(DISTINCT ai.user_id) AS users,
+        COALESCE(SUM(CASE WHEN NOT ${WRITE_ACTION_ID_LIKE} THEN 1 ELSE 0 END), 0) AS reads,
+        COALESCE(SUM(CASE WHEN ${WRITE_ACTION_ID_LIKE} THEN 1 ELSE 0 END), 0) AS writes
       FROM action_invocations ai
       LEFT JOIN workflow_executions we ON ai.workflow_execution_id = we.id
       WHERE (we.id IS NULL OR we.mode != 'test')
         AND datetime(ai.created_at) >= datetime(?) AND datetime(ai.created_at) < datetime(?)
       GROUP BY ai.service
-      ORDER BY invocations DESC
+      ORDER BY (reads + writes) DESC
     `)
     .bind(startIso, endIso)
-    .all<{ service: string; invocations: number }>();
+    .all<{ service: string; users: number; reads: number; writes: number }>();
 
-  return (result.results ?? []).map((r) => ({ service: r.service, invocations: r.invocations }));
+  return (result.results ?? []).map((r) => ({
+    service: r.service,
+    users: r.users,
+    reads: r.reads,
+    writes: r.writes,
+  }));
+}
+
+export interface ChannelStickinessRow {
+  channel: string;
+  /** Distinct users active on this channel on the latest UTC day present in the window. */
+  dau: number;
+  /** Distinct users active on this channel anywhere in the window. */
+  mau: number;
+}
+
+/**
+ * DAU/MAU per channel — the "product stickiness" proxy. MAU is distinct
+ * users per channel across the whole window; DAU is distinct users per
+ * channel on the latest UTC day that actually has turn_complete activity in
+ * the window (not necessarily "today" — the window may not reach the
+ * present). A channel with MAU but zero activity on that specific day still
+ * appears, with dau: 0.
+ */
+export async function getChannelStickiness(
+  db: D1Database,
+  startIso: string,
+  endIso: string,
+): Promise<ChannelStickinessRow[]> {
+  const mauResult = await db
+    .prepare(`
+      SELECT channel, COUNT(DISTINCT user_id) AS mau
+      FROM analytics_events
+      WHERE event_type = 'turn_complete' AND channel IS NOT NULL AND user_id IS NOT NULL
+        AND created_at >= ? AND created_at < ?
+      GROUP BY channel
+      ORDER BY mau DESC
+    `)
+    .bind(startIso, endIso)
+    .all<{ channel: string; mau: number }>();
+
+  const mauRows = mauResult.results ?? [];
+  if (mauRows.length === 0) return [];
+
+  const latestDayRow = await db
+    .prepare(`
+      SELECT MAX(date(created_at)) AS latest_day
+      FROM analytics_events
+      WHERE event_type = 'turn_complete' AND channel IS NOT NULL
+        AND created_at >= ? AND created_at < ?
+    `)
+    .bind(startIso, endIso)
+    .first<{ latest_day: string | null }>();
+  const latestDay = latestDayRow?.latest_day ?? null;
+
+  const dauMap = new Map<string, number>();
+  if (latestDay !== null) {
+    const dauResult = await db
+      .prepare(`
+        SELECT channel, COUNT(DISTINCT user_id) AS dau
+        FROM analytics_events
+        WHERE event_type = 'turn_complete' AND channel IS NOT NULL AND user_id IS NOT NULL
+          AND date(created_at) = ? AND created_at < ?
+        GROUP BY channel
+      `)
+      .bind(latestDay, endIso)
+      .all<{ channel: string; dau: number }>();
+    for (const row of dauResult.results ?? []) {
+      dauMap.set(row.channel, row.dau);
+    }
+  }
+
+  return mauRows.map((row) => ({
+    channel: row.channel,
+    dau: dauMap.get(row.channel) ?? 0,
+    mau: row.mau,
+  }));
+}
+
+export interface ActionsPerPromptRow {
+  day: string;
+  channel: string;
+  toolExecs: number;
+  turns: number;
+}
+
+/**
+ * Raw daily tool_exec / turn_complete counts per channel — the "how agentic
+ * is their work" trend. Division into a ratio (and null-on-zero-turns
+ * handling) is a presentation concern left to callers, since a 0-turn day
+ * is meaningfully different from a 0-tool-call day.
+ */
+export async function getActionsPerPromptByChannel(
+  db: D1Database,
+  startIso: string,
+  endIso: string,
+): Promise<ActionsPerPromptRow[]> {
+  const result = await db
+    .prepare(`
+      SELECT
+        date(created_at) AS day,
+        channel,
+        COALESCE(SUM(CASE WHEN event_type = 'tool_exec' THEN 1 ELSE 0 END), 0) AS tool_execs,
+        COALESCE(SUM(CASE WHEN event_type = 'turn_complete' THEN 1 ELSE 0 END), 0) AS turns
+      FROM analytics_events
+      WHERE channel IS NOT NULL
+        AND event_type IN ('tool_exec', 'turn_complete')
+        AND created_at >= ? AND created_at < ?
+      GROUP BY day, channel
+      ORDER BY day, channel
+    `)
+    .bind(startIso, endIso)
+    .all<{ day: string; channel: string; tool_execs: number; turns: number }>();
+
+  return (result.results ?? []).map((r) => ({
+    day: r.day,
+    channel: r.channel,
+    toolExecs: r.tool_execs,
+    turns: r.turns,
+  }));
 }
 
 // ─── Workflow autonomy ──────────────────────────────────────────────────────

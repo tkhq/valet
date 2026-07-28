@@ -6,10 +6,15 @@ import {
   getActiveUsersByDay,
   getActiveUsersByWeek,
   getReturningUserStats,
+  getTotalUserCount,
   getEnabledTriggerCounts,
   getWorkflowRunsByDay,
   getChannelBreadth,
-  getServiceBreadth,
+  getConnectorBreadth,
+  getChannelStickiness,
+  type ChannelStickinessRow,
+  getActionsPerPromptByChannel,
+  type ActionsPerPromptRow,
   getWorkflowAutonomyStats,
   getWorkflowOutcomesByWorkflow,
   getWorkflowOutcomesByTriggerType,
@@ -101,6 +106,8 @@ function seedInvocation(
     executionId?: string | null;
     sessionId?: string | null;
     service?: string;
+    actionId?: string;
+    userId?: string;
     status?: string;
     resolvedBy?: string | null;
     resolvedAt?: string | null;
@@ -110,11 +117,13 @@ function seedInvocation(
   exec(
     sqlite,
     `INSERT INTO action_invocations (id, session_id, workflow_execution_id, user_id, service, action_id, risk_level, resolved_mode, status, resolved_by, resolved_at, created_at)
-     VALUES (?, ?, ?, 'u1', ?, 'act', 'high', 'require_approval', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 'high', 'require_approval', ?, ?, ?, ?)`,
     opts.id,
     opts.sessionId ?? null,
     opts.executionId ?? null,
+    opts.userId ?? 'u1',
     opts.service ?? 'github',
+    opts.actionId ?? 'act',
     opts.status ?? 'executed',
     opts.resolvedBy ?? null,
     opts.resolvedAt ?? null,
@@ -169,6 +178,15 @@ describe('adoption-metrics db helpers', () => {
     });
   });
 
+  describe('getTotalUserCount', () => {
+    it('counts all registered users, not just active ones', async () => {
+      // beforeEach already seeded u1, u2, u3 with no activity.
+      expect(await getTotalUserCount(db)).toBe(3);
+      seedUser(sqlite, 'u4');
+      expect(await getTotalUserCount(db)).toBe(4);
+    });
+  });
+
   describe('getEnabledTriggerCounts', () => {
     it('counts only enabled triggers, grouped by type', async () => {
       const insert = `INSERT INTO triggers (id, user_id, name, enabled, type, config) VALUES (?, 'u1', ?, ?, ?, '{}')`;
@@ -218,18 +236,86 @@ describe('adoption-metrics db helpers', () => {
       ]);
     });
 
-    it('counts services from action_invocations, excluding test-mode workflow rows', async () => {
-      seedExecution(sqlite, { id: 'wx-t', status: 'completed', mode: 'test', startedAt: '2026-07-02 00:00:00', completedAt: '2026-07-02 00:10:00' });
-      seedInvocation(sqlite, { id: 'i1', sessionId: 's1', service: 'github', createdAt: '2026-07-02T10:00:00.000Z' });
-      seedInvocation(sqlite, { id: 'i2', sessionId: 's1', service: 'github', createdAt: '2026-07-03 10:00:00' });
-      seedInvocation(sqlite, { id: 'i3', sessionId: 's1', service: 'slack', createdAt: '2026-07-03T11:00:00.000Z' });
-      seedInvocation(sqlite, { id: 'i4', executionId: 'wx-t', service: 'linear', createdAt: '2026-07-02T10:00:00.000Z' });
-      seedInvocation(sqlite, { id: 'i5', sessionId: 's1', service: 'notion', createdAt: '2026-06-01T10:00:00.000Z' });
+    it('classifies reads vs writes by action_id keyword and counts distinct users', async () => {
+      seedInvocation(sqlite, { id: 'i1', sessionId: 's1', service: 'github', actionId: 'github.get_pull_request', userId: 'u1', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i2', sessionId: 's1', service: 'github', actionId: 'github.get_pull_request', userId: 'u1', createdAt: '2026-07-03T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i3', sessionId: 's1', service: 'github', actionId: 'github.create_pr', userId: 'u2', createdAt: '2026-07-03T11:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i4', sessionId: 's1', service: 'slack', actionId: 'slack.send_message', userId: 'u3', createdAt: '2026-07-03T12:00:00.000Z' });
 
-      const rows = await getServiceBreadth(db, START, END);
+      const rows = await getConnectorBreadth(db, START, END);
       expect(rows).toEqual([
-        { service: 'github', invocations: 2 },
-        { service: 'slack', invocations: 1 },
+        { service: 'github', users: 2, reads: 2, writes: 1 },
+        { service: 'slack', users: 1, reads: 0, writes: 1 },
+      ]);
+    });
+
+    it('excludes invocations from mode=test workflow runs', async () => {
+      seedExecution(sqlite, { id: 'wx-t', status: 'completed', mode: 'test', startedAt: '2026-07-02 00:00:00', completedAt: '2026-07-02 00:10:00' });
+      seedInvocation(sqlite, { id: 'i5', sessionId: 's1', service: 'github', actionId: 'github.get_pull_request', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i6', executionId: 'wx-t', service: 'linear', actionId: 'linear.get_issue', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedInvocation(sqlite, { id: 'i7', sessionId: 's1', service: 'notion', actionId: 'notion.get_page', createdAt: '2026-06-01T10:00:00.000Z' });
+
+      const rows = await getConnectorBreadth(db, START, END);
+      expect(rows).toEqual([{ service: 'github', users: 1, reads: 1, writes: 0 }]);
+    });
+
+    it('computes DAU (latest day in window) and MAU (whole window) per channel', async () => {
+      // Latest day in this window is 07-03. slack: u1 active both days, u2 only day 1.
+      // telegram: u3 only on day 1 — present in MAU, absent from the latest-day DAU.
+      seedEvent(sqlite, { id: 'st1', userId: 'u1', channel: 'slack', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st2', userId: 'u1', channel: 'slack', createdAt: '2026-07-03T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st3', userId: 'u2', channel: 'slack', createdAt: '2026-07-02T11:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st4', userId: 'u3', channel: 'telegram', createdAt: '2026-07-02T12:00:00.000Z' });
+      // Excluded: non-turn_complete event, null channel, out-of-window event.
+      seedEvent(sqlite, { id: 'st5', type: 'llm_call', userId: 'u1', channel: 'slack', createdAt: '2026-07-03T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st6', userId: 'u2', channel: null, createdAt: '2026-07-03T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'st7', userId: 'u3', channel: 'telegram', createdAt: '2026-06-01T10:00:00.000Z' });
+
+      const rows = await getChannelStickiness(db, START, END);
+      expect(rows).toEqual([
+        { channel: 'slack', dau: 1, mau: 2 },
+        { channel: 'telegram', dau: 0, mau: 1 },
+      ]);
+    });
+
+    it('excludes events on the latest day that fall at or after the window end from DAU', async () => {
+      // windowEnd lands mid-day on 07-03 (the day that will resolve as "latest day").
+      // u1's event is before windowEnd and sets latestDay to 07-03. u2's event is on the
+      // same calendar date but chronologically at/after windowEnd, so it must not count
+      // toward that day's DAU even though the DAU subquery only bucketed by date().
+      const windowEnd = '2026-07-03T12:00:00.000Z';
+      seedEvent(sqlite, { id: 'stb1', userId: 'u1', channel: 'slack', createdAt: '2026-07-03T08:00:00.000Z' });
+      seedEvent(sqlite, { id: 'stb2', userId: 'u2', channel: 'slack', createdAt: '2026-07-03T18:00:00.000Z' });
+
+      const rows = await getChannelStickiness(db, START, windowEnd);
+      const slack = rows.find((r) => r.channel === 'slack');
+      expect(slack?.dau).toBe(1);
+    });
+
+    it('returns an empty array when there is no channel activity', async () => {
+      expect(await getChannelStickiness(db, START, END)).toEqual([]);
+    });
+  });
+
+  describe('getActionsPerPromptByChannel', () => {
+    it('buckets tool_exec and turn_complete counts per day and channel', async () => {
+      seedEvent(sqlite, { id: 'ap1', type: 'tool_exec', channel: 'slack', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap2', type: 'tool_exec', channel: 'slack', createdAt: '2026-07-02T10:01:00.000Z' });
+      seedEvent(sqlite, { id: 'ap3', type: 'tool_exec', channel: 'slack', createdAt: '2026-07-02T10:02:00.000Z' });
+      seedEvent(sqlite, { id: 'ap4', type: 'turn_complete', channel: 'slack', createdAt: '2026-07-02T10:03:00.000Z' });
+      // A channel with turns but zero tool calls that day — division-by-zero
+      // is a frontend concern (backend just reports the raw counts).
+      seedEvent(sqlite, { id: 'ap5', type: 'turn_complete', channel: 'web', createdAt: '2026-07-02T11:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap6', type: 'turn_complete', channel: 'web', createdAt: '2026-07-02T11:05:00.000Z' });
+      // Excluded: null channel, unrelated event type, out-of-window.
+      seedEvent(sqlite, { id: 'ap7', type: 'tool_exec', channel: null, createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap8', type: 'llm_call', channel: 'slack', createdAt: '2026-07-02T10:00:00.000Z' });
+      seedEvent(sqlite, { id: 'ap9', type: 'tool_exec', channel: 'slack', createdAt: '2026-06-01T10:00:00.000Z' });
+
+      const rows = await getActionsPerPromptByChannel(db, START, END);
+      expect(rows).toEqual([
+        { day: '2026-07-02', channel: 'slack', toolExecs: 3, turns: 1 },
+        { day: '2026-07-02', channel: 'web', toolExecs: 0, turns: 2 },
       ]);
     });
   });

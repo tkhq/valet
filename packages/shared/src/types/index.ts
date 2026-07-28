@@ -1459,14 +1459,24 @@ export interface AnalyticsAdoptionResponse {
     /** Users active in more than one distinct week (retention proxy). */
     returningUsers: number;
     returningUserRate: number | null;
+    /** All registered users, regardless of activity — the adoption-level baseline. */
+    totalUsers: number;
     /** Currently-enabled triggers by type — present state, not windowed. */
     enabledTriggers: Array<{ type: string; count: number }>;
     /** Production workflow runs started per UTC day. */
     workflowRunsByDay: Array<{ day: string; runs: number }>;
     /** Channels exercised (turn_complete events with a channel). */
     channels: Array<{ channel: string; turns: number }>;
-    /** Integration services exercised (action_invocations.service). */
-    services: Array<{ service: string; invocations: number }>;
+    /** DAU (latest window day) / MAU (whole window) per channel. */
+    channelStickiness: Array<{ channel: string; dau: number; mau: number }>;
+    /** Integration connectors exercised, with distinct users and a read/write split. */
+    connectors: Array<{ service: string; users: number; reads: number; writes: number }>;
+    /** Raw daily tool_exec/turn_complete counts per channel ("actions per prompt" trend). */
+    actionsPerPromptByChannel: Array<{ day: string; channel: string; toolExecs: number; turns: number }>;
+    /** Real SUM(additions + deletions) from session_files_changed, org-wide for the window. */
+    linesChanged: number;
+    /** Distinct (session, file) changes recorded across the window. */
+    filesChanged: number;
   };
   autonomy: {
     terminalRuns: number;
