@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { runDag } from '../runtime.js';
-import type { WorkflowDefinition, LoopNode } from '@valet/shared';
+import type { WorkflowDefinition, LoopNode, ForeachBodyNode } from '@valet/shared';
 import type { WorkflowRunParams, TraceWriter, TraceTransition } from '../types.js';
 import type { Env } from '../../env.js';
 import type { WorkflowStep, WorkflowStepConfig, WorkflowSleepDuration, WorkflowTimeoutDuration } from 'cloudflare:workers';
@@ -125,7 +125,7 @@ describe('loop — no until (repeat N times)', () => {
 describe('loop — error handling', () => {
   // A project node whose source doesn't resolve to an array throws
   // deterministically — the standard way to make a body step fail.
-  const failingStep = { id: 'boom', type: 'project', source: '{{trigger.data.missing}}', columns: [{ path: 'x' }] } as const;
+  const failingStep: ForeachBodyNode = { id: 'boom', type: 'project', source: '{{trigger.data.missing}}', columns: [{ header: 'X', path: 'x' }] };
 
   it("onIterationError='fail' (default) fails the loop node with step context", async () => {
     const def = loopDef({

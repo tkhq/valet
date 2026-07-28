@@ -187,6 +187,164 @@ describe('validateDefinition', () => {
     expect(errs[0]!.message).toContain('llm, tool, set, stop, orchestrator, session');
   });
 
+  it('returns a helpful unknown loop body type error', () => {
+    const errs = validateDefinition({
+      version: 'dag/v1',
+      nodes: [
+        {
+          id: 'refine',
+          type: 'loop',
+          maxIterations: 3,
+          body: [{ id: 'route_item', type: 'if', conditions: [] }],
+        },
+      ],
+      edges: [],
+    });
+
+    expect(errs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'unknown_loop_body_type',
+        path: 'nodes.0.body.0.type',
+        nodeId: 'route_item',
+        message: expect.stringContaining('loop body step type "if" is not allowed'),
+      }),
+    ]));
+    expect(errs.find((e) => e.code === 'unknown_loop_body_type')!.message).toContain('llm, tool, set, stop, orchestrator, session');
+  });
+
+  it('accepts a valid loop node with an until condition', () => {
+    const def = definition({
+      nodes: [
+        {
+          id: 'refine',
+          type: 'loop',
+          maxIterations: 5,
+          body: [
+            { id: 'draft', type: 'llm', prompt: 'draft it', maxOutputTokens: 500 },
+            { id: 'review', type: 'llm', prompt: 'review it', maxOutputTokens: 500, outputSchema: { approved: { type: 'boolean' } } },
+          ],
+          until: { conditions: [{ left: 'steps.review.approved', dataType: 'boolean', operation: 'isTrue' }] },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'refine', to: 'finish' }],
+    });
+
+    expect(blockingErrors(validateDefinition(def))).toEqual([]);
+  });
+
+  it('rejects duplicate node IDs within a single loop body', () => {
+    const def = definition({
+      nodes: [
+        {
+          id: 'refine',
+          type: 'loop',
+          maxIterations: 3,
+          body: [
+            { id: 'dup', type: 'set', values: {} },
+            { id: 'dup', type: 'set', values: {} },
+          ],
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'refine', to: 'finish' }],
+    });
+
+    const errs = blockingErrors(validateDefinition(def));
+    expect(errs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'duplicate_id',
+        nodeId: 'refine',
+        message: expect.stringContaining('two steps of loop "refine" share an id'),
+      }),
+    ]));
+  });
+
+  it('rejects an invalid regex in a loop until condition, same as an if node', () => {
+    const def = definition({
+      nodes: [
+        {
+          id: 'refine',
+          type: 'loop',
+          maxIterations: 3,
+          body: [{ id: 'draft', type: 'set', values: {} }],
+          until: {
+            conditions: [{ left: 'steps.draft.status', dataType: 'string', operation: 'matchesRegex', right: '(unterminated' }],
+          },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'refine', to: 'finish' }],
+    });
+
+    const errs = blockingErrors(validateDefinition(def));
+    expect(errs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'invalid_regex',
+        nodeId: 'refine',
+        path: 'until.conditions.right',
+      }),
+    ]));
+  });
+
+  it('rejects an unsupported operation for the dataType in a loop until condition', () => {
+    const def = definition({
+      nodes: [
+        {
+          id: 'refine',
+          type: 'loop',
+          maxIterations: 3,
+          body: [{ id: 'draft', type: 'set', values: {} }],
+          until: {
+            conditions: [{ left: 'steps.draft.count', dataType: 'number', operation: 'matchesRegex', right: 'x' }],
+          },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'refine', to: 'finish' }],
+    });
+
+    const errs = blockingErrors(validateDefinition(def));
+    expect(errs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'if_operation_unsupported',
+        nodeId: 'refine',
+        path: 'until.conditions.operation',
+      }),
+    ]));
+  });
+
+  it('enforces maxIterations bounds via the node schema', () => {
+    const tooMany = definition({
+      nodes: [
+        {
+          id: 'refine',
+          type: 'loop',
+          maxIterations: 26,
+          body: [{ id: 'draft', type: 'set', values: {} }],
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'refine', to: 'finish' }],
+    });
+    const errs = blockingErrors(validateDefinition(tooMany));
+    expect(errs.length).toBeGreaterThan(0);
+
+    const withinBounds = definition({
+      nodes: [
+        {
+          id: 'refine',
+          type: 'loop',
+          maxIterations: 25,
+          body: [{ id: 'draft', type: 'set', values: {} }],
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'refine', to: 'finish' }],
+    });
+    expect(blockingErrors(validateDefinition(withinBounds))).toEqual([]);
+  });
+
   it('rejects duplicate node IDs', () => {
     const def = definition({
       nodes: [

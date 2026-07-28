@@ -244,6 +244,92 @@ describe('lintTemplateReferences', () => {
     expect(errs).toEqual([]);
   });
 
+  it('allows steps / prev / iteration roots inside a loop body', () => {
+    const errs = lintTemplateReferences(def([
+      { id: 'trigger', type: 'trigger' },
+      {
+        id: 'refine',
+        type: 'loop',
+        maxIterations: 3,
+        body: [
+          {
+            id: 'draft',
+            type: 'tool',
+            service: 'slack',
+            action: 'slack.send_message',
+            params: { text: 'pass {{iteration}}, prior: {{prev.review}}, this run: {{steps.draft}}' },
+          },
+        ],
+      },
+    ]));
+
+    expect(errs).toEqual([]);
+  });
+
+  it('still warns on a genuinely unknown root inside a loop body', () => {
+    const errs = lintTemplateReferences(def([
+      { id: 'trigger', type: 'trigger' },
+      {
+        id: 'refine',
+        type: 'loop',
+        maxIterations: 3,
+        body: [
+          {
+            id: 'draft',
+            type: 'tool',
+            service: 'slack',
+            action: 'slack.send_message',
+            params: { text: '{{bogus.thing}}' },
+          },
+        ],
+      },
+    ]));
+
+    expect(errs).toHaveLength(1);
+    expect(errs[0]!.message).toContain('bogus.thing');
+  });
+
+  it('exposes the loop result envelope to downstream nodes without warning', () => {
+    const errs = lintTemplateReferences(def([
+      { id: 'trigger', type: 'trigger' },
+      {
+        id: 'refine',
+        type: 'loop',
+        maxIterations: 3,
+        body: [{ id: 'draft', type: 'set', values: { text: 'hi' } }],
+      },
+      {
+        id: 'finish',
+        type: 'stop',
+        message: '{{nodes.refine.data.iterations}} passes, satisfied={{nodes.refine.data.satisfied}}, last={{nodes.refine.data.steps.draft}}',
+      },
+    ]));
+
+    expect(errs).toEqual([]);
+  });
+
+  it('treats a loop step id data subtree as opaque to downstream nodes (no deeper-path warning)', () => {
+    // Step output shape depends on the body node's type, so any depth
+    // under nodes.<loopId>.data.steps.<bodyId> should be accepted, not
+    // just the bare path.
+    const errs = lintTemplateReferences(def([
+      { id: 'trigger', type: 'trigger' },
+      {
+        id: 'refine',
+        type: 'loop',
+        maxIterations: 3,
+        body: [{ id: 'review', type: 'llm', model: 'anthropic:claude-sonnet-4-5', prompt: 'review it', outputSchema: { approved: { type: 'boolean' } } }],
+      },
+      {
+        id: 'finish',
+        type: 'stop',
+        message: 'approved={{nodes.refine.data.steps.review.approved}}',
+      },
+    ]));
+
+    expect(errs).toEqual([]);
+  });
+
   it('lints template-bearing fields across all node types', () => {
     const errs = lintTemplateReferences(def([
       { id: 'trigger', type: 'trigger' },
