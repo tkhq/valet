@@ -15,7 +15,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createApp, type AuthWiring } from "./app.js";
 import { selectServerAdapter } from "./server-adapter.js";
-import { buildNodeProviders } from "./providers/node.js";
+import { buildNodeProviders, shouldSeedLocalIdentity } from "./providers/node.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
 import { loadSessionMeta } from "./engine/session-meta.js";
@@ -161,8 +161,11 @@ const providers = await buildNodeProviders({
   sandboxApiUrl,
   // Real auth configured → skip seeding the local-dev identity so the
   // "zero users → first signup becomes admin" provisioning rule can fire
-  // (see `NodeProviderOpts.seedLocalIdentity`).
-  seedLocalIdentity: !authConfig,
+  // (see `NodeProviderOpts.seedLocalIdentity`). EXCEPT when the stub auth
+  // rung is also enabled: `VALET_LOCAL_AUTH=1` makes the middleware resolve
+  // session-less requests to `local-user`, and an unseeded stub identity
+  // 404s every route that joins the `users` table (`/api/me`, org routes).
+  seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig, process.env),
 });
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
