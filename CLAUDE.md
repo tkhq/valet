@@ -143,8 +143,6 @@ valet/
 ├── docs/
 │   ├── specs/               # Subsystem specs (source of truth per domain)
 │   └── plans/               # Implementation plans
-├── V1.md                    # Original architecture spec (outdated)
-├── V2.md                    # Orchestration layer spec (orchestrators, channels, personas)
 ├── Makefile                 # Dev, test, deploy commands
 └── docker-compose.yml       # Local dev services (keycloak profile, legacy OpenCode)
 ```
