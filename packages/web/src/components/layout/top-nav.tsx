@@ -15,6 +15,27 @@ import { NotificationsBell } from "./notifications-bell";
  * sessions are reached via `/sessions` now (its stub page hosts "New
  * session" until Task 4 builds the full dashboard/sessions split).
  */
+/**
+ * Top-nav link with a working active state. Text color lives in
+ * `activeProps`/`inactiveProps` — NOT the base className — because TanStack
+ * Router concatenates `activeProps.className` onto the base, and two
+ * conflicting Tailwind text colors resolve by stylesheet order, not by
+ * which was added last (the old `text-muted` base + `text-ink` active pair
+ * rendered no visible active state at all).
+ */
+function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className="rounded px-2 py-1 text-sm hover:bg-ink-wash"
+      activeProps={{ className: "text-ink font-medium bg-ink-wash" }}
+      inactiveProps={{ className: "text-muted hover:text-ink" }}
+    >
+      {children}
+    </Link>
+  );
+}
+
 export function TopNav() {
   const info = useOrchestratorInfo();
   const name = info.data?.name ?? "Valet";
@@ -35,41 +56,11 @@ export function TopNav() {
 
       <div className="flex-1" />
 
-      <Link
-        to="/chat"
-        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
-        activeProps={{ className: "text-ink" }}
-      >
-        Chat
-      </Link>
-      <Link
-        to="/memory"
-        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
-        activeProps={{ className: "text-ink" }}
-      >
-        Memory
-      </Link>
-      <Link
-        to="/sessions"
-        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
-        activeProps={{ className: "text-ink" }}
-      >
-        Sessions
-      </Link>
-      <Link
-        to="/workflows"
-        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
-        activeProps={{ className: "text-ink" }}
-      >
-        Workflows
-      </Link>
-      <Link
-        to="/integrations"
-        className="rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink"
-        activeProps={{ className: "text-ink" }}
-      >
-        Integrations
-      </Link>
+      <NavLink to="/chat">Chat</NavLink>
+      <NavLink to="/memory">Memory</NavLink>
+      <NavLink to="/sessions">Sessions</NavLink>
+      <NavLink to="/workflows">Workflows</NavLink>
+      <NavLink to="/integrations">Integrations</NavLink>
 
       <NotificationsBell />
 

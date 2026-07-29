@@ -45,7 +45,17 @@ export function WorkflowsIndexPage() {
           <div className="text-sm text-danger-500">Failed to load workflows.</div>
         )}
         {!isLoading && !error && workflows.length === 0 && (
-          <div className="text-sm text-muted">No workflows yet — create one above.</div>
+          <div className="text-sm text-muted">
+            No workflows yet —{" "}
+            <button
+              type="button"
+              onClick={() => setNewOpen(true)}
+              className="text-ink underline underline-offset-2 hover:text-moss"
+            >
+              create one
+            </button>
+            .
+          </div>
         )}
 
         {!isLoading && workflows.length > 0 && (

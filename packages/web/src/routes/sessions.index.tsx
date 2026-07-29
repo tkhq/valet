@@ -42,7 +42,15 @@ function SessionsPage() {
         )}
         {!isLoading && !error && sessions.length === 0 && (
           <div className="text-sm text-muted">
-            Standalone sessions are for direct work and automation — create one.
+            Standalone sessions are for direct work and automation —{" "}
+            <button
+              type="button"
+              onClick={() => setNewOpen(true)}
+              className="text-ink underline underline-offset-2 hover:text-moss"
+            >
+              create one
+            </button>
+            .
           </div>
         )}
         {!isLoading && sessions.length > 0 && (

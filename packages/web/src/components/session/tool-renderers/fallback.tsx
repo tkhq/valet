@@ -1,7 +1,7 @@
 import { Hexagon } from "lucide-react";
 import { useState } from "react";
 import { cn } from "~/lib/cn";
-import { ToolBody } from "./tool-shell";
+import { CopyButton, ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
 /**
@@ -59,9 +59,16 @@ export const fallbackRenderer: ToolRenderer = {
                 : "border-[--border]/60 bg-neutral-50/60 dark:bg-neutral-950/60",
             )}
           >
-            <SectionLabel tone={error ? "danger" : undefined}>
-              {error ? "error" : "result"}
-            </SectionLabel>
+            <div className="flex items-center justify-between">
+              <SectionLabel tone={error ? "danger" : undefined}>
+                {error ? "error" : "result"}
+              </SectionLabel>
+              <CopyButton
+                label={error ? "Copy error" : "Copy result"}
+                getText={() => text || (objResult ? compactJson(objResult) : "")}
+                className="-mt-1"
+              />
+            </div>
             {objResult && !text ? (
               <KeyValueTable entries={Object.entries(objResult)} />
             ) : (
@@ -139,7 +146,7 @@ function KeyValueTable({ entries }: { entries: [string, unknown][] }) {
       {entries.map(([k, v]) => (
         <div key={k} className="contents">
           <dt className="text-muted font-mono whitespace-nowrap pt-[2px]">{k}</dt>
-          <dd className="min-w-0 font-mono">
+          <dd className="min-w-0">
             <ValueCell value={v} />
           </dd>
         </div>
@@ -169,7 +176,9 @@ function ValueCell({ value }: { value: unknown }) {
     return <span className="text-[--fg]/95 tabular-nums">{value.toLocaleString()}</span>;
   }
   if (typeof value === "string") {
-    return <CollapsedText text={value} inline />;
+    // Identifier-like values (paths, ids, keys — no whitespace) read as
+    // code; prose values (descriptions, message bodies) read as text.
+    return <CollapsedText text={value} inline mono={!/\s/.test(value.trim())} />;
   }
   // Object / array — render as compact JSON, expandable.
   return <CollapsedJson value={value} />;
@@ -179,10 +188,13 @@ function CollapsedText({
   text,
   inline,
   tone,
+  mono = true,
 }: {
   text: string;
   inline?: boolean;
   tone?: "danger";
+  /** Monospace (identifier-like) vs. the normal sans face (prose values). */
+  mono?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const SHORT = inline ? 80 : 280;
@@ -190,6 +202,7 @@ function CollapsedText({
   const shown = expanded || !isLong ? text : text.slice(0, SHORT) + "…";
   const cls = cn(
     "whitespace-pre-wrap break-words",
+    mono ? "font-mono" : "font-sans",
     tone === "danger"
       ? "text-danger-700 dark:text-danger-400"
       : "text-[--fg]/95",
@@ -219,7 +232,7 @@ function CollapsedJson({ value }: { value: unknown }) {
   const isShort = compact.length < 80;
 
   if (isShort) {
-    return <span className="text-[--fg]/85">{compact}</span>;
+    return <span className="font-mono text-[--fg]/85">{compact}</span>;
   }
   if (!expanded) {
     return (
