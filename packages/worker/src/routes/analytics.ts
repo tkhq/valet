@@ -11,6 +11,8 @@ import {
   getThroughputStats,
   getEventFeed,
   getUsageByModel,
+  billableInputTokens,
+  billableOutputTokens,
 } from '../lib/db/analytics.js';
 import { getCronHeartbeats, getWebhookDeliveryStats } from '../lib/db/observability.js';
 import { adminMiddleware } from '../middleware/admin.js';
@@ -160,9 +162,9 @@ async function computeValueWindow(
   let nonFrontierTokens = 0;
   let unknownTokens = 0;
   for (const row of modelRows) {
-    const cost = computeCost(row.model, row.inputTokens, row.outputTokens, pricingMap);
+    const cost = computeCost(row.model, row, pricingMap);
     if (cost !== null) llmCost = (llmCost ?? 0) + cost;
-    const tokens = row.inputTokens + row.outputTokens;
+    const tokens = billableInputTokens(row) + billableOutputTokens(row);
     const tier = classifyModelTier(row.model);
     if (tier === 'frontier') frontierTokens += tokens;
     else if (tier === 'unknown') unknownTokens += tokens;

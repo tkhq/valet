@@ -28,9 +28,11 @@ export type AnalyticsEventRow = {
 };
 
 // Canonical SQL expressions for "billable input" and "billable output"
-// composed from the raw OpenCode token breakdown. Anthropic bills cache
-// reads + writes as input (at different rates) and reasoning as output.
-// Centralised here so every consumer aggregates the same way.
+// TOKEN VOLUME composed from the raw OpenCode token breakdown (cache reads +
+// writes count as input, reasoning as output). These are for token-count
+// display and ordering ONLY — never feed them into cost math: each tier is
+// billed at a different rate (cache reads ~0.1x input), so cost consumers
+// must aggregate the raw five-way breakdown and use computeCost.
 export const SQL_BILLABLE_INPUT_EXPR =
   '(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0))';
 export const SQL_BILLABLE_OUTPUT_EXPR =
@@ -41,6 +43,54 @@ const AE_BILLABLE_INPUT_EXPR =
   '(COALESCE(ae.input_tokens, 0) + COALESCE(ae.cache_read_tokens, 0) + COALESCE(ae.cache_write_tokens, 0))';
 const AE_BILLABLE_OUTPUT_EXPR =
   '(COALESCE(ae.output_tokens, 0) + COALESCE(ae.reasoning_tokens, 0))';
+
+// Raw five-way token SELECT columns, `ae`-qualified and bare. Cost-bearing
+// queries select these so routes can price each tier at its own rate.
+const AE_TOKEN_SUM_COLS = `
+        SUM(COALESCE(ae.input_tokens, 0)) as input_tokens,
+        SUM(COALESCE(ae.output_tokens, 0)) as output_tokens,
+        SUM(COALESCE(ae.cache_read_tokens, 0)) as cache_read_tokens,
+        SUM(COALESCE(ae.cache_write_tokens, 0)) as cache_write_tokens,
+        SUM(COALESCE(ae.reasoning_tokens, 0)) as reasoning_tokens`;
+const SQL_TOKEN_SUM_COLS = `
+        SUM(COALESCE(input_tokens, 0)) as input_tokens,
+        SUM(COALESCE(output_tokens, 0)) as output_tokens,
+        SUM(COALESCE(cache_read_tokens, 0)) as cache_read_tokens,
+        SUM(COALESCE(cache_write_tokens, 0)) as cache_write_tokens,
+        SUM(COALESCE(reasoning_tokens, 0)) as reasoning_tokens`;
+
+/**
+ * Raw per-tier token sums for a group of llm_call rows. `inputTokens` is
+ * UNCACHED input and `outputTokens` is visible output. Billable display
+ * totals are composed via billableInputTokens / billableOutputTokens.
+ */
+export interface LlmTokenSums {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+}
+
+/** Input-side token volume as billed (uncached input + cache reads + cache writes). */
+export function billableInputTokens(t: LlmTokenSums): number {
+  return t.inputTokens + t.cacheReadTokens + t.cacheWriteTokens;
+}
+
+/** Output-side token volume as billed (visible output + reasoning). */
+export function billableOutputTokens(t: LlmTokenSums): number {
+  return t.outputTokens + t.reasoningTokens;
+}
+
+function mapTokenSums(r: Record<string, unknown>): LlmTokenSums {
+  return {
+    inputTokens: Number(r.input_tokens),
+    outputTokens: Number(r.output_tokens),
+    cacheReadTokens: Number(r.cache_read_tokens),
+    cacheWriteTokens: Number(r.cache_write_tokens),
+    reasoningTokens: Number(r.reasoning_tokens),
+  };
+}
 
 // ─── Batch Insert (DO flush → D1) ──────────────────────────────────────────
 
@@ -143,11 +193,9 @@ export async function getUsageHeroStats(
   };
 }
 
-export interface UsageByDayRow {
+export interface UsageByDayRow extends LlmTokenSums {
   date: string;
   model: string;
-  inputTokens: number;
-  outputTokens: number;
 }
 
 export async function getUsageByDay(
@@ -158,9 +206,7 @@ export async function getUsageByDay(
     .prepare(`
       SELECT
         date(ae.created_at) as date,
-        ae.model,
-        SUM(${AE_BILLABLE_INPUT_EXPR}) as input_tokens,
-        SUM(${AE_BILLABLE_OUTPUT_EXPR}) as output_tokens
+        ae.model,${AE_TOKEN_SUM_COLS}
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
@@ -173,8 +219,7 @@ export async function getUsageByDay(
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
     date: String(r.date),
     model: String(r.model),
-    inputTokens: Number(r.input_tokens),
-    outputTokens: Number(r.output_tokens),
+    ...mapTokenSums(r),
   }));
 }
 
@@ -221,11 +266,9 @@ export async function getUsageByUser(
   }));
 }
 
-export interface UsageByUserModelRow {
+export interface UsageByUserModelRow extends LlmTokenSums {
   userId: string;
   model: string;
-  inputTokens: number;
-  outputTokens: number;
   callCount: number;
 }
 
@@ -237,9 +280,7 @@ export async function getUsageByUserModel(
     .prepare(`
       SELECT
         ae.user_id,
-        ae.model,
-        SUM(${AE_BILLABLE_INPUT_EXPR}) as input_tokens,
-        SUM(${AE_BILLABLE_OUTPUT_EXPR}) as output_tokens,
+        ae.model,${AE_TOKEN_SUM_COLS},
         COUNT(*) as call_count
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
@@ -254,19 +295,31 @@ export async function getUsageByUserModel(
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
     userId: String(r.user_id),
     model: String(r.model),
-    inputTokens: Number(r.input_tokens),
-    outputTokens: Number(r.output_tokens),
     callCount: Number(r.call_count),
+    ...mapTokenSums(r),
   }));
 }
 
-export interface UsageByPurposeModelRow {
+export interface UsageByPurposeModelRow extends LlmTokenSums {
   purpose: string;
   model: string;
-  inputTokens: number;
-  outputTokens: number;
   callCount: number;
 }
+
+/**
+ * Origin of a usage row: the session's purpose, unless the row is marked as
+ * ephemeral-session usage, which gets its own synthetic origin.
+ *
+ * Must be repeated verbatim in GROUP BY rather than referenced by its alias —
+ * `sessions` has a real `purpose` column, so a bare `GROUP BY purpose` binds to
+ * that column instead of this expression and collapses the origins back together.
+ */
+const AE_ORIGIN_EXPR = `
+  CASE json_extract(ae.properties, '$.usage_kind')
+    WHEN 'memory_flush' THEN 'memory_flush'
+    WHEN 'review' THEN 'review'
+    ELSE COALESCE(s.purpose, 'interactive')
+  END`;
 
 /**
  * Usage grouped by session ORIGIN (sessions.purpose: 'interactive' | 'workflow' | 'orchestrator')
@@ -274,6 +327,10 @@ export interface UsageByPurposeModelRow {
  * and then roll up to a per-origin total. LEFT JOIN + COALESCE keeps any row whose session row is
  * missing (defaults to 'interactive'). No user_id filter — this is the origin split of ALL usage,
  * matching the by-model/hero scope.
+ *
+ * Usage from ephemeral OpenCode sessions (memory-flush forks, review sessions) is billed to the
+ * key but is not conversation work, so it gets its own synthetic origin from the row's usage_kind
+ * marker rather than being folded into the parent session's purpose.
  */
 export async function getUsageByPurposeModel(
   db: D1Database,
@@ -282,16 +339,14 @@ export async function getUsageByPurposeModel(
   const result = await db
     .prepare(`
       SELECT
-        COALESCE(s.purpose, 'interactive') as purpose,
-        ae.model,
-        SUM(${AE_BILLABLE_INPUT_EXPR}) as input_tokens,
-        SUM(${AE_BILLABLE_OUTPUT_EXPR}) as output_tokens,
+        ${AE_ORIGIN_EXPR} as purpose,
+        ae.model,${AE_TOKEN_SUM_COLS},
         COUNT(*) as call_count
       FROM analytics_events ae
       LEFT JOIN sessions s ON s.id = ae.session_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
-      GROUP BY purpose, ae.model
+      GROUP BY ${AE_ORIGIN_EXPR}, ae.model
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)
     .bind(periodStart)
@@ -300,19 +355,16 @@ export async function getUsageByPurposeModel(
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
     purpose: String(r.purpose),
     model: String(r.model),
-    inputTokens: Number(r.input_tokens),
-    outputTokens: Number(r.output_tokens),
     callCount: Number(r.call_count),
+    ...mapTokenSums(r),
   }));
 }
 
-export interface UsageByWorkflowModelRow {
+export interface UsageByWorkflowModelRow extends LlmTokenSums {
   workflowId: string | null;
   workflowName: string;
   triggerType: string;
   model: string;
-  inputTokens: number;
-  outputTokens: number;
   callCount: number;
 }
 
@@ -339,9 +391,7 @@ export async function getUsageByWorkflowModel(
         we.workflow_id,
         COALESCE(w.name, w.slug, 'Unknown workflow') as workflow_name,
         COALESCE(t.type, 'manual') as trigger_type,
-        ae.model,
-        SUM(${AE_BILLABLE_INPUT_EXPR}) as input_tokens,
-        SUM(${AE_BILLABLE_OUTPUT_EXPR}) as output_tokens,
+        ae.model,${AE_TOKEN_SUM_COLS},
         COUNT(*) as call_count
       FROM analytics_events ae
       JOIN sessions s ON s.id = ae.session_id
@@ -350,6 +400,9 @@ export async function getUsageByWorkflowModel(
       LEFT JOIN triggers t ON t.id = we.trigger_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        -- Ephemeral-session usage reports under its own origin, so exclude it
+        -- here to keep this drill-down consistent with the by-origin table.
+        AND json_extract(ae.properties, '$.usage_kind') IS NULL
       GROUP BY we.workflow_id, w.name, w.slug, t.type, ae.model
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)
@@ -361,16 +414,13 @@ export async function getUsageByWorkflowModel(
     workflowName: String(r.workflow_name),
     triggerType: String(r.trigger_type),
     model: String(r.model),
-    inputTokens: Number(r.input_tokens),
-    outputTokens: Number(r.output_tokens),
     callCount: Number(r.call_count),
+    ...mapTokenSums(r),
   }));
 }
 
-export interface UsageByModelRow {
+export interface UsageByModelRow extends LlmTokenSums {
   model: string;
-  inputTokens: number;
-  outputTokens: number;
   callCount: number;
 }
 
@@ -384,9 +434,7 @@ export async function getUsageByModel(
   const result = await db
     .prepare(`
       SELECT
-        model,
-        SUM(${SQL_BILLABLE_INPUT_EXPR}) as input_tokens,
-        SUM(${SQL_BILLABLE_OUTPUT_EXPR}) as output_tokens,
+        model,${SQL_TOKEN_SUM_COLS},
         COUNT(*) as call_count
       FROM analytics_events
       WHERE event_type = 'llm_call'
@@ -400,9 +448,8 @@ export async function getUsageByModel(
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
     model: String(r.model),
-    inputTokens: Number(r.input_tokens),
-    outputTokens: Number(r.output_tokens),
     callCount: Number(r.call_count),
+    ...mapTokenSums(r),
   }));
 }
 

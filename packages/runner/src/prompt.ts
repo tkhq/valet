@@ -405,6 +405,96 @@ const PROVIDER_RETRY_LOOP_ABORT_RETRIES = 4;
 const REVIEW_POLL_INTERVAL_MS = 500;
 const REVIEW_TIMEOUT_MS = 120_000;
 
+/**
+ * Per-message token breakdown, mirroring OpenCode's `tokens` shape verbatim.
+ * Each bucket is billed differently downstream (cache reads ~0.1x input,
+ * cache writes 1.25x, reasoning as output), so none of them are folded here.
+ */
+export interface UsageEntry {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+}
+
+/**
+ * Pull the token breakdown out of a `message.updated` info payload.
+ *
+ * Shared by the main session accounting path and the ephemeral-session
+ * capture so the two can never disagree about what a token bucket means.
+ * Returns null when the message carries no usable usage (no id, no tokens
+ * object, or every bucket zero).
+ */
+export function extractUsageEntry(
+  info: Record<string, unknown>,
+  fallbackModel: string | null,
+): { ocMessageId: string; entry: UsageEntry; billableInput: number; billableOutput: number } | null {
+  const ocMessageId = typeof info.id === "string" ? info.id : undefined;
+  if (!ocMessageId) return null;
+  const tokenObj = isRecord(info.tokens) ? info.tokens : undefined;
+  if (!tokenObj) return null;
+
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const cache = isRecord(tokenObj.cache) ? tokenObj.cache : {};
+  const inputTokens = num(tokenObj.input);
+  const outputTokens = num(tokenObj.output);
+  const cacheReadTokens = num(cache.read);
+  const cacheWriteTokens = num(cache.write);
+  const reasoningTokens = num(tokenObj.reasoning);
+
+  // Anthropic bills cache reads + writes as input (at their own rates) and
+  // reasoning as output. Compaction thresholds gate on what the model
+  // actually processed, hence the billable composition.
+  const billableInput = inputTokens + cacheReadTokens + cacheWriteTokens;
+  const billableOutput = outputTokens + reasoningTokens;
+  if (billableInput <= 0 && billableOutput <= 0) return null;
+
+  const modelId = typeof info.modelID === "string" ? info.modelID : undefined;
+  const providerId = typeof info.providerID === "string" ? info.providerID : undefined;
+  return {
+    ocMessageId,
+    entry: {
+      model: modelId && providerId ? `${providerId}/${modelId}` : fallbackModel ?? "unknown",
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      reasoningTokens,
+    },
+    billableInput,
+    billableOutput,
+  };
+}
+
+/**
+ * Accounting state for an ephemeral OpenCode session (memory-flush fork or
+ * review session). These sessions make real, billed provider calls whose SSE
+ * events are deliberately excluded from the main session handler, so their
+ * usage is tracked here and reported separately.
+ */
+interface EphemeralUsageState {
+  kind: "memory_flush" | "review";
+  /** Turn to attribute the usage to; null when the work has no owning turn. */
+  originTurnId: string | null;
+  /** Model to fall back to when a message omits modelID/providerID. */
+  fallbackModel: string | null;
+  entries: Map<string, UsageEntry>;
+  /**
+   * Message IDs that already existed when capture was armed.
+   *
+   * `POST /session/{id}/fork` clones every parent message via updateMessage,
+   * which emits a `message.updated` per clone carrying the ORIGINAL token
+   * counts. Capturing those would report the parent's entire history as
+   * flush cost. SSE delivery can lag the fork's HTTP response, so an
+   * "arm after forking" flag alone is a race — the clone IDs are recorded
+   * explicitly instead.
+   */
+  excludedMessageIds: Set<string>;
+  armed: boolean;
+}
+
 // Pre-compaction memory flush configuration
 const FLUSH_THRESHOLD_RATIO = 0.70;  // Trigger at 70% of context window
 const FLUSH_TURN_INTERVAL = 20;      // Fallback: every 20 turns if no token data
@@ -674,14 +764,7 @@ export class ChannelSession {
   // tokens shape verbatim so downstream consumers can compose cost-aware
   // views (cache reads vs writes are billed at different rates, reasoning
   // is billed as output, etc).
-  usageEntries = new Map<string, {
-    model: string;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheWriteTokens: number;
-    reasoningTokens: number;
-  }>();
+  usageEntries = new Map<string, UsageEntry>();
 
   // Pre-compaction memory flush state (session-lifetime — NOT reset per prompt)
   cumulativeInputTokens = 0;
@@ -892,6 +975,9 @@ export class PromptHandler {
   // Ephemeral session tracking — resolved when the session becomes idle via SSE
   private idleWaiters = new Map<string, () => void>();
   private ephemeralContent = new Map<string, string>(); // accumulated text from SSE
+  // Token accounting for those same ephemeral sessions, kept alongside (not
+  // merged into) ephemeralContent so text capture stays untouched.
+  private ephemeralUsage = new Map<string, EphemeralUsageState>();
 
   // (pendingReplyChannelType / pendingReplyChannelId removed at class level —
   //  the per-channel fields on ChannelSession are the source of truth. The
@@ -2241,6 +2327,10 @@ export class PromptHandler {
       // 3. Create ephemeral session and register for SSE content capture
       const ephemeralId = await this.createEphemeralSession();
       this.ephemeralContent.set(ephemeralId, "");
+      // Freshly created (not forked), so it carries no pre-existing messages.
+      // No owning turn either — reviews run outside the prompt lifecycle, so
+      // the usage attributes to the session rather than borrowing a stale turn.
+      this.beginEphemeralUsage(ephemeralId, "review", null, null, new Set());
       console.log(`[PromptHandler] Created ephemeral session ${ephemeralId} for review`);
 
       try {
@@ -2273,6 +2363,7 @@ export class PromptHandler {
         this.agentClient.sendReviewResult(requestId, parsed, diffFiles);
       } finally {
         // 8. Always clean up
+        this.flushEphemeralUsage(ephemeralId);
         this.ephemeralContent.delete(ephemeralId);
         this.idleWaiters.delete(ephemeralId);
         await this.deleteSession(ephemeralId).catch((err) =>
@@ -2581,9 +2672,88 @@ export class PromptHandler {
     await this.executeMemoryFlush(channel);
   }
 
+  /**
+   * Register an ephemeral session for token accounting.
+   *
+   * `excludedMessageIds` must contain every message that already exists on the
+   * session, so pre-existing history (a fork's cloned messages) is never
+   * counted as work this session performed.
+   */
+  private beginEphemeralUsage(
+    ephemeralSessionId: string,
+    kind: EphemeralUsageState["kind"],
+    originTurnId: string | null,
+    fallbackModel: string | null,
+    excludedMessageIds: Set<string>,
+  ): void {
+    this.ephemeralUsage.set(ephemeralSessionId, {
+      kind,
+      originTurnId,
+      fallbackModel,
+      entries: new Map(),
+      excludedMessageIds,
+      armed: true,
+    });
+  }
+
+  /**
+   * Report an ephemeral session's usage and drop its state.
+   *
+   * Called from a `finally` so a timed-out flush still reports the tokens it
+   * already burned. Clearing the entries makes a second call a no-op rather
+   * than a double report.
+   */
+  private flushEphemeralUsage(ephemeralSessionId: string): void {
+    const state = this.ephemeralUsage.get(ephemeralSessionId);
+    this.ephemeralUsage.delete(ephemeralSessionId);
+    if (!state || state.entries.size === 0) return;
+
+    const entries = Array.from(state.entries.entries()).map(([ocMessageId, entry]) => ({
+      ocMessageId,
+      ...entry,
+    }));
+    const billableInput = entries.reduce(
+      (sum, e) => sum + e.inputTokens + e.cacheReadTokens + e.cacheWriteTokens, 0);
+    const billableOutput = entries.reduce((sum, e) => sum + e.outputTokens + e.reasoningTokens, 0);
+    console.log(
+      `[PromptHandler] Reporting ${state.kind} usage for ${ephemeralSessionId}: ` +
+      `${entries.length} message(s), ${billableInput} in / ${billableOutput} out`
+    );
+    this.agentClient.sendUsageReport(state.originTurnId ?? undefined, entries, {
+      kind: state.kind,
+      ephemeralSessionId,
+    });
+  }
+
+  /** Message IDs currently on a session — the fork clones we must not bill. */
+  private async listSessionMessageIds(sessionId: string): Promise<Set<string>> {
+    try {
+      const res = await fetch(`${this.opencodeUrl}/session/${sessionId}/message`);
+      if (!res.ok) {
+        console.warn(`[PromptHandler] Could not list messages for ${sessionId}: ${res.status}`);
+        return new Set();
+      }
+      const data = await res.json() as Array<{ info?: { id?: unknown }; id?: unknown }>;
+      const ids = new Set<string>();
+      for (const m of Array.isArray(data) ? data : []) {
+        const id = m?.info?.id ?? m?.id;
+        if (typeof id === "string") ids.add(id);
+      }
+      return ids;
+    } catch (err) {
+      console.warn(`[PromptHandler] Could not list messages for ${sessionId}:`, err);
+      return new Set();
+    }
+  }
+
   private async executeMemoryFlush(channel: ChannelSession): Promise<void> {
     const sessionId = channel.opencodeSessionId;
     if (!sessionId) return;
+
+    // Snapshot BEFORE the first await: this runs fire-and-forget from turn
+    // finalize, and cleanupAfterFinalize nulls channel.turnId moments later.
+    const originTurnId = channel.turnId;
+    const fallbackModel = channel.lastUsedModel ?? null;
 
     channel.memoryFlushInProgress = true;
 
@@ -2604,6 +2774,16 @@ export class PromptHandler {
 
       // 2. Register for ephemeral capture (reuses existing pattern from reviews)
       this.ephemeralContent.set(forkedSessionId, "");
+      // The fork cloned the whole conversation, emitting a message.updated per
+      // cloned message with its ORIGINAL token counts. Exclude those ids so the
+      // parent's history is not re-billed as flush cost.
+      this.beginEphemeralUsage(
+        forkedSessionId,
+        "memory_flush",
+        originTurnId,
+        fallbackModel,
+        await this.listSessionMessageIds(forkedSessionId),
+      );
       const idlePromise = this.pollUntilIdle(forkedSessionId, FLUSH_TIMEOUT_MS);
 
       // 3. Send flush prompt to the FORKED session
@@ -2619,6 +2799,7 @@ export class PromptHandler {
     } finally {
       // 5. Clean up: delete the forked session
       if (forkedSessionId) {
+        this.flushEphemeralUsage(forkedSessionId);
         this.ephemeralContent.delete(forkedSessionId);
         this.idleWaiters.delete(forkedSessionId);
         this.deleteSession(forkedSessionId).catch(() => {});
@@ -3519,6 +3700,17 @@ export class PromptHandler {
           if (snapshot) {
             this.ephemeralContent.set(eventSessionId, snapshot);
           }
+          // Ephemeral sessions bill the provider like any other call; record
+          // their usage so it is not silently missing from cost reporting.
+          const usageState = this.ephemeralUsage.get(eventSessionId);
+          if (usageState?.armed) {
+            const usage = extractUsageEntry(info, usageState.fallbackModel);
+            if (usage && !usageState.excludedMessageIds.has(usage.ocMessageId)) {
+              // Last write wins: token totals are filled in progressively as
+              // the message completes, and the flush happens once at the end.
+              usageState.entries.set(usage.ocMessageId, usage.entry);
+            }
+          }
         }
       }
 
@@ -4068,47 +4260,12 @@ export class PromptHandler {
     // Accumulate token counts for pre-compaction detection (dedup by message ID)
     if (role === "assistant" && ocMessageId) {
       if (!channel.countedTokenMessageIds.has(ocMessageId)) {
-        const tokenObj = info.tokens as Record<string, unknown> | undefined;
-        if (tokenObj) {
-          // OpenCode reports tokens as five raw buckets:
-          //   { input, output, reasoning, cache: { read, write } }
-          // We persist each verbatim so downstream cost analyses can apply
-          // the right per-bucket pricing (Anthropic cache reads are cheap,
-          // cache writes expensive, reasoning is billed as output).
-          //
-          // Compaction thresholds gate on what the model actually processed,
-          // so cumulative*Tokens sum the billable totals:
-          //   billable input  = input + cache.read + cache.write
-          //   billable output = output + reasoning
-          const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-          const baseInput = num(tokenObj.input);
-          const cache = isRecord(tokenObj.cache) ? tokenObj.cache : {};
-          const cacheRead = num(cache.read);
-          const cacheWrite = num(cache.write);
-          const baseOutput = num(tokenObj.output);
-          const reasoning = num(tokenObj.reasoning);
-          const billableInput = baseInput + cacheRead + cacheWrite;
-          const billableOutput = baseOutput + reasoning;
-          if (billableInput > 0 || billableOutput > 0) {
-            channel.countedTokenMessageIds.add(ocMessageId);
-            channel.cumulativeInputTokens += billableInput;
-            channel.cumulativeOutputTokens += billableOutput;
-
-            // Track per-message usage for cost reporting
-            const modelId = info.modelID as string | undefined;
-            const providerId = info.providerID as string | undefined;
-            const usageModel = modelId && providerId
-              ? `${providerId}/${modelId}`
-              : channel.lastUsedModel ?? "unknown";
-            channel.usageEntries.set(ocMessageId, {
-              model: usageModel,
-              inputTokens: baseInput,
-              outputTokens: baseOutput,
-              cacheReadTokens: cacheRead,
-              cacheWriteTokens: cacheWrite,
-              reasoningTokens: reasoning,
-            });
-          }
+        const usage = extractUsageEntry(info, channel.lastUsedModel ?? null);
+        if (usage) {
+          channel.countedTokenMessageIds.add(ocMessageId);
+          channel.cumulativeInputTokens += usage.billableInput;
+          channel.cumulativeOutputTokens += usage.billableOutput;
+          channel.usageEntries.set(ocMessageId, usage.entry);
         }
       }
     }

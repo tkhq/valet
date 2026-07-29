@@ -47,6 +47,10 @@ function formatOrigin(purpose: string): { name: string; hint: string } {
       return { name: 'Automated', hint: 'workflows · scheduled triggers' };
     case 'orchestrator':
       return { name: 'Orchestrator', hint: 'assistant' };
+    case 'memory_flush':
+      return { name: 'Memory flush', hint: 'pre-compaction checkpoints' };
+    case 'review':
+      return { name: 'Auto review', hint: 'automatic diff reviews' };
     default:
       return { name: purpose.charAt(0).toUpperCase() + purpose.slice(1), hint: '' };
   }

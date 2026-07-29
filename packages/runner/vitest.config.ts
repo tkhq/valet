@@ -8,6 +8,7 @@ export default defineConfig({
       "src/opencode-config-writer.test.ts",
       "src/opencode-manager.test.ts",
       "src/prompt.test.ts",
+      "src/ephemeral-usage.test.ts",
     ],
     testTimeout: 10_000,
   },

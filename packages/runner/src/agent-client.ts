@@ -388,7 +388,9 @@ export class AgentClient {
   }
 
   sendUsageReport(
-    turnId: string,
+    // Absent for usage that has no owning turn (ephemeral sessions), in which
+    // case the DO attributes it to the session alone.
+    turnId: string | undefined,
     // Raw OpenCode token breakdown per message. The DO persists each bucket
     // verbatim into analytics_events; consumers compose billable totals.
     entries: Array<{
@@ -400,9 +402,17 @@ export class AgentClient {
       cacheWriteTokens: number;
       reasoningTokens: number;
     }>,
+    // Set when the usage came from an ephemeral session rather than the
+    // session's own conversation, so it can be reported as its own origin.
+    meta?: { kind: "memory_flush" | "review"; ephemeralSessionId: string },
   ): void {
     if (entries.length === 0) return;
-    this.send({ type: "usage-report", turnId, entries });
+    this.send({
+      type: "usage-report",
+      ...(turnId ? { turnId } : {}),
+      entries,
+      ...(meta ?? {}),
+    });
   }
 
   sendAnalyticsEvents(events: Array<{ eventType: string; durationMs?: number; properties?: Record<string, unknown> }>): void {
