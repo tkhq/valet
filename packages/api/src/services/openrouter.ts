@@ -75,3 +75,75 @@ export function curatedOpenrouterModels(): LlmProviderModel[] {
   }
   return out;
 }
+
+/**
+ * OpenRouter's live model catalog endpoint (public — no key required).
+ * Env-overridable so tests can point it at a local fixture server instead
+ * of the real network.
+ */
+export function openrouterModelsUrl(): string {
+  return process.env.VALET_OPENROUTER_MODELS_URL ?? "https://openrouter.ai/api/v1/models";
+}
+
+/**
+ * Parse OpenRouter's live `GET /api/v1/models` payload into row-ready
+ * entries. Live pricing is per-TOKEN decimal strings ("0.000003"); the
+ * catalog convention (matching pi-ai `Model.cost`) is per-MILLION tokens,
+ * so values are scaled by 1e6. Malformed entries are skipped, never
+ * guessed at. Pure — unit-tested against a fixture payload.
+ */
+export function parseOpenrouterLiveModels(payload: unknown): LlmProviderModel[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const data = (payload as { data?: unknown }).data;
+  if (!Array.isArray(data)) return [];
+  const out: LlmProviderModel[] = [];
+  for (const raw of data) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const m = raw as Record<string, unknown>;
+    if (typeof m.id !== "string" || m.id.length === 0) continue;
+    const name = typeof m.name === "string" && m.name.length > 0 ? m.name : m.id;
+    const contextWindow = typeof m.context_length === "number" ? m.context_length : undefined;
+    let pricing: LlmProviderModel["pricing"];
+    const p = m.pricing;
+    if (typeof p === "object" && p !== null) {
+      const input = Number((p as Record<string, unknown>).prompt);
+      const output = Number((p as Record<string, unknown>).completion);
+      if (Number.isFinite(input) && Number.isFinite(output)) {
+        pricing = { input: input * 1e6, output: output * 1e6 };
+      }
+    }
+    out.push({ id: m.id, name, contextWindow, pricing });
+  }
+  return out;
+}
+
+/**
+ * The full pickable OpenRouter catalog: the LIVE catalog (fresh models the
+ * pi-ai registry snapshot doesn't know yet — the reason this exists)
+ * merged with the registry (fallback metadata + offline resilience). Live
+ * entries win on id collisions. A live-fetch failure degrades to
+ * registry-only rather than erroring — the picker must keep working
+ * offline. Returns whether the live catalog contributed.
+ */
+export async function mergedOpenrouterModels(): Promise<{ models: LlmProviderModel[]; live: boolean }> {
+  const byId = new Map<string, LlmProviderModel>();
+  for (const m of openrouterRegistry().values()) byId.set(m.id, toProviderModel(m));
+
+  let live = false;
+  try {
+    const res = await fetch(openrouterModelsUrl(), { signal: AbortSignal.timeout(10_000) });
+    if (res.ok) {
+      const parsed = parseOpenrouterLiveModels(await res.json());
+      if (parsed.length > 0) {
+        live = true;
+        for (const m of parsed) byId.set(m.id, m);
+      }
+    }
+  } catch {
+    // Network/timeout — registry-only result is still useful.
+  }
+
+  const models = Array.from(byId.values());
+  models.sort((a, b) => a.id.localeCompare(b.id));
+  return { models, live };
+}

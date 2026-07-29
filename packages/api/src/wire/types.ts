@@ -1090,12 +1090,15 @@ export interface PutLlmProviderPreferencesRequest {
 
 export type PutLlmProviderPreferencesResponse = GetLlmProviderPreferencesResponse;
 
-// `GET /openrouter/models` — the full pi-ai openrouter registry (id, name,
-// contextWindow, pricing), sorted by id. Powers the settings picker that
-// edits an openrouter row's curated `models` selection. Registry-only — no
-// upstream network call, so it never fails on OpenRouter availability.
+// `GET /openrouter/models` — OpenRouter's LIVE catalog merged with the
+// built-in pi-ai registry (live wins on collisions), sorted by id. Powers
+// the settings picker that edits an openrouter row's curated `models`
+// selection; the live fetch is what makes brand-new models pickable before
+// any registry bump. `live: false` = the upstream fetch failed and the
+// response is registry-only (stale but usable).
 export interface OpenrouterRegistryResponse {
   models: LlmProviderModelWire[];
+  live: boolean;
 }
 
 // `POST .../probe` — custom-provider discovery: GETs `{baseUrl}/models`

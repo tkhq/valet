@@ -107,6 +107,32 @@ function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonica
   return { ...model, id: canonicalId };
 }
 
+/**
+ * Synthesize a `Model<"openai-completions">` for an openrouter-row
+ * selection the pi-ai registry doesn't know (picked from OpenRouter's live
+ * catalog). Wire id = the OpenRouter model id verbatim; metadata comes
+ * from the stored row entry. Null when the id isn't in the row's selection
+ * either — an arbitrary un-selected non-registry id stays unresolvable.
+ */
+function synthesizeOpenrouterModel(row: LlmProviderRow, modelId: string): Model<"openai-completions"> | null {
+  const entry = row.models.find((m) => m.id === modelId);
+  if (!entry) return null;
+  return {
+    id: entry.id,
+    name: entry.name,
+    api: "openai-completions",
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: entry.pricing
+      ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
+      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: entry.contextWindow ?? 128_000,
+    maxTokens: 8192,
+  };
+}
+
 /** Synthesize a `Model<"openai-completions">` for a custom provider's model
  * entry. `id` is the WIRE id (`entry.id`, what the upstream endpoint's
  * `model` parameter expects); round-tripping is carried by
@@ -158,7 +184,14 @@ export async function resolveModelSpec(
     if (isKnownProviderKind(row.kind)) {
       // Guaranteed by isKnownProviderKind; narrow for the registry lookup.
       const kind = row.kind as KnownKind;
-      const model = registryModel(kind, modelId);
+      // OpenRouter selections can name models newer than pi-ai's registry
+      // snapshot (added from OpenRouter's live catalog in settings) —
+      // synthesize those from the row's stored entry, same trust model as
+      // custom providers' declared lists. Registry metadata wins when the
+      // model IS known.
+      const model =
+        registryModel(kind, modelId) ??
+        (kind === "openrouter" ? synthesizeOpenrouterModel(row, modelId) : null);
       if (!model) return null;
       const apiKey = (await orgKey(credentials, orgId, row.id)) ?? getEnvApiKey(kind);
       if (apiKey === undefined) {

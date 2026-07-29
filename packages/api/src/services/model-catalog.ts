@@ -151,9 +151,11 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
 
   // OpenRouter — registry-backed like the known kinds above, but exposure
   // is the row's curated selection (or the curated defaults on zero-config
-  // env-key boots), never the full ~274-model registry. Selection entries
-  // are re-resolved against the registry so pricing/context stay current;
-  // ids that fell out of the registry are skipped.
+  // env-key boots), never the full registry. Selection entries re-resolve
+  // against the registry when present (pricing/context stay current);
+  // entries the registry doesn't know (added from OpenRouter's LIVE
+  // catalog via the picker) surface with their stored row metadata — same
+  // trust model as custom providers' declared lists.
   {
     const row = rows.find((r) => r.kind === "openrouter");
     const registry = openrouterRegistry();
@@ -178,13 +180,12 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
     }
     for (const sel of selection ?? []) {
       const reg = registry.get(sel.id);
-      if (!reg) continue;
-      const m = toProviderModel(reg);
+      const m = reg ? toProviderModel(reg) : sel;
       entries.push({
         id: `${namespace}/${m.id}`,
         name: m.name,
         contextWindow: m.contextWindow,
-        reasoning: reg.reasoning,
+        reasoning: reg?.reasoning,
         providerId,
         providerKind: "openrouter",
         providerName,

@@ -40,7 +40,7 @@ import {
   type UpdateLlmProviderOptions,
 } from "../services/llm-providers.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
-import { curatedOpenrouterModels, openrouterRegistry, toProviderModel } from "../services/openrouter.js";
+import { curatedOpenrouterModels, mergedOpenrouterModels } from "../services/openrouter.js";
 import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type {
   CreateLlmProviderRequest,
@@ -186,19 +186,21 @@ llmProvidersRouter.put("/preferences", async (c) => {
   return c.json(resp);
 });
 
-// ── GET /openrouter/models — full pi-ai openrouter registry ──────────────
+// ── GET /openrouter/models — live OpenRouter catalog ∪ pi-ai registry ────
 //
 // Powers the settings model-selection picker for openrouter rows. Like
 // `/preferences`, registered before `/:id` so "openrouter" is never
-// captured as a provider id. Registry-only — no OpenRouter network call.
+// captured as a provider id. Attempts OpenRouter's live `/api/v1/models`
+// (so brand-new models are pickable before any pi-ai registry bump) and
+// merges with the built-in registry; degrades to registry-only offline
+// (`live: false`).
 
 llmProvidersRouter.get("/openrouter/models", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const models = Array.from(openrouterRegistry().values()).map(toProviderModel);
-  models.sort((a, b) => a.id.localeCompare(b.id));
-  const resp: OpenrouterRegistryResponse = { models };
+  const { models, live } = await mergedOpenrouterModels();
+  const resp: OpenrouterRegistryResponse = { models, live };
   return c.json(resp);
 });
 

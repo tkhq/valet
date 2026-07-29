@@ -195,14 +195,19 @@ describe("model catalog", () => {
       expect(entry?.pricing).toBeDefined();
     });
 
-    it("selection ids that fell out of the registry are skipped; disabled rows are inactive", async () => {
+    it("non-registry selections (live-catalog picks) surface with stored row metadata; disabled rows are inactive", async () => {
       const row = await createLlmProvider(db, {
         orgId,
         kind: "openrouter",
         name: "OpenRouter",
         models: [
           { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" },
-          { id: "vendor/model-that-never-existed", name: "Ghost" },
+          {
+            id: "moonshotai/kimi-k3",
+            name: "MoonshotAI: Kimi K3",
+            contextWindow: 1_048_576,
+            pricing: { input: 3, output: 15 },
+          },
         ],
       });
       await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
@@ -213,8 +218,15 @@ describe("model catalog", () => {
 
       const entries = await buildOrgCatalog(db, credentials, orgId);
       const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
-      expect(openrouterEntries.map((e) => e.id)).toEqual(["openrouter/moonshotai/kimi-k2.6"]);
-      expect(openrouterEntries[0]?.active).toBe(false);
+      expect(openrouterEntries.map((e) => e.id).sort()).toEqual([
+        "openrouter/moonshotai/kimi-k2.6",
+        "openrouter/moonshotai/kimi-k3",
+      ]);
+      const k3 = openrouterEntries.find((e) => e.id === "openrouter/moonshotai/kimi-k3");
+      expect(k3?.name).toBe("MoonshotAI: Kimi K3");
+      expect(k3?.contextWindow).toBe(1_048_576);
+      expect(k3?.pricing).toEqual({ input: 3, output: 15 });
+      for (const e of openrouterEntries) expect(e.active).toBe(false);
     });
   });
 

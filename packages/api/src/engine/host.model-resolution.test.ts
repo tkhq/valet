@@ -323,6 +323,36 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(r?.model.provider).toBe("openrouter");
       expect(r?.apiKey).toBe("env-openrouter");
     });
+
+    it("openrouter — a NON-REGISTRY row selection (live-catalog pick) synthesizes and round-trips", async () => {
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [
+          {
+            id: "moonshotai/kimi-k3",
+            name: "MoonshotAI: Kimi K3",
+            contextWindow: 1_048_576,
+            pricing: { input: 3, output: 15 },
+          },
+        ],
+      });
+      await saveKey(row.id, "org-openrouter");
+      const spec = "openrouter/moonshotai/kimi-k3";
+      const r1 = await resolveModelSpec(db, credentials, orgId, spec);
+      expect(r1?.model.id).toBe("moonshotai/kimi-k3"); // wire id
+      expect(r1?.canonicalId).toBe(spec);
+      expect(r1?.model.api).toBe("openai-completions");
+      expect(r1?.model.baseUrl).toBe("https://openrouter.ai/api/v1");
+      expect(r1?.model.contextWindow).toBe(1_048_576);
+      const r2 = await resolveModelSpec(db, credentials, orgId, r1!.canonicalId!);
+      expect(r2?.model.id).toBe(r1?.model.id);
+      expect(r2?.apiKey).toBe(r1?.apiKey);
+
+      // Un-selected non-registry ids stay unresolvable ("unknown model id").
+      expect(await resolveModelSpec(db, credentials, orgId, "openrouter/vendor/never-heard-of-it")).toBeNull();
+    });
   });
 
   describe("no-db degradation", () => {

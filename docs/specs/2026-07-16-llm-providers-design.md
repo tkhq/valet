@@ -81,10 +81,17 @@ pi-ai's env-key map). Deviations from the other known kinds:
   (`openrouter/deepseek/deepseek-v4-pro`); `parseModelId`'s first-slash split
   keeps the canonical-id round-trip intact (pinned by test).
 - **Admin picker route.** `GET /api/org/llm-providers/openrouter/models`
-  returns the full registry (admin-gated, registered before `/:id` like
-  `/preferences`; server-side only — no upstream call). The settings card
-  hosts a selection editor (chips + filterable add-panel) on top of the
-  standard known-kind key/toggle chrome.
+  (admin-gated, registered before `/:id` like `/preferences`) returns
+  OpenRouter's LIVE `/api/v1/models` catalog merged over the pi-ai registry
+  (live wins on collisions; degrades to registry-only with `live: false`
+  when unreachable; `VALET_OPENROUTER_MODELS_URL` overrides the upstream
+  URL for tests). This makes brand-new models pickable before any pi-ai
+  bump. Non-registry selections are stored with their live metadata on the
+  row, surface in the catalog from that stored entry, and RESOLVE via
+  synthesis (openai-completions + openrouter baseUrl — same trust model as
+  custom providers); un-selected non-registry ids stay unresolvable. The
+  settings card hosts a selection editor (chips + filterable add-panel) on
+  top of the standard known-kind key/toggle chrome.
 - `models` is accepted on create/PATCH for `openrouter` rows in addition to
   `openai_compatible`; everything else (singleton rule, baseUrl refusal, key
   storage, env-fallback indicator, org-key-over-env precedence) is inherited

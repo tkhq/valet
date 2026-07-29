@@ -9,6 +9,7 @@ import {
   OPENROUTER_DEFAULT_MODEL_IDS,
   curatedOpenrouterModels,
   openrouterRegistry,
+  parseOpenrouterLiveModels,
   toProviderModel,
 } from "./openrouter.js";
 
@@ -31,6 +32,41 @@ describe("openrouter curated defaults", () => {
   it("the user-requested picks are present", () => {
     expect(OPENROUTER_DEFAULT_MODEL_IDS).toContain("deepseek/deepseek-v4-pro");
     expect(OPENROUTER_DEFAULT_MODEL_IDS).toContain("moonshotai/kimi-k2.6");
+  });
+
+  it("parseOpenrouterLiveModels maps the live payload, scales per-token pricing to per-million, skips malformed", () => {
+    const parsed = parseOpenrouterLiveModels({
+      data: [
+        {
+          id: "moonshotai/kimi-k3",
+          name: "MoonshotAI: Kimi K3",
+          context_length: 1_048_576,
+          pricing: { prompt: "0.000003", completion: "0.000015" },
+        },
+        { id: "vendor/no-frills" }, // minimal entry — name falls back to id
+        { name: "no id — skipped" },
+        "not-an-object",
+      ],
+    });
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toEqual({
+      id: "moonshotai/kimi-k3",
+      name: "MoonshotAI: Kimi K3",
+      contextWindow: 1_048_576,
+      pricing: { input: 3, output: 15 },
+    });
+    expect(parsed[1]).toEqual({
+      id: "vendor/no-frills",
+      name: "vendor/no-frills",
+      contextWindow: undefined,
+      pricing: undefined,
+    });
+  });
+
+  it("parseOpenrouterLiveModels returns [] on garbage payloads", () => {
+    expect(parseOpenrouterLiveModels(null)).toEqual([]);
+    expect(parseOpenrouterLiveModels("nope")).toEqual([]);
+    expect(parseOpenrouterLiveModels({ data: "nope" })).toEqual([]);
   });
 
   it("toProviderModel carries pricing and context window", () => {

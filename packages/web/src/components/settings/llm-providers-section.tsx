@@ -180,7 +180,27 @@ function KnownProviderCard({
           </Button>
         )}
       </div>
-      {kind === "openrouter" && row && <OpenrouterModelsEditor provider={row} />}
+      {kind === "openrouter" &&
+        (row ? (
+          <OpenrouterModelsEditor provider={row} />
+        ) : (
+          // Zero-config (env key, no row): the selection editor needs a row
+          // to persist to. Materialize one — the server seeds it with the
+          // curated defaults, so nothing changes until the admin edits.
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={createProvider.isPending}
+            onClick={() =>
+              void ensureRowId().catch((err) =>
+                setError(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          >
+            {createProvider.isPending ? "Preparing…" : "Customize models"}
+          </Button>
+        ))}
 
       {error && <p className="text-xs text-danger-500">{error}</p>}
     </div>
@@ -259,8 +279,13 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
             aria-label="Filter OpenRouter models"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter 270+ models — e.g. deepseek, kimi, grok…"
+            placeholder="Search all OpenRouter models — e.g. kimi-k3, deepseek, grok…"
           />
+          {registryQ.data && !registryQ.data.live && (
+            <p className="text-xs text-muted">
+              Couldn't reach OpenRouter — showing the built-in list (may lag behind new releases).
+            </p>
+          )}
           {registryQ.isLoading && (
             <div className="flex items-center gap-2 py-2 text-sm text-muted">
               <Spinner size={14} /> Loading registry…
