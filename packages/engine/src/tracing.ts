@@ -15,6 +15,7 @@
  * it (the request span has long since ended).
  */
 import {
+  ROOT_CONTEXT,
   SpanStatusCode,
   context,
   trace,
@@ -87,6 +88,16 @@ export function linkFromTraceparent(traceparent: unknown): Link | undefined {
   return {
     context: { traceId: m[1], spanId: m[2], traceFlags: parseInt(m[3], 16), isRemote: true },
   };
+}
+
+/**
+ * Run `fn` with NO active span context. For periodic/timer work (heartbeat,
+ * sweep): a `setInterval` armed inside a request or turn context inherits
+ * that context in every tick forever — without this, sweep-driven store
+ * spans keep attaching to a long-dead request trace.
+ */
+export function detachedFromTrace<T>(fn: () => T): T {
+  return context.with(ROOT_CONTEXT, fn);
 }
 
 /** Truncate a command/label for span attributes — keep traces lean. */

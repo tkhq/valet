@@ -3,7 +3,7 @@ import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
-import { withSpan } from "./tracing.js";
+import { detachedFromTrace, withSpan } from "./tracing.js";
 import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
@@ -183,12 +183,18 @@ export class Session {
         // A transient store error inside the tick must not become an
         // unhandled rejection that kills the process — log and let the next
         // interval retry. Same idiom as the emit-append failure path.
-        this.heartbeatOnce().catch((err) => {
-          console.error(
-            `[engine] heartbeat failed (session=${this.id}):`,
-            err instanceof Error ? err.message : String(err),
-          );
-        });
+        // detachedFromTrace: interval callbacks inherit whatever trace
+        // context was active when ensureTimers armed them (a request or
+        // turn) — every tick would otherwise attach spans to that long-dead
+        // trace forever.
+        detachedFromTrace(() =>
+          this.heartbeatOnce().catch((err) => {
+            console.error(
+              `[engine] heartbeat failed (session=${this.id}):`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
+        );
       }, 10_000);
       this.heartbeatTimer.unref?.();
     }
@@ -196,13 +202,16 @@ export class Session {
       this.sweepTimer = setInterval(() => {
         // sweepOnce grew store reads + fenced gate writes (sweepExpiredGates);
         // a SQLITE_BUSY on a 5s tick must not crash the process. Swallow +
-        // log so the next sweep still runs.
-        this.sweepOnce().catch((err) => {
-          console.error(
-            `[engine] sweep failed (session=${this.id}):`,
-            err instanceof Error ? err.message : String(err),
-          );
-        });
+        // log so the next sweep still runs. detachedFromTrace: same
+        // stale-context reasoning as the heartbeat above.
+        detachedFromTrace(() =>
+          this.sweepOnce().catch((err) => {
+            console.error(
+              `[engine] sweep failed (session=${this.id}):`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
+        );
       }, 5_000);
       this.sweepTimer.unref?.();
     }

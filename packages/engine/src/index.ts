@@ -53,6 +53,7 @@ export {
   activeTraceparent,
   attrTruncate,
   engineTracer,
+  detachedFromTrace,
   linkFromTraceparent,
   markSpanError,
   withSpan,
