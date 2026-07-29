@@ -10,8 +10,10 @@ import {
   ORG_ROLES,
   ROLE_PERMISSIONS,
   isOrgRole,
+  isPermission,
   permissionsForOrgRole,
   can,
+  effectiveApiKeyPermissions,
 } from "./permissions.js";
 
 describe("role bundles", () => {
@@ -46,5 +48,43 @@ describe("can", () => {
     expect(can(operator, "providers:manage")).toBe(true);
     expect(can(operator, "members:manage")).toBe(false);
     expect(can({ permissions: permissionsForOrgRole("member") }, "credentials:org")).toBe(false);
+  });
+});
+
+describe("isPermission", () => {
+  it("accepts every permission in the vocabulary", () => {
+    for (const p of PERMISSIONS) expect(isPermission(p)).toBe(true);
+  });
+  it("rejects unknown / non-string values", () => {
+    expect(isPermission("nope:manage")).toBe(false);
+    expect(isPermission(undefined)).toBe(false);
+    expect(isPermission(42)).toBe(false);
+  });
+});
+
+describe("effectiveApiKeyPermissions", () => {
+  const admin = permissionsForOrgRole("admin");
+  const operator = permissionsForOrgRole("operator");
+
+  it("returns the full owner bundle for undefined / null / empty scopes (back-compat)", () => {
+    expect(effectiveApiKeyPermissions(admin, undefined)).toBe(admin);
+    expect(effectiveApiKeyPermissions(admin, null)).toBe(admin);
+    expect(effectiveApiKeyPermissions(admin, [])).toBe(admin);
+  });
+
+  it("intersects a non-empty scope list with the owner bundle", () => {
+    const scoped = effectiveApiKeyPermissions(admin, ["providers:manage", "credentials:org"]);
+    expect([...scoped].sort()).toEqual(["credentials:org", "providers:manage"]);
+  });
+
+  it("drops scopes the owner does not hold (owner is the ceiling)", () => {
+    // A key owned by an operator declares admin-level scopes; owner's bundle wins.
+    const scoped = effectiveApiKeyPermissions(operator, ["members:manage", "providers:manage"]);
+    expect([...scoped]).toEqual(["providers:manage"]);
+  });
+
+  it("ignores unknown scope strings (forward-compat with additive PERMISSIONS bumps)", () => {
+    const scoped = effectiveApiKeyPermissions(admin, ["providers:manage", "future:permission"]);
+    expect([...scoped]).toEqual(["providers:manage"]);
   });
 });

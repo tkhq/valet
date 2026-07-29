@@ -8,7 +8,13 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
-import { isOrgRole, permissionsForOrgRole, type OrgRole, type Permission } from "../auth/permissions.js";
+import {
+  effectiveApiKeyPermissions,
+  isOrgRole,
+  permissionsForOrgRole,
+  type OrgRole,
+  type Permission,
+} from "../auth/permissions.js";
 
 export interface AuthUser {
   id: string;
@@ -38,6 +44,19 @@ const SANDBOX_ALLOWED_PATH_PREFIXES = ["/api/memory", "/api/sandbox"];
  * outside `AuthUser["role"]`'s type. */
 function normalizeRole(role: string): "admin" | "member" {
   return role === "admin" ? "admin" : "member";
+}
+
+/** Reads an api-key row's optional `scopes` (a string[] under `metadata.scopes`)
+ * into a plain array the scope-intersection helper can consume. Any other
+ * shape (non-array, non-string entries) collapses to `null` — treated as
+ * "no scopes declared, use the owner's full bundle." Isolated here so the
+ * auth middleware doesn't do its own JSON walking. */
+export function extractApiKeyScopes(metadata: Record<string, unknown> | null | undefined): readonly string[] | null {
+  if (!metadata) return null;
+  const raw = metadata.scopes;
+  if (!Array.isArray(raw)) return null;
+  const scopes = raw.filter((v): v is string => typeof v === "string");
+  return scopes.length > 0 ? scopes : null;
 }
 
 /** Org role from org_members.role — "member" when no membership row exists
@@ -189,13 +208,20 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         }
         const orgId = await resolveOrgId(db);
         const orgRole = await resolveOrgRole(db, orgId, row.id);
+        // RBAC design's binding compatibility rule: a scoped API key gets
+        // the intersection of its owner's bundle and its declared scopes.
+        // No scopes column exists on the api-key row yet, so today the
+        // scopes list is always the optional `metadata.scopes` array —
+        // when creation UI arrives it'll populate this field. Unset =
+        // owner's full bundle (back-compat with every existing key).
+        const scopes = extractApiKeyScopes(result.key.metadata);
         c.set("user", {
           id: row.id,
           email: row.email,
           name: row.name ?? undefined,
           role: row.role,
           orgRole,
-          permissions: permissionsForOrgRole(orgRole),
+          permissions: effectiveApiKeyPermissions(permissionsForOrgRole(orgRole), scopes),
           orgId,
         } satisfies AuthUser);
         await next();

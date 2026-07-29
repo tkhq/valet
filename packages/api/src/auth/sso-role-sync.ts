@@ -41,17 +41,32 @@ function claimValues(v: unknown): string[] {
 }
 
 /**
+ * Discriminated result of `extractMappedRole`. `source` distinguishes the
+ * two failure modes that both fall back to "member" — `no-claim-values`
+ * (the IdP didn't emit anything at `roleClaim` in either `userInfo` or the
+ * ID-token) vs `no-map-match` (values were present but none matched the
+ * configured `AUTH_OIDC_ROLE_MAP`). Callers need this to log the difference,
+ * since a silent "member" fallback in either case can cascade into
+ * admin-by-admin demotion (see `syncSsoOrgRole`'s guard rationale).
+ */
+export type RoleResolution =
+  | { role: OrgRole; source: "matched"; matchedClaim: string; observedValues: readonly string[] }
+  | { role: "member"; source: "no-claim-values"; observedValues: readonly [] }
+  | { role: "member"; source: "no-map-match"; observedValues: readonly string[] };
+
+/**
  * Resolves the mapped `OrgRole` for a login: walks `roleClaim` in `userInfo`
  * first, falling back to `idTokenClaims` when `userInfo` lacks the path.
  * The first `roleMap` entry (in array order) whose `claimValue` appears
- * among the claim's values wins; no match (or no claim at all) → "member".
+ * among the claim's values wins; anything else → `{ role: "member", … }`
+ * with `source` naming which failure mode fired so the caller can log it.
  */
 export function extractMappedRole(params: {
   roleMap: { claimValue: string; role: OrgRole }[];
   roleClaim: string;
   userInfo: Record<string, unknown>;
   idTokenClaims?: Record<string, unknown>;
-}): OrgRole {
+}): RoleResolution {
   const { roleMap, roleClaim, userInfo, idTokenClaims } = params;
 
   let values = claimValues(walkDotPath(userInfo, roleClaim));
@@ -59,12 +74,16 @@ export function extractMappedRole(params: {
     values = claimValues(walkDotPath(idTokenClaims, roleClaim));
   }
 
+  if (values.length === 0) {
+    return { role: "member", source: "no-claim-values", observedValues: [] };
+  }
+
   for (const entry of roleMap) {
     if (values.includes(entry.claimValue)) {
-      return entry.role;
+      return { role: entry.role, source: "matched", matchedClaim: entry.claimValue, observedValues: values };
     }
   }
-  return "member";
+  return { role: "member", source: "no-map-match", observedValues: values };
 }
 
 /**
@@ -95,6 +114,13 @@ export function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
  * login, `provisioning.ts`'s `userCreateAfter` inserts the row earlier in
  * the same request, so this only ever "misses" if that hook hasn't run
  * (shouldn't happen in the wired flow). Never writes `users.role`.
+ *
+ * Logs every role change at `warn` (promotion) or `error` (demotion) —
+ * SSO-driven role churn is the class of event operators must be able to
+ * grep for after the fact. A silent demote-then-demote-then-demote cascade
+ * (an IdP group drift losing admins one login at a time until the
+ * last-admin guard catches the tail) is exactly the failure mode this
+ * logging exists to make visible.
  *
  * Guards against a sole-admin lockout: if the incoming claim would demote
  * the org's last remaining admin (e.g. a revoked IdP group or a typo'd
@@ -128,6 +154,24 @@ export async function syncSsoOrgRole(db: AppDb, userId: string, role: OrgRole): 
         .update(orgMembers)
         .set({ role })
         .where(and(eq(orgMembers.orgId, row.orgId), eq(orgMembers.userId, userId)));
+
+      // Log AFTER the write succeeds so a failed transaction doesn't leave
+      // a misleading "applied" line. Demotions are error-level (they lose
+      // capability and are the head of a possible admin-loss cascade);
+      // promotions are warn-level (still policy-relevant, but not
+      // security-degrading).
+      const level = isDemotion(row.role, role) ? "error" : "warn";
+      const logger = level === "error" ? console.error : console.warn;
+      logger(
+        `[sso-role-sync] applied IdP-driven role change for user ${userId} in org ${row.orgId}: ` +
+          `${row.role} → ${role}`,
+      );
     });
   }
+}
+
+/** admin > operator > member, for demotion detection. */
+function isDemotion(from: OrgRole, to: OrgRole): boolean {
+  const rank: Record<OrgRole, number> = { admin: 2, operator: 1, member: 0 };
+  return rank[to] < rank[from];
 }

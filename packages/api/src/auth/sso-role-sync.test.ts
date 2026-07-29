@@ -2,7 +2,7 @@
  * Tests for SSO role sync: claim extraction, JWT payload decode, and the
  * `org_members.role` sync itself.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -17,28 +17,49 @@ const roleMap = [
 describe("extractMappedRole", () => {
   it("maps from userInfo dot-path (Keycloak realm_access.roles)", () => {
     const userInfo = { realm_access: { roles: ["offline_access", "valet-operator"] } };
-    expect(extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo })).toBe("operator");
+    expect(extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo })).toEqual({
+      role: "operator",
+      source: "matched",
+      matchedClaim: "valet-operator",
+      observedValues: ["offline_access", "valet-operator"],
+    });
   });
 
   it("map order wins when multiple values match", () => {
     const userInfo = { realm_access: { roles: ["valet-operator", "valet-admin"] } };
-    expect(extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo })).toBe("admin");
+    const result = extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo });
+    expect(result.role).toBe("admin");
+    expect(result.source).toBe("matched");
   });
 
   it("falls back to idTokenClaims when userInfo lacks the path", () => {
     const idTokenClaims = { realm_access: { roles: ["valet-admin"] } };
-    expect(extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo: {}, idTokenClaims })).toBe("admin");
+    const result = extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo: {}, idTokenClaims });
+    expect(result.role).toBe("admin");
+    expect(result.source).toBe("matched");
   });
 
-  it("no match / absent claim → member", () => {
-    expect(extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo: {} })).toBe("member");
+  it("distinguishes absent claim (no-claim-values) from present-but-unmatched (no-map-match)", () => {
+    // Absent: userInfo has no realm_access at all.
+    expect(extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo: {} })).toEqual({
+      role: "member",
+      source: "no-claim-values",
+      observedValues: [],
+    });
+    // Present-but-unmatched: values exist, none map.
     expect(
       extractMappedRole({ roleMap, roleClaim: "realm_access.roles", userInfo: { realm_access: { roles: ["other"] } } }),
-    ).toBe("member");
+    ).toEqual({
+      role: "member",
+      source: "no-map-match",
+      observedValues: ["other"],
+    });
   });
 
   it("accepts a bare string claim value (non-array)", () => {
-    expect(extractMappedRole({ roleMap, roleClaim: "role", userInfo: { role: "valet-admin" } })).toBe("admin");
+    const result = extractMappedRole({ roleMap, roleClaim: "role", userInfo: { role: "valet-admin" } });
+    expect(result.role).toBe("admin");
+    expect(result.source).toBe("matched");
   });
 });
 
@@ -115,5 +136,48 @@ describe("syncSsoOrgRole", () => {
 
     const [other] = await db.select().from(orgMembers).where(eq(orgMembers.userId, "u6"));
     expect(other?.role).toBe("admin");
+  });
+
+  describe("logging (every applied change must be greppable)", () => {
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    it("promotion (member → operator) logs at warn level", async () => {
+      await seedOrgAndMember("u7", "member");
+      await syncSsoOrgRole(db, "u7", "operator");
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("member → operator"));
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it("demotion (admin → operator, with another admin present) logs at error level", async () => {
+      await seedOrgAndMember("u8", "admin");
+      await db.insert(users).values({ id: "u9", email: "u9@x.test", name: "u9", role: "member" });
+      await db.insert(orgMembers).values({ orgId: "org1", userId: "u9", role: "admin", createdAt: Date.now() });
+
+      await syncSsoOrgRole(db, "u8", "operator");
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("admin → operator"));
+    });
+
+    it("idempotent same-role sync logs nothing", async () => {
+      await seedOrgAndMember("u10", "operator");
+      await syncSsoOrgRole(db, "u10", "operator");
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it("guarded sole-admin demotion logs the refusal (existing behavior preserved)", async () => {
+      await seedOrgAndMember("u11", "admin");
+      await syncSsoOrgRole(db, "u11", "member");
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("refused to demote"));
+    });
   });
 });

@@ -45,3 +45,37 @@ export function permissionsForOrgRole(role: OrgRole): ReadonlySet<Permission> {
 export function can(principal: { permissions: ReadonlySet<Permission> }, permission: Permission): boolean {
   return principal.permissions.has(permission);
 }
+
+const PERMISSION_SET: ReadonlySet<Permission> = new Set(PERMISSIONS);
+
+export function isPermission(v: unknown): v is Permission {
+  return typeof v === "string" && PERMISSION_SET.has(v as Permission);
+}
+
+/**
+ * Effective permissions for a principal that carries an owner bundle
+ * (derived from `org_members.role`) plus an optional scope list. Encodes
+ * the API-key scope-intersection rule that the RBAC design's binding
+ * compatibility note promises — the seam that lets scoped API keys arrive
+ * later without a per-route test retrofit:
+ *
+ *   - `scopes == null` or `scopes.length === 0` → the owner's full bundle
+ *     (back-compat: today's unscoped keys keep every permission their
+ *     owner holds, and no existing test needs to change).
+ *   - Non-empty `scopes` → owner bundle ∩ declared scopes. Unknown strings
+ *     are ignored (not an error) — additive PERMISSIONS bumps stay
+ *     forward-compatible with older key rows.
+ *
+ * Sandbox tokens and other future scoped principals reuse this rule.
+ */
+export function effectiveApiKeyPermissions(
+  ownerBundle: ReadonlySet<Permission>,
+  scopes: readonly string[] | null | undefined,
+): ReadonlySet<Permission> {
+  if (!scopes || scopes.length === 0) return ownerBundle;
+  const intersected = new Set<Permission>();
+  for (const s of scopes) {
+    if (isPermission(s) && ownerBundle.has(s)) intersected.add(s);
+  }
+  return intersected;
+}
