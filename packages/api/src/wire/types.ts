@@ -1023,7 +1023,7 @@ export interface PatchIdentityLinkResponse {
 // namespaced `{providerKindOrRowId}/{modelId}` (see the design doc); this
 // file's `preferences` endpoints move that ordered list.
 
-export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openai_compatible";
+export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openrouter" | "openai_compatible";
 
 export interface LlmProviderModelWire {
   id: string;
@@ -1089,6 +1089,14 @@ export interface PutLlmProviderPreferencesRequest {
 }
 
 export type PutLlmProviderPreferencesResponse = GetLlmProviderPreferencesResponse;
+
+// `GET /openrouter/models` — the full pi-ai openrouter registry (id, name,
+// contextWindow, pricing), sorted by id. Powers the settings picker that
+// edits an openrouter row's curated `models` selection. Registry-only — no
+// upstream network call, so it never fails on OpenRouter availability.
+export interface OpenrouterRegistryResponse {
+  models: LlmProviderModelWire[];
+}
 
 // `POST .../probe` — custom-provider discovery: GETs `{baseUrl}/models`
 // upstream and echoes back the ids. 502 `{ error }` carries the verbatim

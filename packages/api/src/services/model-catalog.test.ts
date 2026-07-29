@@ -14,6 +14,7 @@ import { orgs } from "../schema/index.js";
 import { setOrgModelPreferences } from "./org.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
+import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 
 const orgId = "org1";
 
@@ -147,6 +148,73 @@ describe("model catalog", () => {
       expect(entry).toBeDefined();
       expect(entry?.active).toBe(false);
       expect(entry?.resolvable).toBe(false);
+    });
+  });
+
+  describe("openrouter (curated selection)", () => {
+    it("zero-config: OPENROUTER_API_KEY only → the curated default set, active, nothing more", async () => {
+      vi.stubEnv("OPENROUTER_API_KEY", "sk-or-env-stub");
+      try {
+        const entries = await buildOrgCatalog(db, credentials, orgId);
+        const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
+        expect(openrouterEntries.map((e) => e.id).sort()).toEqual(
+          OPENROUTER_DEFAULT_MODEL_IDS.map((id) => `openrouter/${id}`).sort(),
+        );
+        for (const e of openrouterEntries) {
+          expect(e.active).toBe(true);
+          expect(e.providerName).toBe("OpenRouter");
+        }
+        // Nested-slash ids must validate for defaultModel/preferences.
+        const validIds = catalogValidIds(entries);
+        expect(validIds.has("openrouter/deepseek/deepseek-v4-pro")).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("row with an edited selection → exactly that selection, registry-enriched", async () => {
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }],
+      });
+      await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
+        type: "api_key",
+        apiKey: "sk-or-secret",
+      });
+
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
+      expect(openrouterEntries).toHaveLength(1);
+      const entry = openrouterEntries[0];
+      expect(entry?.id).toBe("openrouter/moonshotai/kimi-k2.6");
+      expect(entry?.active).toBe(true);
+      // Pricing/context come from the registry, not the stored row entry.
+      expect(typeof entry?.contextWindow).toBe("number");
+      expect(entry?.pricing).toBeDefined();
+    });
+
+    it("selection ids that fell out of the registry are skipped; disabled rows are inactive", async () => {
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [
+          { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" },
+          { id: "vendor/model-that-never-existed", name: "Ghost" },
+        ],
+      });
+      await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
+        type: "api_key",
+        apiKey: "sk-or-secret",
+      });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
+      expect(openrouterEntries.map((e) => e.id)).toEqual(["openrouter/moonshotai/kimi-k2.6"]);
+      expect(openrouterEntries[0]?.active).toBe(false);
     });
   });
 

@@ -801,16 +801,19 @@ export const actionInvocations = pgTable("action_invocations", {
 
 // ─── LLM providers (org BYO keys + custom providers) ────────────────────────
 //
-// One row per org-configured LLM provider. The three known kinds
-// (`anthropic`/`openai`/`google`) are per-org singletons — enforced here via
-// a partial unique index (Drizzle's pg-core has no portable way to express
-// a `WHERE` clause on a `uniqueIndex()`, so it's declared in
-// `migrations/pg/0000_app.sql` directly) AND in `services/org.ts` /
-// the Task 3-5 provider service (the service-layer check is the one tests
-// pin — see task brief). `openai_compatible` rows are custom providers and
-// may have any number per org. `models` is only populated for
-// `openai_compatible` providers (known kinds resolve their model list from
-// the engine's built-in catalog) — read/written as JSON, jsonb per the
+// One row per org-configured LLM provider. The known kinds
+// (`anthropic`/`openai`/`google`/`openrouter`) are per-org singletons —
+// enforced here via a partial unique index (Drizzle's pg-core has no
+// portable way to express a `WHERE` clause on a `uniqueIndex()`, so it's
+// declared in `migrations/pg/0000_app.sql` directly) AND in
+// `services/org.ts` / the Task 3-5 provider service (the service-layer
+// check is the one tests pin — see task brief). `openai_compatible` rows
+// are custom providers and may have any number per org. `models` is
+// populated for `openai_compatible` providers (their full declared list)
+// and for `openrouter` rows (the admin's curated selection from pi-ai's
+// openrouter registry — seeded with `OPENROUTER_DEFAULT_MODEL_IDS` at
+// create); the other known kinds resolve their model list from the
+// engine's built-in catalog. Read/written as JSON, jsonb per the
 // `features`/`modelPreferences` convention above.
 
 export interface LlmProviderModel {
@@ -826,7 +829,7 @@ export const llmProviders = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     kind: text("kind", {
-      enum: ["anthropic", "openai", "google", "openai_compatible"],
+      enum: ["anthropic", "openai", "google", "openrouter", "openai_compatible"],
     }).notNull(),
     name: text("name").notNull(),
     baseUrl: text("base_url"),

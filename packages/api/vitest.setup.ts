@@ -15,7 +15,13 @@
  */
 import { beforeEach } from "vitest";
 
-const SCRUBBED_ENV_VARS = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY"] as const;
+const SCRUBBED_ENV_VARS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_OAUTH_TOKEN",
+  "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+  "OPENROUTER_API_KEY",
+] as const;
 
 beforeEach(() => {
   for (const key of SCRUBBED_ENV_VARS) delete process.env[key];

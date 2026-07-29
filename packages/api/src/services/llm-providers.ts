@@ -1,7 +1,7 @@
 /**
  * LLM providers service — org-scoped provider row CRUD + the known-kind
  * per-org singleton rule (llm-providers design doc decision 1). `anthropic`,
- * `openai`, and `google` rows are singletons per org (enforced by the
+ * `openai`, `google`, and `openrouter` rows are singletons per org (enforced by the
  * partial unique index `llm_providers_org_kind_singleton` AND a pre-check
  * here, same belt-and-suspenders pattern as `services/teams.ts`'s
  * `createTeam` — the pre-check makes the common case return a clean error
@@ -23,17 +23,19 @@ import { llmProviders, type LlmProviderModel, type LlmProviderRow } from "../sch
 
 export type LlmProviderKind = LlmProviderRow["kind"];
 
-const KNOWN_KINDS: readonly LlmProviderKind[] = ["anthropic", "openai", "google"];
+const KNOWN_KINDS: readonly LlmProviderKind[] = ["anthropic", "openai", "google", "openrouter"];
 
 export function isLlmProviderKind(v: unknown): v is LlmProviderKind {
-  return v === "anthropic" || v === "openai" || v === "google" || v === "openai_compatible";
+  return (
+    v === "anthropic" || v === "openai" || v === "google" || v === "openrouter" || v === "openai_compatible"
+  );
 }
 
 export function isKnownProviderKind(kind: LlmProviderKind): boolean {
   return (KNOWN_KINDS as LlmProviderKind[]).includes(kind);
 }
 
-/** Thrown when creating a second `anthropic|openai|google` row for the same org. */
+/** Thrown when creating a second `anthropic|openai|google|openrouter` row for the same org. */
 export class LlmProviderSingletonError extends Error {
   readonly code = "llm_provider_singleton";
   readonly statusCode = 409;

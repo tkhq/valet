@@ -14,10 +14,12 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProviders } from "../schema/index.js";
+import { OPENROUTER_DEFAULT_MODEL_IDS } from "../services/openrouter.js";
 import type {
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
+  OpenrouterRegistryResponse,
   ProbeLlmProviderResponse,
   PutLlmProviderKeyResponse,
   TestLlmProviderResponse,
@@ -204,6 +206,49 @@ describe("POST /api/org/llm-providers", () => {
       body: JSON.stringify({ kind: "anthropic", name: "Anthropic", models: [{ id: "m1", name: "Model 1" }] }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("creates an openrouter provider seeded with the curated default model selection", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openrouter", name: "OpenRouter" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateLlmProviderResponse;
+    expect(body.kind).toBe("openrouter");
+    expect(body.baseUrl).toBeUndefined();
+    expect(body.models.map((m) => m.id)).toEqual([...OPENROUTER_DEFAULT_MODEL_IDS]);
+    expect(body.models.map((m) => m.id)).toContain("deepseek/deepseek-v4-pro");
+  });
+
+  it("openrouter is a per-org singleton (second create 409s)", async () => {
+    api = await bootTestApi();
+    const mk = () =>
+      fetch(`${api!.baseUrl}/api/org/llm-providers`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ kind: "openrouter", name: "OpenRouter" }),
+      });
+    expect((await mk()).status).toBe(201);
+    expect((await mk()).status).toBe(409);
+  });
+
+  it("accepts an explicit models selection for openrouter at create", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateLlmProviderResponse;
+    expect(body.models).toEqual([{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }]);
   });
 
   it("allows multiple openai_compatible providers for the same org", async () => {
@@ -1031,5 +1076,50 @@ describe("POST /api/org/llm-providers/:id/test", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as TestLlmProviderResponse;
     expect(body.ok).toBe(false);
+  });
+});
+
+describe("GET /api/org/llm-providers/openrouter/models (registry)", () => {
+  it("403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/openrouter/models`, {
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("returns the full pi-ai openrouter registry, sorted, id/name/pricing per entry", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/openrouter/models`, {
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OpenrouterRegistryResponse;
+    // Far more than the curated default set — this is the full registry.
+    expect(body.models.length).toBeGreaterThan(100);
+    const ids = body.models.map((m) => m.id);
+    expect(ids).toEqual([...ids].sort((a, b) => a.localeCompare(b)));
+    expect(ids).toContain("deepseek/deepseek-v4-pro");
+    const entry = body.models.find((m) => m.id === "deepseek/deepseek-v4-pro");
+    expect(typeof entry?.name).toBe("string");
+    expect(typeof entry?.pricing?.input).toBe("number");
+  });
+
+  it("PATCH accepts a models selection on an openrouter row", async () => {
+    api = await bootTestApi();
+    const createRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openrouter", name: "OpenRouter" }),
+    });
+    const created = (await createRes.json()) as CreateLlmProviderResponse;
+    const patchRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ models: [{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }] }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as CreateLlmProviderResponse;
+    expect(patched.models).toEqual([{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }]);
   });
 });

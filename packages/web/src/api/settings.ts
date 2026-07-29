@@ -33,6 +33,7 @@ import type {
   ListTeamMembersResponse,
   ListTeamsResponse,
   MeResponse,
+  OpenrouterRegistryResponse,
   OrgMembersResponse,
   OrgResponse,
   PatchLlmProviderRequest,
@@ -67,6 +68,7 @@ export const qkSettings = {
   orgMembers: () => ["settings", "org", "members"] as const,
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
+  openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
   llmProviderPreferences: () => ["settings", "llmProviderPreferences"] as const,
   teams: () => ["settings", "teams"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
@@ -120,6 +122,18 @@ export function useLlmProviders(opts?: UseQueryOptions<ListLlmProvidersResponse>
     queryKey: qkSettings.llmProviders(),
     queryFn: () => api.listLlmProviders(),
     ...opts,
+  });
+}
+
+/** Full pi-ai openrouter registry (server-side, no upstream call) — powers
+ * the openrouter card's model-selection picker. Static per deploy, so an
+ * infinite staleTime; fetched only when the picker opens (`enabled`). */
+export function useOpenrouterRegistry(opts?: { enabled?: boolean }) {
+  return useQuery<OpenrouterRegistryResponse>({
+    queryKey: qkSettings.openrouterRegistry(),
+    queryFn: () => api.openrouterRegistry(),
+    staleTime: Infinity,
+    enabled: opts?.enabled ?? true,
   });
 }
 
