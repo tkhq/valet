@@ -76,6 +76,11 @@ vi.mock("~/api/settings", () => ({
     error: null,
   }),
   useModels: () => ({ data: modelsData, isLoading: false, error: null }),
+  useOpenrouterRegistry: () => ({
+    data: { models: [{ id: "moonshotai/kimi-k3", name: "MoonshotAI: Kimi K3" }], live: true },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
@@ -178,6 +183,32 @@ describe("LlmProvidersSection — known provider cards", () => {
     };
     renderWithTooltip(<LlmProvidersSection />);
     expect(screen.getByText("using deployment key")).toBeTruthy();
+  });
+
+  it("Escape dismisses the OpenRouter model picker", async () => {
+    const user = userEvent.setup();
+    providersData = {
+      providers: [
+        {
+          id: "row_or",
+          kind: "openrouter",
+          name: "OpenRouter",
+          enabled: true,
+          models: [{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }],
+          hasKey: true,
+          keyLast4: "abcd",
+          envFallback: false,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+
+    await user.click(screen.getByRole("button", { name: "Add models" }));
+    const filter = screen.getByRole("textbox", { name: "Filter OpenRouter models" });
+    await user.type(filter, "kimi");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Filter OpenRouter models" })).toBeNull();
   });
 
   it("toggling enabled fires PATCH", async () => {

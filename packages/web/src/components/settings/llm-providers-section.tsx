@@ -279,7 +279,16 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
             aria-label="Filter OpenRouter models"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              // Same dismiss affordance as the other typeaheads
+              // (AddModelTypeahead, ModelCombobox): Escape closes the panel.
+              if (e.key === "Escape") {
+                setFilter("");
+                setPickerOpen(false);
+              }
+            }}
             placeholder="Search all OpenRouter models — e.g. kimi-k3, deepseek, grok…"
+            autoFocus
           />
           {registryQ.data && !registryQ.data.live && (
             <p className="text-xs text-muted">
