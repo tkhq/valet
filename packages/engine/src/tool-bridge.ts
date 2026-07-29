@@ -1,7 +1,7 @@
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { TextContent, ImageContent } from "@mariozechner/pi-ai";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
-import { withSpan } from "./tracing.js";
+import { attrTruncate, withSpan } from "./tracing.js";
 import { recordToolExecution } from "./metrics.js";
 
 /**
@@ -37,17 +37,35 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
       // execution, a child of the running agent.turn via the active context.
       // A decision-gate suspension throws out of execute; the span ends with
       // error status, which doubles as the suspension marker in the trace.
+      // Sizes, not content: args/result text can be huge and/or sensitive.
+      // `path` is the one arg surfaced verbatim — file tools all take it and
+      // it is the highest-value single attribute when debugging a tool call.
+      const argsRecord = params as Record<string, unknown>;
+      const path = typeof argsRecord.path === "string" ? argsRecord.path : undefined;
       return withSpan(
         `tool.${def.name}`,
-        { "valet.tool.name": def.name, "valet.tool.call_id": toolCallId },
-        async () => {
+        {
+          "valet.tool.name": def.name,
+          "valet.tool.call_id": toolCallId,
+          "valet.tool.args_chars": JSON.stringify(params ?? {}).length,
+          ...(path !== undefined ? { "valet.tool.path": attrTruncate(path) } : {}),
+        },
+        async (span) => {
           const startedAt = Date.now();
           try {
             const result = await def.execute(params as never, ctx);
             recordToolExecution(def.name, Date.now() - startedAt, true);
+            span.setAttribute("valet.tool.result_chars", result.text?.length ?? 0);
+            if (result.attachments?.length) {
+              span.setAttribute("valet.tool.attachments", result.attachments.length);
+            }
             return toAgentToolResult(result);
           } catch (err) {
             recordToolExecution(def.name, Date.now() - startedAt, false);
+            span.setAttribute(
+              "valet.tool.error",
+              attrTruncate(err instanceof Error ? err.message : String(err), 300),
+            );
             throw err;
           }
         },

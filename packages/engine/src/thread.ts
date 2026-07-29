@@ -32,6 +32,7 @@ import { recordSettlement, recordTurn } from "./metrics.js";
 import {
   TRACEPARENT_METADATA_KEY,
   activeTraceparent,
+  attrTruncate,
   engineTracer,
   linkFromTraceparent,
   markSpanError,
@@ -212,6 +213,21 @@ export class Thread {
   private submissionSpan: Span | undefined;
   /** The running turn's `agent.turn` span — turn_end stamps usage/cost onto it. */
   private turnSpan: Span | undefined;
+  /**
+   * Live `llm.generate` span for the current assistant round (distributed
+   * tracing). The engine doesn't own pi-ai's HTTP call, so the span is
+   * synthesized from the agent's message lifecycle: started at
+   * `message_start` with `llmRoundStartedAt` as the start time (pinned to
+   * when the previous round's work finished, so request setup +
+   * time-to-first-token are inside the span), ended at `message_end`.
+   */
+  private llmSpan: Span | undefined;
+  /** When the current LLM round's request effectively began (turn start, or
+   * the previous message/tool completion). */
+  private llmRoundStartedAt: number | undefined;
+  /** Tool calls across ALL rounds of the running turn (currentToolCalls is
+   * per-round — it clears on each assistant message_start). */
+  private turnToolCallCount = 0;
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
   /**
@@ -1106,12 +1122,20 @@ export class Thread {
     const resolver = this.session.options.resolveModel;
     if (!resolver) return this.resolveTurnModel();
     const spec = this.turnModelSpec();
-    return withSpan("model.resolve", { "valet.model.spec": spec }, async () => {
+    return withSpan("model.resolve", { "valet.model.spec": spec }, async (span) => {
       const resolved = await resolver(spec);
       if (resolved) {
+        span.setAttributes({
+          "valet.model.wire_id": resolved.model.id,
+          "valet.model.provider": resolved.model.provider,
+          // Key PRESENCE only — an undefined key means "env fallback", which
+          // is exactly the thing to check when a turn 401s.
+          "valet.model.key_source": resolved.apiKey !== undefined ? "resolver" : "env",
+        });
         this.turnApiKey = resolved.apiKey;
         return resolved.model;
       }
+      span.setAttribute("valet.model.key_source", "internal_fallback");
       return this.resolveTurnModel();
     });
   }
@@ -1233,6 +1257,12 @@ export class Thread {
           // Queue wait — the time between admission and this claim — is a
           // first-order bottleneck signal, invisible inside any child span.
           "valet.submission.queue_wait_ms": Date.now() - claimed.createdAt,
+          // Size, not content: enough to correlate "huge prompt" with a slow
+          // turn without putting user text on a span.
+          "valet.submission.content_chars": JSON.stringify(claimed.content).length,
+          ...(claimed.channel ? { "valet.submission.channel": claimed.channel.channelType } : {}),
+          ...(claimed.dispatchId ? { "valet.submission.dispatch_id": claimed.dispatchId } : {}),
+          ...(claimed.author ? { "valet.submission.author": claimed.author.id } : {}),
         },
         links: admissionLink ? [admissionLink] : undefined,
       });
@@ -1869,10 +1899,14 @@ export class Thread {
       },
       async (span) => {
         this.turnSpan = span;
+        this.turnToolCallCount = 0;
+        this.llmRoundStartedAt = Date.now();
         try {
           await this.driveResumeToCompletionInner(item, repairMessage);
         } finally {
           this.turnSpan = undefined;
+          this.llmSpan?.end();
+          this.llmSpan = undefined;
         }
       },
     );
@@ -2042,13 +2076,22 @@ export class Thread {
           "valet.session.id": this.session.id,
           "valet.thread.id": this.id,
           "valet.queue_item.id": item.id,
+          // Context size going INTO the turn — the first thing to look at
+          // when a turn is slow (big context → slow rounds, compaction risk).
+          "valet.turn.context_messages": this.agent.state.messages.length,
+          ...(item.role !== undefined ? { "valet.turn.role": item.role } : {}),
+          ...(item.model !== undefined ? { "valet.turn.model_override": item.model } : {}),
         },
         async (span) => {
           this.turnSpan = span;
+          this.turnToolCallCount = 0;
+          this.llmRoundStartedAt = Date.now();
           try {
             await this.runItemInner(item);
           } finally {
             this.turnSpan = undefined;
+            this.llmSpan?.end();
+            this.llmSpan = undefined;
           }
         },
       ),
@@ -2315,11 +2358,14 @@ export class Thread {
         "valet.thread.id": this.id,
         "valet.compaction.mode": opts.mode,
       },
-      () => this.compactThreadInner(opts),
+      (span) => this.compactThreadInner(opts, span),
     );
   }
 
-  private async compactThreadInner(opts: { mode: "proactive" | "reactive" | "manual" }): Promise<void> {
+  private async compactThreadInner(
+    opts: { mode: "proactive" | "reactive" | "manual" },
+    span?: Span,
+  ): Promise<void> {
     const cfg = this.session.options.compaction;
     const session = this.session;
     const store = session.providers.store;
@@ -2405,6 +2451,11 @@ export class Thread {
       fileContext: extractFileContext(head),
       createdAt: Date.now(),
     };
+    span?.setAttributes({
+      "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
+      "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
+      "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
+    });
     // Fenced under the current turn's attempt (compaction is always in-turn).
     await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
 
@@ -2800,6 +2851,24 @@ export class Thread {
           this.currentAssistantParts = [];
           this.currentToolCalls.clear();
           this.currentAssistantEntry = undefined;
+          // One llm.generate span per assistant round, parented under the
+          // turn. Start time is the SYNTHESIZED round start — the model was
+          // "thinking" from the moment the prior round's work finished, and
+          // message_start only fires once streaming begins.
+          if (this.turnSpan) {
+            this.llmSpan?.end(); // defensive: never leak a dangling round
+            this.llmSpan = engineTracer().startSpan(
+              "llm.generate",
+              {
+                startTime: this.llmRoundStartedAt ?? Date.now(),
+                attributes: {
+                  "valet.session.id": this.session.id,
+                  "valet.thread.id": this.id,
+                },
+              },
+              otelTrace.setSpan(otelContext.active(), this.turnSpan),
+            );
+          }
           await this.fencedEmit(
             {
               type: "message_start",
@@ -2835,6 +2904,25 @@ export class Thread {
       }
       case "message_end": {
         if (event.message.role === "assistant" && this.currentAssistantMessageId) {
+          // Close this round's llm.generate span with per-round attributes.
+          // The NEXT round (if any) effectively starts now — tools run in
+          // between and tool_execution_end re-stamps the round start.
+          if (this.llmSpan) {
+            const u = event.message.usage;
+            this.llmSpan.setAttributes({
+              "gen_ai.request.model": event.message.model,
+              "gen_ai.usage.input_tokens": u.input,
+              "gen_ai.usage.output_tokens": u.output,
+              "valet.llm.stop_reason": event.message.stopReason,
+              "valet.llm.tool_calls": this.currentToolCalls.size,
+            });
+            if (event.message.stopReason === "error") {
+              markSpanError(this.llmSpan, event.message.errorMessage ?? "stream error");
+            }
+            this.llmSpan.end();
+            this.llmSpan = undefined;
+          }
+          this.llmRoundStartedAt = Date.now();
           const text = textOf(event.message);
           // Compose parts: leading text + tool calls (already tracked)
           const parts: MessagePart[] = [];
@@ -2891,6 +2979,7 @@ export class Thread {
         break;
       }
       case "tool_execution_start":
+        this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
         await this.fencedEmit(
           {
@@ -2925,6 +3014,9 @@ export class Thread {
               : {};
           part.result = { ...structured, text: resultText };
         }
+        // The next LLM round begins once tool results are in — re-stamp the
+        // synthesized round start so llm.generate covers its full wait.
+        this.llmRoundStartedAt = Date.now();
         // Re-persist the entry now that this tool's status/result has been
         // mutated. Without this, sqlite still has status="running" + no
         // result; on reload the chat shows tool cards stuck mid-execution.
@@ -3000,8 +3092,22 @@ export class Thread {
             usage: turnUsage,
             costUsd: turnCost?.total,
           });
+          // A round that errored/aborted before message_end leaves a
+          // dangling llm.generate span — close it with the turn's fate.
+          if (this.llmSpan) {
+            if (errorMessage) markSpanError(this.llmSpan, errorMessage);
+            this.llmSpan.end();
+            this.llmSpan = undefined;
+          }
           // Same snapshot onto the live agent.turn span (distributed tracing).
           if (this.turnSpan) {
+            this.turnSpan.setAttributes({
+              "valet.turn.stop_reason": stopReason ?? "end_turn",
+              "valet.turn.tool_calls": this.turnToolCallCount,
+            });
+            if (errorMessage) {
+              this.turnSpan.setAttribute("valet.turn.error", attrTruncate(errorMessage, 300));
+            }
             if (turnModel !== undefined) this.turnSpan.setAttribute("gen_ai.request.model", turnModel);
             if (turnUsage) {
               this.turnSpan.setAttributes({

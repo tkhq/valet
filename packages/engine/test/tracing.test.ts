@@ -118,6 +118,17 @@ describe("engine distributed tracing", () => {
     expect(settle).toBeDefined();
     expect(patch).toBeDefined();
 
+    // llm.generate: one span per assistant round (tool round + final round),
+    // both under the turn, each carrying per-round usage.
+    const llmSpans = spans.filter((s) => s.name === "llm.generate");
+    expect(llmSpans).toHaveLength(2);
+    for (const l of llmSpans) {
+      expect(l.parentSpanContext?.spanId).toBe(turn!.spanContext().spanId);
+      expect(l.attributes["gen_ai.usage.input_tokens"]).toBeGreaterThan(0);
+    }
+    // Round 1 made the tool call; round 2 made none.
+    expect(llmSpans.map((l) => l.attributes["valet.llm.tool_calls"]).sort()).toEqual([0, 1]);
+
     // Parentage: turn + settle under run; tool under turn; patch under settle.
     expect(turn!.parentSpanContext?.spanId).toBe(run!.spanContext().spanId);
     expect(settle!.parentSpanContext?.spanId).toBe(run!.spanContext().spanId);

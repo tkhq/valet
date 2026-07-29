@@ -10,10 +10,11 @@
  */
 import type { MiddlewareHandler } from "hono";
 import { SpanStatusCode, metrics, trace, type Histogram } from "@opentelemetry/api";
+import type { AppEnv } from "../env.js";
 
 const EXCLUDED_PATHS = new Set(["/api/health"]);
 
-export function traceRequests(): MiddlewareHandler {
+export function traceRequests(): MiddlewareHandler<AppEnv> {
   const tracer = trace.getTracer("@valet/api-http");
   // Lazy: the meter must resolve AFTER initTelemetry's global registration.
   let httpDuration: Histogram | undefined;
@@ -42,6 +43,14 @@ export function traceRequests(): MiddlewareHandler {
           if (c.res.status >= 500) span.setStatus({ code: SpanStatusCode.ERROR });
           // Rename to the matched route now that routing has happened.
           span.updateName(`${c.req.method} ${c.req.routePath ?? c.req.path}`);
+          // Identity + session correlation (set after next() — auth runs
+          // downstream of this middleware). "which user / which session"
+          // are the first two filters in any request investigation.
+          const user = c.var.user as AppEnv["Variables"]["user"] | undefined;
+          if (user) span.setAttribute("valet.user.id", user.id);
+          const routePath = c.req.routePath ?? "";
+          const sessionId = routePath.includes("/sessions/:id") ? c.req.param("id") : undefined;
+          if (sessionId !== undefined) span.setAttribute("valet.session.id", sessionId);
           httpDuration?.record(Date.now() - startedAt, {
             method: c.req.method,
             route: c.req.routePath ?? c.req.path,

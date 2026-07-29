@@ -107,14 +107,24 @@ export class PolicySandbox implements Sandbox {
     // the concurrent sandbox.provision span explaining it.
     return withSpan(
       "sandbox.exec",
-      { "valet.sandbox.command": attrTruncate(command) },
+      {
+        "valet.sandbox.command": attrTruncate(command),
+        ...(opts?.cwd !== undefined ? { "valet.sandbox.cwd": opts.cwd } : {}),
+        ...(opts?.timeout !== undefined ? { "valet.sandbox.timeout_ms": opts.timeout } : {}),
+      },
       async (span) => {
         const startedAt = Date.now();
         const result = await this.dispatch((sb) => sb.exec(command, effectiveOpts), {
           signal: opts?.signal,
         });
         recordSandboxExec(Date.now() - startedAt, false);
-        span.setAttribute("valet.sandbox.exit_code", result.exitCode);
+        span.setAttributes({
+          "valet.sandbox.id": this.id,
+          "valet.sandbox.exit_code": result.exitCode,
+          "valet.sandbox.stdout_chars": result.stdout.length,
+          "valet.sandbox.stderr_chars": result.stderr.length,
+        });
+        if (result.truncated) span.setAttribute("valet.sandbox.output_truncated", true);
         if (result.timedOut) span.setAttribute("valet.sandbox.timed_out", true);
         return result;
       },
@@ -143,7 +153,11 @@ export class PolicySandbox implements Sandbox {
     // so this span measures dispatch latency, not the command's duration.
     return withSpan(
       "sandbox.exec_job",
-      { "valet.sandbox.command": attrTruncate(command) },
+      {
+        "valet.sandbox.command": attrTruncate(command),
+        ...(opts?.cwd !== undefined ? { "valet.sandbox.cwd": opts.cwd } : {}),
+        ...(opts?.timeout !== undefined ? { "valet.sandbox.timeout_ms": opts.timeout } : {}),
+      },
       async () => {
         const startedAt = Date.now();
         const handle = await this.dispatch((sb) => {

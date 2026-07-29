@@ -1,5 +1,5 @@
 import type { Sandbox, SandboxCreateOpts, SandboxProvider } from "../types.js";
-import { withSpan } from "../tracing.js";
+import { markSpanError, withSpan } from "../tracing.js";
 import { recordSandboxProvision } from "../metrics.js";
 import {
   SandboxPreparationError,
@@ -423,13 +423,27 @@ export class SandboxAttachment {
     // the host prepareSandbox hook — as one `sandbox.provision` span, so
     // cold-start latency is directly attributable in traces (a concurrent
     // sandbox.exec span's wait is explained by this one).
-    return withSpan("sandbox.provision", { "valet.sandbox.epoch": this._epoch }, async () => {
-      const startedAt = Date.now();
-      await this.doProvisionInner();
-      // doProvisionInner never throws (failures land in the error state) —
-      // report ok by whether a live handle came out of the provision.
-      recordSandboxProvision(Date.now() - startedAt, this._state === "ready");
-    });
+    return withSpan(
+      "sandbox.provision",
+      {
+        "valet.sandbox.epoch": this._epoch,
+        ...(this.createOpts.image !== undefined ? { "valet.sandbox.image": this.createOpts.image } : {}),
+        ...(this.createOpts.profile !== undefined
+          ? { "valet.sandbox.profile": this.createOpts.profile }
+          : {}),
+      },
+      async (span) => {
+        const startedAt = Date.now();
+        await this.doProvisionInner();
+        // doProvisionInner never throws (failures land in the error state) —
+        // report ok by whether a live handle came out of the provision.
+        const ok = this._state === "ready";
+        recordSandboxProvision(Date.now() - startedAt, ok);
+        span.setAttribute("valet.sandbox.result_state", this._state);
+        if (this._sandbox) span.setAttribute("valet.sandbox.id", this._sandbox.id);
+        if (!ok) markSpanError(span, `provision ended in state ${this._state}`);
+      },
+    );
   }
 
   private async doProvisionInner(): Promise<void> {
