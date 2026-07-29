@@ -65,10 +65,14 @@ export function SettingsRail() {
     permissions.includes(item.permission),
   );
 
-  // Wait for `useOrg()` to resolve before appending — same no-flash rule as
-  // the Organization group (an org-mode admin must never see the item
-  // appear and then vanish).
-  const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
+  // MODELS_ITEM is a single-user-mode stand-in — only appended when the
+  // deploy is truly not-organizations (features.organizations === false).
+  // A member in an org-mode deploy who happens to lack permissions must
+  // NOT see it; they have no /settings/models access. Wait for
+  // `useOrg()` to resolve before appending to avoid the same appear-then-
+  // vanish flash the Organization group guards against.
+  const singleUserMode = orgQ.data?.features.organizations === false;
+  const youItems = singleUserMode ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">

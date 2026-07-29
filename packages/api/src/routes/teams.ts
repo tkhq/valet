@@ -25,7 +25,6 @@ import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { teamMembers, teams, type TeamRow } from "../schema/index.js";
-import { isOrgAdmin } from "../services/org.js";
 import {
   addMember,
   createTeam,
@@ -138,10 +137,14 @@ teamsRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
 
-  // Org admins manage every team in the org, not just ones they belong to;
-  // plain members still only see their own memberships.
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-  const rows = admin
+  // Callers holding `members:manage` see every team in the org (admins
+  // today; whichever future role earns that permission will too). Plain
+  // members still only see their own memberships. Uses the auth
+  // middleware's pre-resolved permission set instead of a fresh
+  // isOrgAdmin DB read — same file's canMutateTeam/canViewTeam already
+  // use this seam, and it removes one roundtrip per list request.
+  const canManage = user.permissions.has("members:manage");
+  const rows = canManage
     ? await listTeamsForOrg(db, user.orgId)
     : (await listTeamsForUser(db, user.id)).filter((r) => r.orgId === user.orgId);
 

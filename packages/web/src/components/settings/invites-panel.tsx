@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { InviteWire } from "@valet/api/wire";
 import {
-  Badge,
   Button,
   Dialog,
   DialogContent,
@@ -11,6 +10,7 @@ import {
   Spinner,
 } from "~/components/primitives";
 import { RadioCard } from "./radio-card";
+import { RoleBadge } from "./role-badge";
 import { useCreateInvite, useInvites, useRevokeInvite } from "~/api/invites";
 
 function formatDate(ts: number): string {
@@ -79,12 +79,7 @@ function InviteRow({ invite }: { invite: InviteWire }) {
         <div className="truncate text-sm text-ink">{invite.email ?? "anyone with the link"}</div>
         <div className="text-xs text-muted">Expires {formatDate(invite.expiresAt)}</div>
       </div>
-      <Badge
-        variant={invite.role === "admin" ? "accent" : invite.role === "operator" ? "success" : "neutral"}
-        className="shrink-0"
-      >
-        {invite.role === "admin" ? "Admin" : invite.role === "operator" ? "Operator" : "Member"}
-      </Badge>
+      <RoleBadge role={invite.role} className="shrink-0" />
       {confirming ? (
         <span className="flex shrink-0 items-center gap-2">
           <Button

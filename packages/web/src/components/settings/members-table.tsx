@@ -3,7 +3,6 @@ import type { OrgMemberWire } from "@valet/api/wire";
 import {
   Avatar,
   AvatarFallback,
-  Badge,
   Button,
   DropdownMenu,
   DropdownMenuContent,
@@ -12,6 +11,7 @@ import {
   Tooltip,
 } from "~/components/primitives";
 import { useSetOrgMemberRole } from "~/api/settings";
+import { RoleBadge } from "./role-badge";
 
 const SOLE_ADMIN_TOOLTIP = "an organization needs at least one admin";
 
@@ -76,18 +76,6 @@ export function MembersTable({ members }: { members: OrgMemberWire[] }) {
   );
 }
 
-function roleLabel(role: "admin" | "operator" | "member"): string {
-  if (role === "admin") return "Admin";
-  if (role === "operator") return "Operator";
-  return "Member";
-}
-
-function roleBadgeVariant(role: "admin" | "operator" | "member"): "accent" | "success" | "neutral" {
-  if (role === "admin") return "accent";
-  if (role === "operator") return "success";
-  return "neutral";
-}
-
 function RoleControl({
   role,
   disabled,
@@ -105,9 +93,7 @@ function RoleControl({
       disabled={disabled}
       className="gap-1.5"
     >
-      <Badge variant={roleBadgeVariant(role)} className="pointer-events-none">
-        {roleLabel(role)}
-      </Badge>
+      <RoleBadge role={role} className="pointer-events-none" />
       <ChevronDown className="h-3.5 w-3.5" aria-hidden />
     </Button>
   );

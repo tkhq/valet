@@ -3,7 +3,7 @@ import { Section } from "~/components/settings/section";
 import { Spinner } from "~/components/primitives";
 import { MembersTable } from "~/components/settings/members-table";
 import { InvitesPanel } from "~/components/settings/invites-panel";
-import { useOrg, useOrgMembers } from "~/api/settings";
+import { useHasPermission, useOrgMembers } from "~/api/settings";
 import { OrgPermissionGuard } from "./settings.organization";
 
 /**
@@ -30,8 +30,7 @@ export function OrganizationMembersPage() {
 
 function OrganizationMembersPageContent() {
   const membersQ = useOrgMembers();
-  const orgQ = useOrg();
-  const canManageMembers = orgQ.data?.permissions.includes("members:manage") ?? false;
+  const canManageMembers = useHasPermission("members:manage");
 
   return (
     <Section title="Members" description="Everyone in your organization.">

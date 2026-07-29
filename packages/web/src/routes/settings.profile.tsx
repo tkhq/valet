@@ -4,7 +4,7 @@ import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { EnableOrgCard } from "~/components/settings/enable-org-card";
 import { Avatar, AvatarFallback, AvatarImage, Button, Input, Spinner } from "~/components/primitives";
-import { useMe, useOrg, usePatchMe } from "~/api/settings";
+import { useHasPermission, useMe, useOrg, usePatchMe } from "~/api/settings";
 import { authClient } from "~/lib/auth-client";
 
 /**
@@ -43,9 +43,8 @@ export function ProfilePage() {
     patchMe.mutate({ name, avatarUrl });
   }
 
-  const showEnableCard =
-    orgQ.data?.permissions.includes("org:manage") === true &&
-    orgQ.data.features.organizations === false;
+  const canManageOrg = useHasPermission("org:manage");
+  const showEnableCard = canManageOrg && orgQ.data?.features.organizations === false;
 
   async function signOut() {
     await authClient.signOut();

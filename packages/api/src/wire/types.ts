@@ -12,6 +12,7 @@
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
 import type { RepoListItem } from "@valet/sdk/repos";
+import type { Permission } from "../auth/permissions.js";
 
 // ── Common ────────────────────────────────────────────────────────────────
 
@@ -911,11 +912,13 @@ export interface OrgFeaturesWire {
   organizations: boolean;
 }
 
-/** Self-contained wire union — matches this file's convention of not
- * importing `auth/permissions.ts`'s `Permission` type. Kept in sync by hand;
- * `auth/permissions.ts`'s BINDING comment is the source of truth for the
- * vocabulary itself. */
-export type OrgPermissionWire = "org:manage" | "members:manage" | "providers:manage" | "infra:manage" | "credentials:org";
+/** Wire alias for the server-side `Permission` union. Aliased (not
+ * re-declared) so adding a permission to `auth/permissions.ts`'s
+ * `PERMISSIONS` tuple automatically flows to the web client — the earlier
+ * hand-maintained wire union silently drifted whenever the two sources
+ * disagreed (both were plain string unions, so the compiler didn't catch
+ * it). Type-only import; carries no runtime weight into the web bundle. */
+export type OrgPermissionWire = Permission;
 
 export interface OrgResponse {
   id: string;

@@ -71,17 +71,25 @@ describe("SettingsRail", () => {
     }
   });
 
-  it("hides the Organization group when the gate is off", () => {
+  it("hides the Organization group when the gate is off, but surfaces Models under You (single-user-mode fallback)", () => {
     mockOrg({ organizations: false, callerRole: "admin", permissions: ADMIN_PERMISSIONS });
     render(<SettingsRail />);
+    // Every ORG label except Models is gone entirely.
     for (const label of ALL_ORG_LABELS) {
+      if (label === "Models") continue;
       expect(screen.queryByText(label)).toBeNull();
     }
+    // Models moves to the You group and points at /settings/models
+    // (the single-user-mode page that reuses the org-admin API).
+    const modelsLink = screen.getByText("Models").closest("a");
+    expect(modelsLink?.getAttribute("to") ?? modelsLink?.getAttribute("href")).toBe("/settings/models");
   });
 
-  it("hides the Organization group when the caller has no org permissions", () => {
+  it("hides the Organization group when the caller has no org permissions (and does NOT surface Models under You)", () => {
     mockOrg({ organizations: true, callerRole: "member", permissions: [] });
     render(<SettingsRail />);
+    // MODELS_ITEM only appears in single-user mode — an org-mode member
+    // with no permissions has no /settings/models access.
     for (const label of ALL_ORG_LABELS) {
       expect(screen.queryByText(label)).toBeNull();
     }
@@ -115,13 +123,13 @@ describe("SettingsRail", () => {
   });
 
   it("shows a You·Models item in single-user mode (org gate off)", () => {
-    mockOrg({ organizations: false, callerRole: "admin" });
+    mockOrg({ organizations: false, callerRole: "admin", permissions: ADMIN_PERMISSIONS });
     render(<SettingsRail />);
     expect(screen.getByText("Models")).toBeTruthy();
   });
 
   it("does NOT duplicate Models under You when the Organization group is visible", () => {
-    mockOrg({ organizations: true, callerRole: "admin" });
+    mockOrg({ organizations: true, callerRole: "admin", permissions: ADMIN_PERMISSIONS });
     render(<SettingsRail />);
     // Exactly one "Models" — the Organization group's.
     expect(screen.getAllByText("Models")).toHaveLength(1);

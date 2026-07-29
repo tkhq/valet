@@ -82,6 +82,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: meData, isLoading: false, error: null }),
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
+  useHasPermission: (perm: string) => orgData?.permissions?.includes(perm) === true,
   useModels: () => ({ data: modelsData, isLoading: false, error: null }),
   usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
   usePatchOrg: () => ({ mutateAsync: patchOrgMutateAsync, isPending: false, error: null }),
