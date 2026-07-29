@@ -28,6 +28,15 @@ import {
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
 import { capturePatch } from "./patch-capture.js";
+import {
+  TRACEPARENT_METADATA_KEY,
+  activeTraceparent,
+  engineTracer,
+  linkFromTraceparent,
+  markSpanError,
+  withSpan,
+} from "./tracing.js";
+import { context as otelContext, trace as otelTrace, type Span } from "@opentelemetry/api";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -193,6 +202,15 @@ export class Thread {
     | undefined;
   /** Wall clock at claim/resume — feeds `turn_end`'s `turnDurationMs`. */
   private turnStartedAt: number | undefined;
+  /**
+   * Live `submission.run` span for the currently-claimed item (distributed
+   * tracing): started at claim, ended when the claim clears. Children
+   * (`agent.turn`, `submission.settle`) parent under it via
+   * `inSubmissionContext`. No-op Span when no SDK is registered.
+   */
+  private submissionSpan: Span | undefined;
+  /** The running turn's `agent.turn` span — turn_end stamps usage/cost onto it. */
+  private turnSpan: Span | undefined;
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
   /**
@@ -584,6 +602,13 @@ export class Thread {
     },
   ): QueueItem {
     const now = Date.now();
+    // Distributed tracing: stamp the admitting request's traceparent so the
+    // eventual `submission.run` span can LINK back to it (the admission span
+    // ends long before the turn runs, so a link — not a parent — is correct).
+    const traceparent = activeTraceparent();
+    const metadata = traceparent
+      ? { ...(fields.metadata ?? {}), [TRACEPARENT_METADATA_KEY]: traceparent }
+      : fields.metadata;
     return {
       id: uid("q"),
       threadId: this.id,
@@ -594,7 +619,7 @@ export class Thread {
       replyTarget: fields.replyTarget,
       model: fields.model,
       role: fields.role,
-      metadata: fields.metadata,
+      metadata,
       status: "queued",
       attemptCount: 0,
       maxAttempts: 10,
@@ -1079,12 +1104,15 @@ export class Thread {
   private async resolveTurnModelForTurn(): Promise<PiModel> {
     const resolver = this.session.options.resolveModel;
     if (!resolver) return this.resolveTurnModel();
-    const resolved = await resolver(this.turnModelSpec());
-    if (resolved) {
-      this.turnApiKey = resolved.apiKey;
-      return resolved.model;
-    }
-    return this.resolveTurnModel();
+    const spec = this.turnModelSpec();
+    return withSpan("model.resolve", { "valet.model.spec": spec }, async () => {
+      const resolved = await resolver(spec);
+      if (resolved) {
+        this.turnApiKey = resolved.apiKey;
+        return resolved.model;
+      }
+      return this.resolveTurnModel();
+    });
   }
 
   /**
@@ -1194,6 +1222,19 @@ export class Thread {
       await store.insertAttemptMarker(claimed.id, attemptId);
       this.runningItem = claimed;
       this.turnStartedAt = Date.now();
+      const admissionLink = linkFromTraceparent(claimed.metadata?.[TRACEPARENT_METADATA_KEY]);
+      this.submissionSpan = engineTracer().startSpan("submission.run", {
+        attributes: {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.queue_item.id": claimed.id,
+          "valet.submission.attempt": claimed.attemptCount,
+          // Queue wait — the time between admission and this claim — is a
+          // first-order bottleneck signal, invisible inside any child span.
+          "valet.submission.queue_wait_ms": Date.now() - claimed.createdAt,
+        },
+        links: admissionLink ? [admissionLink] : undefined,
+      });
       this.fence = { itemId: claimed.id, attemptId };
       this.staleFenceDetected = false;
       this.session.ensureTimers();
@@ -1311,6 +1352,8 @@ export class Thread {
         );
         return;
       } finally {
+        this.submissionSpan?.end();
+        this.submissionSpan = undefined;
         this.runningItem = null;
         this.fence = undefined;
       }
@@ -1435,6 +1478,24 @@ export class Thread {
    * signalled that a successor already owns the item.
    */
   private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
+    return this.inSubmissionContext(() =>
+      withSpan(
+        "submission.settle",
+        {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.queue_item.id": item.id,
+        },
+        (span) => this.settleTurnInner(item, turnFailure, span),
+      ),
+    );
+  }
+
+  private async settleTurnInner(
+    item: QueueItem,
+    turnFailure: { error: unknown } | undefined,
+    span: Span,
+  ): Promise<void> {
     if (this.staleFenceDetected) {
       // A successor owns this item; do not settle. (Zombie self-fencing.)
       return;
@@ -1450,6 +1511,12 @@ export class Thread {
     if (current.status === "settled" || current.status === "terminalizing") return;
 
     const outcome = this.decideTurnOutcome(current, turnFailure);
+    span.setAttribute("valet.submission.outcome", outcome.outcome);
+    this.submissionSpan?.setAttribute("valet.submission.outcome", outcome.outcome);
+    if (outcome.outcome === "failed") {
+      markSpanError(span, outcome.error ?? "submission failed");
+      if (this.submissionSpan) markSpanError(this.submissionSpan, outcome.error ?? "submission failed");
+    }
     let patchRef: SettlePatchRef;
     try {
       await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
@@ -1477,14 +1544,25 @@ export class Thread {
    * than re-provisioned (a hibernated sandbox must not be woken to diff it).
    */
   private async captureSettlePatch(item: QueueItem): Promise<SettlePatchRef> {
-    return capturePatch({
-      sessionId: this.session.id,
-      queueItemId: item.id,
-      blobs: this.session.providers.blobs,
-      startRef: this.session.options.startRef,
-      sandbox: this.session.attachment.current(),
-      attachmentState: this.session.attachment.state,
-    });
+    return withSpan(
+      "patch.capture",
+      { "valet.session.id": this.session.id, "valet.queue_item.id": item.id },
+      async (span) => {
+        const ref = await capturePatch({
+          sessionId: this.session.id,
+          queueItemId: item.id,
+          blobs: this.session.providers.blobs,
+          startRef: this.session.options.startRef,
+          sandbox: this.session.attachment.current(),
+          attachmentState: this.session.attachment.state,
+        });
+        span.setAttribute("valet.patch.status", ref.status);
+        if (ref.reason !== undefined) span.setAttribute("valet.patch.reason", ref.reason);
+        if (ref.bytes !== undefined) span.setAttribute("valet.patch.bytes", ref.bytes);
+        if (ref.status === "failed") markSpanError(span, ref.reason ?? "patch capture failed");
+        return ref;
+      },
+    );
   }
 
   /** Map the turn's terminal state to a SubmissionOutcome. */
@@ -1776,6 +1854,26 @@ export class Thread {
    * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
    */
   private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    return withSpan(
+      "agent.turn",
+      {
+        "valet.session.id": this.session.id,
+        "valet.thread.id": this.id,
+        "valet.queue_item.id": item.id,
+        "valet.turn.resumed": true,
+      },
+      async (span) => {
+        this.turnSpan = span;
+        try {
+          await this.driveResumeToCompletionInner(item, repairMessage);
+        } finally {
+          this.turnSpan = undefined;
+        }
+      },
+    );
+  }
+
+  private async driveResumeToCompletionInner(item: QueueItem, repairMessage: string): Promise<void> {
     const store = this.session.providers.store;
     const fence = this.fence;
     if (!fence) return;
@@ -1924,7 +2022,42 @@ export class Thread {
     return text;
   }
 
+  /**
+   * Run the claimed turn inside an `agent.turn` span, itself parented under
+   * the live `submission.run` span. The span's usage/cost/model attributes
+   * are stamped by the `turn_end` handler via `this.turnSpan`; children
+   * (model resolution, tool executions, sandbox execs, credential reads)
+   * nest automatically through the host's context manager.
+   */
   private async runItem(item: QueueItem): Promise<void> {
+    return this.inSubmissionContext(() =>
+      withSpan(
+        "agent.turn",
+        {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.queue_item.id": item.id,
+        },
+        async (span) => {
+          this.turnSpan = span;
+          try {
+            await this.runItemInner(item);
+          } finally {
+            this.turnSpan = undefined;
+          }
+        },
+      ),
+    );
+  }
+
+  /** Run `fn` with the live `submission.run` span as the active parent. */
+  private inSubmissionContext<T>(fn: () => Promise<T>): Promise<T> {
+    const span = this.submissionSpan;
+    if (!span) return fn();
+    return otelContext.with(otelTrace.setSpan(otelContext.active(), span), fn);
+  }
+
+  private async runItemInner(item: QueueItem): Promise<void> {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
@@ -2170,6 +2303,19 @@ export class Thread {
   async compactThread(opts: { mode: "proactive" | "reactive" | "manual" }): Promise<void> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return;
+    return withSpan(
+      "compaction",
+      {
+        "valet.session.id": this.session.id,
+        "valet.thread.id": this.id,
+        "valet.compaction.mode": opts.mode,
+      },
+      () => this.compactThreadInner(opts),
+    );
+  }
+
+  private async compactThreadInner(opts: { mode: "proactive" | "reactive" | "manual" }): Promise<void> {
+    const cfg = this.session.options.compaction;
     const session = this.session;
     const store = session.providers.store;
     const model = cfg?.summarizerModel ?? session.options.model;
@@ -2839,6 +2985,23 @@ export class Thread {
             await this.fencedWrite(() =>
               this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
             );
+          }
+          // Same snapshot onto the live agent.turn span (distributed tracing).
+          if (this.turnSpan) {
+            if (turnModel !== undefined) this.turnSpan.setAttribute("gen_ai.request.model", turnModel);
+            if (turnUsage) {
+              this.turnSpan.setAttributes({
+                "gen_ai.usage.input_tokens": turnUsage.input,
+                "gen_ai.usage.output_tokens": turnUsage.output,
+                "valet.usage.cache_read_tokens": turnUsage.cacheRead,
+                "valet.usage.cache_write_tokens": turnUsage.cacheWrite,
+                "valet.usage.total_tokens": turnUsage.total,
+              });
+            }
+            if (turnCost) this.turnSpan.setAttribute("valet.cost.total_usd", turnCost.total);
+            if (stopReason === "error") {
+              markSpanError(this.turnSpan, errorMessage ?? "turn ended with an error");
+            }
           }
         }
         if (errorMessage) {

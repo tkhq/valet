@@ -24,7 +24,7 @@ import { loadAuthConfig } from "./auth/config.js";
 import { buildAuthHooks } from "./auth/provisioning.js";
 import { buildAuth } from "./auth/index.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
-import { initEngineTelemetry } from "./observability/otel.js";
+import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
 import { webDistPath } from "./assets/base.js";
@@ -150,6 +150,13 @@ const authConfig = loadAuthConfig(process.env);
 // e.g. sandbox-docker on localhost) keep working unchanged.
 const sandboxApiUrl = process.env.VALET_SANDBOX_API_URL ?? authConfig?.baseUrl;
 
+// OTel bootstrap (env-gated: null without an OTLP endpoint). Registered
+// BEFORE providers/app construction so the global tracer + context manager
+// are live for everything built below — HTTP spans, engine spans, store
+// spans all resolve through this one registration.
+const telemetry = initTelemetry();
+if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
+
 const providers = await buildNodeProviders({
   databaseUrl,
   pgDataDir,
@@ -168,12 +175,6 @@ const providers = await buildNodeProviders({
   // 404s every route that joins the `users` table (`/api/me`, org routes).
   seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig, process.env),
 });
-
-// OTel engine-trace export (env-gated: no-op without an OTLP endpoint).
-// Wired before the boot-reconciliation passes for the same reason as the
-// attention router below — boot-time settlements should be traced too.
-const telemetry = initEngineTelemetry(providers.eventStream);
-if (telemetry) console.log(`otel: exporting engine traces to ${telemetry.endpoint}`);
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
 // escalation and child-session decision_gate → approval onto the shared

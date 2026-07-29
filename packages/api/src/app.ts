@@ -50,6 +50,7 @@ import { channelsRouter } from "./routes/channels.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
+import { traceRequests } from "./observability/http-middleware.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
@@ -102,6 +103,10 @@ export function createApp(
   const app = new Hono<AppEnv>();
   const { auth, authConfig } = authWiring;
 
+  // One server span per request (no-op unless the OTLP SDK is registered —
+  // see observability/otel.ts). First in the chain so every downstream
+  // middleware and handler runs inside the request's active span context.
+  app.use("*", traceRequests());
   app.use("*", logger());
   app.use(
     "*",

@@ -48,6 +48,15 @@ export {
   MAX_PATCH_BYTES,
   type PatchCaptureContext,
 } from "./patch-capture.js";
+export {
+  TRACEPARENT_METADATA_KEY,
+  activeTraceparent,
+  attrTruncate,
+  engineTracer,
+  linkFromTraceparent,
+  markSpanError,
+  withSpan,
+} from "./tracing.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
 export { Thread } from "./thread.js";

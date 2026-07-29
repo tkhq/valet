@@ -1,6 +1,7 @@
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { TextContent, ImageContent } from "@mariozechner/pi-ai";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
+import { withSpan } from "./tracing.js";
 
 /**
  * Adapt one engine ToolDef to a pi-agent-core AgentTool, capturing the engine
@@ -31,8 +32,18 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
         toolName: def.name,
         toolArgs: params as Record<string, unknown>,
       });
-      const result = await def.execute(params as never, ctx);
-      return toAgentToolResult(result);
+      // Every engine tool call funnels through this bridge — one span per
+      // execution, a child of the running agent.turn via the active context.
+      // A decision-gate suspension throws out of execute; the span ends with
+      // error status, which doubles as the suspension marker in the trace.
+      return withSpan(
+        `tool.${def.name}`,
+        { "valet.tool.name": def.name, "valet.tool.call_id": toolCallId },
+        async () => {
+          const result = await def.execute(params as never, ctx);
+          return toAgentToolResult(result);
+        },
+      );
     },
   };
 }

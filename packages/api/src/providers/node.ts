@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
+import { tracedSessionStore } from "../observability/traced-store.js";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
@@ -199,7 +200,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       .onConflictDoNothing();
   }
 
-  const engineStore = new PgSessionStore(pgdb);
+  // Store tracing (distributed tracing): only when the OTLP SDK will be
+  // registered — the proxy is pure overhead otherwise. `store.*` spans time
+  // every Postgres round trip inside the request/submission trees.
+  const telemetryEnabled = !!(
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+  );
+  const rawEngineStore = new PgSessionStore(pgdb);
+  const engineStore = telemetryEnabled ? tracedSessionStore(rawEngineStore) : rawEngineStore;
   const blobs = new FsBlobStore(opts.blobsRoot);
   // Backend selection (kubernetes-deployment plan Task 6, spec decision 7):
   // VALET_SANDBOX_BACKEND=docker|kubernetes|local, default docker — the

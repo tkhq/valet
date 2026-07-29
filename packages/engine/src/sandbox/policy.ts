@@ -6,6 +6,7 @@ import type {
   Sandbox,
 } from "../types.js";
 import { SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
+import { attrTruncate, withSpan } from "../tracing.js";
 import type { SandboxAttachment } from "./attachment.js";
 
 /** Default `CreateSessionOptions.sandboxReadyTimeoutMs` (spec decision 6). */
@@ -99,7 +100,22 @@ export class PolicySandbox implements Sandbox {
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
     if (opts?.signal?.aborted) throw this.abortError(opts.signal);
     const effectiveOpts: ExecOpts = { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
-    return this.dispatch((sb) => sb.exec(command, effectiveOpts), { signal: opts?.signal });
+    // Traced (distributed tracing): sandbox execs are the dominant tool-time
+    // sink; each becomes one span (child of the running tool span). The span
+    // covers ensureReady too, so a cold-attachment wait shows up here — with
+    // the concurrent sandbox.provision span explaining it.
+    return withSpan(
+      "sandbox.exec",
+      { "valet.sandbox.command": attrTruncate(command) },
+      async (span) => {
+        const result = await this.dispatch((sb) => sb.exec(command, effectiveOpts), {
+          signal: opts?.signal,
+        });
+        span.setAttribute("valet.sandbox.exit_code", result.exitCode);
+        if (result.timedOut) span.setAttribute("valet.sandbox.timed_out", true);
+        return result;
+      },
+    );
   }
 
   async snapshot(): Promise<string> {
@@ -120,10 +136,17 @@ export class PolicySandbox implements Sandbox {
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     if (opts?.signal?.aborted) throw this.abortError(opts.signal);
     const effectiveOpts: ExecOpts = { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
-    return this.dispatch((sb) => {
-      if (!sb.execJob) throw jobUnsupportedError();
-      return sb.execJob(command, effectiveOpts);
-    }, { signal: opts?.signal });
+    // Job-mode kickoff only — the job's own runtime is polled, not awaited,
+    // so this span measures dispatch latency, not the command's duration.
+    return withSpan(
+      "sandbox.exec_job",
+      { "valet.sandbox.command": attrTruncate(command) },
+      () =>
+        this.dispatch((sb) => {
+          if (!sb.execJob) throw jobUnsupportedError();
+          return sb.execJob(command, effectiveOpts);
+        }, { signal: opts?.signal }),
+    );
   }
 
   async pollJob(execId: string, offset: number): Promise<JobPoll> {

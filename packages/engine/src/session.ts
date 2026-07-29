@@ -3,6 +3,7 @@ import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
+import { withSpan } from "./tracing.js";
 import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
@@ -746,12 +747,24 @@ export class Session {
     // the store itself). A resolver return of `null` yields `null`; there is
     // NO store fallback behind a resolver. Absent === byte-identical raw read.
     const resolver = this.options.credentialResolver;
+    // Traced (distributed tracing): every credential access — host resolver
+    // or raw store read — is one `credentials.get` span, nesting under the
+    // running tool/turn span via the active context. Values never land on
+    // the span; only the service name and hit/miss.
     const read = (service: string): Promise<StoredCredential | null> =>
-      resolver
-        ? resolver(owner, service)
-        : credStore
-          ? credStore.get(owner, service)
-          : Promise.resolve(null);
+      withSpan(
+        "credentials.get",
+        { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
+        async (span) => {
+          const stored = resolver
+            ? await resolver(owner, service)
+            : credStore
+              ? await credStore.get(owner, service)
+              : null;
+          span.setAttribute("valet.credential.hit", stored !== null);
+          return stored;
+        },
+      );
     return {
       async get(service?: string) {
         if (!resolver && !credStore) return null;

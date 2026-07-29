@@ -1,7 +1,7 @@
 # Observability — OTel engine-trace export + bundled Grafana LGTM stack
 
 **Date:** 2026-07-28
-**Status:** Implemented
+**Status:** Implemented (rev 2 — distributed tracing, same day)
 **Scope:** Env-gated OpenTelemetry trace export from `packages/api` (a pure
 consumer of the engine event bus) and a bundled local observability stack
 (`grafana/otel-lgtm`) in the Helm chart. Builds directly on the engine
@@ -11,42 +11,52 @@ cost on the `turn_end` event and patch-capture records on
 
 ## Decisions
 
-1. **The exporter is an event-bus subscriber, not engine instrumentation.**
-   The engine stays free of OTel imports. `initEngineTelemetry`
-   (`packages/api/src/observability/otel.ts`) subscribes to the shared
-   `EventStream` and synthesizes spans from enriched bus events. This is
-   exactly the consumption pattern the engine-traces spec designed the
-   enriched `turn_end` payload for — no `engine_entries` reads.
+1. **Direct instrumentation on `@opentelemetry/api` (rev 2).** The first
+   revision synthesized spans from bus events; it is replaced by direct
+   instrumentation everywhere. `@valet/engine` depends ONLY on
+   `@opentelemetry/api` — the dependency-free facade whose spans are no-ops
+   until a host registers an SDK. The api registers the SDK
+   (`initTelemetry`, env-gated on `OTEL_EXPORTER_OTLP_ENDPOINT`) globally,
+   which activates every span in-process AND installs the
+   AsyncLocalStorage context manager that makes parent/child nesting flow
+   across await boundaries. No SDK ⇒ dev-local/tests byte-identical.
 
-2. **Env-gated to a no-op.** Unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or the
-   `_TRACES_` variant) is set, no SDK is constructed and no subscriber is
-   attached — dev-local and every test run behave byte-identically to
-   before. The helm chart sets the var; nothing else does.
+2. **Span tree per submission, linked (not parented) to the admitting
+   request.** Admission stamps the active context's W3C traceparent into
+   `QueueItem.metadata["otel.traceparent"]` (`buildQueueItem`, the single
+   construction funnel). At claim, `submission.run` starts with a span LINK
+   back to it — the HTTP span ended long before the turn runs, so a link is
+   the honest causality edge. Tree:
 
-3. **Spans are synthesized retroactively.** The engine has no per-turn span
-   context to propagate; instead `turn_end.turnDurationMs` gives the span
-   its real duration (`startTime = event.timestamp - turnDurationMs`).
-   Settlements/errors/sandbox transitions are instant (zero-duration)
-   spans. There is deliberately no cross-span trace/parent linkage in this
-   iteration — Tempo search by `service.name` / span name / session-id
-   attribute is the query surface.
+   - `{METHOD} {route}` — Hono middleware (`traceRequests`), one server
+     span per request, health probes excluded, active across `next()`.
+   - `submission.run` — claim→settle; `queue_wait_ms` (admission→claim
+     latency), attempt, outcome; ERROR on failed outcomes.
+     - `agent.turn` — the whole turn; `gen_ai.request.model`,
+       `gen_ai.usage.*`, `valet.usage.*`, `valet.cost.total_usd` stamped at
+       turn_end (same snapshot as the entry); resumes carry
+       `valet.turn.resumed`.
+       - `model.resolve` — host resolver latency.
+       - `tool.{name}` — every tool call via the tool bridge; a
+         decision-gate suspension ends the span with ERROR status (the
+         suspension marker in the trace).
+         - `sandbox.exec` / `sandbox.exec_job` — PolicySandbox dispatch,
+           command (truncated), exit code; covers the ensureReady wait.
+         - `credentials.get` — every credential access (resolver or raw
+           store), service + hit/miss; never values.
+       - `compaction` — proactive/reactive/manual passes.
+     - `submission.settle` — reserve→finalize, outcome.
+       - `patch.capture` — settle-time diff status/bytes.
+   - `sandbox.provision` — full cold boot incl. the `prepareSandbox` hook
+     (fire-and-forget warm; may outlive its parent turn).
+   - `store.{method}` — every SessionStore call via a tracing proxy
+     (`tracedSessionStore`), applied only when telemetry is enabled.
 
-4. **Span vocabulary:**
-   - `agent.turn` — `gen_ai.request.model`, `gen_ai.usage.input_tokens`/
-     `output_tokens`, `valet.usage.cache_read_tokens`/`cache_write_tokens`/
-     `total_tokens`, `valet.cost.total_usd` (absent when unpriced — the
-     cost-is-null rule carries through), `valet.turn.reason`; ERROR status
-     on `reason === "error"`.
-   - `submission.settled` — `valet.submission.outcome` (+`.error`),
-     `valet.patch.*` (the settle-patch record verbatim).
-   - `engine.error` — `valet.error.code`/`message`/`recoverable`, ERROR.
-   - `sandbox.status` — `valet.sandbox.state`/`epoch`/`id`.
-   - Every span: `valet.session.id`, `valet.thread.id`,
-     `valet.queue_item.id` when present.
-   The mapping is the pure function `spansForBusEvent` (unit-tested);
-   SDK/exporter wiring is a thin shell.
+3. **Values never land on spans.** Credential spans carry service + hit;
+   sandbox spans carry a 200-char command prefix; tool spans carry names
+   and call ids, not args or results.
 
-5. **Bundled stack: `grafana/otel-lgtm`, default-enabled, ephemeral.** One
+4. **Bundled stack: `grafana/otel-lgtm`, default-enabled, ephemeral.** One
    Deployment + two Services (`valet-otel` ClusterIP for OTLP 4317/4318,
    `valet-grafana` NodePort 30300 with anonymous-admin Grafana). emptyDir
    storage — this is the local reference/debug stack, not durable
@@ -59,6 +69,8 @@ cost on the `turn_end` event and patch-capture records on
 
 - Metrics and logs export (the LGTM stack accepts both; the api only sends
   traces today).
-- Trace-context propagation into sandboxes / LLM HTTP calls.
+- Trace-context propagation INTO sandboxes (traceparent env into exec'd
+  processes) and into the LLM provider's HTTP calls (pi-ai owns that
+  client); the `agent.turn` span bounds LLM latency from outside.
 - Grafana dashboards-as-code; Tempo search + Explore is the v1 surface.
 - Durable telemetry storage or remote-cluster observability defaults.
