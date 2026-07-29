@@ -9,7 +9,7 @@ import type { PgDb } from "./db.js";
  * mismatch (including "older") means the db predates this migration set —
  * delete the pg data dir (`rm -rf ~/.valet/pg`) and let it recreate.
  */
-export const ENGINE_SCHEMA_VERSION = "2";
+export const ENGINE_SCHEMA_VERSION = "3";
 
 /**
  * The one pre-1.0 engine migration. CLAUDE.md rule: we edit `0000` in place,

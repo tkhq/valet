@@ -60,6 +60,8 @@ CREATE TABLE "engine_entries" (
 	"resolution" text,
 	"withdrawn_reason" text,
 	"metadata" text,
+	"usage" text,
+	"cost" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
@@ -95,6 +97,11 @@ CREATE TABLE "engine_queue_items" (
 	"abort_requested_at" bigint,
 	"owner_id" text,
 	"lease_expires_at" bigint,
+	"settle_patch_status" text,
+	"settle_patch_reason" text,
+	"settle_patch_blob_key" text,
+	"settle_patch_bytes" integer,
+	"settle_patch_truncated" integer,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -115,7 +122,7 @@ CREATE TABLE "engine_meta" (
 	"value" text NOT NULL
 );
 --> statement-breakpoint
-INSERT INTO "engine_meta" ("key", "value") VALUES ('schema_version', '2');
+INSERT INTO "engine_meta" ("key", "value") VALUES ('schema_version', '3');
 --> statement-breakpoint
 CREATE TABLE "engine_events" (
 	"session_id" text NOT NULL,
@@ -149,6 +156,7 @@ CREATE TABLE "engine_sessions" (
 	"parent_thread_id" text,
 	"model" text,
 	"metadata" text,
+	"start_ref" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

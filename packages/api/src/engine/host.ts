@@ -19,6 +19,7 @@ import {
   type SandboxProvider,
   type Session,
   type SessionData,
+  type SessionStartRef,
   type SessionStore,
   type StoredCredential,
   type ResolvedModel,
@@ -480,7 +481,31 @@ export class EngineHost {
     );
     const image = prebuild?.imageRef ?? this.opts.defaultImage;
     if (prebuild) await this.recordPrebuildId(sessionId, prebuild.prebuildId);
-    const prepareSandbox = this.buildPrepareSandbox(meta, prebuild);
+    // Start-ref sink (engine traces spec, change 2 — host pattern B): prep
+    // resolves the primary clone's ref inside the sandbox, and this callback
+    // lands it on the session. `prepareSandbox` can run before create/restore
+    // returns (attachment provisioning races the build), so a ref that
+    // arrives early is parked and flushed right after the session exists.
+    // Best-effort throughout: a session that already carries a start-ref
+    // keeps it (start conditions are immutable; a later epoch's re-clone may
+    // legitimately sit at a newer SHA and must not overwrite).
+    let builtSession: Session | undefined;
+    let pendingStartRef: SessionStartRef | undefined;
+    const onStartRef = async (ref: SessionStartRef) => {
+      const target = builtSession;
+      if (!target) {
+        pendingStartRef = ref;
+        return;
+      }
+      if (target.options.startRef) return;
+      await target.setStartRef(ref).catch((err: unknown) => {
+        console.error(
+          `EngineHost: recording start-ref for session ${sessionId} failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    };
+    const prepareSandbox = this.buildPrepareSandbox(meta, prebuild, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     const session = existing
       ? await engine.restoreSession({
@@ -517,6 +542,12 @@ export class EngineHost {
           ...(prepareSandbox ? { prepareSandbox } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
         });
+
+    builtSession = session;
+    if (pendingStartRef) {
+      await onStartRef(pendingStartRef);
+      pendingStartRef = undefined;
+    }
 
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
@@ -589,6 +620,7 @@ export class EngineHost {
   private buildPrepareSandbox(
     meta: SessionMeta,
     prebuild?: PrebuildResolution | null,
+    onStartRef?: (ref: SessionStartRef) => void | Promise<void>,
   ): ((sandbox: Sandbox, epoch: number) => Promise<void>) | undefined {
     if (!meta.repos || meta.repos.length === 0) return undefined;
     return buildWorkspacePrep({
@@ -596,6 +628,7 @@ export class EngineHost {
       repos: meta.repos,
       userName: meta.userName,
       userEmail: meta.userEmail,
+      ...(onStartRef ? { onStartRef } : {}),
       // When the session booted from a prebuilt image, the PRIMARY (position-0)
       // binding's repo is baked into the image; fetch-on-start prep stages it
       // out of the image rather than cloning, then conditionally re-installs.

@@ -43,7 +43,7 @@
  * `POST /api/sandbox/git-credential` at clone time. This module only ever
  * interpolates non-secret values (`apiUrl`, repo URLs/paths, git identity).
  */
-import type { ExecResult, Sandbox } from "@valet/engine";
+import type { ExecResult, Sandbox, SessionStartRef } from "@valet/engine";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import { ownerOf } from "../services/session-github-token.js";
 import { PREBUILT_REPO_PATH, type RecipeStep } from "../prebuilds/recipe.js";
@@ -85,6 +85,13 @@ export interface WorkspacePrepOpts {
    * (byte-identical).
    */
   prebuild?: { bakedSha: string; recipe: RecipeStep[] };
+  /**
+   * Start-ref sink (engine traces spec, change 2 — host pattern B). Called
+   * once per successful prep with the PRIMARY (position-0) binding's resolved
+   * `{ repoUrl, branch, commitSha }`. Best-effort: resolution or callback
+   * failure is logged and never fails prep. Absent === no capture.
+   */
+  onStartRef?: (ref: SessionStartRef) => void | Promise<void>;
 }
 
 /** POSIX single-quote escaping for values interpolated into `sh` command
@@ -454,6 +461,34 @@ async function prepPrebuiltBinding(
 }
 
 /**
+ * Resolve the PRIMARY binding's start-ref from the prepped clone (engine
+ * traces spec, change 2): origin URL, full HEAD SHA, and the checked-out
+ * branch (`undefined` when detached). Returns null when any piece is
+ * unresolvable — callers treat that as "no start-ref", never a prep failure.
+ * Exported for direct unit coverage.
+ */
+export async function resolveStartRef(sandbox: Sandbox, dir: string): Promise<SessionStartRef | null> {
+  const res = await safeExec(
+    sandbox,
+    "git remote get-url origin && git rev-parse HEAD && git rev-parse --abbrev-ref HEAD",
+    { cwd: dir },
+  );
+  if (res.exitCode !== 0) return null;
+  const [repoUrl, commitSha, branch] = res.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.trim());
+  if (!repoUrl || !commitSha) return null;
+  return {
+    repoUrl,
+    commitSha,
+    // `--abbrev-ref HEAD` prints literally "HEAD" for detached checkouts.
+    branch: branch && branch !== "HEAD" ? branch : undefined,
+    capturedAt: Date.now(),
+  };
+}
+
+/**
  * Builds the `prepareSandbox` closure for a session with repo bindings.
  * Callers (`EngineHost.buildSession`) only invoke this when
  * `meta.repos` is non-empty — an unbound session passes no
@@ -473,6 +508,22 @@ export function buildWorkspacePrep(opts: WorkspacePrepOpts): (sandbox: Sandbox, 
         await prepPrebuiltBinding(sandbox, dirs[index], opts.repos[index], opts.prebuild);
       } else {
         await prepBinding(sandbox, dirs[index], opts.repos[index]);
+      }
+    }
+
+    // Start-ref capture (engine traces spec, change 2) — after every binding
+    // prepped, from the PRIMARY clone. Best-effort: a failure here must never
+    // fail prep (the workspace is fine; only the trace loses replayability).
+    if (opts.onStartRef) {
+      try {
+        const ref = await resolveStartRef(sandbox, dirs[0]);
+        if (ref) await opts.onStartRef(ref);
+        else console.error("workspace prep: start-ref unresolvable for primary binding — continuing");
+      } catch (err) {
+        console.error(
+          "workspace prep: start-ref capture failed — continuing:",
+          err instanceof Error ? err.message : String(err),
+        );
       }
     }
   };

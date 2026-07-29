@@ -42,6 +42,12 @@ export {
   parseOrchestratorSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
+export {
+  capturePatch,
+  patchBlobKey,
+  MAX_PATCH_BYTES,
+  type PatchCaptureContext,
+} from "./patch-capture.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
 export { Thread } from "./thread.js";

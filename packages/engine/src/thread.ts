@@ -27,6 +27,7 @@ import {
 } from "./submission.js";
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
+import { capturePatch } from "./patch-capture.js";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -49,9 +50,11 @@ import type {
   DecisionResolution,
   DecisionWithdrawReason,
   EngineEvent,
+  MessageCost,
   MessagePart,
   MessageEntry,
   MessageQuery,
+  MessageUsage,
   Principal,
   PromptAuthor,
   PromptContent,
@@ -63,6 +66,7 @@ import type {
   SessionEntry,
   SignalContent,
   SkillInvokeOptions,
+  SettlePatchRef,
   SubmissionOutcome,
   SubmissionResult,
   SuspendedTurnState,
@@ -187,6 +191,8 @@ export class Thread {
   private lastAssistantUsage:
     | { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
     | undefined;
+  /** Wall clock at claim/resume — feeds `turn_end`'s `turnDurationMs`. */
+  private turnStartedAt: number | undefined;
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
   /**
@@ -1187,6 +1193,7 @@ export class Thread {
 
       await store.insertAttemptMarker(claimed.id, attemptId);
       this.runningItem = claimed;
+      this.turnStartedAt = Date.now();
       this.fence = { itemId: claimed.id, attemptId };
       this.staleFenceDetected = false;
       this.session.ensureTimers();
@@ -1443,10 +1450,15 @@ export class Thread {
     if (current.status === "settled" || current.status === "terminalizing") return;
 
     const outcome = this.decideTurnOutcome(current, turnFailure);
+    let patchRef: SettlePatchRef;
     try {
       await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
       await this.repairRestState(item, fence);
-      await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
+      // Best-effort workspace patch (engine traces spec, change 3) — runs
+      // between reserve and finalize so the record lands in finalize's own
+      // transaction, but its own I/O never throws and never weakens the CAS.
+      patchRef = await this.captureSettlePatch(item);
+      await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) {
         this.staleFenceDetected = true;
@@ -1455,8 +1467,24 @@ export class Thread {
       throw err;
     }
     await store.deleteAttemptMarker(item.id, fence.attemptId);
-    await this.emitSettled(item.id, outcome);
+    await this.emitSettled(item.id, outcome, patchRef);
     await this.emitQueueState();
+  }
+
+  /**
+   * Best-effort settle-time patch capture (engine traces spec, change 3).
+   * Never throws; a sandbox that isn't currently `ready` is skipped rather
+   * than re-provisioned (a hibernated sandbox must not be woken to diff it).
+   */
+  private async captureSettlePatch(item: QueueItem): Promise<SettlePatchRef> {
+    return capturePatch({
+      sessionId: this.session.id,
+      queueItemId: item.id,
+      blobs: this.session.providers.blobs,
+      startRef: this.session.options.startRef,
+      sandbox: this.session.attachment.current(),
+      attachmentState: this.session.attachment.state,
+    });
   }
 
   /** Map the turn's terminal state to a SubmissionOutcome. */
@@ -1527,7 +1555,11 @@ export class Thread {
     }
   }
 
-  private async emitSettled(itemId: string, outcome: SubmissionOutcome): Promise<void> {
+  private async emitSettled(
+    itemId: string,
+    outcome: SubmissionOutcome,
+    patch?: SettlePatchRef,
+  ): Promise<void> {
     // Deterministic eventKey `settled:{itemId}`: every settlement path (fenced
     // two-phase, retryFinalize, reconciliation, and the fenceless
     // settleUnclaimed sites) routes through here, so a double-emission across
@@ -1539,6 +1571,7 @@ export class Thread {
         threadId: this.id,
         queueItemId: itemId,
         outcome,
+        ...(patch ? { patch } : {}),
       },
       { eventKey: `settled:${itemId}`, queueItemId: itemId },
     );
@@ -1611,17 +1644,22 @@ export class Thread {
       }
     }
 
+    let patchRef: SettlePatchRef;
     try {
       await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
       await this.repairRestState(item, fence);
       if (suspended) await store.clearSuspendedTurn(this.session.id, this.id, fence);
-      await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
+      // A claimed-then-reconciled item may have run tools before the crash or
+      // supersession — capture whatever landed on disk, same best-effort
+      // contract as the normal settle path.
+      patchRef = await this.captureSettlePatch(item);
+      await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) return; // successor owns it now
       throw err;
     }
     await store.deleteAttemptMarker(item.id, attemptId);
-    await this.emitSettled(item.id, outcome);
+    await this.emitSettled(item.id, outcome, patchRef);
     await this.emitQueueState();
   }
 
@@ -1657,6 +1695,7 @@ export class Thread {
     if (!replaced) return; // lost the CAS
     await store.insertAttemptMarker(item.id, attemptId);
     this.runningItem = replaced;
+    this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
     this.session.ensureTimers();
@@ -1718,6 +1757,7 @@ export class Thread {
     if (!replaced) return; // lost the CAS
     await store.insertAttemptMarker(item.id, attemptId);
     this.runningItem = replaced;
+    this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
     this.session.ensureTimers();
@@ -2760,6 +2800,12 @@ export class Thread {
           event.message.role === "assistant" ? event.message.stopReason : undefined;
         const errorMessage =
           event.message.role === "assistant" ? event.message.errorMessage : undefined;
+        // Usage/cost trace (engine traces spec, change 1): one snapshot feeds
+        // BOTH the entry update and the enriched turn_end event below, so the
+        // two surfaces can never disagree.
+        let turnUsage: MessageUsage | undefined;
+        let turnCost: MessageCost | undefined;
+        let turnModel: string | undefined;
         if (event.message.role === "assistant") {
           const u = event.message.usage;
           this.lastAssistantUsage = {
@@ -2769,6 +2815,31 @@ export class Thread {
             cacheWrite: u.cacheWrite,
             total: u.totalTokens || u.input + u.output + u.cacheRead + u.cacheWrite,
           };
+          // All-zero usage (dev fakes, providers that don't report) is
+          // "no usage reported" — omit, mirroring the cost-is-null rule.
+          if (this.lastAssistantUsage.total > 0) turnUsage = { ...this.lastAssistantUsage };
+          turnModel = event.message.model;
+          // Cost is null, not zero: unpriced models (custom providers, dev
+          // fakes) omit the field entirely — a missing value reads
+          // "unpriced", never "$0".
+          const c = u.cost;
+          if (c && c.total > 0) {
+            turnCost = {
+              input: c.input,
+              output: c.output,
+              cacheRead: c.cacheRead,
+              cacheWrite: c.cacheWrite,
+              total: c.total,
+            };
+          }
+          if (this.currentAssistantEntry && turnUsage) {
+            const entry = this.currentAssistantEntry;
+            entry.usage = turnUsage;
+            if (turnCost) entry.cost = turnCost;
+            await this.fencedWrite(() =>
+              this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
+            );
+          }
         }
         if (errorMessage) {
           // Same stdout mirror as `emitError`: the event is best-effort (a
@@ -2796,7 +2867,17 @@ export class Thread {
             ? "error"
             : "end_turn";
         await this.fencedEmit(
-          { type: "turn_end", threadId: this.id, reason },
+          {
+            type: "turn_end",
+            threadId: this.id,
+            reason,
+            ...(turnModel !== undefined ? { model: turnModel } : {}),
+            ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
+            ...(turnCost !== undefined ? { cost: turnCost } : {}),
+            ...(turnUsage !== undefined && this.turnStartedAt !== undefined
+              ? { turnDurationMs: Date.now() - this.turnStartedAt }
+              : {}),
+          },
           { queueItemId: this.runningItem?.id },
         );
         await this.fencedEmit(

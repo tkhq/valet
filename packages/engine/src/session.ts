@@ -2,7 +2,7 @@ import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
-import { NoCredentialsError, StaleAttemptError } from "./errors.js";
+import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
@@ -25,6 +25,7 @@ import type {
   Sandbox,
   SessionData,
   SessionEntry,
+  SessionStartRef,
   SkillSource,
   StoredCredential,
   ThreadData,
@@ -304,6 +305,10 @@ export class Session {
     if (options.owner === undefined) session.principal = data.owner;
     if (options.parentSessionId === undefined) session.parentSessionId = data.parentSessionId;
     if (options.parentThreadId === undefined) session.parentThreadId = data.parentThreadId;
+    // Preserve the persisted start-ref across generic restores (hosts don't
+    // round-trip it through options) so the next `toData()` save can't stomp
+    // it back to undefined — and so `setStartRef`'s single-shot guard sees it.
+    if (options.startRef === undefined) options.startRef = data.startRef;
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -620,9 +625,34 @@ export class Session {
       // `model.id` whenever the host resolver returned a wire-ready model
       // for a namespaced spec (see `ResolvedModel.canonicalId`).
       model: this.options.modelSpec ?? this.options.model.id,
+      startRef: this.options.startRef,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
+  }
+
+  /**
+   * Record the workspace start-ref (engine traces spec, change 2) — host
+   * pattern (B), for hosts whose clone happens inside `prepareSandbox`.
+   * Idempotent, single-shot: a repeat call with an identical ref is a no-op;
+   * a call with a DIFFERENT ref throws `ValidationError` — a session's start
+   * conditions are immutable by definition, so divergence indicates a host
+   * bug, not a legitimate state change.
+   */
+  async setStartRef(ref: SessionStartRef): Promise<void> {
+    const existing = this.options.startRef;
+    if (existing) {
+      const same =
+        existing.repoUrl === ref.repoUrl &&
+        existing.commitSha === ref.commitSha &&
+        (existing.branch ?? undefined) === (ref.branch ?? undefined);
+      if (same) return;
+      throw new ValidationError(
+        `session ${this.id} already has a start-ref (${existing.repoUrl}@${existing.commitSha}); refusing to overwrite with ${ref.repoUrl}@${ref.commitSha}`,
+      );
+    }
+    this.options.startRef = ref;
+    await this.providers.store.saveSession(await this.toData());
   }
 
   /**
