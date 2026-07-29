@@ -436,7 +436,7 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Tokens per minute, by kind",
+      "title": "Tokens per second, by kind",
       "gridPos": {
         "x": 0,
         "y": 14,
@@ -477,7 +477,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (kind) (rate(valet_tokens_total[$__rate_interval])) * 60",
+          "expr": "sum by (kind) (rate(valet_tokens_total[$__rate_interval]))",
           "legendFormat": "{{kind}}"
         }
       ]
@@ -485,7 +485,7 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Tokens per minute, by model",
+      "title": "Tokens per second, by model",
       "gridPos": {
         "x": 8,
         "y": 14,
@@ -526,7 +526,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model) (rate(valet_tokens_total[$__rate_interval])) * 60",
+          "expr": "sum by (model) (rate(valet_tokens_total[$__rate_interval]))",
           "legendFormat": "{{model}}"
         }
       ]
