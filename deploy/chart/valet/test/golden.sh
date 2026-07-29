@@ -139,7 +139,7 @@ grep -q 'VALET_SANDBOX_API_URL: "http://valet-api.default.svc.cluster.local:80"'
 pass "VALET_SANDBOX_API_URL carries the api Service's .svc.cluster.local DNS name"
 
 # --- No Secret keys leak into the ConfigMap ------------------------------
-CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/bundled.yaml")
+CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/bundled.yaml")
 for secret_key in BETTER_AUTH_SECRET VALET_ENCRYPTION_KEY ANTHROPIC_API_KEY POSTGRES_PASSWORD DATABASE_URL; do
   if echo "$CONFIGMAP_BLOCK" | grep -q "$secret_key"; then
     fail "ConfigMap leaks secret key: $secret_key"
@@ -194,7 +194,7 @@ pass "bundled render: registry Service is NodePort with nodePort 30500"
 if grep -q 'name: valet-registry' "$TMP_DIR/external-registry.yaml"; then
   fail "external-registry render: bundled registry resources still rendered when externalRegistry.url is set"
 fi
-EXTERNAL_REGISTRY_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/external-registry.yaml")
+EXTERNAL_REGISTRY_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/external-registry.yaml")
 echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "registry.example.com"' \
   || fail "external-registry render: VALET_PREBUILD_REGISTRY does not carry externalRegistry.url verbatim"
 # External registry has no push/pull split — the PUSH host equals the pull URL.
@@ -207,7 +207,7 @@ echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_SANDBOX_IMAGE_PULL_SECRET: 
 pass "external-registry render: no bundled registry resources, VALET_PREBUILD_REGISTRY(_PUSH/_INSECURE)/pull-secret wired from externalRegistry.*"
 
 # --- registry: VALET_PREBUILD_REGISTRY wiring (bundled) --------------------
-BUNDLED_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/bundled.yaml")
+BUNDLED_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/bundled.yaml")
 # PULL host = localhost:<nodePort> (what kubelet resolves per-node).
 echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "localhost:30500"' \
   || fail "bundled render: VALET_PREBUILD_REGISTRY (pull host) is not localhost:<nodePort> — kubelet can't pull a cluster-DNS Service name"
@@ -280,7 +280,7 @@ helm template valet "$CHART_DIR" --kube-version 1.30.0 \
   --set observability.enabled=false \
   --set observability.otlpEndpoint="http://collector.example.com:4318" \
   > "$TMP_DIR/external-otel.yaml"
-EXTERNAL_OTEL_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/external-otel.yaml")
+EXTERNAL_OTEL_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/external-otel.yaml")
 echo "$EXTERNAL_OTEL_CONFIGMAP" | grep -q 'OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.example.com:4318"' \
   || fail "external otlpEndpoint not carried into the ConfigMap verbatim"
 if grep -q 'name: valet-otel-lgtm' "$TMP_DIR/external-otel.yaml"; then
