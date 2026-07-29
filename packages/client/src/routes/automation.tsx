@@ -3,6 +3,7 @@ import { PageContainer, PageHeader } from '@/components/layout/page-container';
 import { cn } from '@/lib/cn';
 
 const TABS = [
+  { path: '/automation/templates', label: 'Templates' },
   { path: '/automation/triggers', label: 'Triggers' },
   { path: '/automation/workflows', label: 'Workflows' },
   { path: '/automation/executions', label: 'Runs' },
