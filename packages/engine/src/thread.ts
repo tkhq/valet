@@ -1003,7 +1003,7 @@ export class Thread {
     modelId: string | null,
     reason: string = "set_via_api",
   ): Promise<{ fromModel: string; toModel: string }> {
-    const sessionDefault = this.session.options.model.id;
+    const sessionDefault = this.session.options.modelSpec ?? this.session.options.model.id;
     const before = this.modelOverride ?? sessionDefault;
     if (modelId === null) {
       this.modelOverride = undefined;
@@ -1053,9 +1053,11 @@ export class Thread {
     return this.session.options.model;
   }
 
-  /** Effective model spec string for this turn: thread override → session default id. */
+  /** Effective model spec string for this turn: thread override → session
+   *  default spec (`modelSpec` — the canonical form; `model.id` is the wire
+   *  id and only coincides for bare/internal resolution). */
   private turnModelSpec(): string {
-    return this.modelOverride ?? this.session.options.model.id;
+    return this.modelOverride ?? this.session.options.modelSpec ?? this.session.options.model.id;
   }
 
   /**
@@ -2451,7 +2453,7 @@ export class Thread {
               threadId: this.id,
               queueItemId: runningItemId ?? "",
               gateId: gate.id,
-              model: session.options.model.id,
+              model: session.options.modelSpec ?? session.options.model.id,
               toolCallId,
               toolName,
               toolArgs,

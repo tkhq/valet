@@ -5,7 +5,7 @@
  * plus the API key to run it with, sourced from org LLM-provider config
  * (llm-providers design doc, plan Task 5):
  *
- *   - Known kinds (`anthropic`/`openai`/`google`): the model comes from
+ *   - Known kinds (`anthropic`/`openai`/`google`/`openrouter`): the model comes from
  *     pi-ai's built-in registry (`getModel`); the key is the org credential at
  *     `llm:{rowId}` when a provider row + key exist, else pi-ai's env fallback
  *     (`getEnvApiKey`). With no row at all (zero-config boot) the env key still
@@ -15,14 +15,16 @@
  *     is NO env fallback, so a missing key throws `provider {name} has no API
  *     key`.
  *
- * Canonical-id round-trip (Task 1 adversarial-review carry-forward 1): the
- * engine persists the returned `model.id` and feeds it BACK to this resolver at
- * every turn start, so resolution MUST be idempotent on its own output. pi-ai
- * registry models carry bare canonical ids (`claude-haiku-4-5`, `gpt-x`) that
- * would round-trip ambiguously (a bare `gpt-x` reads as Anthropic under the
- * back-compat rule), so every returned model's `id` is rewritten to the FULL
- * namespaced form (`{namespace}/{modelId}`). `resolve(resolve(spec).model.id)`
- * then yields the same provider + key for anthropic, openai, and custom specs.
+ * Canonical-id round-trip (Task 1 adversarial-review carry-forward 1, revised
+ * with the openrouter extension): the engine persists `canonicalId` (the
+ * caller's namespaced spec, echoed verbatim) and feeds it BACK to this
+ * resolver at every turn start, so `resolve(resolve(spec).canonicalId)` MUST
+ * be idempotent. The returned `model.id` is the provider-WIRE id (registry /
+ * custom-entry id, e.g. `gpt-4.1`, `deepseek/deepseek-v4-pro`) — pi-ai sends
+ * it verbatim as the request `model` parameter, so rewriting it to the
+ * namespaced form (the pre-openrouter behavior) broke the actual provider
+ * call for every namespaced spec. Bare Anthropic specs are the degenerate
+ * case where wire id and canonical spec coincide.
  *
  * Return contract (mirrors the engine seam's `ResolvedModel | null`):
  *   - `null` — the spec is genuinely unknown (no such registry model). The
@@ -46,11 +48,18 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 
-/** The three registry-backed kinds (narrower than `LlmProviderKind`). */
-type KnownKind = "anthropic" | "openai" | "google";
+/** The registry-backed kinds (narrower than `LlmProviderKind`). Note
+ * `openrouter` model ids themselves contain slashes
+ * (`deepseek/deepseek-v4-pro`), so a namespaced spec nests:
+ * `openrouter/deepseek/deepseek-v4-pro`. `parseModelId` splits on the
+ * FIRST slash only, so `modelId` keeps its inner slash and the registry
+ * lookup + canonical-id round-trip both hold. Resolution deliberately
+ * accepts ANY registry model — the curated selection on openrouter rows
+ * (`services/openrouter.ts`) governs catalog/picker visibility only. */
+type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
 
 function isKnownKindNamespace(ns: string): ns is KnownKind {
-  return ns === "anthropic" || ns === "openai" || ns === "google";
+  return ns === "anthropic" || ns === "openai" || ns === "google" || ns === "openrouter";
 }
 
 /** Shared no-key message for the two registry-model credential-throw sites. */
@@ -71,30 +80,42 @@ async function orgKey(credentials: CredentialStore, orgId: string, rowId: string
 }
 
 /**
- * Registry model with its `id` rewritten to the caller's canonical spec so the
- * persisted id round-trips back to the same provider (carry-forward 1). A
- * namespaced input (`openai/gpt-x`) keeps its namespace — critical so a bare
- * `gpt-x` can never be re-read as Anthropic; a bare input (`claude-haiku-4-5`)
- * stays bare, since a bare id is Anthropic back-compat by definition and
- * re-resolves to Anthropic unambiguously.
+ * Registry lookup for a known kind. The returned model keeps its REGISTRY id
+ * (`gpt-4.1`, `deepseek/deepseek-v4-pro`) — that's the wire id pi-ai sends
+ * verbatim as the request `model` parameter, and a namespaced rewrite here
+ * breaks the actual provider call (OpenRouter 400s on
+ * `openrouter/vendor/model`; same class of failure for every namespaced
+ * spec). Round-tripping is `ResolvedModel.canonicalId`'s job: the engine
+ * persists/re-feeds the canonical spec, never the wire id.
  */
-function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonicalId: string): Model<any> | null {
+function registryModel(kind: KnownKind, modelId: string): Model<any> | null {
   // pi-ai's getModel is typed against its compile-time MODELS table; we accept
   // user-configurable ids and cast at the boundary (same idiom as the retired
   // hardcoded resolveModel). Runtime lookup is dynamic, so an unknown id yields
   // undefined rather than a type error. The engine accepts Model<any>.
-  const model = getModel(kind as "anthropic", modelId as "claude-haiku-4-5");
+  return getModel(kind as "anthropic", modelId as "claude-haiku-4-5") ?? null;
+}
+
+/** The canonical-id variant, used ONLY for `NoCredentialsError.model` — the
+ * attached model exists so setModel-style validation can accept a keyless
+ * spec, and its `id` doubles as the user-facing spec in error surfaces. It
+ * never reaches a wire call (turn start re-resolves and throws again while
+ * the key is still missing). */
+function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonicalId: string): Model<any> | null {
+  const model = registryModel(kind, modelId);
   if (!model) return null;
   return { ...model, id: canonicalId };
 }
 
 /** Synthesize a `Model<"openai-completions">` for a custom provider's model
- * entry. `id` is the full namespaced spec so it round-trips (carry-forward 1). */
+ * entry. `id` is the WIRE id (`entry.id`, what the upstream endpoint's
+ * `model` parameter expects); round-tripping is carried by
+ * `ResolvedModel.canonicalId` (`{rowId}/{modelId}`), not the model object. */
 function synthesizeCustomModel(row: LlmProviderRow, modelId: string): Model<"openai-completions"> | null {
   const entry = row.models.find((m) => m.id === modelId);
   if (!entry) return null;
   return {
-    id: `${row.id}/${entry.id}`,
+    id: entry.id,
     name: entry.name,
     api: "openai-completions",
     provider: row.id,
@@ -137,18 +158,23 @@ export async function resolveModelSpec(
     if (isKnownProviderKind(row.kind)) {
       // Guaranteed by isKnownProviderKind; narrow for the registry lookup.
       const kind = row.kind as KnownKind;
-      const model = registryModelWithCanonicalId(kind, modelId, canonicalId);
+      const model = registryModel(kind, modelId);
       if (!model) return null;
       const apiKey = (await orgKey(credentials, orgId, row.id)) ?? getEnvApiKey(kind);
-      if (apiKey === undefined) throw new NoCredentialsError(noKeyMessage(canonicalId), model);
-      return { model, apiKey };
+      if (apiKey === undefined) {
+        throw new NoCredentialsError(
+          noKeyMessage(canonicalId),
+          registryModelWithCanonicalId(kind, modelId, canonicalId) ?? model,
+        );
+      }
+      return { model, apiKey, canonicalId };
     }
     // Custom (openai_compatible): org key only, no env fallback.
     const model = synthesizeCustomModel(row, modelId);
     if (!model) throw new Error(`model ${modelId} is not active on provider ${row.name}`);
     const apiKey = await orgKey(credentials, orgId, row.id);
-    if (!apiKey) throw new NoCredentialsError(`provider ${row.name} has no API key`, model);
-    return { model, apiKey };
+    if (!apiKey) throw new NoCredentialsError(`provider ${row.name} has no API key`, { ...model, id: canonicalId });
+    return { model, apiKey, canonicalId };
   }
 
   // No provider row for this namespace.
@@ -157,11 +183,16 @@ export async function resolveModelSpec(
     // no key ANYWHERE (there is no org row to hold one) — throw the explicit
     // credential signal so the engine's bounded pre-run release path handles
     // it instead of burning the turn on a keyless model call.
-    const model = registryModelWithCanonicalId(namespace, modelId, canonicalId);
+    const model = registryModel(namespace, modelId);
     if (!model) return null;
     const apiKey = getEnvApiKey(namespace);
-    if (apiKey === undefined) throw new NoCredentialsError(noKeyMessage(canonicalId), model);
-    return { model, apiKey };
+    if (apiKey === undefined) {
+      throw new NoCredentialsError(
+        noKeyMessage(canonicalId),
+        registryModelWithCanonicalId(namespace, modelId, canonicalId) ?? model,
+      );
+    }
+    return { model, apiKey, canonicalId };
   }
 
   // A non-known namespace with no matching row is a deleted/unknown custom

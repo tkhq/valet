@@ -1128,10 +1128,19 @@ export interface SkillInvokeOptions {
  * run the turn on, plus an optional per-turn API key. `apiKey` undefined means
  * "no host key — use pi-ai's env-var fallback". Produced by the host, consumed
  * by the engine at turn start and by `Session.setModel`/`Thread.setModel`.
+ *
+ * `model.id` is the provider-WIRE id — pi-ai sends it verbatim as the request
+ * `model` parameter, so it must be exactly what the provider's API accepts
+ * (e.g. `gpt-4.1`, `deepseek/deepseek-v4-pro`), never a Valet-namespaced
+ * spec. `canonicalId` is the namespaced spec the engine persists and feeds
+ * BACK to the resolver on later turns (`openai/gpt-4.1`,
+ * `openrouter/deepseek/deepseek-v4-pro`); it defaults to `model.id` when
+ * absent (bare Anthropic back-compat, where wire id and spec coincide).
  */
 export interface ResolvedModel {
   model: Model<any>;
   apiKey?: string;
+  canonicalId?: string;
 }
 
 export interface CreateSessionOptions {
@@ -1147,6 +1156,16 @@ export interface CreateSessionOptions {
   roles?: RoleSpec[];
   skills?: SkillSource[];
   model: Model<any>;
+  /**
+   * The session default model's canonical (namespaced) spec — what
+   * `SessionData.model` persists and what `resolveModel` re-receives on
+   * later turns. Absent → `model.id` is used (correct whenever wire id and
+   * spec coincide, i.e. bare Anthropic ids / internal resolution). Hosts
+   * with a `resolveModel` seam SHOULD set this whenever the resolved
+   * model's wire id differs from the spec (`openai/…`, `openrouter/…`,
+   * custom `{rowId}/…`).
+   */
+  modelSpec?: string;
   modelFailover?: Model<any>[];
   /**
    * Optional host-provided model resolver. Absent === the engine's current

@@ -616,7 +616,10 @@ export class Session {
       sandboxId: this.attachment.sandboxId,
       parentSessionId: this.parentSessionId,
       parentThreadId: this.parentThreadId,
-      model: this.options.model.id,
+      // The canonical spec, not the wire id — `modelSpec` differs from
+      // `model.id` whenever the host resolver returned a wire-ready model
+      // for a namespaced spec (see `ResolvedModel.canonicalId`).
+      model: this.options.modelSpec ?? this.options.model.id,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -634,7 +637,7 @@ export class Session {
     modelId: string,
     reason: string = "set_via_api",
   ): Promise<{ fromModel: string; toModel: string }> {
-    const before = this.options.model.id;
+    const before = this.options.modelSpec ?? this.options.model.id;
     // With a host resolver present, validate through it (null → same "unknown
     // model id" surface as the internal resolver's undefined). Absent → today's
     // internal `resolveModelId` path, unchanged. NoCredentialsError means the
@@ -651,19 +654,22 @@ export class Session {
     }
     if (!next) throw new Error(`unknown model id: ${modelId}`);
     this.options.model = next;
+    // The caller's spec — NOT `next.id` — is the identity the session
+    // persists and re-resolves (wire id may differ; ResolvedModel.canonicalId).
+    this.options.modelSpec = modelId;
     await this.providers.store.saveSession(await this.toData());
-    if (before !== next.id) {
+    if (before !== modelId) {
       await this.emit({
         type: "model_switched",
         // session scope — no threadId. Bridge / wire types treat the
         // missing threadId as "session-level switch".
         threadId: undefined,
         fromModel: before,
-        toModel: next.id,
+        toModel: modelId,
         reason,
       });
     }
-    return { fromModel: before, toModel: next.id };
+    return { fromModel: before, toModel: modelId };
   }
 
   async emit(event: EngineEvent, opts?: EmitOptions): Promise<void> {

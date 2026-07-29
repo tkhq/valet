@@ -57,11 +57,13 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(resolved?.apiKey).toBe("env-anthropic");
     });
 
-    it("namespaced anthropic id keeps its namespace in the canonical id", async () => {
+    it("namespaced anthropic id keeps its namespace in the canonical id (wire id stays bare)", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
       const resolved = await resolveModelSpec(db, credentials, orgId, `anthropic/${ANTHROPIC_MODEL}`);
       expect(resolved?.model.provider).toBe("anthropic");
-      expect(resolved?.model.id).toBe(`anthropic/${ANTHROPIC_MODEL}`);
+      // model.id is the WIRE id — what pi-ai sends to the provider verbatim.
+      expect(resolved?.model.id).toBe(ANTHROPIC_MODEL);
+      expect(resolved?.canonicalId).toBe(`anthropic/${ANTHROPIC_MODEL}`);
     });
 
     it("unknown model on a known kind returns null (setModel → 'unknown model id')", async () => {
@@ -161,7 +163,8 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       const resolved = await resolveModelSpec(db, credentials, orgId, `${row.id}/qwen-coder`);
       expect(resolved).not.toBeNull();
       const m = resolved!.model;
-      expect(m.id).toBe(`${row.id}/qwen-coder`); // full namespaced spec → round-trips
+      expect(m.id).toBe("qwen-coder"); // WIRE id — what the upstream endpoint expects
+      expect(resolved!.canonicalId).toBe(`${row.id}/qwen-coder`); // spec round-trips via canonicalId
       expect(m.name).toBe("Qwen Coder");
       expect(m.api).toBe("openai-completions");
       expect(m.provider).toBe(row.id);
@@ -267,10 +270,12 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       const row = await createLlmProvider(db, { orgId, kind: "openai", name: "OpenAI" });
       await saveKey(row.id, "org-openai");
       const r1 = await resolveModelSpec(db, credentials, orgId, `openai/${OPENAI_MODEL}`);
-      const r2 = await resolveModelSpec(db, credentials, orgId, r1!.model.id);
-      expect(r1?.model.id).toBe(`openai/${OPENAI_MODEL}`);
+      const r2 = await resolveModelSpec(db, credentials, orgId, r1!.canonicalId!);
+      expect(r1?.model.id).toBe(OPENAI_MODEL); // wire id
+      expect(r1?.canonicalId).toBe(`openai/${OPENAI_MODEL}`); // persisted spec
       expect(r2?.model.provider).toBe("openai");
       expect(r2?.model.id).toBe(r1?.model.id);
+      expect(r2?.canonicalId).toBe(r1?.canonicalId);
       expect(r2?.apiKey).toBe(r1?.apiKey);
     });
 
@@ -284,10 +289,39 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       });
       await saveKey(row.id, "org-custom");
       const r1 = await resolveModelSpec(db, credentials, orgId, `${row.id}/m1`);
-      const r2 = await resolveModelSpec(db, credentials, orgId, r1!.model.id);
+      const r2 = await resolveModelSpec(db, credentials, orgId, r1!.canonicalId!);
+      expect(r1?.model.id).toBe("m1"); // wire id
+      expect(r1?.canonicalId).toBe(`${row.id}/m1`);
       expect(r2?.model.provider).toBe(row.id);
       expect(r2?.model.id).toBe(r1?.model.id);
+      expect(r2?.canonicalId).toBe(r1?.canonicalId);
       expect(r2?.apiKey).toBe(r1?.apiKey);
+    });
+
+    it("openrouter — NESTED-slash model id survives the round-trip", async () => {
+      // Registry model ids themselves contain a slash
+      // (`deepseek/deepseek-v4-pro`), so the namespaced spec has two:
+      // `parseModelId` must split on the FIRST only, and the WIRE id keeps
+      // its inner slash un-prefixed (OpenRouter 400s on `openrouter/x/y`).
+      const row = await createLlmProvider(db, { orgId, kind: "openrouter", name: "OpenRouter" });
+      await saveKey(row.id, "org-openrouter");
+      const spec = "openrouter/deepseek/deepseek-v4-pro";
+      const r1 = await resolveModelSpec(db, credentials, orgId, spec);
+      expect(r1?.model.id).toBe("deepseek/deepseek-v4-pro"); // wire id
+      expect(r1?.canonicalId).toBe(spec);
+      expect(r1?.model.baseUrl).toBe("https://openrouter.ai/api/v1");
+      expect(r1?.apiKey).toBe("org-openrouter");
+      const r2 = await resolveModelSpec(db, credentials, orgId, r1!.canonicalId!);
+      expect(r2?.model.id).toBe(r1?.model.id);
+      expect(r2?.canonicalId).toBe(r1?.canonicalId);
+      expect(r2?.apiKey).toBe(r1?.apiKey);
+    });
+
+    it("openrouter — env fallback via OPENROUTER_API_KEY with no row (zero-config)", async () => {
+      vi.stubEnv("OPENROUTER_API_KEY", "env-openrouter");
+      const r = await resolveModelSpec(db, credentials, orgId, "openrouter/moonshotai/kimi-k2.6");
+      expect(r?.model.provider).toBe("openrouter");
+      expect(r?.apiKey).toBe("env-openrouter");
     });
   });
 
@@ -431,7 +465,8 @@ describe("EngineHost model resolution wiring", () => {
       workspace: "/tmp",
     });
     await session.setModel(spec);
-    expect(session.options.model.id).toBe(spec);
+    expect(session.options.modelSpec).toBe(spec);
+    expect(session.options.model.id).toBe("m1"); // wire id
 
     engineHost.evictAll();
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
@@ -469,7 +504,8 @@ describe("EngineHost model resolution wiring", () => {
       workspace: "/tmp",
     });
     await session.setModel(spec);
-    expect(session.options.model.id).toBe(spec);
+    expect(session.options.modelSpec).toBe(spec);
+    expect(session.options.model.id).toBe("m1"); // wire id
 
     engineHost.evictAll();
     // Change the user default to prove restore prefers the persisted model.
@@ -480,7 +516,8 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       workspace: "/tmp",
     });
-    expect(restored.options.model.id).toBe(spec);
+    expect(restored.options.modelSpec).toBe(spec);
+    expect(restored.options.model.id).toBe("m1"); // wire id, restored verbatim
     expect(restored.options.model.provider).toBe(row.id);
   });
 });

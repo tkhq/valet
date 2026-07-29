@@ -260,7 +260,9 @@ sessionsRouter.get("/:id", async (c) => {
   let model: string | undefined;
   if (engineHost.isLive(id)) {
     const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-    model = engineSession.options.model.id;
+    // The canonical spec, not the wire id (`modelSpec` differs whenever the
+    // resolver returned a wire-ready model for a namespaced spec).
+    model = engineSession.options.modelSpec ?? engineSession.options.model.id;
   }
 
   const repos = await getSessionRepos(db, id);
@@ -314,7 +316,7 @@ sessionsRouter.patch("/:id", async (c) => {
   const detail: GetSessionResponse = {
     ...rowToSummary(row),
     messageCount: Number(n ?? 0),
-    model: engineSession.options.model.id,
+    model: engineSession.options.modelSpec ?? engineSession.options.model.id,
     profile: row.profile,
   };
   return c.json(detail);

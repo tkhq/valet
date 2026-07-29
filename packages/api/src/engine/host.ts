@@ -223,6 +223,13 @@ export interface SessionMeta {
   userEmail?: string;
 }
 
+/** A session build's model pair: the wire-ready pi-ai model object plus the
+ * canonical spec the session persists (`CreateSessionOptions.modelSpec`). */
+interface BuildModel {
+  model: Model<any>;
+  spec: string;
+}
+
 interface CacheEntry {
   engine: Engine;
   session: Session;
@@ -456,7 +463,7 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -484,6 +491,7 @@ export class EngineHost {
             workspace: meta.workspace,
             sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
             model,
+            modelSpec,
             resolveModel,
             systemPrompt: SYSTEM_PROMPT,
             tools: extras.tools.length ? extras.tools : undefined,
@@ -500,6 +508,7 @@ export class EngineHost {
           workspace: meta.workspace,
           sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
           model,
+          modelSpec,
           resolveModel,
           systemPrompt: SYSTEM_PROMPT,
           tools: extras.tools.length ? extras.tools : undefined,
@@ -767,7 +776,7 @@ export class EngineHost {
     const personaPrefix = await this.resolvePersonaPrefix(db, scope, meta.orgId, principal);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // Built FRESH per session build, never cached on the host — see the
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
@@ -785,6 +794,7 @@ export class EngineHost {
       queueMode,
       sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
       systemPrompt: personaPrefix + orchestratorPersona(principal),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -1055,22 +1065,24 @@ export class EngineHost {
    * return means the spec names no known model — surfaced as an error so a
    * session never silently boots on the wrong model.
    */
-  private async resolveModelObject(orgId: string, spec: string): Promise<Model<any>> {
-    // Session builds only need the model OBJECT; NoCredentialsError means the
-    // spec is valid but no key exists yet — accept via the attached model so
-    // a keyless org can still open sessions (turns get the engine's bounded
-    // credential-release path instead of a failed build).
+  private async resolveModelObject(orgId: string, spec: string): Promise<BuildModel> {
+    // Session builds need the model OBJECT plus the canonical spec the
+    // session should persist (`CreateSessionOptions.modelSpec` — the wire
+    // `model.id` may differ for namespaced specs). NoCredentialsError means
+    // the spec is valid but no key exists yet — accept via the attached
+    // model so a keyless org can still open sessions (turns get the
+    // engine's bounded credential-release path instead of a failed build).
     let resolved: ResolvedModel | null;
     try {
       resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
     } catch (err) {
-      if (err instanceof NoCredentialsError) return err.model;
+      if (err instanceof NoCredentialsError) return { model: err.model, spec };
       throw err;
     }
     if (!resolved) {
       throw new Error(`EngineHost: unknown model "${spec}" — not in the org catalog or pi-ai registry`);
     }
-    return resolved.model;
+    return { model: resolved.model, spec: resolved.canonicalId ?? resolved.model.id };
   }
 
   /**
@@ -1174,7 +1186,7 @@ export class EngineHost {
     userId: string,
     orgId: string,
     overrideId?: string,
-  ): Promise<Model<any>> {
+  ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       overrideId ??
@@ -1233,7 +1245,7 @@ export class EngineHost {
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
-    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
@@ -1248,6 +1260,7 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
@@ -1324,7 +1337,7 @@ export class EngineHost {
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
@@ -1337,6 +1350,7 @@ export class EngineHost {
       owner: opts.owner,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
