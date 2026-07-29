@@ -9,3 +9,5 @@ dist
 .superpowers
 backend/__pycache__
 backend/.venv
+.claude
+**/node_modules
