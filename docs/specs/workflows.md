@@ -251,10 +251,18 @@ Terminal states: `completed`, `failed`, `cancelled`. The `cleanupCompletedAt` co
 
 Active executions (`pending`, `running`, `waiting_approval`, `waiting_time`) are counted:
 
-- **Per-user limit:** 10 (`PER_USER_EXECUTION_CONCURRENCY_CAP`)
-- **Global limit:** 50 (`GLOBAL_EXECUTION_CONCURRENCY_CAP`)
+- **Per-user limit:** 30 (`PER_USER_EXECUTION_CONCURRENCY_CAP`), raisable per user via `users.max_workflow_executions` (NULL = default)
+- **Global limit:** 150 (`GLOBAL_EXECUTION_CONCURRENCY_CAP`), not overridable
+
+Both ceilings come from `resolveWorkflowConcurrencyLimits` in `lib/db/executions.ts`. Callers must not read `users.max_workflow_executions` directly — the pre-dispatch check (`checkWorkflowConcurrency`, used by the schedule and webhook paths) and the authoritative check inside `createExecution` have to agree, and past drift between the two caused regressions.
+
+The global cap bounds D1 write throughput more than it bounds Cloudflare Workflows instances: every node transition writes a `workflow_execution_nodes` row, and D1 serializes writes per binding. Raise it with that in mind rather than treating it as a Workflows quota.
 
 `cancelling` is intentionally excluded from the active set so a user who just cancelled can immediately start new work — the cron sweep finalizes asynchronously.
+
+Neither cap queues. A rejected start returns `rate_limited` and the caller is responsible for retrying; the schedule path treats `rate_limited` as transient and releases the claimed tick so the catch-up pass can retry it inside the look-back window.
+
+**Bottleneck note:** a workflow whose `session` or `orchestrator` nodes spawn sessions is also bounded by the per-user active-session cap (`users.max_active_sessions`, default 10), which is counted separately. Raising execution concurrency alone will not increase throughput for those workflows.
 
 ## API Contract
 
@@ -403,7 +411,7 @@ For editor typeahead and edge inspection, `foreach` nodes expose their runtime r
 | `if` | Branches on a `conditions` array; downstream edges carry `fromOutput: 'true' \| 'false'`. |
 | `wait` | Durable pause via `step.sleep` for a compact duration string (`'5s'`, `'1h'`). |
 | `approval` | Human approval gate via `workflow_approvals` + `step.waitForEvent`. |
-| `foreach` | Iterates over a typed array output. Body is a single node of a permitted subtype (`llm`, `tool`, `set`, `stop`, `orchestrator`, `session`). Optional `maxItems` truncates the input array before execution; when omitted the runtime processes up to 100 items by default. Explicit `maxItems` may be raised up to the workflow policy ceiling, which defaults to the 5000-iteration execution cap. |
+| `foreach` | Iterates over a typed array output. Body is a single node of a permitted subtype (`llm`, `tool`, `set`, `stop`, `orchestrator`, `session`). Optional `maxItems` truncates the input array before execution; when omitted the runtime processes up to 100 items by default. Explicit `maxItems` may be raised up to the workflow policy ceiling, which defaults to the 5000-iteration execution cap. Optional `concurrency` (1–20, default 1) sets how many items run in parallel, bounded by `policy.maxForeachConcurrency` (defaults to 20, the schema maximum). |
 | `orchestrator` | Dispatch a prompt to the user's orchestrator in a fresh automation-origin thread. With `wait.mode: 'until_idle'`, the executor polls that created thread's prompt queue until it has no queued or processing prompts; it does not wait for the long-lived orchestrator session lifecycle to become idle. Waited nodes output the thread's raw final assistant text as `response`, message metadata as `lastMessage`, schema-validated structured data as `output` when `outputSchema` is set, and can opt into `resultMode: 'transcript'`. |
 | `session` | Start or resume a session and run a prompt. With `wait.mode: 'until_idle'`, the executor first honors terminal D1 lifecycle states (`idle`, `hibernated`, `terminated`), then polls `SessionAgentDO /status` for active sessions and resolves when a runner is connected, `runnerBusy` is false, and no prompts are queued. Waited nodes read the session transcript after idle and output the final assistant reply as `response`, plus schema-validated structured data as `output` when `outputSchema` is set. |
 | `stop` | Terminate the workflow with an outcome envelope. |

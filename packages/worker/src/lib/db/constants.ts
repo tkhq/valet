@@ -39,11 +39,22 @@ export const CLEANUP_CAS_PRIOR_STATUSES = [
   'cancelling',
 ] as const satisfies readonly string[];
 
-/** Per-user concurrency cap (spec §"Retry, Concurrency, And Quota"). */
-export const PER_USER_EXECUTION_CONCURRENCY_CAP = 10;
+/**
+ * Default per-user concurrency cap (spec §"Retry, Concurrency, And Quota").
+ * A user row may raise its own ceiling via `users.max_workflow_executions`;
+ * resolveWorkflowConcurrencyLimits() in lib/db/executions.ts is the only
+ * place that reads the override, and every caller goes through it.
+ */
+export const PER_USER_EXECUTION_CONCURRENCY_CAP = 30;
 
-/** Per-worker global cap. */
-export const GLOBAL_EXECUTION_CONCURRENCY_CAP = 50;
+/**
+ * Per-worker global cap. Sized at ~5x the per-user default so a handful of
+ * tenants can run at their full per-user ceiling concurrently. This bounds
+ * D1 write pressure more than it bounds Cloudflare Workflows instances:
+ * every node transition writes a workflow_execution_nodes row, and D1
+ * serializes writes per binding.
+ */
+export const GLOBAL_EXECUTION_CONCURRENCY_CAP = 150;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

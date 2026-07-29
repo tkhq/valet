@@ -371,6 +371,27 @@ describe('validateDefinition', () => {
     expect(blockingErrors(validateDefinition(def))).toEqual([]);
   });
 
+  it('rejects foreach concurrency above the schema maximum', () => {
+    const def = definition({
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { items: { type: 'array' } } },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{trigger.data.items}}',
+          concurrency: 21,
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'loop', to: 'finish' }],
+    });
+
+    // 21 is above foreachNodeSchema's .max(20), so the shape guard rejects it
+    // before the policy rule runs. Either way it must not publish.
+    expect(blockingErrors(validateDefinition(def)).length).toBeGreaterThan(0);
+  });
+
   it('still rejects foreach concurrency above a policy that lowers the ceiling', () => {
     // The default now equals the schema's own cap (20), so no valid node can
     // exceed it. The ceiling still has to bite when a definition lowers it.

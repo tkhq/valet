@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import type { AppDb } from '../lib/drizzle.js';
 import { setOrgLlmKey } from './admin.js';
+import { PER_USER_EXECUTION_CONCURRENCY_CAP } from '../lib/db/constants.js';
 import type { WorkflowDefinition } from '@valet/shared';
 
 let db: AppDb;
@@ -355,5 +356,82 @@ describe('createExecution', () => {
       trigger: { type: 'manual', timestamp: 't', data: {}, metadata: {} },
       definitionSource: 'draft',
     })).rejects.toBeInstanceOf(WorkflowExecutionStartError);
+  });
+
+  // ── Concurrency ceilings ──────────────────────────────────────────────
+  // Seeds active rows directly rather than starting real executions so the
+  // test states the boundary it cares about instead of depending on the
+  // default's numeric value.
+
+  let seededCounter = 0;
+  function seedActiveExecutions(userId: string, count: number) {
+    for (let i = 0; i < count; i++) {
+      db.insert(workflowExecutions).values({
+        id: `${userId}-active-${++seededCounter}`,
+        workflowId: 'wf-cap',
+        userId,
+        status: 'running',
+        triggerType: 'manual',
+        startedAt: 't',
+      }).run();
+    }
+  }
+
+  it('rejects with rate_limited once the user is at the default per-user cap', async () => {
+    makeWorkflow('wf-cap', dagWithSet());
+    seedActiveExecutions('u1', PER_USER_EXECUTION_CONCURRENCY_CAP);
+    const env = makeEnv();
+
+    const err = await createExecution(env, {
+      workflowId: 'wf-cap',
+      user: { id: 'u1' },
+      trigger: { type: 'manual', timestamp: 't', data: { x: 'hi' }, metadata: {} },
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(WorkflowExecutionStartError);
+    expect((err as WorkflowExecutionStartError).code).toBe('rate_limited');
+    expect((err as WorkflowExecutionStartError).message).toContain(
+      `cap is ${PER_USER_EXECUTION_CONCURRENCY_CAP}`,
+    );
+    expect(createdInstances).toHaveLength(0);
+  });
+
+  it('honours users.max_workflow_executions as a per-user override', async () => {
+    makeWorkflow('wf-cap', dagWithSet());
+    const raised = PER_USER_EXECUTION_CONCURRENCY_CAP + 5;
+    db.update(users).set({ maxWorkflowExecutions: raised }).where(eq(users.id, 'u1')).run();
+    // At the default cap, but under the override — must be admitted.
+    seedActiveExecutions('u1', PER_USER_EXECUTION_CONCURRENCY_CAP);
+    const env = makeEnv();
+
+    const result = await createExecution(env, {
+      workflowId: 'wf-cap',
+      user: { id: 'u1' },
+      trigger: { type: 'manual', timestamp: 't', data: { x: 'hi' }, metadata: {} },
+    });
+    expect(result.status).toBe('pending');
+
+    // ...and the override is still a ceiling, not a bypass.
+    seedActiveExecutions('u1', 5);
+    const err = await createExecution(env, {
+      workflowId: 'wf-cap',
+      user: { id: 'u1' },
+      trigger: { type: 'manual', timestamp: 't', data: { x: 'hi' }, metadata: {} },
+    }).catch((e: unknown) => e);
+    expect((err as WorkflowExecutionStartError).code).toBe('rate_limited');
+    expect((err as WorkflowExecutionStartError).message).toContain(`cap is ${raised}`);
+  });
+
+  it('does not let one user\'s active executions count against another', async () => {
+    makeWorkflow('wf-cap', dagWithSet());
+    seedActiveExecutions('u2', PER_USER_EXECUTION_CONCURRENCY_CAP);
+    const env = makeEnv();
+
+    const result = await createExecution(env, {
+      workflowId: 'wf-cap',
+      user: { id: 'u1' },
+      trigger: { type: 'manual', timestamp: 't', data: { x: 'hi' }, metadata: {} },
+    });
+    expect(result.status).toBe('pending');
   });
 });

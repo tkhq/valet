@@ -16,6 +16,7 @@ export const users = sqliteTable('users', {
   modelPreferences: text({ mode: 'json' }).$type<string[]>(),
   discoveredModels: text({ mode: 'json' }),
   maxActiveSessions: integer(),
+  maxWorkflowExecutions: integer(),
   uiQueueMode: text().default('followup'),
   timezone: text(),
   codeReviewEnabled: integer({ mode: 'boolean' }).notNull().default(true),

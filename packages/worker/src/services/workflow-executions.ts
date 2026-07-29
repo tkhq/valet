@@ -19,7 +19,7 @@
 import { activeTraceparent } from '../lib/tracing.js';
 import type { Env } from '../env.js';
 import { getDb } from '../lib/drizzle.js';
-import { eq, inArray, and } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { workflowExecutions } from '../lib/schema/workflows.js';
 import { workflows } from '../lib/schema/workflows.js';
 import { workflowDefinitionVersions } from '../lib/schema/workflow-definition-versions.js';
@@ -80,7 +80,11 @@ export interface CreateExecutionResult {
   status: 'pending';
 }
 
-import { ACTIVE_EXECUTION_STATUSES, GLOBAL_EXECUTION_CONCURRENCY_CAP, PER_USER_EXECUTION_CONCURRENCY_CAP } from '../lib/db/constants.js';
+import {
+  countActiveExecutions,
+  countActiveExecutionsGlobal,
+  resolveWorkflowConcurrencyLimits,
+} from '../lib/db/executions.js';
 
 export async function createExecution(env: Env, input: CreateExecutionInput): Promise<CreateExecutionResult> {
   const db = getDb(env.DB);
@@ -205,35 +209,31 @@ export async function createExecution(env: Env, input: CreateExecutionInput): Pr
   // 5. Concurrency caps. Per-user + global. Test-run uses the same
   // helper, so the draft path can't bypass the global cap. Race window:
   // a parallel request could also pass these checks and both inserts
-  // succeed (D1 has no SERIALIZABLE isolation). At the MVP caps,
-  // briefly going one over is acceptable; tighten later via an atomic
-  // counter if it matters.
+  // succeed (D1 has no SERIALIZABLE isolation). Briefly going a few over
+  // is acceptable; tighten later via an atomic counter if it matters.
+  // The window widens with the cap — a fan-out driver firing 30 requests
+  // at once can overshoot by more than the old cap of 10 allowed.
   //
-  // ACTIVE_EXECUTION_STATUSES + the caps live in lib/db/constants.ts
-  // as the single source of truth.
-  const activeNow = (await db.select({ id: workflowExecutions.id })
-    .from(workflowExecutions)
-    .where(and(
-      eq(workflowExecutions.userId, input.user.id),
-      inArray(workflowExecutions.status, [...ACTIVE_EXECUTION_STATUSES]),
-    ))
-    .all()).length;
-  if (activeNow >= PER_USER_EXECUTION_CONCURRENCY_CAP) {
+  // Counting and ceiling resolution both go through lib/db/executions so
+  // this check and checkWorkflowConcurrency can't drift — that drift is
+  // what caused the round-2/round-3 regressions. The count helpers use
+  // COUNT(*); the id-list form this replaced would pull back every active
+  // row, which at the raised global cap means 150 rows per start.
+  const limits = await resolveWorkflowConcurrencyLimits(db, input.user.id);
+  const activeNow = await countActiveExecutions(db, input.user.id);
+  if (activeNow >= limits.perUser) {
     throw new WorkflowExecutionStartError(
       'rate_limited',
-      `user has ${activeNow} active workflow executions; cap is ${PER_USER_EXECUTION_CONCURRENCY_CAP}`,
-      { active: activeNow, limit: PER_USER_EXECUTION_CONCURRENCY_CAP },
+      `user has ${activeNow} active workflow executions; cap is ${limits.perUser}`,
+      { active: activeNow, limit: limits.perUser },
     );
   }
-  const globalActive = (await db.select({ id: workflowExecutions.id })
-    .from(workflowExecutions)
-    .where(inArray(workflowExecutions.status, [...ACTIVE_EXECUTION_STATUSES]))
-    .all()).length;
-  if (globalActive >= GLOBAL_EXECUTION_CONCURRENCY_CAP) {
+  const globalActive = await countActiveExecutionsGlobal(db);
+  if (globalActive >= limits.global) {
     throw new WorkflowExecutionStartError(
       'rate_limited',
-      `${globalActive} active workflow executions globally; cap is ${GLOBAL_EXECUTION_CONCURRENCY_CAP}`,
-      { active: globalActive, limit: GLOBAL_EXECUTION_CONCURRENCY_CAP },
+      `${globalActive} active workflow executions globally; cap is ${limits.global}`,
+      { active: globalActive, limit: limits.global },
     );
   }
 

@@ -1,7 +1,7 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import { eq, and, sql, inArray } from 'drizzle-orm';
 import type { AppDb } from '../drizzle.js';
-import { workflowExecutions } from '../schema/index.js';
+import { users, workflowExecutions } from '../schema/index.js';
 
 // ─── Pure Helpers ────────────────────────────────────────────────────────────
 
@@ -105,7 +105,47 @@ export async function checkIdempotencyKey(
 // ACTIVE_EXECUTION_STATUSES lives in lib/db/constants.ts as the single
 // source of truth — see the rationale there.
 
-import { ACTIVE_EXECUTION_STATUSES } from './constants.js';
+import {
+  ACTIVE_EXECUTION_STATUSES,
+  GLOBAL_EXECUTION_CONCURRENCY_CAP,
+  PER_USER_EXECUTION_CONCURRENCY_CAP,
+} from './constants.js';
+
+export interface WorkflowConcurrencyLimits {
+  perUser: number;
+  global: number;
+}
+
+/**
+ * Resolve the effective concurrency ceilings for a user. `users.
+ * max_workflow_executions` is a per-user override (NULL = default),
+ * mirroring `users.max_active_sessions`.
+ *
+ * Only the per-user ceiling is overridable; the global cap is a property
+ * of the worker, not of the tenant, so a large per-user grant still can't
+ * consume more than the worker allows.
+ *
+ * Callers must not read the column directly — routing every path through
+ * here is what keeps the immediate check in startWorkflowExecution and the
+ * pre-dispatch check in checkWorkflowConcurrency from drifting apart.
+ */
+export async function resolveWorkflowConcurrencyLimits(
+  db: AppDb,
+  userId: string,
+): Promise<WorkflowConcurrencyLimits> {
+  const row = await db
+    .select({ maxWorkflowExecutions: users.maxWorkflowExecutions })
+    .from(users)
+    .where(eq(users.id, userId))
+    .get();
+  // Guard against a 0 or negative override silently wedging the user out of
+  // running anything; treat those as "unset" rather than "blocked".
+  const override = row?.maxWorkflowExecutions;
+  const perUser = typeof override === 'number' && override > 0
+    ? override
+    : PER_USER_EXECUTION_CONCURRENCY_CAP;
+  return { perUser, global: GLOBAL_EXECUTION_CONCURRENCY_CAP };
+}
 
 export async function countActiveExecutions(db: AppDb, userId: string): Promise<number> {
   const row = await db
