@@ -2792,7 +2792,15 @@ export class SessionAgentDO {
               cacheReadTokens: entry.cacheReadTokens ?? 0,
               cacheWriteTokens: entry.cacheWriteTokens ?? 0,
               reasoningTokens: entry.reasoningTokens ?? 0,
-              properties: { oc_message_id: entry.ocMessageId },
+              properties: {
+                oc_message_id: entry.ocMessageId,
+                // Ephemeral-session usage (memory-flush fork / review). Marked
+                // so cost reporting can attribute it to its own origin instead
+                // of silently inflating the session's own spend.
+                ...(msg.kind
+                  ? { usage_kind: msg.kind, ephemeral_session_id: msg.ephemeralSessionId }
+                  : {}),
+              },
             });
           }
         }

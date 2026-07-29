@@ -307,11 +307,30 @@ export interface UsageByPurposeModelRow extends LlmTokenSums {
 }
 
 /**
+ * Origin of a usage row: the session's purpose, unless the row is marked as
+ * ephemeral-session usage, which gets its own synthetic origin.
+ *
+ * Must be repeated verbatim in GROUP BY rather than referenced by its alias —
+ * `sessions` has a real `purpose` column, so a bare `GROUP BY purpose` binds to
+ * that column instead of this expression and collapses the origins back together.
+ */
+const AE_ORIGIN_EXPR = `
+  CASE json_extract(ae.properties, '$.usage_kind')
+    WHEN 'memory_flush' THEN 'memory_flush'
+    WHEN 'review' THEN 'review'
+    ELSE COALESCE(s.purpose, 'interactive')
+  END`;
+
+/**
  * Usage grouped by session ORIGIN (sessions.purpose: 'interactive' | 'workflow' | 'orchestrator')
  * × model. Model is retained so the route can compute cost per-model first (pricing is per-model)
  * and then roll up to a per-origin total. LEFT JOIN + COALESCE keeps any row whose session row is
  * missing (defaults to 'interactive'). No user_id filter — this is the origin split of ALL usage,
  * matching the by-model/hero scope.
+ *
+ * Usage from ephemeral OpenCode sessions (memory-flush forks, review sessions) is billed to the
+ * key but is not conversation work, so it gets its own synthetic origin from the row's usage_kind
+ * marker rather than being folded into the parent session's purpose.
  */
 export async function getUsageByPurposeModel(
   db: D1Database,
@@ -320,14 +339,14 @@ export async function getUsageByPurposeModel(
   const result = await db
     .prepare(`
       SELECT
-        COALESCE(s.purpose, 'interactive') as purpose,
+        ${AE_ORIGIN_EXPR} as purpose,
         ae.model,${AE_TOKEN_SUM_COLS},
         COUNT(*) as call_count
       FROM analytics_events ae
       LEFT JOIN sessions s ON s.id = ae.session_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
-      GROUP BY purpose, ae.model
+      GROUP BY ${AE_ORIGIN_EXPR}, ae.model
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)
     .bind(periodStart)
@@ -381,6 +400,9 @@ export async function getUsageByWorkflowModel(
       LEFT JOIN triggers t ON t.id = we.trigger_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        -- Ephemeral-session usage reports under its own origin, so exclude it
+        -- here to keep this drill-down consistent with the by-origin table.
+        AND json_extract(ae.properties, '$.usage_kind') IS NULL
       GROUP BY we.workflow_id, w.name, w.slug, t.type, ae.model
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)

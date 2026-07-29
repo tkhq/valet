@@ -592,7 +592,14 @@ export type RunnerToDOMessage =
   | { type: 'opencode-config-applied'; success: boolean; restarted: boolean; error?: string }
   | {
       type: 'usage-report';
-      turnId: string;
+      // Absent when the usage has no owning turn — ephemeral-session usage is
+      // attributed to the session rather than to a turn.
+      turnId?: string;
+      // Present when the usage came from an ephemeral OpenCode session (a
+      // memory-flush fork or a review session) rather than the session's own
+      // conversation, so cost reporting can break it out as its own origin.
+      kind?: 'memory_flush' | 'review';
+      ephemeralSessionId?: string;
       // Raw OpenCode token breakdown per message. Each entry mirrors the
       // `tokens` shape OpenCode returns (input, output, reasoning, cache.read,
       // cache.write). The DO persists each bucket verbatim into
