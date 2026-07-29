@@ -2769,6 +2769,13 @@ export class Thread {
           };
         }
         if (errorMessage) {
+          // Same stdout mirror as `emitError`: the event is best-effort (a
+          // dead WS drops it), and this is the path provider failures take
+          // (bad key, exhausted credits, 4xx/5xx) — without a log line the
+          // host process is silent about a turn that returned nothing.
+          console.error(
+            `[engine] agent error session=${this.session.id} thread=${this.id} ${stopReason ?? "agent_error"}: ${errorMessage}`,
+          );
           await this.fencedEmit(
             {
               type: "error",
@@ -2844,6 +2851,10 @@ export class Thread {
   }
 
   private emitError(code: string, message: string): void {
+    // Event delivery is best-effort (a dead WS drops it silently), so also
+    // log to stderr — otherwise a failing turn (bad key, exhausted credits,
+    // provider outage) leaves zero trace in the host process output.
+    console.error(`[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
     void this.session.emit({
       type: "error",
       threadId: this.id,

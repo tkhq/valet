@@ -25,6 +25,7 @@ export function MessageList({
   messages,
   threadId,
   onOpenChild,
+  agentBusy = false,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -33,6 +34,13 @@ export function MessageList({
    * in the slide-over. Falls back to a full-page link when omitted.
    */
   onOpenChild?: (childSessionId: string) => void;
+  /**
+   * True while the agent is actively working. Suppresses the "(no
+   * response)" placeholder on the LAST assistant message — a mid-stream
+   * message is legitimately empty between `message_start` and its first
+   * token, and must not flash as a failure.
+   */
+  agentBusy?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -71,11 +79,15 @@ export function MessageList({
       onScroll={onScroll}
       className="flex-1 overflow-y-auto divide-y divide-[--border]"
     >
-      {visible.map((m) =>
+      {visible.map((m, i) =>
         m.signal ? (
           <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
         ) : (
-          <MessageItem key={m.id} message={m} />
+          <MessageItem
+            key={m.id}
+            message={m}
+            suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
+          />
         ),
       )}
     </div>

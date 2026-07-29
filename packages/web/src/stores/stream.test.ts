@@ -468,6 +468,54 @@ describe("setThreadMessages", () => {
   });
 });
 
+describe("turn error visibility", () => {
+  beforeEach(reset);
+
+  function errorEvent(off: number): WireEvent {
+    return {
+      seq: off,
+      ts: Date.now(),
+      offset: offset(off),
+      type: "error",
+      threadId: THREAD,
+      code: "run_failed",
+      message: "400 credit balance too low",
+      recoverable: true,
+    };
+  }
+
+  it("keeps the error through turn_end so a failed turn stays visible", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, errorEvent(1));
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "turn_end",
+      threadId: THREAD,
+      reason: "error",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.error).toEqual({ code: "run_failed", message: "400 credit balance too low" });
+    expect(slice.agentStatus).toBe("idle");
+  });
+
+  it("clears the error when a new message starts streaming", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, errorEvent(1));
+    ingest(SESSION, messageStart("m1", 2));
+    expect(useStreamStore.getState().bySession[SESSION].error).toBeUndefined();
+  });
+
+  it("clears the error when the user sends a new prompt", () => {
+    const { ingest, addUserMessage } = useStreamStore.getState();
+    ingest(SESSION, errorEvent(1));
+    addUserMessage(SESSION, "retry", THREAD);
+    expect(useStreamStore.getState().bySession[SESSION].error).toBeUndefined();
+  });
+});
+
 describe("store default slice", () => {
   beforeEach(reset);
 

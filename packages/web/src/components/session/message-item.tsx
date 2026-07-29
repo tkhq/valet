@@ -6,7 +6,15 @@ import { Markdown } from "~/components/markdown";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { cn } from "~/lib/cn";
 
-export function MessageItem({ message }: { message: StreamMessage }) {
+export function MessageItem({
+  message,
+  suppressEmptyPlaceholder = false,
+}: {
+  message: StreamMessage;
+  /** True for the last message while the agent is mid-turn — an empty
+   *  assistant row is then a streaming placeholder, not a failed turn. */
+  suppressEmptyPlaceholder?: boolean;
+}) {
   const isUser = message.role === "user";
   return (
     <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
@@ -34,10 +42,32 @@ export function MessageItem({ message }: { message: StreamMessage }) {
             {message.parts.map((part, i) => (
               <PartView key={i} part={part} />
             ))}
+            {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
+              <p className="text-xs italic text-muted">
+                (no response — the turn failed or was interrupted before any
+                output; see the error above or the server logs)
+              </p>
+            )}
           </div>
         </div>
       </div>
     </article>
+  );
+}
+
+/**
+ * A persisted assistant row with no parts and no content is what a turn
+ * that died before its first token leaves behind (e.g. the provider
+ * rejected the call — bad key, exhausted credits). Rendering it as a blank
+ * bubble made those failures look like the product silently broke; name
+ * the state instead. Exported for tests.
+ */
+export function isEmptyAssistantMessage(message: StreamMessage): boolean {
+  return (
+    message.role === "assistant" &&
+    message.parts.length === 0 &&
+    !message.content &&
+    !message.signal
   );
 }
 
