@@ -871,8 +871,8 @@
     },
     {
       "id": 23,
-      "type": "traces",
-      "title": "Recent submissions (submission.run) \u2014 click through for the full tree",
+      "type": "table",
+      "title": "Recent submissions (submission.run) \u2014 click a trace ID for the full tree",
       "gridPos": {
         "x": 0,
         "y": 41,
@@ -889,10 +889,31 @@
           "queryType": "traceql",
           "query": "{name=\"submission.run\"}",
           "limit": 20,
-          "tableType": "traces"
+          "tableType": "traces",
+          "filters": [],
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          }
         }
       ],
-      "options": {}
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Start time",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": false
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }

@@ -17,6 +17,14 @@ metadata:
     app.kubernetes.io/component: observability
 spec:
   replicas: 1
+  # Recreate: /data moved onto an RWO PVC so telemetry history survives pod
+  # restarts — a rolling update would deadlock on the volume.
+  strategy:
+    type: Recreate
+    # Explicit null: clears the live object's rollingUpdate defaults when
+    # upgrading an existing release — the API server rejects Recreate with
+    # rollingUpdate params present, and the merge patch keeps them otherwise.
+    rollingUpdate: null
   selector:
     matchLabels:
       {{- include "valet.selectorLabels" . | nindent 6 }}
@@ -47,24 +55,45 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            # Valet dashboard: provider yaml lands next to the image's own
-            # provisioning entries; the JSON next to its bundled dashboards.
+            # Provider yaml: subPath is fine here — it only ever changes with
+            # a chart upgrade. The dashboard JSON is mounted as a DIRECTORY
+            # (no subPath) so ConfigMap edits propagate live and Grafana's
+            # file provider re-reads without a pod restart.
             - name: dashboards
               mountPath: /otel-lgtm/grafana/conf/provisioning/dashboards/valet-provider.yaml
               subPath: valet-provider.yaml
             - name: dashboards
-              mountPath: /otel-lgtm/valet-dashboard.json
-              subPath: valet-dashboard.json
+              mountPath: /etc/valet-dashboards
           {{- with .Values.observability.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: {{ include "valet.fullname" . }}-otel-lgtm-data
         - name: dashboards
           configMap:
             name: {{ include "valet.fullname" . }}-grafana-dashboards
+---
+# Telemetry storage: survives pod restarts/upgrades (unlike the previous
+# emptyDir, which wiped Tempo/Prometheus history on every rollout). Small by
+# design — this is still a local debug stack, not long-term retention.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "valet.fullname" . }}-otel-lgtm-data
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.observability.storageClassName }}
+  storageClassName: {{ .Values.observability.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.observability.storageSize | default "2Gi" }}
 ---
 # OTLP ingest endpoint for the api (in-cluster DNS).
 apiVersion: v1

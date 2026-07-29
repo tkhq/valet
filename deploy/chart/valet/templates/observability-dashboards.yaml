@@ -16,8 +16,13 @@ data:
     providers:
       - name: "Valet"
         type: file
+        updateIntervalSeconds: 10
+        allowUiUpdates: false
         options:
-          path: /otel-lgtm/valet-dashboard.json
+          # Directory (not a single file): the ConfigMap is mounted here
+          # WITHOUT subPath, so dashboard edits propagate live — no pod
+          # restart, no telemetry wipe.
+          path: /etc/valet-dashboards
           foldersFromFilesStructure: false
   valet-dashboard.json: |-
 {{ .Files.Get "dashboards/valet.json" | indent 4 }}

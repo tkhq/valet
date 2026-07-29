@@ -85,8 +85,13 @@ cost on the `turn_end` event and patch-capture records on
    because `increase()` misses a counter's birth value), rate/quantile
    timeseries for outcomes, turn duration, tokens, spend, tools, sandbox,
    credentials, HTTP and store latencies, plus a Tempo traces panel listing
-   recent `submission.run` trees. Golden assertions pin the ConfigMap render
-   and its observability.enabled gate.
+   recent `submission.run` trees (a TABLE panel over the Tempo TraceQL
+   search — the `traces` panel type renders single traces, not search
+   results). The dashboard JSON is mounted as a DIRECTORY (no subPath) so
+   ConfigMap edits go live in ~1 min without a pod restart, and `/data`
+   sits on a small PVC (`observability.storageSize`, default 2Gi; Recreate
+   strategy) so telemetry history survives restarts. Golden assertions pin
+   the ConfigMap render and its observability.enabled gate.
 
 ## Out of scope
 
@@ -96,4 +101,5 @@ cost on the `turn_end` event and patch-capture records on
   processes) and into the LLM provider's HTTP calls (pi-ai owns that
   client); the `agent.turn` span bounds LLM latency from outside.
 - Grafana dashboards-as-code; Tempo search + Explore is the v1 surface.
-- Durable telemetry storage or remote-cluster observability defaults.
+- Long-term telemetry retention or remote-cluster observability defaults
+  (the PVC merely survives restarts; it is still a local debug store).
