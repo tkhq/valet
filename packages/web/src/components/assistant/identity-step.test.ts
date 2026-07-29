@@ -6,7 +6,18 @@
  * functions over exercising private/DOM internals).
  */
 import { describe, expect, it } from "vitest";
-import { appendTraitSentence, identitySubmitBody, pickRandomName } from "./identity-step";
+import { NAME_POOL, appendTraitSentence, identitySubmitBody, pickRandomName } from "./identity-step";
+
+describe("NAME_POOL", () => {
+  it("has 300 unique, non-blank names", () => {
+    expect(NAME_POOL.length).toBe(300);
+    expect(new Set(NAME_POOL).size).toBe(300);
+    for (const name of NAME_POOL) {
+      expect(name).toBe(name.trim());
+      expect(name.length).toBeGreaterThan(1);
+    }
+  });
+});
 
 describe("pickRandomName", () => {
   it("picks a name from the pool", () => {
