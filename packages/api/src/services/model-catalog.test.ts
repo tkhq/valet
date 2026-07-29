@@ -59,6 +59,7 @@ describe("model catalog", () => {
       vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
       vi.stubEnv("OPENAI_API_KEY", "");
       vi.stubEnv("GEMINI_API_KEY", "");
+      vi.stubEnv("OPENROUTER_API_KEY", "");
       try {
         const entries = await buildOrgCatalog(db, credentials, orgId);
         expect(entries.filter((e) => e.active)).toHaveLength(0);
@@ -236,6 +237,7 @@ describe("model catalog", () => {
       vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
       vi.stubEnv("OPENAI_API_KEY", "");
       vi.stubEnv("GEMINI_API_KEY", "");
+      vi.stubEnv("OPENROUTER_API_KEY", "");
       try {
         const models = getModels("anthropic")
           .map((m) => m.id)
