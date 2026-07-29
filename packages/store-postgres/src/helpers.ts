@@ -5,6 +5,7 @@ import type {
   DecisionGateEntry,
   MessageEntry,
   SessionEntry,
+  SettlePatchRef,
 } from "@valet/engine";
 
 export function jsonOrNull<T>(value: T | undefined | null): string | null {
@@ -83,6 +84,8 @@ export interface EntryRow {
   resolution: string | null;
   withdrawnReason: string | null;
   metadata: string | null;
+  usage: string | null;
+  cost: string | null;
   createdAt: number;
 }
 
@@ -115,6 +118,8 @@ export function rawToEntryRow(raw: Record<string, unknown>): EntryRow {
     resolution: asStringOrNull(raw.resolution, "resolution"),
     withdrawnReason: asStringOrNull(raw.withdrawn_reason, "withdrawn_reason"),
     metadata: asStringOrNull(raw.metadata, "metadata"),
+    usage: asStringOrNull(raw.usage, "usage"),
+    cost: asStringOrNull(raw.cost, "cost"),
     createdAt: toNum(raw.created_at, "created_at"),
   };
 }
@@ -146,6 +151,8 @@ export interface EntryInsertRow {
   resolution: string | null;
   withdrawnReason: string | null;
   metadata: string | null;
+  usage: string | null;
+  cost: string | null;
   createdAt: number;
 }
 
@@ -177,6 +184,8 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
     resolution: null,
     withdrawnReason: null,
     metadata: jsonOrNull(entry.metadata),
+    usage: null,
+    cost: null,
     createdAt: entry.createdAt,
   };
   switch (entry.type) {
@@ -191,6 +200,8 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
         channel: jsonOrNull(entry.channel),
         model: entry.model ?? null,
         stopReason: entry.stopReason ?? null,
+        usage: jsonOrNull(entry.usage),
+        cost: jsonOrNull(entry.cost),
       };
     case "compaction":
       return {
@@ -239,6 +250,8 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         channel: parseJson(row.channel),
         model: row.model ?? undefined,
         stopReason: (row.stopReason as MessageEntry["stopReason"]) ?? undefined,
+        usage: parseJson(row.usage),
+        cost: parseJson(row.cost),
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
         queueItemId: row.queueItemId ?? undefined,
@@ -333,6 +346,7 @@ export interface QueueItemRow {
   abortRequestedAt: number | null;
   ownerId: string | null;
   leaseExpiresAt: number | null;
+  settlePatch: SettlePatchRef | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -364,8 +378,27 @@ export function rawToQueueItemRow(raw: Record<string, unknown>): QueueItemRow {
     abortRequestedAt: toNumOrNull(raw.abort_requested_at, "abort_requested_at"),
     ownerId: asStringOrNull(raw.owner_id, "owner_id"),
     leaseExpiresAt: toNumOrNull(raw.lease_expires_at, "lease_expires_at"),
+    settlePatch: settlePatchFromRaw(raw),
     createdAt: toNum(raw.created_at, "created_at"),
     updatedAt: toNum(raw.updated_at, "updated_at"),
+  };
+}
+
+/** Reassemble a `SettlePatchRef` from the five settle_patch_* columns; null
+ * when no record was ever written (status column NULL). */
+function settlePatchFromRaw(raw: Record<string, unknown>): SettlePatchRef | null {
+  const status = asStringOrNull(raw.settle_patch_status, "settle_patch_status");
+  if (!status) return null;
+  const reason = asStringOrNull(raw.settle_patch_reason, "settle_patch_reason");
+  const blobKey = asStringOrNull(raw.settle_patch_blob_key, "settle_patch_blob_key");
+  const bytes = toNumOrNull(raw.settle_patch_bytes, "settle_patch_bytes");
+  const truncated = toNumOrNull(raw.settle_patch_truncated, "settle_patch_truncated");
+  return {
+    status: status as SettlePatchRef["status"],
+    ...(reason !== null ? { reason } : {}),
+    ...(blobKey !== null ? { blobKey } : {}),
+    ...(bytes !== null ? { bytes } : {}),
+    ...(truncated !== null ? { truncated: truncated === 1 } : {}),
   };
 }
 
@@ -385,6 +418,7 @@ export interface SessionRow {
   parentThreadId: string | null;
   model: string | null;
   metadata: string | null;
+  startRef: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -405,6 +439,7 @@ export function rawToSessionRow(raw: Record<string, unknown>): SessionRow {
     parentThreadId: asStringOrNull(raw.parent_thread_id, "parent_thread_id"),
     model: asStringOrNull(raw.model, "model"),
     metadata: asStringOrNull(raw.metadata, "metadata"),
+    startRef: asStringOrNull(raw.start_ref, "start_ref"),
     createdAt: toNum(raw.created_at, "created_at"),
     updatedAt: toNum(raw.updated_at, "updated_at"),
   };

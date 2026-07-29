@@ -1,8 +1,24 @@
-import { useState, type ReactNode } from "react";
-import { ChevronRight } from "lucide-react";
+import { useRef, useState, type ReactNode } from "react";
+import { Check, ChevronRight, Copy } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "~/lib/cn";
 import type { ToolCategory, ToolStatus } from "./types";
+
+/**
+ * Friendly display names for tool identifiers. Unknown (plugin) tools fall
+ * back to `prettyToolName`, which just de-snake_cases; the raw identifier
+ * stays available as the header's `title` tooltip either way.
+ */
+const TOOL_LABELS: Record<string, string> = {
+  bash: "shell",
+  mem_write: "memory write",
+  mem_read: "memory read",
+  thread_read: "thread read",
+};
+
+export function prettyToolName(toolName: string): string {
+  return TOOL_LABELS[toolName] ?? toolName.replace(/[_.-]+/g, " ");
+}
 
 /**
  * The shared chrome that wraps every tool-call rendering. Categorical color
@@ -109,12 +125,13 @@ export function ToolShell({
             aria-hidden
           />
           <span
+            title={toolName}
             className={cn(
               "shrink-0 uppercase tracking-[0.08em] text-[10px] font-semibold",
               CATEGORY_TEXT[category],
             )}
           >
-            {toolName}
+            {prettyToolName(toolName)}
           </span>
           {target && (
             <span className="truncate text-[--fg]/85 min-w-0 flex-1">
@@ -204,6 +221,54 @@ function StatusPip({ status }: { status: ToolStatus }) {
       />
       {status === "running" ? "running" : status === "completed" ? "done" : "error"}
     </span>
+  );
+}
+
+/**
+ * Copy-to-clipboard affordance for tool bodies. `getText` is lazy so
+ * renderers can assemble command+output at click time. Flashes a check for
+ * a moment after a successful copy.
+ */
+export function CopyButton({
+  getText,
+  label = "Copy",
+  className,
+}: {
+  getText: () => string;
+  label?: string;
+  className?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(getText());
+      setCopied(true);
+      clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable (permissions/insecure context) — do nothing.
+    }
+  }
+
+  const Icon = copied ? Check : Copy;
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      aria-label={label}
+      title={label}
+      className={cn(
+        "rounded p-1 text-muted/70 hover:text-[--fg] hover:bg-ink-wash",
+        "opacity-0 group-hover/tool:opacity-100 focus-visible:opacity-100 transition-opacity",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
+        copied && "text-success-600 dark:text-success-500 opacity-100",
+        className,
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" aria-hidden />
+    </button>
   );
 }
 

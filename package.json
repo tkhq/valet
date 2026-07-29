@@ -4,6 +4,9 @@
   "workspaces": [
     "packages/*"
   ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "pnpm --filter @valet/worker dev",
     "build": "pnpm --filter @valet/worker build",
@@ -15,9 +18,12 @@
     "test:unit": "vitest run"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
     "tsx": "^4.0.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18",
+    "ws": "^8.18.0",
     "yaml": "^2.9.0"
   },
   "pnpm": {

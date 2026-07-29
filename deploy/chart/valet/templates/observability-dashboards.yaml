@@ -1,0 +1,29 @@
+{{- if .Values.observability.enabled }}
+# Grafana dashboard provisioning for the bundled otel-lgtm stack: a provider
+# yaml pointing at the dashboard JSON, both mounted into the container next
+# to the image's own dashboards (see observability.yaml's volumeMounts).
+# Dashboard source of truth: deploy/chart/valet/dashboards/valet.json.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valet.fullname" . }}-grafana-dashboards
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+data:
+  valet-provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: "Valet"
+        type: file
+        updateIntervalSeconds: 10
+        allowUiUpdates: false
+        options:
+          # Directory (not a single file): the ConfigMap is mounted here
+          # WITHOUT subPath, so dashboard edits propagate live — no pod
+          # restart, no telemetry wipe.
+          path: /etc/valet-dashboards
+          foldersFromFilesStructure: false
+  valet-dashboard.json: |-
+{{ .Files.Get "dashboards/valet.json" | indent 4 }}
+{{- end }}

@@ -1,542 +1,165 @@
 # CLAUDE.md — Valet Development Guide
 
-NOTE: Do NOT add "Co-Authored-by" trailers mentioning AI models (e.g., Opus, Claude) in commit messages PRs, or comments.
+Do NOT add "Co-Authored-by" trailers mentioning AI models in commits, PRs, or comments.
 
-## Working on this codebase
+## What this is
 
-Read this section first. Everything below it is project context; this section is rules learned the hard way.
+Valet is a hosted background coding agent platform. The current (v2) stack: `packages/api` (Hono on Node) hosts `@valet/engine` (portable agent loop over pi-agent-core); sessions run in sandboxes via pluggable providers (docker in dev, kubernetes in the helm deploy, local/virtual in tests); state lives in Postgres (`store-postgres` — embedded PGlite in dev); `packages/web` is the client. Per-user orchestrators are themselves full agent sessions.
 
-### Tool-call persistence is fragile — verify the round trip
+The legacy stack (`packages/worker`/`client`/`runner`, `backend/`, Cloudflare + Modal) is frozen for the existing prod deploy and slated for deletion — don't build on it. Worker deploys pin commit `35b398e5`; `packages/worker` is excluded from root `pnpm typecheck` (check it in isolation if ever needed).
 
-We've broken tool-call rendering on reload three times in a row. Each break looked different on the surface but had the same root cause: the persisted state in `engine_entries` and the rendered state in the UI were out of sync. The class of bug is **persistence shape drift between (a) what the engine writes, (b) what the wire layer ships, and (c) what the frontend renders**.
-
-When you touch any of these, verify the *full* round trip ends-to-end, not just one hop:
-
-1. **Engine writes the entry**: `Thread.handleAgentEvent` in `packages/engine/src/thread.ts` is the canonical persistence path. `message_end` calls `appendEntries`; `tool_execution_end` mutates `part.status`/`part.result` and calls `updateEntry`. If a tool ever changes a part *after* `message_end`, that mutation must be re-persisted, or the DB row stays stuck on the pre-mutation state.
-2. **Wire bridge ships the entry**: `packages/api/src/engine/bridge.ts` `engineToWireParts` maps `MessagePart` to the wire shape. The wire `tool_call` part carries `args`, `result`, `status`, `error`, `callId`. **Treat `result` as `unknown`** on both ends — engine stores whatever the tool / pi-agent-core emits, which is *not* always the same shape as the engine's own `ToolResult` (`{ text, attachments? }`).
-3. **REST `/messages` reads the entry**: `packages/api/src/routes/messages.ts` `entryToMessage` uses `engineToWireParts`. WS `init` no longer carries messages — REST is authoritative for thread history. If REST drops `parts`, the UI will look fine live and break on reload.
-4. **Frontend extracts displayable text**: `packages/web/src/components/session/tool-renderers/types.ts` `resultText` must handle every shape the engine might persist:
-   - `{ text: string }` — engine's own `ToolResult` shape
-   - `{ content: [{ type: "text", text: string }, …] }` — pi-agent-core's `AgentToolResult` shape (what gets persisted today via `tool_execution_end`)
-   - bare `string` — defensive
-
-### When you change tool plumbing, run these tests
-
-These exist specifically to catch persistence-shape regressions. Run them before claiming the work is done:
+## The dev loop
 
 ```bash
-# Engine-level: persisted entry has tool_call with status="completed" + actual result content
-pnpm --filter @valet/engine test -- happy-path
-
-# Store-contract: tool_call parts round-trip + updateEntry transitions running→completed
-pnpm --filter @valet/engine test -- in-memory-store
-pnpm --filter @valet/store-postgres test
-
-# API integration: real Anthropic + Docker, then GET /messages must include readable result
-ANTHROPIC_API_KEY=sk-ant-... pnpm --filter @valet/api test -- src/integration
-```
-
-If you change the result shape engine-side, **add an assertion that `result.text` (or whatever the canonical access pattern is) contains the actual output** — `expect(result).toBeDefined()` is *not* sufficient. The bug we keep shipping has `result` defined but its text is unreachable.
-
-### When tool calls render as "(empty output)" or "(empty file)"
-
-That's almost certainly a shape mismatch, *not* a persistence-failure. The data is in `engine_entries`; the frontend can't dig it out. Inspect:
-
-- Real Postgres (`DATABASE_URL` set): `psql "$DATABASE_URL" -c "select parts from engine_entries where role='assistant' order by id desc limit 1;"`
-- Embedded PGlite (default dev, data dir `~/.valet/pg/`) — stop the dev API first (a live process owns the data dir), then run from `packages/api` (bare-specifier resolution). Note: plain `node --input-type=module`, NOT `tsx -e` — tsx's eval mode compiles to CJS and rejects top-level await:
-  ```bash
-  cd packages/api && node --input-type=module -e '
-  import { PGlite } from "@electric-sql/pglite";
-  const db = new PGlite(process.env.HOME + "/.valet/pg");
-  const { rows } = await db.query(
-    "select parts from engine_entries where role=$1 order by id desc limit 1",
-    ["assistant"],
-  );
-  console.log(rows);
-  await db.close();
-  '
-  ```
-- Compare against what `resultText` extracts in `packages/web/src/components/session/tool-renderers/types.ts`
-
-### Other persistence-adjacent gotchas
-
-- **`updateEntry` is mandatory after any post-`message_end` mutation** (tool completion, decision-gate resolution, compaction). The store contract suite has a regression test for the running→completed transition; if you touch the engine's persistence path, run that suite.
-- **The wire `init` event is metadata-only.** Don't add `messages` back to it. Thread history loads via `GET /api/sessions/:id/messages?threadId=…`. Adding messages to init re-introduces the bug where reconnecting on a non-default thread wipes that thread's state.
-- **Optimistic UI messages must carry the active `threadId`.** Tagging them `null` and fall-back-matching in the filter caused user bubbles to leak across threads.
-- **Tool renderers (`packages/web/src/components/session/tool-renderers/`) are a registry**. The fallback handles unknown plugin tools. Adding a hand-tuned renderer for a new tool means dropping a `ToolRenderer` into that directory and listing it before the fallback in `index.ts`. The shell, status semantics, scanner animation, and category color are inherited from `ToolShell`.
-
-### Pre-1.0: edit migrations in place, don't add new ones
-
-We are NOT in production. There is no real data to preserve. When you change an engine or app schema:
-
-- **Edit `packages/store-postgres/migrations/pg/0000_engine.sql`** (and the corresponding `packages/api/migrations/pg/0000_app.sql` for app-side tables) directly to add the new columns. For app tables, update the matching Drizzle table in `packages/api/src/schema/index.ts`. The engine store has no Drizzle schema — it's raw SQL; update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` instead (bigint ms columns MUST funnel through `toNum`, see the note there).
-- **Do NOT add `0001_…sql`, `0002_…sql`, etc.** Each one becomes a separate `ALTER TABLE` migration that we'll have to maintain forever. Until the first release, the right move is one clean `0000` that reflects the current schema.
-- After editing, blow away the local PGlite data dir (`rm -rf ~/.valet/pg`) and let it recreate on the next boot. The pg migration runners have NO backfill path (unlike the retired sqlite ones): an existing data dir whose tracker already lists `0000` will simply skip your edited file — the reset is mandatory, not a nicety.
-- Once we ship 1.0 and have user data on disk, this rule flips: every schema change becomes a new numbered migration, no edits to past ones.
-
-### Sandbox gateway (`packages/sandbox-gateway`) gotchas
-
-- **Docker-backend gateway testing needs a `full`-capable image.** `make dev-local`'s default sandbox-docker image (plain `node:20-bookworm`) has no ttyd/code-server/gateway. Point `VALET_SANDBOX_IMAGE` at an image built from `docker/Dockerfile.sandbox-k8s` to exercise the Terminal/VS Code tabs against the docker backend.
-- **`full`-profile sandboxes receive `VALET_SESSION_ID` and `VALET_SANDBOX_PROFILE` env vars**, in addition to the existing `VALET_SANDBOX_JWT_SECRET`. The gateway enforces `sid === VALET_SESSION_ID` from the JWT claims — a JWT valid for one session is rejected inside a different session's sandbox even with a correct signature.
-- **Any new package that imports `ws` must declare BOTH `@types/ws` AND `@types/node`.** `@types/ws`'s own type-resolution chain walks up to `@types/node`; if the local `devDependencies` only has `@types/ws`, pnpm's workspace layout can resolve `@types/node` from an unrelated ancestor `node_modules` instead of the package's own, silently pulling in the wrong Node types. This recurred on this branch (`packages/sandbox-gateway`) even after the earlier `@types/ws`-only fix in `packages/api` — declare both explicitly in every `ws`-consuming package.
-- **A test run "failing" with `WebSocket is not defined` is almost always the Node-20-vs-22 trap, not a real regression** — re-verify under Node 22 (`source ~/.nvm/nvm.sh && nvm use 22`) before trusting the failure.
-
-### Sandbox hibernation gotchas
-
-- **`VALET_SANDBOX_IDLE_MINUTES`** controls the host's idle-sweep hibernation window (default `30`, `0` disables). It only does anything on the `kubernetes` sandbox backend — `capabilities().hibernation` is `false` for docker/local/virtual, so the sweep is a no-op there regardless of this env var.
-
-### An api restart revokes running sandboxes' tokens without telling them
-
-`EngineHost.sessionFor`/`buildSession` mints a fresh `VALET_SANDBOX_TOKEN` and revokes the prior one on every cache-miss rebuild (`evictAll()` on api restart, `evictCache()` on orchestrator PATCH) — but the physical sandbox is still running and `SandboxProvider.restore()` is never called, so nothing pushes the new token in. Any in-sandbox consumer that reads `$VALET_SANDBOX_TOKEN` from process env (today: the git-credential helper, `valet-gh`) keeps using the stale, now-revoked value and 403s until the sandbox is recreated. Applies to any future in-sandbox api consumer, not just GitHub — see `docs/specs/2026-07-16-github-repo-integration-design.md`'s Deviations section for the full mechanism and candidate fixes (verify-don't-revoke vs. push-token-on-rebuild).
-
-### pnpm workspace peer-dep splits: a new dep edge can silently fork a "singleton" package
-
-Adding a workspace dependency edge between two packages that both depend on a peer-dep'd package (e.g. `pi-ai`, whose provider registry is meant to be one shared instance) can make pnpm's resolver install **two separate copies** of that package — one per differing peer range — instead of hoisting to a single instance. Symptom: code that assumes a singleton (a provider registry, a module-level cache) silently stops sharing state across the two copies, and anything gated on "did this really hit the network" (a faux-provider "no-network" test, an in-memory stub) goes live/breaks with no type error and no obvious stack trace pointing at the cause. Fixed here by pinning a shared version via root `pnpm.overrides` (e.g. the `zod` pin that keeps `pi-ai` a single instance across `packages/api` and `packages/engine`). If a test that should never hit the network suddenly does, or a "singleton" starts behaving like two, suspect a peer-dep split before anything else — check `pnpm why <pkg>` for duplicate resolved versions.
-
----
-
-## What This Project Is
-
-Valet is a hosted background coding agent platform. Users interact with an AI coding agent through a web UI, Slack, or Telegram. Each session runs in an isolated Modal sandbox with a full dev environment (VS Code, browser via VNC, terminal, and an OpenCode agent with 73 custom tools). A per-user orchestrator ("Jarvis") manages sessions, routes messages across channels, and maintains long-term memory. The architecture is modeled after Ramp's Inspect system.
-
-## Project Structure
-
-```
-valet/
-├── packages/
-│   ├── api/                 # Greenfield Node-first API (Hono + node-server + node-ws)
-│   │                        #   wired to @valet/engine + sandbox-docker + store-postgres
-│   ├── web/                 # Greenfield client (Vite + React 19 + Tailwind 3 + Radix)
-│   ├── client/              # LEGACY React SPA — kept for prod CF deploy, frozen
-│   ├── worker/              # LEGACY Cloudflare Worker — kept for prod CF deploy, frozen
-│   ├── engine/              # @valet/engine — portable agent loop (pi-agent-core)
-│   ├── store-postgres/      # SessionStore impl over Postgres (PGlite dev/test, node-postgres prod)
-│   ├── sandbox-docker/      # Sandbox provider over Docker (long-running container, bind mount)
-│   ├── sandbox-local/       # Sandbox provider over the host fs/process
-│   ├── shared/              # Shared TypeScript types & errors
-│   ├── runner/              # Bun/TS runner for inside legacy sandboxes
-│   ├── sdk/                 # Integration & channel SDK contracts, MCP client, UI components
-│   ├── plugin-github/       # GitHub integration (actions: PRs, issues, webhooks)
-│   ├── plugin-slack/        # Slack (actions + channel adapter)
-│   ├── plugin-gmail/        # Gmail integration
-│   ├── plugin-google-*/     # Google Calendar, Drive, Sheets integrations
-│   ├── plugin-linear/       # Linear issue tracking
-│   ├── plugin-notion/       # Notion integration
-│   ├── plugin-stripe/       # Stripe integration
-│   ├── plugin-cloudflare/   # Cloudflare API integration
-│   ├── plugin-sentry/       # Sentry error tracking
-│   ├── plugin-deepwiki/     # DeepWiki knowledge base
-│   ├── plugin-telegram/     # Telegram (channel adapter)
-│   ├── plugin-browser/      # Browser skill (content-only)
-│   ├── plugin-workflows/    # Workflow skill (content-only)
-│   ├── plugin-sandbox-tunnels/  # Tunnel skill (content-only)
-│   └── plugin-memory-compaction/ # Memory compaction tool (content-only)
-├── backend/                 # Modal Python backend
-├── docker/
-│   ├── Dockerfile.sandbox   # Sandbox container image
-│   ├── start.sh             # Sandbox startup script
-│   └── opencode/            # OpenCode config: tools/
-├── docs/
-│   └── specs/               # Subsystem specs (source of truth per domain)
-├── V1.md                    # Original architecture spec (may be outdated)
-├── V2.md                    # Orchestration layer spec (orchestrators, channels, personas)
-├── Makefile                 # Dev, test, deploy commands
-├── docker-compose.yml       # Local dev (OpenCode container)
-└── .beans/                  # Task tracking (beans)
-```
-
-## Tech Stack Quick Reference
-
-| Layer | Tech | Key Files |
-|-------|------|-----------|
-| **API (new)** | Hono 4, @hono/node-server, @hono/node-ws, Drizzle (Postgres: PGlite dev/test, node-postgres prod), pi-ai | `packages/api/src/` |
-| **Web (new)** | Vite 6, React 19, TanStack Router/Query, Tailwind 3, Radix UI, Zustand | `packages/web/src/` |
-| Frontend (legacy) | React 19, Vite 6, TanStack Router/Query, Zustand, Tailwind, Radix UI | `packages/client/src/` |
-| Worker (legacy) | Cloudflare Workers, Hono 4, D1 (SQLite via Drizzle ORM), R2, Durable Objects | `packages/worker/src/` |
-| Engine | @mariozechner/pi-agent-core, TypeBox plugin schemas | `packages/engine/src/` |
-| Sandbox-docker | dockerode, long-running container, bind-mounted workspace | `packages/sandbox-docker/src/` |
-| Shared | TypeScript types, error classes, scope keys | `packages/shared/src/` |
-| SDK | Integration contracts, channel contracts, MCP client/OAuth, UI components | `packages/sdk/src/` |
-| Runner | Bun, TypeScript, `@opencode-ai/sdk`, Hono gateway | `packages/runner/src/` |
-| Backend | Python 3.12, Modal SDK | `backend/` |
-| Sandbox | OpenCode serve (73 tools, 3 skills, 1 plugin), code-server, Xvfb+VNC, TTYD | `docker/` |
-
-## Subsystem Specs
-
-Detailed per-subsystem specifications live in `docs/specs/`. These are the source of truth for each domain's behavior, boundaries, data model, and contracts. When modifying a subsystem, update its spec in the same commit.
-
-| Spec | Covers |
-|------|--------|
-| [`docs/specs/sessions.md`](docs/specs/sessions.md) | Session lifecycle, state machine, sandbox orchestration, prompt queue, message streaming, hibernation/restore, access control, multiplayer |
-| [`docs/specs/sandbox-runtime.md`](docs/specs/sandbox-runtime.md) | Sandbox boot sequence, service ports, auth gateway, Runner process, OpenCode lifecycle, Runner↔DO WebSocket protocol, Modal backend |
-| [`docs/specs/real-time.md`](docs/specs/real-time.md) | SessionAgentDO WebSocket handling, EventBusDO, event types, V2 streaming protocol, client reconnection, message deduplication |
-| [`docs/specs/workflows.md`](docs/specs/workflows.md) | Workflow definitions, trigger types (webhook/schedule/manual), execution lifecycle, WorkflowExecutorDO, step engine, approval gates, proposals, version history |
-| [`docs/specs/auth-access.md`](docs/specs/auth-access.md) | OAuth flows (GitHub/Google), token auth, admin middleware, org model (settings/invites/LLM keys), session access control, JWT issuance |
-| [`docs/specs/orchestrator.md`](docs/specs/orchestrator.md) | Orchestrator identity, auto-restart, child session spawning, memory system (FTS), mailbox, channel routing, task board |
-| [`docs/specs/integrations.md`](docs/specs/integrations.md) | Integration framework, GitHub (OAuth/webhooks/API proxy), Telegram bot, Gmail, Google Calendar, channel bindings, custom LLM providers, credential storage |
-| [`docs/specs/sandbox-images.md`](docs/specs/sandbox-images.md) | Base image definition (Modal SDK), layer order, version pinning, cache busting, env var assembly, snapshot/restore, workspace volumes, Dockerfile drift |
-
-Boundary rules are enforced: each spec declares what it does NOT cover. Don't add content to the wrong spec — create or update the correct one.
-
-### Design Specs & Implementation Plans (Superpowers)
-
-When using superpowers skills (brainstorming → writing-plans → executing-plans), design specs and implementation plans go in the existing project directories — NOT in a `docs/superpowers/` folder:
-
-- **Design specs** → `docs/specs/YYYY-MM-DD-<topic>-design.md`
-- **Implementation plans** → `docs/plans/YYYY-MM-DD-<topic>.md`
-
-## Key Architectural Decisions
-
-These are decided and locked in. Do not revisit:
-
-1. **WebSocket only** between Runner and SessionAgent DO. No HTTP callbacks.
-2. **Single merged SessionAgent DO** for session orchestration. Three DOs total: `SessionAgentDO`, `EventBusDO`, `WorkflowExecutorDO`.
-3. **Single Modal App** for the Python backend (structured for future split).
-4. **Repo-specific images** from day one. Base image fallback for unconfigured repos.
-5. **iframes** for VNC (websockify noVNC web UI) and Terminal (TTYD web UI). No embedded JS clients.
-6. **Single auth gateway proxy** on port 9000 in sandbox. Routes `/vscode/*`, `/vnc/*`, `/ttyd/*` to internal services. JWT validation.
-7. **Unified plugin system** — all extensions (actions, channels, skills, personas, tools) live in `packages/plugin-*/`. Code plugins (actions/channels) are compiled into the worker via generated registries (`make generate-registries`). Content plugins (skills/personas/tools) are synced to D1 at startup and delivered to sandboxes via the Runner WebSocket.
-8. **User orchestrator is a full agent session** — SessionAgent DO + sandbox + Runner + OpenCode with orchestrator persona and tools. Uses well-known session ID `orchestrator:{userId}`.
-9. **Org orchestrator is also a full agent session** — org's "chief of staff", admin-configured identity/handle, handles unattributed events + automation rules. Uses well-known session ID `orchestrator:org:{orgId}`.
-
-## Development Commands
-
-```bash
-# Install dependencies
 pnpm install
-
-# Greenfield agent-loop stack (Node API + new web client)
-make dev-local          # @valet/api on :8788 + @valet/web on :5173
-                        # Requires ANTHROPIC_API_KEY + Docker daemon.
-                        # Open http://localhost:5173
-                        # Setting BETTER_AUTH_SECRET enables real auth (email/password,
-                        # optional OIDC/social via AUTH_* vars — see
-                        # docs/specs/2026-07-14-auth-v2-design.md). Unset, VALET_LOCAL_AUTH=1
-                        # keeps the stub behaving as before.
-                        # Channel transports (e.g. Telegram) default to long-poll mode with no
-                        # extra config. Setting VALET_PUBLIC_URL (or a public BETTER_AUTH_URL —
-                        # not localhost/*.localdev) flips ChannelHost to webhook mode instead;
-                        # see docs/specs/2026-07-15-telegram-channel-design.md decision 3.
-
-# Legacy stack (Cloudflare Worker + old client)
-make dev-worker         # Cloudflare Worker on :8787
-make dev-opencode       # OpenCode container on :4096
-cd packages/client && pnpm dev  # Legacy frontend on :5173 (conflicts with web!)
-
-# Or all at once (legacy):
-make dev-all
-
-# Dogfood the new API end-to-end (real Anthropic + Docker round-trip)
-make dogfood-api
-
-# Kubernetes (local k3s, Rancher Desktop) — full runbook: deploy/README.md
-make k8s-sandbox-install # Install vendored agent-sandbox CRD/controller (idempotent, run first)
-make k8s-build           # docker build valet-api:dev + valet-sandbox:dev (moby mode, ~15-20 min cold)
-make k8s-up              # helm upgrade --install onto rancher-desktop, namespace valet
-kubectl --context rancher-desktop -n valet port-forward svc/valet-api 8080:80  # or https://valet.localdev via /etc/hosts
-make k8s-logs            # tail the api pod
-make k8s-down            # helm uninstall (PVCs + Sandbox CRs survive by design — see deploy/README.md for a full reset)
-
-# Database
-make db-migrate         # Run D1 migrations locally
-make db-seed            # Seed test data
-make db-reset           # Reset database (drop and recreate)
-
-# Typecheck
-pnpm typecheck          # All packages except packages/worker (see note below)
-cd packages/worker && pnpm typecheck  # Single package
-
-# Tests
-pnpm test               # Run all vitest tests
-make test               # Unit + integration tests
-make test-workflow       # Test workflow CRUD
-make test-triggers       # Test trigger CRUD
-make test-webhooks       # Test webhook trigger execution
-
-# Code generation
-make generate-registries # Regenerate action/channel plugin registries
-
-# Logs
-make logs-cloudflare     # Tail deployed Cloudflare Worker logs
-
-# Deploy
-make deploy              # Deploy worker + modal + client (includes migrations)
-make deploy-migrate      # Apply D1 migrations to production only
-make release             # Full idempotent release: install, build, push image, deploy
+make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Docker
+                        # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ~/.valet/pg
 ```
 
-**Kubernetes context safety (binding).** The developer machine's default/ambient `kubectl` context may point at a PRODUCTION cluster (verified — a GKE prod cluster). Every `make k8s-*` target and every command in `deploy/README.md` pins `--context rancher-desktop` (`--kube-context rancher-desktop` for `helm`) explicitly. Never run a bare `kubectl`/`helm` command against this workflow — go through the `make` targets or add the context flag yourself. `VALET_SANDBOX_BACKEND=kubernetes` is what the chart sets to switch the api off the `docker` default onto `packages/sandbox-kubernetes` (session sandboxes become `Sandbox` CRs + pods instead of local Docker containers); `make dev-local` stays on `docker`.
-
-**`packages/worker` is excluded from root `pnpm typecheck`.** It's frozen (kept only for the legacy prod Cloudflare deploy) and was dropped from `tsconfig.json`'s project references as part of the plugin-system-v2 conversion, once the worker's own `src/integrations/packages.ts`/`src/channels/packages.ts` registries stopped being regenerated (plugins now self-declare v2 manifests consumed by `packages/api`, not the worker). Worker deploys pin the last commit before that conversion started: `35b398e5`. Run `cd packages/worker && pnpm typecheck` directly if you need to typecheck it in isolation — root `pnpm typecheck` passing is no longer evidence either way for the worker.
-
-### Applying D1 Migrations to Production
-
-`make deploy` includes the migration step, but if you need to apply migrations separately:
+While iterating:
 
 ```bash
-make deploy-migrate
+pnpm typecheck                                  # all packages (worker excluded)
+pnpm --filter @valet/<pkg> test [-- <filter>]   # targeted suites for what you touched
+make smoke-orchestrator                         # fastest agent-loop-alive check (real Anthropic, no Docker)
 ```
 
-All deploy targets (`deploy-worker`, `deploy-migrate`, `deploy-modal`, `deploy-client`) are thin wrappers around `scripts/deploy.sh` which auto-discovers config (D1 ID, Modal workspace URL, worker URL) from CLI tools when values aren't set in `.env.deploy`.
-
-### Modal Backend Deployment
-
-Modal deployment uses `uv` to manage the Python environment and must be run from the project root:
+**Before calling any change finished, run `make e2e` and get a clean scorecard.** It loads `.env.e2e`, probes your daemons/creds, and runs every suite it can — this is THE validation, not an optional extra. Pre-existing environmental failures (dead keys, missing creds) are the only acceptable red rows, and you must be able to name why each one is unrelated to your change.
 
 ```bash
-# Deploy Modal backend (from project root)
-make deploy-modal
-# Or directly: uv run --project backend modal deploy backend/app.py
+make e2e                          # full scorecard
+make e2e E2E_ARGS="--doctor"      # environment readiness (fresh machine)
+make e2e E2E_ARGS="--only cli,typecheck --json"
+make e2e-clean                    # sweep state leaked by crashed runs
 ```
 
-**Path resolution gotchas:**
+Commit per discrete task, subjects ≤72 chars. When you modify a subsystem, update its spec in `docs/specs/` in the same commit.
 
-1. **`backend/app.py`** — Paths here are relative to the **current working directory** (project root), not the backend folder:
-   ```python
-   # Correct (relative to project root):
-   .add_local_dir("docker", remote_path="/root/docker")
-   .add_local_dir("packages/runner", remote_path="/root/packages/runner")
+## Writing (ASD-STE100)
 
-   # Wrong (would look for ../docker from project root):
-   .add_local_dir("../docker", remote_path="/root/docker")
-   ```
+All prose in this repo is technical writing: specs, READMEs, runbooks, error messages, PR text, code comments, UI copy. Write it to ASD-STE100 Simplified Technical English, adapted as follows.
 
-2. **`backend/images/base.py`** — Paths here are **remote paths** inside the Modal function container (where files were mounted by app.py):
-   ```python
-   # These reference /root/... which is where app.py mounted the local files
-   .add_local_dir("/root/packages/runner", "/runner", copy=True)
-   .add_local_file("/root/docker/start.sh", "/start.sh", copy=True)
-   ```
+Use strict STE for text that tells a reader what to do — procedures, runbooks, error messages, warnings:
 
-**Forcing image rebuilds:**
+- Put one instruction in each sentence. Keep instructions at 20 words or fewer. Keep descriptions at 25 words or fewer.
+- Put a condition before the action it controls ("If the build fails, delete the cache", not the reverse).
+- Use a numbered list for a sequence of steps.
 
-The sandbox image is cached. To force a rebuild after changing `docker/start.sh` or `packages/runner/`:
+Use STE-flavored prose for everything else — READMEs, specs, PR descriptions, release notes. Prefer short sentences, but vary length when it improves flow. In both modes:
 
-1. Bump the version in `backend/images/base.py`:
-   ```python
-   "IMAGE_BUILD_VERSION": "2026-01-28-v7",  # increment this
-   ```
-2. Redeploy: `make deploy-modal`
-3. Create a new session (existing sandboxes won't update)
+- Use one name for one thing. Do not alternate between synonyms for the same component.
+- Use short common words: "use" not "utilize", "start" not "commence", "show" not "demonstrate".
+- Use active voice with a named actor. Use a verb for an action: "analyze the log", not "perform an analysis of the log". Keep passive voice only when the actor is unknown or irrelevant.
+- Remove empty intensifiers ("seamless", "robust", "powerful"), fake transitions, and padded summaries. Every sentence must add information or direct an action.
+- Keep caveats, warnings, and limitations. Never cut substance to make text shorter.
+- Keep necessary technical terms. Define an unfamiliar term at first use.
 
-## Developing Inside a Sandbox
+Two repo-specific rules:
 
-When working on the valet codebase from inside a Modal sandbox (e.g. via an Valet session), the environment has specific constraints. The sandbox is a Debian container (Trixie/13, GLIBC 2.40) — not a full VM — so some tools are unavailable.
+- **Every user-facing error message names the corrective action when one exists.** "Missing GitHub access token. Connect the GitHub integration in Settings." is the model. A bare fact ("expected an array response") is incomplete when the user can act.
+- **Terminology:** "workspace" is overloaded — `SessionData.workspace` is a display label, `/workspace` is the in-sandbox path, and workspace prep is the clone subsystem. Say which one you mean. Spell the session start reference "start-ref" in prose and `startRef` in code.
 
-### What's available
+`make e2e E2E_ARGS="--only docs-lint"` runs an advisory STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
 
-The sandbox comes with a full dev environment already running:
+This section governs new and edited prose. Do not rewrite existing documents wholesale for style alone. Apply the rules to the text you touch.
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| **OpenCode server** | 4096 | AI coding agent (HTTP + SSE) with 73 custom tools, 3 skills, 1 plugin |
-| **VS Code (code-server)** | 8080 | Web IDE |
-| **noVNC** | 6080 | Virtual display GUI (Xvfb on :99) |
-| **TTYD** | 7681 | Web terminal |
-| **Auth gateway** | 9000 | JWT proxy that routes to all services above |
-| **Runner** | — | Bridges OpenCode ↔ SessionAgent DO via WebSocket |
+## Locked architecture decisions
+
+1. **The engine is portable** — `@valet/engine` owns the loop, sessions, threads, queue, gates, persistence contracts. Nothing in it imports Hono or knows HTTP.
+2. **Pluggable providers** — `SessionStore` and `SandboxProvider` swap behind engine contracts with shared conformance suites.
+3. **REST is authoritative for thread history** — `GET /api/sessions/:id/messages`. The WS `init` event is metadata-only; never add messages back to it.
+4. **Plugins self-describe** — one `ValetPlugin` manifest per `packages/plugin-*`, exported from `./plugin`; `make generate-registries` regenerates `packages/api/src/plugins/registry.gen.ts` from `plugin.yaml` (`v2: true`).
+5. **Orchestrators are full agent sessions** — well-known id `orchestrator:{userId}`, spawning children through the same engine APIs.
+6. **Auth is better-auth** — email/password + optional OIDC; `VALET_LOCAL_AUTH=1` is the dev stub (see `docs/specs/2026-07-14-auth-v2-design.md`).
+
+## Rules learned the hard way
+
+### Tool-call persistence round trip
+
+We've broken tool-call rendering on reload three times; the root cause is always shape drift between what the engine writes, the wire ships, and the frontend renders. When touching any hop, verify all four end to end:
+
+1. Engine writes: `Thread.handleAgentEvent` (`packages/engine/src/thread.ts`). Any part mutation after `message_end` MUST be re-persisted via `updateEntry` or the DB row sticks pre-mutation.
+2. Wire ships: `engineToWireParts` (`packages/api/src/engine/bridge.ts`). Treat tool `result` as `unknown` — pi-agent-core's shape ≠ the engine's own `ToolResult`.
+3. REST reads: `entryToMessage` (`packages/api/src/routes/messages.ts`). If REST drops `parts`, the UI looks fine live and breaks on reload.
+4. Frontend extracts: `resultText` (`packages/web/src/components/session/tool-renderers/types.ts`) must handle `{ text }`, pi-agent-core's `{ content: [{ type: "text", text }] }`, and bare `string`.
+
+Regression suites (run before claiming done): `pnpm --filter @valet/engine test -- happy-path`, `-- in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
+
+"(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns `~/.valet/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
+
+### Pre-1.0: edit migrations in place
+
+Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, `rm -rf ~/.valet/pg` is MANDATORY — the migration tracker skips an already-applied `0000` and there is no backfill path. This rule flips to numbered migrations at 1.0.
+
+### Node & workspace traps
+
+- Tests failing with `WebSocket is not defined` = the Node-20-vs-22 trap, not a regression. Re-verify under Node 22 (`nvm use 22`).
+- Any package importing `ws` must declare BOTH `@types/ws` AND `@types/node` in its own devDependencies, or pnpm may resolve the wrong Node types from an ancestor `node_modules`.
+- A new workspace dep edge can silently FORK a peer-dep'd "singleton" (e.g. `pi-ai`'s provider registry) into two copies. Symptom: a no-network test goes live, or module-level state stops being shared. Check `pnpm why <pkg>` for duplicate versions; fix by pinning via root `pnpm.overrides` (see the `zod` pin).
+
+### Sandbox gotchas
+
+- The default dev sandbox image has no ttyd/code-server/gateway; point `VALET_SANDBOX_IMAGE` at an image built from `docker/Dockerfile.sandbox-k8s` to exercise the Terminal/VS Code tabs on the docker backend.
+- The in-sandbox gateway enforces `sid === VALET_SESSION_ID` from JWT claims — one session's JWT is rejected in another session's sandbox.
+- `VALET_SANDBOX_IDLE_MINUTES` (default 30) only matters on the kubernetes backend; hibernation is a no-op elsewhere.
+- **An api restart revokes running sandboxes' tokens without telling them**: cache rebuilds mint a fresh `VALET_SANDBOX_TOKEN` and revoke the old one, but nothing pushes the new value into a still-running sandbox — in-sandbox consumers (git-credential helper, `valet-gh`) 403 until the sandbox is recreated. See the GitHub integration design's Deviations section.
+
+### Kubernetes context safety (binding)
+
+The ambient `kubectl` context on this machine may point at a PRODUCTION GKE cluster. Every `make k8s-*` target pins `--context rancher-desktop` (`--kube-context` for helm). Never run bare `kubectl`/`helm` against this workflow — use the make targets or add the context flag yourself. `VALET_SANDBOX_BACKEND=kubernetes` is how the chart switches sandboxes to CRs; `make dev-local` stays on docker.
+
+## Commands
 
 ```bash
-pnpm install                          # Install all dependencies
-cd packages/client && pnpm dev        # React frontend on http://localhost:5173
-pnpm typecheck                        # TypeScript checking across all packages
-cd packages/worker && pnpm typecheck  # Single-package typecheck
-git clone / commit / push / pull      # Git credentials are pre-configured
+make dev-local           # the v2 dev stack (see Dev loop above)
+make e2e / e2e-clean     # canonical validation
+make smoke-orchestrator  # agent loop alive (no Docker)
+make smoke-session       # full session round-trip (Docker)
+make generate-registries # regen plugin registry from plugin.yaml manifests
+pnpm typecheck / pnpm test
+
+# Kubernetes (local k3s / Rancher Desktop) — runbook: deploy/README.md
+make k8s-sandbox-install # vendored agent-sandbox CRD/controller (run first)
+make k8s-build / k8s-up / k8s-logs / k8s-down
 ```
 
-Node.js, Bun, and all standard build tools (build-essential, ripgrep, jq, etc.) are available.
+Legacy-stack commands (worker/Modal/D1 deploys) live in the Makefile and `scripts/deploy.sh`; don't extend them.
 
-### Running OpenCode
+## Structure & conventions
 
-OpenCode (`opencode-ai`) is installed globally in the sandbox. The system instance runs on port 4096 (managed by `start.sh`), but you can run your own instance on a different port for testing:
-
-```bash
-opencode serve --port 4097
+```
+packages/
+  api/              # Hono API: routes in src/routes/, engine wiring in src/engine/,
+                    #   app schema in src/schema/, CLI in src/cli/ (pure run* fns)
+  web/              # Vite + React 19 + TanStack Router/Query + Tailwind + Radix
+                    #   routes in src/routes/, tool renderers are a registry
+  engine/           # @valet/engine — the portable loop
+  workflow/         # workflow DAG interpreter
+  store-postgres/   # SessionStore (PGlite dev/test, node-postgres prod)
+  sandbox-docker|kubernetes|local|gateway/
+  shared/           # shared types (add cross-package entities here FIRST)
+  sdk/              # integration/channel contracts, MCP client, UI components
+  plugin-*/         # one package per integration/skill
+  client|worker|runner/ + backend/   # FROZEN legacy
+deploy/             # helm chart + vendored agent-sandbox controller
+docs/specs/         # dated YYYY-MM-DD-*-design.md = v2 (current, maintain these);
+                    #   undated = legacy-stack specs (accurate for frozen code only)
+docs/plans/         # implementation plans
 ```
 
-This is useful when testing changes to OpenCode configuration, custom tools, or debugging agent behavior independently of the managed session.
+- Web tool renderers (`packages/web/src/components/session/tool-renderers/`) are a registry — new renderer file + list it before the fallback in `index.ts`.
+- Optimistic UI messages must carry the active `threadId` (null + fallback matching leaked bubbles across threads).
+- Superpowers design specs → `docs/specs/YYYY-MM-DD-<topic>-design.md`; plans → `docs/plans/YYYY-MM-DD-<topic>.md`.
 
-The system OpenCode instance is configured via `docker/opencode/opencode.json` and `docker/opencode/tools/`. Provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) are available in the environment.
+### Type safety
 
-### What does NOT work
+1. No `any` — use real types, or `Record<string, unknown>` + narrowing.
+2. No `as unknown as T` double-casts, ever. In tests, build the full shape.
+3. Minimize `as` — prefer narrowing; legitimate uses (discriminated-union narrowing, bad third-party types) get a comment.
+4. No `@ts-ignore`/`@ts-expect-error` — fix the type error.
+5. Fix what you touch: leave every edited file cleaner than found.
+6. If a test needs `(obj as any).privateMethod`, extract an exported pure function and test that instead.
 
-- **`wrangler d1 migrations apply --local`** — Write and review migration SQL directly; it gets applied during deployment.
-- **Docker** — Not available. Modal sandboxes are already containers; nested Docker (DinD) is not supported.
-- **`modal deploy`** — The Modal Python backend must be deployed from outside the sandbox (requires `uv` on the host).
+### Adding a plugin (v2)
 
-### Recommended workflow
-
-1. **Frontend**: Run `cd packages/client && pnpm dev`, open `http://localhost:5173` in the VNC browser (port 6080) to preview changes live.
-2. **Worker**: Run `cd packages/worker && pnpm dev` to start the worker locally with `wrangler dev` on `:8787`. You can also point the frontend at it: `VITE_API_URL=http://localhost:8787/api pnpm dev`. Use `pnpm typecheck` to catch type errors.
-3. **Shared types**: Edit `packages/shared/src/`, then `pnpm typecheck` from root to verify all consumers compile.
-4. **SDK**: Edit `packages/sdk/src/`, then `pnpm typecheck` from root. SDK exports are consumed by plugin packages and the worker.
-5. **Plugin packages**: Edit `packages/plugin-*/`. Run `make generate-registries` if adding a new plugin with actions or channels. Run `pnpm typecheck` to verify.
-6. **Runner**: Edit `packages/runner/src/`, run `cd packages/runner && pnpm typecheck`. The live runner instance is managed by `start.sh` — don't restart it manually.
-7. **Migrations**: Write SQL in `packages/worker/migrations/NNNN_name.sql` and add the corresponding Drizzle schema in `packages/worker/src/lib/schema/`. Migrations are applied via `wrangler d1 migrations apply` from outside the sandbox or during `make deploy`.
-
-### Testing against the deployed worker
-
-The production worker URL is configured in `.env.deploy` as `WORKER_PROD_URL`. To run the frontend against it:
-
-```bash
-cd packages/client
-VITE_API_URL=<your-worker-url>/api pnpm dev
-```
-
-You can also `curl` the deployed API directly for testing routes.
-
-## Code Conventions
-
-### Worker (Hono)
-
-- Routes go in `packages/worker/src/routes/<name>.ts`
-- Each route file exports a Hono router: `export const fooRouter = new Hono<{ Bindings: Env; Variables: Variables }>()`
-- Route is mounted in `index.ts`: `app.route('/api/foo', fooRouter)`
-- Database uses **Drizzle ORM**: schema in `src/lib/schema/`, query helpers in `src/lib/db/`, Drizzle instance via `src/lib/drizzle.ts`. Barrel re-export at `src/lib/db.ts`.
-- Three Durable Objects in `src/durable-objects/`: `SessionAgentDO` (session-agent.ts), `EventBusDO` (event-bus.ts), `WorkflowExecutorDO` (workflow-executor.ts). All re-exported from `index.ts`.
-- Services go in `packages/worker/src/services/<name>.ts`
-- Middleware: `auth.ts` (OAuth + API keys), `db.ts` (Drizzle setup), `admin.ts` (role-based access), `error-handler.ts` (global error handling). Auth sets `c.get('user')` with `{ id, email, role }`.
-- Plugin registries: `src/integrations/packages.ts` (actions), `src/channels/packages.ts` (channels), `src/plugins/content-registry.ts` (skills/personas/tools). All auto-generated by `make generate-registries` from `packages/plugin-*/`.
-- Env types in `packages/worker/src/env.ts` — `Env` interface (bindings) and `Variables` interface (request context)
-- Errors use classes from `@valet/shared`: `UnauthorizedError`, `NotFoundError`, `ValidationError`
-- All API responses are JSON. Error format: `{ error, code, requestId }`
-- Wrangler config in `packages/worker/wrangler.toml` — DO bindings, D1, R2, cron triggers
-- Migrations in `packages/worker/migrations/` — numbered `0001_name.sql` through `0055_name.sql` (and growing)
-
-### Frontend (React)
-
-- File-based routing via TanStack Router: `packages/client/src/routes/`
-- API layer in `packages/client/src/api/` — one file per resource with query key factories
-- API client at `packages/client/src/api/client.ts` — centralized fetch with auth header injection
-- Components at `packages/client/src/components/<feature>/`
-- Hooks at `packages/client/src/hooks/`
-- Stores (Zustand) at `packages/client/src/stores/`
-- UI primitives at `packages/client/src/components/ui/` — Radix-based
-- Pattern: query key factories per resource (`sessionKeys.all`, `sessionKeys.detail(id)`, etc.)
-- Pattern: `PageContainer` + `PageHeader` for page layout
-- Pattern: Skeleton loaders for every list component
-
-### Shared Types
-
-- All shared types in `packages/shared/src/types/index.ts`
-- Message part types in `packages/shared/src/types/message-parts.ts`
-- Scope key utilities in `packages/shared/src/scope-key.ts`
-- Errors in `packages/shared/src/errors.ts`
-- When adding a new entity, add types here first, then use in both worker and client
-
-### SDK
-
-- Integration contracts in `packages/sdk/src/integrations/` — defines the shape action packages must implement (actions, triggers, provider)
-- Channel contracts in `packages/sdk/src/channels/` — defines `ChannelTransport` interface for channel packages
-- MCP client and OAuth helpers in `packages/sdk/src/mcp/` — `client.ts`, `oauth.ts`, `action-source.ts`
-- UI components in `packages/sdk/src/ui/` — shared channel badges, icons
-- Metadata helpers in `packages/sdk/src/meta.ts`
-- Exports: `@valet/sdk` (main), `@valet/sdk/channels`, `@valet/sdk/integrations`, `@valet/sdk/meta`, `@valet/sdk/ui`
-
-### Plugin Packages (`packages/plugin-*`)
-
-Each plugin lives in `packages/plugin-<name>/` with a `plugin.yaml` manifest. Plugins can provide any combination of:
-
-**Code capabilities** (compiled into worker):
-- `src/actions/` — tool definitions the agent can invoke (provider, actions, triggers)
-- `src/channels/` — channel transport implementation (send/receive messages)
-
-**Content capabilities** (delivered to sandbox via Runner WebSocket):
-- `skills/*.md` — OpenCode skill files
-- `personas/*.md` — persona files
-- `tools/*.ts` — OpenCode plugin/tool files
-
-Code plugins have `package.json`, `tsconfig.json`, and export via `@valet/plugin-<name>/actions` and/or `@valet/plugin-<name>/channels`. Content-only plugins need just `plugin.yaml` and content files.
-
-Auto-discovered by `make generate-registries` which scans `packages/plugin-*/` and generates:
-- `src/integrations/packages.ts` — action plugin registry
-- `src/channels/packages.ts` — channel plugin registry
-- `src/plugins/content-registry.ts` — inlined content artifacts for D1 sync
-
-### Runner
-
-- Runtime: Bun
-- Entry: `packages/runner/src/bin.ts`
-- WebSocket to DO: `packages/runner/src/agent-client.ts`
-- OpenCode interaction: `packages/runner/src/prompt.ts`
-- OpenCode lifecycle: `packages/runner/src/opencode-manager.ts`
-- Auth gateway: `packages/runner/src/gateway.ts` (Hono on port 9000)
-- Workflow engine: `packages/runner/src/workflow-engine.ts`, `workflow-compiler.ts`, `workflow-cli.ts`
-- Secrets: `packages/runner/src/secrets.ts`, `onepassword-provider.ts`
-
-### Backend
-
-- Python 3.12, Modal SDK
-- Entry: `backend/app.py` (Modal App with web endpoints)
-- Configuration: `backend/config.py`
-- Session management: `backend/session.py`
-- Sandbox lifecycle: `backend/sandboxes.py`
-- Image definition: `backend/images/base.py`
-
-### Type Safety
-
-This codebase has accumulated `any`, `unknown`, and type assertions (`as`) as shortcuts to silence the compiler. These hide real bugs and make refactoring dangerous. Follow these rules:
-
-1. **No `any`.** Use the real type. If the shape is truly dynamic, use `Record<string, unknown>` and narrow with runtime checks. If a function is generic, use a type parameter. `any` disables the type checker for everything it touches.
-
-2. **No `as unknown as T` double-casts.** This is always wrong — it means the types disagree and you're lying to the compiler instead of fixing the disagreement. In tests, provide the required fields for the interface instead of double-casting a partial object.
-
-3. **Minimize `as` assertions.** An `as` means "I know better than the compiler." Usually you don't. If a function returns `string | undefined` and you write `as string`, you've hidden a potential bug. Prefer narrowing (`if`, `??`, type guards) over assertions. Legitimate uses: narrowing a discriminated union after a check, or bridging a third-party lib with bad types — add a comment explaining why.
-
-4. **No `@ts-ignore` or `@ts-expect-error`.** Fix the type error. If it's a third-party type bug, add a minimal `as` with a comment linking to the upstream issue.
-
-5. **Fix what you touch.** When editing a file that has `any`, unnecessary assertions, or double-casts, clean them up as part of your change. You don't need to fix the whole codebase — just leave every file you touch better than you found it.
-
-6. **Extract pure functions to avoid testing private members.** If a test needs `(obj as any).privateMethod(...)`, extract the logic into an exported pure function. Test the pure function directly (no mocks, no casts), and have the private method call it. Don't create wrapper types or helpers to smuggle access to private members.
-
-### Git Conventions
-
-- Commit code upon completion of each bean.
-
-## Common Patterns
-
-### Adding a new D1 table
-
-1. Create migration: `packages/worker/migrations/NNNN_name.sql`
-2. Add Drizzle schema: `packages/worker/src/lib/schema/<name>.ts` and re-export from `schema/index.ts`
-3. Add types to `packages/shared/src/types/index.ts`
-4. Add DB query helpers to `packages/worker/src/lib/db/<name>.ts` and re-export from `lib/db.ts`
-5. Add API routes to `packages/worker/src/routes/<name>.ts`
-6. Mount in `packages/worker/src/index.ts`
-7. Add React Query hooks in `packages/client/src/api/<name>.ts`
-8. Run `make db-migrate` (local) or apply to production via the deploy migration workflow above
-
-### Adding a new plugin (v2)
-
-Plugins are self-describing: a package exports a single `ValetPlugin` manifest (`{ name, version, actions?, triggers?, skills?, roles?, credentials?, description? }`, see `@valet/engine`'s `ValetPlugin` type) from `./plugin`, and `packages/api` bundles it. The worker's per-capability registries (`src/integrations/packages.ts`, `src/channels/packages.ts`, `src/plugins/content-registry.ts`) are retired — do not add new plugins there.
-
-1. Create directory: `packages/plugin-<name>/`
-2. Add `plugin.yaml` with name, version, description, icon, and `v2: true` (set `enabled: false` too if the manifest should exist but not ship yet — see `packages/plugin-telegram/plugin.yaml`)
-3. Add `package.json`:
-   - `"valet": { "plugin": "./dist/plugin.js" }` marker
-   - `"exports"` with a `"./plugin"` entry pointing at `dist/plugin.js`/`dist/plugin.d.ts`
-   - `@valet/engine` workspace dependency (plus `@valet/sdk`, `@valet/shared`, etc. as needed)
-   - `build`/`typecheck`/`test` scripts matching a sibling plugin package
-4. Add `tsconfig.json` extending the root config, referencing `../engine` (and any other workspace deps)
-5. Implement `src/plugin.ts` default-exporting the `ValetPlugin` manifest:
-   - Actions/triggers: build via `ActionPlugin`/`TriggerDef` (see `packages/plugin-github/src/plugin.ts`) or `mcpActionPlugin` (see `packages/plugin-deepwiki/src/plugin.ts`) for MCP-backed services
-   - Skills: `loadSkillFromMarkdown(content, "plugin")` per `skills/*.md` file
-   - Roles/personas: `loadRoleFromMarkdown(content, "plugin")` per role definition file
-6. Add reference to root `tsconfig.json`'s `references` array (skip `packages/worker/tsconfig.json` — it's frozen and excluded from root typecheck)
-7. Add dependency in `packages/api/package.json`: `"@valet/plugin-<name>": "workspace:*"`
-8. Run `make generate-registries` — scans `packages/plugin-*/plugin.yaml` for `v2: true` (skipping `enabled: false`) and regenerates `packages/api/src/plugins/registry.gen.ts`
-9. Run `pnpm typecheck` to verify
-
-### Adding a new Durable Object
-
-1. Create class in `packages/worker/src/durable-objects/<name>.ts`
-2. Re-export from `packages/worker/src/index.ts`
-3. Add binding to `packages/worker/wrangler.toml` (durable_objects.bindings + migrations)
-4. Add type to `packages/worker/src/env.ts` Env interface
-5. Use in routes via `c.env.BINDING_NAME.idFromName(...)`
-
-### Adding a frontend route
-
-1. Create route file at `packages/client/src/routes/<path>.tsx`
-2. TanStack Router auto-generates route tree on dev server restart
-3. Add navigation link to sidebar at `packages/client/src/components/layout/sidebar.tsx`
+`packages/plugin-<name>/` with `plugin.yaml` (`v2: true`; `enabled: false` to park it) + `package.json` (`"valet": { "plugin": "./dist/plugin.js" }`, `./plugin` export, `@valet/engine` dep, sibling-matching scripts) + `tsconfig.json` referencing workspace deps. `src/plugin.ts` default-exports the `ValetPlugin` manifest — actions via `ActionPlugin`/`mcpActionPlugin`, skills/roles via `loadSkillFromMarkdown`/`loadRoleFromMarkdown`. Add to root `tsconfig.json` references and `packages/api/package.json` deps, then `make generate-registries` + `pnpm typecheck`.

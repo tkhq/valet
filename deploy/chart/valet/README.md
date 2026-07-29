@@ -1,16 +1,17 @@
 # valet Helm chart
 
 Deploys the api (which also serves the built web app), an optional bundled
-Postgres StatefulSet, and the namespace/RBAC the api needs to drive session
-sandboxes as `Sandbox` custom resources.
+Postgres StatefulSet, the bundled observability stack, and the
+namespace/RBAC the api needs to drive session sandboxes as `Sandbox`
+custom resources.
 
 ## Install ordering (required)
 
 This chart does **not** bundle the [agent-sandbox](https://agent-sandbox.sigs.k8s.io/)
-CRDs or controller — there is no published Helm chart/repo for it upstream
-to depend on, and Helm's `crds/` directory semantics (install-once, never
-upgraded) make version-pinning it inside this chart impractical. Install it
-separately, first:
+CRDs or controller. Upstream publishes no Helm chart or repo to depend on.
+Helm's `crds/` directory semantics (install once, never upgrade) also make
+version-pinning it inside this chart impractical. Install it separately,
+first:
 
 ```sh
 # 1. Install the vendored, version-pinned agent-sandbox release manifest
@@ -26,41 +27,47 @@ helm upgrade --install valet deploy/chart/valet \
   --namespace valet --create-namespace
 ```
 
-If step 1 is skipped, the api's `Sandbox` custom resource creates (RBAC is
-scoped for them, but the CRD itself won't exist) fail at session-provision
-time — not at chart-install time, since Helm doesn't validate CRD existence
-for API groups it doesn't own.
+If you skip step 1, the api's `Sandbox` create calls fail at
+session-provision time, not at chart-install time. The RBAC is scoped for
+the CRs, but the CRD itself will not exist, and Helm does not validate CRD
+existence for API groups it does not own.
 
 ## What's in the chart
 
-- **api Deployment** (`replicas: 1` — the engine is a stateful in-process
-  singleton, do not scale it), Service, Ingress (Traefik, TLS terminated at
-  the ingress).
-- **Bundled Postgres** (StatefulSet + Service + Secret), gated on
-  `postgres.bundled` (default `true`) and disabled automatically when
+- **api Deployment**, Service, and Ingress (Traefik, TLS terminated at the
+  ingress). `replicas` is pinned to 1 — the engine is a stateful
+  in-process singleton, so do not scale it.
+- **Bundled Postgres** (StatefulSet + Service + Secret). Gated on
+  `postgres.bundled` (default `true`), and disabled automatically when
   `externalDatabase.url` is set.
-- **Sandbox namespace + RBAC**: a `Namespace`, a namespaced `Role` (sandbox
-  CRs + pods + pods/exec + pods/log — no cluster-scoped permissions, no PVC
-  verbs; the agent-sandbox controller owns PVC lifecycle), and a
-  `RoleBinding` to the api's `ServiceAccount`.
-- **App Secret** with a `lookup`-based retain guard: `BETTER_AUTH_SECRET`
-  and `VALET_ENCRYPTION_KEY` are generated once (if not supplied via
-  values) and then reused on every subsequent `helm upgrade` — regenerating
-  them would invalidate every session cookie and rotate the sandbox JWT
-  signing master, since `VALET_SANDBOX_JWT_MASTER` falls back to
+- **Observability stack** (`observability.enabled`, default `true`): one
+  `grafana/otel-lgtm` Deployment (OTel collector, Tempo, Loki, Mimir,
+  Grafana), a ClusterIP Service for OTLP ingest, a NodePort Service for
+  Grafana (30300), a PVC for telemetry storage, and the provisioned
+  "Valet — Agent Observability" dashboard.
+- **Sandbox namespace + RBAC**: a `Namespace`, a namespaced `Role`, and a
+  `RoleBinding` to the api's `ServiceAccount`. The Role grants sandbox
+  CRs, pods, pods/exec, and pods/log. It grants no cluster-scoped
+  permissions and no PVC verbs — the agent-sandbox controller owns PVC
+  lifecycle.
+- **App Secret** with a `lookup`-based retain guard. `BETTER_AUTH_SECRET`
+  and `VALET_ENCRYPTION_KEY` are generated once when values do not supply
+  them, then reused on every later `helm upgrade`. Regenerating them would
+  invalidate every session cookie and rotate the sandbox JWT signing
+  master, because `VALET_SANDBOX_JWT_MASTER` falls back to
   `BETTER_AUTH_SECRET` when unset.
 - **`helm test`**: a Pod hook that curls the api Service's `/api/health`.
 
 ## Notes
 
-- **PVCs survive `helm uninstall`** by Kubernetes design (StatefulSet
-  `volumeClaimTemplates` PVCs are not owned by the Helm release). For a true
-  reset, delete them explicitly:
+- **PVCs survive `helm uninstall`** by Kubernetes design — StatefulSet
+  `volumeClaimTemplates` PVCs are not owned by the Helm release. For a
+  true reset, delete them explicitly:
   ```sh
   kubectl --context rancher-desktop -n valet delete pvc -l app.kubernetes.io/instance=valet
   ```
 - No secrets are committed to `values.yaml` — only empty placeholders.
-  Supply real values via `--set` / a local `values-local.yaml` (gitignored)
-  / `--set-file`, or leave them blank to let the chart generate-and-retain
-  `BETTER_AUTH_SECRET` / `VALET_ENCRYPTION_KEY` / the bundled Postgres
-  password.
+  Supply real values via `--set`, a gitignored local `values-local.yaml`,
+  or `--set-file`. Or leave them blank to let the chart generate and
+  retain `BETTER_AUTH_SECRET`, `VALET_ENCRYPTION_KEY`, and the bundled
+  Postgres password.

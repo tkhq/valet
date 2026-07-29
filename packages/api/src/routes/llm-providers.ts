@@ -40,6 +40,7 @@ import {
   type UpdateLlmProviderOptions,
 } from "../services/llm-providers.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
+import { curatedOpenrouterModels, mergedOpenrouterModels } from "../services/openrouter.js";
 import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type {
   CreateLlmProviderRequest,
@@ -47,6 +48,7 @@ import type {
   GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
   LlmProviderSummary,
+  OpenrouterRegistryResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
   ProbeLlmProviderResponse,
@@ -84,6 +86,13 @@ function isValidLlmProviderModel(m: unknown): m is LlmProviderModel {
 function isLlmProviderModelArray(v: unknown): v is LlmProviderModel[] {
   if (!Array.isArray(v)) return false;
   return v.every(isValidLlmProviderModel);
+}
+
+/** Kinds whose rows carry a `models` list: custom providers (their full
+ * declared list) and openrouter (the curated selection from pi-ai's
+ * registry — see `services/openrouter.ts`). */
+function kindAcceptsModels(kind: LlmProviderKind): boolean {
+  return kind === "openai_compatible" || kind === "openrouter";
 }
 
 /** `baseUrl` is required for `openai_compatible` and refused for known kinds. */
@@ -167,6 +176,24 @@ llmProvidersRouter.put("/preferences", async (c) => {
   return c.json(resp);
 });
 
+// ── GET /openrouter/models — live OpenRouter catalog ∪ pi-ai registry ────
+//
+// Powers the settings model-selection picker for openrouter rows. Like
+// `/preferences`, registered before `/:id` so "openrouter" is never
+// captured as a provider id. Attempts OpenRouter's live `/api/v1/models`
+// (so brand-new models are pickable before any pi-ai registry bump) and
+// merges with the built-in registry; degrades to registry-only offline
+// (`live: false`).
+
+llmProvidersRouter.get("/openrouter/models", async (c) => {
+  const forbidden = requirePermission("providers:manage")(c);
+  if (forbidden) return forbidden;
+
+  const { models, live } = await mergedOpenrouterModels();
+  const resp: OpenrouterRegistryResponse = { models, live };
+  return c.json(resp);
+});
+
 // ── GET / — list ──────────────────────────────────────────────────────────
 
 llmProvidersRouter.get("/", async (c) => {
@@ -198,7 +225,7 @@ llmProvidersRouter.post("/", async (c) => {
   }
 
   if (!isLlmProviderKind(body.kind)) {
-    return c.json({ error: "kind must be one of anthropic|openai|google|openai_compatible" }, 400);
+    return c.json({ error: "kind must be one of anthropic|openai|google|openrouter|openai_compatible" }, 400);
   }
   if (typeof body.name !== "string" || body.name.length === 0) {
     return c.json({ error: "name is required" }, 400);
@@ -210,8 +237,8 @@ llmProvidersRouter.post("/", async (c) => {
   if (body.models !== undefined && !isLlmProviderModelArray(body.models)) {
     return c.json({ error: "models must be an array of {id, name}" }, 400);
   }
-  if (body.models !== undefined && body.kind !== "openai_compatible") {
-    return c.json({ error: "models is only accepted for openai_compatible providers" }, 400);
+  if (body.models !== undefined && !kindAcceptsModels(body.kind)) {
+    return c.json({ error: "models is only accepted for openai_compatible or openrouter providers" }, 400);
   }
 
   try {
@@ -220,7 +247,11 @@ llmProvidersRouter.post("/", async (c) => {
       kind: body.kind,
       name: body.name,
       baseUrl: baseUrlCheck.value,
-      models: body.kind === "openai_compatible" ? body.models : undefined,
+      // OpenRouter rows seed the curated default selection unless the
+      // caller supplied an explicit list (services/openrouter.ts).
+      models: kindAcceptsModels(body.kind)
+        ? body.models ?? (body.kind === "openrouter" ? curatedOpenrouterModels() : undefined)
+        : undefined,
     });
     const resp: CreateLlmProviderResponse = await toSummary(c, row);
     return c.json(resp, 201);
@@ -276,8 +307,8 @@ llmProvidersRouter.patch("/:id", async (c) => {
     if (!isLlmProviderModelArray(body.models)) {
       return c.json({ error: "models must be an array of {id, name}" }, 400);
     }
-    if (existing.kind !== "openai_compatible") {
-      return c.json({ error: "models is only accepted for openai_compatible providers" }, 400);
+    if (!kindAcceptsModels(existing.kind)) {
+      return c.json({ error: "models is only accepted for openai_compatible or openrouter providers" }, 400);
     }
     patch.models = body.models;
   }

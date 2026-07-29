@@ -617,3 +617,69 @@ CREATE TABLE "prebuilds" (
 );
 --> statement-breakpoint
 CREATE INDEX "prebuilds_config_status_created" ON "prebuilds" ("config_id","status","created_at");
+--> statement-breakpoint
+CREATE TABLE "events" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"service" text NOT NULL,
+	"event_key" text NOT NULL,
+	"dedupe_key" text NOT NULL,
+	"actor" jsonb,
+	"refs" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"summary" text NOT NULL,
+	"payload" jsonb NOT NULL,
+	"occurred_at" bigint NOT NULL,
+	"received_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "events_service_dedupe" ON "events" ("service","dedupe_key");
+--> statement-breakpoint
+CREATE INDEX "events_org_received" ON "events" ("org_id","received_at");
+--> statement-breakpoint
+CREATE INDEX "events_org_key" ON "events" ("org_id","event_key");
+--> statement-breakpoint
+CREATE TABLE "event_subscriptions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"name" text NOT NULL,
+	"event_keys" jsonb NOT NULL,
+	"filters" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"target" jsonb NOT NULL,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"created_by" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "event_subscriptions_org_enabled" ON "event_subscriptions" ("org_id","enabled");
+--> statement-breakpoint
+CREATE TABLE "event_deliveries" (
+	"id" text PRIMARY KEY NOT NULL,
+	"event_id" text NOT NULL,
+	"subscription_id" text NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"next_attempt_at" bigint NOT NULL,
+	"last_error" text,
+	"delivered_at" bigint,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "event_deliveries_due" ON "event_deliveries" ("status","next_attempt_at");
+--> statement-breakpoint
+CREATE INDEX "event_deliveries_event" ON "event_deliveries" ("event_id");
+--> statement-breakpoint
+CREATE TABLE "linear_installations" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"workspace_id" text NOT NULL,
+	"workspace_name" text NOT NULL,
+	"webhook_id" text,
+	"connected_by" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "linear_installations_org_workspace" ON "linear_installations" ("org_id","workspace_id");

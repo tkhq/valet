@@ -1,6 +1,6 @@
 import { Terminal } from "lucide-react";
 import { cn } from "~/lib/cn";
-import { ToolBody, TruncatedText } from "./tool-shell";
+import { CopyButton, ToolBody, TruncatedText } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
 interface BashArgs {
@@ -53,13 +53,18 @@ export const bashRenderer: ToolRenderer = {
       <ToolBody className="bg-neutral-950 dark:bg-black text-emerald-300/95 px-0 py-0">
         {/* Command line, terminal-prompt style. */}
         {command && (
-          <div className="px-3 py-2 border-b border-emerald-500/15 flex gap-2">
+          <div className="px-3 py-2 border-b border-emerald-500/15 flex gap-2 items-start">
             <span aria-hidden className="select-none text-emerald-400/80">
               $
             </span>
             <pre className="font-mono text-[12px] leading-snug whitespace-pre-wrap break-all flex-1 text-emerald-100/95">
               {command}
             </pre>
+            <CopyButton
+              label="Copy command and output"
+              getText={() => (body ? `$ ${command}\n${body}` : `$ ${command}`)}
+              className="-my-0.5 text-neutral-400 hover:text-neutral-100 hover:bg-white/10"
+            />
           </div>
         )}
         {/* Output. While running, show a subtle blinking caret. */}

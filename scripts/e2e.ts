@@ -1,0 +1,333 @@
+/**
+ * `make e2e` — the unified e2e entrypoint (spec:
+ * docs/specs/2026-07-25-e2e-runner-design.md).
+ *
+ * Loads `.env.e2e` (ambient env wins), probes prerequisites once, runs each
+ * armed step from `scripts/e2e/lib.ts` as a child process, and prints a
+ * ✓/✗/⊘ scorecard. Exit nonzero iff an armed step failed.
+ *
+ * Flags:
+ *   --list            print steps + armed state, run nothing
+ *   --doctor          environment readiness checklist, run nothing
+ *   --only a,b,c      run a subset (step ids)
+ *   --json            machine-readable report on stdout
+ *   --verbose         stream child output live (default: replay on failure)
+ *
+ * Deliberately NOT set here: `CI` — several docker-gated suites self-skip
+ * when CI is set, and this runner is local-first.
+ */
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  CRED_VARS,
+  doctorExitCode,
+  truncateOutput,
+  missingNeeds,
+  needHint,
+  parseEnvFile,
+  renderDoctor,
+  renderScorecard,
+  selectSteps,
+  toJsonReport,
+  STEPS,
+  type DoctorCheck,
+  type Probes,
+  type StepDef,
+  type StepResult,
+} from "./e2e/lib.js";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// ── preflight: Node >= 22 ──────────────────────────────────────────────────
+// Several suites and the smoke scripts use the global `WebSocket`, which
+// landed in Node 22. Under Node 20 they fail 15 minutes in with a cryptic
+// "WebSocket is not defined" — fail fast here instead.
+const nodeMajor = Number(process.versions.node.split(".")[0]);
+if (nodeMajor < 22) {
+  console.error(
+    `make e2e requires Node >= 22 (found ${process.versions.node}). Run \`nvm use 22\` (or \`nvm alias default 22\`) and retry.`,
+  );
+  process.exit(2);
+}
+
+// ── flags ──────────────────────────────────────────────────────────────────
+
+const argv = process.argv.slice(2);
+const flag = (name: string): boolean => argv.includes(`--${name}`);
+const onlyArg = ((): string[] | undefined => {
+  const i = argv.indexOf("--only");
+  if (i === -1) return undefined;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith("--")) {
+    console.error("--only requires a comma-separated list of step ids");
+    process.exit(2);
+  }
+  return v.split(",").map((s) => s.trim()).filter((s) => s !== "");
+})();
+const JSON_OUT = flag("json");
+const VERBOSE = flag("verbose");
+
+// ── env loading (.env.e2e; ambient wins) ───────────────────────────────────
+
+const envFile = resolve(ROOT, ".env.e2e");
+if (existsSync(envFile)) {
+  let fileVars: Record<string, string>;
+  try {
+    fileVars = parseEnvFile(readFileSync(envFile, "utf8"));
+  } catch (err) {
+    // A malformed secrets file must fail loudly, not run a weaker tier.
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(2);
+  }
+  for (const [k, v] of Object.entries(fileVars)) {
+    // Empty ambient values count as unset — an exported-but-blank var must
+    // not shadow a real value from the file.
+    const ambient = process.env[k];
+    if ((ambient === undefined || ambient === "") && v !== "") process.env[k] = v;
+  }
+}
+
+// ── probes (cheap, read-only, once) ────────────────────────────────────────
+
+function probeCmd(cmd: string, args: string[]): boolean {
+  const r = spawnSync(cmd, args, { stdio: "ignore", timeout: 15_000 });
+  return r.status === 0;
+}
+
+const probes: Probes = {
+  key: Boolean(process.env.ANTHROPIC_API_KEY),
+  docker: probeCmd("docker", ["info"]),
+  helm: probeCmd("helm", ["version"]),
+  k8sContext: probeCmd("kubectl", ["--context", "rancher-desktop", "config", "get-contexts", "rancher-desktop"]),
+  e2eK8sOptIn: process.env.VALET_E2E_K8S === "1",
+  telegram: Boolean(process.env.TELEGRAM_TEST_BOT_TOKEN && process.env.TELEGRAM_TEST_CHAT_ID),
+  githubLive: Boolean(
+    process.env.VALET_GITHUB_LIVE_TEST &&
+      process.env.VALET_GITHUB_LIVE_APP_ID &&
+      process.env.VALET_GITHUB_LIVE_APP_PRIVATE_KEY_PEM,
+  ),
+  openai: Boolean(process.env.OPENAI_API_KEY),
+};
+
+// ── doctor: environment readiness checklist, no suites ─────────────────────
+// The "initialization phase" for a fresh machine/agent: everything a run
+// needs, checked in seconds, each miss with its repair command.
+
+if (flag("doctor")) {
+  const dist = (pkg: string): boolean => existsSync(resolve(ROOT, `packages/${pkg}/dist/index.js`));
+  const checks: DoctorCheck[] = [
+    {
+      id: "node",
+      label: "Node >= 22",
+      ok: true, // the preflight above already exited if not
+      required: true,
+      detail: `v${process.versions.node}`,
+    },
+    {
+      id: "deps",
+      label: "dependencies installed",
+      ok: existsSync(resolve(ROOT, "node_modules")) && existsSync(resolve(ROOT, "packages/api/node_modules")),
+      required: true,
+      hint: "run `pnpm install`",
+    },
+    // @valet/shared and @valet/sdk are the only workspace packages consumed
+    // via built dist (their package.json exports point at dist/); everything
+    // else resolves TS sources directly.
+    {
+      id: "shared-dist",
+      label: "@valet/shared built",
+      ok: dist("shared"),
+      required: true,
+      hint: "run `pnpm --filter @valet/shared build`",
+    },
+    {
+      id: "sdk-dist",
+      label: "@valet/sdk built",
+      ok: dist("sdk"),
+      required: true,
+      hint: "run `pnpm --filter @valet/sdk build`",
+    },
+    {
+      id: "env-file",
+      label: ".env.e2e present",
+      ok: existsSync(envFile),
+      required: false,
+      hint: "cp .env.e2e.example .env.e2e and fill in credentials (keyless tiers still run)",
+    },
+    { id: "key", label: "Anthropic key", ok: probes.key, required: false, hint: needHint("key") },
+    { id: "docker", label: "Docker daemon", ok: probes.docker, required: false, hint: needHint("docker") },
+    { id: "helm", label: "helm CLI", ok: probes.helm, required: false, hint: "install helm (brew install helm)" },
+    { id: "k8s", label: "kubectl context rancher-desktop", ok: probes.k8sContext, required: false, hint: needHint("k8sContext") },
+    { id: "k8s-opt-in", label: "k8s fullstack opt-in", ok: probes.e2eK8sOptIn, required: false, hint: needHint("e2eK8sOptIn") },
+    { id: "telegram", label: "Telegram creds", ok: probes.telegram, required: false, hint: needHint("telegram") },
+    { id: "github-live", label: "GitHub live-App creds", ok: probes.githubLive, required: false, hint: needHint("githubLive") },
+    { id: "openai", label: "OpenAI key", ok: probes.openai, required: false, hint: needHint("openai") },
+  ];
+  const armed = STEPS.filter((s) => missingNeeds(s, probes).length === 0).length;
+  console.log(renderDoctor(checks, armed, STEPS.length));
+  process.exit(doctorExitCode(checks));
+}
+
+// ── step selection ─────────────────────────────────────────────────────────
+
+let steps: StepDef[];
+try {
+  steps = selectSteps(STEPS, onlyArg);
+} catch (err) {
+  console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(2);
+}
+
+if (flag("list")) {
+  const width = Math.max(...steps.map((s) => s.id.length));
+  for (const s of steps) {
+    const missing = missingNeeds(s, probes);
+    const state = missing.length === 0 ? "armed" : `skipped — ${missing.map(needHint).join("; ")}`;
+    console.log(`${s.id.padEnd(width)}  [${s.group}]  ${state}`);
+  }
+  process.exit(0);
+}
+
+// ── keycloak pre-hook ──────────────────────────────────────────────────────
+
+const KEYCLOAK_WELLKNOWN = "http://localhost:8081/realms/valet/.well-known/openid-configuration";
+
+async function keycloakHealthy(): Promise<boolean> {
+  try {
+    const res = await fetch(KEYCLOAK_WELLKNOWN, { signal: AbortSignal.timeout(3_000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Boot the compose keycloak profile and wait for the realm (≤120s). The
+ * container is left running between runs — cold boot is 30–60s. */
+async function ensureKeycloak(): Promise<string | undefined> {
+  if (await keycloakHealthy()) return undefined;
+  const up = spawnSync("docker", ["compose", "--profile", "keycloak", "up", "-d", "keycloak"], {
+    cwd: ROOT,
+    stdio: VERBOSE ? "inherit" : "ignore",
+    timeout: 120_000,
+  });
+  if (up.status !== 0) return "keycloak compose up failed";
+  for (let i = 0; i < 60; i++) {
+    if (await keycloakHealthy()) return undefined;
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+  return "keycloak did not become healthy within 120s";
+}
+
+// ── execution ──────────────────────────────────────────────────────────────
+
+let current: ChildProcess | undefined;
+const results: StepResult[] = [];
+
+function finish(extraExit = 0): never {
+  const report = toJsonReport(results);
+  if (JSON_OUT) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(`\n${renderScorecard(results)}`);
+  }
+  process.exit(report.exitCode || extraExit);
+}
+
+let currentStepId: string | undefined;
+process.on("SIGINT", () => {
+  if (current?.pid) {
+    try {
+      process.kill(-current.pid, "SIGKILL");
+    } catch {}
+  }
+  // The in-flight step did not finish — record it as failed so an
+  // interrupted run can NEVER exit 0 and read as green downstream.
+  if (currentStepId !== undefined) {
+    results.push({ id: currentStepId, status: "failed", durationMs: 0, skipReason: undefined });
+  }
+  console.error("\ninterrupted — partial scorecard:");
+  finish(130);
+});
+
+function runStep(step: StepDef): Promise<StepResult> {
+  const started = Date.now();
+  const env: NodeJS.ProcessEnv = { ...process.env, ...step.env };
+  if (step.scrubKeys) for (const k of CRED_VARS) delete env[k];
+
+  currentStepId = step.id;
+  return new Promise((resolveStep) => {
+    const child = spawn(step.command[0], step.command.slice(1), {
+      cwd: step.cwd ? resolve(ROOT, step.cwd) : ROOT,
+      env,
+      stdio: VERBOSE ? "inherit" : ["ignore", "pipe", "pipe"],
+      detached: true, // own process group so timeouts kill the whole tree
+    });
+    current = child;
+    let output = "";
+    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {}
+      }
+    }, step.timeoutMs);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      current = undefined;
+      currentStepId = undefined;
+      const durationMs = Date.now() - started;
+      const ok = code === 0 && !timedOut;
+      if (!ok && !VERBOSE) {
+        process.stderr.write(`\n── ${step.id} output ──\n${truncateOutput(output)}\n`);
+      }
+      if (timedOut) process.stderr.write(`── ${step.id} timed out after ${step.timeoutMs / 1000}s ──\n`);
+      resolveStep({ id: step.id, status: ok ? "passed" : "failed", durationMs });
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      current = undefined;
+      currentStepId = undefined;
+      process.stderr.write(`── ${step.id} spawn error: ${err.message} ──\n`);
+      resolveStep({ id: step.id, status: "failed", durationMs: Date.now() - started });
+    });
+  });
+}
+
+async function main(): Promise<never> {
+  for (const step of steps) {
+    const missing = missingNeeds(step, probes);
+    if (missing.length > 0) {
+      results.push({
+        id: step.id,
+        status: "skipped",
+        durationMs: 0,
+        skipReason: missing.map(needHint).join("; "),
+      });
+      continue;
+    }
+    if (step.preHook === "keycloak") {
+      const hookErr = await ensureKeycloak();
+      if (hookErr !== undefined) {
+        results.push({ id: step.id, status: "skipped", durationMs: 0, skipReason: hookErr });
+        continue;
+      }
+    }
+    if (!JSON_OUT) console.log(`\n▶ ${step.id} — ${step.title}`);
+    results.push(await runStep(step));
+  }
+
+  finish();
+}
+
+main().catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});

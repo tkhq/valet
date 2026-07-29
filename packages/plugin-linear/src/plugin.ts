@@ -1,5 +1,6 @@
 import { mcpActionPlugin } from '@valet/sdk/mcp';
 import type { ValetPlugin } from '@valet/engine';
+import { linearTriggerDefs } from './triggers.js';
 
 const plugin: ValetPlugin = {
   name: 'linear',
@@ -12,6 +13,7 @@ const plugin: ValetPlugin = {
       defaultRiskLevel: 'medium',
     }),
   ],
+  triggers: linearTriggerDefs,
   credentials: [
     {
       type: 'oauth2',

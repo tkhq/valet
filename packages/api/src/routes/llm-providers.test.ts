@@ -14,10 +14,12 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProviders, orgMembers } from "../schema/index.js";
+import { OPENROUTER_DEFAULT_MODEL_IDS } from "../services/openrouter.js";
 import type {
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
+  OpenrouterRegistryResponse,
   ProbeLlmProviderResponse,
   PutLlmProviderKeyResponse,
   TestLlmProviderResponse,
@@ -204,6 +206,49 @@ describe("POST /api/org/llm-providers", () => {
       body: JSON.stringify({ kind: "anthropic", name: "Anthropic", models: [{ id: "m1", name: "Model 1" }] }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("creates an openrouter provider seeded with the curated default model selection", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openrouter", name: "OpenRouter" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateLlmProviderResponse;
+    expect(body.kind).toBe("openrouter");
+    expect(body.baseUrl).toBeUndefined();
+    expect(body.models.map((m) => m.id)).toEqual([...OPENROUTER_DEFAULT_MODEL_IDS]);
+    expect(body.models.map((m) => m.id)).toContain("deepseek/deepseek-v4-pro");
+  });
+
+  it("openrouter is a per-org singleton (second create 409s)", async () => {
+    api = await bootTestApi();
+    const mk = () =>
+      fetch(`${api!.baseUrl}/api/org/llm-providers`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ kind: "openrouter", name: "OpenRouter" }),
+      });
+    expect((await mk()).status).toBe(201);
+    expect((await mk()).status).toBe(409);
+  });
+
+  it("accepts an explicit models selection for openrouter at create", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateLlmProviderResponse;
+    expect(body.models).toEqual([{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }]);
   });
 
   it("allows multiple openai_compatible providers for the same org", async () => {
@@ -1040,5 +1085,107 @@ describe("POST /api/org/llm-providers/:id/test", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as TestLlmProviderResponse;
     expect(body.ok).toBe(false);
+  });
+});
+
+describe("GET /api/org/llm-providers/openrouter/models (live ∪ registry)", () => {
+  // Never let these tests hit the real openrouter.ai — every test below
+  // pins VALET_OPENROUTER_MODELS_URL to a local fixture or a dead port.
+  afterEach(() => {
+    delete process.env.VALET_OPENROUTER_MODELS_URL;
+  });
+
+  it("403s for a non-admin org member", async () => {
+    process.env.VALET_OPENROUTER_MODELS_URL = "http://127.0.0.1:9/models";
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/openrouter/models`, {
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("live fetch failure degrades to the pi-ai registry (sorted, live:false)", async () => {
+    process.env.VALET_OPENROUTER_MODELS_URL = "http://127.0.0.1:9/models"; // unreachable
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/openrouter/models`, {
+      headers: HEADERS,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OpenrouterRegistryResponse;
+    expect(body.live).toBe(false);
+    // Far more than the curated default set — this is the full registry.
+    expect(body.models.length).toBeGreaterThan(100);
+    const ids = body.models.map((m) => m.id);
+    expect(ids).toEqual([...ids].sort((a, b) => a.localeCompare(b)));
+    expect(ids).toContain("deepseek/deepseek-v4-pro");
+    const entry = body.models.find((m) => m.id === "deepseek/deepseek-v4-pro");
+    expect(typeof entry?.name).toBe("string");
+    expect(typeof entry?.pricing?.input).toBe("number");
+  });
+
+  it("merges the LIVE catalog over the registry — brand-new models become pickable", async () => {
+    const app = new Hono();
+    app.get("/or-models", (c) =>
+      c.json({
+        data: [
+          {
+            id: "moonshotai/kimi-k3",
+            name: "MoonshotAI: Kimi K3",
+            context_length: 1_048_576,
+            pricing: { prompt: "0.000003", completion: "0.000015" },
+          },
+          // Also present in the registry — the live entry must win.
+          {
+            id: "moonshotai/kimi-k2.6",
+            name: "Kimi K2.6 (live)",
+            context_length: 262_144,
+            pricing: { prompt: "0.000001", completion: "0.000002" },
+          },
+        ],
+      }),
+    );
+    const server: ServerType = serve({ fetch: app.fetch, port: 0 });
+    const port = listenAddress(server);
+    process.env.VALET_OPENROUTER_MODELS_URL = `http://127.0.0.1:${port}/or-models`;
+    try {
+      api = await bootTestApi();
+      const res = await fetch(`${api.baseUrl}/api/org/llm-providers/openrouter/models`, {
+        headers: HEADERS,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as OpenrouterRegistryResponse;
+      expect(body.live).toBe(true);
+      const k3 = body.models.find((m) => m.id === "moonshotai/kimi-k3");
+      expect(k3).toEqual({
+        id: "moonshotai/kimi-k3",
+        name: "MoonshotAI: Kimi K3",
+        contextWindow: 1_048_576,
+        pricing: { input: 3, output: 15 },
+      });
+      const k26 = body.models.find((m) => m.id === "moonshotai/kimi-k2.6");
+      expect(k26?.name).toBe("Kimi K2.6 (live)"); // live wins over registry
+      // Registry-only models are still present (merge, not replace).
+      expect(body.models.some((m) => m.id === "deepseek/deepseek-v4-pro")).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("PATCH accepts a models selection on an openrouter row", async () => {
+    api = await bootTestApi();
+    const createRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openrouter", name: "OpenRouter" }),
+    });
+    const created = (await createRes.json()) as CreateLlmProviderResponse;
+    const patchRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ models: [{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }] }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as CreateLlmProviderResponse;
+    expect(patched.models).toEqual([{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }]);
   });
 });

@@ -8,15 +8,18 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { createNodeWebSocket } from "@hono/node-ws";
 import type { AppEnv } from "./env.js";
+import type { RunningServer, ServerAdapter } from "./server-adapter.js";
+import { nodeServerAdapter } from "./server-adapter.node.js";
 import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
 import { buildAuthMiddleware } from "./middleware/auth.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
-import type { AuthConfigResponse } from "./wire/types.js";
+import type { AuthConfigResponse, HealthResponse } from "./wire/types.js";
+import { VALET_VERSION } from "./version.js";
+import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
@@ -36,6 +39,7 @@ import { orgInvitesRouter } from "./routes/org-invites.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
+import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { imageCatalogRouter } from "./routes/image-catalog.js";
 import { prebuildsRouter, prebuildsPublicRouter } from "./routes/prebuilds.js";
@@ -43,12 +47,20 @@ import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
+import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
+import { traceRequests } from "./observability/http-middleware.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
-  /** Call after `serve()` to attach the WS upgrade handler to the http server. */
-  injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
+  /**
+   * Start listening on `port` and attach the WS upgrade handler, using the
+   * runtime adapter passed to `createApp`. Returns a uniform handle whose
+   * `close()` stops the socket. The WS `attach` token is captured internally,
+   * so callers never touch runtime-specific plumbing.
+   */
+  startServer(opts: { port: number; onListen?: (port: number) => void }): RunningServer;
   /** True when `opts.webDistDir` pointed at a real build and the SPA was
    * mounted. `false` when unset (dev mode) OR set-but-missing-index.html —
    * the caller distinguishes those two (a set-but-unmounted dist is fatal). */
@@ -80,10 +92,21 @@ export function createApp(
   providers: Providers,
   authWiring: AuthWiring = {},
   opts: CreateAppOpts = {},
+  // Default to the Node adapter so the many HTTP-only test callers (and the
+  // node bundle) need no change. Under Bun, `main.ts` passes the Bun adapter
+  // explicitly via `selectServerAdapter()` — the Node adapter's `serve` /
+  // `createWebSocket` are then never called. The Node adapter is import-safe
+  // under Bun; only `hono/bun` (the Bun adapter's dep) is not import-safe
+  // under Node, and it is never statically imported here.
+  adapter: ServerAdapter = nodeServerAdapter,
 ): CreatedApp {
   const app = new Hono<AppEnv>();
   const { auth, authConfig } = authWiring;
 
+  // One server span per request (no-op unless the OTLP SDK is registered —
+  // see observability/otel.ts). First in the chain so every downstream
+  // middleware and handler runs inside the request's active span context.
+  app.use("*", traceRequests());
   app.use("*", logger());
   app.use(
     "*",
@@ -108,10 +131,25 @@ export function createApp(
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
 
-  // Public health check (no auth).
-  app.get("/api/health", (c) =>
-    c.json({ ok: true, service: "valet-api", ts: Date.now() }),
-  );
+  // PUBLIC generic event-webhook ingress — same reasoning as the mounts
+  // above: the caller is the provider (Linear etc.), not a logged-in Valet
+  // user; verification is signature-level (plugin `TriggerDef.verify` over
+  // the raw bytes) inside the router itself, not the auth gate below.
+  app.route("/webhooks/events", eventWebhooksRouter);
+
+  // Public health check (no auth). Carries the running binary's version and
+  // the resolved sandbox backend so `valet status` can report client/server
+  // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
+  app.get("/api/health", (c) => {
+    const body: HealthResponse = {
+      ok: true,
+      service: "valet-api",
+      ts: Date.now(),
+      version: VALET_VERSION,
+      sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
+    };
+    return c.json(body);
+  });
 
   // better-auth owns everything under /api/auth/* (signup, login, session,
   // social + SSO callbacks, api-key endpoints, MCP OAuth). Mounted BEFORE
@@ -180,16 +218,22 @@ export function createApp(
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
   app.route("/api/org/github-app", githubAppRouter);
+  app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/image-catalog", imageCatalogRouter);
   app.route("/api/org/prebuilds", prebuildsRouter);
   app.route("/api/prebuilds", prebuildsPublicRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
+  // Mounted at /api (not /api/events) because the router carries both the
+  // /events* and /event-subscriptions* path families. Placed after every
+  // more-specific /api/* router above so nothing gets shadowed.
+  app.route("/api", eventsRouter);
 
-  // WebSocket — must be registered against the same Hono instance that
-  // node-ws was constructed with. main.ts calls injectWebSocket(server)
-  // after serve().
-  const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
+  // WebSocket — must be registered against the same Hono instance the runtime
+  // WS handler was constructed with. The adapter's `serve` (returned in
+  // `startServer` below) attaches the upgrade handler at listen time (Node:
+  // `injectWebSocket(server)`; Bun: `Bun.serve({ websocket })`).
+  const { upgradeWebSocket, serve } = adapter.createWebSocket(app);
   registerWsRoutes(app, upgradeWebSocket);
   // Gateway reverse-proxy: WS upgrade `GET` registered before the HTTP
   // `ALL` on the same `/api/sessions/:id/gateway/*` path — `upgradeWebSocket`
@@ -222,7 +266,11 @@ export function createApp(
     );
   });
 
-  return { app, injectWebSocket, webServed };
+  return {
+    app,
+    startServer: (startOpts) => serve(startOpts),
+    webServed,
+  };
 }
 
 export type App = ReturnType<typeof createApp>["app"];

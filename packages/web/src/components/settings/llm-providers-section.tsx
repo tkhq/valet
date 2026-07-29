@@ -19,25 +19,32 @@ import {
   useDeleteLlmProvider,
   useDeleteLlmProviderKey,
   useLlmProviders,
+  useOpenrouterRegistry,
   usePatchLlmProvider,
   useProbeLlmProvider,
   usePutLlmProviderKey,
   useTestLlmProvider,
 } from "~/api/settings";
 
-const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google"];
+type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
 
-const KNOWN_LABEL: Record<"anthropic" | "openai" | "google", string> = {
+const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google", "openrouter"];
+
+const KNOWN_LABEL: Record<KnownKind, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
+  openrouter: "OpenRouter",
 };
 
 /**
  * Organization · Models — provider configuration (llm-providers design,
- * plan Task 7). One card per known provider kind (anthropic/openai/google,
- * created implicitly on first key save/toggle) plus any number of custom
- * `openai_compatible` providers with a create form below the list.
+ * plan Task 7 + openrouter extension). One card per known provider kind
+ * (anthropic/openai/google/openrouter, created implicitly on first key
+ * save/toggle) plus any number of custom `openai_compatible` providers
+ * with a create form below the list. The openrouter card additionally
+ * hosts a curated model-selection editor backed by the server-side pi-ai
+ * registry (`GET /api/org/llm-providers/openrouter/models`).
  */
 export function LlmProvidersSection() {
   const providersQ = useLlmProviders();
@@ -63,7 +70,7 @@ export function LlmProvidersSection() {
           {KNOWN_KINDS.map((kind) => (
             <KnownProviderCard
               key={kind}
-              kind={kind as "anthropic" | "openai" | "google"}
+              kind={kind as KnownKind}
               row={knownRows.get(kind)}
             />
           ))}
@@ -77,13 +84,13 @@ export function LlmProvidersSection() {
   );
 }
 
-// ── Known-provider (anthropic/openai/google) card ──────────────────────────
+// ── Known-provider (anthropic/openai/google/openrouter) card ───────────────
 
 function KnownProviderCard({
   kind,
   row,
 }: {
-  kind: "anthropic" | "openai" | "google";
+  kind: KnownKind;
   row: LlmProviderSummary | undefined;
 }) {
   const createProvider = useCreateLlmProvider();
@@ -113,8 +120,17 @@ function KnownProviderCard({
   }
 
   async function handleToggleEnabled(checked: boolean) {
-    if (!row) return;
-    patchProvider.mutate({ id: row.id, body: { enabled: checked } });
+    // No row yet (env-fallback zero-config): materialize one so the toggle
+    // has something to persist to — without this, a provider running on a
+    // deployment env key could never be disabled, and its full registry
+    // stayed in every model picker unconditionally.
+    setError(null);
+    try {
+      const id = await ensureRowId();
+      await patchProvider.mutateAsync({ id, body: { enabled: checked } });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function handleRemoveKey() {
@@ -132,13 +148,11 @@ function KnownProviderCard({
           <span className="text-sm font-medium text-ink">{KNOWN_LABEL[kind]}</span>
           {showDeploymentBadge && <Badge variant="neutral">using deployment key</Badge>}
         </div>
-        {row && (
-          <Switch
-            checked={row.enabled}
-            onCheckedChange={handleToggleEnabled}
-            aria-label={`Enable ${KNOWN_LABEL[kind]}`}
-          />
-        )}
+        <Switch
+          checked={row?.enabled ?? true}
+          onCheckedChange={handleToggleEnabled}
+          aria-label={`Enable ${KNOWN_LABEL[kind]}`}
+        />
       </div>
 
       <div className="flex items-end gap-2">
@@ -166,7 +180,152 @@ function KnownProviderCard({
           </Button>
         )}
       </div>
+      {kind === "openrouter" &&
+        (row ? (
+          <OpenrouterModelsEditor provider={row} />
+        ) : (
+          // Zero-config (env key, no row): the selection editor needs a row
+          // to persist to. Materialize one — the server seeds it with the
+          // curated defaults, so nothing changes until the admin edits.
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={createProvider.isPending}
+            onClick={() =>
+              void ensureRowId().catch((err) =>
+                setError(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          >
+            {createProvider.isPending ? "Preparing…" : "Customize models"}
+          </Button>
+        ))}
+
       {error && <p className="text-xs text-danger-500">{error}</p>}
+    </div>
+  );
+}
+
+// ── OpenRouter curated model selection ──────────────────────────────────────
+
+/**
+ * The openrouter row's `models` column holds the org's curated selection
+ * (seeded with the server's default set at row create). This editor lists
+ * the current selection with per-model remove, and an "Add models" panel
+ * with a client-side filter over the full registry (fetched lazily).
+ */
+function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) {
+  const patchProvider = usePatchLlmProvider();
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const registryQ = useOpenrouterRegistry({ enabled: pickerOpen });
+
+  const selectedIds = new Set(provider.models.map((m) => m.id));
+
+  function saveModels(models: LlmProviderModelWire[]) {
+    patchProvider.mutate({ id: provider.id, body: { models } });
+  }
+
+  function removeModel(id: string) {
+    saveModels(provider.models.filter((m) => m.id !== id));
+  }
+
+  function addModel(model: LlmProviderModelWire) {
+    if (selectedIds.has(model.id)) return;
+    saveModels([...provider.models, model]);
+  }
+
+  const filtered = (registryQ.data?.models ?? []).filter(
+    (m) =>
+      !selectedIds.has(m.id) &&
+      (filter.trim() === "" || m.id.toLowerCase().includes(filter.trim().toLowerCase())),
+  );
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium uppercase tracking-wider text-muted">Models</span>
+        <Button type="button" variant="ghost" size="sm" onClick={() => setPickerOpen((v) => !v)}>
+          {pickerOpen ? "Done" : "Add models"}
+        </Button>
+      </div>
+
+      {provider.models.length === 0 && (
+        <p className="text-xs text-muted">No models selected — add some to expose them in pickers.</p>
+      )}
+      <div className="flex flex-wrap gap-1.5">
+        {provider.models.map((m) => (
+          <span
+            key={m.id}
+            className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
+          >
+            {m.id}
+            <button
+              type="button"
+              aria-label={`Remove ${m.id}`}
+              onClick={() => removeModel(m.id)}
+              className="text-muted hover:text-danger-500"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+
+      {pickerOpen && (
+        <div className="space-y-2 rounded border border-line p-2">
+          <Input
+            aria-label="Filter OpenRouter models"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              // Same dismiss affordance as the other typeaheads
+              // (AddModelTypeahead, ModelCombobox): Escape closes the panel.
+              if (e.key === "Escape") {
+                setFilter("");
+                setPickerOpen(false);
+              }
+            }}
+            placeholder="Search all OpenRouter models — e.g. kimi-k3, deepseek, grok…"
+            autoFocus
+          />
+          {registryQ.data && !registryQ.data.live && (
+            <p className="text-xs text-muted">
+              Couldn't reach OpenRouter — showing the built-in list (may lag behind new releases).
+            </p>
+          )}
+          {registryQ.isLoading && (
+            <div className="flex items-center gap-2 py-2 text-sm text-muted">
+              <Spinner size={14} /> Loading registry…
+            </div>
+          )}
+          {registryQ.error && (
+            <p className="text-xs text-danger-500">Failed to load the model registry.</p>
+          )}
+          <div className="max-h-56 space-y-1 overflow-y-auto">
+            {filtered.slice(0, 50).map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => addModel(m)}
+                className="flex w-full items-center justify-between rounded px-2 py-1 text-left text-sm text-ink hover:bg-ink-wash"
+              >
+                <span className="truncate">{m.id}</span>
+                <span className="ml-2 shrink-0 text-xs text-muted">{m.name}</span>
+              </button>
+            ))}
+            {registryQ.data && filtered.length === 0 && (
+              <p className="px-2 py-1 text-xs text-muted">No matching models.</p>
+            )}
+            {filtered.length > 50 && (
+              <p className="px-2 py-1 text-xs text-muted">
+                {filtered.length - 50} more — narrow the filter.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

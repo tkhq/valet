@@ -8,10 +8,23 @@ api:
   # election or shared engine state across pods.
   replicas: 1
 
+  # Defaults target the local reference env (`make k8s-build` images, visible
+  # to k3s via Rancher Desktop moby mode). CI publishes multi-arch images to
+  # GHCR on every dev-v2 merge (.github/workflows/docker-publish.yml) — for a
+  # remote cluster, point at those and pin the immutable sha tag:
+  #   repository: ghcr.io/<owner>/valet-api
+  #   tag: sha-<shortsha>
+  # (The moving `dev-v2` tag + `pullPolicy: IfNotPresent` is a stale-image
+  # trap: a node that already has the tag never re-pulls.)
   image:
     repository: valet-api
     tag: dev
     pullPolicy: IfNotPresent
+
+  # Names of existing `kubernetes.io/dockerconfigjson` Secrets (in the
+  # release namespace) for pulling the api image from a private registry.
+  # Unneeded for the public GHCR images.
+  imagePullSecrets: []
 
   port: 8787
 
@@ -49,6 +62,15 @@ api:
     googleClientSecret: ""
     githubClientSecret: ""
 
+  # Additional envFrom entries appended to the api Deployment. Use this
+  # to load env vars from Secrets/ConfigMaps managed outside the chart
+  # (e.g. External Secrets Operator syncing from AWS Secrets Manager).
+  # Later entries override earlier ones on key collision — leave the
+  # matching chart-managed secrets in api.secrets blank to defer to them.
+  extraEnvFrom: []
+  # - secretRef:
+  #     name: valet-external-secrets
+
 serviceAccount:
   # ServiceAccount the api pod runs as. Bound (via RoleBinding, in the
   # sandbox namespace) to the Role granting Sandbox CR + pods/exec/log
@@ -62,6 +84,8 @@ sandbox:
   # stay narrowly scoped instead of granting pod access next to the api
   # pod itself.
   namespace: valet-sandboxes
+  # Same CI-publishing story as api.image: for remote clusters use
+  # ghcr.io/<owner>/valet-sandbox pinned to a sha-<shortsha> tag.
   image:
     repository: valet-sandbox
     tag: dev
@@ -73,6 +97,10 @@ service:
 ingress:
   enabled: true
   className: traefik
+  # Extra Ingress metadata.annotations (e.g. cert-manager.io/cluster-issuer
+  # on EKS). The traefik router.tls annotation is emitted automatically
+  # only when className is "traefik".
+  annotations: {}
   host: valet.localdev
   # TLS terminates at Traefik. Leave secretName empty to use Traefik's
   # built-in default (self-signed) certificate — fine for the local
@@ -158,6 +186,26 @@ build:
   # Soft in-process cap (KubernetesImageBuilder) on simultaneously
   # outstanding BuildKit Jobs; extra builds queue FIFO.
   concurrency: 1
+
+observability:
+  # Bundled local observability stack (grafana/otel-lgtm: OTel collector +
+  # Tempo + Loki + Mimir + Grafana in one container). The api exports engine
+  # traces to it via OTLP (agent turns with usage/cost, submission
+  # settlements incl. patch capture, errors, sandbox lifecycle). Storage is
+  # ephemeral — a local-reference/debug stack, not a durable telemetry store.
+  # Set enabled: false for remote deploys, or leave it off and point
+  # otlpEndpoint at an external collector.
+  enabled: true
+  image:
+    repository: grafana/otel-lgtm
+    tag: latest
+  # Grafana UI NodePort: http://localhost:30300 on the local cluster.
+  grafanaNodePort: 30300
+  resources: {}
+  # When set, the api exports OTLP to this URL instead of the bundled
+  # stack's in-cluster Service (useful with enabled: false + an external
+  # collector). Must be the HTTP (4318) OTLP endpoint base URL.
+  otlpEndpoint: ""
 
 helmTest:
   enabled: true

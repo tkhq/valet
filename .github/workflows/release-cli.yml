@@ -1,0 +1,200 @@
+name: Release CLI
+
+# Builds self-contained native `valet` binaries on a version tag.
+#
+# Each binary is one file (Bun `--compile`) with the whole product embedded:
+# the esbuild server bundle plus an archive of PGlite's wasm/data and the web
+# SPA (extracted to a content-hashed temp dir at first run). No Node, no sibling
+# assets — `./valet serve` and browse. See docs/plans/2026-07-18-native-binary-
+# bun-compile.md and the spec Deviations.
+#
+# Platforms: macOS arm64 (native runner) + macOS x64 (cross-compiled), Linux
+# x64 (native runner) + Linux arm64 (cross-compiled from the x64 runner —
+# the embedded assets are platform-agnostic). Windows = WSL (run the
+# linux-x64 binary).
+#
+# macOS Gatekeeper: the binaries are ad-hoc signed (Bun's default), not
+# Developer-ID-signed/notarized. A BROWSER download gets quarantined and
+# macOS shows a misleading "binary is damaged" dialog; `curl` downloads
+# carry no quarantine flag and just run. Both release bodies carry the
+# `xattr -d com.apple.quarantine` escape hatch. Real notarization needs an
+# Apple Developer cert wired into this workflow (not done).
+#
+# Publish paths:
+#   - tag push (v*): versioned GitHub Release with all binaries attached.
+#   - merge to dev-v2: the same binaries replace the assets of a single
+#     rolling prerelease tagged `dev-v2-latest`, so the download URLs
+#     (…/releases/download/dev-v2-latest/valet-<os>-<arch>) stay stable.
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [dev-v2]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag/label for a manual build (no Release is published)"
+        required: false
+
+permissions:
+  contents: write # create the GitHub Release + upload assets
+
+# Superseded dev-v2 builds are pointless (the rolling prerelease only keeps
+# the latest); never cancel a tag release build.
+concurrency:
+  group: release-cli-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/') }}
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            # darwin-x64 (Intel Macs) is cross-compiled from the arm64
+            # runner; only the native arm64 binary is smoke-tested.
+            targets: bun-darwin-arm64 bun-darwin-x64
+            smoke: valet-darwin-arm64
+          - runner: ubuntu-latest
+            targets: bun-linux-x64 bun-linux-arm64
+            smoke: valet-linux-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pin the Bun the arc's compile/WS/PGlite gates were verified against.
+          bun-version: 1.2.17
+
+      - run: pnpm install --frozen-lockfile
+
+      # registry.gen.ts is committed, but regenerate so a tag always reflects
+      # the current plugin set.
+      - name: Generate plugin registries
+        run: make generate-registries
+
+      # A fresh checkout has no workspace dist/ outputs. Root `pnpm
+      # typecheck` is `tsc --build` over the project-reference graph — the
+      # only command that emits them in dependency order (per-package plain
+      # `tsc` can't: it doesn't build referenced projects). The web SPA
+      # typecheck and the server bundle resolve against these dist/ outputs.
+      - name: Build workspace packages (tsc --build)
+        run: pnpm typecheck
+
+      - name: Build web SPA
+        run: pnpm --filter @valet/web build
+
+      - name: Build server bundle + asset archive
+        run: |
+          pnpm --filter @valet/api run build:assets
+          pnpm --filter @valet/api run build:bundle
+          pnpm --filter @valet/api run build:tar
+
+      - name: Compile native binaries
+        run: |
+          set -euo pipefail
+          for t in ${{ matrix.targets }}; do
+            node packages/api/build/compile-binary.mjs --target "$t"
+          done
+          ls -la packages/api/dist/valet-*-* | grep -v '\.mjs'
+
+      # Smoke only the binary that matches this runner's platform (a cross-built
+      # binary can't run here). Boot it fully self-contained and hit health.
+      - name: Smoke test (native target)
+        run: |
+          set -euo pipefail
+          BIN="packages/api/dist/${{ matrix.smoke }}"
+          DATA_DIR="$(mktemp -d)"
+          PORT=8799
+          VALET_LOCAL_AUTH=1 ANTHROPIC_API_KEY=sk-ant-ci-placeholder \
+            "$BIN" serve --port "$PORT" --data-dir "$DATA_DIR" --sandbox local &
+          SERVE_PID=$!
+          trap 'kill "$SERVE_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS "http://localhost:$PORT/api/health" | grep -q '"ok":true'; then
+              echo "binary booted self-contained and served /api/health"
+              # SPA served from the embedded (extracted) web dir, not a 404.
+              curl -fsS "http://localhost:$PORT/" | grep -q '<div id="root"' && echo "web SPA served"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "binary did not become healthy within 60s" >&2
+          exit 1
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: valet-binaries-${{ matrix.runner }}
+          path: packages/api/dist/valet-*-*
+          if-no-files-found: error
+
+      # Attach binaries to the Release (tag pushes only). Multiple matrix jobs
+      # append to the same tag's release.
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/api/dist/valet-*-*
+          fail_on_unmatched_files: true
+          # Pre-release-suffixed tags (v0.2.0-rc.1) are marked prerelease.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            Valet native single-file CLI (`${{ github.ref_name }}`).
+
+            Download the binary for your platform, `chmod +x`, and run
+            `./valet-<os>-<arch> serve` — no Node, no install. `valet chat`,
+            `valet send --json …`, `valet login <url>` all work from the same
+            file. Windows: run the linux-x64 binary under WSL.
+
+            **macOS:** if you downloaded with a browser, Gatekeeper shows a
+            bogus "binary is damaged" dialog (the binaries are not notarized).
+            Clear the quarantine flag — or download with `curl -LO`, which
+            never sets it:
+
+            ```
+            xattr -d com.apple.quarantine ./valet-darwin-<arch>
+            ```
+
+      # Rolling prerelease on dev-v2 merges: fixed tag, same-named assets are
+      # replaced in place, so download URLs are stable across merges. The
+      # release's "source code" links point at whatever commit first created
+      # the tag — the body carries the actual SHA.
+      - name: Publish rolling dev-v2 prerelease
+        if: github.ref == 'refs/heads/dev-v2'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-v2-latest
+          name: dev-v2 rolling build
+          prerelease: true
+          files: packages/api/dist/valet-*-*
+          fail_on_unmatched_files: true
+          body: |
+            Rolling native `valet` binaries from the latest merge to `dev-v2`
+            (currently `${{ github.sha }}`). Assets are replaced on every
+            merge — this is not a versioned release.
+
+            Download the binary for your platform, `chmod +x`, and run
+            `./valet-<os>-<arch> serve`. Windows: run the linux-x64 binary
+            under WSL.
+
+            **macOS:** if you downloaded with a browser, Gatekeeper shows a
+            bogus "binary is damaged" dialog (the binaries are not notarized).
+            Clear the quarantine flag — or download with `curl -LO`, which
+            never sets it:
+
+            ```
+            xattr -d com.apple.quarantine ./valet-darwin-<arch>
+            ```

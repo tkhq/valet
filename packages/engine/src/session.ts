@@ -2,7 +2,9 @@ import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
-import { NoCredentialsError, StaleAttemptError } from "./errors.js";
+import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
+import { detachedFromTrace, withSpan } from "./tracing.js";
+import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
@@ -25,6 +27,7 @@ import type {
   Sandbox,
   SessionData,
   SessionEntry,
+  SessionStartRef,
   SkillSource,
   StoredCredential,
   ThreadData,
@@ -181,12 +184,18 @@ export class Session {
         // A transient store error inside the tick must not become an
         // unhandled rejection that kills the process — log and let the next
         // interval retry. Same idiom as the emit-append failure path.
-        this.heartbeatOnce().catch((err) => {
-          console.error(
-            `[engine] heartbeat failed (session=${this.id}):`,
-            err instanceof Error ? err.message : String(err),
-          );
-        });
+        // detachedFromTrace: interval callbacks inherit whatever trace
+        // context was active when ensureTimers armed them (a request or
+        // turn) — every tick would otherwise attach spans to that long-dead
+        // trace forever.
+        detachedFromTrace(() =>
+          this.heartbeatOnce().catch((err) => {
+            console.error(
+              `[engine] heartbeat failed (session=${this.id}):`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
+        );
       }, 10_000);
       this.heartbeatTimer.unref?.();
     }
@@ -194,13 +203,16 @@ export class Session {
       this.sweepTimer = setInterval(() => {
         // sweepOnce grew store reads + fenced gate writes (sweepExpiredGates);
         // a SQLITE_BUSY on a 5s tick must not crash the process. Swallow +
-        // log so the next sweep still runs.
-        this.sweepOnce().catch((err) => {
-          console.error(
-            `[engine] sweep failed (session=${this.id}):`,
-            err instanceof Error ? err.message : String(err),
-          );
-        });
+        // log so the next sweep still runs. detachedFromTrace: same
+        // stale-context reasoning as the heartbeat above.
+        detachedFromTrace(() =>
+          this.sweepOnce().catch((err) => {
+            console.error(
+              `[engine] sweep failed (session=${this.id}):`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
+        );
       }, 5_000);
       this.sweepTimer.unref?.();
     }
@@ -304,6 +316,10 @@ export class Session {
     if (options.owner === undefined) session.principal = data.owner;
     if (options.parentSessionId === undefined) session.parentSessionId = data.parentSessionId;
     if (options.parentThreadId === undefined) session.parentThreadId = data.parentThreadId;
+    // Preserve the persisted start-ref across generic restores (hosts don't
+    // round-trip it through options) so the next `toData()` save can't stomp
+    // it back to undefined — and so `setStartRef`'s single-shot guard sees it.
+    if (options.startRef === undefined) options.startRef = data.startRef;
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -616,10 +632,38 @@ export class Session {
       sandboxId: this.attachment.sandboxId,
       parentSessionId: this.parentSessionId,
       parentThreadId: this.parentThreadId,
-      model: this.options.model.id,
+      // The canonical spec, not the wire id — `modelSpec` differs from
+      // `model.id` whenever the host resolver returned a wire-ready model
+      // for a namespaced spec (see `ResolvedModel.canonicalId`).
+      model: this.options.modelSpec ?? this.options.model.id,
+      startRef: this.options.startRef,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
+  }
+
+  /**
+   * Record the workspace start-ref (engine traces spec, change 2) — host
+   * pattern (B), for hosts whose clone happens inside `prepareSandbox`.
+   * Idempotent, single-shot: a repeat call with an identical ref is a no-op;
+   * a call with a DIFFERENT ref throws `ValidationError` — a session's start
+   * conditions are immutable by definition, so divergence indicates a host
+   * bug, not a legitimate state change.
+   */
+  async setStartRef(ref: SessionStartRef): Promise<void> {
+    const existing = this.options.startRef;
+    if (existing) {
+      const same =
+        existing.repoUrl === ref.repoUrl &&
+        existing.commitSha === ref.commitSha &&
+        (existing.branch ?? undefined) === (ref.branch ?? undefined);
+      if (same) return;
+      throw new ValidationError(
+        `session ${this.id} already has a start-ref (${existing.repoUrl}@${existing.commitSha}); refusing to overwrite with ${ref.repoUrl}@${ref.commitSha}`,
+      );
+    }
+    this.options.startRef = ref;
+    await this.providers.store.saveSession(await this.toData());
   }
 
   /**
@@ -634,7 +678,7 @@ export class Session {
     modelId: string,
     reason: string = "set_via_api",
   ): Promise<{ fromModel: string; toModel: string }> {
-    const before = this.options.model.id;
+    const before = this.options.modelSpec ?? this.options.model.id;
     // With a host resolver present, validate through it (null → same "unknown
     // model id" surface as the internal resolver's undefined). Absent → today's
     // internal `resolveModelId` path, unchanged. NoCredentialsError means the
@@ -651,19 +695,22 @@ export class Session {
     }
     if (!next) throw new Error(`unknown model id: ${modelId}`);
     this.options.model = next;
+    // The caller's spec — NOT `next.id` — is the identity the session
+    // persists and re-resolves (wire id may differ; ResolvedModel.canonicalId).
+    this.options.modelSpec = modelId;
     await this.providers.store.saveSession(await this.toData());
-    if (before !== next.id) {
+    if (before !== modelId) {
       await this.emit({
         type: "model_switched",
         // session scope — no threadId. Bridge / wire types treat the
         // missing threadId as "session-level switch".
         threadId: undefined,
         fromModel: before,
-        toModel: next.id,
+        toModel: modelId,
         reason,
       });
     }
-    return { fromModel: before, toModel: next.id };
+    return { fromModel: before, toModel: modelId };
   }
 
   async emit(event: EngineEvent, opts?: EmitOptions): Promise<void> {
@@ -710,12 +757,25 @@ export class Session {
     // the store itself). A resolver return of `null` yields `null`; there is
     // NO store fallback behind a resolver. Absent === byte-identical raw read.
     const resolver = this.options.credentialResolver;
+    // Traced (distributed tracing): every credential access — host resolver
+    // or raw store read — is one `credentials.get` span, nesting under the
+    // running tool/turn span via the active context. Values never land on
+    // the span; only the service name and hit/miss.
     const read = (service: string): Promise<StoredCredential | null> =>
-      resolver
-        ? resolver(owner, service)
-        : credStore
-          ? credStore.get(owner, service)
-          : Promise.resolve(null);
+      withSpan(
+        "credentials.get",
+        { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
+        async (span) => {
+          const stored = resolver
+            ? await resolver(owner, service)
+            : credStore
+              ? await credStore.get(owner, service)
+              : null;
+          span.setAttribute("valet.credential.hit", stored !== null);
+          recordCredentialRead(service, stored !== null);
+          return stored;
+        },
+      );
     return {
       async get(service?: string) {
         if (!resolver && !credStore) return null;

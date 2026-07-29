@@ -1,0 +1,138 @@
+{{- if .Values.observability.enabled }}
+# Bundled local observability stack: grafana/otel-lgtm packs an OTel
+# collector (OTLP :4317 gRPC / :4318 HTTP), Tempo (traces), Loki (logs),
+# Mimir (metrics), and Grafana (:3000, pre-provisioned datasources) into one
+# container. The api exports engine traces (agent turns with usage+cost,
+# submission settlements incl. patch-capture records, errors, sandbox
+# lifecycle) to it via OTLP — see packages/api/src/observability/otel.ts.
+# Storage is ephemeral (emptyDir): this is a local-reference/debugging stack,
+# not a durable telemetry store. Disable for remote deploys (or point
+# observability.otlpEndpoint at a real collector instead).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "valet.fullname" . }}-otel-lgtm
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  replicas: 1
+  # Recreate: /data moved onto an RWO PVC so telemetry history survives pod
+  # restarts — a rolling update would deadlock on the volume.
+  strategy:
+    type: Recreate
+    # Explicit null: clears the live object's rollingUpdate defaults when
+    # upgrading an existing release — the API server rejects Recreate with
+    # rollingUpdate params present, and the merge patch keeps them otherwise.
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      {{- include "valet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: observability
+  template:
+    metadata:
+      labels:
+        {{- include "valet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: observability
+    spec:
+      containers:
+        - name: otel-lgtm
+          image: "{{ .Values.observability.image.repository }}:{{ .Values.observability.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 3000
+              name: grafana
+          env:
+            # Local stack: skip the Grafana login screen entirely.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # Provider yaml: subPath is fine here — it only ever changes with
+            # a chart upgrade. The dashboard JSON is mounted as a DIRECTORY
+            # (no subPath) so ConfigMap edits propagate live and Grafana's
+            # file provider re-reads without a pod restart.
+            - name: dashboards
+              mountPath: /otel-lgtm/grafana/conf/provisioning/dashboards/valet-provider.yaml
+              subPath: valet-provider.yaml
+            - name: dashboards
+              mountPath: /etc/valet-dashboards
+          {{- with .Values.observability.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "valet.fullname" . }}-otel-lgtm-data
+        - name: dashboards
+          configMap:
+            name: {{ include "valet.fullname" . }}-grafana-dashboards
+---
+# Telemetry storage: survives pod restarts/upgrades (unlike the previous
+# emptyDir, which wiped Tempo/Prometheus history on every rollout). Small by
+# design — this is still a local debug stack, not long-term retention.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "valet.fullname" . }}-otel-lgtm-data
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.observability.storageClassName }}
+  storageClassName: {{ .Values.observability.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.observability.storageSize | default "2Gi" }}
+---
+# OTLP ingest endpoint for the api (in-cluster DNS).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valet.fullname" . }}-otel
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "valet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+  ports:
+    - port: 4317
+      targetPort: otlp-grpc
+      name: otlp-grpc
+    - port: 4318
+      targetPort: otlp-http
+      name: otlp-http
+---
+# Grafana UI, exposed as a NodePort so the local cluster serves it on
+# http://localhost:<grafanaNodePort> without a port-forward.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valet.fullname" . }}-grafana
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  type: NodePort
+  selector:
+    {{- include "valet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+  ports:
+    - port: 3000
+      targetPort: grafana
+      nodePort: {{ .Values.observability.grafanaNodePort | default 30300 }}
+      name: grafana
+{{- end }}

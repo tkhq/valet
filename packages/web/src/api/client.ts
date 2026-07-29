@@ -82,6 +82,7 @@ import type {
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
+  OpenrouterRegistryResponse,
   ProbeLlmProviderResponse,
   PutCredentialRequest,
   PutCredentialResponse,
@@ -374,6 +375,8 @@ export const api = {
     request<undefined>("DELETE", `/org/llm-providers/${encodeURIComponent(id)}/key`),
   probeLlmProvider: (id: string) =>
     request<ProbeLlmProviderResponse>("POST", `/org/llm-providers/${encodeURIComponent(id)}/probe`),
+  openrouterRegistry: () =>
+    request<OpenrouterRegistryResponse>("GET", "/org/llm-providers/openrouter/models"),
   testLlmProvider: (id: string, body: TestLlmProviderRequest) =>
     request<TestLlmProviderResponse>(
       "POST",

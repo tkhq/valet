@@ -532,5 +532,117 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       await store.deleteSession("sess-1");
       expect(await store.getSession("sess-1")).toBeNull();
     });
+
+    // ── Engine traces substrate (usage/cost, start-ref, settle patch) ──
+
+    it("entry usage + cost round-trip; usage-only and neither stay absent", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const usage = { input: 120, output: 45, cacheRead: 800, cacheWrite: 12, total: 977 };
+      const cost = { input: 0.0012, output: 0.0034, cacheRead: 0.0002, cacheWrite: 0.0001, total: 0.0049 };
+      await store.appendEntries("sess-1", "th-1", [
+        { ...msg("e-both", "assistant", "a", 10), usage, cost },
+        { ...msg("e-usage", "assistant", "b", 20), usage },
+        msg("e-neither", "assistant", "c", 30),
+      ]);
+      const loaded = await store.getEntries("sess-1", "th-1");
+      const byId = new Map(loaded.map((e) => [e.id, e]));
+      const both = byId.get("e-both");
+      if (both?.type !== "message") throw new Error("unreachable");
+      expect(both.usage).toEqual(usage);
+      expect(both.cost).toEqual(cost);
+      const usageOnly = byId.get("e-usage");
+      if (usageOnly?.type !== "message") throw new Error("unreachable");
+      expect(usageOnly.usage).toEqual(usage);
+      expect(usageOnly.cost).toBeUndefined();
+      const neither = byId.get("e-neither");
+      if (neither?.type !== "message") throw new Error("unreachable");
+      expect(neither.usage).toBeUndefined();
+      expect(neither.cost).toBeUndefined();
+    });
+
+    it("updateEntry lands usage/cost on an already-appended entry (turn_end write path)", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const entry = msg("e-1", "assistant", "done", 10);
+      await store.appendEntries("sess-1", "th-1", [entry]);
+      const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 };
+      await store.updateEntry("sess-1", "th-1", { ...entry, usage });
+      const [loaded] = await store.getEntries("sess-1", "th-1");
+      if (loaded.type !== "message") throw new Error("unreachable");
+      expect(loaded.usage).toEqual(usage);
+      expect(loaded.cost).toBeUndefined();
+    });
+
+    it("session startRef round-trips verbatim; absent stays absent", async () => {
+      const startRef = {
+        repoUrl: "https://github.com/tkhq/valet.git",
+        branch: "dev-v2",
+        commitSha: "0123456789abcdef0123456789abcdef01234567",
+        capturedAt: 1_700_000_000_000,
+      };
+      await store.saveSession(newSession({ id: "with-ref", startRef }));
+      await store.saveSession(newSession({ id: "without-ref" }));
+      expect((await store.getSession("with-ref"))?.startRef).toEqual(startRef);
+      expect((await store.getSession("without-ref"))?.startRef).toBeUndefined();
+    });
+
+    it("finalizeSettlement(patchRef) lands the settle-patch record on the item", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.admitSubmission("sess-1", "th-1", queueItem("q-1", 100, 100));
+      const claimed = await store.claimSubmission({
+        sessionId: "sess-1",
+        threadId: "th-1",
+        itemId: "q-1",
+        attemptId: "att-1",
+        ownerId: "own-1",
+      });
+      expect(claimed).not.toBeNull();
+      const fence = { itemId: "q-1", attemptId: "att-1" };
+      await store.reserveSettlement("sess-1", "th-1", "q-1", { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", "q-1", fence, {
+        status: "captured",
+        blobKey: "patches/sess-1/q-1.diff",
+        bytes: 512,
+        truncated: false,
+      });
+      const item = await store.getQueueItem("sess-1", "q-1");
+      expect(item?.status).toBe("settled");
+      expect(item?.settlePatch).toMatchObject({
+        status: "captured",
+        blobKey: "patches/sess-1/q-1.diff",
+        bytes: 512,
+      });
+    });
+
+    it("finalizeSettlement without patchRef leaves settlePatch absent (back-compat)", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.admitSubmission("sess-1", "th-1", queueItem("q-1", 100, 100));
+      await store.claimSubmission({
+        sessionId: "sess-1",
+        threadId: "th-1",
+        itemId: "q-1",
+        attemptId: "att-1",
+        ownerId: "own-1",
+      });
+      const fence = { itemId: "q-1", attemptId: "att-1" };
+      await store.reserveSettlement("sess-1", "th-1", "q-1", { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", "q-1", fence);
+      const item = await store.getQueueItem("sess-1", "q-1");
+      expect(item?.status).toBe("settled");
+      expect(item?.settlePatch).toBeUndefined();
+    });
+
+    it("settleUnclaimed stamps the settle-patch skip 'no_work'", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.admitSubmission("sess-1", "th-1", queueItem("q-1", 100, 100));
+      const ok = await store.settleUnclaimed("sess-1", "th-1", "q-1", { outcome: "aborted" });
+      expect(ok).toBe(true);
+      const item = await store.getQueueItem("sess-1", "q-1");
+      expect(item?.settlePatch).toMatchObject({ status: "skipped", reason: "no_work" });
+    });
   });
 }

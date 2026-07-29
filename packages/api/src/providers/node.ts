@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
+import { tracedSessionStore } from "../observability/traced-store.js";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
@@ -23,7 +24,10 @@ import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
+import { EventDispatcher } from "../events/dispatcher.js";
+import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
+import { pgliteWasmOptions } from "../assets/base.js";
 import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { PrebuildService } from "../prebuilds/service.js";
@@ -110,13 +114,29 @@ export interface NodeProviderOpts {
   /**
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
-   * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
-   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
-   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
-   * fresh real deployment could never mint its first admin and every real
-   * signup would land in the seeded "Local Dev" org.
+   * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set) AND
+   * the stub rung is off: `evaluateAdmission`'s "zero users → first signup
+   * becomes admin" rule (`auth/provisioning.ts`) never fires if a local user
+   * is pre-seeded, so a fresh real deployment could never mint its first
+   * admin and every real signup would land in the seeded "Local Dev" org.
+   * But when `VALET_LOCAL_AUTH=1` is ALSO set, the middleware's stub rung
+   * resolves session-less requests to `local-user` — an unseeded stub
+   * identity 404s every `users`-joining route, so seeding is mandatory then.
+   * `shouldSeedLocalIdentity` encodes this decision; `main.ts` calls it.
    */
   seedLocalIdentity?: boolean;
+}
+
+/**
+ * Whether boot should seed `local-user`/`local-org`. True unless real auth
+ * is configured WITHOUT the stub rung — the only mode where an unseeded db
+ * is coherent (see `NodeProviderOpts.seedLocalIdentity`).
+ */
+export function shouldSeedLocalIdentity(
+  authConfigured: boolean,
+  env: { VALET_LOCAL_AUTH?: string } = process.env,
+): boolean {
+  return !authConfigured || env.VALET_LOCAL_AUTH === "1";
 }
 
 export const LOCAL_USER = {
@@ -147,7 +167,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     source = new Pool({ connectionString: opts.databaseUrl });
   } else {
     mkdirSync(opts.pgDataDir, { recursive: true });
-    source = new PGlite(opts.pgDataDir);
+    // Bundled single-binary: PGlite's default `import.meta.url`-relative wasm
+    // load resolves to the bundle's own dir, so hand it the sibling
+    // wasm/data assets explicitly. `undefined` in dev/tsx → default loading.
+    const wasmOpts = await pgliteWasmOptions();
+    source = wasmOpts ? new PGlite(opts.pgDataDir, wasmOpts) : new PGlite(opts.pgDataDir);
   }
 
   // Normalized query interface (decision 4) shared by the app's raw-SQL
@@ -176,7 +200,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       .onConflictDoNothing();
   }
 
-  const engineStore = new PgSessionStore(pgdb);
+  // Store tracing (distributed tracing): only when the OTLP SDK will be
+  // registered — the proxy is pure overhead otherwise. `store.*` spans time
+  // every Postgres round trip inside the request/submission trees.
+  const telemetryEnabled = !!(
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+  );
+  const rawEngineStore = new PgSessionStore(pgdb);
+  const engineStore = telemetryEnabled ? tracedSessionStore(rawEngineStore) : rawEngineStore;
   const blobs = new FsBlobStore(opts.blobsRoot);
   // Backend selection (kubernetes-deployment plan Task 6, spec decision 7):
   // VALET_SANDBOX_BACKEND=docker|kubernetes|local, default docker — the
@@ -317,6 +348,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     crashAt: opts.workflowCrashAt,
   });
 
+  // Event dispatcher (event-system plan Task 6): drains event_deliveries
+  // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
+  // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
+  const eventDispatcher = new EventDispatcher({
+    db,
+    workflowRunHost,
+    workflowStore,
+    deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+  });
+
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
   // in this file builds (`{ db, credentials: engineCredentials, key }`).
@@ -341,6 +382,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     channelHost,
     workflowStore,
     workflowRunHost,
+    eventDispatcher,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

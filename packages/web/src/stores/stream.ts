@@ -197,6 +197,9 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "message_start": {
+      // A new message is actually streaming — any error banner from a prior
+      // failed turn is stale now.
+      next.error = undefined;
       // Begin a new message row. The wire's role is the full MessageRole
       // union (user/assistant/tool/system); we forward verbatim. Earlier
       // versions collapsed to assistant which broke any future user-role
@@ -294,7 +297,12 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
 
     case "turn_end": {
       next.agentStatus = "idle";
-      next.error = undefined;
+      // Deliberately KEEP `slice.error`: on a failed turn the engine emits
+      // `error` then `turn_end` within the same tick, so clearing here made
+      // the error banner flash for milliseconds and vanish — a failing turn
+      // (exhausted credits, bad key) looked like a silent empty reply. The
+      // error clears when a new message actually streams (`message_start`)
+      // or when the user sends a new prompt (`addUserMessage`).
       return next;
     }
 
@@ -456,7 +464,9 @@ export const useStreamStore = create<StreamStore>((set) => ({
       return {
         bySession: {
           ...state.bySession,
-          [sessionId]: { ...slice, messages: [...slice.messages, message] },
+          // A fresh prompt supersedes any lingering error banner from the
+          // previous failed turn (see the `turn_end` reducer note).
+          [sessionId]: { ...slice, messages: [...slice.messages, message], error: undefined },
         },
       };
     });

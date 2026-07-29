@@ -59,6 +59,44 @@ With only deployment env `ANTHROPIC_API_KEY`: everything behaves as today (env-f
   - **Probe/test `baseUrl` is admin-trusted**, not validated against an allowlist (SSRF-shaped surface, mitigated only by the route being org-admin-gated) — flagged in a code comment at the call site, not hardened this pass.
 - **Web: model-preference reordering uses up/down buttons**, not drag-and-drop — no dnd dependency exists in the repo, and the brief didn't require adding one.
 
+## Extension: OpenRouter as a known kind (2026-07-28)
+
+OpenRouter is the fourth known provider kind (`openrouter`), backed by pi-ai's
+built-in openrouter registry (~274 models, `openai-completions` API, baseUrl
+preset `https://openrouter.ai/api/v1`, env fallback `OPENROUTER_API_KEY` via
+pi-ai's env-key map). Deviations from the other known kinds:
+
+- **Curated catalog exposure, full-registry resolution.** The registry is too
+  large for pickers, so the catalog surfaces only a selection: the provider
+  row's `models` column (previously custom-only) holds the org's selection,
+  seeded at row create with `OPENROUTER_DEFAULT_MODEL_IDS`
+  (`services/openrouter.ts` — every id pinned against the registry by test).
+  Zero-config boots (env key, no row) synthesize the curated defaults only.
+  Selection entries are re-resolved against the registry per catalog build
+  (pricing/context stay current; ids that fell out of the registry are
+  skipped). RESOLUTION accepts any registry model regardless of selection —
+  the usual live-vs-picker split.
+- **Nested model ids.** Registry ids contain slashes
+  (`deepseek/deepseek-v4-pro`), so namespaced specs nest
+  (`openrouter/deepseek/deepseek-v4-pro`); `parseModelId`'s first-slash split
+  keeps the canonical-id round-trip intact (pinned by test).
+- **Admin picker route.** `GET /api/org/llm-providers/openrouter/models`
+  (admin-gated, registered before `/:id` like `/preferences`) returns
+  OpenRouter's LIVE `/api/v1/models` catalog merged over the pi-ai registry
+  (live wins on collisions; degrades to registry-only with `live: false`
+  when unreachable; `VALET_OPENROUTER_MODELS_URL` overrides the upstream
+  URL for tests). This makes brand-new models pickable before any pi-ai
+  bump. Non-registry selections are stored with their live metadata on the
+  row, surface in the catalog from that stored entry, and RESOLVE via
+  synthesis (openai-completions + openrouter baseUrl — same trust model as
+  custom providers); un-selected non-registry ids stay unresolvable. The
+  settings card hosts a selection editor (chips + filterable add-panel) on
+  top of the standard known-kind key/toggle chrome.
+- `models` is accepted on create/PATCH for `openrouter` rows in addition to
+  `openai_compatible`; everything else (singleton rule, baseUrl refusal, key
+  storage, env-fallback indicator, org-key-over-env precedence) is inherited
+  unchanged from the known-kind machinery.
+
 ## Non-goals
 
 - Per-user LLM keys (org + deployment env only this pass).

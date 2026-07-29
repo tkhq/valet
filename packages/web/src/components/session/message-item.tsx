@@ -6,34 +6,68 @@ import { Markdown } from "~/components/markdown";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { cn } from "~/lib/cn";
 
-export function MessageItem({ message }: { message: StreamMessage }) {
+export function MessageItem({
+  message,
+  suppressEmptyPlaceholder = false,
+}: {
+  message: StreamMessage;
+  /** True for the last message while the agent is mid-turn — an empty
+   *  assistant row is then a streaming placeholder, not a failed turn. */
+  suppressEmptyPlaceholder?: boolean;
+}) {
   const isUser = message.role === "user";
   return (
-    <article className={cn("group flex gap-3 px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
-      <Avatar size="sm">
-        <AvatarFallback>
-          {isUser ? <UserIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
-        </AvatarFallback>
-      </Avatar>
-      <div className="flex-1 min-w-0 space-y-2">
-        <div className="text-xs text-muted flex items-center gap-2">
-          <span className="font-medium text-[--fg]/80">
-            {isUser ? "You" : message.role === "assistant" ? "Assistant" : message.role}
-          </span>
-          <span>•</span>
-          <span>{formatTime(message.createdAt)}</span>
-          {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
-        </div>
-        <div className="space-y-2">
-          {message.parts.length === 0 && message.content && (
-            <TextBlock text={message.content} />
-          )}
-          {message.parts.map((part, i) => (
-            <PartView key={i} part={part} />
-          ))}
+    <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
+      {/* Row background spans full width; the content column is capped at a
+          readable measure and centered — prose and tool cards both benefit. */}
+      <div className="mx-auto flex w-full max-w-4xl gap-3">
+        <Avatar size="sm">
+          <AvatarFallback>
+            {isUser ? <UserIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
+          </AvatarFallback>
+        </Avatar>
+        <div className="flex-1 min-w-0 space-y-2">
+          <div className="text-xs text-muted flex items-center gap-2">
+            <span className="font-medium text-[--fg]/80">
+              {isUser ? "You" : message.role === "assistant" ? "Assistant" : message.role}
+            </span>
+            <span>•</span>
+            <span>{formatTime(message.createdAt)}</span>
+            {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
+          </div>
+          <div className="space-y-2">
+            {message.parts.length === 0 && message.content && (
+              <TextBlock text={message.content} />
+            )}
+            {message.parts.map((part, i) => (
+              <PartView key={i} part={part} />
+            ))}
+            {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
+              <p className="text-xs italic text-muted">
+                (no response — the turn failed or was interrupted before any
+                output; see the error above or the server logs)
+              </p>
+            )}
+          </div>
         </div>
       </div>
     </article>
+  );
+}
+
+/**
+ * A persisted assistant row with no parts and no content is what a turn
+ * that died before its first token leaves behind (e.g. the provider
+ * rejected the call — bad key, exhausted credits). Rendering it as a blank
+ * bubble made those failures look like the product silently broke; name
+ * the state instead. Exported for tests.
+ */
+export function isEmptyAssistantMessage(message: StreamMessage): boolean {
+  return (
+    message.role === "assistant" &&
+    message.parts.length === 0 &&
+    !message.content &&
+    !message.signal
   );
 }
 

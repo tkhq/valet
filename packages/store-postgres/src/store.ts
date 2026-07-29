@@ -13,6 +13,7 @@ import type {
   SessionEntry,
   SessionStatus,
   SessionStore,
+  SettlePatchRef,
   SubmissionClaim,
   SubmissionOutcome,
   SuspendedTurnState,
@@ -73,6 +74,7 @@ function queueItemRowToItem(row: QueueItemRow): QueueItem {
     abortRequestedAt: row.abortRequestedAt ?? undefined,
     ownerId: row.ownerId ?? undefined,
     leaseExpiresAt: row.leaseExpiresAt ?? undefined,
+    settlePatch: row.settlePatch ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -108,6 +110,11 @@ function queueItemInsertParams(sessionId: string, threadId: string, item: QueueI
     item.abortRequestedAt ?? null,
     item.ownerId ?? null,
     item.leaseExpiresAt ?? null,
+    item.settlePatch?.status ?? null,
+    item.settlePatch?.reason ?? null,
+    item.settlePatch?.blobKey ?? null,
+    item.settlePatch?.bytes ?? null,
+    item.settlePatch === undefined ? null : item.settlePatch.truncated ? 1 : 0,
     item.createdAt,
     item.updatedAt,
   ];
@@ -120,10 +127,13 @@ const INSERT_QUEUE_ITEM_SQL = `
     reply_target, model, role, metadata, attempt_id, attempt_count,
     max_attempts, credential_attempts, last_credential_release_at,
     timeout_at, abort_requested_at, owner_id, lease_expires_at,
+    settle_patch_status, settle_patch_reason, settle_patch_blob_key,
+    settle_patch_bytes, settle_patch_truncated,
     created_at, updated_at
   ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-    $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
+    $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+    $31, $32
   )
 `;
 
@@ -222,6 +232,8 @@ const ENTRY_COLUMNS = [
   "resolution",
   "withdrawn_reason",
   "metadata",
+  "usage",
+  "cost",
   "created_at",
 ] as const;
 
@@ -258,6 +270,8 @@ function entryInsertParams(row: EntryInsertRow): unknown[] {
     row.resolution,
     row.withdrawnReason,
     row.metadata,
+    row.usage,
+    row.cost,
     row.createdAt,
   ];
 }
@@ -270,8 +284,8 @@ export class PgSessionStore implements SessionStore {
       `INSERT INTO engine_sessions (
          id, owner_type, owner_id, user_id, org_id, workspace, purpose, status,
          sandbox_id, snapshot_id, parent_session_id, parent_thread_id, model, metadata,
-         created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         start_ref, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        ON CONFLICT (id) DO UPDATE SET
          owner_type = EXCLUDED.owner_type,
          owner_id = EXCLUDED.owner_id,
@@ -281,6 +295,7 @@ export class PgSessionStore implements SessionStore {
          parent_thread_id = EXCLUDED.parent_thread_id,
          model = EXCLUDED.model,
          metadata = EXCLUDED.metadata,
+         start_ref = EXCLUDED.start_ref,
          updated_at = EXCLUDED.updated_at`,
       [
         session.id,
@@ -297,6 +312,7 @@ export class PgSessionStore implements SessionStore {
         session.parentThreadId ?? null,
         session.model ?? null,
         jsonOrNull(session.metadata),
+        jsonOrNull(session.startRef),
         session.createdAt,
         session.updatedAt,
       ],
@@ -417,8 +433,8 @@ export class PgSessionStore implements SessionStore {
            token_count_before = $14, token_count_after = $15, file_context = $16,
            branch_root_id = $17, branch_leaf_id = $18, gate_id = $19,
            resolved_at = $20, resolution = $21, withdrawn_reason = $22,
-           metadata = $23, created_at = $24
-         WHERE session_id = $25 AND thread_id = $26 AND id = $27`,
+           metadata = $23, usage = $24, cost = $25, created_at = $26
+         WHERE session_id = $27 AND thread_id = $28 AND id = $29`,
         [
           row.parentId,
           row.entryType,
@@ -443,6 +459,8 @@ export class PgSessionStore implements SessionStore {
           row.resolution,
           row.withdrawnReason,
           row.metadata,
+          row.usage,
+          row.cost,
           row.createdAt,
           sessionId,
           threadId,
@@ -1009,10 +1027,35 @@ export class PgSessionStore implements SessionStore {
     });
   }
 
-  async finalizeSettlement(sessionId: string, threadId: string, itemId: string, fence: WriteFence): Promise<void> {
+  async finalizeSettlement(
+    sessionId: string,
+    threadId: string,
+    itemId: string,
+    fence: WriteFence,
+    patchRef?: SettlePatchRef,
+  ): Promise<void> {
     await this.db.transaction(async (tx) => {
       const row = await this.lockAndCheckFence(tx, sessionId, threadId, itemId, fence);
       if (row.status === "settled") return; // idempotent
+      if (patchRef) {
+        await tx.query(
+          `UPDATE engine_queue_items SET status = 'settled',
+             settle_patch_status = $1, settle_patch_reason = $2,
+             settle_patch_blob_key = $3, settle_patch_bytes = $4,
+             settle_patch_truncated = $5, updated_at = $6
+           WHERE id = $7`,
+          [
+            patchRef.status,
+            patchRef.reason ?? null,
+            patchRef.blobKey ?? null,
+            patchRef.bytes ?? null,
+            patchRef.truncated ? 1 : 0,
+            Date.now(),
+            itemId,
+          ],
+        );
+        return;
+      }
       await tx.query(`UPDATE engine_queue_items SET status = 'settled', updated_at = $1 WHERE id = $2`, [
         Date.now(),
         itemId,
@@ -1028,10 +1071,14 @@ export class PgSessionStore implements SessionStore {
     opts?: { mergedIntoItemId?: string },
   ): Promise<boolean> {
     const mergedIntoItemId = outcome.outcome === "merged" ? (opts?.mergedIntoItemId ?? null) : null;
+    // Never-claimed items definitionally ran no tools — stamp the settle-patch
+    // skip so offline readers can tell "no work" from "predates patch capture".
     const result = await this.db.query(
       `UPDATE engine_queue_items
        SET status = 'settled', outcome = $1, error = $2,
-           merged_into_item_id = COALESCE($3, merged_into_item_id), updated_at = $4
+           merged_into_item_id = COALESCE($3, merged_into_item_id),
+           settle_patch_status = 'skipped', settle_patch_reason = 'no_work',
+           updated_at = $4
        WHERE id = $5 AND session_id = $6 AND thread_id = $7 AND status IN ('collecting', 'queued')`,
       [outcome.outcome, outcome.error ?? null, mergedIntoItemId, Date.now(), itemId, sessionId, threadId],
     );
@@ -1167,6 +1214,7 @@ function rowToSession(r: SessionRow): SessionData {
     parentThreadId: r.parentThreadId ?? undefined,
     model: r.model ?? undefined,
     metadata: parseJson(r.metadata),
+    startRef: parseJson(r.startRef),
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };

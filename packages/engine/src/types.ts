@@ -34,6 +34,24 @@ export interface Principal {
   id: string;
 }
 
+/**
+ * What code the session's sandbox workspace actually booted with (engine
+ * traces spec, change 2). Captured by the HOST — the engine never derives it
+ * by sniffing the sandbox — and persisted verbatim on the session row.
+ * Sessions without one (pre-migration, or non-git workspaces) are not
+ * eval-replayable; absent means absent.
+ */
+export interface SessionStartRef {
+  /** Canonical clone URL, without secrets (e.g. `https://github.com/tkhq/valet.git`). */
+  repoUrl: string;
+  /** Branch as fetched (e.g. `dev-v2`), or `undefined` for detached-HEAD boots. */
+  branch?: string;
+  /** Full 40-char SHA. Never a short hash — replay must be unambiguous. */
+  commitSha: string;
+  /** Best-effort capture wall clock. Convenience only; the row's `created_at` is the source of truth. */
+  capturedAt: number;
+}
+
 export interface SessionData {
   id: string;
   /** Who the session belongs to; access to team/org-owned sessions follows membership. */
@@ -47,6 +65,12 @@ export interface SessionData {
   snapshotId?: string;
   parentSessionId?: string;
   parentThreadId?: string;
+  /**
+   * Start-ref for the sandbox workspace, captured after `prepareSandbox`
+   * completes. Absent for sessions that predate this field or ran without a
+   * git-backed workspace.
+   */
+  startRef?: SessionStartRef;
   /**
    * Persisted session-default model id (e.g. "claude-haiku-4-5" or
    * "anthropic/claude-opus-4-7"). Layered resolution at turn time:
@@ -108,6 +132,24 @@ export interface SubmissionOutcome {
   error?: string;
 }
 
+/**
+ * Settle-time patch capture record (engine traces spec, change 3). Written
+ * to the queue item by `finalizeSettlement` and mirrored on the
+ * `submission_settled` event; both point at the same BlobStore key
+ * (`patches/{sessionId}/{queueItemId}.diff`). Best-effort — capture failure
+ * never fails the settle.
+ */
+export interface SettlePatchRef {
+  status: "captured" | "skipped" | "failed";
+  /** Human-readable, only when status != 'captured'. */
+  reason?: string;
+  /** `patches/{sessionId}/{queueItemId}.diff` when captured. */
+  blobKey?: string;
+  /** Stored bytes (post-truncation if truncated). */
+  bytes?: number;
+  truncated?: boolean;
+}
+
 export type SubmissionStatus =
   | "collecting"
   | "queued"
@@ -154,6 +196,9 @@ export interface QueueItem {
   abortRequestedAt?: number;
   ownerId?: string;
   leaseExpiresAt?: number;
+  /** Settle-time patch capture record; written at settlement. Absent on
+   * unsettled items and on items settled before patch capture shipped. */
+  settlePatch?: SettlePatchRef;
   createdAt: number;
   updatedAt: number;
 }
@@ -269,6 +314,28 @@ export type MessagePart =
   | { type: "attachment"; attachment: ToolAttachment }
   | { type: "error"; message: string; code?: string };
 
+/** Per-turn token usage (engine traces spec, change 1). Shape mirrors the
+ * pi-ai `Usage` counters; `total` falls back to the four-way sum when the
+ * provider's `totalTokens` is 0/absent. */
+export interface MessageUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+}
+
+/** Per-turn USD cost from pi-ai's pricing registry. Present only when the
+ * model is priced — never zero-filled: a missing field reads "unpriced",
+ * never "$0". */
+export interface MessageCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+}
+
 export interface MessageEntry extends BaseEntry {
   type: "message";
   role: "user" | "assistant" | "tool" | "system";
@@ -279,6 +346,10 @@ export interface MessageEntry extends BaseEntry {
   model?: string;
   /** Persisted on the turn's final assistant entry. */
   stopReason?: "end_turn" | "error" | "abort";
+  /** Present only on the turn's final assistant entry when the model reported usage. */
+  usage?: MessageUsage;
+  /** Present only when the model is in pi-ai's pricing registry; unpriced turns omit. */
+  cost?: MessageCost;
   /**
    * Present when this user entry originated from a `SignalContent` prompt.
    * `content` holds the raw (unescaped) body; rendering into LLM context
@@ -746,7 +817,22 @@ export type EngineEvent =
     }
   | { type: "tool_start"; threadId: string; tool: string; args: Record<string, unknown> }
   | { type: "tool_end"; threadId: string; tool: string; result: string; isError: boolean }
-  | { type: "turn_end"; threadId: string; reason: "end_turn" | "error" | "abort" }
+  | {
+      type: "turn_end";
+      threadId: string;
+      reason: "end_turn" | "error" | "abort";
+      /**
+       * Usage/cost enrichment (engine traces spec, change 1): written from the
+       * SAME `lastAssistantUsage` snapshot as the entry's `usage`/`cost` so
+       * event-bus consumers (telemetry projections) never need to read
+       * `engine_entries`. Absent on non-assistant turn ends (aborted with no
+       * assistant activity).
+       */
+      model?: string;
+      usage?: MessageUsage;
+      cost?: MessageCost;
+      turnDurationMs?: number;
+    }
   | { type: "thread_start"; threadId: string; parentThreadId?: string }
   | { type: "queue_state"; threadId: string; state: QueueState }
   | { type: "compaction_start" | "compaction_end"; threadId: string }
@@ -769,6 +855,9 @@ export type EngineEvent =
       threadId: string;
       queueItemId: string;
       outcome: SubmissionOutcome;
+      /** Patch-capture linkage (engine traces spec, change 3): same record the
+       * settle wrote to the queue item, so live consumers need no store read. */
+      patch?: SettlePatchRef;
     }
   | {
       /**
@@ -1008,18 +1097,27 @@ export interface SessionStore {
     outcome: SubmissionOutcome,
     fence: WriteFence,
   ): Promise<void>;
-  /** terminalizing→settled. Idempotent (re-running after settled is a no-op). Fenced. */
+  /**
+   * terminalizing→settled. Idempotent (re-running after settled is a no-op).
+   * Fenced. `patchRef`, when present, is written to the item's settle-patch
+   * columns in the same transactional finalize (engine traces spec, change 3);
+   * callers that pass nothing observe the prior behavior and leave any
+   * existing record untouched.
+   */
   finalizeSettlement(
     sessionId: string,
     threadId: string,
     itemId: string,
     fence: WriteFence,
+    patchRef?: SettlePatchRef,
   ): Promise<void>;
   /**
    * CAS settle for never-claimed items (decision 2): succeeds only when
    * status is 'collecting' or 'queued'. Used for superseded/merged/
    * aborted-while-queued outcomes. mergedIntoItemId is stamped when
-   * outcome is 'merged'.
+   * outcome is 'merged'. A matched CAS also stamps the settle-patch record
+   * `skipped:no_work` (engine traces spec, change 3): a never-claimed item
+   * definitionally ran no tools, so there is no diff to capture.
    */
   settleUnclaimed(
     sessionId: string,
@@ -1128,10 +1226,19 @@ export interface SkillInvokeOptions {
  * run the turn on, plus an optional per-turn API key. `apiKey` undefined means
  * "no host key — use pi-ai's env-var fallback". Produced by the host, consumed
  * by the engine at turn start and by `Session.setModel`/`Thread.setModel`.
+ *
+ * `model.id` is the provider-WIRE id — pi-ai sends it verbatim as the request
+ * `model` parameter, so it must be exactly what the provider's API accepts
+ * (e.g. `gpt-4.1`, `deepseek/deepseek-v4-pro`), never a Valet-namespaced
+ * spec. `canonicalId` is the namespaced spec the engine persists and feeds
+ * BACK to the resolver on later turns (`openai/gpt-4.1`,
+ * `openrouter/deepseek/deepseek-v4-pro`); it defaults to `model.id` when
+ * absent (bare Anthropic back-compat, where wire id and spec coincide).
  */
 export interface ResolvedModel {
   model: Model<any>;
   apiKey?: string;
+  canonicalId?: string;
 }
 
 export interface CreateSessionOptions {
@@ -1147,6 +1254,25 @@ export interface CreateSessionOptions {
   roles?: RoleSpec[];
   skills?: SkillSource[];
   model: Model<any>;
+  /**
+   * The session default model's canonical (namespaced) spec — what
+   * `SessionData.model` persists and what `resolveModel` re-receives on
+   * later turns. Absent → `model.id` is used (correct whenever wire id and
+   * spec coincide, i.e. bare Anthropic ids / internal resolution). Hosts
+   * with a `resolveModel` seam SHOULD set this whenever the resolved
+   * model's wire id differs from the spec (`openai/…`, `openrouter/…`,
+   * custom `{rowId}/…`).
+   */
+  modelSpec?: string;
+  /**
+   * Start-ref for this session's workspace (engine traces spec, change 2).
+   * Set by the host once the workspace state is known — either resolved
+   * before `createSession` (out-of-band clone) or via `Session.setStartRef`
+   * after `prepareSandbox` completes (in-sandbox clone). Persisted verbatim
+   * on the session row; treated as opaque by the engine. Absent === no
+   * start-ref recorded (this session is not eval-replayable).
+   */
+  startRef?: SessionStartRef;
   modelFailover?: Model<any>[];
   /**
    * Optional host-provided model resolver. Absent === the engine's current

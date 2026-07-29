@@ -1,17 +1,22 @@
 /**
- * Node entry point.
+ * Node server boot.
  *
  *   ANTHROPIC_API_KEY=sk-... VALET_LOCAL_AUTH=1 pnpm --filter @valet/api dev
  *
- * Boots the API on PORT (default 8787). Exits non-zero with a clear message
- * if required env vars are missing.
+ * `startServer()` boots the API on `PORT` (default 8787) reading all effective
+ * values from `process.env`, and returns a handle whose `close()` performs the
+ * graceful shutdown. Importing this module has NO side effects — the server
+ * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
+ * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
-import { serve } from "@hono/node-server";
 import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createApp, type AuthWiring } from "./app.js";
-import { buildNodeProviders } from "./providers/node.js";
+import { selectServerAdapter } from "./server-adapter.js";
+import { buildNodeProviders, shouldSeedLocalIdentity } from "./providers/node.js";
+import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
 import { loadSessionMeta } from "./engine/session-meta.js";
 import type { Providers } from "./providers/types.js";
@@ -19,8 +24,22 @@ import { loadAuthConfig } from "./auth/config.js";
 import { buildAuthHooks } from "./auth/provisioning.js";
 import { buildAuth } from "./auth/index.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
+import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
+import { webDistPath } from "./assets/base.js";
+
+/** Handle returned by `startServer`: a graceful `close()` plus the resolved
+ * values the boot actually used. */
+export interface ServerHandle {
+  /** Graceful shutdown: stop hosts, evict sandboxes, close the http server.
+   * Idempotent; leaves the durable store intact for boot-time reconciliation. */
+  close(): Promise<void>;
+  /** The port the server is listening on. */
+  port: number;
+  /** The resolved sandbox backend (`docker` | `local` | `kubernetes`). */
+  backend: string;
+}
 
 /**
  * Eager restore of sessions with unsettled submissions. On boot the store may
@@ -83,6 +102,16 @@ async function restoreUnsettledSessions(providers: Providers): Promise<void> {
   console.log(`boot restore: restored ${restored} sessions with unsettled submissions`);
 }
 
+/**
+ * Boot the API server. Reads every effective value from `process.env` (a
+ * caller such as `valet serve` sets those BEFORE calling), starts listening,
+ * runs boot-time reconciliation, and returns a `ServerHandle`.
+ *
+ * This function does NOT register signal handlers or call `process.exit` — the
+ * caller owns process lifecycle (see the direct-entry guard at the bottom of
+ * this file, and `cli/commands/serve.ts`).
+ */
+export async function startServer(): Promise<ServerHandle> {
 const port = Number.parseInt(process.env.PORT ?? "8787", 10);
 const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
 const databaseUrl = process.env.DATABASE_URL;
@@ -121,6 +150,13 @@ const authConfig = loadAuthConfig(process.env);
 // e.g. sandbox-docker on localhost) keep working unchanged.
 const sandboxApiUrl = process.env.VALET_SANDBOX_API_URL ?? authConfig?.baseUrl;
 
+// OTel bootstrap (env-gated: null without an OTLP endpoint). Registered
+// BEFORE providers/app construction so the global tracer + context manager
+// are live for everything built below — HTTP spans, engine spans, store
+// spans all resolve through this one registration.
+const telemetry = initTelemetry();
+if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
+
 const providers = await buildNodeProviders({
   databaseUrl,
   pgDataDir,
@@ -133,8 +169,11 @@ const providers = await buildNodeProviders({
   sandboxApiUrl,
   // Real auth configured → skip seeding the local-dev identity so the
   // "zero users → first signup becomes admin" provisioning rule can fire
-  // (see `NodeProviderOpts.seedLocalIdentity`).
-  seedLocalIdentity: !authConfig,
+  // (see `NodeProviderOpts.seedLocalIdentity`). EXCEPT when the stub auth
+  // rung is also enabled: `VALET_LOCAL_AUTH=1` makes the middleware resolve
+  // session-less requests to `local-user`, and an unseeded stub identity
+  // 404s every route that joins the `users` table (`/api/me`, org routes).
+  seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig, process.env),
 });
 
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
@@ -179,6 +218,11 @@ console.log("channel host started");
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
 
+// Event dispatcher (event-system plan Task 6): begin the delivery drain loop
+// so pending/failed event_deliveries left over from a prior process (and
+// freshly-ingested ones between nudges) get delivered.
+providers.eventDispatcher.start();
+
 // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
 // queued/building rows orphaned by a prior process crash/restart, then begin
 // the 10s build-status poll + 10min nightly-scheduler intervals. A no-op
@@ -201,11 +245,19 @@ const authWiring: AuthWiring = authConfig
     }
   : {};
 
-// Bundled production image only (docker/Dockerfile.api sets this to the
-// baked-in `packages/web/dist`) — unset in `make dev-local`, where Vite's
-// own dev server serves the web app. See `static-web.ts`.
-const webDistDir = process.env.VALET_WEB_DIST_DIR;
-const { app, injectWebSocket, webServed } = createApp(providers, authWiring, { webDistDir });
+// Bundled single-binary (`VALET_BUNDLED=1`) → the SPA baked beside the bundle
+// at `dist/assets/web`. Dev/tsx → `VALET_WEB_DIST_DIR` (unset in
+// `make dev-local`, where Vite's own dev server serves the web app), or the
+// baked-in `packages/web/dist` in the legacy docker image. See
+// `static-web.ts` and `assets/base.ts`.
+const webDistDir = webDistPath();
+// Runtime seam: Node (`serve` + `injectWebSocket`) by default, Bun
+// (`Bun.serve` + `hono/bun`) inside a `bun --compile` binary. See
+// server-adapter.ts.
+const adapter = await selectServerAdapter();
+// `startServer` from createApp is renamed at the destructure so it can't
+// shadow this module's exported `startServer()` (we're inside its body).
+const { app, startServer: startListening, webServed } = createApp(providers, authWiring, { webDistDir }, adapter);
 // A set-but-unmounted dist means the bundled image shipped without a valid
 // build (missing/incomplete web/dist/index.html) — the api would boot and
 // silently 404 JSON at `/` instead of serving the SPA. Fail loud at boot.
@@ -216,28 +268,38 @@ if (webDistDir && !webServed) {
   process.exit(1);
 }
 
-const server = serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`@valet/api listening on http://localhost:${info.port}`);
-  console.log(`  data dir: ${dataDir}`);
-  console.log(`  db:       ${databaseUrl ? databaseUrl.replace(/:[^:@]*@/, ":***@") : `pglite:${pgDataDir}`}`);
-  console.log(`  blobs:    ${blobsRoot}`);
-  console.log(
-    `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
-  );
-  console.log(`  web:      ${webServed ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
+const server = startListening({
+  port,
+  onListen: (boundPort) => {
+    console.log(`@valet/api listening on http://localhost:${boundPort}`);
+    console.log(`  data dir: ${dataDir}`);
+    console.log(`  db:       ${databaseUrl ? databaseUrl.replace(/:[^:@]*@/, ":***@") : `pglite:${pgDataDir}`}`);
+    console.log(`  blobs:    ${blobsRoot}`);
+    console.log(
+      `  auth:     ${authConfig ? "real (BETTER_AUTH_SECRET set)" : process.env.VALET_LOCAL_AUTH === "1" ? "stub (VALET_LOCAL_AUTH=1)" : "DISABLED — set VALET_LOCAL_AUTH=1 for /api/* access"}`,
+    );
+    console.log(`  web:      ${webServed ? `serving ${webDistDir}` : "not served (VALET_WEB_DIST_DIR unset — dev mode)"}`);
+  },
 });
 
-// Attach the WS upgrade handler to the running http server.
-injectWebSocket(server);
+// ── Graceful shutdown — evict live sandboxes so containers don't leak. This
+// does NOT call process.exit: the caller (direct-entry guard below, or the
+// serve command) owns process lifecycle. Idempotent so repeated close() /
+// double signals are harmless.
 
-// ── Graceful shutdown — destroy live sandboxes so containers don't leak.
-
-async function shutdown(signal: NodeJS.Signals) {
-  console.log(`\nReceived ${signal}, shutting down (sessions evicted, durable state kept)...`);
+let closed = false;
+async function close(): Promise<void> {
+  if (closed) return;
+  closed = true;
   try {
     await providers.workflowRunHost.stopHost();
   } catch (err) {
     console.error("workflowRunHost.stopHost failed:", err);
+  }
+  try {
+    await providers.eventDispatcher.stop();
+  } catch (err) {
+    console.error("eventDispatcher.stop failed:", err);
   }
   try {
     providers.prebuildService.stop();
@@ -258,13 +320,14 @@ async function shutdown(signal: NodeJS.Signals) {
   } catch (err) {
     console.error("evictAll failed:", err);
   }
-  server.close(() => process.exit(0));
-  // Hard-exit if close() takes too long (containers can be slow to stop).
-  setTimeout(() => process.exit(1), 5_000).unref();
+  try {
+    // Flush any batched spans before the process goes away.
+    await telemetry?.shutdown();
+  } catch (err) {
+    console.error("otel shutdown failed:", err);
+  }
+  await server.close();
 }
-
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 // Last-resort guards. A single bad request must not take down the server
 // and break every other live session. Real fixes belong in the route or WS
@@ -276,3 +339,33 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
   console.error("uncaughtException:", err);
 });
+
+  return { close, port, backend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) };
+}
+
+/**
+ * Wire SIGINT/SIGTERM to a graceful shutdown that exits the process. Shared by
+ * the direct-entry boot below; the serve command wires its own handler so it
+ * can also clean up its pidfile.
+ */
+function installSignalShutdown(handle: ServerHandle): void {
+  const onSignal = (signal: NodeJS.Signals) => {
+    console.log(`\nReceived ${signal}, shutting down (sessions evicted, durable state kept)...`);
+    void handle.close().finally(() => process.exit(0));
+    // Hard-exit if close() takes too long (containers can be slow to stop).
+    setTimeout(() => process.exit(1), 5_000).unref();
+  };
+  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
+}
+
+// Direct-entry boot: `tsx src/main.ts` (dev / the workflow-run e2e harness).
+// Guarded so `import`-ing this module never boots — the bundle's entry is
+// `cli.ts`, where every module shares the bundle's `import.meta.url`; the
+// `/main.` check keeps this false there (serve() drives the boot in the
+// bundle), true only when main.ts is itself the script being run.
+const entryHref = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
+if (import.meta.url === entryHref && /\/main\.(ts|js|mjs)$/.test(import.meta.url)) {
+  const handle = await startServer();
+  installSignalShutdown(handle);
+}

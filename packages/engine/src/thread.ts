@@ -27,6 +27,18 @@ import {
 } from "./submission.js";
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
+import { capturePatch } from "./patch-capture.js";
+import { recordSettlement, recordTurn } from "./metrics.js";
+import {
+  TRACEPARENT_METADATA_KEY,
+  activeTraceparent,
+  attrTruncate,
+  engineTracer,
+  linkFromTraceparent,
+  markSpanError,
+  withSpan,
+} from "./tracing.js";
+import { context as otelContext, trace as otelTrace, type Span } from "@opentelemetry/api";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
@@ -49,9 +61,11 @@ import type {
   DecisionResolution,
   DecisionWithdrawReason,
   EngineEvent,
+  MessageCost,
   MessagePart,
   MessageEntry,
   MessageQuery,
+  MessageUsage,
   Principal,
   PromptAuthor,
   PromptContent,
@@ -63,6 +77,7 @@ import type {
   SessionEntry,
   SignalContent,
   SkillInvokeOptions,
+  SettlePatchRef,
   SubmissionOutcome,
   SubmissionResult,
   SuspendedTurnState,
@@ -187,6 +202,32 @@ export class Thread {
   private lastAssistantUsage:
     | { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
     | undefined;
+  /** Wall clock at claim/resume — feeds `turn_end`'s `turnDurationMs`. */
+  private turnStartedAt: number | undefined;
+  /**
+   * Live `submission.run` span for the currently-claimed item (distributed
+   * tracing): started at claim, ended when the claim clears. Children
+   * (`agent.turn`, `submission.settle`) parent under it via
+   * `inSubmissionContext`. No-op Span when no SDK is registered.
+   */
+  private submissionSpan: Span | undefined;
+  /** The running turn's `agent.turn` span — turn_end stamps usage/cost onto it. */
+  private turnSpan: Span | undefined;
+  /**
+   * Live `llm.generate` span for the current assistant round (distributed
+   * tracing). The engine doesn't own pi-ai's HTTP call, so the span is
+   * synthesized from the agent's message lifecycle: started at
+   * `message_start` with `llmRoundStartedAt` as the start time (pinned to
+   * when the previous round's work finished, so request setup +
+   * time-to-first-token are inside the span), ended at `message_end`.
+   */
+  private llmSpan: Span | undefined;
+  /** When the current LLM round's request effectively began (turn start, or
+   * the previous message/tool completion). */
+  private llmRoundStartedAt: number | undefined;
+  /** Tool calls across ALL rounds of the running turn (currentToolCalls is
+   * per-round — it clears on each assistant message_start). */
+  private turnToolCallCount = 0;
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
   /**
@@ -578,6 +619,13 @@ export class Thread {
     },
   ): QueueItem {
     const now = Date.now();
+    // Distributed tracing: stamp the admitting request's traceparent so the
+    // eventual `submission.run` span can LINK back to it (the admission span
+    // ends long before the turn runs, so a link — not a parent — is correct).
+    const traceparent = activeTraceparent();
+    const metadata = traceparent
+      ? { ...(fields.metadata ?? {}), [TRACEPARENT_METADATA_KEY]: traceparent }
+      : fields.metadata;
     return {
       id: uid("q"),
       threadId: this.id,
@@ -588,7 +636,7 @@ export class Thread {
       replyTarget: fields.replyTarget,
       model: fields.model,
       role: fields.role,
-      metadata: fields.metadata,
+      metadata,
       status: "queued",
       attemptCount: 0,
       maxAttempts: 10,
@@ -1003,7 +1051,7 @@ export class Thread {
     modelId: string | null,
     reason: string = "set_via_api",
   ): Promise<{ fromModel: string; toModel: string }> {
-    const sessionDefault = this.session.options.model.id;
+    const sessionDefault = this.session.options.modelSpec ?? this.session.options.model.id;
     const before = this.modelOverride ?? sessionDefault;
     if (modelId === null) {
       this.modelOverride = undefined;
@@ -1053,9 +1101,11 @@ export class Thread {
     return this.session.options.model;
   }
 
-  /** Effective model spec string for this turn: thread override → session default id. */
+  /** Effective model spec string for this turn: thread override → session
+   *  default spec (`modelSpec` — the canonical form; `model.id` is the wire
+   *  id and only coincides for bare/internal resolution). */
   private turnModelSpec(): string {
-    return this.modelOverride ?? this.session.options.model.id;
+    return this.modelOverride ?? this.session.options.modelSpec ?? this.session.options.model.id;
   }
 
   /**
@@ -1071,12 +1121,23 @@ export class Thread {
   private async resolveTurnModelForTurn(): Promise<PiModel> {
     const resolver = this.session.options.resolveModel;
     if (!resolver) return this.resolveTurnModel();
-    const resolved = await resolver(this.turnModelSpec());
-    if (resolved) {
-      this.turnApiKey = resolved.apiKey;
-      return resolved.model;
-    }
-    return this.resolveTurnModel();
+    const spec = this.turnModelSpec();
+    return withSpan("model.resolve", { "valet.model.spec": spec }, async (span) => {
+      const resolved = await resolver(spec);
+      if (resolved) {
+        span.setAttributes({
+          "valet.model.wire_id": resolved.model.id,
+          "valet.model.provider": resolved.model.provider,
+          // Key PRESENCE only — an undefined key means "env fallback", which
+          // is exactly the thing to check when a turn 401s.
+          "valet.model.key_source": resolved.apiKey !== undefined ? "resolver" : "env",
+        });
+        this.turnApiKey = resolved.apiKey;
+        return resolved.model;
+      }
+      span.setAttribute("valet.model.key_source", "internal_fallback");
+      return this.resolveTurnModel();
+    });
   }
 
   /**
@@ -1185,6 +1246,26 @@ export class Thread {
 
       await store.insertAttemptMarker(claimed.id, attemptId);
       this.runningItem = claimed;
+      this.turnStartedAt = Date.now();
+      const admissionLink = linkFromTraceparent(claimed.metadata?.[TRACEPARENT_METADATA_KEY]);
+      this.submissionSpan = engineTracer().startSpan("submission.run", {
+        attributes: {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.queue_item.id": claimed.id,
+          "valet.submission.attempt": claimed.attemptCount,
+          // Queue wait — the time between admission and this claim — is a
+          // first-order bottleneck signal, invisible inside any child span.
+          "valet.submission.queue_wait_ms": Date.now() - claimed.createdAt,
+          // Size, not content: enough to correlate "huge prompt" with a slow
+          // turn without putting user text on a span.
+          "valet.submission.content_chars": JSON.stringify(claimed.content).length,
+          ...(claimed.channel ? { "valet.submission.channel": claimed.channel.channelType } : {}),
+          ...(claimed.dispatchId ? { "valet.submission.dispatch_id": claimed.dispatchId } : {}),
+          ...(claimed.author ? { "valet.submission.author": claimed.author.id } : {}),
+        },
+        links: admissionLink ? [admissionLink] : undefined,
+      });
       this.fence = { itemId: claimed.id, attemptId };
       this.staleFenceDetected = false;
       this.session.ensureTimers();
@@ -1302,6 +1383,8 @@ export class Thread {
         );
         return;
       } finally {
+        this.submissionSpan?.end();
+        this.submissionSpan = undefined;
         this.runningItem = null;
         this.fence = undefined;
       }
@@ -1426,6 +1509,24 @@ export class Thread {
    * signalled that a successor already owns the item.
    */
   private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
+    return this.inSubmissionContext(() =>
+      withSpan(
+        "submission.settle",
+        {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.queue_item.id": item.id,
+        },
+        (span) => this.settleTurnInner(item, turnFailure, span),
+      ),
+    );
+  }
+
+  private async settleTurnInner(
+    item: QueueItem,
+    turnFailure: { error: unknown } | undefined,
+    span: Span,
+  ): Promise<void> {
     if (this.staleFenceDetected) {
       // A successor owns this item; do not settle. (Zombie self-fencing.)
       return;
@@ -1441,10 +1542,25 @@ export class Thread {
     if (current.status === "settled" || current.status === "terminalizing") return;
 
     const outcome = this.decideTurnOutcome(current, turnFailure);
+    span.setAttribute("valet.submission.outcome", outcome.outcome);
+    this.submissionSpan?.setAttribute("valet.submission.outcome", outcome.outcome);
+    recordSettlement(
+      outcome.outcome,
+      this.turnStartedAt !== undefined ? Math.max(0, this.turnStartedAt - item.createdAt) : undefined,
+    );
+    if (outcome.outcome === "failed") {
+      markSpanError(span, outcome.error ?? "submission failed");
+      if (this.submissionSpan) markSpanError(this.submissionSpan, outcome.error ?? "submission failed");
+    }
+    let patchRef: SettlePatchRef;
     try {
       await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
       await this.repairRestState(item, fence);
-      await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
+      // Best-effort workspace patch (engine traces spec, change 3) — runs
+      // between reserve and finalize so the record lands in finalize's own
+      // transaction, but its own I/O never throws and never weakens the CAS.
+      patchRef = await this.captureSettlePatch(item);
+      await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) {
         this.staleFenceDetected = true;
@@ -1453,8 +1569,35 @@ export class Thread {
       throw err;
     }
     await store.deleteAttemptMarker(item.id, fence.attemptId);
-    await this.emitSettled(item.id, outcome);
+    await this.emitSettled(item.id, outcome, patchRef);
     await this.emitQueueState();
+  }
+
+  /**
+   * Best-effort settle-time patch capture (engine traces spec, change 3).
+   * Never throws; a sandbox that isn't currently `ready` is skipped rather
+   * than re-provisioned (a hibernated sandbox must not be woken to diff it).
+   */
+  private async captureSettlePatch(item: QueueItem): Promise<SettlePatchRef> {
+    return withSpan(
+      "patch.capture",
+      { "valet.session.id": this.session.id, "valet.queue_item.id": item.id },
+      async (span) => {
+        const ref = await capturePatch({
+          sessionId: this.session.id,
+          queueItemId: item.id,
+          blobs: this.session.providers.blobs,
+          startRef: this.session.options.startRef,
+          sandbox: this.session.attachment.current(),
+          attachmentState: this.session.attachment.state,
+        });
+        span.setAttribute("valet.patch.status", ref.status);
+        if (ref.reason !== undefined) span.setAttribute("valet.patch.reason", ref.reason);
+        if (ref.bytes !== undefined) span.setAttribute("valet.patch.bytes", ref.bytes);
+        if (ref.status === "failed") markSpanError(span, ref.reason ?? "patch capture failed");
+        return ref;
+      },
+    );
   }
 
   /** Map the turn's terminal state to a SubmissionOutcome. */
@@ -1525,7 +1668,11 @@ export class Thread {
     }
   }
 
-  private async emitSettled(itemId: string, outcome: SubmissionOutcome): Promise<void> {
+  private async emitSettled(
+    itemId: string,
+    outcome: SubmissionOutcome,
+    patch?: SettlePatchRef,
+  ): Promise<void> {
     // Deterministic eventKey `settled:{itemId}`: every settlement path (fenced
     // two-phase, retryFinalize, reconciliation, and the fenceless
     // settleUnclaimed sites) routes through here, so a double-emission across
@@ -1537,6 +1684,7 @@ export class Thread {
         threadId: this.id,
         queueItemId: itemId,
         outcome,
+        ...(patch ? { patch } : {}),
       },
       { eventKey: `settled:${itemId}`, queueItemId: itemId },
     );
@@ -1609,17 +1757,22 @@ export class Thread {
       }
     }
 
+    let patchRef: SettlePatchRef;
     try {
       await store.reserveSettlement(this.session.id, this.id, item.id, outcome, fence);
       await this.repairRestState(item, fence);
       if (suspended) await store.clearSuspendedTurn(this.session.id, this.id, fence);
-      await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
+      // A claimed-then-reconciled item may have run tools before the crash or
+      // supersession — capture whatever landed on disk, same best-effort
+      // contract as the normal settle path.
+      patchRef = await this.captureSettlePatch(item);
+      await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) return; // successor owns it now
       throw err;
     }
     await store.deleteAttemptMarker(item.id, attemptId);
-    await this.emitSettled(item.id, outcome);
+    await this.emitSettled(item.id, outcome, patchRef);
     await this.emitQueueState();
   }
 
@@ -1655,6 +1808,7 @@ export class Thread {
     if (!replaced) return; // lost the CAS
     await store.insertAttemptMarker(item.id, attemptId);
     this.runningItem = replaced;
+    this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
     this.session.ensureTimers();
@@ -1716,6 +1870,7 @@ export class Thread {
     if (!replaced) return; // lost the CAS
     await store.insertAttemptMarker(item.id, attemptId);
     this.runningItem = replaced;
+    this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
     this.session.ensureTimers();
@@ -1734,6 +1889,30 @@ export class Thread {
    * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
    */
   private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    return withSpan(
+      "agent.turn",
+      {
+        "valet.session.id": this.session.id,
+        "valet.thread.id": this.id,
+        "valet.queue_item.id": item.id,
+        "valet.turn.resumed": true,
+      },
+      async (span) => {
+        this.turnSpan = span;
+        this.turnToolCallCount = 0;
+        this.llmRoundStartedAt = Date.now();
+        try {
+          await this.driveResumeToCompletionInner(item, repairMessage);
+        } finally {
+          this.turnSpan = undefined;
+          this.llmSpan?.end();
+          this.llmSpan = undefined;
+        }
+      },
+    );
+  }
+
+  private async driveResumeToCompletionInner(item: QueueItem, repairMessage: string): Promise<void> {
     const store = this.session.providers.store;
     const fence = this.fence;
     if (!fence) return;
@@ -1882,7 +2061,51 @@ export class Thread {
     return text;
   }
 
+  /**
+   * Run the claimed turn inside an `agent.turn` span, itself parented under
+   * the live `submission.run` span. The span's usage/cost/model attributes
+   * are stamped by the `turn_end` handler via `this.turnSpan`; children
+   * (model resolution, tool executions, sandbox execs, credential reads)
+   * nest automatically through the host's context manager.
+   */
   private async runItem(item: QueueItem): Promise<void> {
+    return this.inSubmissionContext(() =>
+      withSpan(
+        "agent.turn",
+        {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.queue_item.id": item.id,
+          // Context size going INTO the turn — the first thing to look at
+          // when a turn is slow (big context → slow rounds, compaction risk).
+          "valet.turn.context_messages": this.agent.state.messages.length,
+          ...(item.role !== undefined ? { "valet.turn.role": item.role } : {}),
+          ...(item.model !== undefined ? { "valet.turn.model_override": item.model } : {}),
+        },
+        async (span) => {
+          this.turnSpan = span;
+          this.turnToolCallCount = 0;
+          this.llmRoundStartedAt = Date.now();
+          try {
+            await this.runItemInner(item);
+          } finally {
+            this.turnSpan = undefined;
+            this.llmSpan?.end();
+            this.llmSpan = undefined;
+          }
+        },
+      ),
+    );
+  }
+
+  /** Run `fn` with the live `submission.run` span as the active parent. */
+  private inSubmissionContext<T>(fn: () => Promise<T>): Promise<T> {
+    const span = this.submissionSpan;
+    if (!span) return fn();
+    return otelContext.with(otelTrace.setSpan(otelContext.active(), span), fn);
+  }
+
+  private async runItemInner(item: QueueItem): Promise<void> {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
@@ -2128,6 +2351,22 @@ export class Thread {
   async compactThread(opts: { mode: "proactive" | "reactive" | "manual" }): Promise<void> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return;
+    return withSpan(
+      "compaction",
+      {
+        "valet.session.id": this.session.id,
+        "valet.thread.id": this.id,
+        "valet.compaction.mode": opts.mode,
+      },
+      (span) => this.compactThreadInner(opts, span),
+    );
+  }
+
+  private async compactThreadInner(
+    opts: { mode: "proactive" | "reactive" | "manual" },
+    span?: Span,
+  ): Promise<void> {
+    const cfg = this.session.options.compaction;
     const session = this.session;
     const store = session.providers.store;
     const model = cfg?.summarizerModel ?? session.options.model;
@@ -2212,6 +2451,11 @@ export class Thread {
       fileContext: extractFileContext(head),
       createdAt: Date.now(),
     };
+    span?.setAttributes({
+      "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
+      "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
+      "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
+    });
     // Fenced under the current turn's attempt (compaction is always in-turn).
     await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
 
@@ -2451,7 +2695,7 @@ export class Thread {
               threadId: this.id,
               queueItemId: runningItemId ?? "",
               gateId: gate.id,
-              model: session.options.model.id,
+              model: session.options.modelSpec ?? session.options.model.id,
               toolCallId,
               toolName,
               toolArgs,
@@ -2607,6 +2851,24 @@ export class Thread {
           this.currentAssistantParts = [];
           this.currentToolCalls.clear();
           this.currentAssistantEntry = undefined;
+          // One llm.generate span per assistant round, parented under the
+          // turn. Start time is the SYNTHESIZED round start — the model was
+          // "thinking" from the moment the prior round's work finished, and
+          // message_start only fires once streaming begins.
+          if (this.turnSpan) {
+            this.llmSpan?.end(); // defensive: never leak a dangling round
+            this.llmSpan = engineTracer().startSpan(
+              "llm.generate",
+              {
+                startTime: this.llmRoundStartedAt ?? Date.now(),
+                attributes: {
+                  "valet.session.id": this.session.id,
+                  "valet.thread.id": this.id,
+                },
+              },
+              otelTrace.setSpan(otelContext.active(), this.turnSpan),
+            );
+          }
           await this.fencedEmit(
             {
               type: "message_start",
@@ -2642,6 +2904,25 @@ export class Thread {
       }
       case "message_end": {
         if (event.message.role === "assistant" && this.currentAssistantMessageId) {
+          // Close this round's llm.generate span with per-round attributes.
+          // The NEXT round (if any) effectively starts now — tools run in
+          // between and tool_execution_end re-stamps the round start.
+          if (this.llmSpan) {
+            const u = event.message.usage;
+            this.llmSpan.setAttributes({
+              "gen_ai.request.model": event.message.model,
+              "gen_ai.usage.input_tokens": u.input,
+              "gen_ai.usage.output_tokens": u.output,
+              "valet.llm.stop_reason": event.message.stopReason,
+              "valet.llm.tool_calls": this.currentToolCalls.size,
+            });
+            if (event.message.stopReason === "error") {
+              markSpanError(this.llmSpan, event.message.errorMessage ?? "stream error");
+            }
+            this.llmSpan.end();
+            this.llmSpan = undefined;
+          }
+          this.llmRoundStartedAt = Date.now();
           const text = textOf(event.message);
           // Compose parts: leading text + tool calls (already tracked)
           const parts: MessagePart[] = [];
@@ -2698,6 +2979,7 @@ export class Thread {
         break;
       }
       case "tool_execution_start":
+        this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
         await this.fencedEmit(
           {
@@ -2732,6 +3014,9 @@ export class Thread {
               : {};
           part.result = { ...structured, text: resultText };
         }
+        // The next LLM round begins once tool results are in — re-stamp the
+        // synthesized round start so llm.generate covers its full wait.
+        this.llmRoundStartedAt = Date.now();
         // Re-persist the entry now that this tool's status/result has been
         // mutated. Without this, sqlite still has status="running" + no
         // result; on reload the chat shows tool cards stuck mid-execution.
@@ -2758,6 +3043,12 @@ export class Thread {
           event.message.role === "assistant" ? event.message.stopReason : undefined;
         const errorMessage =
           event.message.role === "assistant" ? event.message.errorMessage : undefined;
+        // Usage/cost trace (engine traces spec, change 1): one snapshot feeds
+        // BOTH the entry update and the enriched turn_end event below, so the
+        // two surfaces can never disagree.
+        let turnUsage: MessageUsage | undefined;
+        let turnCost: MessageCost | undefined;
+        let turnModel: string | undefined;
         if (event.message.role === "assistant") {
           const u = event.message.usage;
           this.lastAssistantUsage = {
@@ -2767,8 +3058,80 @@ export class Thread {
             cacheWrite: u.cacheWrite,
             total: u.totalTokens || u.input + u.output + u.cacheRead + u.cacheWrite,
           };
+          // All-zero usage (dev fakes, providers that don't report) is
+          // "no usage reported" — omit, mirroring the cost-is-null rule.
+          if (this.lastAssistantUsage.total > 0) turnUsage = { ...this.lastAssistantUsage };
+          turnModel = event.message.model;
+          // Cost is null, not zero: unpriced models (custom providers, dev
+          // fakes) omit the field entirely — a missing value reads
+          // "unpriced", never "$0".
+          const c = u.cost;
+          if (c && c.total > 0) {
+            turnCost = {
+              input: c.input,
+              output: c.output,
+              cacheRead: c.cacheRead,
+              cacheWrite: c.cacheWrite,
+              total: c.total,
+            };
+          }
+          if (this.currentAssistantEntry && turnUsage) {
+            const entry = this.currentAssistantEntry;
+            entry.usage = turnUsage;
+            if (turnCost) entry.cost = turnCost;
+            await this.fencedWrite(() =>
+              this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
+            );
+          }
+          // Metrics: same snapshot the entry/span get (no-op without a
+          // registered MeterProvider).
+          recordTurn({
+            model: turnModel,
+            reason: stopReason === "aborted" ? "abort" : stopReason === "error" ? "error" : "end_turn",
+            durationMs: this.turnStartedAt !== undefined ? Date.now() - this.turnStartedAt : undefined,
+            usage: turnUsage,
+            costUsd: turnCost?.total,
+          });
+          // A round that errored/aborted before message_end leaves a
+          // dangling llm.generate span — close it with the turn's fate.
+          if (this.llmSpan) {
+            if (errorMessage) markSpanError(this.llmSpan, errorMessage);
+            this.llmSpan.end();
+            this.llmSpan = undefined;
+          }
+          // Same snapshot onto the live agent.turn span (distributed tracing).
+          if (this.turnSpan) {
+            this.turnSpan.setAttributes({
+              "valet.turn.stop_reason": stopReason ?? "end_turn",
+              "valet.turn.tool_calls": this.turnToolCallCount,
+            });
+            if (errorMessage) {
+              this.turnSpan.setAttribute("valet.turn.error", attrTruncate(errorMessage, 300));
+            }
+            if (turnModel !== undefined) this.turnSpan.setAttribute("gen_ai.request.model", turnModel);
+            if (turnUsage) {
+              this.turnSpan.setAttributes({
+                "gen_ai.usage.input_tokens": turnUsage.input,
+                "gen_ai.usage.output_tokens": turnUsage.output,
+                "valet.usage.cache_read_tokens": turnUsage.cacheRead,
+                "valet.usage.cache_write_tokens": turnUsage.cacheWrite,
+                "valet.usage.total_tokens": turnUsage.total,
+              });
+            }
+            if (turnCost) this.turnSpan.setAttribute("valet.cost.total_usd", turnCost.total);
+            if (stopReason === "error") {
+              markSpanError(this.turnSpan, errorMessage ?? "turn ended with an error");
+            }
+          }
         }
         if (errorMessage) {
+          // Same stdout mirror as `emitError`: the event is best-effort (a
+          // dead WS drops it), and this is the path provider failures take
+          // (bad key, exhausted credits, 4xx/5xx) — without a log line the
+          // host process is silent about a turn that returned nothing.
+          console.error(
+            `[engine] agent error session=${this.session.id} thread=${this.id} ${stopReason ?? "agent_error"}: ${errorMessage}`,
+          );
           await this.fencedEmit(
             {
               type: "error",
@@ -2787,7 +3150,17 @@ export class Thread {
             ? "error"
             : "end_turn";
         await this.fencedEmit(
-          { type: "turn_end", threadId: this.id, reason },
+          {
+            type: "turn_end",
+            threadId: this.id,
+            reason,
+            ...(turnModel !== undefined ? { model: turnModel } : {}),
+            ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
+            ...(turnCost !== undefined ? { cost: turnCost } : {}),
+            ...(turnUsage !== undefined && this.turnStartedAt !== undefined
+              ? { turnDurationMs: Date.now() - this.turnStartedAt }
+              : {}),
+          },
           { queueItemId: this.runningItem?.id },
         );
         await this.fencedEmit(
@@ -2844,6 +3217,10 @@ export class Thread {
   }
 
   private emitError(code: string, message: string): void {
+    // Event delivery is best-effort (a dead WS drops it silently), so also
+    // log to stderr — otherwise a failing turn (bad key, exhausted credits,
+    // provider outage) leaves zero trace in the host process output.
+    console.error(`[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
     void this.session.emit({
       type: "error",
       threadId: this.id,

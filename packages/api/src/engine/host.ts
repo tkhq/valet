@@ -19,6 +19,7 @@ import {
   type SandboxProvider,
   type Session,
   type SessionData,
+  type SessionStartRef,
   type SessionStore,
   type StoredCredential,
   type ResolvedModel,
@@ -221,6 +222,13 @@ export interface SessionMeta {
    */
   userName?: string;
   userEmail?: string;
+}
+
+/** A session build's model pair: the wire-ready pi-ai model object plus the
+ * canonical spec the session persists (`CreateSessionOptions.modelSpec`). */
+interface BuildModel {
+  model: Model<any>;
+  spec: string;
 }
 
 interface CacheEntry {
@@ -456,7 +464,7 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -473,7 +481,31 @@ export class EngineHost {
     );
     const image = prebuild?.imageRef ?? this.opts.defaultImage;
     if (prebuild) await this.recordPrebuildId(sessionId, prebuild.prebuildId);
-    const prepareSandbox = this.buildPrepareSandbox(meta, prebuild);
+    // Start-ref sink (engine traces spec, change 2 — host pattern B): prep
+    // resolves the primary clone's ref inside the sandbox, and this callback
+    // lands it on the session. `prepareSandbox` can run before create/restore
+    // returns (attachment provisioning races the build), so a ref that
+    // arrives early is parked and flushed right after the session exists.
+    // Best-effort throughout: a session that already carries a start-ref
+    // keeps it (start conditions are immutable; a later epoch's re-clone may
+    // legitimately sit at a newer SHA and must not overwrite).
+    let builtSession: Session | undefined;
+    let pendingStartRef: SessionStartRef | undefined;
+    const onStartRef = async (ref: SessionStartRef) => {
+      const target = builtSession;
+      if (!target) {
+        pendingStartRef = ref;
+        return;
+      }
+      if (target.options.startRef) return;
+      await target.setStartRef(ref).catch((err: unknown) => {
+        console.error(
+          `EngineHost: recording start-ref for session ${sessionId} failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    };
+    const prepareSandbox = this.buildPrepareSandbox(meta, prebuild, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     const session = existing
       ? await engine.restoreSession({
@@ -484,6 +516,7 @@ export class EngineHost {
             workspace: meta.workspace,
             sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
             model,
+            modelSpec,
             resolveModel,
             systemPrompt: SYSTEM_PROMPT,
             tools: extras.tools.length ? extras.tools : undefined,
@@ -500,6 +533,7 @@ export class EngineHost {
           workspace: meta.workspace,
           sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
           model,
+          modelSpec,
           resolveModel,
           systemPrompt: SYSTEM_PROMPT,
           tools: extras.tools.length ? extras.tools : undefined,
@@ -508,6 +542,12 @@ export class EngineHost {
           ...(prepareSandbox ? { prepareSandbox } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
         });
+
+    builtSession = session;
+    if (pendingStartRef) {
+      await onStartRef(pendingStartRef);
+      pendingStartRef = undefined;
+    }
 
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
@@ -580,6 +620,7 @@ export class EngineHost {
   private buildPrepareSandbox(
     meta: SessionMeta,
     prebuild?: PrebuildResolution | null,
+    onStartRef?: (ref: SessionStartRef) => void | Promise<void>,
   ): ((sandbox: Sandbox, epoch: number) => Promise<void>) | undefined {
     if (!meta.repos || meta.repos.length === 0) return undefined;
     return buildWorkspacePrep({
@@ -587,6 +628,7 @@ export class EngineHost {
       repos: meta.repos,
       userName: meta.userName,
       userEmail: meta.userEmail,
+      ...(onStartRef ? { onStartRef } : {}),
       // When the session booted from a prebuilt image, the PRIMARY (position-0)
       // binding's repo is baked into the image; fetch-on-start prep stages it
       // out of the image rather than cloning, then conditionally re-installs.
@@ -767,7 +809,7 @@ export class EngineHost {
     const personaPrefix = await this.resolvePersonaPrefix(db, scope, meta.orgId, principal);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // Built FRESH per session build, never cached on the host — see the
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
@@ -785,6 +827,7 @@ export class EngineHost {
       queueMode,
       sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
       systemPrompt: personaPrefix + orchestratorPersona(principal),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -1055,22 +1098,24 @@ export class EngineHost {
    * return means the spec names no known model — surfaced as an error so a
    * session never silently boots on the wrong model.
    */
-  private async resolveModelObject(orgId: string, spec: string): Promise<Model<any>> {
-    // Session builds only need the model OBJECT; NoCredentialsError means the
-    // spec is valid but no key exists yet — accept via the attached model so
-    // a keyless org can still open sessions (turns get the engine's bounded
-    // credential-release path instead of a failed build).
+  private async resolveModelObject(orgId: string, spec: string): Promise<BuildModel> {
+    // Session builds need the model OBJECT plus the canonical spec the
+    // session should persist (`CreateSessionOptions.modelSpec` — the wire
+    // `model.id` may differ for namespaced specs). NoCredentialsError means
+    // the spec is valid but no key exists yet — accept via the attached
+    // model so a keyless org can still open sessions (turns get the
+    // engine's bounded credential-release path instead of a failed build).
     let resolved: ResolvedModel | null;
     try {
       resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
     } catch (err) {
-      if (err instanceof NoCredentialsError) return err.model;
+      if (err instanceof NoCredentialsError) return { model: err.model, spec };
       throw err;
     }
     if (!resolved) {
       throw new Error(`EngineHost: unknown model "${spec}" — not in the org catalog or pi-ai registry`);
     }
-    return resolved.model;
+    return { model: resolved.model, spec: resolved.canonicalId ?? resolved.model.id };
   }
 
   /**
@@ -1174,7 +1219,7 @@ export class EngineHost {
     userId: string,
     orgId: string,
     overrideId?: string,
-  ): Promise<Model<any>> {
+  ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       overrideId ??
@@ -1233,7 +1278,7 @@ export class EngineHost {
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
-    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
@@ -1248,6 +1293,7 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
@@ -1324,7 +1370,7 @@ export class EngineHost {
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const model = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
@@ -1337,6 +1383,7 @@ export class EngineHost {
       owner: opts.owner,
       sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
       model,
+      modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,

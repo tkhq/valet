@@ -546,4 +546,107 @@ describe("buildWorkspacePrep", () => {
       expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
     });
   });
+
+  describe("start-ref capture (engine traces, change 2)", () => {
+    const RESOLVE_CMD =
+      "git remote get-url origin && git rev-parse HEAD && git rev-parse --abbrev-ref HEAD";
+    const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+    it("resolves the primary binding's ref after prep and hands it to onStartRef", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(RESOLVE_CMD, {
+        stdout: `https://github.com/acme/widgets.git\n${SHA}\nmain\n`,
+        stderr: "",
+        exitCode: 0,
+      });
+      const onStartRef = vi.fn();
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()], onStartRef });
+      await prep(sandbox, 1);
+      expect(onStartRef).toHaveBeenCalledTimes(1);
+      const ref = onStartRef.mock.calls[0][0];
+      expect(ref).toMatchObject({
+        repoUrl: "https://github.com/acme/widgets.git",
+        commitSha: SHA,
+        branch: "main",
+      });
+      expect(typeof ref.capturedAt).toBe("number");
+      // Resolution runs against the PRIMARY clone dir (workspace root here).
+      const call = sandbox.execCalls.find((c) => c.command === RESOLVE_CMD);
+      expect(call?.opts?.cwd).toBe(".");
+    });
+
+    it("detached HEAD ('HEAD' from --abbrev-ref) yields branch: undefined", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(RESOLVE_CMD, {
+        stdout: `https://github.com/acme/widgets.git\n${SHA}\nHEAD\n`,
+        stderr: "",
+        exitCode: 0,
+      });
+      const onStartRef = vi.fn();
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()], onStartRef });
+      await prep(sandbox, 1);
+      expect(onStartRef.mock.calls[0][0].branch).toBeUndefined();
+    });
+
+    it("resolution failure logs and never fails prep or calls onStartRef", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(RESOLVE_CMD, { stdout: "", stderr: "no origin", exitCode: 1 });
+      const onStartRef = vi.fn();
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()], onStartRef });
+        await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+        expect(onStartRef).not.toHaveBeenCalled();
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("a throwing onStartRef callback is contained (prep still succeeds)", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(RESOLVE_CMD, {
+        stdout: `https://github.com/acme/widgets.git\n${SHA}\nmain\n`,
+        stderr: "",
+        exitCode: 0,
+      });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const prep = buildWorkspacePrep({
+          apiUrl: API_URL,
+          repos: [binding()],
+          onStartRef: () => {
+            throw new Error("host exploded");
+          },
+        });
+        await expect(prep(sandbox, 1)).resolves.toBeUndefined();
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("no onStartRef: the resolve command never runs (byte-identical prep)", async () => {
+      const sandbox = new RecordingSandbox();
+      const prep = buildWorkspacePrep({ apiUrl: API_URL, repos: [binding()] });
+      await prep(sandbox, 1);
+      expect(sandbox.execCalls.some((c) => c.command === RESOLVE_CMD)).toBe(false);
+    });
+
+    it("multi-binding: resolves from the PRIMARY (position-0) binding's dir", async () => {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(RESOLVE_CMD, {
+        stdout: `https://github.com/acme/widgets.git\n${SHA}\nmain\n`,
+        stderr: "",
+        exitCode: 0,
+      });
+      const onStartRef = vi.fn();
+      const prep = buildWorkspacePrep({
+        apiUrl: API_URL,
+        repos: [binding(), binding({ fullName: "acme/gadgets", cloneUrl: "https://github.com/acme/gadgets.git" })],
+        onStartRef,
+      });
+      await prep(sandbox, 1);
+      const call = sandbox.execCalls.find((c) => c.command === RESOLVE_CMD);
+      expect(call?.opts?.cwd).toBe("widgets");
+    });
+  });
 });

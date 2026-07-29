@@ -11,6 +11,7 @@ import type {
   SessionEntry,
   SessionStatus,
   SessionStore,
+  SettlePatchRef,
   SubmissionClaim,
   SubmissionOutcome,
   SuspendedTurnState,
@@ -565,10 +566,12 @@ export class InMemorySessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     fence: WriteFence,
+    patchRef?: SettlePatchRef,
   ): Promise<void> {
     const item = this.fencedItem(sessionId, threadId, itemId, fence);
     if (item.status === "settled") return; // idempotent
     item.status = "settled";
+    if (patchRef) item.settlePatch = patchRef;
     item.updatedAt = Date.now();
   }
 
@@ -588,6 +591,9 @@ export class InMemorySessionStore implements SessionStore {
     if (outcome.outcome === "merged" && opts?.mergedIntoItemId) {
       item.mergedIntoItemId = opts.mergedIntoItemId;
     }
+    // Never-claimed items definitionally ran no tools — stamp the skip so
+    // offline readers can tell "no work" from "predates patch capture".
+    item.settlePatch = { status: "skipped", reason: "no_work" };
     item.updatedAt = Date.now();
     return true;
   }

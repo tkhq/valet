@@ -139,7 +139,7 @@ grep -q 'VALET_SANDBOX_API_URL: "http://valet-api.default.svc.cluster.local:80"'
 pass "VALET_SANDBOX_API_URL carries the api Service's .svc.cluster.local DNS name"
 
 # --- No Secret keys leak into the ConfigMap ------------------------------
-CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/bundled.yaml")
+CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/bundled.yaml")
 for secret_key in BETTER_AUTH_SECRET VALET_ENCRYPTION_KEY ANTHROPIC_API_KEY POSTGRES_PASSWORD DATABASE_URL; do
   if echo "$CONFIGMAP_BLOCK" | grep -q "$secret_key"; then
     fail "ConfigMap leaks secret key: $secret_key"
@@ -194,7 +194,7 @@ pass "bundled render: registry Service is NodePort with nodePort 30500"
 if grep -q 'name: valet-registry' "$TMP_DIR/external-registry.yaml"; then
   fail "external-registry render: bundled registry resources still rendered when externalRegistry.url is set"
 fi
-EXTERNAL_REGISTRY_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/external-registry.yaml")
+EXTERNAL_REGISTRY_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/external-registry.yaml")
 echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "registry.example.com"' \
   || fail "external-registry render: VALET_PREBUILD_REGISTRY does not carry externalRegistry.url verbatim"
 # External registry has no push/pull split — the PUSH host equals the pull URL.
@@ -207,7 +207,7 @@ echo "$EXTERNAL_REGISTRY_CONFIGMAP" | grep -q 'VALET_SANDBOX_IMAGE_PULL_SECRET: 
 pass "external-registry render: no bundled registry resources, VALET_PREBUILD_REGISTRY(_PUSH/_INSECURE)/pull-secret wired from externalRegistry.*"
 
 # --- registry: VALET_PREBUILD_REGISTRY wiring (bundled) --------------------
-BUNDLED_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/bundled.yaml")
+BUNDLED_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/bundled.yaml")
 # PULL host = localhost:<nodePort> (what kubelet resolves per-node).
 echo "$BUNDLED_CONFIGMAP" | grep -q 'VALET_PREBUILD_REGISTRY: "localhost:30500"' \
   || fail "bundled render: VALET_PREBUILD_REGISTRY (pull host) is not localhost:<nodePort> — kubelet can't pull a cluster-DNS Service name"
@@ -234,6 +234,71 @@ if grep -qiE 'ghp_|gho_|github_pat_' "$TMP_DIR/bundled.yaml" "$TMP_DIR/external-
   fail "a git-token-shaped string leaked into a rendered manifest"
 fi
 pass "no token-shaped secret material rendered anywhere (chart never bakes in a git token — minted per-build at runtime)"
+
+# --- ingress: generic annotations passthrough (EKS/cert-manager) ------------
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set ingress.className=nginx \
+  --set ingress.annotations."cert-manager\.io/cluster-issuer"=letsencrypt \
+  --set ingress.tls.secretName=valet-tls \
+  > "$TMP_DIR/ingress-nginx.yaml"
+grep -q 'cert-manager.io/cluster-issuer: letsencrypt' "$TMP_DIR/ingress-nginx.yaml" \
+  || fail "ingress.annotations not rendered into Ingress metadata"
+if grep -q 'traefik.ingress.kubernetes.io/router.tls' "$TMP_DIR/ingress-nginx.yaml"; then
+  fail "traefik annotation leaked into a non-traefik ingress"
+fi
+pass "ingress.annotations passthrough works; traefik annotation gated on className"
+
+grep -q 'traefik.ingress.kubernetes.io/router.tls: "true"' "$TMP_DIR/bundled.yaml" \
+  || fail "default traefik TLS annotation regressed"
+pass "default (traefik) ingress annotation unchanged"
+
+# --- observability: bundled otel-lgtm stack + api OTLP wiring ---------------
+grep -q 'name: valet-otel-lgtm' "$TMP_DIR/bundled.yaml" || fail "bundled render: no otel-lgtm Deployment"
+grep -q 'name: valet-otel$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no valet-otel OTLP Service"
+grep -q 'name: valet-grafana$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no valet-grafana Service"
+GRAFANA_SVC_BLOCK=$(awk '/^kind: Service$/{svc=1} svc&&/name: valet-grafana$/{hit=1} hit&&/^---$/{exit} hit{print}' "$TMP_DIR/bundled.yaml")
+echo "$GRAFANA_SVC_BLOCK" | grep -q 'nodePort: 30300' \
+  || fail "bundled render: grafana Service missing nodePort 30300 from observability.grafanaNodePort"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'OTEL_EXPORTER_OTLP_ENDPOINT: "http://valet-otel.default.svc.cluster.local:4318"' \
+  || fail "bundled render: ConfigMap OTEL_EXPORTER_OTLP_ENDPOINT is not the bundled otel Service's in-cluster OTLP/HTTP URL"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'OTEL_SERVICE_NAME: "valet-api"' \
+  || fail "bundled render: ConfigMap missing OTEL_SERVICE_NAME"
+pass "observability: bundled otel-lgtm Deployment/Services rendered, api OTLP endpoint wired"
+
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set observability.enabled=false \
+  > "$TMP_DIR/no-observability.yaml"
+if grep -q 'name: valet-otel-lgtm' "$TMP_DIR/no-observability.yaml"; then
+  fail "observability.enabled=false still renders the otel-lgtm stack"
+fi
+if grep -q 'OTEL_EXPORTER_OTLP_ENDPOINT' "$TMP_DIR/no-observability.yaml"; then
+  fail "observability.enabled=false still sets OTEL_EXPORTER_OTLP_ENDPOINT (api must stay a no-op)"
+fi
+pass "observability disabled: no otel resources, no OTLP env (api telemetry stays env-gated off)"
+
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set observability.enabled=false \
+  --set observability.otlpEndpoint="http://collector.example.com:4318" \
+  > "$TMP_DIR/external-otel.yaml"
+EXTERNAL_OTEL_CONFIGMAP=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/external-otel.yaml")
+echo "$EXTERNAL_OTEL_CONFIGMAP" | grep -q 'OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.example.com:4318"' \
+  || fail "external otlpEndpoint not carried into the ConfigMap verbatim"
+if grep -q 'name: valet-otel-lgtm' "$TMP_DIR/external-otel.yaml"; then
+  fail "external otlpEndpoint render still bundles the otel-lgtm stack when enabled=false"
+fi
+pass "external collector: otlpEndpoint wired verbatim without the bundled stack"
+
+# --- observability: provisioned Grafana dashboard --------------------------
+grep -q 'name: valet-grafana-dashboards' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: no grafana-dashboards ConfigMap"
+grep -q 'valet-dashboard.json' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: dashboard JSON not mounted/rendered"
+grep -q '"uid": "valet-observability"' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: dashboard JSON body (uid valet-observability) missing from the ConfigMap"
+if grep -q 'valet-grafana-dashboards' "$TMP_DIR/no-observability.yaml"; then
+  fail "observability.enabled=false still renders the dashboards ConfigMap"
+fi
+pass "observability: valet dashboard ConfigMap rendered and gated on observability.enabled"
 
 echo
 echo "All golden assertions passed."

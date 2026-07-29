@@ -10,22 +10,69 @@ import { useSaveIdentity } from "~/api/orchestrator";
  * helpers (`pickRandomName`, `appendTraitSentence`, `identitySubmitBody`)
  * stay in `identity-step.tsx` — both call sites import them from there.
  */
+// 300 unique names, loosely grouped by theme. The reroll is uniform random,
+// so ordering doesn't matter — groups exist only to keep curation sane.
+// The test suite pins the contract: exactly 300, unique, non-blank.
 export const NAME_POOL = [
-  "Atlas",
-  "Beacon",
-  "Cleo",
-  "Dash",
-  "Echo",
-  "Fable",
-  "Iris",
-  "Juno",
-  "Lark",
-  "Nova",
-  "Opal",
-  "Piper",
-  "Quinn",
-  "Sage",
-  "Wren",
+  // Myth & legend
+  "Atlas", "Juno", "Iris", "Echo", "Cleo", "Freya", "Circe", "Athena",
+  "Selene", "Thalia", "Orion", "Apollo", "Hermes", "Loki", "Odin", "Saga",
+  "Eos", "Rhea", "Gaia", "Nyx", "Helios", "Sibyl", "Titan", "Vesta",
+  "Zephyr", "Electra", "Luna", "Minerva", "Phoebe", "Triton", "Calypso",
+  "Daphne", "Merlin", "Avalon", "Phoenix", "Griffin",
+  // Celestial & space
+  "Nova", "Vega", "Lyra", "Cosmo", "Comet", "Astra", "Orbit", "Stella",
+  "Aurora", "Celeste", "Halley", "Kepler", "Quasar", "Pulsar", "Nebula",
+  "Zenith", "Polaris", "Sirius", "Rigel", "Altair", "Castor", "Pollux",
+  "Mira", "Ceres", "Europa", "Callisto",
+  "Titania", "Oberon", "Miranda", "Ariel", "Sol",
+  // Trees & plants
+  "Willow", "Aspen", "Cedar", "Rowan", "Birch", "Maple", "Juniper", "Hazel",
+  "Fern", "Ivy", "Moss", "Clover", "Sage", "Basil", "Thyme", "Laurel",
+  "Olive", "Poppy", "Dahlia", "Lotus", "Orchid", "Jasmine", "Briar",
+  "Heather", "Sylvan", "Sequoia",
+  // Land, sea & sky
+  "Storm", "Gale", "Breeze", "Frost", "Ember", "Blaze", "Flint", "Ridge",
+  "Glen", "Brook",
+  "River", "Delta", "Cove", "Reef", "Dune", "Mesa", "Sierra", "Terra",
+  "Slate", "Canyon", "Meadow", "Grove", "Ocean", "Marina", "Tide",
+  "Harbor", "Haven", "Summit", "Tundra", "Fjord", "Lagoon", "Isla",
+  // Birds & beasts
+  "Wren", "Lark", "Robin", "Finch", "Sparrow", "Swift", "Falcon", "Hawk",
+  "Raven", "Magpie", "Starling", "Kestrel", "Osprey", "Heron", "Dove",
+  "Swan", "Crane", "Puffin", "Oriole", "Fox", "Lynx",
+  "Otter", "Leo", "Cricket", "Monarch", "Kiwi",
+  // Gems & metals
+  "Opal", "Ruby", "Jade", "Amber", "Coral", "Pearl", "Onyx", "Topaz",
+  "Beryl", "Garnet", "Jasper", "Agate", "Quartz", "Cobalt", "Copper",
+  "Silver", "Emerald", "Sterling",
+  // Colors & shades
+  "Indigo", "Scarlet", "Sienna", "Teal", "Violet", "Ebony",
+  "Ivory", "Saffron", "Auburn", "Ginger", "Ash", "Coal",
+  // Words & music
+  "Fable", "Sonnet", "Ballad", "Lyric", "Quill", "Rune", "Glyph", "Verse",
+  "Rhyme", "Tempo", "Aria", "Viola", "Piper", "Melody", "Cadence", "Jazz",
+  "Reed", "Harper", "Muse", "Clio", "Puck", "Darcy",
+  "Byron", "Bronte", "Waltz", "Tango",
+  // Minds & makers
+  "Ada", "Hopper", "Curie", "Tesla", "Edison", "Darwin", "Newton", "Sagan",
+  "Euler", "Pascal", "Hedy", "Turing", "Pixel",
+  "Vector", "Cipher", "Dynamo", "Sprocket", "Gizmo", "Tinker",
+  // Places afar
+  "Rio", "Cairo", "Milan", "Kyoto", "Oslo", "Geneva", "Verona", "Dakota",
+  "Denali", "Everest", "Fuji", "Sahara", "Hudson",
+  "Capri", "Malta", "Havana", "Lisbon", "Porto", "Bali",
+  "Kona", "Maui", "Tahiti", "Fiji", "Samoa",
+  // Kitchen & cupboard
+  "Biscuit", "Waffle", "Pepper", "Nutmeg", "Cocoa", "Mocha", "Chai",
+  "Wasabi", "Plum", "Fig", "Mango", "Berry", "Honey", "Mochi",
+  "Pesto", "Clove", "Truffle",
+  // Spark & spirit
+  "Beacon", "Dash", "Quinn", "Ziggy", "Sunny", "Lucky", "Chance", "Scout",
+  "Pilot", "Ranger", "Rover", "Nomad", "Ace", "Bolt", "Spark", "Blitz",
+  "Pip", "Domino", "Gambit",
+  "Kite", "Compass", "Anchor", "Merit", "Valor", "Verity", "Amity",
+  "Bliss", "Honor", "Liberty", "Noble", "Pax", "Solace", "Moxie",
 ] as const;
 
 export const TRAIT_CHIPS = [

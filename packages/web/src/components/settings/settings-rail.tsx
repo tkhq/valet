@@ -33,6 +33,11 @@ const YOU_ITEMS = [
   { to: "/settings/api-keys", label: "API keys" },
 ] as const;
 
+/** Single-user-mode stand-in for Organization · Models — shown under "You"
+ * only while the Organization group is hidden (`/settings/models` renders
+ * the same sections; the org-admin API authorizes the seeded local user). */
+const MODELS_ITEM = { to: "/settings/models", label: "Models" } as const;
+
 const ORGANIZATION_ITEMS: ReadonlyArray<{
   to: string;
   label: string;
@@ -60,9 +65,14 @@ export function SettingsRail() {
     permissions.includes(item.permission),
   );
 
+  // Wait for `useOrg()` to resolve before appending — same no-flash rule as
+  // the Organization group (an org-mode admin must never see the item
+  // appear and then vanish).
+  const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
+
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">
-      <RailGroup label="You" items={YOU_ITEMS} pathname={pathname} />
+      <RailGroup label="You" items={youItems} pathname={pathname} />
       {showOrganizationGroup && (
         <RailGroup label="Organization" items={organizationItems} pathname={pathname} />
       )}

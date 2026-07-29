@@ -14,6 +14,7 @@ import { orgs } from "../schema/index.js";
 import { setOrgModelPreferences } from "./org.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
+import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 
 const orgId = "org1";
 
@@ -58,6 +59,7 @@ describe("model catalog", () => {
       vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
       vi.stubEnv("OPENAI_API_KEY", "");
       vi.stubEnv("GEMINI_API_KEY", "");
+      vi.stubEnv("OPENROUTER_API_KEY", "");
       try {
         const entries = await buildOrgCatalog(db, credentials, orgId);
         expect(entries.filter((e) => e.active)).toHaveLength(0);
@@ -150,12 +152,92 @@ describe("model catalog", () => {
     });
   });
 
+  describe("openrouter (curated selection)", () => {
+    it("zero-config: OPENROUTER_API_KEY only → the curated default set, active, nothing more", async () => {
+      vi.stubEnv("OPENROUTER_API_KEY", "sk-or-env-stub");
+      try {
+        const entries = await buildOrgCatalog(db, credentials, orgId);
+        const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
+        expect(openrouterEntries.map((e) => e.id).sort()).toEqual(
+          OPENROUTER_DEFAULT_MODEL_IDS.map((id) => `openrouter/${id}`).sort(),
+        );
+        for (const e of openrouterEntries) {
+          expect(e.active).toBe(true);
+          expect(e.providerName).toBe("OpenRouter");
+        }
+        // Nested-slash ids must validate for defaultModel/preferences.
+        const validIds = catalogValidIds(entries);
+        expect(validIds.has("openrouter/deepseek/deepseek-v4-pro")).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("row with an edited selection → exactly that selection, registry-enriched", async () => {
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }],
+      });
+      await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
+        type: "api_key",
+        apiKey: "sk-or-secret",
+      });
+
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
+      expect(openrouterEntries).toHaveLength(1);
+      const entry = openrouterEntries[0];
+      expect(entry?.id).toBe("openrouter/moonshotai/kimi-k2.6");
+      expect(entry?.active).toBe(true);
+      // Pricing/context come from the registry, not the stored row entry.
+      expect(typeof entry?.contextWindow).toBe("number");
+      expect(entry?.pricing).toBeDefined();
+    });
+
+    it("non-registry selections (live-catalog picks) surface with stored row metadata; disabled rows are inactive", async () => {
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [
+          { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" },
+          {
+            id: "moonshotai/kimi-k3",
+            name: "MoonshotAI: Kimi K3",
+            contextWindow: 1_048_576,
+            pricing: { input: 3, output: 15 },
+          },
+        ],
+      });
+      await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
+        type: "api_key",
+        apiKey: "sk-or-secret",
+      });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
+      expect(openrouterEntries.map((e) => e.id).sort()).toEqual([
+        "openrouter/moonshotai/kimi-k2.6",
+        "openrouter/moonshotai/kimi-k3",
+      ]);
+      const k3 = openrouterEntries.find((e) => e.id === "openrouter/moonshotai/kimi-k3");
+      expect(k3?.name).toBe("MoonshotAI: Kimi K3");
+      expect(k3?.contextWindow).toBe(1_048_576);
+      expect(k3?.pricing).toEqual({ input: 3, output: 15 });
+      for (const e of openrouterEntries) expect(e.active).toBe(false);
+    });
+  });
+
   describe("ordering", () => {
     it("orders modelPreferences first (in order), then remaining actives alphabetically", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
       vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
       vi.stubEnv("OPENAI_API_KEY", "");
       vi.stubEnv("GEMINI_API_KEY", "");
+      vi.stubEnv("OPENROUTER_API_KEY", "");
       try {
         const models = getModels("anthropic")
           .map((m) => m.id)

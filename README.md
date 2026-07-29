@@ -2,7 +2,7 @@
 
 **Self-hosted background coding agents with full dev environments.**
 
-Give your AI coding agent its own sandbox — complete with VS Code, a browser, and a terminal — and let it work in the background while you do something else. Watch it think, intervene when needed, or check back when it's done.
+Give your AI coding agent its own sandbox — complete with VS Code, a terminal, and a real workspace — and let it work in the background while you do something else. Watch it think, intervene when needed, or check back when it's done.
 
 <p align="center">
   <img src="docs/valet.png" alt="Valet session" />
@@ -11,157 +11,158 @@ Give your AI coding agent its own sandbox — complete with VS Code, a browser, 
 ## Features
 
 - **Isolated sandboxes** — Every session gets its own container with a full dev environment. No local machine risk, no shared state between tasks.
-- **Full dev environment** — VS Code, browser (via VNC), and terminal accessible directly in the web UI. The agent has the same tools a human developer would.
-- **Watch or walk away** — Stream the agent's work in real-time, or let it run in the background. Pick up where it left off anytime.
-- **Repo-aware** — Connect your GitHub repos. The agent clones, branches, codes, and opens PRs — using your OAuth credentials, scoped to each sandbox.
-- **Team-ready** — Invite your team, manage roles, share sessions. Built for collaborative use from day one.
-- **Self-hosted** — Deploy on your own Cloudflare + Modal infrastructure. Your code and API keys stay on your accounts.
+- **Full dev environment** — VS Code and a terminal accessible directly in the web UI, served through an in-sandbox auth gateway. The agent has the same tools a human developer would.
+- **Watch or walk away** — Stream the agent's work in real time over WebSocket, or let it run in the background. Thread history is persisted; pick up where it left off anytime.
+- **Orchestrator sessions** — A per-user orchestrator (itself a full agent session) spawns and manages child sessions, routes chat channels, and keeps memory across tasks.
+- **Chat channels** — Talk to your agents from outside the web UI. Telegram is supported today; channels are pluggable.
+- **Plugin integrations** — GitHub, Slack, Linear, Notion, Gmail, Google Calendar/Drive/Sheets, Stripe, Sentry, Cloudflare, and more — each a self-describing plugin package.
+- **CLI included** — `valet` is a single self-contained binary that is both the server (`valet serve`) and its client (`valet sessions`, `valet send`, `valet chat`, …). See [docs/cli.md](docs/cli.md).
+- **Self-hosted** — Run it on your own machine with Docker, or deploy to Kubernetes with the bundled Helm chart. Your code and API keys stay on your infrastructure.
 
 ## Quick Start
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) 18+ and [pnpm](https://pnpm.io/)
-- A [Cloudflare](https://dash.cloudflare.com/) account (Workers, D1, R2, Pages)
-- A [Modal](https://modal.com/) account (sandbox compute)
-- A [GitHub OAuth App](https://github.com/settings/developers) (authentication)
-
-### Setup
-
-```bash
-# Install dependencies
-pnpm install
-
-# Copy config templates
-cp .env.deploy.example .env.deploy    # Deployment config (Cloudflare IDs, Modal workspace)
-cp .env.example .env                  # Secrets (API keys)
-
-# Configure OAuth — create packages/worker/.dev.vars with your GitHub OAuth credentials
-# See the wiki for detailed OAuth setup instructions
-
-# Set up the database
-make db-setup
-```
+- [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/)
+- [Docker](https://www.docker.com/) (session sandboxes in local dev)
+- An Anthropic API key
 
 ### Run locally
 
 ```bash
-make dev-all    # Starts worker (:8787), client (:5173), and OpenCode container
+pnpm install
+
+ANTHROPIC_API_KEY=sk-ant-... make dev-local
+# API on :8788, web UI on :5173 — open http://localhost:5173
 ```
 
-The first user to sign in is automatically promoted to admin.
+By default dev runs with a stubbed local user (`VALET_LOCAL_AUTH=1`) and an embedded Postgres (PGlite, data in `~/.valet/pg`) — no database or auth setup required. Setting `BETTER_AUTH_SECRET` enables real auth (email/password, optional OIDC/social).
 
-### Deploy
+### Validate changes
 
 ```bash
-make release    # Full release: typecheck, build, push image, deploy worker + Modal + client
+make e2e                          # unified e2e scorecard — runs every suite your creds/daemons allow
+make e2e E2E_ARGS="--doctor"      # environment readiness checklist
+pnpm typecheck                    # TypeScript across all packages
+pnpm test                         # root vitest sweep
+```
+
+### Deploy (Kubernetes)
+
+The Helm chart in `deploy/` runs the API, a bundled Postgres, and sandboxes as [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) CRs. The full runbook (local reference environment on Rancher Desktop) is [`deploy/README.md`](deploy/README.md); architecture and constraints are in [docs/kubernetes.md](docs/kubernetes.md).
+
+```bash
+make k8s-sandbox-install   # install the sandbox CRD/controller (run first, idempotent)
+make k8s-build             # build valet-api:dev + valet-sandbox:dev images
+make k8s-up                # helm upgrade --install
 ```
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Client["Client Layer"]
-        React["React SPA"]
+    subgraph Clients["Clients"]
+        Web["Web UI (React)"]
+        CLI["valet CLI"]
+        Channels["Chat channels (Telegram, …)"]
     end
 
-    subgraph Edge["Edge Layer (Cloudflare)"]
-        Router["Hono Router"]
-
-        subgraph DOs["Durable Objects"]
-            SessionAgent["SessionAgent DO"]
-            EventBus["EventBus DO"]
-            APIKeys["APIKeys DO"]
-        end
-
-        subgraph Storage["Storage"]
-            D1["D1 (SQLite)"]
-            R2["R2 (Files)"]
-        end
-
-        Pages["Cloudflare Pages"]
+    subgraph API["packages/api — Hono on Node"]
+        Routes["REST + WebSocket routes"]
+        Host["EngineHost"]
+        Plugins["Plugin registry"]
     end
 
-    subgraph Modal["Modal Backend (Python)"]
-        App["Modal App"]
-        Sandbox["Sandbox Container"]
-
-        subgraph SandboxServices["Sandbox Services"]
-            Runner["Runner (Bun/TS)"]
-            OpenCode["OpenCode Agent"]
-            CodeServer["VS Code (code-server)"]
-            VNC["VNC (Xvfb + noVNC)"]
-            TTYD["Terminal (TTYD)"]
-            Gateway["Auth Gateway :9000"]
-        end
+    subgraph Engine["@valet/engine — portable agent loop"]
+        Sessions["Sessions / threads / queue / gates"]
+        Orchestrator["Orchestrator session (per user)"]
     end
 
-    React --> Router
-    Pages -.- React
-    Router --> DOs
-    Router --> Storage
-    SessionAgent <-->|WebSocket| Runner
-    Runner --> OpenCode
-    Gateway --> CodeServer
-    Gateway --> VNC
-    Gateway --> TTYD
-    App --> Sandbox
-    EventBus -->|SSE| React
+    subgraph Providers["Pluggable providers"]
+        Store["SessionStore — Postgres<br/>(PGlite dev, node-postgres prod)"]
+        Sandbox["SandboxProvider — Docker dev,<br/>Kubernetes deploy, local/virtual tests"]
+    end
+
+    subgraph Box["Sandbox container"]
+        Agent["Agent workspace"]
+        Gateway["JWT gateway — terminal, VS Code"]
+    end
+
+    Web --> Routes
+    CLI --> Routes
+    Channels --> Routes
+    Routes --> Host
+    Host --> Sessions
+    Orchestrator --> Sessions
+    Plugins --> Sessions
+    Sessions --> Store
+    Sessions --> Sandbox
+    Sandbox --> Box
+    Web -.->|terminal / IDE tabs| Gateway
 ```
 
-**How a session works:** You send a message through the web UI. The Cloudflare Worker routes it to a SessionAgent Durable Object, which forwards it over WebSocket to a Runner process inside a Modal sandbox. The Runner passes the prompt to an OpenCode agent, streams results back through the same chain, and you see the agent's work in real-time.
+**How a session works:** You send a message through the web UI, CLI, or a chat channel. The API hands it to `@valet/engine`, which runs the agent loop (over pi-agent-core) inside the session's sandbox, persists every entry to Postgres, and streams events back over WebSocket. REST is authoritative for thread history, so reconnecting — or coming back hours later — always shows the full record.
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| `packages/client` | React SPA — chat UI, session management, embedded IDE panels |
-| `packages/worker` | Cloudflare Worker — API routes, session orchestration, Durable Objects |
-| `packages/runner` | Bun/TS process inside each sandbox — bridges the DO and OpenCode agent |
+| `packages/api` | Node API (Hono) — routes, engine hosting, auth, plugin registry, the `valet` CLI |
+| `packages/web` | Web client — Vite, React 19, TanStack Router/Query, Tailwind, Radix |
+| `packages/engine` | `@valet/engine` — portable agent loop, sessions, threads, gates, persistence contracts |
+| `packages/store-postgres` | `SessionStore` over Postgres (PGlite in dev/test, node-postgres in prod) |
+| `packages/sandbox-docker` | Sandbox provider over Docker (local dev default) |
+| `packages/sandbox-kubernetes` | Sandbox provider over agent-sandbox CRs (Helm deploy) |
+| `packages/sandbox-local` | Sandbox provider over the host fs/process (tests) |
+| `packages/sandbox-gateway` | In-sandbox JWT gateway serving the terminal and VS Code tabs |
+| `packages/workflow` | Workflow DAG interpreter (nodes, expressions, checkpoints) |
+| `packages/sdk` | Integration & channel contracts, MCP client, shared UI components |
 | `packages/shared` | Shared TypeScript types and error classes |
-| `backend` | Python/Modal — sandbox lifecycle, image builds, compute management |
-| `docker` | Sandbox container image — code-server, VNC, TTYD, auth gateway |
+| `packages/plugin-*` | One package per integration/skill — GitHub, Slack, Telegram, Linear, Notion, … |
+| `deploy/` | Helm chart + vendored agent-sandbox controller |
+| `docker/` | Sandbox container images |
+
+A few legacy packages (`packages/worker`, `packages/client`, `packages/runner`, `backend/`) remain from the original Cloudflare + Modal stack. They are frozen — kept only for the existing production deploy — and are slated for deletion. Don't build on them.
 
 ## Development
 
 ```bash
-# Individual services
-make dev-worker           # Cloudflare Worker on :8787
-make dev-client           # Vite dev server on :5173
-make dev-opencode         # OpenCode container on :4096
+make dev-local            # API (:8788) + web (:5173) — the v2 dev loop
 
-# Database
-make db-migrate           # Run D1 migrations locally
-make db-seed              # Seed test data
-make db-reset             # Drop and recreate
+# Quick smokes (also rows in make e2e)
+make smoke-orchestrator   # fastest agent-loop-alive check (real Anthropic, no Docker)
+make smoke-session        # full session round-trip (real Anthropic + Docker)
 
 # Code quality
-make typecheck            # TypeScript check (all packages)
+pnpm typecheck            # all packages (legacy worker excluded)
+pnpm test                 # root vitest sweep
 
-# Deploy individually
-make deploy-worker        # Cloudflare Worker
-make deploy-modal         # Modal backend
-make deploy-client        # Cloudflare Pages
+# Code generation
+make generate-registries  # regenerate the plugin registry from plugin.yaml manifests
+
+# Kubernetes (local k3s / Rancher Desktop)
+make k8s-build && make k8s-up
+make k8s-logs             # tail the api pod
+make k8s-down
 ```
 
 ## Documentation
 
-- **[OAuth Setup](docs/oauth-setup.md)** — GitHub and Google OAuth configuration for dev and production
-- **[Environment Variables](docs/environment-variables.md)** — Full reference for all config vars across packages
-- **[API Reference](docs/api-reference.md)** — Complete endpoint documentation
-- **[Architecture Deep Dive](docs/architecture.md)** — Request flows, auth model, sandbox internals
-- **[Deployment Guide](docs/deployment.md)** — Production deployment, secrets management, image rebuilds
-- **[Project Structure](docs/project-structure.md)** — Detailed source tree walkthrough
+- **[The `valet` CLI](docs/cli.md)** — serve, sessions, send, chat, gates, instance profiles
+- **[Kubernetes architecture](docs/kubernetes.md)** — what gets deployed and the constraints to respect
+- **[Deploy runbook](deploy/README.md)** — the local reference environment, step by step
+- **[Subsystem specs](docs/specs/)** — source of truth per domain; dated `YYYY-MM-DD-*-design.md` files describe the current (v2) stack
+- **[Security model](docs/security-model.md)** — sandbox isolation and credential handling
 
 ## Contributing
 
 Contributions are welcome. Please open an issue to discuss larger changes before submitting a PR.
 
 ```bash
-pnpm install              # Install dependencies
-make db-setup             # Set up local database
-make dev-all              # Start all services
-make typecheck            # Verify your changes compile
+pnpm install              # install dependencies
+make dev-local            # start the dev stack
+pnpm typecheck            # verify your changes compile
+make e2e                  # run the e2e scorecard
 ```
 
 ## License

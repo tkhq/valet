@@ -42,6 +42,31 @@ export {
   parseOrchestratorSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
+export {
+  capturePatch,
+  patchBlobKey,
+  MAX_PATCH_BYTES,
+  type PatchCaptureContext,
+} from "./patch-capture.js";
+export {
+  TRACEPARENT_METADATA_KEY,
+  activeTraceparent,
+  attrTruncate,
+  engineTracer,
+  detachedFromTrace,
+  linkFromTraceparent,
+  markSpanError,
+  withSpan,
+} from "./tracing.js";
+export {
+  recordCredentialRead,
+  recordSandboxExec,
+  recordSandboxProvision,
+  recordSettlement,
+  recordToolExecution,
+  recordTurn,
+  resetMetricsForTest,
+} from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
 export { Thread } from "./thread.js";
@@ -95,6 +120,8 @@ export {
   type OAuthDeclaration,
   type TriggerDef,
   type VerifiedEvent,
+  type NormalizedEvent,
+  type EventCatalogEntry,
   type PluginValidationIssue,
   type ChannelTransport,
   type ChannelTransportFactory,

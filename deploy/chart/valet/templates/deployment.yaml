@@ -20,6 +20,12 @@ spec:
         app.kubernetes.io/component: api
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.api.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       {{- if and .Values.postgres.bundled (not .Values.externalDatabase.url) }}
       initContainers:
         # Boot runs migrations against DATABASE_URL; without this gate the
@@ -50,6 +56,9 @@ spec:
                 name: {{ include "valet.fullname" . }}-config
             - secretRef:
                 name: {{ include "valet.fullname" . }}-app
+            {{- with .Values.api.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
             - name: PORT
               value: {{ .Values.api.port | quote }}

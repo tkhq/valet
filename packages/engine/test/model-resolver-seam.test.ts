@@ -208,10 +208,12 @@ describe("host model resolver seam", () => {
     // Unresolvable → throws the same "unknown model id" surface as today.
     await expect(session.setModel("nope/nope")).rejects.toThrow(/unknown model id/);
 
-    // Resolvable → succeeds and persists the string.
+    // Resolvable → succeeds and persists the CALLER'S SPEC (the canonical
+    // id the resolver re-receives on later turns), not the resolved
+    // model's wire id — see ResolvedModel.canonicalId.
     await session.setModel("prov_x/m1");
     const persisted = await store.getSession(session.id);
-    expect(persisted?.model).toBe(model.id);
+    expect(persisted?.model).toBe("prov_x/m1");
 
     // Thread.setModel also validates through the resolver.
     const thread = await session.ensureDefaultThread();

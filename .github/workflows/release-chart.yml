@@ -1,0 +1,185 @@
+name: Release Helm Chart
+
+# Publishes deploy/chart/valet to ghcr.io/tkhq/charts as an OCI artifact.
+#
+# On pull_request: runs `validate` only — lint, template, golden tests,
+# and a version-collision check against GHCR. Fails the PR if the chart
+# is edited without bumping Chart.yaml's version.
+#
+# On push to dev-v2: runs `release`, which packages and pushes the chart
+# and creates a `chart/valet-v<version>` git tag.
+#
+# ONE-TIME BOOTSTRAP: after the first successful push, set the GHCR
+# package visibility to public (org-owned packages default to private):
+#   Settings → Packages → charts/valet → Package settings → Change
+#   visibility → Public. Otherwise `terraform apply` in the consumer
+#   repo (test-agents-infra) will 401 until whoever runs it has done
+#   `helm registry login ghcr.io` locally.
+
+on:
+  push:
+    branches: [dev-v2]
+    paths:
+      - "deploy/chart/valet/**"
+      - ".github/workflows/release-chart.yml"
+  pull_request:
+    branches: [dev-v2]
+    paths:
+      - "deploy/chart/valet/**"
+      - ".github/workflows/release-chart.yml"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Bypass the version-collision check (allows re-publishing an existing tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # push git tag on release
+  packages: write # push/read OCI artifact on GHCR
+
+concurrency:
+  group: release-chart
+  cancel-in-progress: false
+
+env:
+  CHART_DIR: deploy/chart/valet
+  REGISTRY: ghcr.io/tkhq/charts
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.chart.outputs.name }}
+      version: ${{ steps.chart.outputs.version }}
+      tag: ${{ steps.chart.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Read chart version
+        id: chart
+        run: |
+          set -euo pipefail
+          # Avoid `yq` — presence on ubuntu-latest isn't a stable contract.
+          name=$(awk '/^name:/{print $2; exit}'    "$CHART_DIR/Chart.yaml")
+          version=$(awk '/^version:/{print $2; exit}' "$CHART_DIR/Chart.yaml")
+          if [[ -z "$name" || -z "$version" ]]; then
+            echo "::error::Chart.yaml is missing name and/or version" >&2
+            exit 1
+          fi
+          # Strip surrounding quotes if any (Chart.yaml usually leaves them off).
+          version="${version%\"}"; version="${version#\"}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Chart version '$version' is not valid semver" >&2
+            exit 1
+          fi
+          echo "name=$name"                >> "$GITHUB_OUTPUT"
+          echo "version=$version"          >> "$GITHUB_OUTPUT"
+          echo "tag=chart/$name-v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Lint + template
+        run: |
+          helm lint "$CHART_DIR"
+          helm template "$CHART_DIR" >/dev/null
+
+      - name: Golden tests
+        run: |
+          if [[ -x "$CHART_DIR/test/golden.sh" ]]; then
+            "$CHART_DIR/test/golden.sh"
+          else
+            echo "No golden.sh found, skipping"
+          fi
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Check version not already published
+        # Skipped when workflow_dispatch was called with force=true.
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.force) }}
+        run: |
+          set -uo pipefail
+          name="${{ steps.chart.outputs.name }}"
+          version="${{ steps.chart.outputs.version }}"
+
+          # Distinguish "definitely not published" from "unknown error".
+          # A false positive here would silently overwrite a published
+          # chart (GHCR does not enforce OCI tag immutability by default).
+          stderr_file=$(mktemp)
+          attempts=0
+          while true; do
+            attempts=$((attempts + 1))
+            if helm show chart "oci://$REGISTRY/$name" --version "$version" >/dev/null 2>"$stderr_file"; then
+              echo "::error::Chart $name version $version is already published. Bump 'version' in $CHART_DIR/Chart.yaml (or dispatch with force=true to override)."
+              exit 1
+            fi
+            # helm/oras 404 wording varies by version — match the common markers.
+            if grep -qiE 'not found|manifest unknown|no such|404' "$stderr_file"; then
+              echo "Version $version not yet published — safe to release."
+              exit 0
+            fi
+            if [[ $attempts -ge 3 ]]; then
+              echo "::error::Could not determine whether $name:$version is published after $attempts attempts. Refusing to publish to avoid silent overwrite. Registry response:"
+              cat "$stderr_file" >&2
+              exit 1
+            fi
+            echo "Transient error from registry, retrying ($attempts/3)..."
+            cat "$stderr_file" >&2
+            sleep $((attempts * 2))
+          done
+
+  release:
+    needs: validate
+    # Only publish on push to dev-v2 or manual dispatch — never on PRs.
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history to create + push an annotated tag
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Package + push
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d)
+          helm package "$CHART_DIR" --destination "$out"
+          helm push "$out/${{ needs.validate.outputs.name }}-${{ needs.validate.outputs.version }}.tgz" "oci://$REGISTRY"
+
+      - name: Tag release
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists, skipping"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published"
+            echo ""
+            echo "\`oci://$REGISTRY/${{ needs.validate.outputs.name }}:${{ needs.validate.outputs.version }}\`"
+            echo ""
+            echo "Consume from Terraform:"
+            echo '```hcl'
+            echo 'helm_release.valet:'
+            echo '  repository = "oci://'"$REGISTRY"'"'
+            echo '  chart      = "${{ needs.validate.outputs.name }}"'
+            echo '  version    = "${{ needs.validate.outputs.version }}"'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

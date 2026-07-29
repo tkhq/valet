@@ -17,10 +17,16 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
+    "build:assets": "node build/copy-assets.mjs",
+    "build:bundle": "node build.mjs",
+    "build": "pnpm run build:assets && pnpm run build:bundle",
+    "build:tar": "node build/make-assets-tar.mjs",
+    "build:binary": "pnpm run build:assets && pnpm run build:bundle && pnpm run build:tar && node build/compile-binary.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
-    "dogfood": "tsx scripts/dogfood.ts"
+    "smoke:session": "tsx scripts/smoke-session.ts",
+    "smoke:orchestrator": "tsx scripts/smoke-orchestrator.ts"
   },
   "dependencies": {
     "@better-auth/api-key": "1.6.23",
@@ -32,6 +38,12 @@
     "@mariozechner/pi-agent-core": "0.73.0",
     "@mariozechner/pi-ai": "0.73.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@valet/engine": "workspace:*",
     "@valet/plugin-browser": "workspace:*",
     "@valet/plugin-cloudflare": "workspace:*",
@@ -68,10 +80,13 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@types/node": "^20.0.0",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
     "drizzle-kit": "^0.31.9",
+    "esbuild": "^0.28.1",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }

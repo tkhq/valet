@@ -35,13 +35,17 @@ import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { getOrgModelPreferences } from "./org.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
+import { curatedOpenrouterModels, openrouterRegistry, toProviderModel } from "./openrouter.js";
+import type { LlmProviderModel } from "../schema/index.js";
 import type { ModelInfo } from "../wire/types.js";
 
 export type CatalogEntry = ModelInfo & { resolvable: boolean };
 
-/** The three known kinds pi-ai's registry covers — deliberately narrower
- * than `LlmProviderKind` (which also includes `openai_compatible`, handled
- * separately below since it has no pi-ai registry / env fallback). */
+/** The registry-backed known kinds whose FULL registry surfaces in the
+ * catalog — deliberately narrower than `LlmProviderKind`: `openrouter` is
+ * registry-backed too but its ~274 models would flood pickers, so it goes
+ * through a curated-selection branch below; `openai_compatible` has no
+ * pi-ai registry / env fallback at all. */
 type KnownCatalogKind = "anthropic" | "openai" | "google";
 
 const KNOWN_KINDS: readonly KnownCatalogKind[] = ["anthropic", "openai", "google"];
@@ -142,6 +146,53 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       const envKey = getEnvApiKey(kind);
       if (!envKey) continue;
       entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind]));
+    }
+  }
+
+  // OpenRouter — registry-backed like the known kinds above, but exposure
+  // is the row's curated selection (or the curated defaults on zero-config
+  // env-key boots), never the full registry. Selection entries re-resolve
+  // against the registry when present (pricing/context stay current);
+  // entries the registry doesn't know (added from OpenRouter's LIVE
+  // catalog via the picker) surface with their stored row metadata — same
+  // trust model as custom providers' declared lists.
+  {
+    const row = rows.find((r) => r.kind === "openrouter");
+    const registry = openrouterRegistry();
+    let selection: LlmProviderModel[] | undefined;
+    let active = false;
+    let resolvable = false;
+    let namespace = "openrouter";
+    let providerId = "openrouter";
+    let providerName = "OpenRouter";
+    if (row) {
+      const orgKey = await hasOrgKey(credentials, orgId, row.id);
+      resolvable = orgKey || Boolean(getEnvApiKey("openrouter"));
+      active = row.enabled && resolvable;
+      namespace = providerNamespace(row);
+      providerId = row.id;
+      providerName = row.name;
+      selection = row.models;
+    } else if (getEnvApiKey("openrouter")) {
+      resolvable = true;
+      active = true;
+      selection = curatedOpenrouterModels();
+    }
+    for (const sel of selection ?? []) {
+      const reg = registry.get(sel.id);
+      const m = reg ? toProviderModel(reg) : sel;
+      entries.push({
+        id: `${namespace}/${m.id}`,
+        name: m.name,
+        contextWindow: m.contextWindow,
+        reasoning: reg?.reasoning,
+        providerId,
+        providerKind: "openrouter",
+        providerName,
+        active,
+        pricing: m.pricing,
+        resolvable,
+      });
     }
   }
 

@@ -1,96 +1,71 @@
 # @valet/engine
 
-Prototype implementation of the portable runtime engine described in
-[`docs/specs/2026-05-02-portable-runtime-engine-design.md`](../../docs/specs/2026-05-02-portable-runtime-engine-design.md).
+The portable agent runtime. It runs the agent loop (over pi-agent-core),
+owns session/thread state, executes tools, persists a durable transcript,
+and emits typed events. Hosts inject every platform concern through a
+`ProviderBundle` — this package has zero platform dependencies and never
+imports Hono or knows HTTP.
 
-This is the V1 in-repo engine library. It runs the agent loop, owns
-session/thread state, executes tools, and emits typed events. Platform
-adapters (Cloudflare, Kubernetes) host this library; this package itself
-has zero platform dependencies.
+`packages/api` is the production host. The design spec is
+[`docs/specs/2026-05-02-portable-runtime-engine-design.md`](../../docs/specs/2026-05-02-portable-runtime-engine-design.md);
+later dated specs in `docs/specs/` extend it (orchestrator, sandbox
+runtime v2, engine traces).
 
-## What works in this prototype
+## Capabilities
 
-- Engine public API: `createSession`, `restoreSession({ sessionId, options })`,
-  `getSession`, `deleteSession`, `Session.prompt`, `Session.thread()`,
-  `Session.resolveDecision`, `Session.withdrawDecision`,
-  `Session.abort/pause/resume`.
-- Per-thread state: each thread gets its own `pi-agent-core` `Agent`
-  instance with its own queue and DAG history.
-- Per-thread queue modes: `followup` (FIFO), `steer` (abort + start),
-  `collect` (buffered window).
-- Decision gates: tool calls `ctx.requestDecision({...})` to suspend the
-  turn. The gate is persisted, a `DecisionGateEntry` lands in the DAG, the
-  engine emits `decision_gate`, and the turn resumes when the user calls
-  `session.resolveDecision()`. Pending gates withdraw on `steer` or
-  `abort` and expire after `expiresAt`.
-- **Restart-safe re-entrant decision gates.** Gate IDs are deterministic:
-  `gate:{sessionId}:{threadId}:{queueItemId}:{resumeKey}`. Tools must
-  supply a stable `resumeKey`. On `restoreSession`, the engine re-arms
-  pending gates and replays the suspended tool with `ctx.suspendedDecision`
-  populated; `requestDecision` short-circuits and returns the stored
-  resolution instead of opening a new gate. Validated by an end-to-end
-  test that opens a gate, throws away the engine, builds a new one on the
-  same store, calls `restoreSession`, then `resolveDecision`, and verifies
-  the agent's continuation message is persisted.
-- Multi-thread: threads run concurrently, share the sandbox, and have
-  isolated histories. Aborting one thread doesn't affect siblings.
-- Built-in `thread_read` tool: a thread can read recent messages from a
-  sibling, parent, or child thread.
-- Built-in tools: `read`, `write`, `edit`, `bash`, `thread_read`.
-- **Persistent SessionStore.** `PgSessionStore` (`@valet/store-postgres`:
-  raw-SQL Postgres store, embedded PGlite for dev/tests, node-postgres for
-  real deployments) implements the same `SessionStore` interface as
-  `InMemorySessionStore`. Both pass the exported contract suites
-  (`runSessionStoreContract`, `runEventStreamContract`, concurrency
-  contract). Tables: `engine_sessions`, `engine_threads`, `engine_entries`,
-  `engine_queue_items`, `engine_decision_gates`,
-  `engine_decision_gate_refs`, `engine_suspended_turns`,
-  `engine_attempt_markers`, `engine_events`, `engine_meta`.
-- In-memory providers: `InMemorySessionStore`, `InMemoryEventBus`,
+- **Public API**: `createSession`, `restoreSession`, `getSession`,
+  `deleteSession`; `Session.prompt`, `.thread()`, `.resolveDecision`,
+  `.withdrawDecision`, `.abort/pause/resume`, `.setModel`, `.setStartRef`.
+- **Threads**: each thread owns its own pi-agent-core `Agent`, queue, and
+  DAG history. Threads run concurrently and share the session's sandbox.
+  Queue modes: `followup` (FIFO), `steer` (supersede + start), `collect`
+  (buffered window).
+- **Durable submissions**: idempotent admission by `dispatchId`, CAS
+  claiming, leases with expiry takeover, attempt markers, abort stamps,
+  and fenced two-phase settlement. Boot-time reconciliation resumes every
+  session with unsettled work — a crash never loses an accepted prompt.
+- **Decision gates**: a tool calls `ctx.requestDecision(...)` and the turn
+  suspends durably. Gate IDs are deterministic
+  (`gate:{sessionId}:{threadId}:{queueItemId}:{resumeKey}`), so a restart
+  re-arms pending gates and replays the suspended tool with
+  `ctx.suspendedDecision` populated. Gates expire on a timer and withdraw
+  on steer or abort.
+- **Tools**: built-ins `read`, `write`, `edit`, `bash` (with job mode for
+  long commands), `thread_read`. Plugin actions bridge into the same
+  `ToolDef` shape via `tool-bridge.ts`.
+- **Compaction**: proactive and reactive context compression with a
+  pruning pass, summary entries, and file-context extraction.
+- **Model resolution**: a host `resolveModel` seam resolves the session's
+  canonical model spec to a wire model + per-turn API key on every turn.
+  `NoCredentialsError` releases the claim for bounded keyless retries.
+- **Sandbox attachment**: a lazy state machine (`PolicySandbox` +
+  `SandboxAttachment`) that provisions on first touch, runs the host
+  `prepareSandbox` hook once per epoch, degrades on transport failure, and
+  supports hibernation on capable backends.
+- **Traces**: per-turn usage/cost persisted on assistant entries, session
+  start-refs, settle-time patch capture to the `BlobStore`, and direct
+  OpenTelemetry instrumentation (`@opentelemetry/api` only — a no-op until
+  a host registers an SDK).
+- **In-memory providers**: `InMemorySessionStore`, `InMemoryEventStream`,
   `InMemoryBlobStore`, `InMemoryCredentialStore`, `VirtualSandbox` /
-  `VirtualSandboxProvider` (in-memory FS + a small whitelist of safe shell
-  commands). These double as test fixtures.
+  `VirtualSandboxProvider`. These double as test fixtures.
 
-## What's deferred (post-prototype)
+## Providers
 
-- **Cloudflare wiring.** A future Workers deployment reuses
-  `@valet/store-postgres` unchanged over Neon through Hyperdrive
-  (node-postgres works on Workers with `nodejs_compat`) — see
-  docs/specs/2026-07-15-postgres-backend-design.md, decision 13.
-- **Compaction.** Token-aware context compression is not implemented.
-  `CompactionEntry` is in the DAG schema; the algorithm itself is a
-  follow-up.
-- **Roles & skills loading.** The types are defined, but role and skill
-  resolution at prompt time is not wired in.
-- **Model failover.** Single-model only for now.
-- **Plugin Action Bridge.** The `actionSourceToTools` adapter described
-  in the spec is not implemented yet — plugins should currently export
-  `ToolDef[]` directly.
-- **Structured results.** Schema-validated output extraction with
-  `---RESULT_START---` delimiters is not implemented.
+The host supplies a `ProviderBundle`:
 
-## Spec-vs-reality deltas (notes from the pi-ai/pi-agent-core spike)
+| Provider | Interface | Production impl |
+|----------|-----------|-----------------|
+| `store` | `SessionStore` | `PgSessionStore` (`@valet/store-postgres`) |
+| `stream` | `EventStream` | `PgEventStream` (`@valet/store-postgres`) |
+| `sandboxProvider` | `SandboxProvider` | docker / kubernetes / local |
+| `credentials` | `CredentialStore` | the api's encrypted credentials table |
+| `blobs` | `BlobStore` (optional) | filesystem blob store |
 
-The spec was written before pinning the API surface of `pi-ai` /
-`pi-agent-core`. The implementation reconciles:
-
-1. **`ToolDef.execute(args, ctx)` vs `AgentTool.execute(toolCallId, params, signal, onUpdate)`.**
-   The spec keeps the spec-faithful `ToolDef` shape as the public type;
-   internally we wrap each `ToolDef` to a pi `AgentTool` via
-   `tool-bridge.ts` and capture `ToolContext` in a closure.
-2. **No native turn-suspension primitive.** pi-agent-core's
-   `beforeToolCall` can `{ block: true }` (deny path) but doesn't pause.
-   For a "wait for human" gate we await a Promise inside the tool.
-3. **`message_start` vs `message_update`.** pi-agent-core fires
-   `message_start` once per assistant message; `message_update` carries
-   delta events (text, thinking, tool calls). The engine subscribes to
-   both.
-4. **Custom `AgentMessage` types via `convertToLlm`.** The engine could
-   later persist `DecisionGateEntry` etc. as custom AgentMessages
-   alongside the LLM transcript, then filter them out before each LLM
-   call. We don't need this in the prototype because we persist via the
-   SessionStore directly, but the pattern is useful when we want
-   in-context awareness of past gates.
+Store implementations must pass the exported contract suites
+(`runSessionStoreContract`, `runEventStreamContract`, plus the concurrency
+and restart-safe-gates contracts). `InMemorySessionStore` and
+`PgSessionStore` both do.
 
 ## Tests
 
@@ -98,7 +73,7 @@ The spec was written before pinning the API surface of `pi-ai` /
 pnpm --filter @valet/engine test
 ```
 
-Covers: happy path (3), decision gates (4), queue modes (4),
-multi-thread + thread_read (3), short-circuit predicate unit tests (6),
-SessionStore contract suite × 2 backends (20), full restart cycle (1) —
-41 tests total.
+The suite covers the happy path, decision gates (including kill-and-restart
+replay), queue modes, multi-thread, reconciliation, compaction, model and
+credential resolver seams, sandbox attachment and hibernation, tracing,
+and the store contracts against both backends.
