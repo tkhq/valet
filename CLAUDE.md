@@ -35,6 +35,29 @@ make e2e-clean                    # sweep state leaked by crashed runs
 
 Commit per discrete task, subjects ≤72 chars. When you modify a subsystem, update its spec in `docs/specs/` in the same commit.
 
+## Writing (ASD-STE100)
+
+All prose in this repo is technical writing: specs, READMEs, runbooks, error messages, PR text, code comments, UI copy. Write it to ASD-STE100 Simplified Technical English, adapted as follows.
+
+Use strict STE for text that tells a reader what to do — procedures, runbooks, error messages, warnings:
+
+- Put one instruction in each sentence. Keep instructions at 20 words or fewer. Keep descriptions at 25 words or fewer.
+- Put a condition before the action it controls ("If the build fails, delete the cache", not the reverse).
+- Use a numbered list for a sequence of steps.
+
+Use STE-flavored prose for everything else — READMEs, specs, PR descriptions, release notes. Prefer short sentences, but vary length when it improves flow. In both modes:
+
+- Use one name for one thing. Do not alternate between synonyms for the same component.
+- Use short common words: "use" not "utilize", "start" not "commence", "show" not "demonstrate".
+- Use active voice with a named actor. Use a verb for an action: "analyze the log", not "perform an analysis of the log". Keep passive voice only when the actor is unknown or irrelevant.
+- Remove empty intensifiers ("seamless", "robust", "powerful"), fake transitions, and padded summaries. Every sentence must add information or direct an action.
+- Keep caveats, warnings, and limitations. Never cut substance to make text shorter.
+- Keep necessary technical terms. Define an unfamiliar term at first use.
+
+The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
+
+This section governs new and edited prose. Do not rewrite existing documents wholesale for style alone. Apply the rules to the text you touch.
+
 ## Locked architecture decisions
 
 1. **The engine is portable** — `@valet/engine` owns the loop, sessions, threads, queue, gates, persistence contracts. Nothing in it imports Hono or knows HTTP.
