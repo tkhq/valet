@@ -288,5 +288,17 @@ if grep -q 'name: valet-otel-lgtm' "$TMP_DIR/external-otel.yaml"; then
 fi
 pass "external collector: otlpEndpoint wired verbatim without the bundled stack"
 
+# --- observability: provisioned Grafana dashboard --------------------------
+grep -q 'name: valet-grafana-dashboards' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: no grafana-dashboards ConfigMap"
+grep -q 'valet-dashboard.json' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: dashboard JSON not mounted/rendered"
+grep -q '"uid": "valet-observability"' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: dashboard JSON body (uid valet-observability) missing from the ConfigMap"
+if grep -q 'valet-grafana-dashboards' "$TMP_DIR/no-observability.yaml"; then
+  fail "observability.enabled=false still renders the dashboards ConfigMap"
+fi
+pass "observability: valet dashboard ConfigMap rendered and gated on observability.enabled"
+
 echo
 echo "All golden assertions passed."

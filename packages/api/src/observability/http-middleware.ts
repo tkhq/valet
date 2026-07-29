@@ -9,14 +9,21 @@
  * from this very context) — nests under or links back to this request.
  */
 import type { MiddlewareHandler } from "hono";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
+import { SpanStatusCode, metrics, trace, type Histogram } from "@opentelemetry/api";
 
 const EXCLUDED_PATHS = new Set(["/api/health"]);
 
 export function traceRequests(): MiddlewareHandler {
   const tracer = trace.getTracer("@valet/api-http");
+  // Lazy: the meter must resolve AFTER initTelemetry's global registration.
+  let httpDuration: Histogram | undefined;
   return async (c, next) => {
     if (EXCLUDED_PATHS.has(c.req.path)) return next();
+    httpDuration ??= metrics.getMeter("@valet/api-http").createHistogram("valet.http.request.duration", {
+      unit: "ms",
+      description: "HTTP request duration, by method/route/status",
+    });
+    const startedAt = Date.now();
     // Route pattern (e.g. /api/sessions/:id/messages) keeps span-name
     // cardinality bounded; fall back to the raw path pre-routing.
     const name = `${c.req.method} ${c.req.routePath ?? c.req.path}`;
@@ -35,6 +42,11 @@ export function traceRequests(): MiddlewareHandler {
           if (c.res.status >= 500) span.setStatus({ code: SpanStatusCode.ERROR });
           // Rename to the matched route now that routing has happened.
           span.updateName(`${c.req.method} ${c.req.routePath ?? c.req.path}`);
+          httpDuration?.record(Date.now() - startedAt, {
+            method: c.req.method,
+            route: c.req.routePath ?? c.req.path,
+            status: c.res.status,
+          });
         } catch (err) {
           span.setStatus({
             code: SpanStatusCode.ERROR,

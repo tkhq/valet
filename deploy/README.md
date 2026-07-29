@@ -118,8 +118,11 @@ Grafana is a NodePort — no port-forward needed on the local cluster:
 open http://localhost:30300        # anonymous admin, no login
 ```
 
-Explore → Tempo → search for span name `agent.turn` (service `valet-api`)
-after running a session. To verify from the shell:
+Dashboards → **Valet — Agent Observability** (provisioned from
+`deploy/chart/valet/dashboards/valet.json`) shows turns, spend, tokens,
+settlement outcomes, queue wait, tool/sandbox/store/HTTP latencies, and a
+table of recent `submission.run` traces. For raw traces: Explore → Tempo →
+`{name="submission.run"}` after running a session. To verify from the shell:
 
 ```sh
 curl -s "http://localhost:30300/api/datasources/proxy/uid/tempo/api/search?tags=service.name%3Dvalet-api"

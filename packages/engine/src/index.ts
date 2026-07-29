@@ -58,6 +58,15 @@ export {
   markSpanError,
   withSpan,
 } from "./tracing.js";
+export {
+  recordCredentialRead,
+  recordSandboxExec,
+  recordSandboxProvision,
+  recordSettlement,
+  recordToolExecution,
+  recordTurn,
+  resetMetricsForTest,
+} from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
 export { Thread } from "./thread.js";

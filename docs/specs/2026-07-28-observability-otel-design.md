@@ -1,7 +1,7 @@
 # Observability — OTel engine-trace export + bundled Grafana LGTM stack
 
 **Date:** 2026-07-28
-**Status:** Implemented (rev 2 — distributed tracing, same day)
+**Status:** Implemented (rev 3 — metrics + provisioned dashboard, 2026-07-29)
 **Scope:** Env-gated OpenTelemetry trace export from `packages/api` (a pure
 consumer of the engine event bus) and a bundled local observability stack
 (`grafana/otel-lgtm`) in the Helm chart. Builds directly on the engine
@@ -65,10 +65,33 @@ cost on the `turn_end` event and patch-capture records on
    collector instead. Golden assertions in
    `deploy/chart/valet/test/golden.sh` pin all three renders.
 
+5. **Metrics (rev 3): first-class OTel instruments, same no-op contract.**
+   `packages/engine/src/metrics.ts` records via `metrics.getMeter()` (lazy —
+   instruments resolve after the host's global MeterProvider registration):
+   `valet.turns`, `valet.turn.duration`, `valet.tokens` (by kind/model),
+   `valet.cost.usd`, `valet.submissions.settled` (by outcome),
+   `valet.submission.queue_wait`, `valet.tool.duration`,
+   `valet.sandbox.exec.duration`, `valet.sandbox.provision.duration`,
+   `valet.credential.reads` (service, hit). The api adds
+   `valet.http.request.duration` (middleware) and `valet.store.duration`
+   (traced-store proxy). `initTelemetry` exports them via OTLP every 10s;
+   the otel-lgtm collector forwards to Prometheus's native OTLP endpoint
+   (names render as `valet_*_total` / `valet_*_milliseconds_*`).
+
+6. **Provisioned dashboard.** `deploy/chart/valet/dashboards/valet.json`
+   ("Valet — Agent Observability", uid `valet-observability`) is mounted
+   into the otel-lgtm container via the `-grafana-dashboards` ConfigMap:
+   stat tiles (turns/spend/tokens/settlements since api start — plain sums,
+   because `increase()` misses a counter's birth value), rate/quantile
+   timeseries for outcomes, turn duration, tokens, spend, tools, sandbox,
+   credentials, HTTP and store latencies, plus a Tempo traces panel listing
+   recent `submission.run` trees. Golden assertions pin the ConfigMap render
+   and its observability.enabled gate.
+
 ## Out of scope
 
-- Metrics and logs export (the LGTM stack accepts both; the api only sends
-  traces today).
+- Logs export (the LGTM stack accepts OTLP logs; stdout/kubectl remains the
+  log surface today).
 - Trace-context propagation INTO sandboxes (traceparent env into exec'd
   processes) and into the LLM provider's HTTP calls (pi-ai owns that
   client); the `agent.turn` span bounds LLM latency from outside.

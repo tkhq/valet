@@ -1,5 +1,6 @@
 import type { Sandbox, SandboxCreateOpts, SandboxProvider } from "../types.js";
 import { withSpan } from "../tracing.js";
+import { recordSandboxProvision } from "../metrics.js";
 import {
   SandboxPreparationError,
   SandboxStartupError,
@@ -422,9 +423,13 @@ export class SandboxAttachment {
     // the host prepareSandbox hook — as one `sandbox.provision` span, so
     // cold-start latency is directly attributable in traces (a concurrent
     // sandbox.exec span's wait is explained by this one).
-    return withSpan("sandbox.provision", { "valet.sandbox.epoch": this._epoch }, () =>
-      this.doProvisionInner(),
-    );
+    return withSpan("sandbox.provision", { "valet.sandbox.epoch": this._epoch }, async () => {
+      const startedAt = Date.now();
+      await this.doProvisionInner();
+      // doProvisionInner never throws (failures land in the error state) —
+      // report ok by whether a live handle came out of the provision.
+      recordSandboxProvision(Date.now() - startedAt, this._state === "ready");
+    });
   }
 
   private async doProvisionInner(): Promise<void> {

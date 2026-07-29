@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { TextContent, ImageContent } from "@mariozechner/pi-ai";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
 import { withSpan } from "./tracing.js";
+import { recordToolExecution } from "./metrics.js";
 
 /**
  * Adapt one engine ToolDef to a pi-agent-core AgentTool, capturing the engine
@@ -40,8 +41,15 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
         `tool.${def.name}`,
         { "valet.tool.name": def.name, "valet.tool.call_id": toolCallId },
         async () => {
-          const result = await def.execute(params as never, ctx);
-          return toAgentToolResult(result);
+          const startedAt = Date.now();
+          try {
+            const result = await def.execute(params as never, ctx);
+            recordToolExecution(def.name, Date.now() - startedAt, true);
+            return toAgentToolResult(result);
+          } catch (err) {
+            recordToolExecution(def.name, Date.now() - startedAt, false);
+            throw err;
+          }
         },
       );
     },

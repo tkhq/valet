@@ -4,6 +4,7 @@ import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
+import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@mariozechner/pi-ai";
 import type {
   BusEvent,
@@ -771,6 +772,7 @@ export class Session {
               ? await credStore.get(owner, service)
               : null;
           span.setAttribute("valet.credential.hit", stored !== null);
+          recordCredentialRead(service, stored !== null);
           return stored;
         },
       );

@@ -47,6 +47,14 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            # Valet dashboard: provider yaml lands next to the image's own
+            # provisioning entries; the JSON next to its bundled dashboards.
+            - name: dashboards
+              mountPath: /otel-lgtm/grafana/conf/provisioning/dashboards/valet-provider.yaml
+              subPath: valet-provider.yaml
+            - name: dashboards
+              mountPath: /otel-lgtm/valet-dashboard.json
+              subPath: valet-dashboard.json
           {{- with .Values.observability.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -54,6 +62,9 @@ spec:
       volumes:
         - name: data
           emptyDir: {}
+        - name: dashboards
+          configMap:
+            name: {{ include "valet.fullname" . }}-grafana-dashboards
 ---
 # OTLP ingest endpoint for the api (in-cluster DNS).
 apiVersion: v1

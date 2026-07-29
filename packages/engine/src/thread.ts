@@ -28,6 +28,7 @@ import {
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
 import { capturePatch } from "./patch-capture.js";
+import { recordSettlement, recordTurn } from "./metrics.js";
 import {
   TRACEPARENT_METADATA_KEY,
   activeTraceparent,
@@ -1513,6 +1514,10 @@ export class Thread {
     const outcome = this.decideTurnOutcome(current, turnFailure);
     span.setAttribute("valet.submission.outcome", outcome.outcome);
     this.submissionSpan?.setAttribute("valet.submission.outcome", outcome.outcome);
+    recordSettlement(
+      outcome.outcome,
+      this.turnStartedAt !== undefined ? Math.max(0, this.turnStartedAt - item.createdAt) : undefined,
+    );
     if (outcome.outcome === "failed") {
       markSpanError(span, outcome.error ?? "submission failed");
       if (this.submissionSpan) markSpanError(this.submissionSpan, outcome.error ?? "submission failed");
@@ -2986,6 +2991,15 @@ export class Thread {
               this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
             );
           }
+          // Metrics: same snapshot the entry/span get (no-op without a
+          // registered MeterProvider).
+          recordTurn({
+            model: turnModel,
+            reason: stopReason === "aborted" ? "abort" : stopReason === "error" ? "error" : "end_turn",
+            durationMs: this.turnStartedAt !== undefined ? Date.now() - this.turnStartedAt : undefined,
+            usage: turnUsage,
+            costUsd: turnCost?.total,
+          });
           // Same snapshot onto the live agent.turn span (distributed tracing).
           if (this.turnSpan) {
             if (turnModel !== undefined) this.turnSpan.setAttribute("gen_ai.request.model", turnModel);

@@ -7,6 +7,7 @@ import type {
 } from "../types.js";
 import { SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
 import { attrTruncate, withSpan } from "../tracing.js";
+import { recordSandboxExec } from "../metrics.js";
 import type { SandboxAttachment } from "./attachment.js";
 
 /** Default `CreateSessionOptions.sandboxReadyTimeoutMs` (spec decision 6). */
@@ -108,9 +109,11 @@ export class PolicySandbox implements Sandbox {
       "sandbox.exec",
       { "valet.sandbox.command": attrTruncate(command) },
       async (span) => {
+        const startedAt = Date.now();
         const result = await this.dispatch((sb) => sb.exec(command, effectiveOpts), {
           signal: opts?.signal,
         });
+        recordSandboxExec(Date.now() - startedAt, false);
         span.setAttribute("valet.sandbox.exit_code", result.exitCode);
         if (result.timedOut) span.setAttribute("valet.sandbox.timed_out", true);
         return result;
@@ -141,11 +144,15 @@ export class PolicySandbox implements Sandbox {
     return withSpan(
       "sandbox.exec_job",
       { "valet.sandbox.command": attrTruncate(command) },
-      () =>
-        this.dispatch((sb) => {
+      async () => {
+        const startedAt = Date.now();
+        const handle = await this.dispatch((sb) => {
           if (!sb.execJob) throw jobUnsupportedError();
           return sb.execJob(command, effectiveOpts);
-        }, { signal: opts?.signal }),
+        }, { signal: opts?.signal });
+        recordSandboxExec(Date.now() - startedAt, true);
+        return handle;
+      },
     );
   }
 
