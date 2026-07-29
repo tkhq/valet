@@ -86,6 +86,25 @@ describe("SettingsRail", () => {
       expect(screen.queryByText(label)).toBeNull();
     }
   });
+
+  it("shows a You·Models item in single-user mode (org gate off)", () => {
+    mockOrg({ organizations: false, callerRole: "admin" });
+    render(<SettingsRail />);
+    expect(screen.getByText("Models")).toBeTruthy();
+  });
+
+  it("does NOT duplicate Models under You when the Organization group is visible", () => {
+    mockOrg({ organizations: true, callerRole: "admin" });
+    render(<SettingsRail />);
+    // Exactly one "Models" — the Organization group's.
+    expect(screen.getAllByText("Models")).toHaveLength(1);
+  });
+
+  it("shows no Models item before the org query resolves (no flash)", () => {
+    mockOrg(undefined, true);
+    render(<SettingsRail />);
+    expect(screen.queryByText("Models")).toBeNull();
+  });
 });
 
 describe("/settings index redirect", () => {

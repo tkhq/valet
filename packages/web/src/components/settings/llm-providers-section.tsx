@@ -120,8 +120,17 @@ function KnownProviderCard({
   }
 
   async function handleToggleEnabled(checked: boolean) {
-    if (!row) return;
-    patchProvider.mutate({ id: row.id, body: { enabled: checked } });
+    // No row yet (env-fallback zero-config): materialize one so the toggle
+    // has something to persist to — without this, a provider running on a
+    // deployment env key could never be disabled, and its full registry
+    // stayed in every model picker unconditionally.
+    setError(null);
+    try {
+      const id = await ensureRowId();
+      await patchProvider.mutateAsync({ id, body: { enabled: checked } });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function handleRemoveKey() {
@@ -139,13 +148,11 @@ function KnownProviderCard({
           <span className="text-sm font-medium text-ink">{KNOWN_LABEL[kind]}</span>
           {showDeploymentBadge && <Badge variant="neutral">using deployment key</Badge>}
         </div>
-        {row && (
-          <Switch
-            checked={row.enabled}
-            onCheckedChange={handleToggleEnabled}
-            aria-label={`Enable ${KNOWN_LABEL[kind]}`}
-          />
-        )}
+        <Switch
+          checked={row?.enabled ?? true}
+          onCheckedChange={handleToggleEnabled}
+          aria-label={`Enable ${KNOWN_LABEL[kind]}`}
+        />
       </div>
 
       <div className="flex items-end gap-2">
