@@ -1,9 +1,9 @@
 # API Reference
 
-All endpoints are served by `@valet/api`. Response and request DTOs are the
-TypeScript types in `packages/api/src/wire/types.ts` (imported by the web
-client as `@valet/api/wire`) — that file is the authoritative contract; this
-page is the map.
+All endpoints are served by `@valet/api`. Response and request DTOs are
+the TypeScript types in `packages/api/src/wire/types.ts`, which the web
+client imports as `@valet/api/wire`. That file is the authoritative
+contract. This page is the map.
 
 ## Authentication
 
@@ -43,7 +43,7 @@ App webhooks (HMAC-verified).
 | `/api/sessions/:id/decisions/:gateId/resolve` | POST | Resolve a gate |
 | `/api/sessions/:id/decisions/:gateId/withdraw` | POST | Withdraw a gate |
 
-The WebSocket `init` frame is metadata-only; history always loads over REST.
+The WebSocket `init` frame is metadata-only. History always loads over REST.
 Wire event types are listed in
 [architecture.md](architecture.md#websocket-and-wire-protocol).
 

@@ -127,15 +127,15 @@ constructs an `Engine` with a `ProviderBundle`:
 
 - A **session** is the unit of ownership, workspace, and sandbox attachment.
   Purposes: user session, orchestrator, `child`, `workflow`.
-- A **thread** is the concurrency, history, and FIFO boundary. Each thread owns
-  its own pi-agent-core `Agent`; threads within a session run concurrently,
-  prompts within a thread queue in order. Queue modes control steering vs
-  follow-up behavior.
+- A **thread** is the concurrency, history, and FIFO boundary. Each
+  thread owns its own pi-agent-core `Agent`. Threads within a session run
+  concurrently. Prompts within a thread queue in order. Queue modes
+  control steering vs follow-up behavior.
 - **Entries** form the transcript DAG (`message`, `compaction`,
   `branch_summary`, `decision_gate`). `Thread.handleAgentEvent` is the
-  canonical persistence path: `message_end` appends entries; tool completion
-  mutates the part and re-persists via `updateEntry`. Compaction summarizes on
-  context overflow.
+  canonical persistence path: `message_end` appends entries, and tool
+  completion mutates the part and re-persists via `updateEntry`.
+  Compaction summarizes on context overflow.
 
 ### Durable submissions
 
@@ -167,7 +167,7 @@ gates, and thread reads.
 
 ### Boot
 
-`src/main.ts` boots on `PORT` (default `8787`; `make dev-local` runs on
+`src/main.ts` boots on `PORT` (default `8787`. `make dev-local` runs on
 `8788`): load auth config → build providers → wire the attention router →
 reconcile unsettled sessions → re-arm child watches → start channel ingress,
 workflow run host, and prebuild service → build better-auth → serve HTTP + WS
@@ -228,15 +228,16 @@ The middleware resolves callers in priority order:
 
 Other credential surfaces:
 
-- **Org roles**: `org_members.role` is `admin | member`; admin gates the org
-  settings and invite routes.
+- **Org roles**: `org_members.role` is `admin | member`. Admin gates the
+  org settings and invite routes.
 - **MCP OAuth**: `/mcp` is guarded by better-auth's MCP plugin — standard
   OAuth discovery (`/.well-known/oauth-authorization-server`), dynamic client
   registration, Bearer tokens. This is distinct from `x-api-key`.
-- **Sandbox gateway JWTs**: short-lived HS256 tokens minted per session from a
-  per-session secret derived from a master key; the in-sandbox gateway
-  verifies the signature *and* that the `sid` claim matches its own
-  `VALET_SESSION_ID`, so a token for one session is useless inside another.
+- **Sandbox gateway JWTs**: short-lived HS256 tokens minted per session
+  from a per-session secret derived from a master key. The in-sandbox
+  gateway verifies the signature *and* that the `sid` claim matches its
+  own `VALET_SESSION_ID`. A token for one session is therefore useless
+  inside another.
 - **Integration credentials** are AES-256-GCM encrypted at rest
   (`VALET_ENCRYPTION_KEY`) in the `credentials` table, keyed by owner +
   service.
@@ -260,8 +261,8 @@ selection is `VALET_SANDBOX_BACKEND` (`docker` default, `local`,
 (`:8765`), ttyd (`:7681`), and the sandbox gateway (`:9000`) — the terminal
 and VS Code tabs in the UI. The browser reaches them through the API's
 authenticated proxy (`/api/sessions/:id/gateway/*`), which checks session
-ownership and forwards a gateway JWT; the in-sandbox gateway independently
-verifies that JWT. The `full` image is built from
+ownership and forwards a gateway JWT. The in-sandbox gateway
+independently verifies that JWT. The `full` image is built from
 `docker/Dockerfile.sandbox-k8s`.
 
 **Environment.** Every sandbox receives `VALET_SANDBOX_TOKEN` (bearer for
@@ -318,7 +319,7 @@ A plugin is a package exporting a single `ValetPlugin` manifest from
 ```
 
 `make generate-registries` scans `packages/plugin-*/plugin.yaml` for
-`v2: true` and generates `packages/api/src/plugins/registry.gen.ts`; 17
+`v2: true` and generates `packages/api/src/plugins/registry.gen.ts`. 17
 plugins are bundled today (GitHub, Slack, Linear, Notion, Gmail, Google
 Calendar/Workspace, Telegram, Stripe, Sentry, Cloudflare, browser, workflows,
 personas, and more). External plugins are also discovered from `node_modules`
@@ -393,7 +394,7 @@ and a Docker daemon.
   webhook) must be installed first (`make k8s-sandbox-install`).
 
 `make k8s-build` / `k8s-up` / `k8s-logs` / `k8s-down` drive the local
-Rancher Desktop flow; every target pins `--context rancher-desktop`.
+Rancher Desktop flow. Every target pins `--context rancher-desktop`.
 
 ## Port Summary
 

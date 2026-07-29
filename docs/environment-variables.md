@@ -8,9 +8,9 @@ All variables are read by the `@valet/api` server process unless noted. The
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic key for the agent loop (server exits without it; org-level LLM providers can be added in the UI) |
-| `PORT` | No | HTTP port (default `8787`; `make dev-local` sets `8788`) |
-| `DATABASE_URL` | No | Postgres connection string. Set → node-postgres; unset → embedded PGlite under the data dir |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic key for the agent loop. The server exits without it. You can add org-level LLM providers in the UI |
+| `PORT` | No | HTTP port (default `8787`. `make dev-local` sets `8788`) |
+| `DATABASE_URL` | No | Postgres connection string. Set → node-postgres. Unset → embedded PGlite under the data dir |
 | `VALET_DATA_DIR` | No | Data root (default `~/.valet`): config, PGlite, blobs, serve.lock |
 | `VALET_PG_DATA_DIR` / `VALET_BLOBS_DIR` | No | Override the PGlite and blob-store locations individually |
 | `VALET_ENCRYPTION_KEY` | Prod | AES-256-GCM key for credentials at rest (warned if unset) |
@@ -19,7 +19,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 
 ## Auth
 
-Real auth activates when `BETTER_AUTH_SECRET` is set; otherwise the local
+Real auth activates when `BETTER_AUTH_SECRET` is set. Otherwise the local
 stub applies. Provider variable pairs are all-or-none.
 
 | Variable | Description |
@@ -28,7 +28,7 @@ stub applies. Provider variable pairs are all-or-none.
 | `BETTER_AUTH_URL` | Public base URL (default `http://localhost:8788`) |
 | `AUTH_TRUSTED_ORIGINS` | Extra CORS/trusted origins (`http://localhost:5173` is always included) |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Comma-separated signup domain allowlist |
-| `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak); optional `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
+| `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
 | `AUTH_GOOGLE_CLIENT_ID` / `AUTH_GOOGLE_CLIENT_SECRET` | Google social login |
 | `AUTH_GITHUB_CLIENT_ID` / `AUTH_GITHUB_CLIENT_SECRET` | GitHub social login |
 | `VALET_LOCAL_AUTH` | `1` → stub identity for local dev (only when real auth is not configured) |
@@ -41,7 +41,7 @@ stub applies. Provider variable pairs are all-or-none.
 |----------|-------------|
 | `VALET_SANDBOX_BACKEND` | `docker` (default) \| `local` \| `kubernetes` |
 | `VALET_SANDBOX_IMAGE` | Sandbox image ref (required for kubernetes; docker defaults to `node:20-bookworm`) |
-| `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables; only effective on backends with hibernation — kubernetes) |
+| `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables). Only effective on backends with hibernation (kubernetes) |
 | `VALET_SANDBOX_NAMESPACE` | Kubernetes namespace for Sandbox CRs |
 | `VALET_SANDBOX_IMAGE_PULL_SECRET` | Image pull secret name (kubernetes) |
 | `VALET_KUBE_CONTEXT` | kubectl context (required when running out-of-cluster) |
@@ -55,7 +55,7 @@ Inside each sandbox, the provider injects: `VALET_SANDBOX_TOKEN`,
 
 | Variable | Description |
 |----------|-------------|
-| `VALET_PUBLIC_URL` | Public URL for channel webhooks. Set (or a public `BETTER_AUTH_URL`) → webhook mode; unset → long-poll |
+| `VALET_PUBLIC_URL` | Public URL for channel webhooks. Set (or a public `BETTER_AUTH_URL`) → webhook mode. Unset → long-poll |
 
 ## CLI
 

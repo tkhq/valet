@@ -1,9 +1,9 @@
 # Kubernetes Deployment Architecture
 
 How Valet runs on Kubernetes, and the infra-level constraints you must
-respect when deploying the cluster. The practical runbook for the local
-reference environment (Rancher Desktop) is
-[`deploy/README.md`](../deploy/README.md); the design rationale is
+respect when deploying the cluster. The runbook for the local reference
+environment (Rancher Desktop) is [`deploy/README.md`](../deploy/README.md).
+The design rationale is
 [`docs/specs/2026-07-15-kubernetes-deployment-design.md`](specs/2026-07-15-kubernetes-deployment-design.md).
 This page is the map of what exists and what will break if you deviate.
 
@@ -58,41 +58,39 @@ flowchart TB
 `api.replicas` is pinned to 1 and must stay there for now. The engine keeps
 in-memory state that has no cross-pod story yet: live event fan-out to
 WebSockets, the per-process session cache, and the singleton pollers
-(channel long-poll, idle sweep). Running two replicas means clients missing
-events depending on which pod their socket landed on. Restart tolerance
-comes from durability (boot-time reconciliation over Postgres), not from
-redundancy — so there is no HPA and no PodDisruptionBudget. This is a
-current limitation, not the end state; see
-[Not Implemented Yet](#not-implemented-yet) for the path to horizontal
-scaling.
+(channel long-poll, idle sweep). With two replicas, clients miss events depending on which pod their
+socket landed on. Restart tolerance comes from durability (boot-time
+reconciliation over Postgres), not from redundancy, so there is no HPA
+and no PodDisruptionBudget. This is a current limitation, not the end
+state. See [Not Implemented Yet](#not-implemented-yet) for the path to
+horizontal scaling.
 
 ### Install the agent-sandbox controller first
 
 The chart assumes the `Sandbox` CRD (`agents.x-k8s.io/v1beta1`) and its
-validating webhook already exist. There is no published Helm chart for
-agent-sandbox, and Helm's `crds/` semantics (install-once, never upgraded)
-can't manage it — so the release manifest is vendored and applied
-separately (`make k8s-sandbox-install`, idempotent server-side apply).
+validating webhook already exist. There is no published Helm chart for agent-sandbox, and Helm's `crds/`
+semantics (install once, never upgrade) cannot manage it. The release
+manifest is therefore vendored and applied separately
+(`make k8s-sandbox-install`, an idempotent server-side apply).
 Version bumps are an explicit vendored-manifest update. The webhook's
 Service and certs are part of the manifest: wait for its endpoints to be
 ready before installing the chart, or CR creation will fail.
 
 ### Postgres must be ready before the API boots
 
-The API runs schema migrations at boot. The Deployment has a
-`wait-for-postgres` initContainer gating on the bundled StatefulSet's
-readiness — without it the api crash-loops until PG is up. If you swap in
-`externalDatabase.url`, the same requirement transfers to you: the database
-must be reachable at pod start. An api pod stuck in `Init:0/1` means
-Postgres isn't ready.
+The API runs schema migrations at boot. The Deployment has a `wait-for-postgres` initContainer that gates on the
+bundled StatefulSet's readiness. Without it, the api crash-loops until
+Postgres is up. If you swap in `externalDatabase.url`, the same
+requirement transfers to you: the database must be reachable at pod
+start. An api pod stuck in `Init:0/1` means Postgres is not ready.
 
 ## Networking and URLs
 
 ### `BETTER_AUTH_URL` must be `https://`
 
 better-auth marks session cookies `Secure`. TLS terminates at the ingress
-(Traefik; self-signed default cert locally, real cert via
-`ingress.tls.secretName` otherwise) — but if the advertised URL is plain
+(Traefik, with a self-signed default cert locally and a real cert via
+`ingress.tls.secretName` otherwise). But if the advertised URL is plain
 `http`, login *silently* fails: the browser simply never sends the cookie
 back. This is a values-level footgun (`api.betterAuthUrl`), not a code path
 you'll see an error from.
@@ -102,10 +100,10 @@ you'll see an error from.
 Sandbox pods run in a different namespace and must reach the API to
 exchange git credentials and read memory. The chart's ConfigMap sets
 `VALET_SANDBOX_API_URL` to the API Service's in-cluster DNS name
-(`http://<release>-api.<ns>.svc.cluster.local:<port>`). Without it, the
-server falls back to the public `BETTER_AUTH_URL` — which is generally
-*not* pod-reachable (it resolves at your ingress/laptop, not inside the
-cluster), and things like in-sandbox git operations fail confusingly.
+(`http://<release>-api.<ns>.svc.cluster.local:<port>`). Without it, the server falls back to the public `BETTER_AUTH_URL`. That
+URL is generally *not* pod-reachable — it resolves at your ingress or
+laptop, not inside the cluster — and in-sandbox git operations then fail
+confusingly.
 
 ### Registry traffic is split: pull via NodePort, push via cluster DNS
 
@@ -119,10 +117,10 @@ paths resolve names differently:
 - **Push and retention** (BuildKit jobs, garbage collection): in-cluster
   Service DNS.
 
-Swapping in `externalRegistry.url` collapses the split (one URL, TLS) but
-comes with a known limitation: prebuild image retention wires no registry
-credentials, so pruning is skipped against an external registry — stale
-images accumulate until pruned out of band. An `externalRegistry.pullSecret`
+Swapping in `externalRegistry.url` collapses the split (one URL, TLS).
+Known limitation: prebuild image retention wires no registry credentials,
+so pruning is skipped against an external registry. Stale images
+accumulate until you prune them out of band. An `externalRegistry.pullSecret`
 (`dockerconfigjson` Secret, created out of band in the sandbox namespace) is
 required for sandbox pods to pull from a private registry.
 
@@ -130,11 +128,11 @@ required for sandbox pods to pull from a private registry.
 
 Leaving `api.secrets.*` blank makes the chart generate values on first
 install and **retain them across `helm upgrade`** (a `lookup`-based guard in
-`templates/secret.yaml`). This is not cosmetic: naively regenerating
-`BETTER_AUTH_SECRET` on each upgrade would invalidate every user session
-*and* rotate the sandbox JWT master (`VALET_SANDBOX_JWT_MASTER` falls back
-to `BETTER_AUTH_SECRET`), cutting off every running sandbox's terminal and
-VS Code access. If you manage secrets externally, keep them stable for the
+`templates/secret.yaml`). This is not cosmetic. A naive regeneration of `BETTER_AUTH_SECRET` on
+each upgrade would invalidate every user session *and* rotate the sandbox
+JWT master (`VALET_SANDBOX_JWT_MASTER` falls back to
+`BETTER_AUTH_SECRET`), which cuts off every running sandbox's terminal
+and VS Code access. If you manage secrets externally, keep them stable for the
 same reason. The bundled Postgres password follows the same retain pattern.
 
 ## Sandbox Lifecycle and Storage
@@ -148,10 +146,10 @@ instead of granting pod access next to its own pod. The Role grants:
 pods/`pods/exec`/`pods/log`. Nothing cluster-scoped — the controller owns
 PVC management.
 
-The `update` verb is not optional: the provider's create-is-upsert path
+The `update` verb is not optional. The provider's create-is-upsert path
 re-asserts an existing CR via HTTP PUT, which is exactly the
-workspace-preserving re-provision path. Omitting it produces 403s only when
-a sandbox is *recovered* — the worst time to find out.
+workspace-preserving re-provision path. If you omit the verb, 403s appear
+only when a sandbox is *recovered* — the worst time to find out.
 
 ### The sandbox's identity is the CR, not the pod
 
@@ -173,21 +171,20 @@ Operational consequences:
   this).
 - `kubectl delete sandbox` is **data loss** for that session's workspace.
 - `helm uninstall` leaves both StatefulSet PVCs (Kubernetes design —
-  `volumeClaimTemplates` PVCs aren't release-owned) and any standing
-  `Sandbox` CRs; a true reset requires the explicit deletes documented in
+  `volumeClaimTemplates` PVCs are not release-owned) and any standing
+  `Sandbox` CRs. A true reset requires the explicit deletes documented in
   `deploy/README.md`.
 
-For anyone debugging: the backing pod's name is *not* in the CR status — it
-lives in the `agents.x-k8s.io/pod-name` annotation, and the controller
+For anyone debugging: the backing pod's name is *not* in the CR status.
+It lives in the `agents.x-k8s.io/pod-name` annotation, and the controller
 mints a fresh pod name after recovery. The provider re-resolves it per
-operation; so should you.
+operation. So should you.
 
 ### Hibernation is a spec patch, not a delete
 
-Kubernetes is the only backend with `capabilities().hibernation`. The API's
-idle sweep (`VALET_SANDBOX_IDLE_MINUTES`, default 30) suspends idle
-sandboxes by patching the CR's `operatingMode: Suspended` — the controller
-scales the pod to zero while the CR and PVC remain. Waking patches it back
+Kubernetes is the only backend with `capabilities().hibernation`. The API's idle sweep (`VALET_SANDBOX_IDLE_MINUTES`, default 30) suspends
+idle sandboxes by patching the CR's `operatingMode: Suspended`. The
+controller then scales the pod to zero while the CR and PVC remain. Waking patches it back
 to `Running`. Interactive terminal/editor activity holds a sandbox awake.
 Budget-wise this means idle sessions cost you a PVC, not a pod.
 
@@ -202,10 +199,11 @@ A cluster with no default storage class leaves everything `Pending`.
 
 ### Prebuilt images come from in-cluster BuildKit jobs
 
-Prebuilt sandbox images are built by `moby/buildkit:rootless` Jobs:
-default 1–2 CPU / 2–4 Gi, `activeDeadlineSeconds: 1800` (a stuck build is
-killed, not left running), and an in-process concurrency cap of 1 (extra
-builds queue FIFO). Size node capacity accordingly if you enable prebuilds.
+Prebuilt sandbox images are built by `moby/buildkit:rootless` Jobs. The
+defaults: 1–2 CPU / 2–4 Gi, `activeDeadlineSeconds: 1800` (a stuck build
+is killed, not left running), and an in-process concurrency cap of 1
+(extra builds queue FIFO). If you enable prebuilds, size node capacity
+accordingly.
 
 ### Published images: GHCR on every dev-v2 merge
 
@@ -242,25 +240,26 @@ multi-node cluster should use the GHCR images above instead.
 
 ## Not Implemented Yet
 
-These are on the roadmap but not built — plan deployments around their
+These are on the roadmap but not built. Plan deployments around their
 absence today rather than assuming them:
 
 - **Horizontal API scaling** (HPA, PDBs). The singleton is a v1
-  simplification, not the end state: the durable substrate was built for
-  distribution (submissions are CAS-claimed with leases and expiry
-  takeover, settlement is write-fenced, the event log is offset-addressed,
-  workflow runs carry owner leases). What's missing is the coordination
-  layer on top — cross-pod event wake-up (the live fan-out in
-  `PgEventStream` is in-process only; Postgres `LISTEN/NOTIFY` is the
-  natural fix), per-session ownership (sticky routing or a session lease),
-  and leader election for the singleton pollers (channel long-poll, idle
-  sweep, workflow host). No schema changes required. Until then, note that
-  the API pod is orchestration, not compute — sandboxes already scale out
-  per-session — so one replica is an availability constraint (brief blip on
+  simplification, not the end state. The durable substrate was built for
+  distribution: submissions are CAS-claimed with leases and expiry
+  takeover, settlement is write-fenced, the event log is
+  offset-addressed, and workflow runs carry owner leases. What is missing
+  is the coordination layer on top: cross-pod event wake-up (the live
+  fan-out in `PgEventStream` is in-process only, and Postgres
+  `LISTEN/NOTIFY` is the natural fix), per-session ownership (sticky
+  routing or a session lease), and leader election for the singleton
+  pollers (channel long-poll, idle sweep, workflow host). No schema
+  changes are required. Until then, note that the API pod is
+  orchestration, not compute — sandboxes already scale out per-session.
+  One replica is therefore an availability constraint (a brief blip on
   rollout) more than a throughput one.
 - **Network policies and pod security admission hardening** beyond the
-  namespace split; gVisor/Kata runtime classes for sandbox pods likewise
-  (prod-hardening follow-ups).
+  namespace split; gVisor/Kata runtime classes for sandbox pods are
+  likewise prod-hardening follow-ups.
 - **Remote-cluster deploy automation** — CI publishes the images (see
   [Images and Builds](#images-and-builds)), but rolling them out to a
   cluster is still a manual `helm upgrade`.
