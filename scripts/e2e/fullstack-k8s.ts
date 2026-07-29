@@ -72,8 +72,10 @@ async function main(): Promise<number> {
     `HELM_RELEASE=${RELEASE}`,
     `K8S_NAMESPACE=${NS}`,
     // registry.bundled=false: the dev release already claims NodePort 30500,
-    // and the e2e scenario never builds prebuilt images.
-    `HELM_EXTRA_ARGS=--set sandbox.namespace=${NS}-sandboxes --set registry.bundled=false`,
+    // and the e2e scenario never builds prebuilt images. Same story for
+    // observability.enabled=false (grafana NodePort 30300) — the e2e release
+    // needs no telemetry stack of its own.
+    `HELM_EXTRA_ARGS=--set sandbox.namespace=${NS}-sandboxes --set registry.bundled=false --set observability.enabled=false`,
   ], 10 * 60_000);
   run("rollout", "kubectl", [
     "--context", CTX, "-n", NS,
