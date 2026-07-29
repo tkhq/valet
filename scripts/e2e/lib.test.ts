@@ -32,9 +32,9 @@ const ALL_TRUE: Probes = {
 };
 
 describe("STEPS", () => {
-  it("has the spec's 33 unique rows", () => {
-    expect(STEPS).toHaveLength(33);
-    expect(new Set(STEPS.map((s) => s.id)).size).toBe(33);
+  it("has the spec's 34 unique rows", () => {
+    expect(STEPS).toHaveLength(34);
+    expect(new Set(STEPS.map((s) => s.id)).size).toBe(34);
   });
 
   it("includes every spec row id", () => {
@@ -241,7 +241,7 @@ describe("selectSteps", () => {
   });
 
   it("returns all steps without --only", () => {
-    expect(selectSteps(STEPS)).toHaveLength(33);
+    expect(selectSteps(STEPS)).toHaveLength(34);
   });
 
   it("throws on unknown ids", () => {
