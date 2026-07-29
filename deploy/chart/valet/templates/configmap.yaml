@@ -44,6 +44,13 @@ data:
   VALET_SANDBOX_IMAGE_PULL_SECRET: {{ .Values.externalRegistry.pullSecret | quote }}
   {{- end }}
   {{- end }}
+  {{- if or .Values.observability.enabled .Values.observability.otlpEndpoint }}
+  # OTLP trace export (packages/api/src/observability/otel.ts). The api is
+  # env-gated on this var: absent → no SDK started. Default target is the
+  # bundled otel-lgtm stack's in-cluster OTLP/HTTP port.
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otlpEndpoint | default (printf "http://%s-otel.%s.svc.cluster.local:4318" (include "valet.fullname" .) .Release.Namespace) | quote }}
+  OTEL_SERVICE_NAME: "valet-api"
+  {{- end }}
   VALET_PREBUILD_BUILD_DEADLINE_SECONDS: {{ .Values.build.activeDeadlineSeconds | quote }}
   VALET_PREBUILD_BUILD_CPU_REQUEST: {{ .Values.build.resources.requests.cpu | quote }}
   VALET_PREBUILD_BUILD_CPU_LIMIT: {{ .Values.build.resources.limits.cpu | quote }}

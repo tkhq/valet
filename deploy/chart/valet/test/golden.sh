@@ -252,5 +252,41 @@ grep -q 'traefik.ingress.kubernetes.io/router.tls: "true"' "$TMP_DIR/bundled.yam
   || fail "default traefik TLS annotation regressed"
 pass "default (traefik) ingress annotation unchanged"
 
+# --- observability: bundled otel-lgtm stack + api OTLP wiring ---------------
+grep -q 'name: valet-otel-lgtm' "$TMP_DIR/bundled.yaml" || fail "bundled render: no otel-lgtm Deployment"
+grep -q 'name: valet-otel$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no valet-otel OTLP Service"
+grep -q 'name: valet-grafana$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no valet-grafana Service"
+GRAFANA_SVC_BLOCK=$(awk '/^kind: Service$/{svc=1} svc&&/name: valet-grafana$/{hit=1} hit&&/^---$/{exit} hit{print}' "$TMP_DIR/bundled.yaml")
+echo "$GRAFANA_SVC_BLOCK" | grep -q 'nodePort: 30300' \
+  || fail "bundled render: grafana Service missing nodePort 30300 from observability.grafanaNodePort"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'OTEL_EXPORTER_OTLP_ENDPOINT: "http://valet-otel.default.svc.cluster.local:4318"' \
+  || fail "bundled render: ConfigMap OTEL_EXPORTER_OTLP_ENDPOINT is not the bundled otel Service's in-cluster OTLP/HTTP URL"
+echo "$BUNDLED_CONFIGMAP" | grep -q 'OTEL_SERVICE_NAME: "valet-api"' \
+  || fail "bundled render: ConfigMap missing OTEL_SERVICE_NAME"
+pass "observability: bundled otel-lgtm Deployment/Services rendered, api OTLP endpoint wired"
+
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set observability.enabled=false \
+  > "$TMP_DIR/no-observability.yaml"
+if grep -q 'name: valet-otel-lgtm' "$TMP_DIR/no-observability.yaml"; then
+  fail "observability.enabled=false still renders the otel-lgtm stack"
+fi
+if grep -q 'OTEL_EXPORTER_OTLP_ENDPOINT' "$TMP_DIR/no-observability.yaml"; then
+  fail "observability.enabled=false still sets OTEL_EXPORTER_OTLP_ENDPOINT (api must stay a no-op)"
+fi
+pass "observability disabled: no otel resources, no OTLP env (api telemetry stays env-gated off)"
+
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set observability.enabled=false \
+  --set observability.otlpEndpoint="http://collector.example.com:4318" \
+  > "$TMP_DIR/external-otel.yaml"
+EXTERNAL_OTEL_CONFIGMAP=$(awk '/^kind: ConfigMap$/,/^---$/' "$TMP_DIR/external-otel.yaml")
+echo "$EXTERNAL_OTEL_CONFIGMAP" | grep -q 'OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.example.com:4318"' \
+  || fail "external otlpEndpoint not carried into the ConfigMap verbatim"
+if grep -q 'name: valet-otel-lgtm' "$TMP_DIR/external-otel.yaml"; then
+  fail "external otlpEndpoint render still bundles the otel-lgtm stack when enabled=false"
+fi
+pass "external collector: otlpEndpoint wired verbatim without the bundled stack"
+
 echo
 echo "All golden assertions passed."

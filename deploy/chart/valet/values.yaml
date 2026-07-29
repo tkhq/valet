@@ -187,6 +187,26 @@ build:
   # outstanding BuildKit Jobs; extra builds queue FIFO.
   concurrency: 1
 
+observability:
+  # Bundled local observability stack (grafana/otel-lgtm: OTel collector +
+  # Tempo + Loki + Mimir + Grafana in one container). The api exports engine
+  # traces to it via OTLP (agent turns with usage/cost, submission
+  # settlements incl. patch capture, errors, sandbox lifecycle). Storage is
+  # ephemeral — a local-reference/debug stack, not a durable telemetry store.
+  # Set enabled: false for remote deploys, or leave it off and point
+  # otlpEndpoint at an external collector.
+  enabled: true
+  image:
+    repository: grafana/otel-lgtm
+    tag: latest
+  # Grafana UI NodePort: http://localhost:30300 on the local cluster.
+  grafanaNodePort: 30300
+  resources: {}
+  # When set, the api exports OTLP to this URL instead of the bundled
+  # stack's in-cluster Service (useful with enabled: false + an external
+  # collector). Must be the HTTP (4318) OTLP endpoint base URL.
+  otlpEndpoint: ""
+
 helmTest:
   enabled: true
   image: curlimages/curl:8.11.0

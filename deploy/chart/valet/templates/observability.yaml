@@ -1,0 +1,98 @@
+{{- if .Values.observability.enabled }}
+# Bundled local observability stack: grafana/otel-lgtm packs an OTel
+# collector (OTLP :4317 gRPC / :4318 HTTP), Tempo (traces), Loki (logs),
+# Mimir (metrics), and Grafana (:3000, pre-provisioned datasources) into one
+# container. The api exports engine traces (agent turns with usage+cost,
+# submission settlements incl. patch-capture records, errors, sandbox
+# lifecycle) to it via OTLP — see packages/api/src/observability/otel.ts.
+# Storage is ephemeral (emptyDir): this is a local-reference/debugging stack,
+# not a durable telemetry store. Disable for remote deploys (or point
+# observability.otlpEndpoint at a real collector instead).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "valet.fullname" . }}-otel-lgtm
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "valet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: observability
+  template:
+    metadata:
+      labels:
+        {{- include "valet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: observability
+    spec:
+      containers:
+        - name: otel-lgtm
+          image: "{{ .Values.observability.image.repository }}:{{ .Values.observability.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 3000
+              name: grafana
+          env:
+            # Local stack: skip the Grafana login screen entirely.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          {{- with .Values.observability.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+# OTLP ingest endpoint for the api (in-cluster DNS).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valet.fullname" . }}-otel
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "valet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+  ports:
+    - port: 4317
+      targetPort: otlp-grpc
+      name: otlp-grpc
+    - port: 4318
+      targetPort: otlp-http
+      name: otlp-http
+---
+# Grafana UI, exposed as a NodePort so the local cluster serves it on
+# http://localhost:<grafanaNodePort> without a port-forward.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valet.fullname" . }}-grafana
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+spec:
+  type: NodePort
+  selector:
+    {{- include "valet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: observability
+  ports:
+    - port: 3000
+      targetPort: grafana
+      nodePort: {{ .Values.observability.grafanaNodePort | default 30300 }}
+      name: grafana
+{{- end }}

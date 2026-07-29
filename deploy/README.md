@@ -101,6 +101,34 @@ fails):
 First sign-up becomes the org admin (real auth is on in the cluster — no
 dev bypass).
 
+## Observability (Grafana + OpenTelemetry)
+
+The chart bundles a local observability stack by default
+(`observability.enabled`, `grafana/otel-lgtm`: OTel collector + Tempo +
+Loki + Mimir + Grafana in one container, ephemeral storage). The api
+exports engine traces to it over OTLP — agent turns with token usage and
+USD cost, submission settlements (including settle-patch capture records),
+engine errors, and sandbox lifecycle transitions. See
+`packages/api/src/observability/otel.ts` and
+`docs/specs/2026-07-28-observability-otel-design.md`.
+
+Grafana is a NodePort — no port-forward needed on the local cluster:
+
+```sh
+open http://localhost:30300        # anonymous admin, no login
+```
+
+Explore → Tempo → search for span name `agent.turn` (service `valet-api`)
+after running a session. To verify from the shell:
+
+```sh
+curl -s "http://localhost:30300/api/datasources/proxy/uid/tempo/api/search?tags=service.name%3Dvalet-api"
+```
+
+Disable with `--set observability.enabled=false`, or export to an external
+collector via `observability.otlpEndpoint` (the api is env-gated on
+`OTEL_EXPORTER_OTLP_ENDPOINT` — unset means no SDK is started at all).
+
 ## Tail logs
 
 ```sh

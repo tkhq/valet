@@ -24,6 +24,7 @@ import { loadAuthConfig } from "./auth/config.js";
 import { buildAuthHooks } from "./auth/provisioning.js";
 import { buildAuth } from "./auth/index.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
+import { initEngineTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
 import { webDistPath } from "./assets/base.js";
@@ -168,6 +169,12 @@ const providers = await buildNodeProviders({
   seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig, process.env),
 });
 
+// OTel engine-trace export (env-gated: no-op without an OTLP endpoint).
+// Wired before the boot-reconciliation passes for the same reason as the
+// attention router below — boot-time settlements should be traced too.
+const telemetry = initEngineTelemetry(providers.eventStream);
+if (telemetry) console.log(`otel: exporting engine traces to ${telemetry.endpoint}`);
+
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
 // escalation and child-session decision_gate → approval onto the shared
 // EventStream. Wired BEFORE the boot-reconciliation passes below — both
@@ -311,6 +318,12 @@ async function close(): Promise<void> {
     providers.engineHost.evictAll();
   } catch (err) {
     console.error("evictAll failed:", err);
+  }
+  try {
+    // Flush any batched spans before the process goes away.
+    await telemetry?.shutdown();
+  } catch (err) {
+    console.error("otel shutdown failed:", err);
   }
   await server.close();
 }
