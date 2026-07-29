@@ -27,7 +27,7 @@
 
 # Configuration
 # =============
-# Source deployment config if it exists (copy .env.deploy.example to .env.deploy)
+# Source legacy deployment config if it exists (see the pinned legacy deploy commit for the template)
 -include .env.deploy
 
 # Project name — all resource names derive from this (set in .env.deploy)
