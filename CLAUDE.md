@@ -54,7 +54,12 @@ Use STE-flavored prose for everything else — READMEs, specs, PR descriptions, 
 - Keep caveats, warnings, and limitations. Never cut substance to make text shorter.
 - Keep necessary technical terms. Define an unfamiliar term at first use.
 
-The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
+Two repo-specific rules:
+
+- **Every user-facing error message names the corrective action when one exists.** "Missing GitHub access token. Connect the GitHub integration in Settings." is the model. A bare fact ("expected an array response") is incomplete when the user can act.
+- **Terminology:** "workspace" is overloaded — `SessionData.workspace` is a display label, `/workspace` is the in-sandbox path, and workspace prep is the clone subsystem. Say which one you mean. Spell the session start reference "start-ref" in prose and `startRef` in code.
+
+`make e2e E2E_ARGS="--only docs-lint"` runs an advisory STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
 
 This section governs new and edited prose. Do not rewrite existing documents wholesale for style alone. Apply the rules to the text you touch.
 

@@ -40,7 +40,7 @@ describe("STEPS", () => {
   it("includes every spec row id", () => {
     const ids = STEPS.map((s) => s.id);
     for (const id of [
-      "typecheck", "conventions", "unit", "engine-unit", "workflow-unit", "gateway-unit",
+      "typecheck", "conventions", "docs-lint", "unit", "engine-unit", "workflow-unit", "gateway-unit",
       "runner-unit", "plugins-unit", "sandbox-local", "sandbox-k8s-unit",
       "store-postgres-unit", "web-build", "api-bundle", "helm-golden",
       "sandbox-docker-unit", "registry-drift",
