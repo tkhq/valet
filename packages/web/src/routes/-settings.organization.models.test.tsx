@@ -21,6 +21,10 @@ function renderWithTooltip(ui: ReactElement) {
 const createLlmProviderMutate = vi.fn();
 const createLlmProviderMutateAsync = vi.fn();
 const patchLlmProviderMutate = vi.fn();
+const patchLlmProviderMutateAsync = vi.fn(async (vars: unknown) => {
+  patchLlmProviderMutate(vars);
+  return {};
+});
 const deleteLlmProviderMutate = vi.fn();
 const putLlmProviderKeyMutate = vi.fn();
 const putLlmProviderKeyMutateAsync = vi.fn();
@@ -45,7 +49,12 @@ vi.mock("~/api/settings", () => ({
     isPending: false,
     error: null,
   }),
-  usePatchLlmProvider: () => ({ mutate: patchLlmProviderMutate, isPending: false, error: null }),
+  usePatchLlmProvider: () => ({
+    mutate: patchLlmProviderMutate,
+    mutateAsync: patchLlmProviderMutateAsync,
+    isPending: false,
+    error: null,
+  }),
   useDeleteLlmProvider: () => ({ mutate: deleteLlmProviderMutate, isPending: false, error: null }),
   usePutLlmProviderKey: () => ({
     mutate: putLlmProviderKeyMutate,
@@ -350,16 +359,34 @@ describe("ModelPreferencesSection", () => {
     );
   });
 
-  it("lists unlisted active catalog models with an add affordance", async () => {
+  it("adds an unlisted model via the search typeahead", async () => {
     const user = userEvent.setup();
     preferencesData = { preferences: ["anthropic/claude-1"] };
     render(<ModelPreferencesSection />);
-    expect(screen.getByText("GPT One")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    // Closed until focused — no flat catalog dump on the page.
+    expect(screen.queryByText("GPT One")).toBeNull();
+
+    const search = screen.getByRole("textbox", { name: "Search models to add" });
+    await user.type(search, "gpt");
+    await user.click(screen.getByText("GPT One"));
     expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
       { preferences: ["anthropic/claude-1", "openai/gpt-1"] },
       expect.objectContaining({ onError: expect.any(Function) }),
     );
+  });
+
+  it("typeahead filters by query and reports no matches", async () => {
+    const user = userEvent.setup();
+    preferencesData = { preferences: [] };
+    render(<ModelPreferencesSection />);
+    const search = screen.getByRole("textbox", { name: "Search models to add" });
+    await user.type(search, "claude");
+    expect(screen.getByText("Claude One")).toBeTruthy();
+    expect(screen.queryByText("GPT One")).toBeNull();
+
+    await user.clear(search);
+    await user.type(search, "zzz-no-such-model");
+    expect(screen.getByText("No matching models.")).toBeTruthy();
   });
 
   it("surfaces an error message when the save mutation rejects", async () => {

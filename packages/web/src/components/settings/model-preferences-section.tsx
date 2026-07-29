@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ArrowDown, ArrowUp, X } from "lucide-react";
-import { Badge, Button, Spinner } from "~/components/primitives";
+import type { ModelInfo } from "@valet/api/wire";
+import { Badge, Button, Input, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useLlmProviderPreferences, useModels, usePutLlmProviderPreferences } from "~/api/settings";
 
@@ -8,9 +9,10 @@ import { useLlmProviderPreferences, useModels, usePutLlmProviderPreferences } fr
  * Organization · Models — ordered model preferences (llm-providers design,
  * plan Task 7). Rows come from the explicit `preferences` array
  * (`GET .../preferences`); the first row is the org default model. Active
- * catalog models (`useModels()`) not yet in the list are offered below with
- * an "add" affordance. No drag-and-drop — up/down buttons reorder, matching
- * the plan's explicit no-new-dependency constraint.
+ * catalog models (`useModels()`) not yet in the list are added via a search
+ * typeahead (the earlier flat "Available models" list scaled to the whole
+ * catalog and drowned the page). No drag-and-drop — up/down buttons
+ * reorder, matching the plan's explicit no-new-dependency constraint.
  */
 export function ModelPreferencesSection() {
   const modelsQ = useModels();
@@ -115,25 +117,82 @@ export function ModelPreferencesSection() {
             })}
           </div>
 
-          {unlisted.length > 0 && (
-            <div className="space-y-1">
-              <div className="text-xs font-medium uppercase tracking-wider text-muted">
-                Available models
-              </div>
-              <div className="divide-y divide-line">
-                {unlisted.map((m) => (
-                  <div key={m.id} className="flex items-center gap-2 py-2">
-                    <span className="min-w-0 flex-1 truncate text-sm text-ink">{m.name}</span>
-                    <Button type="button" variant="ghost" size="sm" onClick={() => add(m.id)}>
-                      Add
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          {unlisted.length > 0 && <AddModelTypeahead options={unlisted} onAdd={add} />}
         </div>
       )}
     </Section>
+  );
+}
+
+/**
+ * Search-to-add typeahead over the active catalog models not yet in the
+ * preference list. Same hand-rolled input+filtered-list pattern as
+ * `ModelCombobox` (no Popover/Command primitive in this package; disclosed
+ * tradeoff there applies here too). The list opens on focus/typing, caps at
+ * 30 rows with a "narrow the search" hint, and stays open after an add so
+ * several models can be added in one sitting.
+ */
+function AddModelTypeahead({
+  options,
+  onAdd,
+}: {
+  options: ModelInfo[];
+  onAdd: (id: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const q = query.trim().toLowerCase();
+  const matches = options.filter(
+    (m) =>
+      q === "" ||
+      m.id.toLowerCase().includes(q) ||
+      m.name.toLowerCase().includes(q) ||
+      m.providerName.toLowerCase().includes(q),
+  );
+
+  return (
+    <div className="space-y-1">
+      <div className="text-xs font-medium uppercase tracking-wider text-muted">Add a model</div>
+      <Input
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            setQuery("");
+            setOpen(false);
+          }
+        }}
+        placeholder={`Search ${options.length} models — name, id, or provider…`}
+        aria-label="Search models to add"
+      />
+      {open && (
+        <div className="max-h-56 overflow-y-auto rounded border border-line">
+          {matches.slice(0, 30).map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => onAdd(m.id)}
+              className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-sm text-ink hover:bg-ink-wash"
+            >
+              <span className="truncate">{m.name}</span>
+              <span className="ml-2 shrink-0 text-xs text-muted">{m.providerName}</span>
+            </button>
+          ))}
+          {matches.length === 0 && (
+            <p className="px-2 py-1.5 text-xs text-muted">No matching models.</p>
+          )}
+          {matches.length > 30 && (
+            <p className="px-2 py-1.5 text-xs text-muted">
+              {matches.length - 30} more — narrow the search.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
