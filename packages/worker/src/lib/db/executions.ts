@@ -107,32 +107,32 @@ export async function checkIdempotencyKey(
 
 import {
   ACTIVE_EXECUTION_STATUSES,
-  GLOBAL_EXECUTION_CONCURRENCY_CAP,
   PER_USER_EXECUTION_CONCURRENCY_CAP,
 } from './constants.js';
 
-export interface WorkflowConcurrencyLimits {
-  perUser: number;
-  global: number;
-}
-
 /**
- * Resolve the effective concurrency ceilings for a user. `users.
- * max_workflow_executions` is a per-user override (NULL = default),
+ * Resolve a user's effective per-user execution ceiling.
+ * `users.max_workflow_executions` is a per-user override (NULL = default),
  * mirroring `users.max_active_sessions`.
  *
- * Only the per-user ceiling is overridable; the global cap is a property
- * of the worker, not of the tenant, so a large per-user grant still can't
- * consume more than the worker allows.
+ * Only the per-user ceiling is overridable — the global cap is a property of
+ * the worker, not the tenant, so callers read GLOBAL_EXECUTION_CONCURRENCY_CAP
+ * directly rather than getting it from here. Keeping the two apart means this
+ * function does a DB read only when a caller actually needs the per-user
+ * number.
  *
- * Callers must not read the column directly — routing every path through
- * here is what keeps the immediate check in startWorkflowExecution and the
+ * Callers must not read the column themselves — routing every path through
+ * here is what keeps the authoritative check in createExecution and the
  * pre-dispatch check in checkWorkflowConcurrency from drifting apart.
+ *
+ * Callers in a loop should memoize by userId: this is one D1 read per call,
+ * and the cron dispatcher can otherwise repeat it for every trigger a user
+ * owns.
  */
-export async function resolveWorkflowConcurrencyLimits(
+export async function resolveUserExecutionCap(
   db: AppDb,
   userId: string,
-): Promise<WorkflowConcurrencyLimits> {
+): Promise<number> {
   const row = await db
     .select({ maxWorkflowExecutions: users.maxWorkflowExecutions })
     .from(users)
@@ -141,10 +141,9 @@ export async function resolveWorkflowConcurrencyLimits(
   // Guard against a 0 or negative override silently wedging the user out of
   // running anything; treat those as "unset" rather than "blocked".
   const override = row?.maxWorkflowExecutions;
-  const perUser = typeof override === 'number' && override > 0
+  return typeof override === 'number' && override > 0
     ? override
     : PER_USER_EXECUTION_CONCURRENCY_CAP;
-  return { perUser, global: GLOBAL_EXECUTION_CONCURRENCY_CAP };
 }
 
 export async function countActiveExecutions(db: AppDb, userId: string): Promise<number> {

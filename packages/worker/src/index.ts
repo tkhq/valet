@@ -77,6 +77,7 @@ import {
 import { getCredential } from './services/credentials.js';
 import { getDb } from './lib/drizzle.js';
 import { checkWorkflowConcurrency } from './services/executions.js';
+import { resolveUserExecutionCap } from './lib/db/executions.js';
 import { dispatchOrchestratorPrompt } from './services/orchestrator.js';
 import { syncPluginsOnce } from './services/plugin-sync.js';
 import { matchesCronField, getZonedDateParts, cronMatchesNow, findMissedCronTicks } from './lib/cron.js';
@@ -775,6 +776,20 @@ async function dispatchScheduledWorkflows(event: ScheduledController, env: Env):
   let dispatched = 0;
   let catchupDispatched = 0;
 
+  // Per-user execution ceilings are stable for the length of a tick, and one
+  // user commonly owns many schedule triggers. Resolve once per user instead
+  // of once per trigger per pass — D1 serializes on the binding, so repeating
+  // the read across both the normal and catch-up passes adds latency to the
+  // cron path for no benefit.
+  const userCapCache = new Map<string, number>();
+  async function cachedUserCap(userId: string): Promise<number> {
+    const cached = userCapCache.get(userId);
+    if (cached !== undefined) return cached;
+    const cap = await resolveUserExecutionCap(db, userId);
+    userCapCache.set(userId, cap);
+    return cap;
+  }
+
   // Dispatch helper shared by normal and catch-up paths. Returns true if dispatched.
   async function dispatchTrigger(
     row: TriggerRow,
@@ -792,7 +807,9 @@ async function dispatchScheduledWorkflows(event: ScheduledController, env: Env):
         return false;
       }
 
-      const concurrency = await checkWorkflowConcurrency(db, row.user_id);
+      const concurrency = await checkWorkflowConcurrency(db, row.user_id, {
+        perUser: await cachedUserCap(row.user_id),
+      });
       if (!concurrency.allowed) {
         console.warn(
           `${label}Skipping scheduled workflow dispatch for trigger ${row.trigger_id}: ${concurrency.reason} (activeUser=${concurrency.activeUser}, activeGlobal=${concurrency.activeGlobal})`,

@@ -254,7 +254,9 @@ Active executions (`pending`, `running`, `waiting_approval`, `waiting_time`) are
 - **Per-user limit:** 30 (`PER_USER_EXECUTION_CONCURRENCY_CAP`), raisable per user via `users.max_workflow_executions` (NULL = default)
 - **Global limit:** 150 (`GLOBAL_EXECUTION_CONCURRENCY_CAP`), not overridable
 
-Both ceilings come from `resolveWorkflowConcurrencyLimits` in `lib/db/executions.ts`. Callers must not read `users.max_workflow_executions` directly — the pre-dispatch check (`checkWorkflowConcurrency`, used by the schedule and webhook paths) and the authoritative check inside `createExecution` have to agree, and past drift between the two caused regressions.
+The per-user ceiling comes from `resolveUserExecutionCap` in `lib/db/executions.ts`; the global cap is read from the constant directly, since it doesn't vary by tenant. Callers must not read `users.max_workflow_executions` themselves — the pre-dispatch check (`checkWorkflowConcurrency`, used by the schedule and webhook paths) and the authoritative check inside `createExecution` have to agree, and past drift between the two caused regressions.
+
+`resolveUserExecutionCap` is one D1 read per call, so callers dispatching in a loop memoize it by user and pass the result as `checkWorkflowConcurrency`'s `limits.perUser`. The cron dispatcher does this per tick — one user often owns many schedule triggers, and both the normal and catch-up passes would otherwise repeat the read for each.
 
 The global cap bounds D1 write throughput more than it bounds Cloudflare Workflows instances: every node transition writes a `workflow_execution_nodes` row, and D1 serializes writes per binding. Raise it with that in mind rather than treating it as a Workflows quota.
 

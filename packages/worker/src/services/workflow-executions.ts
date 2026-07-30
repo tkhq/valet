@@ -80,10 +80,11 @@ export interface CreateExecutionResult {
   status: 'pending';
 }
 
+import { GLOBAL_EXECUTION_CONCURRENCY_CAP } from '../lib/db/constants.js';
 import {
   countActiveExecutions,
   countActiveExecutionsGlobal,
-  resolveWorkflowConcurrencyLimits,
+  resolveUserExecutionCap,
 } from '../lib/db/executions.js';
 
 export async function createExecution(env: Env, input: CreateExecutionInput): Promise<CreateExecutionResult> {
@@ -219,21 +220,21 @@ export async function createExecution(env: Env, input: CreateExecutionInput): Pr
   // what caused the round-2/round-3 regressions. The count helpers use
   // COUNT(*); the id-list form this replaced would pull back every active
   // row, which at the raised global cap means 150 rows per start.
-  const limits = await resolveWorkflowConcurrencyLimits(db, input.user.id);
+  const perUserCap = await resolveUserExecutionCap(db, input.user.id);
   const activeNow = await countActiveExecutions(db, input.user.id);
-  if (activeNow >= limits.perUser) {
+  if (activeNow >= perUserCap) {
     throw new WorkflowExecutionStartError(
       'rate_limited',
-      `user has ${activeNow} active workflow executions; cap is ${limits.perUser}`,
-      { active: activeNow, limit: limits.perUser },
+      `user has ${activeNow} active workflow executions; cap is ${perUserCap}`,
+      { active: activeNow, limit: perUserCap },
     );
   }
   const globalActive = await countActiveExecutionsGlobal(db);
-  if (globalActive >= limits.global) {
+  if (globalActive >= GLOBAL_EXECUTION_CONCURRENCY_CAP) {
     throw new WorkflowExecutionStartError(
       'rate_limited',
-      `${globalActive} active workflow executions globally; cap is ${limits.global}`,
-      { active: globalActive, limit: limits.global },
+      `${globalActive} active workflow executions globally; cap is ${GLOBAL_EXECUTION_CONCURRENCY_CAP}`,
+      { active: globalActive, limit: GLOBAL_EXECUTION_CONCURRENCY_CAP },
     );
   }
 

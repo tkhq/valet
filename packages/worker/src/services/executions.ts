@@ -9,23 +9,20 @@ import type { AppDb } from '../lib/drizzle.js';
 import {
   countActiveExecutions,
   countActiveExecutionsGlobal,
-  resolveWorkflowConcurrencyLimits,
+  resolveUserExecutionCap,
 } from '../lib/db/executions.js';
+import { GLOBAL_EXECUTION_CONCURRENCY_CAP } from '../lib/db/constants.js';
 
 export async function checkWorkflowConcurrency(
   database: AppDb,
   userId: string,
   limits: { perUser?: number; global?: number } = {},
 ): Promise<{ allowed: boolean; reason?: string; activeUser: number; activeGlobal: number }> {
-  // An explicit `limits` argument still wins (callers that already resolved
-  // the ceilings), otherwise fall back to the user's effective caps.
-  let perUserLimit = limits.perUser;
-  let globalLimit = limits.global;
-  if (perUserLimit === undefined || globalLimit === undefined) {
-    const resolved = await resolveWorkflowConcurrencyLimits(database, userId);
-    perUserLimit ??= resolved.perUser;
-    globalLimit ??= resolved.global;
-  }
+  // An explicit `limits.perUser` still wins, and skips the DB read — callers
+  // dispatching in a loop resolve the cap once and pass it in. The global cap
+  // is a constant, so supplying only `perUser` costs no read at all.
+  const perUserLimit = limits.perUser ?? await resolveUserExecutionCap(database, userId);
+  const globalLimit = limits.global ?? GLOBAL_EXECUTION_CONCURRENCY_CAP;
 
   const activeUser = await countActiveExecutions(database, userId);
   const activeGlobal = await countActiveExecutionsGlobal(database);
