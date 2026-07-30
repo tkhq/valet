@@ -32,7 +32,12 @@ export interface LoopResult {
   iterations: number;
   /** True when `until` fired before the cap (or when no `until` was set and the loop ran to count). */
   satisfied: boolean;
-  /** The final iteration's body outputs, keyed by body node id. */
+  /**
+   * The final iteration's body outputs, keyed by body node id. When
+   * onIterationError='break' cut the loop short this is that iteration's
+   * PARTIAL output — the steps that ran before the failing one — so it always
+   * describes the same pass that `iterations` counts.
+   */
   steps: Record<string, unknown>;
   /** Set when onIterationError='break' cut the loop short; carries the failing step's error. */
   stoppedEarly?: string;
@@ -54,12 +59,18 @@ export async function executeLoop(args: NodeExecutorArgs<LoopNode>): Promise<Loo
     );
   }
 
+  // Charged per body-step execution, not per iteration: a loop with a 3-step
+  // body and maxIterations=10 draws 30 from the budget. The message says so
+  // explicitly, because "iteration" would read as the loop's own counter and
+  // send whoever hits this looking at maxIterations instead.
   const bumpAndCheck = (): void => {
     const next = (args.state.foreachIterationCount ?? 0) + 1;
     args.state.foreachIterationCount = next;
     if (next > CUMULATIVE_ITERATION_CAP) {
       throw new Error(
-        `loop "${node.id}": cumulative iteration ${next} exceeds the per-execution cap of ${CUMULATIVE_ITERATION_CAP}`,
+        `loop "${node.id}": body-step execution ${next} exceeds the per-execution cap of ` +
+        `${CUMULATIVE_ITERATION_CAP} iterations shared with foreach (each loop iteration ` +
+        `spends one per body step)`,
       );
     }
   };
@@ -85,10 +96,16 @@ export async function executeLoop(args: NodeExecutorArgs<LoopNode>): Promise<Loo
         if (err instanceof CancelledError) throw err;
         const message = err instanceof Error ? err.message : String(err);
         if (onIterationError === 'break') {
+          // Return the partial iteration rather than the last complete one.
+          // `steps` is documented as the final iteration's outputs, and the
+          // final iteration is this one — the body steps that ran before the
+          // failure are exactly what a downstream node wants (in the
+          // drafter/reviewer shape, the draft survives a reviewer failure).
+          // `iterations` counts this attempt, so the two agree.
           return {
             iterations,
             satisfied: false,
-            steps: prevSteps ?? {},
+            steps,
             stoppedEarly: `iteration ${iter} step "${bodyNode.id}" failed: ${message}`,
           };
         }

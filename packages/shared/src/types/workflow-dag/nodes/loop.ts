@@ -90,7 +90,7 @@ The canonical shape is two llm body steps: a drafter that writes (reading
       help: 'Exit condition, checked after each iteration. Same shape as if-node conditions; reference steps.<bodyId>, prev.<bodyId>, iteration. Omit to run exactly maxIterations times.',
     },
     onIterationError: {
-      help: 'fail (default) fails the loop on a failed body step; break stops looping and completes with the last full iteration\'s outputs.',
+      help: 'fail (default) fails the loop on a failed body step; break stops looping and completes with the interrupted iteration\'s outputs up to the failing step.',
     },
   },
   gotchas: [

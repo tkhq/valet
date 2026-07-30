@@ -156,9 +156,33 @@ describe('loop — error handling', () => {
     expect(data.satisfied).toBe(false);
     expect(data.iterations).toBe(1);
     expect(data.stoppedEarly).toContain('iteration 0 step "boom" failed');
-    // Steps are the last FULL iteration — none completed, so empty (the
-    // partial iteration's outputs are not exposed).
-    expect(data.steps).toEqual({});
+    // `steps` is the final iteration, including a partial one: 'a' ran before
+    // 'boom' threw, so its output survives the break for downstream nodes.
+    expect(Object.keys(data.steps as Record<string, unknown>)).toEqual(['a']);
+    expect(data.iterations).toBe(1);
+  });
+
+  it("onIterationError='break' exposes every step that ran before the failure", async () => {
+    // The partial iteration is cut exactly at the failing step: steps before
+    // it are present, the failing step and everything after it are absent.
+    const def = loopDef({
+      body: [
+        { id: 'a', type: 'set', values: { n: '{{iteration}}' } },
+        { id: 'b', type: 'set', values: { seen: '{{steps.a.n}}' } },
+        failingStep,
+        { id: 'never', type: 'set', values: { x: '1' } },
+      ],
+      maxIterations: 3,
+      onIterationError: 'break',
+    });
+
+    const { writer } = makeTraceWriter();
+    const result = await runDag(stubEnv, makeParams(def), makeStep(), writer);
+    expect(result.status).toBe('completed');
+    const data = loopData(result);
+    expect(data.satisfied).toBe(false);
+    expect(Object.keys(data.steps as Record<string, unknown>).sort()).toEqual(['a', 'b']);
+    expect(data.stoppedEarly).toContain('step "boom" failed');
   });
 });
 
