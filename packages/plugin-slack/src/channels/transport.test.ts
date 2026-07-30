@@ -1211,6 +1211,37 @@ describe('SlackTransport', () => {
       expect(postedUrls).not.toContain('https://slack.com/api/chat.postMessage');
     });
 
+    it('still posts the text when it differs from the attachment caption', async () => {
+      // De-dup keys on the caption matching the text. When a caller supplies a
+      // caption that is NOT the reply text, suppressing the standalone post
+      // would drop the reply entirely — so both go out.
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ ok: true, upload_url: 'https://upload.example.com', file_id: 'F1' }),
+      );
+      mockFetch.mockResolvedValueOnce(new Response('OK', { status: 200 }));
+      mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }));
+      mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true, ts: '123.456' }));
+
+      const result = await transport.sendMessage(
+        { channelType: 'slack', channelId: 'C456' },
+        {
+          markdown: 'Full analysis of the report follows.',
+          attachments: [{
+            type: 'file' as const,
+            url: 'data:application/pdf;base64,JVBERi0=',
+            mimeType: 'application/pdf',
+            fileName: 'report.pdf',
+            caption: 'report.pdf',
+          }],
+        },
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      const postedUrls = mockFetch.mock.calls.map((call) => call[0]);
+      expect(postedUrls).toContain('https://slack.com/api/chat.postMessage');
+    });
+
     it('returns error when file upload fails at getUploadURLExternal', async () => {
       mockFetch.mockResolvedValueOnce(
         jsonResponse({ ok: false, error: 'not_allowed' }),

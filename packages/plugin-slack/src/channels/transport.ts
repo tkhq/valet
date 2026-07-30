@@ -509,7 +509,7 @@ export class SlackTransport implements ChannelTransport {
     };
 
     // Upload file attachments first
-    let captionDelivered = false;
+    let deliveredCaption: string | null = null;
     if (message.attachments && message.attachments.length > 0) {
       for (const attachment of message.attachments) {
         const uploadResult = await this.uploadFile(target, attachment, ctx.token);
@@ -520,16 +520,29 @@ export class SlackTransport implements ChannelTransport {
         // carry the reply text as both markdown and the attachment caption so the
         // text survives on transports that caption inline. Here, having already
         // delivered it via initial_comment, we must not post it again below.
-        if (attachment.caption) captionDelivered = true;
+        if (attachment.caption) deliveredCaption = attachment.caption;
       }
     }
 
     // Send text message (or return early if attachment-only or the text was
-    // already delivered as an attachment caption).
+    // already delivered verbatim as an attachment caption).
+    //
+    // The skip is conditional on the caption actually matching the text.
+    // buildOutboundMessage sets both from the same string, so the common path
+    // still posts once — but the transport can be handed a message whose
+    // markdown differs from its caption, and suppressing unconditionally would
+    // drop that text silently. Posting both duplicates a little content;
+    // dropping it loses the reply outright.
     const text = message.markdown || message.text || '';
-    if (!text || captionDelivered) {
+    if (!text || deliveredCaption === text) {
       await clearShimmerIfNeeded();
       return { success: true };
+    }
+    if (deliveredCaption !== null) {
+      console.warn(
+        '[SlackTransport] Attachment caption differs from message text; posting both. ' +
+        'Expected the builder to carry one string as both.',
+      );
     }
 
     // For short messages without blocks, use Slack mrkdwn formatting.
