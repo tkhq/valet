@@ -15,6 +15,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { OrgPermissionWire } from "@valet/api/wire";
 
 const patchMeMutate = vi.fn();
 const patchOrgMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -82,7 +83,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: meData, isLoading: false, error: null }),
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
-  useHasPermission: (perm: string) => orgData?.permissions?.includes(perm) === true,
+  useHasPermission: (perm: OrgPermissionWire) => orgData?.permissions?.includes(perm) === true,
   useModels: () => ({ data: modelsData, isLoading: false, error: null }),
   usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
   usePatchOrg: () => ({ mutateAsync: patchOrgMutateAsync, isPending: false, error: null }),
