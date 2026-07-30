@@ -167,6 +167,52 @@ grep -q 'valet.retainedSecretValue' "$CHART_DIR/templates/postgres-secret.yaml" 
   || fail "postgres Secret template does not use the retain-guard helper"
 pass "lookup-retain helper present and used by both Secret templates"
 
+# --- pod-template checksums: rotate the material, roll the pod -----------
+# Env vars from envFrom/secretKeyRef are injected once, at pod start. Without
+# these annotations a `helm upgrade` that only changes a Secret leaves the pod
+# template byte-identical, Kubernetes keeps the running pod, and the OLD value
+# stays live while `helm upgrade --wait` reports success.
+render_api_deploy() {
+  helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+    --show-only templates/deployment.yaml "$@"
+}
+
+render_api_deploy --set api.secrets.anthropicApiKey=key-one > "$TMP_DIR/deploy-key-one.yaml"
+grep -q 'checksum/secret:' "$TMP_DIR/deploy-key-one.yaml" \
+  || fail "api pod template missing checksum/secret — a rotated Secret would not roll the pod"
+grep -q 'checksum/config:' "$TMP_DIR/deploy-key-one.yaml" \
+  || fail "api pod template missing checksum/config — a changed ConfigMap would not roll the pod"
+pass "api pod template carries checksum/secret + checksum/config"
+
+# Both digests must be identical for identical input. The chart generates
+# BETTER_AUTH_SECRET, VALET_ENCRYPTION_KEY and the bundled postgres password
+# fresh on every render that cannot `lookup` them, so a digest taken over the
+# RENDERED Secret churns and restarts the api pod on a no-op upgrade.
+render_api_deploy --set api.secrets.anthropicApiKey=key-one > "$TMP_DIR/deploy-key-one-again.yaml"
+CHECKSUMS_ONE=$(grep 'checksum/' "$TMP_DIR/deploy-key-one.yaml")
+[ "$CHECKSUMS_ONE" = "$(grep 'checksum/' "$TMP_DIR/deploy-key-one-again.yaml")" ] \
+  || fail "pod-template checksums differ across two identical renders — a no-op upgrade would restart the api pod"
+pass "pod-template checksums are stable across identical renders (no churn)"
+
+SECRET_SUM_ONE=$(grep 'checksum/secret:' "$TMP_DIR/deploy-key-one.yaml")
+render_api_deploy --set api.secrets.anthropicApiKey=key-two > "$TMP_DIR/deploy-key-two.yaml"
+[ "$SECRET_SUM_ONE" != "$(grep 'checksum/secret:' "$TMP_DIR/deploy-key-two.yaml")" ] \
+  || fail "checksum/secret unchanged after rotating api.secrets.anthropicApiKey — the api pod would keep the old key"
+pass "checksum/secret tracks api.secrets.*"
+
+# The bundled postgres credentials reach the api as DATABASE_URL through
+# secretKeyRef, so they belong in the same digest.
+render_api_deploy --set postgres.password=rotated-pw > "$TMP_DIR/deploy-pg.yaml"
+[ "$SECRET_SUM_ONE" != "$(grep 'checksum/secret:' "$TMP_DIR/deploy-pg.yaml")" ] \
+  || fail "checksum/secret unchanged after rotating postgres.password"
+pass "checksum/secret tracks the bundled postgres credentials"
+
+CONFIG_SUM_ONE=$(grep 'checksum/config:' "$TMP_DIR/deploy-key-one.yaml")
+render_api_deploy --set api.betterAuthUrl=https://rotated.example.com > "$TMP_DIR/deploy-cfg.yaml"
+[ "$CONFIG_SUM_ONE" != "$(grep 'checksum/config:' "$TMP_DIR/deploy-cfg.yaml")" ] \
+  || fail "checksum/config unchanged after changing a ConfigMap value"
+pass "checksum/config tracks the rendered ConfigMap"
+
 # --- initContainer present on the api Deployment (bundled) ---------------
 echo "$API_DEPLOY_BLOCK" | grep -q 'initContainers:' || fail "api Deployment missing initContainers (bundled)"
 echo "$API_DEPLOY_BLOCK" | grep -q 'wait-for-postgres' || fail "api Deployment missing wait-for-postgres initContainer"
