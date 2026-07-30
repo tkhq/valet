@@ -13,7 +13,7 @@ import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@mariozechner/pi-ai";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { llmProviders } from "../schema/index.js";
+import { llmProviders, orgMembers } from "../schema/index.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "../services/openrouter.js";
 import type {
   CreateLlmProviderResponse,
@@ -92,7 +92,7 @@ describe("POST /api/org/llm-providers", () => {
       body: JSON.stringify({ kind: "anthropic", name: "Anthropic" }),
     });
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: "org admin required" });
+    expect(await res.json()).toEqual({ error: "forbidden" });
   });
 
   it("creates a known-kind provider as admin", async () => {
@@ -273,6 +273,15 @@ describe("GET /api/org/llm-providers", () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: MEMBER_HEADERS });
     expect(res.status).toBe(403);
+  });
+
+  it("operator can list/create llm providers", async () => {
+    api = await bootTestApi();
+    await api.providers.db.update(orgMembers).set({ role: "operator" }).where(eq(orgMembers.userId, "test-member"));
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(200);
   });
 
   it("lists providers scoped to the caller's org only", async () => {

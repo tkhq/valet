@@ -12,6 +12,7 @@
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
 import type { RepoListItem } from "@valet/sdk/repos";
+import type { Permission } from "../auth/permissions.js";
 
 // ── Common ────────────────────────────────────────────────────────────────
 
@@ -866,7 +867,7 @@ export interface MeResponse {
   avatarUrl: string | null;
   role: "admin" | "member";
   orgId: string;
-  orgRole: "admin" | "member";
+  orgRole: "admin" | "operator" | "member";
   defaultModel: string | null;
 }
 
@@ -911,12 +912,21 @@ export interface OrgFeaturesWire {
   organizations: boolean;
 }
 
+/** Wire alias for the server-side `Permission` union. Aliased (not
+ * re-declared) so adding a permission to `auth/permissions.ts`'s
+ * `PERMISSIONS` tuple automatically flows to the web client — the earlier
+ * hand-maintained wire union silently drifted whenever the two sources
+ * disagreed (both were plain string unions, so the compiler didn't catch
+ * it). Type-only import; carries no runtime weight into the web bundle. */
+export type OrgPermissionWire = Permission;
+
 export interface OrgResponse {
   id: string;
   name: string;
   createdAt: number;
   features: OrgFeaturesWire;
-  callerRole: "admin" | "member";
+  callerRole: "admin" | "operator" | "member";
+  permissions: OrgPermissionWire[];
 }
 
 /** Whitelisted fields only — unknown top-level keys 400. */
@@ -932,7 +942,7 @@ export interface OrgMemberWire {
   email: string;
   name: string;
   avatarUrl: string | null;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   joinedAt: number;
 }
 
@@ -941,7 +951,7 @@ export interface OrgMembersResponse {
 }
 
 export interface PatchOrgMemberRequest {
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
 }
 
 export interface PatchOrgMemberResponse {
@@ -955,21 +965,21 @@ export interface PatchOrgMemberResponse {
 
 export interface CreateInviteRequest {
   email?: string;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
 }
 
 export interface CreateInviteResponse {
   id: string;
   code: string;
   email: string | null;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   expiresAt: number;
 }
 
 export interface InviteWire {
   id: string;
   email: string | null;
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   createdBy: string;
   createdAt: number;
   expiresAt: number;

@@ -262,7 +262,7 @@ export const invites = pgTable("invites", {
   id: text("id").primaryKey(),
   codeHash: text("code_hash").notNull().unique(),
   email: text("email"),
-  role: text("role", { enum: ["admin", "member"] }).notNull().default("member"),
+  role: text("role", { enum: ["admin", "operator", "member"] }).notNull().default("member"),
   createdBy: text("created_by").notNull(),
   createdAt: timestamp("created_at").notNull(),
   expiresAt: timestamp("expires_at").notNull(),
@@ -286,7 +286,7 @@ export const orgMembers = pgTable(
   {
     orgId: text("org_id").notNull(),
     userId: text("user_id").notNull(),
-    role: text("role", { enum: ["admin", "member"] }).notNull(),
+    role: text("role", { enum: ["admin", "operator", "member"] }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }),
   },
   (t) => [primaryKey({ columns: [t.orgId, t.userId] })],

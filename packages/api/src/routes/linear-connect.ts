@@ -19,13 +19,14 @@
  *
  * Every route (callback included — the admin's own browser lands there with
  * their session cookie, same model as `github-connect.ts`'s callback) is
- * behind `requireOrgAdmin`.
+ * gated on the `infra:manage` permission (RBAC design), matching
+ * `github-app.ts`'s workspace-installation surface.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
-import { requireOrgAdmin } from "./_org-admin.js";
+import { requirePermission } from "./_org-admin.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
@@ -84,7 +85,7 @@ function linearService(config: OauthAppConfig): LinearService {
 }
 
 linearConnectRouter.post("/connect", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const config = loadOauthAppConfig(process.env);
@@ -115,7 +116,7 @@ linearConnectRouter.post("/connect", async (c) => {
 });
 
 linearConnectRouter.get("/callback", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const code = c.req.query("code");
@@ -232,7 +233,7 @@ linearConnectRouter.get("/callback", async (c) => {
 });
 
 linearConnectRouter.get("/", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const orgId = c.var.user.orgId;
@@ -252,7 +253,7 @@ linearConnectRouter.get("/", async (c) => {
 });
 
 linearConnectRouter.delete("/", async (c) => {
-  const gate = await requireOrgAdmin(c);
+  const gate = requirePermission("infra:manage")(c);
   if (gate) return gate;
 
   const orgId = c.var.user.orgId;

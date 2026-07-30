@@ -1,9 +1,8 @@
 /**
- * `/api/org/llm-providers` — org-admin provider CRUD + encrypted key
- * management (llm-providers design doc, plan Task 3). Same
- * DB-backed `requireOrgAdmin` gate as `routes/org.ts`/`routes/org-invites.ts`
- * (not the JWT-role variant `routes/credentials.ts` uses) — every route
- * below 403s `{ error: "org admin required" }` for non-admins.
+ * `/api/org/llm-providers` — provider CRUD + encrypted key management
+ * (llm-providers design doc, plan Task 3). Gated on the `providers:manage`
+ * permission (RBAC design) — every route below 403s `{ error: "forbidden" }`
+ * for callers without it (org admins and operators both qualify).
  *
  * Provider rows are always scoped to the caller's own org
  * (`orgId = user.orgId`); a row belonging to another org 404s exactly like
@@ -22,7 +21,8 @@ import { Hono, type Context } from "hono";
 import { completeSimple, getEnvApiKey } from "@mariozechner/pi-ai";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { isOrgAdmin, getOrgModelPreferences, setOrgModelPreferences } from "../services/org.js";
+import { getOrgModelPreferences, setOrgModelPreferences } from "../services/org.js";
+import { requirePermission } from "./_org-admin.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import {
   createLlmProvider,
@@ -63,16 +63,6 @@ import type {
 export const llmProvidersRouter = new Hono<AppEnv>();
 
 const PROVIDER_NOT_FOUND = { error: "provider not found" } as const;
-
-/** Org-admin gate applied to every route below — same pattern as `routes/org.ts`. */
-async function requireOrgAdmin(c: Context<AppEnv>) {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
-    return c.json({ error: "org admin required" }, 403);
-  }
-  return undefined;
-}
 
 /** A single custom-provider model entry, validated field-by-field. `id`/`name`
  * are required strings; `contextWindow` and `pricing.{input,output}` are
@@ -144,7 +134,7 @@ async function toSummary(c: Context<AppEnv>, row: LlmProviderRow): Promise<LlmPr
 // ── GET /preferences, PUT /preferences — registered BEFORE /:id ─────────
 
 llmProvidersRouter.get("/preferences", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -155,7 +145,7 @@ llmProvidersRouter.get("/preferences", async (c) => {
 });
 
 llmProvidersRouter.put("/preferences", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db, engineCredentials } = c.var.providers;
@@ -196,7 +186,7 @@ llmProvidersRouter.put("/preferences", async (c) => {
 // (`live: false`).
 
 llmProvidersRouter.get("/openrouter/models", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { models, live } = await mergedOpenrouterModels();
@@ -207,7 +197,7 @@ llmProvidersRouter.get("/openrouter/models", async (c) => {
 // ── GET / — list ──────────────────────────────────────────────────────────
 
 llmProvidersRouter.get("/", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -221,7 +211,7 @@ llmProvidersRouter.get("/", async (c) => {
 // ── POST / — create ──────────────────────────────────────────────────────
 
 llmProvidersRouter.post("/", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -276,7 +266,7 @@ llmProvidersRouter.post("/", async (c) => {
 // ── PATCH /:id — update ──────────────────────────────────────────────────
 
 llmProvidersRouter.patch("/:id", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
@@ -332,7 +322,7 @@ llmProvidersRouter.patch("/:id", async (c) => {
 // ── PUT /:id/key, DELETE /:id/key — key management ──────────────────────
 
 llmProvidersRouter.put("/:id/key", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db, engineCredentials } = c.var.providers;
@@ -365,7 +355,7 @@ llmProvidersRouter.put("/:id/key", async (c) => {
 });
 
 llmProvidersRouter.delete("/:id/key", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db, engineCredentials } = c.var.providers;
@@ -399,7 +389,7 @@ llmProvidersRouter.delete("/:id/key", async (c) => {
 // ── DELETE /:id — delete provider ────────────────────────────────────────
 
 llmProvidersRouter.delete("/:id", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db, engineCredentials } = c.var.providers;
@@ -438,7 +428,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 llmProvidersRouter.post("/:id/probe", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db, engineCredentials } = c.var.providers;
@@ -503,7 +493,7 @@ llmProvidersRouter.post("/:id/probe", async (c) => {
 // ── POST /:id/test — provider test button (1-token completion) ──────────
 
 llmProvidersRouter.post("/:id/test", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
+  const forbidden = requirePermission("providers:manage")(c);
   if (forbidden) return forbidden;
 
   const { db, engineCredentials } = c.var.providers;

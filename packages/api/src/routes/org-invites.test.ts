@@ -27,7 +27,7 @@ describe("POST /api/org/invites", () => {
     });
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("org admin required");
+    expect(body.error).toBe("forbidden");
   });
 
   it("creates an invite as admin, returns the code once", async () => {
@@ -45,6 +45,19 @@ describe("POST /api/org/invites", () => {
     expect(body.role).toBe("member");
     expect(typeof body.expiresAt).toBe("number");
     expect(typeof body.id).toBe("string");
+  });
+
+  it("creates an operator-role invite as admin", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/org/invites`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ email: "op@example.com", role: "operator" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as CreateInviteResponse;
+    expect(body.role).toBe("operator");
   });
 
   it("401s without auth configured", async () => {

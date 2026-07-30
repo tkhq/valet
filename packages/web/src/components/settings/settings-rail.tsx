@@ -1,14 +1,21 @@
 import { Link, useRouterState } from "@tanstack/react-router";
+import type { OrgPermissionWire } from "@valet/api/wire";
 import { useOrg } from "~/api/settings";
 import { cn } from "~/lib/cn";
 
 /**
  * The settings shell's left rail (split-settings design, "Visual direction"
  * + "Routes & navigation"). Two small-caps groups: **You** (always present,
- * four items) and **Organization** (three items, shown only once the
- * `useOrg()` query resolves to gate-on + caller-admin — hidden otherwise,
- * never disabled, and rendered with no flash since it appears only once
- * cached data arrives rather than defaulting open then collapsing).
+ * four items) and **Organization** (shown only once the `useOrg()` query
+ * resolves to gate-on + the caller holds at least one org permission —
+ * hidden otherwise, never disabled, and rendered with no flash since it
+ * appears only once cached data arrives rather than defaulting open then
+ * collapsing). Within the Organization group, each entry is further gated
+ * on the specific permission that entry's page requires (RBAC design):
+ * General → `org:manage`, Members/Teams → `members:manage`, Models →
+ * `providers:manage`, GitHub/Sandbox images → `infra:manage`. The
+ * `features.organizations` gate is unchanged from the earlier admin-only
+ * design — it still governs the whole group.
  *
  * Active-state styling is computed from the current pathname (via `cn`'s
  * `twMerge`) rather than TanStack's `activeProps`, which only concatenates
@@ -31,31 +38,47 @@ const YOU_ITEMS = [
  * the same sections; the org-admin API authorizes the seeded local user). */
 const MODELS_ITEM = { to: "/settings/models", label: "Models" } as const;
 
-const ORGANIZATION_ITEMS = [
-  { to: "/settings/organization", label: "General" },
-  { to: "/settings/organization/members", label: "Members" },
-  { to: "/settings/organization/teams", label: "Teams" },
-  { to: "/settings/organization/models", label: "Models" },
-  { to: "/settings/organization/github", label: "GitHub" },
-  { to: "/settings/organization/sandbox-images", label: "Sandbox images" },
+const ORGANIZATION_ITEMS: ReadonlyArray<{
+  to: string;
+  label: string;
+  permission: OrgPermissionWire;
+}> = [
+  { to: "/settings/organization", label: "General", permission: "org:manage" },
+  { to: "/settings/organization/members", label: "Members", permission: "members:manage" },
+  { to: "/settings/organization/teams", label: "Teams", permission: "members:manage" },
+  { to: "/settings/organization/models", label: "Models", permission: "providers:manage" },
+  { to: "/settings/organization/github", label: "GitHub", permission: "infra:manage" },
+  {
+    to: "/settings/organization/sandbox-images",
+    label: "Sandbox images",
+    permission: "infra:manage",
+  },
 ] as const;
 
 export function SettingsRail() {
   const orgQ = useOrg();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const permissions = orgQ.data?.permissions ?? [];
   const showOrganizationGroup =
-    orgQ.data?.features.organizations === true && orgQ.data.callerRole === "admin";
+    orgQ.data?.features.organizations === true && permissions.length > 0;
+  const organizationItems = ORGANIZATION_ITEMS.filter((item) =>
+    permissions.includes(item.permission),
+  );
 
-  // Wait for `useOrg()` to resolve before appending — same no-flash rule as
-  // the Organization group (an org-mode admin must never see the item
-  // appear and then vanish).
-  const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
+  // MODELS_ITEM is a single-user-mode stand-in — only appended when the
+  // deploy is truly not-organizations (features.organizations === false).
+  // A member in an org-mode deploy who happens to lack permissions must
+  // NOT see it; they have no /settings/models access. Wait for
+  // `useOrg()` to resolve before appending to avoid the same appear-then-
+  // vanish flash the Organization group guards against.
+  const singleUserMode = orgQ.data?.features.organizations === false;
+  const youItems = singleUserMode ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">
       <RailGroup label="You" items={youItems} pathname={pathname} />
       {showOrganizationGroup && (
-        <RailGroup label="Organization" items={ORGANIZATION_ITEMS} pathname={pathname} />
+        <RailGroup label="Organization" items={organizationItems} pathname={pathname} />
       )}
     </nav>
   );

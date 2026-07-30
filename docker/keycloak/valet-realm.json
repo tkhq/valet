@@ -2,6 +2,9 @@
   "realm": "valet",
   "enabled": true,
   "registrationAllowed": false,
+  "roles": {
+    "realm": [{ "name": "valet-admin" }, { "name": "valet-operator" }]
+  },
   "clients": [
     {
       "clientId": "valet",
@@ -29,7 +32,7 @@
       "enabled": true,
       "firstName": "Alice",
       "lastName": "Dev",
-      "realmRoles": ["offline_access"],
+      "realmRoles": ["offline_access", "valet-admin"],
       "credentials": [
         {
           "type": "password",
@@ -45,7 +48,7 @@
       "enabled": true,
       "firstName": "Bob",
       "lastName": "Dev",
-      "realmRoles": ["offline_access"],
+      "realmRoles": ["offline_access", "valet-operator"],
       "credentials": [
         {
           "type": "password",

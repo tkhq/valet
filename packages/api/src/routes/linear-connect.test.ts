@@ -73,7 +73,7 @@ describe("POST /api/org/linear/connect", () => {
     useFixture();
     const res = await fetch(`${api.baseUrl}/api/org/linear/connect`, { method: "POST", headers: MEMBER_HEADERS });
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: "org admin required" });
+    expect(await res.json()).toEqual({ error: "forbidden" });
   });
 
   it("503s with a clear message when LINEAR_CLIENT_ID/SECRET are unset", async () => {

@@ -22,7 +22,9 @@ import {
   oauthConsent,
 } from "../schema/index.js";
 import type { AuthConfig } from "./config.js";
+import type { OrgRole } from "./permissions.js";
 import type { buildAuthHooks } from "./provisioning.js";
+import { decodeJwtClaims, extractMappedRole, syncSsoOrgRole } from "./sso-role-sync.js";
 
 export interface BuildAuthOpts {
   db: AppDb;
@@ -150,6 +152,61 @@ export interface ValetAuth {
 }
 
 /**
+ * Builds the sso plugin's `provisionUser` callback, closing over the
+ * already-narrowed `roleMap`/`roleClaim` so the callback body itself needs
+ * no further `cfg.oidc` narrowing (or `?? []`-style masking of the "unset"
+ * case, which can't happen here — the caller only invokes this when
+ * `cfg.oidc.roleMap` is set).
+ *
+ * Parameter type is a minimal local shape, not `@better-auth/sso`'s
+ * `provisionUser` data type: `userInfo`/`token` are `Record<string, any>` /
+ * loosely-typed upstream (see `SSOOptions["provisionUser"]` in
+ * `@better-auth/sso`'s dist types), so a structural subset here both avoids
+ * `any` leaking into our code and still satisfies the plugin's contravariant
+ * parameter position.
+ */
+function buildProvisionUser(db: AppDb, roleMap: { claimValue: string; role: OrgRole }[], roleClaim: string) {
+  return async (data: {
+    user: { id: string };
+    userInfo: Record<string, unknown>;
+    token?: { idToken?: string };
+  }): Promise<void> => {
+    const idToken = data.token?.idToken;
+    const resolution = extractMappedRole({
+      roleMap,
+      roleClaim,
+      userInfo: data.userInfo,
+      idTokenClaims: idToken ? (decodeJwtClaims(idToken) ?? undefined) : undefined,
+    });
+    // Both `no-claim-values` and `no-map-match` collapse to `member` — log
+    // which one fired so an operator investigating a silent demotion can
+    // see whether the IdP stopped sending the claim entirely or is
+    // sending values the roleMap doesn't cover. `syncSsoOrgRole` itself
+    // logs the actual write; this only names the *why*.
+    if (resolution.source === "no-claim-values") {
+      console.warn(
+        `[sso-role-sync] user ${data.user.id}: no values at claim "${roleClaim}" in userInfo or idToken; ` +
+          `defaulting to "member". This will demote any admin/operator on next login.`,
+      );
+    } else if (resolution.source === "no-map-match") {
+      console.warn(
+        `[sso-role-sync] user ${data.user.id}: claim "${roleClaim}" had values ` +
+          `[${resolution.observedValues.map((v) => JSON.stringify(v)).join(", ")}] but none matched ` +
+          `AUTH_OIDC_ROLE_MAP; defaulting to "member". This will demote any admin/operator on next login.`,
+      );
+    }
+    try {
+      await syncSsoOrgRole(db, data.user.id, resolution.role);
+    } catch (err) {
+      // Sync is idempotent and re-runs on the next login — a transient DB
+      // error here must never brick the login itself. A stale role beats
+      // a bricked login.
+      console.error(`[sso-role-sync] failed to sync org role for user ${data.user.id}:`, err);
+    }
+  };
+}
+
+/**
  * `oidcConfig.pkce`/`discoveryEndpoint` are required by `@better-auth/sso`'s
  * `OIDCConfig` type (unlike the DB-registered-provider API path, which
  * defaults them at runtime) — computed here from `issuer` per the standard
@@ -221,6 +278,12 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
                   },
                 },
               ],
+              ...(cfg.oidc.roleMap
+                ? {
+                    provisionUser: buildProvisionUser(db, cfg.oidc.roleMap, cfg.oidc.roleClaim),
+                    provisionUserOnEveryLogin: true,
+                  }
+                : {}),
             }
           : {}),
       }),

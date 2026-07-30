@@ -187,6 +187,7 @@ describe("loadAuthConfig", () => {
       clientSecret: "client-secret",
       name: "SSO", // default
       domain: "oidc.example.com", // from issuer hostname
+      roleClaim: "realm_access.roles", // default
     });
   });
 
@@ -353,6 +354,7 @@ describe("loadAuthConfig", () => {
         clientSecret: "oidc-secret",
         name: "Corporate SSO",
         domain: "corp.example.com",
+        roleClaim: "realm_access.roles",
       },
       social: {
         google: {
@@ -366,5 +368,57 @@ describe("loadAuthConfig", () => {
       },
       sandboxJwtMaster: "sandbox-key",
     });
+  });
+
+  // OIDC role-map configuration
+  const baseOidcEnv = {
+    BETTER_AUTH_SECRET: "secret",
+    AUTH_OIDC_ISSUER: "https://oidc.example.com",
+    AUTH_OIDC_CLIENT_ID: "client-id",
+    AUTH_OIDC_CLIENT_SECRET: "client-secret",
+  };
+
+  it("parses AUTH_OIDC_ROLE_MAP preserving order and AUTH_OIDC_ROLE_CLAIM default", () => {
+    const cfg = loadAuthConfig({
+      ...baseOidcEnv,
+      AUTH_OIDC_ROLE_MAP: "valet-admin:admin, valet-operator:operator",
+    });
+    expect(cfg?.oidc?.roleMap).toEqual([
+      { claimValue: "valet-admin", role: "admin" },
+      { claimValue: "valet-operator", role: "operator" },
+    ]);
+    expect(cfg?.oidc?.roleClaim).toBe("realm_access.roles");
+  });
+
+  it("honors AUTH_OIDC_ROLE_CLAIM override", () => {
+    const cfg = loadAuthConfig({
+      ...baseOidcEnv,
+      AUTH_OIDC_ROLE_MAP: "x:member",
+      AUTH_OIDC_ROLE_CLAIM: "resource_access.valet.roles",
+    });
+    expect(cfg?.oidc?.roleClaim).toBe("resource_access.valet.roles");
+  });
+
+  it("throws on an unknown role in the map", () => {
+    expect(() =>
+      loadAuthConfig({ ...baseOidcEnv, AUTH_OIDC_ROLE_MAP: "x:owner" })
+    ).toThrow(/AUTH_OIDC_ROLE_MAP/);
+  });
+
+  it("throws on a malformed pair", () => {
+    expect(() =>
+      loadAuthConfig({ ...baseOidcEnv, AUTH_OIDC_ROLE_MAP: "justoneword" })
+    ).toThrow(/AUTH_OIDC_ROLE_MAP/);
+  });
+
+  it("throws when ROLE_MAP is set without OIDC configured", () => {
+    expect(() =>
+      loadAuthConfig({ BETTER_AUTH_SECRET: "s", AUTH_OIDC_ROLE_MAP: "x:admin" })
+    ).toThrow(/AUTH_OIDC_ROLE_MAP/);
+  });
+
+  it("does not include roleMap and roleClaim when OIDC is not configured", () => {
+    const cfg = loadAuthConfig({ BETTER_AUTH_SECRET: "secret" });
+    expect(cfg?.oidc).toBeUndefined();
   });
 });

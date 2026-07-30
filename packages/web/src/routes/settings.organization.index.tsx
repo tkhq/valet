@@ -11,6 +11,7 @@ import {
   Spinner,
 } from "~/components/primitives";
 import { useOrg, usePatchOrg } from "~/api/settings";
+import { OrgPermissionGuard } from "./settings.organization";
 
 /**
  * `/settings/organization` (index) — Organization · General. Org name +
@@ -18,12 +19,23 @@ import { useOrg, usePatchOrg } from "~/api/settings";
  * which confirms before flipping `features.organizations` off (spec: the
  * confirm copy must state that nothing is deleted — teams and members stay
  * dormant, not removed) and then returns the caller to their own settings.
+ * Gated on `org:manage` (RBAC design) — the layout only checks "any org
+ * permission", so an operator (providers/infra/credentials) reaching this
+ * route directly sees the standard org empty state.
  */
 export const Route = createFileRoute("/settings/organization/")({
   component: OrganizationGeneralPage,
 });
 
 export function OrganizationGeneralPage() {
+  return (
+    <OrgPermissionGuard permission="org:manage">
+      <OrganizationGeneralPageContent />
+    </OrgPermissionGuard>
+  );
+}
+
+function OrganizationGeneralPageContent() {
   const orgQ = useOrg();
   const patchOrg = usePatchOrg();
   const navigate = useNavigate();

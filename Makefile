@@ -141,6 +141,8 @@ dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO p
 	@echo "  AUTH_OIDC_DOMAIN=valet.test"
 	@echo "  AUTH_OIDC_NAME=Keycloak"
 	@echo "  AUTH_TRUSTED_ORIGINS=http://localhost:8081  # sso plugin trusts the issuer's discovery URL"
+	@echo "  AUTH_OIDC_ROLE_MAP=valet-admin:admin,valet-operator:operator"
+	@echo "  # AUTH_OIDC_ROLE_CLAIM defaults to realm_access.roles — override only for non-Keycloak IdPs"
 	@echo "Test users: alice@valet.test / bob@valet.test, password 'password'"
 
 dev-keycloak-down: ## Stop the local Keycloak container

@@ -1,17 +1,18 @@
 /**
  * Org service — org membership, feature gate, and org-scoped settings
  * (split-settings design). `org_members.role` is the real authz source for
- * "is this user an admin of this org"; `users.role` remains the global
- * *operator* gate for `/api/admin` only (see `requireOrgAdmin`'s doc
- * comment on the routes that use it).
+ * org surfaces (three tiers: admin/operator/member — see
+ * `auth/permissions.ts`'s RBAC vocabulary); `users.role` remains the global
+ * *operator* gate for `/api/admin` only.
  */
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import type { OrgRole } from "../auth/permissions.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 
-export type OrgRole = "admin" | "member";
+export { type OrgRole, isOrgRole } from "../auth/permissions.js";
 
 export interface OrgFeatures {
   organizations: boolean;
@@ -168,7 +169,7 @@ export async function setOrgMemberRole(
       return { ok: false, reason: "not_found", error: MEMBER_NOT_FOUND_ERROR };
     }
 
-    if (member.role === "admin" && role === "member") {
+    if (member.role === "admin" && role !== "admin") {
       const admins = await countOrgAdmins(tx, orgId);
       if (admins <= 1) {
         return { ok: false, reason: "last_admin", error: LAST_ADMIN_ERROR };

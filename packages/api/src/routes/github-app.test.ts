@@ -107,7 +107,7 @@ describe("GET /api/org/github-app", () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: MEMBER_HEADERS });
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: "org admin required" });
+    expect(await res.json()).toEqual({ error: "forbidden" });
   });
 
   it("reports unconfigured with an empty installations list and manual webhook mode", async () => {

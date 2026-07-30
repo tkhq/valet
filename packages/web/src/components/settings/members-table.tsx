@@ -3,7 +3,6 @@ import type { OrgMemberWire } from "@valet/api/wire";
 import {
   Avatar,
   AvatarFallback,
-  Badge,
   Button,
   DropdownMenu,
   DropdownMenuContent,
@@ -12,6 +11,7 @@ import {
   Tooltip,
 } from "~/components/primitives";
 import { useSetOrgMemberRole } from "~/api/settings";
+import { RoleBadge } from "./role-badge";
 
 const SOLE_ADMIN_TOOLTIP = "an organization needs at least one admin";
 
@@ -81,9 +81,9 @@ function RoleControl({
   disabled,
   onSelect,
 }: {
-  role: "admin" | "member";
+  role: "admin" | "operator" | "member";
   disabled: boolean;
-  onSelect: (role: "admin" | "member") => void;
+  onSelect: (role: "admin" | "operator" | "member") => void;
 }) {
   const trigger = (
     <Button
@@ -93,9 +93,7 @@ function RoleControl({
       disabled={disabled}
       className="gap-1.5"
     >
-      <Badge variant={role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
-        {role === "admin" ? "Admin" : "Member"}
-      </Badge>
+      <RoleBadge role={role} className="pointer-events-none" />
       <ChevronDown className="h-3.5 w-3.5" aria-hidden />
     </Button>
   );
@@ -113,6 +111,7 @@ function RoleControl({
       <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onSelect={() => onSelect("admin")}>Admin</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onSelect("operator")}>Operator</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onSelect("member")}>Member</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

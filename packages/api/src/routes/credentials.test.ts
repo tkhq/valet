@@ -5,7 +5,9 @@
  * `plugins.test.ts` — flip `VALET_LOCAL_AUTH` off for one request).
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { orgMembers } from "../schema/index.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -267,5 +269,19 @@ describe("GET /api/credentials", () => {
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+});
+
+describe("org-scope gate follows org_members.role", () => {
+  it("org-scope credential access follows org_members.role, not users.role", async () => {
+    api = await bootTestApi();
+    // test-admin is seeded with users.role admin AND org_members.role admin;
+    // demote ONLY the org membership.
+    await api.providers.db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.userId, "test-admin"));
+
+    const res = await fetch(`${api.baseUrl}/api/credentials?scope=org`, {
+      headers: { "x-valet-test-user-id": "test-admin" },
+    });
+    expect(res.status).toBe(403); // was 200 pre-fix — stale users.role honored
   });
 });

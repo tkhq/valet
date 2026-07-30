@@ -72,6 +72,8 @@ Keycloak is configured via the sso plugin's **`defaultSSO` option** (config-only
 
 Keycloak client config gets redirect URI `{BETTER_AUTH_URL}/api/auth/sso/callback/oidc`; social providers use `{BETTER_AUTH_URL}/api/auth/callback/{google|github}`. Google is configured with `accessType: "offline"` + `prompt: "select_account consent"` so a refresh token is captured. better-auth requests the `offline_access` scope on SSO sign-in, so Keycloak users need the `offline_access` realm role (default in stock realms; explicit in imported ones) or the token exchange fails with `not_allowed`. A local Keycloak harness for this flow ships in `docker-compose.yml` (`make dev-keycloak`, realm import at `docker/keycloak/valet-realm.json`).
 
+Mapping IdP roles (e.g. Keycloak realm roles) onto Valet org roles is `AUTH_OIDC_ROLE_MAP`'s job — see `2026-07-21-rbac-permissions-design.md` for the role-map contract and claim-path (`AUTH_OIDC_ROLE_CLAIM`) semantics.
+
 Rate limiting: better-auth's built-in limiter (enabled in production; `/sign-in/email` 3 req/10s built-in rule). In-memory storage is acceptable — the api is a single Node process.
 
 ## Schema

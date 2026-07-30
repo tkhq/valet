@@ -63,13 +63,17 @@ describe("evaluateAdmission", () => {
   it("admits the first user in the db as admin, regardless of domain/invite", async () => {
     const cfg = baseConfig();
     const result = await evaluateAdmission(db, cfg, "anyone@nowhere.test");
-    expect(result).toEqual({ allowed: true, role: "admin" });
+    expect(result).toEqual({ allowed: true, role: "admin", orgRole: "admin" });
   });
 
   it("admits a matching email domain as member (case-insensitive, exact domain)", async () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    expect(await evaluateAdmission(db, cfg, "New@Example.COM")).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, cfg, "New@Example.COM")).toEqual({
+      allowed: true,
+      role: "member",
+      orgRole: "member",
+    });
   });
 
   it("does NOT match a subdomain of an allowed domain", async () => {
@@ -85,6 +89,7 @@ describe("evaluateAdmission", () => {
     expect(await evaluateAdmission(db, cfg, "whoever@nowhere.test", code)).toEqual({
       allowed: true,
       role: "admin",
+      orgRole: "admin",
       inviteId: invite.id,
     });
   });
@@ -96,6 +101,19 @@ describe("evaluateAdmission", () => {
     expect(await evaluateAdmission(db, cfg, "invitee@nowhere.test")).toEqual({
       allowed: true,
       role: "member",
+      orgRole: "member",
+      inviteId: invite.id,
+    });
+  });
+
+  it("admits a valid operator-role invite: binary role member, orgRole operator", async () => {
+    await seedUser(db, "u1", "existing@x.test");
+    const cfg = baseConfig();
+    const { invite, code } = await createInvite(db, { role: "operator", createdBy: "admin1" });
+    expect(await evaluateAdmission(db, cfg, "whoever@nowhere.test", code)).toEqual({
+      allowed: true,
+      role: "member",
+      orgRole: "operator",
       inviteId: invite.id,
     });
   });
@@ -110,7 +128,11 @@ describe("evaluateAdmission", () => {
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
     await createInvite(db, { email: "first@nowhere.test", role: "member", createdBy: "admin1" });
     // db has zero users still — first-user wins over domain match and invite.
-    expect(await evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({ allowed: true, role: "admin" });
+    expect(await evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({
+      allowed: true,
+      role: "admin",
+      orgRole: "admin",
+    });
   });
 
   it("precedence: domain match beats invite", async () => {
@@ -119,7 +141,7 @@ describe("evaluateAdmission", () => {
     const { invite } = await createInvite(db, { email: "person@example.com", role: "admin", createdBy: "admin1" });
     // Domain match resolves to "member" even though an admin invite also matches this email.
     const result = await evaluateAdmission(db, cfg, "person@example.com");
-    expect(result).toEqual({ allowed: true, role: "member" });
+    expect(result).toEqual({ allowed: true, role: "member", orgRole: "member" });
     // The invite itself is untouched (evaluateAdmission never mutates).
     const rows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
     expect(rows[0]?.acceptedBy).toBeNull();
@@ -132,6 +154,7 @@ describe("evaluateAdmission", () => {
     expect(await evaluateAdmission(db, cfg, "person@nowhere.test", "not-a-real-code")).toEqual({
       allowed: true,
       role: "member",
+      orgRole: "member",
       inviteId: invite.id,
     });
   });
@@ -297,6 +320,43 @@ describe("buildAuthHooks", () => {
 
       const inviteRows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
       expect(inviteRows[0]?.acceptedBy).toBe("u-invitee");
+    });
+
+    it("redeeming an operator invite stamps users.role=member but org_members.role=operator", async () => {
+      const cfg = baseConfig();
+      const { invite } = await createInvite(db, {
+        email: "op-invitee@nowhere.test",
+        role: "operator",
+        createdBy: "admin1",
+      });
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
+
+      const user = makeUser({ id: "u-op-invitee", email: "op-invitee@nowhere.test" });
+      const before = await databaseHooks!.user!.create!.before!(user, dbHookCtx({ path: "/callback/google" }));
+      expect(before).not.toBe(false);
+      const stampedRole = (before as { data: { role: string } }).data.role;
+      // The GLOBAL users.role flag stays binary — an operator invite never stamps "operator" there.
+      expect(stampedRole).toBe("member");
+
+      await db
+        .insert(users)
+        .values({ id: user.id, email: user.email, name: user.name, role: stampedRole as "admin" | "member" });
+      await databaseHooks!.user!.create!.after!({ ...user, role: stampedRole }, dbHookCtx({ path: "/callback/google" }));
+
+      const userRows = await db.select().from(users).where(eq(users.id, "u-op-invitee")).limit(1);
+      expect(userRows[0]?.role).toBe("member");
+
+      const orgRows = await db.select().from(orgs).limit(1);
+      const org = orgRows[0];
+      const membershipRows = await db
+        .select()
+        .from(orgMembers)
+        .where(eq(orgMembers.userId, "u-op-invitee"))
+        .limit(1);
+      expect(membershipRows[0]).toMatchObject({ orgId: org!.id, userId: "u-op-invitee", role: "operator" });
+
+      const inviteRows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
+      expect(inviteRows[0]?.acceptedBy).toBe("u-op-invitee");
     });
 
     it("reuses the existing org row rather than creating a second one", async () => {

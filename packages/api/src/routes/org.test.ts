@@ -8,8 +8,10 @@
  *     off => 404 `{error:"organizations not enabled"}` even for admins.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { LAST_ADMIN_ERROR } from "../services/org.js";
+import { orgMembers } from "../schema/index.js";
 import type { OrgMembersResponse, OrgResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -51,6 +53,15 @@ describe("GET /api/org", () => {
     expect(memberRes.status).toBe(200);
     const memberBody = (await memberRes.json()) as OrgResponse;
     expect(memberBody.callerRole).toBe("member");
+  });
+
+  it("returns the caller's permissions", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/org`, { headers: HEADERS });
+    const body = (await res.json()) as OrgResponse;
+    expect(body.callerRole).toBe("admin"); // stub identity
+    expect(body.permissions).toEqual(["org:manage", "members:manage", "providers:manage", "infra:manage", "credentials:org"]);
   });
 
   it("401s without auth configured", async () => {
@@ -280,6 +291,28 @@ describe("PATCH /api/org/members/:userId", () => {
     expect(body.error).toBe(LAST_ADMIN_ERROR);
   });
 
+  it("400s with the exact copy string when demoting the sole admin to operator", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+
+    // Demote test-admin (the second admin) first so local-user is sole admin.
+    const demoteSecond = await fetch(`${api.baseUrl}/api/org/members/test-admin`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ role: "member" }),
+    });
+    expect(demoteSecond.status).toBe(200);
+
+    const res = await fetch(`${api.baseUrl}/api/org/members/local-user`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ role: "operator" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(LAST_ADMIN_ERROR);
+  });
+
   it("401s without auth configured", async () => {
     api = await bootTestApi();
     await enableGate(api.baseUrl);
@@ -321,5 +354,24 @@ describe("PATCH /api/org/members/:userId", () => {
       body: JSON.stringify({ role: "owner" }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("operator role", () => {
+  it("gets 403 from PATCH /api/org and member management", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+    await api.providers.db.update(orgMembers).set({ role: "operator" }).where(eq(orgMembers.userId, "test-member"));
+    const asOperator = { headers: { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" } };
+
+    const patch = await fetch(`${api.baseUrl}/api/org`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "x" }),
+      ...asOperator,
+    });
+    expect(patch.status).toBe(403);
+
+    const members = await fetch(`${api.baseUrl}/api/org/members`, { headers: asOperator.headers });
+    expect(members.status).toBe(403);
   });
 });

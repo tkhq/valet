@@ -35,6 +35,7 @@ import type {
   MeResponse,
   OpenrouterRegistryResponse,
   OrgMembersResponse,
+  OrgPermissionWire,
   OrgResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
@@ -95,6 +96,21 @@ export function useOrg(opts?: UseQueryOptions<OrgResponse>) {
     queryFn: () => api.getOrg(),
     ...opts,
   });
+}
+
+/**
+ * Reads a single permission gate against the current org response. Returns
+ * `false` while the org query is still loading (permission-denying default —
+ * gated UI should stay hidden until the data proves the caller is allowed,
+ * not the other way round). Callers that need the loading state explicitly
+ * should keep using `useOrg()` directly; this hook is the "just tell me
+ * yes/no" shorthand shared across settings pages, so a rename in the
+ * `Permission` vocabulary flows through one hook instead of N inline
+ * `permissions.includes(...)` sites.
+ */
+export function useHasPermission(permission: OrgPermissionWire): boolean {
+  const orgQ = useOrg();
+  return orgQ.data?.permissions.includes(permission) === true;
 }
 
 export function useOrgMembers(opts?: UseQueryOptions<OrgMembersResponse>) {

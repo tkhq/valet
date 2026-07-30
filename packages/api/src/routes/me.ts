@@ -2,9 +2,10 @@
  * `/api/me` — settings-shell per-user profile surface (split-settings
  * design). Returns `MeResponse` with user profile and org membership info.
  *
- * `GET` joins `users` with `org_members` for `orgRole` — a caller with no
- * membership row (shouldn't happen outside tests, but the query doesn't
- * assume it) reads as `"member"`.
+ * `orgRole` comes straight from `AuthUser.orgRole` — the auth middleware
+ * already resolved it against `org_members.role` per request (defaults to
+ * `"member"` when no membership row exists; see `middleware/auth.ts`'s
+ * `resolveOrgRole`).
  *
  * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`);
  * any other key 400s rather than being silently ignored, so a typo'd field
@@ -15,11 +16,12 @@
  * override back to the host default.
  */
 import { Hono } from "hono";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { requireUser } from "../middleware/auth.js";
-import { orgMembers, users } from "../schema/index.js";
+import { users } from "../schema/index.js";
+import type { OrgRole } from "../auth/permissions.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
@@ -29,18 +31,11 @@ const PATCH_FIELDS = new Set(["name", "avatarUrl", "defaultModel"]);
 
 async function loadMeResponse(
   db: AppDb,
-  user: { id: string; email: string; role: "admin" | "member"; orgId: string },
+  user: { id: string; email: string; role: "admin" | "member"; orgId: string; orgRole: OrgRole },
 ): Promise<MeResponse | undefined> {
   const rows = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
-
-  const membershipRows = await db
-    .select({ role: orgMembers.role })
-    .from(orgMembers)
-    .where(and(eq(orgMembers.orgId, user.orgId), eq(orgMembers.userId, user.id)))
-    .limit(1);
-  const membership = membershipRows[0];
 
   return {
     id: row.id,
@@ -49,7 +44,9 @@ async function loadMeResponse(
     avatarUrl: row.image,
     role: user.role,
     orgId: user.orgId,
-    orgRole: membership?.role ?? "member",
+    // `org_members.role` — the auth middleware already resolved this per
+    // request (middleware/auth.ts's `resolveOrgRole`); no need to re-query.
+    orgRole: user.orgRole,
     defaultModel: row.defaultModel,
   };
 }

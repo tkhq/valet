@@ -25,7 +25,6 @@ import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { teamMembers, teams, type TeamRow } from "../schema/index.js";
-import { isOrgAdmin } from "../services/org.js";
 import {
   addMember,
   createTeam,
@@ -91,9 +90,10 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
 
 /**
  * Gates the four mutation routes (delete team, add/set-role/remove member):
- * the caller must be a team admin of `teamId`, or an org admin (per
- * `org_members.role`, not the global `users.role` operator flag). Org admin
- * is a deliberate recovery path (e.g. the team's last admin left the org) —
+ * the caller must be a team admin of `teamId`, or hold the org-level
+ * `members:manage` permission (RBAC design — org admins only today; not
+ * the global `users.role` operator flag). The org-permission override is
+ * a deliberate recovery path (e.g. the team's last admin left the org) —
  * not a general-purpose bypass, so keep it narrow and don't extend it to
  * plain org membership.
  */
@@ -102,7 +102,7 @@ async function canMutateTeam(
   teamId: string,
   user: AuthUser,
 ): Promise<boolean> {
-  if (await isOrgAdmin(db, user.orgId, user.id)) return true;
+  if (user.permissions.has("members:manage")) return true;
   const members = await db
     .select()
     .from(teamMembers)
@@ -113,15 +113,16 @@ async function canMutateTeam(
 
 /**
  * Gates read access to a team's member roster: any member of the team, or
- * any org admin (admins manage the whole org's teams, not just ones they're
- * on) — looser than `canMutateTeam`, which requires *team*-admin.
+ * any caller holding `members:manage` (admins manage the whole org's teams,
+ * not just ones they're on) — looser than `canMutateTeam`, which requires
+ * *team*-admin.
  */
 async function canViewTeam(
   db: AppEnv["Variables"]["providers"]["db"],
   teamId: string,
   user: AuthUser,
 ): Promise<boolean> {
-  if (await isOrgAdmin(db, user.orgId, user.id)) return true;
+  if (user.permissions.has("members:manage")) return true;
   const members = await db
     .select()
     .from(teamMembers)
@@ -136,10 +137,14 @@ teamsRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
 
-  // Org admins manage every team in the org, not just ones they belong to;
-  // plain members still only see their own memberships.
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-  const rows = admin
+  // Callers holding `members:manage` see every team in the org (admins
+  // today; whichever future role earns that permission will too). Plain
+  // members still only see their own memberships. Uses the auth
+  // middleware's pre-resolved permission set instead of a fresh
+  // isOrgAdmin DB read — same file's canMutateTeam/canViewTeam already
+  // use this seam, and it removes one roundtrip per list request.
+  const canManage = user.permissions.has("members:manage");
+  const rows = canManage
     ? await listTeamsForOrg(db, user.orgId)
     : (await listTeamsForUser(db, user.id)).filter((r) => r.orgId === user.orgId);
 

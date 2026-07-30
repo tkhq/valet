@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { InviteWire } from "@valet/api/wire";
 import {
-  Badge,
   Button,
   Dialog,
   DialogContent,
@@ -11,6 +10,7 @@ import {
   Spinner,
 } from "~/components/primitives";
 import { RadioCard } from "./radio-card";
+import { RoleBadge } from "./role-badge";
 import { useCreateInvite, useInvites, useRevokeInvite } from "~/api/invites";
 
 function formatDate(ts: number): string {
@@ -79,9 +79,7 @@ function InviteRow({ invite }: { invite: InviteWire }) {
         <div className="truncate text-sm text-ink">{invite.email ?? "anyone with the link"}</div>
         <div className="text-xs text-muted">Expires {formatDate(invite.expiresAt)}</div>
       </div>
-      <Badge variant={invite.role === "admin" ? "accent" : "neutral"} className="shrink-0">
-        {invite.role === "admin" ? "Admin" : "Member"}
-      </Badge>
+      <RoleBadge role={invite.role} className="shrink-0" />
       {confirming ? (
         <span className="flex shrink-0 items-center gap-2">
           <Button
@@ -120,7 +118,7 @@ function InviteRow({ invite }: { invite: InviteWire }) {
 
 function InviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"member" | "admin">("member");
+  const [role, setRole] = useState<"member" | "operator" | "admin">("member");
   const [code, setCode] = useState<string | null>(null);
   const createInvite = useCreateInvite();
 
@@ -172,6 +170,12 @@ function InviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (op
                   description="Can use the app."
                   selected={role === "member"}
                   onSelect={() => setRole("member")}
+                />
+                <RadioCard
+                  title="Operator"
+                  description="Runs providers, images, and org credentials."
+                  selected={role === "operator"}
+                  onSelect={() => setRole("operator")}
                 />
                 <RadioCard
                   title="Admin"

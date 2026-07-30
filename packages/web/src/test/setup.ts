@@ -21,6 +21,39 @@ afterEach(async () => {
 // DOMMatrixReadOnly's constructor to exist (it's used to derive pane
 // transforms, never asserted against here).
 if (typeof document !== "undefined") {
+  // jsdom's `window.localStorage` throws SecurityError on the default
+  // `about:blank` opaque origin — WHATWG storage-partitioning rule.
+  // Setting `environmentOptions.jsdom.url` in vitest.config.ts SHOULD fix
+  // this, but the option doesn't reliably propagate to the per-file
+  // `// @vitest-environment jsdom` opt-in path. Install a plain in-memory
+  // Storage on the window so `readStoredTheme`/`applyStoredTheme` and any
+  // `afterEach(() => window.localStorage.clear())` calls just work.
+  // Test-only; production uses the real browser Storage.
+  let storageWorks = false;
+  try {
+    // Actually CALL getItem — jsdom's opaque-origin Storage throws on
+    // method invocation, not property access, so a bare `void
+    // .getItem` isn't enough to detect the broken case.
+    window.localStorage.getItem("__probe__");
+    storageWorks = true;
+  } catch {
+    storageWorks = false;
+  }
+  if (!storageWorks) {
+    const store = new Map<string, string>();
+    const memory: Storage = {
+      get length() {
+        return store.size;
+      },
+      clear: () => store.clear(),
+      getItem: (k) => store.get(k) ?? null,
+      key: (i) => Array.from(store.keys())[i] ?? null,
+      removeItem: (k) => void store.delete(k),
+      setItem: (k, v) => void store.set(k, String(v)),
+    };
+    Object.defineProperty(window, "localStorage", { configurable: true, value: memory });
+  }
+
   if (typeof globalThis.ResizeObserver === "undefined") {
     class ResizeObserverShim implements ResizeObserver {
       #callback: ResizeObserverCallback;
