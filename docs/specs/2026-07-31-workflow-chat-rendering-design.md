@@ -4,6 +4,20 @@
 **Status:** Approved (brainstorm output; implementation plan to follow in `docs/plans/`)
 **Branch context:** dev-v2 (V2 DAG workflow engine in `packages/workflow` + `packages/api`)
 
+> **Addendum (same day):** implementation targets the V2 stack —
+> `packages/web` (chat UI, already has `@xyflow/react`, a DAG editor at
+> `/workflows/$workflowId`, list at `/workflows`, run detail at
+> `/workflows/runs/$runId`) and `packages/api` (engine + LocalRunHost) —
+> **not** `packages/client`, which is the V1 surface. Much of sections 2/6
+> already exists in `packages/web`; the real gaps are: (1) the V2 agent has
+> no workflow tools at all (`plugin-workflows` ships only a skill), (2) no
+> chat tool renderer for workflow tools, (3) no run-status overlay on the
+> canvas. The deliverable environment is the local k8s reference env
+> (Rancher Desktop, `make k8s-build && make k8s-up`). Placement decision
+> maps to `packages/web` conventions: the inline card's expand action
+> deep-links to the existing `/workflows/*` routes (the web app has no
+> session drawer system; its tool renderers expand in place).
+
 ## Problem
 
 V1 taught us that users rarely open the dedicated workflows UI and never used the
