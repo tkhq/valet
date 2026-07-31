@@ -1,7 +1,7 @@
 import { useQueries, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
 import type { SessionThread, ListThreadsResponse, Message } from './types';
-import type { ThreadOriginBucketId } from '@valet/shared';
+import type { ThreadOriginBucketId, ThreadStatus } from '@valet/shared';
 import { mergeThreadPages } from '@/components/chat/thread-origin-buckets';
 
 export type PaginatedThreadsResponse = ListThreadsResponse & {
@@ -29,6 +29,7 @@ export const threadKeys = {
     bucket?: ThreadOriginBucketId,
     includeOriginCounts?: boolean,
     search?: string,
+    status?: ThreadStatus,
   ) =>
     [
       ...threadKeys.listsForSession(sessionId),
@@ -37,6 +38,7 @@ export const threadKeys = {
       bucket ?? null,
       !!includeOriginCounts,
       search ?? null,
+      status ?? null,
     ] as const,
   details: () => [...threadKeys.all, 'detail'] as const,
   detail: (sessionId: string, threadId: string) =>
@@ -73,6 +75,14 @@ export interface UseThreadsOptions {
    * `filterThreadsBySearch`).
    */
   search?: string;
+  /**
+   * If set, the server returns only threads with this status. The `status`
+   * param predates this branch, so it works against old and new workers alike
+   * (no skew fallback needed). Used by the sidebar's Dismissed section to
+   * fetch archived threads directly — filtering an unfiltered page client-side
+   * would let active threads crowd every archived row out of the page.
+   */
+  status?: ThreadStatus;
 }
 
 function buildThreadsUrl(sessionId: string, options?: UseThreadsOptions): string {
@@ -86,6 +96,7 @@ function buildThreadsUrl(sessionId: string, options?: UseThreadsOptions): string
   if (options?.bucket) params.set('originBucket', options.bucket);
   if (options?.includeOriginCounts) params.set('includeOriginCounts', '1');
   if (options?.search) params.set('search', options.search);
+  if (options?.status) params.set('status', options.status);
   const qs = params.toString();
   return `/sessions/${sessionId}/threads${qs ? `?${qs}` : ''}`;
 }
@@ -99,6 +110,7 @@ export function useThreads(sessionId: string, options?: UseThreadsOptions) {
       options?.bucket,
       options?.includeOriginCounts,
       options?.search,
+      options?.status,
     ),
     queryFn: () => api.get<PaginatedThreadsResponse>(buildThreadsUrl(sessionId, options)),
     enabled: !!sessionId,
@@ -179,6 +191,7 @@ export function useThreadPages(
         options.bucket,
         options.includeOriginCounts,
         options.search,
+        options.status,
       ),
       queryFn: () =>
         api.get<PaginatedThreadsResponse>(
@@ -188,6 +201,7 @@ export function useThreadPages(
             bucket: options.bucket,
             includeOriginCounts: options.includeOriginCounts,
             search: options.search,
+            status: options.status,
           }),
         ),
       enabled: !!sessionId,

@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import {
+  useThread,
   useThreadPages,
   useThreads,
   useDismissThread,
@@ -706,8 +707,15 @@ export function ThreadSidebar({
   // "Dismissed" section at the bottom shows an aggregate count and list
   // across all origins, matching pre-existing behavior. Skip the bucket
   // filter here so the dismissed count is authoritative.
+  //
+  // `status: 'archived'` is load-bearing: an unfiltered fetch returns the
+  // newest 30 threads of ANY status, so in a busy session (30+ active threads
+  // newer than the oldest archived one) active rows would crowd every archived
+  // row out of the page and the Dismissed section would undercount or vanish.
+  // The `status` param predates this branch, so it holds under deploy skew.
   const { data: dismissedData } = useThreads(sessionId, {
     pageSize: SIDEBAR_PAGE_SIZE,
+    status: 'archived',
   });
 
   const fetchedThreads = threadPages.threads;
@@ -791,27 +799,43 @@ export function ThreadSidebar({
   // one (e.g. because the user just picked a thread from search or a link),
   // switch the tab so the selection is visible instead of silently hidden.
   //
-  // Resolve against `activeThreads` (the raw fetched page) and NOT the
-  // bucket-filtered list: the filtered list only ever contains `activeBucket`
-  // threads, so looking there could never detect a mismatch — it would make
-  // this effect dead code.
+  // ONE-SHOT per activeThreadId, tracked in `resolvedTabForThread` rather than
+  // by narrowing the dep array to `[activeThreadId]`. Re-running unguarded on
+  // every data change would fight the user (a manual tab click would snap
+  // straight back to the active thread's bucket), while the narrow dep array
+  // had a cold-load race: on a permalink the effect fired once while the
+  // thread list was still empty, bailed, and never re-ran when data arrived.
   //
-  // Intentionally keyed on `activeThreadId` alone. Re-running on every
-  // `activeThreads` change would fight the user: when the fetched page happens
-  // to contain other buckets, manually clicking a tab would immediately snap
-  // back to the active thread's bucket.
+  // The fetched pages can't resolve every case on their own: in the healthy
+  // (non-skew) world they're server-filtered to the CURRENT bucket, so a
+  // deep-linked thread from another bucket never appears in them at all. When
+  // the pages don't contain the active thread, fetch its detail once
+  // (`useThread` is disabled once resolved) and read the bucket off that row.
+  const [resolvedTabForThread, setResolvedTabForThread] = useState<string | null>(null);
+  const activeThreadFromPages = useMemo(
+    () => (activeThreadId ? fetchedThreads.find((t) => t.id === activeThreadId) : undefined),
+    [activeThreadId, fetchedThreads],
+  );
+  const needsActiveThreadLookup =
+    !!activeThreadId && resolvedTabForThread !== activeThreadId && !activeThreadFromPages;
+  const { data: activeThreadLookup } = useThread(
+    sessionId,
+    needsActiveThreadLookup && activeThreadId ? activeThreadId : '',
+  );
   useEffect(() => {
-    if (!activeThreadId) return;
-    const activeThread = activeThreads.find((t) => t.id === activeThreadId);
+    if (!activeThreadId || resolvedTabForThread === activeThreadId) return;
+    const activeThread =
+      activeThreadFromPages ??
+      (activeThreadLookup?.thread.id === activeThreadId ? activeThreadLookup.thread : undefined);
     if (!activeThread) return;
+    setResolvedTabForThread(activeThreadId);
     const desired = getThreadOriginBucket(activeThread);
     if (desired !== activeBucket) {
       setActiveBucket(desired);
       setStoredActiveBucket(desired);
       setPagesForActiveBucket(1);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeThreadId]);
+  }, [activeThreadId, resolvedTabForThread, activeThreadFromPages, activeThreadLookup, activeBucket]);
 
   useEffect(() => {
     if (activeThreadId) setLastViewed(activeThreadId);
