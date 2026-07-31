@@ -63,10 +63,33 @@ Chat integration:
 - `packages/client/src/components/chat/tool-cards/workflow-card.tsx`,
   registered in `resolveToolCard()` (`tool-cards/index.tsx`). Compact card:
   workflow name, status chip, ~240px preview canvas. Click opens the drawer.
+- **Card coalescing:** consecutive workflow tool calls for the same
+  `workflowId` within one assistant turn render as a single live-updating card
+  (the latest call), not a stack of near-identical cards. Earlier calls
+  collapse to one-line entries.
+- **Pending state:** while a workflow tool call is still executing (no id to
+  fetch yet), the card renders a skeleton canvas placeholder — no
+  generic-JSON flash before the diagram appears.
+- **Preview legibility cap:** above ~8 nodes, the preview degrades from a
+  canvas to a summary strip (node count + family sequence, e.g. "14 nodes ·
+  trigger → actions → approval") with an "Open" CTA.
+- **Temporal hint:** cards fetch current state by id, so a card in old chat
+  history shows today's workflow, not a point-in-time snapshot. Each card
+  shows a "last edited <time>" hint so this is legible rather than confusing.
 - New `'workflow'` member of the `DrawerPanel` union in
   `packages/client/src/routes/sessions/$sessionId.tsx`, with a lazy-loaded
   `WorkflowDrawer` (same pattern as `FilesDrawer`/`ReviewDrawer`). Drawer =
   full-mode canvas + right-hand **inspector** for the selected node.
+- **Orchestrator surface:** the drawer host currently lives only in the
+  session route. Verify whether the orchestrator UI
+  (`packages/client/src/routes/orchestrator.tsx`) shares it; if not, either
+  extract the drawer host so both surfaces use it, or (fallback) the
+  orchestrator card's expand action deep-links to
+  `/workflows/$workflowId?run=<runId>`. Decide during implementation planning;
+  the inline card itself renders in both surfaces regardless.
+- **Mobile:** on narrow viewports the expanded view opens as a full-screen
+  sheet, not a side drawer. Full-mode canvas must be touch-usable
+  (React Flow supports touch; verify pinch-zoom/pan during implementation).
 
 ## 3. Light edits
 
@@ -78,6 +101,14 @@ workflow update endpoint with optimistic React Query updates.
 Not allowed (stays conversational via the orchestrator): adding/removing nodes,
 creating/deleting edges, changing node types.
 
+**Concurrent-edit policy:** the orchestrator may patch a workflow while the
+user is light-editing it. Light-edit controls are disabled (with an
+explanatory tooltip) while a workflow tool call for the same `workflowId` is
+in flight in the current conversation. Beyond that window, last-writer-wins
+applies: if a refetch reveals the definition changed under an in-progress
+edit, the form resets and shows a "workflow was updated by the orchestrator"
+notice instead of silently clobbering either side.
+
 ## 4. Run overlay + approvals
 
 - Per-node run states derived from the run row + checkpoints:
@@ -85,6 +116,17 @@ creating/deleting edges, changing node types.
 - Approval nodes in `waiting` render Approve/Reject actions in both the inline
   card and the drawer inspector, calling the existing approval resolution
   endpoint (`packages/api/src/routes/workflows.ts:350`).
+- **Approval action gating:** Approve/Reject render only when the fetched run
+  state is currently `waiting` on that gate. Cards for settled runs show the
+  outcome ("approved by …" / "run settled") — never live buttons.
+- **Approval feedback:** on click the button immediately enters a
+  disabled/loading state, the resolve request fires, and an eager refetch (not
+  the next 3s poll tick) updates the card. Failure re-enables the button with
+  an error toast. The endpoint is treated as idempotent per resume token; the
+  UI still guards against double-submit.
+- **`foreach` iterations:** the foreach node renders aggregate status only
+  (e.g. "12/50 done", worst-status accent). Per-iteration detail lives in the
+  inspector as a list; the canvas never fans out per iteration.
 
 ## 5. Visual direction
 
@@ -126,6 +168,9 @@ UI. They are repurposed as the V2 surface:
 - Fetch 404 (workflow deleted) → card degrades to a textual summary from the
   tool output snapshot.
 - Invalid/cyclic DAG → render the layoutable subset + a validation notice.
+- Empty or single-node DAG (valid intermediate state) → empty-state message
+  ("No steps yet — ask the orchestrator to add actions") instead of a bare
+  grid.
 - V1 step-array tool outputs → untouched; generic card.
 
 ## 8. Dependencies
@@ -143,9 +188,12 @@ UI. They are repurposed as the V2 surface:
   inline card renders → drawer opens → run overlay updates → approval works).
 - `cd packages/client && pnpm build` before commit (stricter than typecheck).
 
-## Out of scope
+## Out of scope / follow-ups
 
 - Comprehensive visual editing (node/edge authoring).
 - Session event-stream push for run status (polling first; push is follow-up).
+- **Change highlighting** (follow-up): when an `update_workflow` card renders,
+  highlight nodes/edges changed vs the previous version so the user can review
+  what the orchestrator did at a glance.
 - Rendering V1 step-array workflows as diagrams.
 - Retiring or modifying the V1 `/automation` UI.
