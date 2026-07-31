@@ -14,6 +14,8 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
+import { workflowsActionPlugin } from "../workflows/actions.js";
+import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
@@ -220,6 +222,26 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Plugin loading (plugin-system-v2 plan Task 4): tests supply `opts.plugins`
   // directly and skip the node_modules scan entirely; the normal boot path
   // assembles the bundled registry with whatever's discovered on disk.
+  //
+  // The workflows action plugin is host-defined (its actions need the
+  // workflow store + run host, which don't exist yet at assembly time), so
+  // it enters the catalog through a deferred-deps getter — same one-slot
+  // indirection as `childSpawner` below. The ref is filled right after
+  // `workflowRunHost` is constructed.
+  const workflowsDepsRef: { current: WorkflowServiceDeps | null } = { current: null };
+  const workflowsActions: ValetPlugin = {
+    name: "workflows-actions",
+    version: "0.1.0",
+    description: "Agent-facing DAG workflow management actions.",
+    actions: [
+      workflowsActionPlugin(() => {
+        if (!workflowsDepsRef.current) {
+          throw new Error("workflows actions invoked before provider wiring completed");
+        }
+        return workflowsDepsRef.current;
+      }),
+    ],
+  };
   const { allowlist, denylist } = parseValetPluginsEnv(process.env.VALET_PLUGINS);
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
@@ -232,6 +254,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
             denylist,
           })
         ).plugins,
+        [workflowsActions],
       ]);
 
   // Refresh-on-read decorator (integration-OAuth design): wraps the raw
@@ -347,6 +370,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     onApprovalPending,
     crashAt: opts.workflowCrashAt,
   });
+  workflowsDepsRef.current = { db, workflowStore, workflowRunHost };
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
