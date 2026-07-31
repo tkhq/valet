@@ -21,7 +21,9 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { useAutoRestartOrchestrator } from '@/hooks/use-auto-restart-orchestrator';
 import { filterChildSessionEventsForThread, getEffectiveActiveThreadId } from './thread-selection';
 import { getUserMessageHistory } from './message-history';
-import { getPendingResponseRequiredThreadIds, selectVisibleInteractivePrompts } from '@/lib/approval-prompts';
+import { getPendingResponseRequiredThreadIds, getInteractivePromptThreadId, selectVisibleInteractivePrompts } from '@/lib/approval-prompts';
+import { attentionBucketFromPrompt } from './thread-origin-buckets';
+import type { ThreadOriginBucketId } from '@valet/shared';
 import { getBuildChrome } from '@/lib/build-info';
 import { cn } from '@/lib/cn';
 import { BuildBadge } from '@/components/layout/build-badge';
@@ -282,6 +284,21 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
     () => getPendingResponseRequiredThreadIds(interactivePrompts),
     [interactivePrompts],
   );
+
+  // Best-effort bucket hint per response-required threadId derived from the
+  // prompt's channelType. The sidebar uses this only for threadIds NOT in
+  // the currently-loaded bucket page, so tabs that need attention still
+  // light up when their threads aren't fetched.
+  const attentionBucketHint = useMemo(() => {
+    const map = new Map<string, ThreadOriginBucketId>();
+    for (const prompt of interactivePrompts) {
+      if (prompt.status !== 'pending') continue;
+      const threadId = getInteractivePromptThreadId(prompt);
+      if (!threadId) continue;
+      map.set(threadId, attentionBucketFromPrompt(prompt));
+    }
+    return map;
+  }, [interactivePrompts]);
 
   const handleSendMessage = useCallback(
     async (content: string, model?: string, attachments?: Parameters<typeof sendMessage>[2]) => {
@@ -589,6 +606,7 @@ export function ChatContainer({ sessionId, routeSessionId, initialThreadId, init
                 sessionId={sessionId}
                 activeThreadId={activeThreadId}
                 responseRequiredThreadIds={responseRequiredThreadIds}
+                attentionBucketHint={attentionBucketHint}
                 onSelectThread={selectThread}
                 onNewThread={handleNewThread}
               />
@@ -912,9 +930,19 @@ function ChatSkeleton() {
 
 function ThreadSidebarFallback() {
   return (
-    <div className="flex w-[210px] shrink-0 flex-col border-r border-neutral-200 bg-surface-0 dark:border-neutral-800 dark:bg-surface-0">
+    // Width MUST match ThreadSidebar's `w-[248px]` (thread-sidebar.tsx) —
+    // a mismatch makes the transcript jump sideways when the lazy chunk lands.
+    <div className="flex w-[248px] shrink-0 flex-col border-r border-neutral-200 bg-surface-0 dark:border-neutral-800 dark:bg-surface-0">
       <div className="border-b border-neutral-100 px-3 py-2 dark:border-neutral-800/50">
         <Skeleton className="h-4 w-16" />
+      </div>
+      {/* Placeholder for the tab bar + search row so the thread list doesn't
+          shift vertically when the real sidebar mounts. */}
+      <div className="border-b border-neutral-100 px-2 py-1.5 dark:border-neutral-800/50">
+        <Skeleton className="h-4 w-full" />
+      </div>
+      <div className="border-b border-neutral-100 px-2 py-1.5 dark:border-neutral-800/50">
+        <Skeleton className="h-3 w-2/3" />
       </div>
       <div className="space-y-2 px-3 py-3">
         <Skeleton className="h-7 w-full" />

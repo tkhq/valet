@@ -22,6 +22,8 @@ const {
   updateThreadStatusMock: vi.fn(),
 }));
 
+const VALID_BUCKETS = new Set(['ui', 'slack', 'automation', 'other']);
+
 vi.mock('../lib/db.js', () => ({
   assertSessionAccess: assertSessionAccessMock,
   getCurrentOrchestratorSession: getCurrentOrchestratorSessionMock,
@@ -30,6 +32,7 @@ vi.mock('../lib/db.js', () => ({
   listThreads: listThreadsMock,
   createThread: createThreadMock,
   updateThreadStatus: updateThreadStatusMock,
+  isThreadOriginBucketId: (value: unknown) => typeof value === 'string' && VALID_BUCKETS.has(value),
 }));
 
 import { threadsRouter } from './threads.js';
@@ -95,6 +98,190 @@ describe('threadsRouter POST /:sessionId/threads/:threadId/continue', () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({
       error: "Session with id 'orchestrator' not found",
+    });
+  });
+
+  it('forwards a valid originBucket query param to listThreads', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({
+      threads: [],
+      hasMore: false,
+      originCounts: { ui: 9, slack: 2, automation: 23, other: 0 },
+    });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request('http://localhost/orchestrator/threads?originBucket=automation&limit=30'),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 30,
+      userId: 'user-1',
+      originBucket: 'automation',
+    });
+    const body = await res.json();
+    expect(body).toMatchObject({
+      originCounts: { ui: 9, slack: 2, automation: 23, other: 0 },
+    });
+  });
+
+  it('silently ignores unknown originBucket values (defensive against stale frontends)', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request('http://localhost/orchestrator/threads?originBucket=notabucket'),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    // The bucket param is dropped from the listThreads call — no filter applied.
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 20,
+      userId: 'user-1',
+    });
+  });
+
+  it('forwards includeOriginCounts=1 as includeOriginCounts: true', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request('http://localhost/orchestrator/threads?includeOriginCounts=1'),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 20,
+      userId: 'user-1',
+      includeOriginCounts: true,
+    });
+  });
+
+  it('forwards a search term to listThreads, combined with the bucket filter', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request('http://localhost/orchestrator/threads?originBucket=slack&search=orb%20billing&limit=30'),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 30,
+      userId: 'user-1',
+      originBucket: 'slack',
+      search: 'orb billing',
+    });
+  });
+
+  it('omits an empty search param instead of passing a no-op filter down', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request('http://localhost/orchestrator/threads?search='),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 20,
+      userId: 'user-1',
+    });
+  });
+
+  it('preserves LIKE metacharacters verbatim — escaping is the db layer’s job', async () => {
+    getCurrentOrchestratorSessionMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    assertSessionAccessMock.mockResolvedValue({
+      id: 'orchestrator:user-1:new',
+      userId: 'user-1',
+      purpose: 'orchestrator',
+      isOrchestrator: true,
+    });
+    listThreadsMock.mockResolvedValue({ threads: [], hasMore: false });
+
+    const app = buildApp();
+    const res = await app.fetch(
+      new Request("http://localhost/orchestrator/threads?search=100%25%20'%20OR%201%3D1"),
+      { DB: {} } as any,
+    );
+
+    expect(res.status).toBe(200);
+    // The route must not mangle or pre-escape the term; `listThreads` binds it
+    // as a parameter and adds `ESCAPE '\'`.
+    expect(listThreadsMock).toHaveBeenCalledWith({}, 'orchestrator:user-1:new', {
+      limit: 20,
+      userId: 'user-1',
+      search: "100% ' OR 1=1",
     });
   });
 

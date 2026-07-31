@@ -1,5 +1,123 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import type { SessionThread, ThreadStatus } from '@valet/shared';
+import type {
+  OriginBucketCounts,
+  SessionThread,
+  ThreadOriginBucketId,
+  ThreadStatus,
+} from '@valet/shared';
+
+// ─── Origin Bucket Taxonomy (mirrors client thread-origin-buckets.ts) ───────
+//
+// This SQL CASE expression MUST classify each session_threads row into the
+// same bucket as `getThreadOriginBucket` in
+// packages/client/src/components/chat/thread-origin-buckets.ts. Update both
+// together; the shared type `ThreadOriginBucketId` is the single source of
+// truth for the id set.
+//
+// Precedence (matches the client):
+//   1. origin_type='automation'                => automation
+//   2. origin_type='web'                       => ui
+//   3. origin_type='slack'                     => slack
+//   4. origin_channel_type='slack'             => slack
+//   5. legacy: both origin_* NULL AND ctm channel_type='slack' => slack
+//   6. legacy: both origin_* NULL AND (no channel_thread_mapping OR channel_type='web') => ui
+//   7. otherwise (origin_type/origin_channel_type set but unknown) => other
+//
+// Callers MUST include the channel_thread_mappings LEFT JOIN aliased as `ctm`
+// (see `previewJoin` / `countJoin` below) so the legacy fallback works.
+function originBucketCaseSql(threadAlias: string, channelMappingAlias: string): string {
+  const t = threadAlias;
+  const ctm = channelMappingAlias;
+  return `
+    CASE
+      WHEN ${t}.origin_type = 'automation' THEN 'automation'
+      WHEN ${t}.origin_type = 'web' THEN 'ui'
+      WHEN ${t}.origin_type = 'slack' THEN 'slack'
+      WHEN ${t}.origin_channel_type = 'slack' THEN 'slack'
+      WHEN ${t}.origin_type IS NULL AND ${t}.origin_channel_type IS NULL
+        AND ${ctm}.channel_type = 'slack' THEN 'slack'
+      WHEN ${t}.origin_type IS NULL AND ${t}.origin_channel_type IS NULL
+        AND (${ctm}.channel_type IS NULL OR ${ctm}.channel_type = 'web') THEN 'ui'
+      ELSE 'other'
+    END
+  `;
+}
+
+export const THREAD_ORIGIN_BUCKET_IDS: readonly ThreadOriginBucketId[] = [
+  'ui',
+  'slack',
+  'automation',
+  'other',
+] as const;
+
+export function isThreadOriginBucketId(value: unknown): value is ThreadOriginBucketId {
+  return typeof value === 'string' && THREAD_ORIGIN_BUCKET_IDS.includes(value as ThreadOriginBucketId);
+}
+
+// ─── Thread Search ──────────────────────────────────────────────────────────
+//
+// `listThreads({ search })` matches a free-text term against BOTH the thread
+// title AND the contents of the thread's messages. Contents matching is why
+// this has to be server-side at all: the client only ever holds titles and a
+// 120-char first-message preview, so it cannot search what it hasn't loaded.
+//
+// Implementation notes:
+//  - `LIKE` in SQLite is case-insensitive for ASCII by default (no `LOWER()`
+//    wrapping needed, and wrapping it would only defeat future indexes).
+//  - The messages side is an `EXISTS` correlated subquery on
+//    `messages.thread_id` (indexed: `idx_messages_thread`, migration 0001) and
+//    NOT a JOIN — a JOIN would multiply thread rows by matching messages and
+//    silently break both `LIMIT` paging and the `COUNT(*)` totals.
+//  - Bound params only, plus explicit `ESCAPE` so a user typing `%` or `_`
+//    searches for those literal characters instead of turning the query into a
+//    match-everything wildcard.
+
+/** Longest search term we'll act on. Anything past this is truncated. */
+export const THREAD_SEARCH_MAX_LENGTH = 200;
+
+/** The `ESCAPE` character used by every thread-search LIKE clause. */
+const LIKE_ESCAPE_CHAR = '\\';
+
+/**
+ * Escape LIKE metacharacters (`%`, `_`) and the escape character itself so the
+ * term is matched literally. Must be paired with `ESCAPE '\'` in the SQL.
+ */
+export function escapeLikeTerm(term: string): string {
+  return term.replace(/[\\%_]/g, (char) => `${LIKE_ESCAPE_CHAR}${char}`);
+}
+
+/** Wrap an escaped term in `%…%` for a substring match. */
+export function buildThreadSearchPattern(term: string): string {
+  return `%${escapeLikeTerm(term)}%`;
+}
+
+/**
+ * Trim + length-cap a raw search input. Returns undefined for anything that
+ * shouldn't produce a filter (missing, non-string, empty, whitespace-only) so
+ * callers can spread it conditionally.
+ */
+export function normalizeThreadSearch(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  return trimmed.slice(0, THREAD_SEARCH_MAX_LENGTH);
+}
+
+/**
+ * SQL fragment matching `t.title` OR any message in the thread. Takes TWO bound
+ * params, both the same pattern (title, then message contents).
+ */
+function threadSearchSql(threadAlias: string): string {
+  const t = threadAlias;
+  return `(
+      ${t}.title LIKE ? ESCAPE '${LIKE_ESCAPE_CHAR}'
+      OR EXISTS (
+        SELECT 1 FROM messages ms
+        WHERE ms.thread_id = ${t}.id
+          AND ms.content LIKE ? ESCAPE '${LIKE_ESCAPE_CHAR}'
+      )
+    )`;
+}
 
 export interface ThreadOriginInput {
   originType?: string;
@@ -192,11 +310,97 @@ export async function getActiveThread(
   return row ? rowToThread(row) : null;
 }
 
+export interface ListThreadsOptions {
+  cursor?: string;
+  limit?: number;
+  status?: string;
+  userId?: string;
+  page?: number;
+  pageSize?: number;
+  /**
+   * When set, restrict results to a single origin bucket AND compute per-bucket
+   * totals across the unfiltered (bucket-independent) set so tab counts are
+   * TRUE totals rather than "loaded so far". Callers that want the counts but
+   * not the filter can pass `originBucket: undefined` and set
+   * `includeOriginCounts: true`.
+   */
+  originBucket?: ThreadOriginBucketId;
+  /**
+   * Compute per-bucket totals even when no `originBucket` filter is applied.
+   * When `originBucket` is set, counts are always computed.
+   */
+  includeOriginCounts?: boolean;
+  /**
+   * Free-text filter matched case-insensitively against the thread title AND
+   * the contents of the thread's messages. Applied to `baseWhere`, so it also
+   * narrows `originCounts` — while a search is active, per-bucket totals are
+   * per-bucket MATCH counts. That's deliberate: it tells the user which tab
+   * holds their hits. Empty/whitespace-only terms are ignored.
+   */
+  search?: string;
+}
+
+export interface ListThreadsResult {
+  threads: SessionThread[];
+  cursor?: string;
+  hasMore: boolean;
+  page?: number;
+  pageSize?: number;
+  totalCount?: number;
+  totalPages?: number;
+  originCounts?: OriginBucketCounts;
+}
+
+// Shared LEFT JOIN of `session_threads t` -> earliest channel_thread_mapping
+// row. Used by both the list query (needs channel_type/channel_id in the
+// SELECT) and the count/aggregate queries (need it for the legacy-bucket
+// fallback SQL in `originBucketCaseSql`). Aliased as `ctm` throughout.
+const CHANNEL_MAPPING_JOIN = `
+  LEFT JOIN channel_thread_mappings ctm
+    ON ctm.id = (
+      SELECT id
+      FROM channel_thread_mappings
+      WHERE thread_id = t.id
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1
+    )`;
+
+const EMPTY_ORIGIN_COUNTS: OriginBucketCounts = {
+  ui: 0,
+  slack: 0,
+  automation: 0,
+  other: 0,
+};
+
+async function computeOriginCounts(
+  db: D1Database,
+  whereClause: string,
+  params: (string | number)[],
+): Promise<OriginBucketCounts> {
+  const bucketExpr = originBucketCaseSql('t', 'ctm');
+  const sql = `
+    SELECT ${bucketExpr} AS bucket, COUNT(*) AS count
+    FROM session_threads t
+    ${CHANNEL_MAPPING_JOIN}
+    ${whereClause}
+    GROUP BY bucket
+  `;
+  const result = await db.prepare(sql).bind(...params).all<{ bucket?: string; count?: number }>();
+  const counts: OriginBucketCounts = { ...EMPTY_ORIGIN_COUNTS };
+  for (const row of result.results || []) {
+    const bucket = row.bucket;
+    if (bucket && isThreadOriginBucketId(bucket)) {
+      counts[bucket] = Number(row.count ?? 0);
+    }
+  }
+  return counts;
+}
+
 export async function listThreads(
   db: D1Database,
   sessionId: string,
-  options: { cursor?: string; limit?: number; status?: string; userId?: string; page?: number; pageSize?: number } = {}
-): Promise<{ threads: SessionThread[]; cursor?: string; hasMore: boolean; page?: number; pageSize?: number; totalCount?: number; totalPages?: number }> {
+  options: ListThreadsOptions = {}
+): Promise<ListThreadsResult> {
   const limit = options.limit || 20;
   const page = options.page;
   const pageSize = options.pageSize || limit;
@@ -216,41 +420,64 @@ export async function listThreads(
       ctm.channel_type,
       ctm.channel_id
     FROM session_threads t
-    LEFT JOIN channel_thread_mappings ctm
-      ON ctm.id = (
-        SELECT id
-        FROM channel_thread_mappings
-        WHERE thread_id = t.id
-        ORDER BY created_at ASC, id ASC
-        LIMIT 1
-      )`;
+    ${CHANNEL_MAPPING_JOIN}`;
 
-  let whereClause = '';
-  const params: (string | number)[] = [];
+  // `baseWhere` / `baseParams` scope by session (or user + orchestrator) and
+  // optional status. This is what per-bucket totals aggregate over — counts
+  // MUST be independent of the current bucket filter so tab labels show TRUE
+  // totals (e.g. "AUTOMATION 23") even when the user is viewing "UI".
+  let baseWhere = '';
+  const baseParams: (string | number)[] = [];
 
   if (crossSession) {
     const userId = options.userId;
-    whereClause += `
+    baseWhere += `
     WHERE t.session_id IN (
       SELECT id FROM sessions
       WHERE user_id = ? AND purpose = 'orchestrator'
     )`;
-    if (userId) params.push(userId);
+    if (userId) baseParams.push(userId);
   } else {
-    whereClause += `
+    baseWhere += `
     WHERE t.session_id = ?`;
-    params.push(sessionId);
+    baseParams.push(sessionId);
   }
 
   if (options.status) {
-    whereClause += ' AND t.status = ?';
-    params.push(options.status);
+    baseWhere += ' AND t.status = ?';
+    baseParams.push(options.status);
   }
+
+  // Search narrows `baseWhere`, so it applies to the rows AND to `originCounts`
+  // (which become per-bucket match counts). Bucket-independence is preserved.
+  const search = normalizeThreadSearch(options.search);
+  if (search) {
+    baseWhere += ` AND ${threadSearchSql('t')}`;
+    const pattern = buildThreadSearchPattern(search);
+    baseParams.push(pattern, pattern);
+  }
+
+  const originBucket = options.originBucket;
+  const filterWhere = originBucket
+    ? `${baseWhere} AND ${originBucketCaseSql('t', 'ctm')} = ?`
+    : baseWhere;
+  const filterParams: (string | number)[] = originBucket
+    ? [...baseParams, originBucket]
+    : [...baseParams];
+
+  const wantsCounts = !!originBucket || !!options.includeOriginCounts;
+
+  // Count aggregation runs against `baseWhere` (NOT `filterWhere`) so per-tab
+  // totals are unaffected by the current bucket filter. This is the whole
+  // point of the redesign — tab counts must show TRUE totals.
+  const originCountsPromise = wantsCounts
+    ? computeOriginCounts(db, baseWhere, baseParams)
+    : Promise.resolve<OriginBucketCounts | undefined>(undefined);
 
   if (page && page > 0) {
     const countResult = await db
-      .prepare(`SELECT COUNT(*) as count FROM session_threads t ${whereClause}`)
-      .bind(...params)
+      .prepare(`SELECT COUNT(*) as count FROM session_threads t ${CHANNEL_MAPPING_JOIN} ${filterWhere}`)
+      .bind(...filterParams)
       .first<{ count?: number }>();
     const totalCount = Number(countResult?.count ?? 0);
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
@@ -258,11 +485,12 @@ export async function listThreads(
     const offset = (safePage - 1) * pageSize;
 
     const pageRowsResult = await db
-      .prepare(`${previewJoin} ${whereClause} ORDER BY t.last_active_at DESC LIMIT ? OFFSET ?`)
-      .bind(...params, pageSize, offset)
+      .prepare(`${previewJoin} ${filterWhere} ORDER BY t.last_active_at DESC LIMIT ? OFFSET ?`)
+      .bind(...filterParams, pageSize, offset)
       .all<ThreadRow>();
     const pageRows = pageRowsResult.results || [];
     const threads = pageRows.map(rowToThread);
+    const originCounts = await originCountsPromise;
 
     return {
       threads,
@@ -271,20 +499,22 @@ export async function listThreads(
       pageSize,
       totalCount,
       totalPages,
+      ...(originCounts ? { originCounts } : {}),
     };
   }
 
-  let query = `${previewJoin} ${whereClause}`;
+  let query = `${previewJoin} ${filterWhere}`;
+  const queryParams: (string | number)[] = [...filterParams];
 
   if (options.cursor) {
     query += ' AND t.last_active_at < ?';
-    params.push(options.cursor);
+    queryParams.push(options.cursor);
   }
 
   query += ' ORDER BY t.last_active_at DESC LIMIT ?';
-  params.push(limit + 1);
+  queryParams.push(limit + 1);
 
-  const result = await db.prepare(query).bind(...params).all<ThreadRow>();
+  const result = await db.prepare(query).bind(...queryParams).all<ThreadRow>();
   const rows = result.results || [];
 
   const hasMore = rows.length > limit;
@@ -292,11 +522,13 @@ export async function listThreads(
 
   const threads = pageRows.map(rowToThread);
   const cursorRow = pageRows[pageRows.length - 1];
+  const originCounts = await originCountsPromise;
 
   return {
     threads,
     cursor: hasMore && cursorRow ? String(cursorRow.last_active_at) : undefined,
     hasMore,
+    ...(originCounts ? { originCounts } : {}),
   };
 }
 

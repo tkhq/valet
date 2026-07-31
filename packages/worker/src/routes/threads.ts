@@ -75,7 +75,7 @@ async function assertOrchestratorThreadAccess(
 threadsRouter.get('/:sessionId/threads', async (c) => {
   const user = c.get('user');
   const { sessionId } = c.req.param();
-  const { cursor, limit, status, page, pageSize } = c.req.query();
+  const { cursor, limit, status, page, pageSize, originBucket, includeOriginCounts, search } = c.req.query();
   const resolvedSessionId = await resolveRequestedSessionId(c.env.DB, user.id, sessionId);
 
   const session = await db.assertSessionAccess(c.get('db'), resolvedSessionId, user.id, 'viewer');
@@ -85,12 +85,31 @@ threadsRouter.get('/:sessionId/threads', async (c) => {
   const parsedPage = page ? parseInt(page, 10) : undefined;
   const safePage = parsedPage && !Number.isNaN(parsedPage) ? Math.max(parsedPage, 1) : undefined;
 
+  // Validate origin bucket param — silently ignore unknown values rather than
+  // failing the whole list request (defensive against stale frontends).
+  const safeOriginBucket = db.isThreadOriginBucketId(originBucket) ? originBucket : undefined;
+
+  // Explicit opt-in to per-bucket totals. Truthy values: '1', 'true', '' (bare
+  // param). Callers filtering by originBucket implicitly get counts too.
+  const wantsCounts = includeOriginCounts !== undefined
+    && includeOriginCounts !== 'false'
+    && includeOriginCounts !== '0';
+
+  // Free-text search over thread title + message contents. Trimming and the
+  // length cap live in `db.normalizeThreadSearch` (single source of truth), so
+  // pass the raw value straight through and let an empty/whitespace term become
+  // a no-op filter there.
+  const searchParam = typeof search === 'string' && search.length > 0 ? search : undefined;
+
   const result = await db.listThreads(c.env.DB, resolvedSessionId, {
     cursor,
     limit: safeLimit,
     ...(safePage ? { page: safePage, pageSize: safeLimit } : {}),
     status,
     userId: isOrchestratorSession(session) ? user.id : undefined,
+    ...(safeOriginBucket ? { originBucket: safeOriginBucket } : {}),
+    ...(wantsCounts ? { includeOriginCounts: true } : {}),
+    ...(searchParam ? { search: searchParam } : {}),
   });
 
   return c.json(result);

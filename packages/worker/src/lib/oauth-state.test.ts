@@ -46,7 +46,16 @@ describe('signOAuthState / verifyOAuthState', () => {
   it('rejects tampered signature', async () => {
     const token = await signOAuthState(SECRET, 'slack-user', { userId: 'user-1' }, 600);
     const [header, payload, sig] = token.split('.');
-    const flipped = `${header}.${payload}.${sig.slice(0, -1)}${sig.endsWith('A') ? 'B' : 'A'}`;
+    // Flip a char in the MIDDLE of the signature — not the last char.
+    // HMAC-SHA256 sigs are 32 bytes → 43 base64url chars where the trailing
+    // char only encodes 4 significant bits (256 bits / 6 bits per char = 42.67);
+    // ~6% of random sigs end in a char whose top 4 bits match another char's
+    // top 4 bits, so a naive `sig.slice(0,-1) + otherChar` decodes to the same
+    // bytes and the "tampered" token silently verifies (flake).
+    const mid = Math.floor(sig.length / 2);
+    const midChar = sig[mid];
+    const flippedMid = midChar === 'A' ? 'B' : 'A';
+    const flipped = `${header}.${payload}.${sig.slice(0, mid)}${flippedMid}${sig.slice(mid + 1)}`;
     expect(await verifyOAuthState(SECRET, 'slack-user', flipped)).toBeNull();
   });
 

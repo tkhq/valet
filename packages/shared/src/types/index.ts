@@ -262,6 +262,22 @@ export interface SessionThread {
   lastActiveAt: Date;
 }
 
+// Origin buckets used by the tabbed orchestrator thread list. The taxonomy is
+// shared between the client (tab UI, filtering) and the worker (SQL filter +
+// per-bucket totals) so the two can't drift.
+//   - 'ui'         => originType='web' (or missing/legacy web thread)
+//   - 'slack'      => originType='slack' OR originChannelType='slack'
+//   - 'automation' => originType='automation'
+//   - 'other'      => everything else (telegram/github/api/unknown)
+export type ThreadOriginBucketId = 'ui' | 'slack' | 'automation' | 'other';
+
+export interface OriginBucketCounts {
+  ui: number;
+  slack: number;
+  automation: number;
+  other: number;
+}
+
 export interface ListThreadsResponse {
   threads: SessionThread[];
   cursor?: string;
@@ -270,6 +286,12 @@ export interface ListThreadsResponse {
   pageSize?: number;
   totalCount?: number;
   totalPages?: number;
+  /**
+   * Per-origin-bucket TRUE TOTAL counts across all threads matching the
+   * (session|user, status) filter — independent of paging or the current
+   * `originBucket` filter. Used to render tab-bar labels with real totals.
+   */
+  originCounts?: OriginBucketCounts;
 }
 
 // Diff types

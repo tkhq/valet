@@ -1251,7 +1251,10 @@ export function useChat(sessionId: string) {
 
       case 'thread.created':
       case 'thread.updated': {
-        queryClient.invalidateQueries({ queryKey: threadKeys.list(sessionIdRef.current) });
+        // `listsForSession`, not `list`: the sidebar's queries carry
+        // page/pageSize/bucket/search in their keys, and `list(sessionId)` is a
+        // fully-specified key that would never prefix-match them.
+        queryClient.invalidateQueries({ queryKey: threadKeys.listsForSession(sessionIdRef.current) });
         break;
       }
 
