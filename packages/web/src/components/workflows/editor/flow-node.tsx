@@ -17,25 +17,67 @@
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import type { DagNodeType } from "../editor-model";
 
+export type NodeRunStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "skipped"
+  | "waiting";
+
 export interface FlowNodeData extends Record<string, unknown> {
   label: string;
   summary: string;
   hasError?: boolean;
   sourceOutputs?: Array<"true" | "false">;
   nodeType: DagNodeType;
+  /** Per-node run state, set only by run-overlay surfaces (preview/run detail). */
+  runStatus?: NodeRunStatus;
+  /** Small trailing badge, e.g. foreach progress "3/12". */
+  runBadge?: string;
 }
+
+/** Border/ring classes per run status; statuses are also encoded by the badge
+ * dot below so color is never the only signal. */
+export function runStatusClasses(status: NodeRunStatus | undefined, selected: boolean): string {
+  if (selected) return "border-moss ring-2 ring-moss";
+  switch (status) {
+    case "running":
+      return "border-moss ring-2 ring-moss/50 animate-pulse";
+    case "succeeded":
+      return "border-moss";
+    case "failed":
+      return "border-danger-500 ring-1 ring-danger-500/50";
+    case "waiting":
+      return "border-amber ring-2 ring-amber/50";
+    case "skipped":
+      return "border-line opacity-40";
+    default:
+      return "border-line";
+  }
+}
+
+const RUN_STATUS_GLYPH: Record<NodeRunStatus, string> = {
+  pending: "○",
+  running: "◐",
+  succeeded: "✓",
+  failed: "✕",
+  skipped: "⊘",
+  waiting: "⏸",
+};
 
 /** The xyflow `Node<data, type>` shape this component is registered under (`nodeTypes.workflow`). */
 export type FlowXyNode = Node<FlowNodeData, "workflow">;
 
 export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
-  const { label, summary, hasError, sourceOutputs, nodeType } = data;
+  const { label, summary, hasError, sourceOutputs, nodeType, runStatus, runBadge } = data;
 
   return (
     <div
-      className={`min-w-[180px] max-w-[240px] rounded-md border bg-paper px-3 py-2 shadow-sm ${
-        selected ? "border-moss ring-2 ring-moss" : "border-line"
-      }`}
+      className={`min-w-[180px] max-w-[240px] rounded-md border bg-paper px-3 py-2 shadow-sm ${runStatusClasses(
+        runStatus,
+        !!selected,
+      )}`}
     >
       {nodeType !== "trigger" && (
         <Handle type="target" position={Position.Left} id="target" data-testid="handle-target" />
@@ -43,6 +85,16 @@ export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
 
       <div className="flex items-center justify-between gap-2">
         <span className="text-[10px] font-medium uppercase tracking-wide text-muted">{label}</span>
+        {runStatus && (
+          <span
+            data-testid="node-run-status"
+            className="inline-flex items-center gap-1 text-[9px] font-medium text-muted"
+            title={runBadge ? `${runStatus} (${runBadge})` : runStatus}
+          >
+            {RUN_STATUS_GLYPH[runStatus]}
+            {runBadge ?? ""}
+          </span>
+        )}
         {hasError && (
           <span
             data-testid="node-error-badge"
