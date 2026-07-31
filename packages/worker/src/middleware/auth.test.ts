@@ -203,7 +203,10 @@ describe('authMiddleware', () => {
     const apiTokenQuery = captured.find((c) => c.sql.includes('FROM api_tokens'));
     expect(apiTokenQuery).toBeDefined();
     expect(apiTokenQuery!.sql).not.toContain("datetime('now')");
-    expect(apiTokenQuery!.params[1]).toBe(nowParam);
+    // Each validator calls `new Date().toISOString()` independently, so the
+    // two bound timestamps can differ by a millisecond — assert the shape,
+    // not identity, to avoid a clock-tick flake.
+    expect(apiTokenQuery!.params[1] as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 
   it('updates last_used_at on every authenticated request but does NOT slide expires_at', async () => {
