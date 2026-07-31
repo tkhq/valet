@@ -229,9 +229,12 @@ adminRouter.delete('/users/:id', async (c) => {
 
 /**
  * Revoke all live login sessions for a user. Existing browser sessions
- * for that user will be logged out on their next request (the middleware
- * returns AUTH_INVALID, the client clears local auth state). Does not
- * delete the user or API tokens — use `DELETE /users/:id` for that.
+ * for that user will be logged out on their next HTTP request (the
+ * middleware returns AUTH_INVALID, the client clears local auth state).
+ * Already-open session WebSockets are NOT force-closed — auth is checked
+ * at upgrade time, so an open chat socket keeps working until it
+ * reconnects. Does not delete the user or API tokens — use
+ * `DELETE /users/:id` for that.
  *
  * Refuses self-revoke (an admin should log themselves out normally, not
  * via the admin panel — trivial to mis-click during an incident) and

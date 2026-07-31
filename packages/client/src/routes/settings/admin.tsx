@@ -2091,7 +2091,17 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                                 variant="secondary"
                                 onClick={() => {
                                   revokeSessions.mutate(u.id, {
-                                    onSuccess: () => setRowAction({ kind: 'revoked', userId: u.id }),
+                                    // Guard on current state: a late completion
+                                    // (this row was cancelled or another row
+                                    // armed while the request was in flight)
+                                    // must not clobber what the admin is doing
+                                    // now.
+                                    onSuccess: () =>
+                                      setRowAction((cur) =>
+                                        cur?.kind === 'confirm-revoke' && cur.userId === u.id
+                                          ? { kind: 'revoked', userId: u.id }
+                                          : cur,
+                                      ),
                                     // Leave rowAction on confirm-revoke so the row
                                     // stays visibly armed for a retry; the error
                                     // renders inline below.
@@ -2122,7 +2132,13 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                                   variant="secondary"
                                   onClick={() => {
                                     removeUser.mutate(u.id, {
-                                      onSuccess: () => setRowAction(null),
+                                      // Same late-completion guard as revoke.
+                                      onSuccess: () =>
+                                        setRowAction((cur) =>
+                                          cur?.kind === 'confirm-remove' && cur.userId === u.id
+                                            ? null
+                                            : cur,
+                                        ),
                                       // On error, keep confirm-remove active
                                       // so the inline error is row-attributed.
                                     });
