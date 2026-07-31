@@ -204,10 +204,12 @@ Both GitHub and Google follow the same pattern. Routes are mounted at `/auth` (n
 3. Backfill `gitName` and `gitEmail` if not already set.
 4. Process invite acceptance (by code from state JWT or by email match for new users).
 5. Generate session token: 32 random bytes, hex-encoded.
-6. SHA-256 hash the token, store in `auth_sessions` with 7-day expiry.
+6. SHA-256 hash the token, store in `auth_sessions` with a fixed 7-day expiry from creation.
 7. Redirect to `${FRONTEND_URL}/auth/callback?token=...&provider=...`.
 
-**Token refresh:** Not implemented. Google refresh tokens are stored but never used for automatic refresh. GitHub tokens do not expire by default.
+**Session lifetime:** Fixed 7-day cap from creation. No sliding, no refresh. This is a deliberate security posture: the client stores the token in `localStorage` (XSS-accessible), so the blast radius of a stolen token is bounded by the TTL. Every authenticated request updates `last_used_at` (via `ctx.waitUntil` so Workers does not cancel the write), but does **not** extend `expires_at`. After 7 days from initial login the user must re-authenticate through the identity provider, which also re-runs any account-level access checks (invite expiry, provider-side revocation). Expiry and revocation gate HTTP requests only: session WebSockets are authenticated at upgrade time, so an already-open socket continues working until it reconnects. Single source of truth: `SESSION_TTL_MS` in `middleware/auth.ts` (also imported by `services/oauth.ts` for initial insert).
+
+**Token refresh:** Not implemented. Google refresh tokens are stored but only used to refresh Google API access, never the Valet session. GitHub tokens do not expire by default.
 
 ### Email Gating
 
@@ -230,10 +232,15 @@ Protects all `/api/*` routes. Applied at the app level in `index.ts`.
 **Token extraction:** `Authorization: Bearer <token>` header first, fallback to `?token=<token>` query parameter.
 
 **Validation chain:**
-1. SHA-256 hash the token.
-2. Try `auth_sessions`: match `token_hash`, check `expires_at > now`. Update `last_used_at`.
-3. Fall back to `api_tokens`: match `token_hash`, check not expired, check not revoked. Update `last_used_at`.
-4. If neither validates: `UnauthorizedError`.
+1. If no bearer token is present: throw `UnauthorizedError` with code `AUTH_MISSING`.
+2. SHA-256 hash the token.
+3. Try `auth_sessions`: match `token_hash`, check `expires_at > now`. On success, `waitUntil` a fire-and-forget UPDATE that sets `last_used_at = now`. `expires_at` is **not** modified — the 7-day cap from creation is deliberate.
+4. Fall back to `api_tokens`: match `token_hash`, check not expired, check not revoked. `waitUntil` an update of `last_used_at`.
+5. If neither validates: `UnauthorizedError` with code `AUTH_INVALID`.
+
+DB errors during validation propagate as 500s (`INTERNAL_ERROR`) rather than being swallowed into `AUTH_INVALID` — a transient D1 failure must surface as retriable, not as "your token is dead" (which would make the client wipe local auth state).
+
+**Error codes:** The middleware is the only site that emits `AUTH_MISSING` / `AUTH_INVALID`. The generic `UNAUTHORIZED` code (the default on `UnauthorizedError` when no explicit code is passed) is **not** in `AUTH_FAILURE_CODES` — a route handler that throws `new UnauthorizedError('...')` for a route-level authorization failure will surface as a 401 but will not log the user out on the client. For route-level authorization denials, prefer `ForbiddenError` (403). The client (`packages/client/src/api/client.ts` and the parallel handler in `api/copilot.ts`) clears local auth state and redirects to `/login` only for `AUTH_MISSING` / `AUTH_INVALID`; every other 401 surfaces as an ordinary error.
 
 **Context set:** `c.set('user', { id, email, role })`.
 

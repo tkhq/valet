@@ -19,6 +19,7 @@ import {
   useOrgUsers,
   useUpdateUserRole,
   useRemoveUser,
+  useRevokeUserSessions,
   useAdminOrchestrators,
   useAdminActionLog,
   useRefreshOrchestrator,
@@ -1969,11 +1970,58 @@ function InvitesSection() {
 
 // --- Users ---
 
+type RowAction =
+  | { kind: 'confirm-remove'; userId: string }
+  | { kind: 'confirm-revoke'; userId: string }
+  | { kind: 'revoked'; userId: string }
+  | null;
+
 function UsersSection({ currentUserId }: { currentUserId: string }) {
   const { data: users, isLoading } = useOrgUsers();
   const updateRole = useUpdateUserRole();
   const removeUser = useRemoveUser();
-  const [confirmDelete, setConfirmDelete] = React.useState<string | null>(null);
+  const revokeSessions = useRevokeUserSessions();
+  // Single tagged state so a row can only be in one action mode at a time —
+  // starting a Remove confirm cancels any pending Revoke confirm (and vice
+  // versa), preventing two Confirm/Cancel bars from coexisting on the row.
+  const [rowAction, setRowAction] = React.useState<RowAction>(null);
+
+  // The mutation hooks are shared across all rows, so their `.isError`
+  // state leaks between rows unless we reset explicitly. `resetRowAction`
+  // is the single place that transitions rowAction state, and it clears
+  // stale mutation errors at the same time.
+  const resetRowAction = React.useCallback((next: RowAction) => {
+    removeUser.reset();
+    revokeSessions.reset();
+    setRowAction(next);
+  }, [removeUser, revokeSessions]);
+
+  // The 'revoked' state is a transient success indicator — auto-clear
+  // it after a few seconds so the row returns to its idle state and
+  // admins can re-revoke the same user during an incident without
+  // having to click on another row first.
+  //
+  // We route the reset through a ref rather than depending on
+  // `resetRowAction` directly. `resetRowAction`'s useCallback deps
+  // include the TanStack Query mutation objects, whose identity can
+  // change on internal state churn (isPending / isError transitions on
+  // background refetches). If we depended on `resetRowAction`, every
+  // such churn re-runs this effect, fires `clearTimeout` on the pending
+  // 4s timer, and re-arms a fresh one — potentially keeping 'revoked'
+  // visible far longer than intended. The ref pattern (mirrored via a
+  // separate effect that only writes into the ref) keeps this timer's
+  // cadence tied to `rowAction` alone.
+  const resetRowActionRef = React.useRef(resetRowAction);
+  React.useEffect(() => {
+    resetRowActionRef.current = resetRowAction;
+  }, [resetRowAction]);
+  React.useEffect(() => {
+    if (rowAction?.kind !== 'revoked') return;
+    const t = setTimeout(() => {
+      resetRowActionRef.current(null);
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [rowAction]);
 
   const adminCount = users?.filter((u) => u.role === 'admin').length ?? 0;
 
@@ -2034,31 +2082,93 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
                       {formatDate(u.createdAt)}
                     </td>
                     <td className="py-2 text-right">
-                      {!isSelf && !isLastAdmin && (
-                        <>
-                          {confirmDelete === u.id ? (
-                            <div className="flex items-center gap-2 justify-end">
-                              <span className="text-xs text-red-600 dark:text-red-400">Confirm?</span>
+                      <div className="flex flex-col items-end gap-1">
+                        <div className="flex items-center gap-2 justify-end">
+                          {rowAction?.kind === 'confirm-revoke' && rowAction.userId === u.id ? (
+                            <>
+                              <span className="text-xs text-red-600 dark:text-red-400">Confirm revoke?</span>
                               <Button
                                 variant="secondary"
                                 onClick={() => {
-                                  removeUser.mutate(u.id, { onSettled: () => setConfirmDelete(null) });
+                                  revokeSessions.mutate(u.id, {
+                                    // Guard on current state: a late completion
+                                    // (this row was cancelled or another row
+                                    // armed while the request was in flight)
+                                    // must not clobber what the admin is doing
+                                    // now.
+                                    onSuccess: () =>
+                                      setRowAction((cur) =>
+                                        cur?.kind === 'confirm-revoke' && cur.userId === u.id
+                                          ? { kind: 'revoked', userId: u.id }
+                                          : cur,
+                                      ),
+                                    // Leave rowAction on confirm-revoke so the row
+                                    // stays visibly armed for a retry; the error
+                                    // renders inline below.
+                                  });
                                 }}
-                                disabled={removeUser.isPending}
+                                disabled={revokeSessions.isPending}
                               >
-                                Remove
+                                Revoke
                               </Button>
-                              <Button variant="secondary" onClick={() => setConfirmDelete(null)}>
+                              <Button variant="secondary" onClick={() => resetRowAction(null)}>
                                 Cancel
                               </Button>
-                            </div>
+                            </>
+                          ) : rowAction?.kind === 'revoked' && rowAction.userId === u.id ? (
+                            <span className="text-xs text-neutral-500 dark:text-neutral-400">Sessions revoked</span>
                           ) : (
-                            <Button variant="secondary" onClick={() => setConfirmDelete(u.id)}>
-                              Remove
-                            </Button>
+                            !isSelf && (
+                              <Button variant="secondary" onClick={() => resetRowAction({ kind: 'confirm-revoke', userId: u.id })}>
+                                Revoke sessions
+                              </Button>
+                            )
                           )}
-                        </>
-                      )}
+                          {!isSelf && !isLastAdmin && (
+                            rowAction?.kind === 'confirm-remove' && rowAction.userId === u.id ? (
+                              <>
+                                <span className="text-xs text-red-600 dark:text-red-400">Confirm remove?</span>
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => {
+                                    removeUser.mutate(u.id, {
+                                      // Same late-completion guard as revoke.
+                                      onSuccess: () =>
+                                        setRowAction((cur) =>
+                                          cur?.kind === 'confirm-remove' && cur.userId === u.id
+                                            ? null
+                                            : cur,
+                                        ),
+                                      // On error, keep confirm-remove active
+                                      // so the inline error is row-attributed.
+                                    });
+                                  }}
+                                  disabled={removeUser.isPending}
+                                >
+                                  Remove
+                                </Button>
+                                <Button variant="secondary" onClick={() => resetRowAction(null)}>
+                                  Cancel
+                                </Button>
+                              </>
+                            ) : (
+                              <Button variant="secondary" onClick={() => resetRowAction({ kind: 'confirm-remove', userId: u.id })}>
+                                Remove
+                              </Button>
+                            )
+                          )}
+                        </div>
+                        {rowAction?.kind === 'confirm-revoke' && rowAction.userId === u.id && revokeSessions.isError && (
+                          <span className="text-xs text-red-600 dark:text-red-400">
+                            {(revokeSessions.error as Error)?.message || 'Revoke failed'}
+                          </span>
+                        )}
+                        {rowAction?.kind === 'confirm-remove' && rowAction.userId === u.id && removeUser.isError && (
+                          <span className="text-xs text-red-600 dark:text-red-400">
+                            {(removeUser.error as Error)?.message || 'Remove failed'}
+                          </span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -2070,14 +2180,12 @@ function UsersSection({ currentUserId }: { currentUserId: string }) {
           <p className="text-sm text-neutral-500 dark:text-neutral-400">No users found.</p>
         )}
 
+        {/* Role updates aren't row-scoped (dropdown, no confirm step), so
+            their error still renders as a section-level banner. Remove/revoke
+            errors surface inline in the acting row instead. */}
         {updateRole.isError && (
           <p className="text-sm text-red-600 dark:text-red-400">
             Failed to update role. {(updateRole.error as Error)?.message}
-          </p>
-        )}
-        {removeUser.isError && (
-          <p className="text-sm text-red-600 dark:text-red-400">
-            Failed to remove user. {(removeUser.error as Error)?.message}
           </p>
         )}
       </div>

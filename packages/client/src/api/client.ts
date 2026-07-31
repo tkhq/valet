@@ -1,5 +1,6 @@
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
+import { shouldClearAuthOn401 } from '@valet/shared';
 
 // In production, use the worker URL. In development, proxy through Vite.
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -20,6 +21,68 @@ export function getWebSocketUrl(path: string): string {
   const url = new URL(path, window.location.origin);
   url.protocol = url.protocol.replace('http', 'ws');
   return url.toString();
+}
+
+/**
+ * Read a `Response` body as text AND parse it as a JSON object. Both are
+ * returned so callers that want a friendly-error fallback (the raw text)
+ * don't have to re-read the stream. `parsed` is null for non-JSON bodies,
+ * empty bodies, and valid JSON that isn't a plain object (`null`,
+ * primitives, arrays) — otherwise a naive `.code` / `.error` access on
+ * the caller side would throw or return misleading values.
+ *
+ * `apiClient` and the copilot streaming client both gate auth-clear on
+ * `parsed` (via `shouldClearAuthOn401`), so they must agree on this
+ * shape — a null `parsed` means the response wasn't a Valet JSON body
+ * and the 401 likely came from an intermediary.
+ */
+export async function readErrorBody(
+  response: Response
+): Promise<{ text: string; parsed: Record<string, unknown> | null }> {
+  let text = '';
+  try {
+    text = await response.text();
+  } catch {
+    return { text: '', parsed: null };
+  }
+  if (!text) return { text: '', parsed: null };
+  try {
+    const raw = JSON.parse(text);
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      return { text, parsed: raw as Record<string, unknown> };
+    }
+  } catch {
+    /* fall through */
+  }
+  return { text, parsed: null };
+}
+
+/**
+ * Derive the inputs `shouldClearAuthOn401` needs from a parsed error
+ * body. Kept separate from `readErrorBody` so the reader stays a plain
+ * body parser — this helper is the single place that knows how to
+ * translate a parsed JSON body into an auth-clear signal, and both the
+ * REST client and the copilot streaming client call through it.
+ */
+export function authClearSignalFrom(
+  parsed: Record<string, unknown> | null,
+): { code: string | null | undefined; hasJsonBody: boolean } {
+  if (parsed === null) return { code: undefined, hasJsonBody: false };
+  const rawCode = parsed.code;
+  // A `code` field of an unexpected type (number, boolean, object,
+  // array) means the body isn't a valid Valet error shape. We can't
+  // attribute this response to Valet, so degrade to `hasJsonBody: false`
+  // — shouldClearAuthOn401 refuses to clear on non-Valet-shaped 401s.
+  // The alternative (returning `code: '<sentinel>'`) leaks a magic
+  // string through a typed contract; using the existing `hasJsonBody`
+  // dimension keeps the return shape honest.
+  if (rawCode !== undefined && rawCode !== null && typeof rawCode !== 'string') {
+    return { code: undefined, hasJsonBody: false };
+  }
+  return {
+    code: typeof rawCode === 'string' ? rawCode : (rawCode === null ? null : undefined),
+    hasJsonBody: true,
+  };
 }
 
 export class ApiError extends Error {
@@ -63,14 +126,19 @@ export async function apiClient<T>(
   });
 
   if (!response.ok) {
-    let errorData: { error?: string; code?: string; details?: unknown } = {};
-    try {
-      errorData = await response.json();
-    } catch {
-      // Response may not be JSON
-    }
+    const { parsed } = await readErrorBody(response);
+    const errorData: { error?: string; code?: string; details?: unknown } = parsed ?? {};
 
-    if (response.status === 401) {
+    // Clear local auth on 401 only with evidence the response came from
+    // Valet itself: an auth-tier code (AUTH_MISSING / AUTH_INVALID) or a
+    // JSON-shaped body from the app (even with no code field). A non-JSON
+    // 401 body indicates a Cloudflare WAF interstitial or a proxy — we
+    // must not log the user out on those. Explicit `UNAUTHORIZED`
+    // (route-level authorization denial) also does not clear.
+    if (
+      response.status === 401 &&
+      shouldClearAuthOn401(authClearSignalFrom(parsed))
+    ) {
       useAuthStore.getState().clearAuth();
       router.navigate({ to: '/login' });
     }

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { NotFoundError } from '@valet/shared';
 import type { Env, Variables } from '../env.js';
 import * as db from '../lib/db.js';
+import { sha256Hex } from '../lib/hash.js';
 
 export const apiKeysRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -33,17 +34,6 @@ function generateToken(): string {
 }
 
 /**
- * Hash a token using SHA-256
- */
-async function hashToken(token: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(token);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
  * GET /api/api-keys
  * List user's API keys (metadata only, no secrets)
  */
@@ -69,7 +59,7 @@ apiKeysRouter.post('/', zValidator('json', createKeySchema), async (c) => {
 
   const id = crypto.randomUUID();
   const token = generateToken();
-  const tokenHash = await hashToken(token);
+  const tokenHash = await sha256Hex(token);
   const prefix = token.slice(0, 7) + '...' + token.slice(-4);
 
   let expiresAt: string | null = null;

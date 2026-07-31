@@ -14,6 +14,8 @@ export const ErrorCodes = {
 
   // Auth errors
   UNAUTHORIZED: 'UNAUTHORIZED',
+  AUTH_MISSING: 'AUTH_MISSING',
+  AUTH_INVALID: 'AUTH_INVALID',
   FORBIDDEN: 'FORBIDDEN',
   INVALID_TOKEN: 'INVALID_TOKEN',
   TOKEN_EXPIRED: 'TOKEN_EXPIRED',
@@ -73,9 +75,57 @@ export class NotFoundError extends ValetError {
 }
 
 export class UnauthorizedError extends ValetError {
-  constructor(message = 'Unauthorized') {
-    super(message, ErrorCodes.UNAUTHORIZED, 401);
+  constructor(message = 'Unauthorized', code: ErrorCode = ErrorCodes.UNAUTHORIZED) {
+    super(message, code, 401);
   }
+}
+
+/**
+ * Codes that mean "the caller's identity itself is unknown/expired" — the
+ * only 401s that should wipe local auth state and bounce the user to /login.
+ * Deliberately excludes the generic `UNAUTHORIZED` default: route handlers
+ * that throw `new UnauthorizedError('...')` without an explicit code express
+ * a route-level authorization failure and must not log the user out. Those
+ * should use `ForbiddenError` (403) or pass an explicit auth-tier code.
+ */
+export const AUTH_FAILURE_CODES: readonly ErrorCode[] = [
+  ErrorCodes.AUTH_MISSING,
+  ErrorCodes.AUTH_INVALID,
+];
+
+export function isAuthFailureCode(code: string | undefined): boolean {
+  return typeof code === 'string' && (AUTH_FAILURE_CODES as readonly string[]).includes(code);
+}
+
+/**
+ * Client-side decision: should a 401 response clear local auth state and
+ * bounce to /login? Requires *evidence* the 401 came from the Valet app
+ * itself, not from an intermediary (Cloudflare WAF interstitial HTML,
+ * a text/plain "Unauthorized" from a proxy, etc.). Two cases clear:
+ *
+ *  1. `isAuthFailureCode(code)` — the auth middleware told us the
+ *     identity is dead (AUTH_MISSING / AUTH_INVALID).
+ *  2. `hasJsonBody` is true and the code is missing/empty (undefined,
+ *     null, or ''): a bare 401 from a Valet response that shaped its
+ *     body as JSON but didn't set a `code` field. `JSON.parse` can
+ *     produce a literal `null` on the field, so we accept that too.
+ *
+ * If the response body was non-JSON (`hasJsonBody === false`), we
+ * assume an intermediary served the 401 and leave auth state alone
+ * so a CF WAF blip or edge failure can't log the user out mid-session.
+ *
+ * Explicit `UNAUTHORIZED` (route-level authorization denial) does NOT
+ * clear — that's a route decision, not an identity failure.
+ */
+export function shouldClearAuthOn401(opts: {
+  code: string | null | undefined;
+  hasJsonBody: boolean;
+}): boolean {
+  const { code, hasJsonBody } = opts;
+  if (typeof code === 'string' && isAuthFailureCode(code)) return true;
+  // Loose equality intentionally matches both null and undefined.
+  if (hasJsonBody && (code == null || code === '')) return true;
+  return false;
 }
 
 export class ForbiddenError extends ValetError {

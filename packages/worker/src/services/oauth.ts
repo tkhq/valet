@@ -6,6 +6,8 @@ import { storeCredential } from './credentials.js';
 import { hashPassword, verifyPassword } from '@valet/plugin-email-auth/identity';
 import { verifyGoogleIdToken } from '@valet/plugin-google-auth/identity';
 import { getGitHubConfig } from './github-config.js';
+import { SESSION_TTL_MS } from '../middleware/auth.js';
+import { sha256Hex } from '../lib/hash.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -15,14 +17,6 @@ function generateSessionToken(): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-}
-
-async function hashToken(token: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(token);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ─── Email Gating ───────────────────────────────────────────────────────────
@@ -41,7 +35,7 @@ export async function isEmailAllowed(
 
   // If a valid invite code is provided, always allow
   if (inviteCode) {
-    const invite = await db.getValidInviteByCode(appDb, inviteCode);
+    const invite = await db.getInviteByCode(appDb, inviteCode);
     if (invite) return true;
   }
 
@@ -68,7 +62,7 @@ export async function isEmailAllowed(
     }
 
     // Check for a valid invite by email
-    const invite = await db.getValidInviteByEmail(appDb, emailLower);
+    const invite = await db.getInviteByEmail(appDb, emailLower);
     if (invite) return true;
   } catch {
     // DB not available or table doesn't exist yet — fall through to env var
@@ -106,10 +100,13 @@ async function finalizeUserLogin(
     }
   }
 
-  // Generate session token
+  // Generate session token. Expiry is a fixed 7-day cap from creation
+  // (SESSION_TTL_MS) — the middleware touches `last_used_at` on every
+  // authenticated request but deliberately does NOT slide `expires_at`,
+  // so the user re-authenticates through the identity provider weekly.
   const sessionToken = generateSessionToken();
-  const tokenHash = await hashToken(sessionToken);
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const tokenHash = await sha256Hex(sessionToken);
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 
   await db.createAuthSession(appDb, {
     id: crypto.randomUUID(),

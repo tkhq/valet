@@ -5,6 +5,8 @@ import {
   listUsers,
   updateUserRole,
   deleteUser,
+  deleteUserAuthSessions,
+  getUserById,
   upsertCustomProvider,
 } from '../lib/db.js';
 import type { AppDb } from '../lib/drizzle.js';
@@ -113,6 +115,36 @@ export async function deleteUserSafe(
   }
 
   await deleteUser(db, userId);
+  return { ok: true };
+}
+
+// ─── Session Revocation ─────────────────────────────────────────────────────
+
+export type RevokeSessionsResult =
+  | { ok: true }
+  | { ok: false; error: 'self_revoke' | 'user_not_found' };
+
+/**
+ * Revoke every live login session for `userId`. Refuses self-revoke — an
+ * admin should log themselves out through the normal logout flow rather
+ * than admin-bulk-revoking their own row, which is easy to mis-click when
+ * booting someone else during an incident.
+ */
+export async function revokeUserSessionsSafe(
+  db: AppDb,
+  userId: string,
+  requesterId: string,
+): Promise<RevokeSessionsResult> {
+  if (userId === requesterId) {
+    return { ok: false, error: 'self_revoke' };
+  }
+
+  const target = await getUserById(db, userId);
+  if (!target) {
+    return { ok: false, error: 'user_not_found' };
+  }
+
+  await deleteUserAuthSessions(db, userId);
   return { ok: true };
 }
 

@@ -9,9 +9,10 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { api } from './client';
+import { api, readErrorBody, authClearSignalFrom } from './client';
 import { useAuthStore } from '@/stores/auth';
 import { router } from '@/app';
+import { shouldClearAuthOn401 } from '@valet/shared';
 
 export const copilotKeys = {
   all: ['copilot'] as const,
@@ -193,27 +194,39 @@ export function useCopilotChat(opts: UseCopilotChatOptions) {
       });
 
       if (!resp.ok) {
-        // Auth expiry: replicate the apiClient behaviour — clear auth
-        // state and bounce to /login. Otherwise the user gets stuck on
-        // the editor with a "session expired" toast and no recovery.
-        if (resp.status === 401) {
+        type ErrBody = { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> } };
+        const { text: body, parsed: parsedRaw } = await readErrorBody(resp);
+        const parsed = (parsedRaw ?? {}) as ErrBody;
+
+        // Auth expiry: mirror apiClient — clear on auth-tier codes and
+        // on bare 401s from a Valet JSON response with no code field.
+        // Non-JSON 401 bodies (CF WAF interstitial, proxy text/plain)
+        // are attributed to an intermediary and left alone. Route-level
+        // 401s (workflow ownership check with an explicit UNAUTHORIZED
+        // code) surface as ordinary errors. We throw so control lands
+        // in the outer catch, which handles UI cleanup uniformly with
+        // every other error path (drop the empty assistant bubble, set
+        // status='error', set error). The throw does NOT propagate to
+        // callers of send() — send()'s own catch swallows it — so
+        // `await send(...)` still resolves; callers that need to
+        // short-circuit on auth failure should inspect the hook's
+        // `error` / `status` state, not the promise.
+        if (
+          resp.status === 401 &&
+          shouldClearAuthOn401(authClearSignalFrom(parsedRaw))
+        ) {
           useAuthStore.getState().clearAuth();
           void router.navigate({ to: '/login' });
-          return;
+          throw new Error('Your session has expired — please sign in again.');
         }
-        const body = await resp.text().catch(() => '');
+
         let friendly = body || `HTTP ${resp.status}`;
-        try {
-          const parsed = JSON.parse(body) as { error?: string | { issues?: Array<{ message?: string; path?: unknown[] }> } };
-          if (typeof parsed.error === 'string') {
-            friendly = parsed.error;
-          } else if (parsed.error && Array.isArray(parsed.error.issues)) {
-            friendly = parsed.error.issues
-              .map((i) => `${i.message ?? ''}${i.path ? ` (${i.path.join('.')})` : ''}`)
-              .join('; ');
-          }
-        } catch {
-          /* leave friendly as raw body */
+        if (typeof parsed.error === 'string') {
+          friendly = parsed.error;
+        } else if (parsed.error && Array.isArray(parsed.error.issues)) {
+          friendly = parsed.error.issues
+            .map((i) => `${i.message ?? ''}${i.path ? ` (${i.path.join('.')})` : ''}`)
+            .join('; ');
         }
         throw new Error(friendly);
       }

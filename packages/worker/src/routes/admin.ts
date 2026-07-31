@@ -15,6 +15,7 @@ import {
   deleteCustomProvider,
   getOrchestratorIdentity,
 } from '../lib/db.js';
+import { NotFoundError } from '@valet/shared';
 import { getDb } from '../lib/drizzle.js';
 import * as adminService from '../services/admin.js';
 
@@ -207,11 +208,53 @@ adminRouter.delete('/users/:id', async (c) => {
 
   const result = await adminService.deleteUserSafe(c.get('db'), userId, currentUser.id);
   if (!result.ok) {
-    if (result.error === 'self_delete') {
-      throw new ValidationError('Cannot delete yourself');
+    switch (result.error) {
+      case 'self_delete':
+        throw new ValidationError('Cannot delete yourself');
+      case 'last_admin':
+        throw new ValidationError('Cannot delete the last admin');
+      default: {
+        // Exhaustive switch — if a future error variant is added to
+        // `DeleteUserResult`, TS flags this line. Without a default
+        // throw, control would fall through to `ok: true` and silently
+        // report success on a failed delete.
+        const _exhaustive: never = result.error;
+        throw new Error(`unhandled deleteUserSafe error: ${String(_exhaustive)}`);
+      }
     }
-    if (result.error === 'last_admin') {
-      throw new ValidationError('Cannot delete the last admin');
+  }
+
+  return c.json({ ok: true });
+});
+
+/**
+ * Revoke all live login sessions for a user. Existing browser sessions
+ * for that user will be logged out on their next HTTP request (the
+ * middleware returns AUTH_INVALID, the client clears local auth state).
+ * Already-open session WebSockets are NOT force-closed — auth is checked
+ * at upgrade time, so an open chat socket keeps working until it
+ * reconnects. Does not delete the user or API tokens — use
+ * `DELETE /users/:id` for that.
+ *
+ * Refuses self-revoke (an admin should log themselves out normally, not
+ * via the admin panel — trivial to mis-click during an incident) and
+ * 404s on unknown user id so admins get real feedback.
+ */
+adminRouter.post('/users/:id/revoke-sessions', async (c) => {
+  const userId = c.req.param('id');
+  const currentUser = c.get('user');
+
+  const result = await adminService.revokeUserSessionsSafe(c.get('db'), userId, currentUser.id);
+  if (!result.ok) {
+    switch (result.error) {
+      case 'self_revoke':
+        throw new ValidationError('Cannot revoke your own sessions from the admin panel — use logout instead');
+      case 'user_not_found':
+        throw new NotFoundError('User', userId);
+      default: {
+        const _exhaustive: never = result.error;
+        throw new Error(`unhandled revokeUserSessionsSafe error: ${String(_exhaustive)}`);
+      }
     }
   }
 

@@ -14,7 +14,30 @@ function buildApp() {
   });
   app.use('/api/*', authMiddleware);
   app.get('/api/sessions/:id/runner-attachment', (c) => c.text('ok'));
+  app.get('/api/sessions/:id/messages', (c) => c.text('ok'));
   return app;
+}
+
+interface DbStub {
+  prepare: (sql: string) => {
+    bind: (...args: unknown[]) => {
+      first: <T>() => Promise<T | null>;
+      run: () => Promise<void>;
+    };
+  };
+}
+
+function stubDb(row: Record<string, unknown> | null, capturedWrites?: string[]): DbStub {
+  return {
+    prepare: (sql: string) => ({
+      bind: () => ({
+        first: async <T>() => (row as T) ?? null,
+        run: async () => {
+          capturedWrites?.push(sql);
+        },
+      }),
+    }),
+  };
 }
 
 describe('extractBearerToken', () => {
@@ -56,9 +79,165 @@ describe('authMiddleware', () => {
 
     const res = await app.fetch(
       new Request('http://localhost/api/sessions/session-1/messages'),
-      { DB: { prepare: () => ({ bind: () => ({ first: () => null }) }) } } as any,
+      { DB: stubDb(null) } as any,
     );
 
     expect(res.status).toBe(401);
+  });
+
+  it('returns AUTH_MISSING code when no bearer token is provided', async () => {
+    const app = buildApp();
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages'),
+      { DB: stubDb(null) } as any,
+    );
+
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('AUTH_MISSING');
+  });
+
+  it('returns AUTH_INVALID code when a bearer token is present but unknown', async () => {
+    const app = buildApp();
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer bogus-token' },
+      }),
+      { DB: stubDb(null) } as any,
+    );
+
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('AUTH_INVALID');
+  });
+
+  function buildSessionDb(writes: string[]): DbStub {
+    return {
+      prepare: (sql: string) => ({
+        bind: () => ({
+          first: async <T>() =>
+            (sql.includes('FROM auth_sessions')
+              ? { id: 'user-1', email: 'u@example.com', role: 'member' }
+              : null) as T | null,
+          run: async () => {
+            writes.push(sql);
+          },
+        }),
+      }),
+    };
+  }
+
+  it('surfaces a DB failure as a 500, not AUTH_INVALID', async () => {
+    const app = buildApp();
+
+    // A transient D1 error must NOT be translated into "your token is
+    // invalid" — the client clears local auth on AUTH_INVALID, so a DB
+    // hiccup would log every active user out.
+    const throwingDb: DbStub = {
+      prepare: () => ({
+        bind: () => ({
+          first: async () => {
+            throw new Error('D1_ERROR: network');
+          },
+          run: async () => {},
+        }),
+      }),
+    };
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer valid-token' },
+      }),
+      { DB: throwingDb } as any,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('INTERNAL_ERROR');
+  });
+
+  it('compares expires_at against an ISO timestamp, not SQLite datetime()', async () => {
+    // Regression: `expires_at` is stored as `Date.toISOString()`
+    // (T-separated, Z-suffixed), but the original query used SQLite's
+    // `datetime('now')`, which returns a space-separated string without
+    // the trailing Z. Under BINARY collation those two formats do not
+    // compare correctly — a session that expired earlier on the same
+    // UTC date would continue to authenticate until the date advanced.
+    // The middleware must now bind an ISO-formatted `now` and compare
+    // like-for-like.
+    const app = buildApp();
+
+    const captured: { sql: string; params: unknown[] }[] = [];
+    const capturingDb: DbStub = {
+      prepare: (sql: string) => ({
+        bind: (...params: unknown[]) => ({
+          first: async <T>() => {
+            captured.push({ sql, params });
+            return null as T | null;
+          },
+          run: async () => {},
+        }),
+      }),
+    };
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer some-token' },
+      }),
+      { DB: capturingDb } as any,
+    );
+
+    expect(res.status).toBe(401);
+    const authSessionQuery = captured.find((c) => c.sql.includes('FROM auth_sessions'));
+    expect(authSessionQuery).toBeDefined();
+    expect(authSessionQuery!.sql).not.toContain("datetime('now')");
+    const nowParam = authSessionQuery!.params[1];
+    expect(typeof nowParam).toBe('string');
+    // ISO-8601: `YYYY-MM-DDTHH:MM:SS.sssZ`. The prior bug came from the
+    // stored ISO value being compared against SQLite's space-separated
+    // `datetime('now')`; both sides must now use the same shape.
+    expect(nowParam as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+    const apiTokenQuery = captured.find((c) => c.sql.includes('FROM api_tokens'));
+    expect(apiTokenQuery).toBeDefined();
+    expect(apiTokenQuery!.sql).not.toContain("datetime('now')");
+    // Each validator calls `new Date().toISOString()` independently, so the
+    // two bound timestamps can differ by a millisecond — assert the shape,
+    // not identity, to avoid a clock-tick flake.
+    expect(apiTokenQuery!.params[1] as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
+  it('updates last_used_at on every authenticated request but does NOT slide expires_at', async () => {
+    const app = buildApp();
+    const writes: string[] = [];
+    const waited: Promise<unknown>[] = [];
+
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => {
+        waited.push(p);
+      },
+      passThroughOnException: () => {},
+      props: {},
+    } as unknown as ExecutionContext;
+
+    const res = await app.fetch(
+      new Request('http://localhost/api/sessions/session-1/messages', {
+        headers: { Authorization: 'Bearer valid-token' },
+      }),
+      { DB: buildSessionDb(writes) } as any,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+
+    const update = writes.find((sql) => sql.includes('UPDATE auth_sessions'));
+    expect(update).toBeDefined();
+    expect(update).toContain('last_used_at');
+    // Session expiry is fixed 7 days from creation — the UPDATE must not
+    // touch expires_at.
+    expect(update).not.toContain('expires_at');
+    expect(waited.length).toBeGreaterThan(0);
   });
 });

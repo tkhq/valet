@@ -3,6 +3,8 @@ import type { User, UserRole, QueueMode } from '@valet/shared';
 import { eq, sql, asc, and, inArray } from 'drizzle-orm';
 import { toDate } from '../drizzle.js';
 import { users, credentials } from '../schema/index.js';
+import { deleteUserAuthSessions } from './auth.js';
+import { deleteUserApiTokens } from './api-keys.js';
 
 function rowToUser(row: typeof users.$inferSelect): User {
   return {
@@ -210,9 +212,29 @@ export async function listUsers(db: AppDb): Promise<User[]> {
 }
 
 export async function deleteUser(db: AppDb, userId: string): Promise<void> {
-  // Clean up user-owned credentials (no longer cascade-deleted after migration 0066)
-  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
+  // Ordering here is deliberate: security > referential integrity.
+  //
+  // The primary use case for deleteUser is an admin revoking a compromised
+  // account during an incident. The worst possible outcome is a user that
+  // has been "deleted" but still holds a valid auth_session or api_token.
+  // We therefore drop the users row FIRST — the ON DELETE CASCADE on
+  // `auth_sessions` and `api_tokens` revokes all live access atomically
+  // as part of this single statement, making de-auth the very first
+  // observable side effect.
   await db.delete(users).where(eq(users.id, userId));
+  // Idempotent belt-and-suspenders in case a future migration silently
+  // drops the ON DELETE CASCADE on these tables. No-ops after the cascade.
+  await deleteUserAuthSessions(db, userId);
+  await deleteUserApiTokens(db, userId);
+  // Credentials cleanup runs LAST. `credentials.owner_id` is polymorphic —
+  // it holds either a users.id or an orgs.id, discriminated by owner_type —
+  // so the table has NEVER carried a FK to users, and cascade-on-delete
+  // was never possible. Cleanup must live in code. If this step fails we
+  // leave orphan credentials rows (encrypted blobs with no valid owner —
+  // largely inert since there's no user id to authenticate against).
+  // Recovery is straightforward: re-insert a row into `users` with the
+  // same id and re-run `DELETE /users/:id` to clean them up.
+  await db.delete(credentials).where(and(eq(credentials.ownerType, 'user'), eq(credentials.ownerId, userId)));
 }
 
 // ─── DO Helpers ──────────────────────────────────────────────────────────────
