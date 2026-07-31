@@ -4,29 +4,28 @@
  * (cross-owner access 404s, never 403s — an owned row and a missing row are
  * indistinguishable to the caller).
  *
- * Run state is read through `providers.workflowStore` (the same
- * `WorkflowStore` port `providers.workflowRunHost` drives runs against) —
- * never through the raw `workflow_runs`/`workflow_checkpoints`/
- * `workflow_signals` tables directly, so this route file stays correct
- * regardless of the store's backing implementation.
+ * All definition/run logic lives in `../workflows/service.ts` (shared with
+ * the agent-facing workflows action plugin); this file is HTTP plumbing.
  */
 import { Hono } from "hono";
-import { and, desc, eq } from "drizzle-orm";
-import {
-  validateWorkflowDefinition,
-  type RunParams,
-  type WorkflowDefinition,
-  type WorkflowTriggerPayload,
-} from "@valet/workflow";
 import type { AppEnv } from "../env.js";
-import { workflowDefinitions, workflowRuns } from "../schema/index.js";
-import { definitionVersionId } from "../workflows/definition-version.js";
+import {
+  createWorkflowDefinition,
+  getWorkflowDefinition,
+  getWorkflowRunDetail,
+  listWorkflowDefinitions,
+  listWorkflowRuns,
+  startWorkflowRun,
+  updateWorkflowDefinition,
+  validateDefinitionInput,
+  type WorkflowOwner,
+  type WorkflowServiceDeps,
+} from "../workflows/service.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
   GetWorkflowResponse,
-  GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ResolveWorkflowApprovalRequest,
@@ -35,60 +34,24 @@ import type {
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
-  WorkflowDefinitionSummary,
-  WorkflowRunSummary,
 } from "../wire/types.js";
 
 export const workflowsRouter = new Hono<AppEnv>();
 
-function newId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/**
- * `validateWorkflowDefinition` takes a `WorkflowDefinition`, not `unknown` —
- * it assumes `.nodes`/`.edges` already exist as arrays and iterates them
- * directly (a malformed shape would throw a `TypeError`, not produce a
- * validation error). Requests carry `unknown` JSON, so this narrows the
- * bare-minimum top-level shape first (object with array `nodes`/`edges`)
- * before handing off to the real validator, which then checks node/edge
- * *contents* in detail. The final cast is safe: every field the validator
- * dereferences has just been checked to exist with the right container type.
- */
-function validateDefinitionInput(
-  value: unknown,
-): { ok: true; definition: WorkflowDefinition } | { ok: false; errors: string[] } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { ok: false, errors: ["definition must be an object"] };
-  }
-  const obj = value as Record<string, unknown>;
-  if (!Array.isArray(obj.nodes)) {
-    return { ok: false, errors: ["definition.nodes must be an array"] };
-  }
-  if (!Array.isArray(obj.edges)) {
-    return { ok: false, errors: ["definition.edges must be an array"] };
-  }
-  const definition = value as WorkflowDefinition;
-  const result = validateWorkflowDefinition(definition);
-  if (!result.ok) return { ok: false, errors: result.errors };
-  return { ok: true, definition };
-}
-
-function rowToDefinition(row: typeof workflowDefinitions.$inferSelect): WorkflowDefinitionSummary {
+function serviceCtx(c: {
+  var: { providers: WorkflowServiceDeps; user: { id: string; orgId: string } };
+}): { deps: WorkflowServiceDeps; owner: WorkflowOwner } {
+  const { db, workflowStore, workflowRunHost } = c.var.providers;
   return {
-    id: row.id,
-    name: row.name,
-    definition: row.definition,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    deps: { db, workflowStore, workflowRunHost },
+    owner: { userId: c.var.user.id, orgId: c.var.user.orgId },
   };
 }
 
 // ── Definitions ───────────────────────────────────────────────────────────
 
 workflowsRouter.post("/", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
+  const { deps, owner } = serviceCtx(c);
 
   let body: CreateWorkflowRequest;
   try {
@@ -108,74 +71,31 @@ workflowsRouter.post("/", async (c) => {
     return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
   }
 
-  const now = Date.now();
-  const id = newId("wf");
-  await db
-    .insert(workflowDefinitions)
-    .values({
-      id,
-      orgId: user.orgId,
-      ownerType: "user",
-      ownerId: user.id,
-      name: body.name,
-      definition: body.definition,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-  const resp: CreateWorkflowResponse = {
-    id,
+  const created = await createWorkflowDefinition(deps, owner, {
     name: body.name,
     definition: body.definition,
-    createdAt: now,
-    updatedAt: now,
-  };
+  });
+  const resp: CreateWorkflowResponse = created;
   return c.json(resp, 201);
 });
 
 workflowsRouter.get("/", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-
-  const rows = await db
-    .select()
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .orderBy(desc(workflowDefinitions.updatedAt));
-
-  const resp: ListWorkflowsResponse = { workflows: rows.map(rowToDefinition) };
+  const { deps, owner } = serviceCtx(c);
+  const resp: ListWorkflowsResponse = { workflows: await listWorkflowDefinitions(deps, owner) };
   return c.json(resp);
 });
 
 workflowsRouter.get("/:id", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-  const id = c.req.param("id");
-
-  const rows = await db
-    .select()
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .limit(1);
-  const row = rows[0];
-  if (!row) return c.json({ error: "workflow not found" }, 404);
-
-  const resp: GetWorkflowResponse = rowToDefinition(row);
+  const { deps, owner } = serviceCtx(c);
+  const summary = await getWorkflowDefinition(deps, owner, c.req.param("id"));
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  const resp: GetWorkflowResponse = summary;
   return c.json(resp);
 });
 
 workflowsRouter.put("/:id", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
+  const { deps, owner } = serviceCtx(c);
   const id = c.req.param("id");
-
-  const rows = await db
-    .select()
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .limit(1);
-  const row = rows[0];
-  if (!row) return c.json({ error: "workflow not found" }, 404);
 
   let body: UpdateWorkflowRequest;
   try {
@@ -191,43 +111,21 @@ workflowsRouter.put("/:id", async (c) => {
     }
   }
 
-  const now = Date.now();
-  // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
-  // definition at run-start time (plan decision 17), so updating the
-  // definitions row here never reaches back into a running/parked run.
-  await db
-    .update(workflowDefinitions)
-    .set({
-      name: body.name ?? row.name,
-      definition: body.definition !== undefined ? body.definition : row.definition,
-      updatedAt: now,
-    })
-    .where(eq(workflowDefinitions.id, id));
+  const updated = await updateWorkflowDefinition(deps, owner, id, {
+    name: body.name,
+    definition: body.definition,
+  });
+  if (!updated) return c.json({ error: "workflow not found" }, 404);
 
-  const resp: UpdateWorkflowResponse = {
-    id,
-    name: body.name ?? row.name,
-    definition: body.definition !== undefined ? body.definition : row.definition,
-    createdAt: row.createdAt,
-    updatedAt: now,
-  };
+  const resp: UpdateWorkflowResponse = updated;
   return c.json(resp);
 });
 
 // ── Runs ──────────────────────────────────────────────────────────────────
 
 workflowsRouter.post("/:id/runs", async (c) => {
-  const { db, workflowRunHost } = c.var.providers;
-  const user = c.var.user;
+  const { deps, owner } = serviceCtx(c);
   const id = c.req.param("id");
-
-  const rows = await db
-    .select()
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .limit(1);
-  const row = rows[0];
-  if (!row) return c.json({ error: "workflow not found" }, 404);
 
   let body: StartWorkflowRunRequest = {};
   try {
@@ -237,113 +135,25 @@ workflowsRouter.post("/:id/runs", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const definition = row.definition;
-  const versionId = definitionVersionId(definition);
-  const runId = `wfrun_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const started = await startWorkflowRun(deps, owner, id, body.input);
+  if (!started) return c.json({ error: "workflow not found" }, 404);
 
-  const trigger: WorkflowTriggerPayload = {
-    type: "manual",
-    timestamp: new Date().toISOString(),
-    data: body.input ?? {},
-    metadata: {},
-  };
-  const params: RunParams = {
-    workflowId: id,
-    definitionVersionId: versionId,
-    input: trigger,
-  };
-
-  await workflowRunHost.start(runId, params, definition, { ownerType: "user", ownerId: user.id });
-
-  const resp: StartWorkflowRunResponse = { runId };
+  const resp: StartWorkflowRunResponse = { runId: started.runId };
   return c.json(resp, 201);
 });
 
 workflowsRouter.get("/:id/runs", async (c) => {
-  const { db, workflowStore } = c.var.providers;
-  const user = c.var.user;
-  const id = c.req.param("id");
-
-  const defRows = await db
-    .select({ id: workflowDefinitions.id })
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, user.id)))
-    .limit(1);
-  const defRow = defRows[0];
-  if (!defRow) return c.json({ error: "workflow not found" }, 404);
-
-  // `WorkflowStore` has no "list runs by workflowId" method — it's a small,
-  // portable port (decision 6) and this is an API-only read concern, so the
-  // list is built by asking the app db for the definition's run ids, then
-  // re-fetching each through the store for a consistent shape. `workflow_runs`
-  // doesn't index by owner alone, but every row here is already scoped by
-  // `workflowId`, which we've just verified is owned.
-  const runRows = await db
-    .select({ id: workflowRuns.id })
-    .from(workflowRuns)
-    .where(eq(workflowRuns.workflowId, id))
-    .orderBy(desc(workflowRuns.createdAt));
-
-  const runs: WorkflowRunSummary[] = [];
-  for (const r of runRows) {
-    const run = await workflowStore.getRun(r.id);
-    if (!run) continue;
-    runs.push({
-      runId: run.runId,
-      workflowId: run.params.workflowId,
-      status: run.status,
-      outcome: run.outcome,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-    });
-  }
-
+  const { deps, owner } = serviceCtx(c);
+  const runs = await listWorkflowRuns(deps, owner, c.req.param("id"));
+  if (!runs) return c.json({ error: "workflow not found" }, 404);
   const resp: ListWorkflowRunsResponse = { runs };
   return c.json(resp);
 });
 
 workflowsRouter.get("/runs/:runId", async (c) => {
-  const { workflowStore } = c.var.providers;
-  const user = c.var.user;
-  const runId = c.req.param("runId");
-
-  const run = await workflowStore.getRun(runId);
-  if (!run || !run.owner || run.owner.ownerType !== "user" || run.owner.ownerId !== user.id) {
-    return c.json({ error: "run not found" }, 404);
-  }
-
-  const [checkpoints, signals] = await Promise.all([
-    workflowStore.getCheckpoints(runId),
-    workflowStore.listSignals(runId, { unconsumed: true }),
-  ]);
-
-  const resp: GetWorkflowRunResponse = {
-    run: {
-      runId: run.runId,
-      workflowId: run.params.workflowId,
-      status: run.status,
-      outcome: run.outcome,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-      waitingOn: run.waitingOn,
-      definition: run.definition,
-      params: run.params,
-    },
-    checkpoints: checkpoints.map((cp) => ({
-      nodeId: cp.nodeId,
-      iteration: cp.iteration,
-      status: cp.status,
-      result: cp.result,
-      error: cp.error,
-      createdAt: cp.createdAt,
-    })),
-    signals: signals.map((s) => ({
-      signalId: s.signalId,
-      signalType: s.signalType,
-      payload: s.payload,
-      createdAt: s.createdAt,
-    })),
-  };
+  const { deps, owner } = serviceCtx(c);
+  const resp = await getWorkflowRunDetail(deps, owner, c.req.param("runId"));
+  if (!resp) return c.json({ error: "run not found" }, 404);
   return c.json(resp);
 });
 
