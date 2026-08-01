@@ -176,6 +176,15 @@ export interface ThreadSummary {
   createdAt: number;
   /** Thread-level model override. Falls back to the session default when undefined. */
   model?: string;
+  /**
+   * The engine thread key — encodes the thread's ORIGIN by convention:
+   * `web:{nonce}` (created from the UI), `events` (event-subscription
+   * deliveries), `signal:workflow:{runId}` (workflow orchestrator/llm
+   * nodes), `signal:{senderId}` (cross-orchestrator), channel-owned keys
+   * like `telegram:dm:{chatId}`, or `default`. The web sidebar buckets
+   * threads by this (see packages/web `thread-origin.ts`).
+   */
+  key?: string;
 }
 
 export interface ListThreadsResponse {

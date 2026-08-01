@@ -77,8 +77,9 @@ function threadToSummary(
   sessionId: string,
   title?: string,
   model?: string,
+  key?: string,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model };
+  return { id: threadId, sessionId, title, createdAt, model, key };
 }
 
 async function loadEngineSession(
@@ -125,6 +126,7 @@ messagesRouter.get("/:id/threads", async (c) => {
       session.id,
       titleById.get(t.id),
       t.modelId(),
+      t.key,
     ),
   );
   const body: ListThreadsResponse = { threads: summaries };
@@ -164,6 +166,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     session.id,
     undefined,
     thread.modelId(),
+    thread.key,
   );
   return c.json(summary);
 });
@@ -192,6 +195,7 @@ messagesRouter.post("/:id/threads", async (c) => {
     session.id,
     body.title,
     thread.modelId(),
+    thread.key,
   );
   return c.json(summary, 201);
 });
