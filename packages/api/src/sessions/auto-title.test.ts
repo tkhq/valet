@@ -59,10 +59,24 @@ function makeStubDb(rows: {
       },
     }),
   });
+  // Auto-title now upserts the thread row (INSERT ... ON CONFLICT DO UPDATE)
+  // instead of a straight UPDATE — the `session_threads` mirror may not have
+  // seen this thread id before. Stub records the incoming values so tests
+  // can still assert on the effective write.
+  const insert = (table: { _label: string }) => ({
+    values: (patch: { title?: string | null }) => ({
+      onConflictDoUpdate: async () => {
+        if (table._label === "thread" && patch.title !== undefined) {
+          threadUpdates.push({ title: patch.title });
+        }
+      },
+    }),
+  });
   return {
     db: {
       select,
       update,
+      insert,
     } as unknown as AppDb,
     sessionUpdates,
     threadUpdates,

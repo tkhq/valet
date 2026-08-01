@@ -12,10 +12,10 @@
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
 import { Hono, type Context } from "hono";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, sessionThreads } from "../schema/index.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
@@ -101,15 +101,29 @@ messagesRouter.get("/:id/threads", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
+  const { db } = c.var.providers;
 
   await engineSession.ensureDefaultThread();
   const threads = engineSession.listThreads();
+
+  // Titles live in the app-side `session_threads` mirror (populated by
+  // auto-title). One lookup by id set — small, since a session has O(few)
+  // threads. Missing rows → undefined title, same as before.
+  const ids = threads.map((t) => t.id);
+  const titleRows = ids.length
+    ? await db
+        .select({ id: sessionThreads.id, title: sessionThreads.title })
+        .from(sessionThreads)
+        .where(inArray(sessionThreads.id, ids))
+    : [];
+  const titleById = new Map(titleRows.map((r) => [r.id, r.title ?? undefined] as const));
+
   const summaries = threads.map((t) =>
     threadToSummary(
       t.id,
       t.toThreadData().createdAt,
       session.id,
-      undefined,
+      titleById.get(t.id),
       t.modelId(),
     ),
   );

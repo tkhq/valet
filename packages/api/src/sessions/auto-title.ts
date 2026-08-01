@@ -176,17 +176,30 @@ export async function autoTitle(
 
   let wroteThread: string | null = null;
   if (input.threadId) {
-    // Only overwrite when the thread's own title is empty.
-    const [threadRow] = await deps.db
+    // Only overwrite when the thread's own title is empty. The engine
+    // owns the thread's existence; `session_threads` is our app-side
+    // mirror that carries the title. Upsert here so the mirror row is
+    // created on first titling, and skip the write when a stored title
+    // is already set (respect a user-picked name).
+    const [existing] = await deps.db
       .select({ title: sessionThreads.title })
       .from(sessionThreads)
       .where(eq(sessionThreads.id, input.threadId))
       .limit(1);
-    if (threadRow && !threadRow.title?.trim()) {
+    const currentTitle = existing?.title?.trim();
+    if (!currentTitle) {
       await deps.db
-        .update(sessionThreads)
-        .set({ title })
-        .where(eq(sessionThreads.id, input.threadId));
+        .insert(sessionThreads)
+        .values({
+          id: input.threadId,
+          sessionId: input.sessionId,
+          title,
+          createdAt: ts,
+        })
+        .onConflictDoUpdate({
+          target: sessionThreads.id,
+          set: { title },
+        });
       wroteThread = title;
     }
   }
