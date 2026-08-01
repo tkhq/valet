@@ -37,12 +37,11 @@ export function childStatusDotClassName(status: OrchestratorChildSummary["status
  * Chat sidebar (assistant-centered web UI, decision 12): the assistant's
  * threads with children nested beneath the thread that spawned them.
  *
- * Design: no section header — the sidebar IS the threads list, so a
- * "THREADS" label is redundant chrome that fights the top nav for a
- * horizontal band. Threads render as a numbered ledger (mono ordinal +
- * title) with a single active-state treatment (moss left rail + soft ink
- * wash). Focus rings are moss, not the browser default blue — keeps the
- * calm-companion palette intact for keyboard users.
+ * Design: no section header — the sidebar IS the threads list. "New
+ * thread" is the first affordance (top of the list, where creation
+ * belongs), rows are plain truncated titles with one active-state
+ * treatment (moss left rail + soft ink wash), and the full title is
+ * recoverable via hover tooltip when truncated.
  */
 export function ThreadTree() {
   const info = useOrchestratorInfo();
@@ -78,8 +77,19 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
 
   return (
     <>
+      <div className="px-2 pt-2 pb-1">
+        <button
+          type="button"
+          onClick={() => void createAndNavigate()}
+          disabled={createThread.isPending}
+          className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          <span>New thread</span>
+        </button>
+      </div>
       <ScrollArea className="flex-1">
-        <nav className="py-3">
+        <nav className="pb-3">
           {threadsQ.isLoading && (
             <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading…
@@ -100,17 +110,6 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
           ))}
         </nav>
       </ScrollArea>
-      <div className="px-4 py-3 border-t border-line/60">
-        <button
-          type="button"
-          onClick={() => void createAndNavigate()}
-          disabled={createThread.isPending}
-          className="group inline-flex items-center gap-1.5 text-xs font-mono uppercase tracking-[0.1em] text-muted hover:text-ink transition-colors focus-visible:outline-none focus-visible:text-ink"
-        >
-          <Plus className="h-3 w-3 transition-transform group-hover:rotate-90" />
-          <span>new thread</span>
-        </button>
-      </div>
     </>
   );
 }
@@ -128,12 +127,11 @@ function ThreadNode({
   childSessions: OrchestratorChildSummary[];
   activeChildId?: string;
 }) {
-  const label = thread.title ?? (index === 0 ? "First thread" : `Thread ${index + 1}`);
-  const ordinal = `№ ${String(index + 1).padStart(2, "0")}`;
+  const label = thread.title ?? (index === 0 ? "today" : `Thread ${index + 1}`);
 
   return (
     <div>
-      <Tooltip content={thread.title ? thread.title : label} delayDuration={600}>
+      <Tooltip content={label} delayDuration={600}>
         <Link
           to="/chat"
           search={(prev) => ({
@@ -142,29 +140,17 @@ function ThreadNode({
             child: undefined,
           })}
           className={cn(
-            // A "ledger row": left rail marks selection, mono ordinal +
-            // title fill the row. `pl-[calc(1rem-2px)]` so the row's
-            // content sits at the same x-offset whether or not the moss
-            // rail is present — no shift when you click between threads.
-            "group relative flex items-baseline gap-3 pr-4 py-2 text-sm transition-colors",
+            // Left rail marks selection; `pl-[calc(1rem-2px)]` keeps the
+            // title at the same x-offset whether or not the moss rail is
+            // present — no shift when you click between threads.
+            "flex items-center pr-4 py-2 text-sm transition-colors",
             "focus-visible:outline-none focus-visible:bg-ink-wash",
             active
-              ? "bg-moss/[0.08] text-ink border-l-2 border-moss pl-[calc(1rem-2px)]"
+              ? "bg-moss/[0.08] text-ink border-l-2 border-moss pl-[calc(1rem-2px)] font-medium"
               : "text-ink/85 hover:bg-ink-wash/60 pl-4 border-l-2 border-transparent",
           )}
         >
-          <span
-            className={cn(
-              "font-mono text-[10px] tabular-nums tracking-wider transition-colors shrink-0",
-              active ? "text-moss" : "text-muted/70 group-hover:text-muted",
-            )}
-            aria-hidden
-          >
-            {ordinal}
-          </span>
-          <span className={cn("flex-1 truncate", active ? "font-medium" : "font-normal")}>
-            {label}
-          </span>
+          <span className="flex-1 truncate">{label}</span>
         </Link>
       </Tooltip>
       {childSessions.length > 0 && (
