@@ -32,6 +32,9 @@ export interface WorkflowServiceDeps {
    * service/action pairs (validator env hook). Optional so tests that
    * exercise definition CRUD without a plugin catalog stay lightweight. */
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /** Full plugin list — trigger tools need the event catalogs
+   * (`plugin.triggers`) for event-key validation and discovery. */
+  plugins?: ValetPlugin[];
 }
 
 export interface WorkflowOwner {

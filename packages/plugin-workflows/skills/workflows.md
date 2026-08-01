@@ -14,12 +14,16 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.list_workflows` — list definitions (id, name)
 - `workflows.get_workflow` — full definition by id
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
+- `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
 - `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept)
 - `workflows.start_run` — start a run; returns `runId`
 - `workflows.get_run` — run status, per-node checkpoints, pending waits
+- `workflows.get_node_result` — a node's FULL checkpoint output, for debugging failures
 - `workflows.list_runs` — a workflow's runs (find parked/active ones)
 - `workflows.cancel_run` — terminate a run (settles asynchronously; re-check with `get_run`)
 - `workflows.resolve_approval` — approve/deny a gate, ONLY when the user has explicitly told you their decision (the call itself asks the user to confirm)
+- `workflows.list_event_types` — event keys workflows can be triggered by
+- `workflows.create_trigger` / `workflows.list_triggers` / `workflows.delete_trigger` — run a workflow automatically on matching events (event-driven only; no cron yet). Event data arrives as `{{trigger.data.payload...}}`.
 
 Always surface returned `workflowId`/`runId` values — the chat UI uses them to render the diagram and run status.
 

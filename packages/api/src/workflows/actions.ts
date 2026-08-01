@@ -29,6 +29,14 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildValidateEnvironment } from "./validation-env.js";
+import { applyWorkflowPatch, type WorkflowEdgeRef } from "./patch.js";
+import {
+  createWorkflowTrigger,
+  deleteWorkflowTrigger,
+  listEventTypes,
+  listWorkflowTriggers,
+} from "./trigger-service.js";
+import type { WorkflowDefinition, WorkflowEdge } from "@valet/workflow";
 
 /** Cap + bullet the validator's lint output for the LLM. The validator can
  * emit dozens of errors on a badly-shaped definition; the first ~20 are
@@ -320,6 +328,230 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const patchWorkflow = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      name: Type.Optional(Type.String()),
+      upsert_nodes: Type.Optional(Type.Array(Type.Unknown())),
+      remove_node_ids: Type.Optional(Type.Array(Type.String())),
+      add_edges: Type.Optional(
+        Type.Array(
+          Type.Object({
+            from: Type.String(),
+            to: Type.String(),
+            fromOutput: Type.Optional(Type.Union([Type.Literal("true"), Type.Literal("false")])),
+            when: Type.Optional(Type.String()),
+          }),
+        ),
+      ),
+      remove_edges: Type.Optional(
+        Type.Array(
+          Type.Object({
+            from: Type.String(),
+            to: Type.String(),
+            fromOutput: Type.Optional(Type.Union([Type.Literal("true"), Type.Literal("false")])),
+          }),
+        ),
+      ),
+    }),
+  )({
+    id: "workflows.patch_workflow",
+    name: "Patch workflow",
+    description:
+      "Edit a workflow WITHOUT re-sending the whole definition: rename, upsert single nodes " +
+      "(replace-by-id or append), remove nodes (their edges go too), add/remove edges. " +
+      "Prefer this over save_workflow for small edits — the patched result runs the full " +
+      "linter, so a bad patch returns lint errors instead of saving.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, name, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const wf = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!wf) return { success: false, error: `workflow not found: ${workflow_id}` };
+
+      const stored = wf.definition;
+      if (
+        typeof stored !== "object" ||
+        stored === null ||
+        !Array.isArray((stored as { nodes?: unknown }).nodes) ||
+        !Array.isArray((stored as { edges?: unknown }).edges)
+      ) {
+        return { success: false, error: "stored definition is not a dag/v1 workflow" };
+      }
+
+      const patched = applyWorkflowPatch(stored as WorkflowDefinition, {
+        upsertNodes: upsert_nodes,
+        removeNodeIds: remove_node_ids,
+        addEdges: add_edges as WorkflowEdge[] | undefined,
+        removeEdges: remove_edges as WorkflowEdgeRef[] | undefined,
+      });
+      if (!patched.ok) return { success: false, error: formatLintErrors(patched.errors) };
+
+      const validation = validateDefinitionInput(
+        patched.definition,
+        buildValidateEnvironment(deps.actionPluginByService),
+      );
+      if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
+
+      const updated = await updateWorkflowDefinition(deps, owner, workflow_id, {
+        name,
+        definition: patched.definition,
+      });
+      if (!updated) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return {
+        success: true,
+        data: {
+          workflowId: updated.id,
+          name: updated.name,
+          nodes: patched.definition.nodes.length,
+          edges: patched.definition.edges.length,
+        },
+      };
+    },
+  });
+
+  const getNodeResult = action(
+    Type.Object({
+      run_id: Type.String(),
+      node_id: Type.String(),
+      iteration: Type.Optional(Type.Number()),
+    }),
+  )({
+    id: "workflows.get_node_result",
+    name: "Get node result",
+    description:
+      "Fetch a run node's FULL checkpoint output (result + error) — use when debugging a " +
+      "failed or surprising node; get_run intentionally omits result bodies. Foreach body " +
+      "nodes have one checkpoint per iteration; pass `iteration` to narrow.",
+    riskLevel: "low",
+    execute: async ({ run_id, node_id, iteration }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
+      if (!detail) return { success: false, error: `run not found: ${run_id}` };
+      const matches = detail.checkpoints.filter(
+        (cp) => cp.nodeId === node_id && (iteration === undefined || cp.iteration === iteration),
+      );
+      if (matches.length === 0) {
+        const known = [...new Set(detail.checkpoints.map((cp) => cp.nodeId))];
+        return {
+          success: false,
+          error: `run ${run_id} has no checkpoint for node ${JSON.stringify(node_id)} (nodes with checkpoints: ${known.join(", ") || "none"})`,
+        };
+      }
+      return {
+        success: true,
+        data: {
+          runId: run_id,
+          nodeId: node_id,
+          checkpoints: matches.map((cp) => ({
+            iteration: cp.iteration,
+            status: cp.status,
+            error: cp.error,
+            result: truncateJson(cp.result, 20_000),
+          })),
+        },
+      };
+    },
+  });
+
+  const listEventTypesAction = action(Type.Object({}))({
+    id: "workflows.list_event_types",
+    name: "List event types",
+    description:
+      "List the event keys workflows can be triggered by (per service, with filterable " +
+      "fields). Use before create_trigger to pick a valid event key.",
+    riskLevel: "low",
+    execute: async (_args, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const services = listEventTypes(getDeps().plugins ?? []);
+      if (services.length === 0) {
+        return {
+          success: true,
+          data: { services, note: "no event-emitting integrations are connected yet" },
+        };
+      }
+      return { success: true, data: { services } };
+    },
+  });
+
+  const createTrigger = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      name: Type.String(),
+      event_keys: Type.Array(Type.String(), {
+        description: 'Event key patterns; trailing ".*" wildcard supported (e.g. "github.pull_request.*").',
+      }),
+      filters: Type.Optional(
+        Type.Array(
+          Type.Object({
+            field: Type.String(),
+            op: Type.Union([
+              Type.Literal("eq"),
+              Type.Literal("in"),
+              Type.Literal("prefix"),
+              Type.Literal("contains"),
+            ]),
+            value: Type.Unknown(),
+          }),
+        ),
+      ),
+    }),
+  )({
+    id: "workflows.create_trigger",
+    name: "Create workflow trigger",
+    description:
+      "Make a workflow run automatically on matching events (event-driven only — cron " +
+      "schedules are not supported yet). The event arrives in templates as " +
+      "{{trigger.data.payload...}} plus {{trigger.data.key}}/{{trigger.data.refs...}}. " +
+      "Returns { triggerId }.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, name, event_keys, filters }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const result = await createWorkflowTrigger(
+        deps.db,
+        deps.plugins ?? [],
+        { id: owner.userId, orgId: owner.orgId },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters },
+      );
+      if (!result.ok) return { success: false, error: result.error };
+      return { success: true, data: result.trigger };
+    },
+  });
+
+  const listTriggers = action(
+    Type.Object({ workflow_id: Type.Optional(Type.String()) }),
+  )({
+    id: "workflows.list_triggers",
+    name: "List workflow triggers",
+    description: "List event triggers targeting workflows (optionally one workflow's).",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const triggers = await listWorkflowTriggers(getDeps().db, owner.orgId, workflow_id);
+      return { success: true, data: { triggers } };
+    },
+  });
+
+  const deleteTrigger = action(Type.Object({ trigger_id: Type.String() }))({
+    id: "workflows.delete_trigger",
+    name: "Delete workflow trigger",
+    description: "Delete a workflow trigger by id (from list_triggers/create_trigger).",
+    riskLevel: "medium",
+    execute: async ({ trigger_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await deleteWorkflowTrigger(getDeps().db, owner.orgId, trigger_id);
+      if (result === "not_found") return { success: false, error: `trigger not found: ${trigger_id}` };
+      return { success: true, data: { triggerId: trigger_id, deleted: true } };
+    },
+  });
+
   return {
     service: "workflows",
     description:
@@ -328,12 +560,31 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       listWorkflows,
       getWorkflow,
       saveWorkflow,
+      patchWorkflow,
       deleteWorkflow,
       startRun,
       getRun,
+      getNodeResult,
       listRuns,
       cancelRun,
       resolveApproval,
+      listEventTypesAction,
+      createTrigger,
+      listTriggers,
+      deleteTrigger,
     ],
   };
+}
+
+/** JSON-stringify with a hard cap so a giant node result can't blow up the
+ * LLM context; the flag tells the model the payload was cut. */
+function truncateJson(value: unknown, maxChars: number): { json: string; truncated: boolean } {
+  let json: string;
+  try {
+    json = JSON.stringify(value) ?? "null";
+  } catch (err) {
+    json = `<unserializable: ${err instanceof Error ? err.message : String(err)}>`;
+  }
+  if (json.length <= maxChars) return { json, truncated: false };
+  return { json: json.slice(0, maxChars), truncated: true };
 }
