@@ -122,11 +122,12 @@ export function ancestorDirs(path: string): string[] {
 }
 
 /** Deterministic accent dot for a top-level directory — same
- * default-palette approach as the dashboard's origin pills (CSS-var tokens
- * can't take opacity modifiers; these are full-strength dots anyway). */
+ * default-palette approach as the dashboard's origin pills. Orange rather
+ * than amber to stay clearly apart from the `amber` "waiting" token used
+ * on status dots. */
 const DIR_DOT_PALETTE = [
   "bg-sky-500",
-  "bg-amber-500",
+  "bg-orange-500",
   "bg-violet-500",
   "bg-rose-500",
   "bg-teal-500",

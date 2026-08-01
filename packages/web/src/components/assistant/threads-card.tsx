@@ -11,7 +11,9 @@ const RECENT_LIMIT = 20;
 
 /** Origin pill styling — the dashboard's one deliberate splash of color.
  * Tailwind default-palette colors (alpha-capable), NOT the CSS-var tokens
- * (whose opacity modifiers silently no-op — see theme.css). */
+ * (whose opacity modifiers silently no-op — see theme.css). `amber-N`
+ * works only because tailwind.config.ts restores the numeric amber scale
+ * alongside the `amber` var token. */
 const ORIGIN_PILL: Record<Exclude<ThreadOriginBucket, "all">, { label: string; className: string }> = {
   chat: { label: "chat", className: "bg-sky-500/10 text-sky-700 dark:text-sky-300" },
   auto: { label: "auto", className: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },

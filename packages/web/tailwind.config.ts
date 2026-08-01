@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import colors from "tailwindcss/colors";
 import typography from "@tailwindcss/typography";
 
 /**
@@ -62,7 +63,11 @@ export default {
         muted: "var(--muted)",
         line: "var(--line)",
         moss: "var(--moss)",
-        amber: "var(--amber)",
+        // DEFAULT keeps `bg-amber` (the token) working while restoring
+        // Tailwind's numeric amber scale — a bare `amber: "var(--amber)"`
+        // REPLACED the whole palette here and silently killed every
+        // `amber-500`-style class in the session components.
+        amber: { ...colors.amber, DEFAULT: "var(--amber)" },
         // Pre-mixed hover/press washes — see the opacity-modifier-trap
         // comment in `theme.css` for why these exist instead of
         // `bg-ink/10`-style opacity modifiers on the tokens above.
