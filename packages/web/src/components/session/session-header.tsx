@@ -12,17 +12,15 @@ import { ModelPicker } from "./model-picker";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
 
-/** Collapse a long workspace path down to something header-friendly: for
- * an internal `/root/.valet/orchestrator/user-…` path show just
- * "orchestrator"; for a real workspace path (`/tmp/valet-loadgen/ws-19`)
- * show the trailing segment. Falls back to the raw value when it's
- * already short. */
-function shortenWorkspace(workspace: string): string {
-  if (workspace.length <= 24) return workspace;
+/** Collapse a workspace path down to a header-friendly badge: any
+ * multi-segment path shows only its LAST segment ("ws-19",
+ * "my-repo"), except orchestrator-style paths whose last segment is an
+ * opaque id ("user-1fony…") — those show the second-to-last segment
+ * ("orchestrator") instead. Single-word workspaces pass through. The
+ * full path stays discoverable via the header tooltip. */
+export function shortenWorkspace(workspace: string): string {
   const parts = workspace.split("/").filter((p) => p.length > 0);
-  if (parts.length === 0) return workspace;
-  // Prefer the second-to-last segment for orchestrator-style paths so the
-  // long user-id tail doesn't survive; otherwise the trailing segment.
+  if (parts.length <= 1) return workspace;
   const lastIsUuidLike = /^(user-|orch-|wf|s_|wfrun_)/.test(parts[parts.length - 1] ?? "");
   return lastIsUuidLike
     ? parts[parts.length - 2] ?? parts[parts.length - 1] ?? workspace
@@ -151,8 +149,11 @@ export function SessionHeader({
           <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
             {title}
           </span>
+          {/* No `uppercase` on the badge — workspace names are
+              case-sensitive paths; shouting them in caps misrepresents
+              them. */}
           {session.workspace && (
-            <span className="text-[10px] font-mono uppercase tracking-[0.1em] text-muted/70 truncate">
+            <span className="text-[10px] font-mono tracking-wide text-muted truncate">
               {shortenWorkspace(session.workspace)}
             </span>
           )}
