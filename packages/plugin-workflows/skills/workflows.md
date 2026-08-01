@@ -58,7 +58,9 @@ Edges may carry `"when"` (an expression) to gate a branch.
 
 ## Working practices
 
-- `save_workflow` validates the definition; on error, fix the reported issues and retry — never save around validation.
+- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references, edge semantics, reachability, model ids, and tool service/actions. On error it returns a bulleted list — fix each item and retry; never save around validation.
+- Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
+- Read node outputs in templates as `{{nodes.<id>.result...}}`; trigger data as `{{trigger.data...}}`. Node ids containing `-` need bracket form: `nodes["my-id"].result`.
 - To modify a workflow: `get_workflow` first, edit the returned definition, then `save_workflow` with the same `workflow_id`. Updates never affect in-flight runs (runs snapshot their definition at start).
 - After `start_run`, use `get_run` to report progress. `status: "parked"` with an approval in `waitingOn` means a human must approve — tell the user and point them at the approval card; you cannot approve on their behalf.
 - A run is finished when `status: "settled"`; report the `outcome`.
