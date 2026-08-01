@@ -113,6 +113,16 @@ export function useUpdateWorkflow(id: string): UpdateWorkflowMutation {
   });
 }
 
+export function useDeleteWorkflow() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (id) => api.deleteWorkflow(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkWorkflows.list() });
+    },
+  });
+}
+
 export function useStartRun(id: string) {
   const qc = useQueryClient();
   return useMutation<StartWorkflowRunResponse, Error, Record<string, unknown> | void>({

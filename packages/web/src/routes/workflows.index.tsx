@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { Trash2 } from "lucide-react";
 import type { WorkflowDefinitionSummary } from "@valet/api/wire";
-import { useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
+import { useDeleteWorkflow, useStartRun, useWorkflowRuns, useWorkflows } from "~/api/workflows";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { Button, Spinner } from "~/components/primitives";
 
@@ -73,20 +74,33 @@ export function WorkflowsIndexPage() {
 function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
   const startRun = useStartRun(workflow.id);
   const runsQ = useWorkflowRuns(workflow.id);
+  const del = useDeleteWorkflow();
   const navigate = useNavigate();
   const runCount = runsQ.data?.runs.length;
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function handleRun() {
     const result = await startRun.mutateAsync();
     void navigate({ to: "/workflows/runs/$runId", params: { runId: result.runId } });
   }
 
+  async function handleDelete() {
+    if (!confirm(`Delete workflow "${workflow.name}"? Settled run history is kept.`)) return;
+    setDeleteError(null);
+    try {
+      await del.mutateAsync(workflow.id);
+    } catch (err) {
+      // 409 = active runs; surface the server's actionable message.
+      setDeleteError(err instanceof Error ? err.message : "Delete failed.");
+    }
+  }
+
   return (
-    <li className="flex items-center justify-between rounded border border-line bg-paper px-4 py-3">
+    <li className="flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3">
       <Link
         to="/workflows/$workflowId"
         params={{ workflowId: workflow.id }}
-        className="text-sm font-medium text-ink hover:underline"
+        className="min-w-0 text-sm font-medium text-ink hover:underline"
       >
         {workflow.name}
         {runCount !== undefined && (
@@ -95,9 +109,21 @@ function DefinitionRow({ workflow }: { workflow: WorkflowDefinitionSummary }) {
           </span>
         )}
       </Link>
-      <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
-        {startRun.isPending ? "Starting…" : "Run"}
-      </Button>
+      <div className="flex items-center gap-2 shrink-0">
+        {deleteError && <span className="text-xs text-danger-500">{deleteError}</span>}
+        <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
+          {startRun.isPending ? "Starting…" : "Run"}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => void handleDelete()}
+          disabled={del.isPending}
+          aria-label={`Delete ${workflow.name}`}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
     </li>
   );
 }

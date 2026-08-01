@@ -177,6 +177,36 @@ export async function updateWorkflowDefinition(
   };
 }
 
+export type DeleteWorkflowResult = "deleted" | "not_found" | "has_active_runs";
+
+/**
+ * Hard-deletes a workflow definition. Refuses while the workflow has
+ * non-settled runs — runs snapshot their definition so they WOULD keep
+ * executing, but they'd be orphaned from every list view; forcing a
+ * cancel-first flow keeps the run ledger navigable. Settled runs are kept
+ * (they're history, reachable via their runId).
+ */
+export async function deleteWorkflowDefinition(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  id: string,
+): Promise<DeleteWorkflowResult> {
+  const row = await ownedDefinitionRow(deps, owner, id);
+  if (!row) return "not_found";
+
+  const runRows = await deps.db
+    .select({ id: workflowRuns.id })
+    .from(workflowRuns)
+    .where(eq(workflowRuns.workflowId, id));
+  for (const r of runRows) {
+    const run = await deps.workflowStore.getRun(r.id);
+    if (run && run.status !== "settled") return "has_active_runs";
+  }
+
+  await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
+  return "deleted";
+}
+
 /** Returns null when the workflow doesn't exist (or isn't owned). */
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,

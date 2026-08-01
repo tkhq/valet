@@ -22,6 +22,7 @@ describe("workflowsActionPlugin", () => {
     const plugin = workflowsActionPlugin(noDeps);
     expect(plugin.service).toBe("workflows");
     expect(plugin.actions.map((a) => a.id).sort()).toEqual([
+      "workflows.delete_workflow",
       "workflows.get_run",
       "workflows.get_workflow",
       "workflows.list_workflows",
@@ -38,6 +39,7 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.get_run")).toBe("low");
     expect(byId.get("workflows.save_workflow")).toBe("medium");
     expect(byId.get("workflows.start_run")).toBe("medium");
+    expect(byId.get("workflows.delete_workflow")).toBe("medium");
   });
 });
 

@@ -15,6 +15,7 @@ import type {
 } from "@valet/engine";
 import {
   createWorkflowDefinition,
+  deleteWorkflowDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
   listWorkflowDefinitions,
@@ -198,6 +199,30 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const deleteWorkflow = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.delete_workflow",
+    name: "Delete workflow",
+    description:
+      "Permanently delete a workflow definition. Refused (with an error) while the workflow " +
+      "has non-settled runs — cancel them first. Settled run history is kept.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await deleteWorkflowDefinition(getDeps(), owner, workflow_id);
+      if (result === "not_found") {
+        return { success: false, error: `workflow not found: ${workflow_id}` };
+      }
+      if (result === "has_active_runs") {
+        return {
+          success: false,
+          error: `workflow ${workflow_id} has runs that are not settled — cancel them first, then delete`,
+        };
+      }
+      return { success: true, data: { workflowId: workflow_id, deleted: true } };
+    },
+  });
+
   const getRun = action(Type.Object({ run_id: Type.String() }))({
     id: "workflows.get_run",
     name: "Get workflow run",
@@ -233,6 +258,6 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     service: "workflows",
     description:
       "Create, inspect, and run Valet DAG workflows (dag/v1 definitions: nodes + edges).",
-    actions: [listWorkflows, getWorkflow, saveWorkflow, startRun, getRun],
+    actions: [listWorkflows, getWorkflow, saveWorkflow, deleteWorkflow, startRun, getRun],
   };
 }

@@ -319,6 +319,8 @@ export const api = {
     request<CreateWorkflowResponse>("POST", "/workflows", body),
   updateWorkflow: (id: string, body: UpdateWorkflowRequest) =>
     request<UpdateWorkflowResponse>("PUT", `/workflows/${encodeURIComponent(id)}`, body),
+  deleteWorkflow: (id: string) =>
+    request<{ ok: true }>("DELETE", `/workflows/${encodeURIComponent(id)}`),
   startWorkflowRun: (id: string, body: StartWorkflowRunRequest = {}) =>
     request<StartWorkflowRunResponse>(
       "POST",

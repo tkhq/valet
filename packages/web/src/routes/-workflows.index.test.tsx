@@ -43,6 +43,7 @@ vi.mock("~/api/workflows", () => ({
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
+  useDeleteWorkflow: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 import { WorkflowsIndexPage } from "./workflows.index";

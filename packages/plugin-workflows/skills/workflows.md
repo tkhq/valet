@@ -14,6 +14,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.list_workflows` — list definitions (id, name)
 - `workflows.get_workflow` — full definition by id
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
+- `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept)
 - `workflows.start_run` — start a run; returns `runId`
 - `workflows.get_run` — run status, per-node checkpoints, pending waits
 

@@ -12,6 +12,7 @@ import type { AppEnv } from "../env.js";
 import type { ValidateEnvironment } from "@valet/workflow";
 import {
   createWorkflowDefinition,
+  deleteWorkflowDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
   listWorkflowDefinitions,
@@ -122,6 +123,19 @@ workflowsRouter.put("/:id", async (c) => {
 
   const resp: UpdateWorkflowResponse = updated;
   return c.json(resp);
+});
+
+workflowsRouter.delete("/:id", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await deleteWorkflowDefinition(deps, owner, c.req.param("id"));
+  if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
+  if (result === "has_active_runs") {
+    return c.json(
+      { error: "workflow has runs that are not settled. Cancel them first, then delete." },
+      409,
+    );
+  }
+  return c.json({ ok: true });
 });
 
 // ── Runs ──────────────────────────────────────────────────────────────────
