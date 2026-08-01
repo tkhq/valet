@@ -3,7 +3,7 @@ import type { GetOrchestratorInfoResponse } from "@valet/api/wire";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useNotifications } from "~/api/queries";
 import { ActivityStrip, mergeActivity } from "~/components/assistant/activity-strip";
-import { ChatCard } from "~/components/assistant/chat-card";
+import { ThreadsCard } from "~/components/assistant/threads-card";
 import { IdentityHeader } from "~/components/assistant/identity-header";
 import { IdentityStep } from "~/components/assistant/identity-step";
 import { MemoryCard } from "~/components/assistant/memory-card";
@@ -72,7 +72,7 @@ function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
 
         <div className="grid gap-4 md:grid-cols-2">
           <div className="md:col-span-2">
-            <ChatCard />
+            <ThreadsCard />
           </div>
           <MemoryCard />
           <WorkCard />

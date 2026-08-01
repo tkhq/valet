@@ -33,8 +33,8 @@ vi.mock("~/api/queries", () => ({
   }),
 }));
 
-vi.mock("~/components/assistant/chat-card", () => ({
-  ChatCard: () => <div data-testid="chat-card" />,
+vi.mock("~/components/assistant/threads-card", () => ({
+  ThreadsCard: () => <div data-testid="threads-card" />,
 }));
 vi.mock("~/components/assistant/memory-card", () => ({
   MemoryCard: () => <div data-testid="memory-card" />,
@@ -72,7 +72,7 @@ describe("Dashboard", () => {
     renderDashboard();
 
     expect(screen.getByText("Meet your assistant")).toBeTruthy();
-    expect(screen.queryByTestId("chat-card")).toBeNull();
+    expect(screen.queryByTestId("threads-card")).toBeNull();
   });
 
   it("shows the identity header + card grid once named", () => {
@@ -93,7 +93,7 @@ describe("Dashboard", () => {
 
     expect(screen.getByText("Echo")).toBeTruthy();
     expect(screen.getByText("idle")).toBeTruthy();
-    expect(screen.getByTestId("chat-card")).toBeTruthy();
+    expect(screen.getByTestId("threads-card")).toBeTruthy();
     expect(screen.getByTestId("memory-card")).toBeTruthy();
     expect(screen.getByTestId("work-card")).toBeTruthy();
     expect(screen.queryByText("Meet your assistant")).toBeNull();
@@ -102,7 +102,7 @@ describe("Dashboard", () => {
   it("shows a loading state while the info query is in flight", () => {
     infoMock.mockReturnValue({ data: undefined, isLoading: true, error: null, refetch: vi.fn() });
     renderDashboard();
-    expect(screen.queryByTestId("chat-card")).toBeNull();
+    expect(screen.queryByTestId("threads-card")).toBeNull();
     expect(screen.queryByText("Meet your assistant")).toBeNull();
   });
 });
