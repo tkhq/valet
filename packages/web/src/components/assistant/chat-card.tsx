@@ -6,6 +6,7 @@ import { Button, Spinner, Textarea } from "~/components/primitives";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { useMessages, useSendPrompt } from "~/api/queries";
 import { useSessionStream } from "~/stores/stream";
+import { stripMarkdown } from "~/lib/strip-markdown";
 
 const RECENT_LIMIT = 6;
 
@@ -88,7 +89,7 @@ export function ChatCard() {
             <span className="mr-1.5 text-xs font-medium text-muted">
               {m.role === "user" ? "you" : name.toLowerCase()}
             </span>
-            <span className="text-ink">{m.content.slice(0, 240) || "…"}</span>
+            <span className="text-ink">{stripMarkdown(m.content).slice(0, 240) || "…"}</span>
           </div>
         ))}
       </div>

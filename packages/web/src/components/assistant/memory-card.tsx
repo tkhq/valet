@@ -3,6 +3,7 @@ import { ApiError } from "~/api/client";
 import { useMemoryDoc, useMemoryTree } from "~/api/memory";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { Spinner } from "~/components/primitives";
+import { stripMarkdown } from "~/lib/strip-markdown";
 
 /** Pure — UTC date, matches the server's `journal/YYYY-MM-DD.md` convention
  * (`packages/api/src/orchestrator/bootstrap.ts` `todayJournalPath`). */
@@ -10,11 +11,13 @@ export function todayJournalPath(now: Date = new Date()): string {
   return `journal/${now.toISOString().slice(0, 10)}.md`;
 }
 
-/** Pure excerpt derivation, testable without a query. */
+/** Pure excerpt derivation, testable without a query. Journal files are
+ * markdown; the excerpt strips syntax FIRST so truncation counts readable
+ * characters, not `##`/`**` noise. */
 export function journalExcerpt(content: string, maxChars = 220): string {
-  const trimmed = content.trim();
-  if (trimmed.length <= maxChars) return trimmed;
-  return `${trimmed.slice(0, maxChars).trimEnd()}…`;
+  const plain = stripMarkdown(content);
+  if (plain.length <= maxChars) return plain;
+  return `${plain.slice(0, maxChars).trimEnd()}…`;
 }
 
 /**
