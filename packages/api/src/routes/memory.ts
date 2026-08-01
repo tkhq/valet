@@ -20,6 +20,7 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
+import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import { parsePrincipal } from "@valet/engine";
 import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
@@ -107,6 +108,80 @@ memoryRouter.get("/", async (c) => {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
+  }
+});
+
+/**
+ * GET /api/memory/journal-summary — one-sentence Haiku summary of today's
+ * journal for the dashboard memory card (a text excerpt was unreadable at
+ * card size; a generated TL;DR is what the user actually wants at a
+ * glance). Cached in-process per (owner, date, content-hash): one model
+ * call per journal edit per day, reset on restart — deliberately no table.
+ */
+const journalSummaryCache = new Map<string, string>();
+
+function djb2(text: string): string {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+memoryRouter.get("/journal-summary", async (c) => {
+  let scope: MemoryScope;
+  try {
+    scope = resolveScope(c);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+
+  const date = new Date().toISOString().slice(0, 10);
+  const path = `journal/${date}.md`;
+  let content: string;
+  try {
+    const { db } = c.var.providers;
+    const result = await readFile(db, scope, path);
+    // A journal path always resolves to a file, but the service's return
+    // type unions in directory reads — narrow before touching `.file`.
+    if (!("file" in result)) return c.json({ date, summary: null });
+    content = result.file.content;
+  } catch {
+    // Missing journal (404-shaped service error) → no summary yet today.
+    return c.json({ date, summary: null });
+  }
+  if (!content || content.trim().length === 0) return c.json({ date, summary: null });
+
+  const cacheKey = `${scope.owner.type}:${scope.owner.id}:${date}:${djb2(content)}`;
+  const cached = journalSummaryCache.get(cacheKey);
+  if (cached) return c.json({ date, summary: cached });
+
+  try {
+    const model = getModel("anthropic", "claude-haiku-4-5");
+    if (!model) return c.json({ date, summary: null });
+    const result = await completeSimple(
+      model,
+      {
+        systemPrompt:
+          "Summarize the day's journal in ONE sentence (max ~140 characters). " +
+          "Plain prose, no markdown, no preamble. Focus on what was " +
+          "accomplished or decided, not process.",
+        messages: [
+          { role: "user", content: [{ type: "text", text: content.slice(0, 12_000) }], timestamp: Date.now() },
+        ],
+      },
+      { temperature: 0.3, maxTokens: 80 },
+    );
+    const summary = result.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    if (summary) journalSummaryCache.set(cacheKey, summary);
+    return c.json({ date, summary: summary || null });
+  } catch (err) {
+    console.error("journal-summary generation failed:", err);
+    return c.json({ date, summary: null });
   }
 });
 

@@ -353,6 +353,8 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
+  getJournalSummary: () =>
+    request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
   getOrg: () => request<OrgResponse>("GET", "/org"),
   patchOrg: (body: PatchOrgRequest) => request<PatchOrgResponse>("PATCH", "/org", body),
   getOrgMembers: () => request<OrgMembersResponse>("GET", "/org/members"),

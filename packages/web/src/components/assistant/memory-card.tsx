@@ -1,9 +1,11 @@
 import { Link } from "@tanstack/react-router";
-import { ApiError } from "~/api/client";
-import { useMemoryDoc, useMemoryTree } from "~/api/memory";
+import { useQuery } from "@tanstack/react-query";
+import type { MemoryTreeEntry } from "@valet/api/wire";
+import { api } from "~/api/client";
+import { useMemoryTree } from "~/api/memory";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { Spinner } from "~/components/primitives";
-import { stripMarkdown } from "~/lib/strip-markdown";
+import { relativeTime } from "~/lib/relative-time";
 
 /** Pure — UTC date, matches the server's `journal/YYYY-MM-DD.md` convention
  * (`packages/api/src/orchestrator/bootstrap.ts` `todayJournalPath`). */
@@ -11,36 +13,54 @@ export function todayJournalPath(now: Date = new Date()): string {
   return `journal/${now.toISOString().slice(0, 10)}.md`;
 }
 
-/** Pure excerpt derivation, testable without a query. Journal files are
- * markdown; the excerpt strips syntax FIRST so truncation counts readable
- * characters, not `##`/`**` noise. */
-export function journalExcerpt(content: string, maxChars = 220): string {
-  const plain = stripMarkdown(content);
-  if (plain.length <= maxChars) return plain;
-  return `${plain.slice(0, maxChars).trimEnd()}…`;
+export interface MemoryStats {
+  files: number;
+  journalDays: number;
+  notes: number;
+  pinned: number;
+  lastUpdatedAt: number | null;
+}
+
+/** Pure: tree entries → the card's stat tiles. `journalDays` counts
+ * journal/* files (one per day by convention); `notes` is everything
+ * else. Testable without queries. */
+export function memoryStats(entries: readonly MemoryTreeEntry[]): MemoryStats {
+  let journalDays = 0;
+  let pinned = 0;
+  let lastUpdatedAt: number | null = null;
+  for (const e of entries) {
+    if (e.path.startsWith("journal/")) journalDays += 1;
+    if (e.pinned) pinned += 1;
+    if (lastUpdatedAt === null || e.updatedAt > lastUpdatedAt) lastUpdatedAt = e.updatedAt;
+  }
+  return {
+    files: entries.length,
+    journalDays,
+    notes: entries.length - journalDays,
+    pinned,
+    lastUpdatedAt,
+  };
 }
 
 /**
-/**
- * Dashboard memory card (decision 15): pinned files + today's journal
- * excerpt. Self-contained — owns the tree query and the journal doc fetch,
- * degrades per-section rather than blanking. Links target the Task 6
- * explorer's splat route (`/memory/$`, param `_splat` — the file path)
- * via the typed router `Link` for client-side navigation.
+ * Dashboard memory card — stats + a generated one-line TL;DR of today's
+ * journal, replacing the raw-text excerpt (unreadable at card size). The
+ * summary comes from GET /api/memory/journal-summary (Haiku, cached
+ * server-side per journal edit); stats derive from the tree query.
  */
 export function MemoryCard() {
   const info = useOrchestratorInfo();
   const name = info.data?.name ?? "your assistant";
   const treeQ = useMemoryTree();
-  const journalPath = todayJournalPath();
-  const journalQ = useMemoryDoc(journalPath);
+  const summaryQ = useQuery({
+    queryKey: ["memory", "journal-summary"],
+    queryFn: () => api.getJournalSummary(),
+    refetchInterval: 5 * 60_000,
+  });
 
-  const pinned = (treeQ.data?.entries ?? []).filter((e) => e.pinned);
-  const journalNotFound = journalQ.error instanceof ApiError && journalQ.error.status === 404;
-  const journalOtherError = !!journalQ.error && !journalNotFound;
-
-  const treeEmpty = treeQ.data !== undefined && treeQ.data.entries.length === 0;
-  const nothingRemembered = treeEmpty && journalNotFound;
+  const entries = treeQ.data?.entries ?? [];
+  const stats = memoryStats(entries);
+  const empty = treeQ.data !== undefined && entries.length === 0;
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
@@ -55,7 +75,7 @@ export function MemoryCard() {
         </Link>
       </header>
 
-      <div className="flex-1 px-4 py-3 space-y-4 overflow-y-auto max-h-64">
+      <div className="flex-1 px-4 py-3 space-y-3 overflow-y-auto max-h-64">
         {treeQ.isLoading && (
           <div className="flex items-center gap-2 text-xs text-muted">
             <Spinner size={14} /> Loading…
@@ -70,64 +90,61 @@ export function MemoryCard() {
           </div>
         )}
 
-        {nothingRemembered && (
+        {empty && (
           <p className="text-sm text-muted">
             Nothing remembered yet. Talk to {name}, or import a bundle via the API.
           </p>
         )}
 
-        {!treeQ.isLoading && !treeQ.error && !nothingRemembered && (
+        {!treeQ.isLoading && !treeQ.error && !empty && (
           <>
-            <div className="space-y-1">
-              <h3 className="text-xs font-medium text-muted">Pinned</h3>
-              {pinned.length === 0 ? (
-                <p className="text-xs text-muted">Nothing pinned yet.</p>
-              ) : (
-                <ul className="space-y-1">
-                  {pinned.map((f) => (
-                    <li key={f.path}>
-                      <Link
-                        to="/memory/$"
-                        params={{ _splat: f.path }}
-                        className="text-sm text-ink hover:text-moss hover:underline"
-                      >
-                        📌 {f.title || f.path}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              )}
+            <div className="grid grid-cols-3 gap-2">
+              <StatTile label="Journal days" value={stats.journalDays} />
+              <StatTile label="Notes" value={stats.notes} />
+              <StatTile label="Pinned" value={stats.pinned} />
             </div>
 
             <div className="space-y-1">
-              <h3 className="text-xs font-medium text-muted">Today's journal</h3>
-              {journalQ.isLoading && (
+              <div className="flex items-baseline justify-between">
+                <h3 className="text-[10px] font-medium uppercase tracking-wider text-muted">
+                  Today
+                </h3>
+                {stats.lastUpdatedAt !== null && (
+                  <span className="text-[10px] text-muted">
+                    updated {relativeTime(stats.lastUpdatedAt)}
+                  </span>
+                )}
+              </div>
+              {summaryQ.isLoading && (
                 <div className="flex items-center gap-2 text-xs text-muted">
-                  <Spinner size={14} /> Loading…
+                  <Spinner size={12} /> Summarizing…
                 </div>
               )}
-              {journalNotFound && <p className="text-xs text-muted">No journal entry yet today.</p>}
-              {journalOtherError && (
-                <div className="text-xs text-danger-500">
-                  Couldn't load today's journal.{" "}
-                  <button type="button" className="underline" onClick={() => journalQ.refetch()}>
-                    Retry
-                  </button>
-                </div>
-              )}
-              {journalQ.data?.kind === "file" && journalQ.data.file && (
+              {!summaryQ.isLoading && summaryQ.data?.summary && (
                 <Link
                   to="/memory/$"
-                  params={{ _splat: journalPath }}
-                  className="block text-sm text-ink hover:text-moss"
+                  params={{ _splat: todayJournalPath() }}
+                  className="block text-sm text-ink leading-snug hover:text-moss"
                 >
-                  {journalExcerpt(journalQ.data.file.content)}
+                  {summaryQ.data.summary}
                 </Link>
+              )}
+              {!summaryQ.isLoading && !summaryQ.data?.summary && (
+                <p className="text-xs text-muted">No journal entry yet today.</p>
               )}
             </div>
           </>
         )}
       </div>
     </section>
+  );
+}
+
+function StatTile({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md bg-moss-wash px-2.5 py-2">
+      <div className="font-display text-lg text-ink leading-tight tabular-nums">{value}</div>
+      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+    </div>
   );
 }
