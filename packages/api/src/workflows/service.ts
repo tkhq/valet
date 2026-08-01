@@ -276,6 +276,48 @@ export async function listWorkflowRuns(
   return runs;
 }
 
+/** Owner-gated run lookup shared by cancel/approval below. */
+async function ownedRun(deps: WorkflowServiceDeps, owner: WorkflowOwner, runId: string) {
+  const run = await deps.workflowStore.getRun(runId);
+  if (!run || !run.owner || run.owner.ownerType !== "user" || run.owner.ownerId !== owner.userId) {
+    return null;
+  }
+  return run;
+}
+
+/** Terminates a run. `not_found` covers unknown AND un-owned run ids. */
+export async function cancelWorkflowRun(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  runId: string,
+): Promise<"ok" | "not_found"> {
+  const run = await ownedRun(deps, owner, runId);
+  if (!run) return "not_found";
+  await deps.workflowRunHost.terminate(runId);
+  return "ok";
+}
+
+/** Resolves an approval gate: inserts the approval signal and wakes the
+ * run. The caller decides WHO may resolve (the HTTP route lets the session
+ * user; the agent tool rides a high-risk decision gate). */
+export async function resolveWorkflowApproval(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  input: { runId: string; nodeId: string; approved: boolean; note?: string },
+): Promise<"ok" | "not_found"> {
+  const run = await ownedRun(deps, owner, input.runId);
+  if (!run) return "not_found";
+  await deps.workflowStore.insertSignal({
+    runId: input.runId,
+    signalId: `approval:${input.nodeId}:resolution`,
+    signalType: `approval:${input.nodeId}`,
+    payload: { approved: input.approved, resolvedBy: owner.userId, note: input.note },
+    createdAt: Date.now(),
+  });
+  await deps.workflowRunHost.wake(input.runId);
+  return "ok";
+}
+
 /** Returns null when the run doesn't exist or isn't owned by `owner`. */
 export async function getWorkflowRunDetail(
   deps: WorkflowServiceDeps,

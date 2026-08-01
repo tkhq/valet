@@ -14,11 +14,14 @@ import type {
   PluginActionResult,
 } from "@valet/engine";
 import {
+  cancelWorkflowRun,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
   listWorkflowDefinitions,
+  listWorkflowRuns,
+  resolveWorkflowApproval,
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
@@ -254,10 +257,83 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const listRuns = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.list_runs",
+    name: "List workflow runs",
+    description:
+      "List a workflow's runs (runId, status, outcome, timestamps), newest first. " +
+      "Use to find parked/pending runs before cancelling or checking approvals.",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const runs = await listWorkflowRuns(getDeps(), owner, workflow_id);
+      if (!runs) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: workflow_id, runs } };
+    },
+  });
+
+  const cancelRun = action(Type.Object({ run_id: Type.String() }))({
+    id: "workflows.cancel_run",
+    name: "Cancel workflow run",
+    description:
+      "Terminate a run (running, parked on a wait, or pending approval). Settling is " +
+      "asynchronous — re-check with get_run after a few seconds if a follow-up (e.g. " +
+      "delete_workflow) reports active runs.",
+    riskLevel: "medium",
+    execute: async ({ run_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await cancelWorkflowRun(getDeps(), owner, run_id);
+      if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
+      return { success: true, data: { runId: run_id, cancelled: true } };
+    },
+  });
+
+  const resolveApproval = action(
+    Type.Object({
+      run_id: Type.String(),
+      node_id: Type.String(),
+      approved: Type.Boolean(),
+      note: Type.Optional(Type.String()),
+    }),
+  )({
+    id: "workflows.resolve_approval",
+    name: "Resolve workflow approval",
+    description:
+      "Approve or deny a run's pending approval gate. Approval gates exist for HUMANS — " +
+      "only call this when the user has explicitly told you their decision in this " +
+      "conversation; never resolve a gate on your own judgment. (This action itself " +
+      "requires the user's confirmation.)",
+    riskLevel: "high",
+    execute: async ({ run_id, node_id, approved, note }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await resolveWorkflowApproval(getDeps(), owner, {
+        runId: run_id,
+        nodeId: node_id,
+        approved,
+        note,
+      });
+      if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
+      return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
+    },
+  });
+
   return {
     service: "workflows",
     description:
       "Create, inspect, and run Valet DAG workflows (dag/v1 definitions: nodes + edges).",
-    actions: [listWorkflows, getWorkflow, saveWorkflow, deleteWorkflow, startRun, getRun],
+    actions: [
+      listWorkflows,
+      getWorkflow,
+      saveWorkflow,
+      deleteWorkflow,
+      startRun,
+      getRun,
+      listRuns,
+      cancelRun,
+      resolveApproval,
+    ],
   };
 }

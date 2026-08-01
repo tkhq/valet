@@ -17,6 +17,9 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept)
 - `workflows.start_run` — start a run; returns `runId`
 - `workflows.get_run` — run status, per-node checkpoints, pending waits
+- `workflows.list_runs` — a workflow's runs (find parked/active ones)
+- `workflows.cancel_run` — terminate a run (settles asynchronously; re-check with `get_run`)
+- `workflows.resolve_approval` — approve/deny a gate, ONLY when the user has explicitly told you their decision (the call itself asks the user to confirm)
 
 Always surface returned `workflowId`/`runId` values — the chat UI uses them to render the diagram and run status.
 

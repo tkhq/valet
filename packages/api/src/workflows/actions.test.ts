@@ -22,10 +22,13 @@ describe("workflowsActionPlugin", () => {
     const plugin = workflowsActionPlugin(noDeps);
     expect(plugin.service).toBe("workflows");
     expect(plugin.actions.map((a) => a.id).sort()).toEqual([
+      "workflows.cancel_run",
       "workflows.delete_workflow",
       "workflows.get_run",
       "workflows.get_workflow",
+      "workflows.list_runs",
       "workflows.list_workflows",
+      "workflows.resolve_approval",
       "workflows.save_workflow",
       "workflows.start_run",
     ]);
@@ -40,6 +43,11 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.save_workflow")).toBe("medium");
     expect(byId.get("workflows.start_run")).toBe("medium");
     expect(byId.get("workflows.delete_workflow")).toBe("medium");
+    expect(byId.get("workflows.list_runs")).toBe("low");
+    expect(byId.get("workflows.cancel_run")).toBe("medium");
+    // High → the plugin catalog's default policy gates it behind a human
+    // decision — the agent cannot silently approve its own gates.
+    expect(byId.get("workflows.resolve_approval")).toBe("high");
   });
 });
 
