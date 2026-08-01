@@ -545,7 +545,17 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
 
   const createSchedule = action(
     Type.Object({
-      workflow_id: Type.String(),
+      workflow_id: Type.Optional(
+        Type.String({ description: "Target a workflow: start a run each fire." }),
+      ),
+      prompt: Type.Optional(
+        Type.String({
+          description:
+            "Target the orchestrator instead: this prompt is delivered to you (the " +
+            "orchestrator) each fire, on a dedicated thread. Provide exactly one of " +
+            "workflow_id or prompt.",
+        }),
+      ),
       name: Type.String(),
       cron: Type.String({
         description: '5-field cron expression, e.g. "0 9 * * 1-5" = 9:00 every weekday.',
@@ -555,25 +565,26 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       ),
       input: Type.Optional(
         Type.Record(Type.String(), Type.Unknown(), {
-          description: "Static payload delivered to the run as {{trigger.data.input...}}.",
+          description: "Workflow target only: static payload delivered as {{trigger.data.input...}}.",
         }),
       ),
     }),
   )({
     id: "workflows.create_schedule",
-    name: "Create workflow schedule",
+    name: "Create schedule",
     description:
-      "Run a workflow on a cron schedule. The scheduler polls every ~30s, so fire times are " +
-      "accurate to about half a minute; missed fires during downtime collapse into one " +
-      "catch-up run. Returns { scheduleId, nextFireAt }.",
+      "Run something on a cron schedule: a WORKFLOW (workflow_id → a run starts each fire) " +
+      "or the ORCHESTRATOR (prompt → you receive the prompt each fire, e.g. 'check my PRs " +
+      "every morning'). Fires are accurate to ~30s; missed fires during downtime collapse " +
+      "into one catch-up. Returns { scheduleId, nextFireAt }.",
     riskLevel: "medium",
-    execute: async ({ workflow_id, name, cron, timezone, input }, ctx) => {
+    execute: async ({ workflow_id, prompt, name, cron, timezone, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowSchedule(
         getDeps().db,
         { id: owner.userId, orgId: owner.orgId },
-        { workflowId: workflow_id, name, cron, timezone, input },
+        { workflowId: workflow_id, prompt, name, cron, timezone, input },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.schedule };

@@ -22,6 +22,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { nextFireAt } from "./schedule-service.js";
+import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
 
 const POLL_MS = 30_000;
 
@@ -29,6 +30,10 @@ export interface WorkflowSchedulerDeps {
   db: AppDb;
   workflowStore: WorkflowStore;
   workflowRunHost: RunHost;
+  /** Orchestrator-target fires submit the schedule's prompt through the
+   * same delivery seam event subscriptions use (idempotent by dispatchId,
+   * org-asserted, lands on a dedicated orchestrator thread). */
+  deliverToOrchestrator: OrchestratorDeliverFn;
   /** Injectable clock for tests. */
   now?: () => number;
 }
@@ -89,6 +94,49 @@ export class WorkflowScheduler {
     const next = nextFireAt(schedule.cron, schedule.timezone, now);
     if (!next.ok) {
       console.error(`workflow scheduler: disabling ${schedule.id} — ${next.error}`);
+      await db
+        .update(workflowSchedules)
+        .set({ enabled: false, updatedAt: now })
+        .where(eq(workflowSchedules.id, schedule.id));
+      return;
+    }
+
+    if (schedule.targetKind === "orchestrator") {
+      if (!schedule.prompt || schedule.prompt.trim() === "") {
+        console.error(`workflow scheduler: disabling ${schedule.id} — orchestrator target without a prompt`);
+        await db
+          .update(workflowSchedules)
+          .set({ enabled: false, updatedAt: now })
+          .where(eq(workflowSchedules.id, schedule.id));
+        return;
+      }
+      // Idempotent per slot via dispatchId, mirroring event deliveries.
+      await this.deps.deliverToOrchestrator({
+        orgId: schedule.orgId,
+        ownerType: schedule.ownerType,
+        ownerId: schedule.ownerId,
+        signal: {
+          kind: "signal",
+          signalType: "schedule",
+          body: schedule.prompt,
+          attributes: {
+            scheduleId: schedule.id,
+            scheduleName: schedule.name,
+            cron: schedule.cron,
+            firedAt: new Date(schedule.nextFireAt).toISOString(),
+          },
+        },
+        dispatchId: `schedule:${schedule.id}:${schedule.nextFireAt}`,
+      });
+      await db
+        .update(workflowSchedules)
+        .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now })
+        .where(eq(workflowSchedules.id, schedule.id));
+      return;
+    }
+
+    if (!schedule.workflowId) {
+      console.error(`workflow scheduler: disabling ${schedule.id} — workflow target without a workflow_id`);
       await db
         .update(workflowSchedules)
         .set({ enabled: false, updatedAt: now })

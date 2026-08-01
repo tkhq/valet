@@ -297,7 +297,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // drive `providers.eventDispatcher.pollOnce()` themselves (the ingest
   // path's `nudge` still triggers an immediate poll, matching production).
   // Never started on its timer in tests — drive `tick()` manually if needed.
-  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost });
+  const workflowScheduler = new WorkflowScheduler({
+    db,
+    workflowStore,
+    workflowRunHost,
+    deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+  });
 
   const eventDispatcher = new EventDispatcher({
     db,

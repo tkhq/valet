@@ -1029,7 +1029,16 @@ export const workflowSchedules = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "org"] }).notNull().default("user"),
     ownerId: text("owner_id").notNull(),
-    workflowId: text("workflow_id").notNull(),
+    /** Fire target: start a workflow run, or prompt the orchestrator
+     * (V1's `schedule_target=orchestrator`). `workflow_id`/`prompt` are
+     * each required only for their own kind. */
+    targetKind: text("target_kind", { enum: ["workflow", "orchestrator"] })
+      .notNull()
+      .default("workflow"),
+    workflowId: text("workflow_id"),
+    /** Prompt submitted to the orchestrator's "schedules" thread when
+     * `target_kind = 'orchestrator'`. */
+    prompt: text("prompt"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),

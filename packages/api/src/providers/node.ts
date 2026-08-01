@@ -376,7 +376,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
   // of the event dispatcher's workflow targets). `start()`/`stop()` from
   // main.ts alongside the dispatcher.
-  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost });
+  const deliverToOrchestrator = buildOrchestratorTarget({ db, engineHost });
+  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
@@ -385,7 +386,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     workflowRunHost,
     workflowStore,
-    deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+    deliverToOrchestrator,
   });
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same

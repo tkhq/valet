@@ -12,7 +12,9 @@ import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
-  workflowId: string;
+  targetKind: "workflow" | "orchestrator";
+  workflowId?: string;
+  prompt?: string;
   name: string;
   cron: string;
   timezone: string;
@@ -56,7 +58,9 @@ export function nextFireAt(
 function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowScheduleSummary {
   return {
     scheduleId: row.id,
-    workflowId: row.workflowId,
+    targetKind: row.targetKind,
+    workflowId: row.workflowId ?? undefined,
+    prompt: row.prompt ?? undefined,
     name: row.name,
     cron: row.cron,
     timezone: row.timezone,
@@ -70,19 +74,39 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
 export async function createWorkflowSchedule(
   db: AppDb,
   user: { id: string; orgId: string },
-  input: { workflowId: string; name: string; cron: string; timezone?: string; input?: unknown },
+  input: {
+    /** Exactly one of `workflowId` (start a run) or `prompt` (prompt the
+     * orchestrator — V1's `schedule_target=orchestrator`). */
+    workflowId?: string;
+    prompt?: string;
+    name: string;
+    cron: string;
+    timezone?: string;
+    input?: unknown;
+  },
   now = Date.now(),
 ): Promise<{ ok: true; schedule: WorkflowScheduleSummary } | { ok: false; error: string }> {
   const timezone = input.timezone ?? "UTC";
   const next = nextFireAt(input.cron, timezone, now);
   if (!next.ok) return next;
 
-  const wfRows = await db
-    .select({ id: workflowDefinitions.id })
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.id, input.workflowId), eq(workflowDefinitions.orgId, user.orgId)))
-    .limit(1);
-  if (wfRows.length === 0) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+  const hasWorkflow = typeof input.workflowId === "string" && input.workflowId.length > 0;
+  const hasPrompt = typeof input.prompt === "string" && input.prompt.trim().length > 0;
+  if (hasWorkflow === hasPrompt) {
+    return {
+      ok: false,
+      error: "provide exactly one of workflow_id (start a workflow run) or prompt (prompt the orchestrator)",
+    };
+  }
+
+  if (hasWorkflow) {
+    const wfRows = await db
+      .select({ id: workflowDefinitions.id })
+      .from(workflowDefinitions)
+      .where(and(eq(workflowDefinitions.id, input.workflowId!), eq(workflowDefinitions.orgId, user.orgId)))
+      .limit(1);
+    if (wfRows.length === 0) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+  }
 
   const inserted = await db
     .insert(workflowSchedules)
@@ -91,7 +115,9 @@ export async function createWorkflowSchedule(
       orgId: user.orgId,
       ownerType: "user",
       ownerId: user.id,
-      workflowId: input.workflowId,
+      targetKind: hasWorkflow ? "workflow" : "orchestrator",
+      workflowId: hasWorkflow ? input.workflowId! : null,
+      prompt: hasPrompt ? input.prompt! : null,
       name: input.name,
       cron: input.cron,
       timezone,
