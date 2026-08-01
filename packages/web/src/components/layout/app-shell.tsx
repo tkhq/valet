@@ -31,10 +31,13 @@ function loadStoredCollapsed(): boolean {
  * Three-zone app shell: a top nav, a left sidebar, and the main content
  * outlet.
  *
- * Desktop (`md`+): the sidebar is user-resizable via a drag handle on its
- * right edge (width persisted to localStorage, clamped 200–520px) and
- * collapsible via the panel toggle in its bottom corner; when collapsed, a
- * matching expand button floats at the top-left of the content area.
+ * Desktop (`md`+): the sidebar sizes to its content (widest thread title)
+ * up to a user-set MAXIMUM — the drag handle on its right edge adjusts
+ * that max (persisted to localStorage, clamped 200–520px), so a list of
+ * short titles doesn't waste horizontal space while long titles get room
+ * until the cap, then truncate. Collapsible via the panel toggle at the
+ * sidebar's top-right corner; when collapsed, a matching expand button
+ * floats at the top-left of the content area.
  *
  * Mobile: collapses out of the flow and is reachable via a small toggle
  * button that opens it as a full-height overlay drawer (paper bg, hairline
@@ -63,6 +66,7 @@ export function AppShell({
   const [width, setWidth] = useState<number>(() => loadStoredWidth());
   const [collapsed, setCollapsed] = useState<boolean>(() => loadStoredCollapsed());
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const asideRef = useRef<HTMLElement | null>(null);
   const [dragging, setDragging] = useState(false);
 
   // Closes the drawer when a link inside it is clicked (thread/child
@@ -83,7 +87,11 @@ export function AppShell({
 
   function onHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     e.preventDefault();
-    dragRef.current = { startX: e.clientX, startWidth: width };
+    // Start from the aside's RENDERED width, not the stored max — when the
+    // content-sized sidebar is narrower than the max, the handle sits at
+    // the actual edge, and the drag should track the cursor from there.
+    const rendered = asideRef.current?.offsetWidth ?? width;
+    dragRef.current = { startX: e.clientX, startWidth: rendered };
     setDragging(true);
   }
 
@@ -129,21 +137,22 @@ export function AppShell({
           <>
             {!collapsed && (
               <aside
-                className="hidden md:flex shrink-0 flex-col relative"
-                style={{ width }}
+                ref={asideRef}
+                className="hidden md:flex shrink-0 flex-col relative w-max min-w-[200px]"
+                style={{ maxWidth: width }}
               >
+                <button
+                  type="button"
+                  aria-label="Collapse sidebar"
+                  onClick={() => setAndStoreCollapsed(true)}
+                  className="absolute top-2 right-2 z-20 inline-flex h-7 w-7 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"
+                >
+                  <PanelLeftClose className="h-4 w-4" />
+                </button>
                 <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
-                <div className="border-t border-line/60 px-2 py-1.5 flex justify-end">
-                  <button
-                    type="button"
-                    aria-label="Collapse sidebar"
-                    onClick={() => setAndStoreCollapsed(true)}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"
-                  >
-                    <PanelLeftClose className="h-4 w-4" />
-                  </button>
-                </div>
-                {/* Resize handle — 6px hit area straddling the border. */}
+                {/* Resize handle — 6px hit area straddling the border.
+                    Adjusts the MAX width; actual width is content-driven
+                    below the max (`w-max` + inline maxWidth above). */}
                 <div
                   role="separator"
                   aria-orientation="vertical"

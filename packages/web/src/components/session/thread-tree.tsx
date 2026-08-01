@@ -6,7 +6,7 @@ import { useCreateThread, useThreads } from "~/api/queries";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
-import { ScrollArea, Spinner, Tooltip } from "~/components/primitives";
+import { Spinner, Tooltip } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 
 const CHILDREN_POLL_MS = 30_000;
@@ -77,18 +77,25 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
 
   return (
     <>
-      <div className="px-2 pt-2 pb-1">
+      {/* `pr-12` reserves room for the AppShell's collapse toggle, which
+          floats at the aside's top-right corner (absolute, so it doesn't
+          contribute to the sidebar's intrinsic max-content width). */}
+      <div className="pl-2 pr-12 pt-2 pb-1">
         <button
           type="button"
           onClick={() => void createAndNavigate()}
           disabled={createThread.isPending}
-          className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50"
+          className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50 whitespace-nowrap"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="h-3.5 w-3.5 shrink-0" />
           <span>New thread</span>
         </button>
       </div>
-      <ScrollArea className="flex-1">
+      {/* Plain overflow div, NOT the Radix ScrollArea — its viewport wraps
+          content in a `display: table` div that sizes to intrinsic content
+          width, which defeats both the sidebar's max-content sizing and
+          row truncation when clamped. */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
           {threadsQ.isLoading && (
             <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted">
@@ -109,7 +116,7 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
             />
           ))}
         </nav>
-      </ScrollArea>
+      </div>
     </>
   );
 }
