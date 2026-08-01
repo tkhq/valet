@@ -60,14 +60,15 @@ describe("ModelPicker — catalog-driven", () => {
 
     await user.click(screen.getByRole("button", { name: "Choose model" }));
 
-    const items = screen.getAllByRole("menuitem");
-    // Response order is preserved: the non-curated custom entry comes first,
-    // even though it has no curated label — a curated-first re-sort would
-    // put the Sonnet entry here instead.
-    expect(items[0].textContent).toContain("Llama 3");
-    expect(items[0].textContent).toContain("My Router");
-    // Second is the curated Sonnet entry (curated label, not raw name).
-    expect(items[1].textContent).toContain("Sonnet 4.5");
+    // Model rows carry a stable data attribute — order = ModelInfo response
+    // order (non-curated Llama 3 first, then curated Sonnet 4.5). Provider
+    // name renders as a sticky group header above the row, not inline.
+    const rows = document.querySelectorAll<HTMLElement>("[data-model-index]");
+    expect(rows[0].textContent).toContain("Llama 3");
+    expect(rows[1].textContent).toContain("Sonnet 4.5");
+    // The provider group headers surface the provider names.
+    expect(document.body.textContent).toContain("My Router");
+    expect(document.body.textContent).toContain("Anthropic");
   });
 
   it("selecting a custom-provider entry submits the catalog id verbatim", async () => {
@@ -76,7 +77,11 @@ describe("ModelPicker — catalog-driven", () => {
     renderPicker({ onSelect });
 
     await user.click(screen.getByRole("button", { name: "Choose model" }));
-    await user.click(screen.getByText("Llama 3"));
+    // Row clicks use onMouseDown (avoids stealing focus from the sticky
+    // search input); simulate that directly rather than user.click.
+    const row = document.querySelector<HTMLElement>('[data-model-index="0"]');
+    if (!row) throw new Error("expected a model row to render");
+    row.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
 
     expect(onSelect).toHaveBeenCalledWith("custom_1/llama-3");
   });
