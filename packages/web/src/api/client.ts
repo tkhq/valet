@@ -201,6 +201,13 @@ export const api = {
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
   pauseSession: (id: string) =>
     request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
+  autoTitleSession: (id: string, threadId?: string) => {
+    const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
+    return request<{ sessionTitle: string | null; threadTitle: string | null }>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/auto-title${qs}`,
+    );
+  },
 
   // orchestrator (session ids contain colons — always encoded above too, but
   // this entry point never touches a raw id itself, only ensures one exists)

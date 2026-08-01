@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
+  qk,
   useDecisions,
   useMessages,
   useSession,
   useThreads,
 } from "~/api/queries";
+import { api } from "~/api/client";
 import { useSessionWebSocket } from "~/api/ws";
 import {
   useSessionStream,
@@ -111,6 +114,44 @@ export function SessionView({
   }, [sessionId, decisionsQ.data, setPendingGates]);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
+
+  // Auto-title: fire once per session when we first see an assistant reply
+  // AND the session's title is empty/placeholder. The server enforces the
+  // idempotency ("already titled" → no-op), but tracking a fired-set here
+  // avoids retriggering on every re-render/stream event. Fire-and-forget;
+  // failures are logged but don't block the UI.
+  const qc = useQueryClient();
+  const autoTitleFiredRef = useRef<Set<string>>(new Set());
+  const sessionTitle = session.data?.title?.trim();
+  const sessionUntitled = !sessionTitle || sessionTitle === "Untitled session";
+  const hasAssistantReply = stream.messages.some(
+    (m) => m.role === "assistant" && (m.content || m.parts.length > 0),
+  );
+  useEffect(() => {
+    if (!session.data) return;
+    if (!sessionUntitled) return;
+    if (!hasAssistantReply) return;
+    if (autoTitleFiredRef.current.has(sessionId)) return;
+    autoTitleFiredRef.current.add(sessionId);
+    api
+      .autoTitleSession(sessionId, effectiveThreadId)
+      .then((result) => {
+        if (result.sessionTitle) {
+          qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+          qc.invalidateQueries({ queryKey: qk.sessions() });
+        }
+        if (result.threadTitle) {
+          qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+        }
+      })
+      .catch((err) => {
+        // Roll back the fired flag so a later retrigger (WS reconnect, tab
+        // return) can retry — network hiccup shouldn't permanently disable
+        // titling for this session.
+        autoTitleFiredRef.current.delete(sessionId);
+        console.warn("auto-title failed:", err);
+      });
+  }, [session.data, sessionUntitled, hasAssistantReply, sessionId, effectiveThreadId, qc]);
 
   if (session.isLoading) {
     return (

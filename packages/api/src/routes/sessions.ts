@@ -5,6 +5,7 @@ import { isAbsolute } from "node:path";
 import { parseOrchestratorSessionId } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { autoTitle } from "../sessions/auto-title.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -320,6 +321,33 @@ sessionsRouter.patch("/:id", async (c) => {
     profile: row.profile,
   };
   return c.json(detail);
+});
+
+// ── Auto-title ────────────────────────────────────────────────────────────
+
+/**
+ * Generate + persist a title for this session (and optionally a thread)
+ * from the opening messages. Fires from the client after the first
+ * assistant reply settles; idempotent so replaying the trigger is safe.
+ * Returns 200 with `{ sessionTitle, threadTitle }` even in the "nothing to
+ * do" cases (`already_titled`, `no_messages`) — the client just treats
+ * null title fields as "leave the row alone".
+ */
+sessionsRouter.post("/:id/auto-title", async (c) => {
+  const { db } = c.var.providers;
+  const id = c.req.param("id");
+  const userId = c.var.user.id;
+
+  const url = new URL(c.req.url);
+  const threadId = url.searchParams.get("threadId") ?? undefined;
+
+  const result = await autoTitle({ db }, { sessionId: id, threadId, userId });
+  if (!result.ok) {
+    if (result.reason === "session_not_found") return c.json({ error: "session not found" }, 404);
+    // already_titled / no_messages → 200 with nulls; client no-ops.
+    return c.json({ sessionTitle: null, threadTitle: null });
+  }
+  return c.json({ sessionTitle: result.sessionTitle, threadTitle: result.threadTitle });
 });
 
 // ── Sandbox JWT ───────────────────────────────────────────────────────────
