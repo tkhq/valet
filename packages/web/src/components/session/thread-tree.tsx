@@ -153,7 +153,7 @@ function ThreadNode({
             "flex items-center pr-4 py-2 text-sm transition-colors",
             "focus-visible:outline-none focus-visible:bg-ink-wash",
             active
-              ? "bg-moss/[0.08] text-ink border-l-2 border-moss pl-[calc(1rem-2px)] font-medium"
+              ? "bg-moss/15 text-ink border-l-2 border-moss pl-[calc(1rem-2px)] font-medium"
               : "text-ink/85 hover:bg-ink-wash/60 pl-4 border-l-2 border-transparent",
           )}
         >
@@ -171,7 +171,7 @@ function ThreadNode({
                   "flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
                   "focus-visible:outline-none focus-visible:bg-ink-wash",
                   c.sessionId === activeChildId
-                    ? "bg-moss/[0.08] text-ink"
+                    ? "bg-moss/15 text-ink"
                     : "text-muted hover:bg-ink-wash/60 hover:text-ink",
                 )}
               >
