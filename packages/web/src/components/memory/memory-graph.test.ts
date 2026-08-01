@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MemoryGraphResponse } from "~/api/memory-types";
 import {
+  buildHoverIndex,
   dotSize,
   filterGraph,
   LABEL_ALL_MAX,
@@ -8,7 +9,6 @@ import {
   layoutGraph,
   linkInDegree,
   persistentLabelIds,
-  spotlightSet,
 } from "./memory-graph";
 
 const graph: MemoryGraphResponse = {
@@ -54,10 +54,21 @@ describe("filterGraph", () => {
   });
 });
 
-describe("spotlightSet", () => {
-  it("contains the node and its direct neighbors in both directions", () => {
-    const set = spotlightSet("people/alice.md", graph.edges);
-    expect(set).toEqual(new Set(["people/alice.md", "people/bob.md", "dir:people"]));
+describe("buildHoverIndex", () => {
+  it("maps neighbors in both directions", () => {
+    const idx = buildHoverIndex(graph.edges);
+    expect(new Set(idx.neighbors.get("people/alice.md"))).toEqual(
+      new Set(["people/bob.md", "dir:people"]),
+    );
+    expect(idx.neighbors.get("people/bob.md")).toContain("people/alice.md");
+  });
+
+  it("edge ids match the flow-edge `${kind}:${index}` scheme", () => {
+    const idx = buildHoverIndex(graph.edges);
+    // people/alice.md touches edges[1] (containment) and edges[3] (link).
+    expect(new Set(idx.incidentEdges.get("people/alice.md"))).toEqual(
+      new Set(["containment:1", "link:3"]),
+    );
   });
 });
 

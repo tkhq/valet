@@ -16,7 +16,7 @@
  * viewport is panning/zooming — nodes sliding under a stationary cursor
  * otherwise rapid-fire enter/leave and the whole canvas strobes.
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -41,9 +41,12 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { api } from "~/api/client";
+import { useMemoryDoc, useMemoryTree } from "~/api/memory";
 import type { MemoryGraphEdge, MemoryGraphNode, MemoryGraphResponse } from "~/api/memory-types";
 import { Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
+import { relativeTime } from "~/lib/relative-time";
+import { stripMarkdown } from "~/lib/strip-markdown";
 import { dirDotHex } from "./memory-tree";
 
 // ─── Pure graph filtering (testable) ────────────────────────────────────
@@ -85,15 +88,32 @@ export function filterGraph(graph: MemoryGraphResponse, filters: GraphFilters): 
   return { nodes, edges };
 }
 
-/** Node ids adjacent to `id` (any edge kind), plus `id` itself — the hover
- * spotlight set. */
-export function spotlightSet(id: string, edges: MemoryGraphEdge[]): Set<string> {
-  const set = new Set([id]);
-  for (const e of edges) {
-    if (e.from === id) set.add(e.to);
-    if (e.to === id) set.add(e.from);
-  }
-  return set;
+/** Precomputed hover lookups. Edge ids follow the flow-edge scheme
+ * `${kind}:${index}` — `buildHoverIndex` and the `flowEdges` memo must
+ * iterate the same edge array. */
+export interface HoverIndex {
+  /** node id → neighbor node ids (any edge kind). */
+  neighbors: Map<string, string[]>;
+  /** node id → ids of edges incident to it. */
+  incidentEdges: Map<string, string[]>;
+}
+
+export function buildHoverIndex(edges: MemoryGraphEdge[]): HoverIndex {
+  const neighbors = new Map<string, string[]>();
+  const incidentEdges = new Map<string, string[]>();
+  const push = (map: Map<string, string[]>, key: string, value: string) => {
+    const list = map.get(key);
+    if (list) list.push(value);
+    else map.set(key, [value]);
+  };
+  edges.forEach((e, i) => {
+    const edgeId = `${e.kind}:${i}`;
+    push(neighbors, e.from, e.to);
+    push(neighbors, e.to, e.from);
+    push(incidentEdges, e.from, edgeId);
+    push(incidentEdges, e.to, edgeId);
+  });
+  return { neighbors, incidentEdges };
 }
 
 // ─── Metrics: size + label policy (testable) ────────────────────────────
@@ -200,8 +220,6 @@ interface GraphNodeData extends Record<string, unknown> {
   node: MemoryGraphNode;
   size: number;
   labelAlways: boolean;
-  dimmed: boolean;
-  emphasized: boolean;
 }
 
 function shortLabel(node: MemoryGraphNode): string {
@@ -210,18 +228,20 @@ function shortLabel(node: MemoryGraphNode): string {
   return base.endsWith(".md") ? base.slice(0, -3) : base;
 }
 
+/**
+ * Static renderer — the hover spotlight never re-renders this. Emphasis
+ * and dimming come from the `.mg-spot` / `.mg-hot` classes toggled
+ * imperatively on the xyflow DOM (see SPOTLIGHT_CSS); React state changes
+ * on every mouse enter/leave were re-rendering ~275 nodes + ~1200 edges
+ * per toggle, which read as whole-canvas flashing when sweeping the
+ * cursor across the graph.
+ */
 function GraphDot({ data }: NodeProps<Node<GraphNodeData>>) {
-  const { node, size, labelAlways, dimmed, emphasized } = data;
+  const { node, size, labelAlways } = data;
   const color = node.topDir !== undefined && node.topDir !== "" ? dirDotHex(node.topDir) : "#64748b";
-  const showLabel = labelAlways || emphasized;
 
   return (
-    <div
-      className={cn(
-        "flex flex-col items-center gap-1 transition-opacity duration-150",
-        dimmed ? "opacity-30" : "opacity-100",
-      )}
-    >
+    <div className="flex flex-col items-center gap-1">
       <Handle type="target" position={Position.Top} className="!invisible !h-0 !w-0 !min-h-0 !min-w-0" />
       <Handle type="source" position={Position.Bottom} className="!invisible !h-0 !w-0 !min-h-0 !min-w-0" />
       {node.kind === "dir" ? (
@@ -238,21 +258,15 @@ function GraphDot({ data }: NodeProps<Node<GraphNodeData>>) {
       ) : (
         <span
           className="rounded-full"
-          style={{
-            backgroundColor: color,
-            width: size,
-            height: size,
-            boxShadow: emphasized ? `0 0 0 3px ${color}33` : undefined,
-          }}
+          style={{ backgroundColor: color, width: size, height: size }}
           aria-hidden="true"
         />
       )}
       <span
         className={cn(
-          "max-w-[150px] truncate rounded px-1 text-[10px] leading-tight",
+          "mg-label max-w-[150px] truncate rounded px-1 text-[10px] leading-tight",
           node.kind === "phantom" ? "italic text-muted" : "text-ink",
-          emphasized && "bg-paper font-medium shadow-sm",
-          !showLabel && "invisible",
+          !labelAlways && "invisible",
         )}
       >
         {shortLabel(node)}
@@ -266,6 +280,90 @@ const nodeTypes = { memoryDot: GraphDot };
 /** Hover stays suppressed this long after the last pan/zoom event —
  * nodes sliding under a stationary cursor otherwise strobe the fade. */
 const HOVER_RESUME_MS = 200;
+/** The cursor must rest on a node this long before the spotlight engages
+ * (hover intent) — sweeping across the graph triggers nothing. */
+const HOVER_ENGAGE_MS = 150;
+/** Grace period after leaving a node before the spotlight clears, so
+ * moving between a node and its neighbor doesn't blink. */
+const HOVER_CLEAR_MS = 150;
+
+const CARD_WIDTH = 288;
+
+/**
+ * Hover info card — metadata immediately (from the tree query, already
+ * cached), content preview async via the doc query. `pointer-events-none`
+ * so the card never steals the hover and flickers the spotlight.
+ */
+function MemoryHoverCard({
+  node,
+  x,
+  y,
+  meta,
+  inLinks,
+}: {
+  node: MemoryGraphNode;
+  x: number;
+  y: number;
+  meta?: { updatedAt: number; pinned: boolean; type: string };
+  inLinks: number;
+}) {
+  const docQ = useMemoryDoc(node.path ?? "", { enabled: node.path !== undefined, staleTime: 60_000 });
+  const preview =
+    docQ.data?.file?.content !== undefined
+      ? stripMarkdown(docQ.data.file.content).slice(0, 280)
+      : null;
+  const color = node.topDir ? dirDotHex(node.topDir) : "#64748b";
+
+  return (
+    <div
+      className="pointer-events-none absolute z-10 rounded-md border border-line bg-paper shadow-lg"
+      style={{ left: x, top: y, width: CARD_WIDTH }}
+    >
+      <div className="px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} aria-hidden="true" />
+          <span className="truncate text-sm font-medium text-ink">{node.title || node.path}</span>
+          {meta?.pinned && <span aria-hidden="true">📌</span>}
+        </div>
+        <div className="mt-0.5 truncate font-mono text-[10px] text-muted">{node.path}</div>
+        <div className="mt-1 flex items-center gap-2 text-[10px] text-muted">
+          {meta?.type && <span className="rounded bg-ink-wash px-1 py-px">{meta.type}</span>}
+          <span>{inLinks} incoming link{inLinks === 1 ? "" : "s"}</span>
+          {meta && <span>updated {relativeTime(meta.updatedAt)}</span>}
+        </div>
+      </div>
+      <div className="border-t border-line px-3 py-2 text-xs leading-snug text-muted">
+        {preview === null && (
+          <span className="flex items-center gap-1.5">
+            <Spinner size={11} /> Loading preview…
+          </span>
+        )}
+        {preview !== null && (
+          <span className="line-clamp-4 whitespace-pre-line text-ink">{preview || "(empty file)"}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Spotlight styling, applied via container classes instead of React
+ * state. Edge base opacity is an inline style, so the edge rules need
+ * !important; the node rules win on specificity alone.
+ */
+const SPOTLIGHT_CSS = `
+.mg-canvas .react-flow__node { transition: opacity 160ms ease; }
+.mg-spot .react-flow__node { opacity: 0.25; }
+.mg-spot .react-flow__node.mg-hot { opacity: 1; }
+.mg-spot .react-flow__edge { opacity: 0.06 !important; }
+.mg-spot .react-flow__edge.mg-hot { opacity: 0.9 !important; }
+.mg-spot .react-flow__node.mg-hot .mg-label {
+  visibility: visible;
+  background: var(--paper);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.1);
+}
+`;
 
 // ─── Canvas ──────────────────────────────────────────────────────────────
 
@@ -273,12 +371,19 @@ export function MemoryGraphCanvas() {
   const navigate = useNavigate();
   const graphQ = useQuery({ queryKey: ["memory", "graph"], queryFn: () => api.getMemoryGraph() });
   const [filters, setFilters] = useState<GraphFilters>({ journal: false, folders: true });
-  const [hoverId, setHoverId] = useState<string | null>(null);
   // Timestamp of the last viewport move, not a boolean: programmatic moves
   // (the initial fitView) can fire onMoveStart without a matching
   // onMoveEnd, and a stuck flag would gate hover forever. A timestamp
   // self-heals — hover resumes HOVER_RESUME_MS after the last move event.
   const lastMoveTs = useRef(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const engageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The hover card is React state, but it lives OUTSIDE the flow — the
+  // memoized node/edge arrays don't depend on it, so showing/hiding it
+  // never re-renders the canvas contents.
+  const [hoverCard, setHoverCard] = useState<{ node: MemoryGraphNode; x: number; y: number } | null>(null);
+  const treeQ = useMemoryTree();
 
   const filtered = useMemo(
     () => (graphQ.data ? filterGraph(graphQ.data, filters) : { nodes: [], edges: [] }),
@@ -288,11 +393,15 @@ export function MemoryGraphCanvas() {
   const inDeg = useMemo(() => linkInDegree(filtered.edges), [filtered.edges]);
   const labeled = useMemo(() => persistentLabelIds(filtered.nodes, inDeg), [filtered.nodes, inDeg]);
   const positions = useMemo(() => layoutGraph(filtered.nodes, filtered.edges, inDeg), [filtered, inDeg]);
-
-  const spotlight = useMemo(
-    () => (hoverId !== null ? spotlightSet(hoverId, filtered.edges) : null),
-    [hoverId, filtered.edges],
-  );
+  const hoverIndex = useMemo(() => buildHoverIndex(filtered.edges), [filtered.edges]);
+  // Hover-card metadata — the tree query is cached from the Files pane.
+  const metaByPath = useMemo(() => {
+    const map = new Map<string, { updatedAt: number; pinned: boolean; type: string }>();
+    for (const e of treeQ.data?.entries ?? []) {
+      map.set(e.path, { updatedAt: e.updatedAt, pinned: e.pinned, type: e.type });
+    }
+    return map;
+  }, [treeQ.data]);
 
   const flowNodes: Node<GraphNodeData>[] = useMemo(
     () =>
@@ -304,34 +413,102 @@ export function MemoryGraphCanvas() {
           node: n,
           size: dotSize(inDeg.get(n.id) ?? 0),
           labelAlways: labeled.has(n.id),
-          dimmed: spotlight !== null && !spotlight.has(n.id),
-          emphasized: spotlight !== null && spotlight.has(n.id),
         },
         draggable: false,
         connectable: false,
       })),
-    [filtered.nodes, positions, inDeg, labeled, spotlight],
+    [filtered.nodes, positions, inDeg, labeled],
   );
 
   const flowEdges: Edge[] = useMemo(
     () =>
-      filtered.edges.map((e, i) => {
-        const inSpotlight = spotlight !== null && spotlight.has(e.from) && spotlight.has(e.to);
-        const faded = spotlight !== null && !inSpotlight;
-        return {
-          id: `${e.kind}:${i}`,
-          source: e.from,
-          target: e.to,
-          type: "straight",
-          focusable: false,
-          style:
-            e.kind === "containment"
-              ? { stroke: "#94a3b8", strokeDasharray: "2 4", opacity: faded ? 0.06 : 0.16 }
-              : { stroke: "#64748b", opacity: faded ? 0.08 : inSpotlight ? 0.8 : 0.22 },
-        };
-      }),
-    [filtered.edges, spotlight],
+      filtered.edges.map((e, i) => ({
+        id: `${e.kind}:${i}`,
+        source: e.from,
+        target: e.to,
+        type: "straight",
+        focusable: false,
+        style:
+          e.kind === "containment"
+            ? { stroke: "#94a3b8", strokeDasharray: "2 4", opacity: 0.16 }
+            : { stroke: "#64748b", opacity: 0.22 },
+      })),
+    [filtered.edges],
   );
+
+  // ── Imperative spotlight — never re-renders the flow ──────────────────
+
+  function clearSpotlight() {
+    const c = containerRef.current;
+    if (!c) return;
+    c.classList.remove("mg-spot");
+    for (const el of c.querySelectorAll(".mg-hot")) el.classList.remove("mg-hot");
+    setHoverCard(null); // no-op re-render when already null
+  }
+
+  function applySpotlight(id: string) {
+    const c = containerRef.current;
+    if (!c) return;
+    for (const el of c.querySelectorAll(".mg-hot")) el.classList.remove("mg-hot");
+    c.classList.add("mg-spot");
+    const hotNodes = [id, ...(hoverIndex.neighbors.get(id) ?? [])];
+    for (const nodeId of hotNodes) {
+      c.querySelector(`.react-flow__node[data-id="${CSS.escape(nodeId)}"]`)?.classList.add("mg-hot");
+    }
+    for (const edgeId of hoverIndex.incidentEdges.get(id) ?? []) {
+      c.querySelector(`.react-flow__edge[data-id="${CSS.escape(edgeId)}"]`)?.classList.add("mg-hot");
+    }
+
+    // Info card, concept nodes only — anchored beside the node's screen
+    // rect, flipped left when it would overflow the container.
+    const graphNode = filtered.nodes.find((n) => n.id === id);
+    if (graphNode?.kind !== "concept") {
+      setHoverCard(null);
+      return;
+    }
+    const nodeEl = c.querySelector(`.react-flow__node[data-id="${CSS.escape(id)}"]`);
+    if (!nodeEl) {
+      setHoverCard(null);
+      return;
+    }
+    const nodeRect = nodeEl.getBoundingClientRect();
+    const cRect = c.getBoundingClientRect();
+    let x = nodeRect.right - cRect.left + 12;
+    if (x + CARD_WIDTH > cRect.width - 8) x = nodeRect.left - cRect.left - CARD_WIDTH - 12;
+    const y = Math.min(Math.max(8, nodeRect.top - cRect.top), Math.max(8, cRect.height - 190));
+    setHoverCard({ node: graphNode, x, y });
+  }
+
+  function cancelTimers() {
+    if (engageTimer.current !== null) clearTimeout(engageTimer.current);
+    if (clearTimer.current !== null) clearTimeout(clearTimer.current);
+    engageTimer.current = null;
+    clearTimer.current = null;
+  }
+
+  function onEnterNode(id: string) {
+    if (performance.now() - lastMoveTs.current < HOVER_RESUME_MS) return;
+    cancelTimers();
+    const alreadySpotlighting = containerRef.current?.classList.contains("mg-spot") ?? false;
+    if (alreadySpotlighting) {
+      applySpotlight(id); // re-target instantly when walking between neighbors
+    } else {
+      engageTimer.current = setTimeout(() => applySpotlight(id), HOVER_ENGAGE_MS);
+    }
+  }
+
+  function onLeaveNode() {
+    cancelTimers();
+    clearTimer.current = setTimeout(clearSpotlight, HOVER_CLEAR_MS);
+  }
+
+  // Filters change → xyflow remounts nodes → stale mg-hot classes vanish
+  // with them, but the container's mg-spot must go too.
+  useEffect(() => {
+    clearSpotlight();
+    return cancelTimers;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered]);
 
   if (graphQ.isLoading) {
     return (
@@ -368,7 +545,8 @@ export function MemoryGraphCanvas() {
   const hasPhantoms = filtered.nodes.some((n) => n.kind === "phantom");
 
   return (
-    <div className="relative flex-1 min-h-0">
+    <div ref={containerRef} className="mg-canvas relative flex-1 min-h-0">
+      <style>{SPOTLIGHT_CSS}</style>
       <ReactFlow
         nodes={flowNodes}
         edges={flowEdges}
@@ -382,14 +560,11 @@ export function MemoryGraphCanvas() {
         elementsSelectable={false}
         onMove={() => {
           lastMoveTs.current = performance.now();
-          // No-op when already null (React bails on identical state), so
-          // this doesn't re-render on every pan frame.
-          setHoverId(null);
+          cancelTimers();
+          clearSpotlight();
         }}
-        onNodeMouseEnter={(_, node) => {
-          if (performance.now() - lastMoveTs.current > HOVER_RESUME_MS) setHoverId(node.id);
-        }}
-        onNodeMouseLeave={() => setHoverId(null)}
+        onNodeMouseEnter={(_, node) => onEnterNode(node.id)}
+        onNodeMouseLeave={() => onLeaveNode()}
         onNodeClick={(_, node) => {
           const data = node.data as GraphNodeData;
           if (data.node.kind === "concept" && data.node.path) {
@@ -399,6 +574,16 @@ export function MemoryGraphCanvas() {
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} className="opacity-40" />
       </ReactFlow>
+
+      {hoverCard && (
+        <MemoryHoverCard
+          node={hoverCard.node}
+          x={hoverCard.x}
+          y={hoverCard.y}
+          meta={hoverCard.node.path !== undefined ? metaByPath.get(hoverCard.node.path) : undefined}
+          inLinks={inDeg.get(hoverCard.node.id) ?? 0}
+        />
+      )}
 
       <div className="absolute right-3 top-3 rounded-md border border-line bg-paper/95 px-3 py-2 text-xs shadow-sm">
         <div className="mb-1.5 text-muted">
