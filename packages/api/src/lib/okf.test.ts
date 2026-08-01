@@ -266,5 +266,14 @@ describe("okf serialization", () => {
       expect(remapImportPath("notes/index.md")).toBe("notes/index-imported.md");
       expect(remapImportPath("notes/log.md")).toBe("notes/log-imported.md");
     });
+
+    it('root "graph" is reserved (URL-shadowed by the graph view): writes reject, imports remap', () => {
+      expect(() => assertWritablePath("graph")).toThrow(/reserved for the memory graph view/);
+      expect(remapImportPath("graph")).toBe("graph-imported");
+      // Only the exact root path collides with /memory/graph.
+      expect(() => assertWritablePath("graph.md")).not.toThrow();
+      expect(() => assertWritablePath("notes/graph")).not.toThrow();
+      expect(remapImportPath("notes/graph")).toBe("notes/graph");
+    });
   });
 });

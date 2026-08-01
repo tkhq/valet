@@ -207,7 +207,12 @@ export function layoutGraph(
     .force("y", forceY<SimNode>((d) => d.anchorY).strength(0.14))
     .stop();
 
-  sim.tick(300);
+  // This runs synchronously on the main thread (useMemo) and re-runs on
+  // every filter toggle — halve the tick budget on big graphs so a
+  // journal-on relayout (~350 nodes, ~1400 edges) stays well under a
+  // second instead of freezing the UI. Cluster anchors do most of the
+  // structural work; the tail ticks only polish spacing.
+  sim.tick(nodes.length > 200 ? 130 : 300);
 
   const out = new Map<string, { x: number; y: number }>();
   for (const n of simNodes) out.set(n.id, { x: n.x ?? 0, y: n.y ?? 0 });
@@ -552,8 +557,13 @@ export function MemoryGraphCanvas() {
         edges={flowEdges}
         nodeTypes={nodeTypes}
         fitView
-        minZoom={0.05}
-        maxZoom={2.5}
+        minZoom={0.1}
+        maxZoom={2}
+        // The game-breaker fix: without culling, zooming in keeps all
+        // ~275 nodes + ~1200 edges in the DOM while nearly all of them
+        // are off-viewport at a large scale — the paint cost froze the
+        // renderer for 45s+ under rapid wheel zoom.
+        onlyRenderVisibleElements
         proOptions={{ hideAttribution: true }}
         nodesDraggable={false}
         nodesConnectable={false}

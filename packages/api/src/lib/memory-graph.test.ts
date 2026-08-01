@@ -4,6 +4,7 @@ import {
   extractLinkTargets,
   MAX_GRAPH_NODES,
   MAX_PHANTOM_NODES,
+  MAX_SCAN_CHARS,
   resolveLinkTarget,
   type GraphSourceFile,
 } from "./memory-graph.js";
@@ -39,6 +40,13 @@ describe("extractLinkTargets", () => {
   it("finds markdown links, deduped, self-links excluded", () => {
     const body = "see [b](/b.md) and [b again](/b.md) and [self](/a.md)";
     expect(extractLinkTargets("a.md", body)).toEqual(["b.md"]);
+  });
+
+  it("stops scanning past the per-file budget (DoS guard)", () => {
+    const body = `${"x".repeat(MAX_SCAN_CHARS)}\n[late](/notes/late.md)`;
+    expect(extractLinkTargets("a.md", body)).toEqual([]);
+    const early = `[early](/notes/early.md)\n${"x".repeat(MAX_SCAN_CHARS)}`;
+    expect(extractLinkTargets("a.md", early)).toEqual(["notes/early.md"]);
   });
 
   it("ignores links inside code fences and inline code", () => {

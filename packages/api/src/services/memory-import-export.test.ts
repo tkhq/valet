@@ -2,7 +2,15 @@ import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgs, users } from "../schema/index.js";
-import { exportFiles, importFiles, readFile, searchFiles, writeFile, type MemoryScope } from "./memory.js";
+import {
+  exportFiles,
+  importFiles,
+  MAX_IMPORT_FILES,
+  readFile,
+  searchFiles,
+  writeFile,
+  type MemoryScope,
+} from "./memory.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -77,6 +85,13 @@ describe("memory import/export", () => {
     expect(result.imported).toEqual(["notes/a.md"]);
     expect(result.skipped).toHaveLength(1);
     expect(result.skipped[0].reason).toMatch(/collision/);
+  });
+
+  it("rejects a bundle over the file-count cap with a split-it message", async () => {
+    const scope = scopeFor("u1");
+    const files: Record<string, string> = {};
+    for (let i = 0; i <= MAX_IMPORT_FILES; i++) files[`notes/f${i}.md`] = "x";
+    await expect(importFiles(db, scope, { files, trusted: true })).rejects.toThrow(/Split the bundle/);
   });
 
   it("index.md entries are skipped on import", async () => {

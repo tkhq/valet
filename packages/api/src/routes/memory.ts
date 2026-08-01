@@ -19,13 +19,13 @@
  * only, since there's no "acting as a team" session concept yet).
  */
 import { Hono, type Context } from "hono";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import { parsePrincipal } from "@valet/engine";
 import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import { buildMemoryGraph } from "../lib/memory-graph.js";
+import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { memoryFiles } from "../schema/index.js";
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
@@ -120,6 +120,17 @@ memoryRouter.get("/", async (c) => {
  * call per journal edit per day, reset on restart — deliberately no table.
  */
 const journalSummaryCache = new Map<string, string>();
+/** Keys carry a date + content hash, so stale entries accumulate forever
+ * on a long-lived process — evict oldest-inserted past this bound. */
+const JOURNAL_CACHE_MAX = 512;
+
+function journalCachePut(key: string, value: string): void {
+  if (journalSummaryCache.size >= JOURNAL_CACHE_MAX) {
+    const oldest = journalSummaryCache.keys().next().value;
+    if (oldest !== undefined) journalSummaryCache.delete(oldest);
+  }
+  journalSummaryCache.set(key, value);
+}
 
 function djb2(text: string): string {
   let h = 5381;
@@ -178,7 +189,7 @@ memoryRouter.get("/journal-summary", async (c) => {
       .map((b) => b.text)
       .join("")
       .trim();
-    if (summary) journalSummaryCache.set(cacheKey, summary);
+    if (summary) journalCachePut(cacheKey, summary);
     return c.json({ date, summary: summary || null });
   } catch (err) {
     console.error("journal-summary generation failed:", err);
@@ -383,10 +394,14 @@ memoryRouter.get("/graph", async (c) => {
   }
 
   const { db } = c.var.providers;
+  // limit matches buildMemoryGraph's node cap — without it this query
+  // loads every content blob into memory before the cap applies.
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)))
+    .orderBy(asc(memoryFiles.path))
+    .limit(MAX_GRAPH_NODES);
 
   return c.json(
     buildMemoryGraph(
@@ -437,8 +452,10 @@ memoryRouter.post("/import", async (c) => {
   }
 
   // Accept either the plain `{ path → content }` shape or the export
-  // manifest shape `{ path → { content, hash } }`.
-  const files: Record<string, string> = {};
+  // manifest shape `{ path → { content, hash } }`. Null-prototype
+  // accumulator: bundle keys are attacker-controlled and a literal
+  // `__proto__` key must land as a plain own property, not a setter hit.
+  const files: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [path, value] of Object.entries(body.files)) {
     files[path] = typeof value === "string" ? value : value.content;
   }

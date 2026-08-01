@@ -142,6 +142,11 @@ export function assertWritablePath(path: string): void {
   if (segments[0] === "lib") {
     throw new ReservedPathError("lib/ is reserved for mounted libraries — write under notes/ or projects/");
   }
+  if (normalized === "graph") {
+    // /memory/graph is the explorer's graph-view URL and shadows the
+    // /memory/$ doc route — a root file named "graph" would be unreachable.
+    throw new ReservedPathError('"graph" is reserved for the memory graph view — add an extension or a directory');
+  }
   if (segments.length > MAX_MEMORY_PATH_DEPTH) {
     throw new ReservedPathError(`path exceeds ${MAX_MEMORY_PATH_DEPTH} levels — flatten under projects/<name>/`);
   }
@@ -182,6 +187,12 @@ export function remapImportPath(path: string): string {
     segments[segments.length - 1] = "index-imported.md";
   } else if (basename === "log.md") {
     segments[segments.length - 1] = "log-imported.md";
+  }
+
+  // Root-level "graph" would be URL-shadowed by the graph view (see
+  // assertWritablePath) — remap so the imported doc stays reachable.
+  if (segments.length === 1 && segments[0] === "graph") {
+    segments[0] = "graph-imported";
   }
 
   return segments.join("/");

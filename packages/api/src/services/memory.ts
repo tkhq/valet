@@ -738,7 +738,19 @@ export interface ImportResult {
  * normalization collisions (two source paths mapping to the same stored
  * path) skip every entry after the first.
  */
+/** Import runs one existence SELECT + one upsert transaction per file —
+ * an unbounded bundle monopolizes the (single-writer in dev) database for
+ * the whole request. The cap matches the graph/tree scale ceiling. */
+export const MAX_IMPORT_FILES = 1000;
+
 export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportFilesParams): Promise<ImportResult> {
+  const fileCount = Object.keys(params.files).length;
+  if (fileCount > MAX_IMPORT_FILES) {
+    throw new ValidationError(
+      `bundle has ${fileCount} files; the limit is ${MAX_IMPORT_FILES} per import. Split the bundle and import in parts.`,
+    );
+  }
+
   const imported: string[] = [];
   const skipped: ImportSkip[] = [];
   const remapped: ImportRemap[] = [];

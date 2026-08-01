@@ -43,6 +43,10 @@ export interface MemoryGraph {
 export const MAX_GRAPH_NODES = 500;
 /** Phantom (dangling-target) node cap: signal, not noise. */
 export const MAX_PHANTOM_NODES = 40;
+/** Per-file link-scan budget. Link extraction is O(content) per request;
+ * without a cap, 500 multi-MB files make GET /graph an OOM/DoS vector.
+ * Links past this offset are simply not discovered. */
+export const MAX_SCAN_CHARS = 256 * 1024;
 
 export interface GraphSourceFile {
   path: string;
@@ -97,7 +101,8 @@ export function extractLinkTargets(fromPath: string, body: string): string[] {
   const seen = new Set<string>();
   let inFence = false;
 
-  for (const rawLine of body.split("\n")) {
+  const scanBody = body.length > MAX_SCAN_CHARS ? body.slice(0, MAX_SCAN_CHARS) : body;
+  for (const rawLine of scanBody.split("\n")) {
     if (rawLine.startsWith("```") || rawLine.startsWith("~~~")) {
       inFence = !inFence;
       continue;

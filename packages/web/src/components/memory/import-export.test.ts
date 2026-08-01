@@ -46,6 +46,15 @@ describe("parseBundle", () => {
   it("rejects an empty bundle", () => {
     expect(() => parseBundle(JSON.stringify({ files: {} }))).toThrow(/no files/);
   });
+
+  it("a literal __proto__ key cannot pollute Object.prototype", () => {
+    const b = parseBundle('{"files":{"__proto__":"evil","a.md":"ok"}}');
+    expect(b.fileCount).toBe(2);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    // The key survives as plain data on the null-prototype accumulator.
+    expect(Object.keys(b.files)).toContain("__proto__");
+    expect(({} as { __proto__?: unknown }).__proto__).toBe(Object.prototype);
+  });
 });
 
 describe("summarizeImport", () => {

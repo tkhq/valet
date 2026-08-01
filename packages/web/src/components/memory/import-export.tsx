@@ -40,7 +40,13 @@ export function parseBundle(text: string): ParsedBundle {
     throw new Error("Bundle must be a JSON object with a `files` map.");
   }
 
-  const files: Record<string, string | { content: string }> = {};
+  // Null-prototype accumulator: bundle keys are untrusted, and a literal
+  // "__proto__" key assigned onto `{}` mutates Object.prototype for the
+  // whole page. With no prototype there is no setter to hit.
+  const files: Record<string, string | { content: string }> = Object.create(null) as Record<
+    string,
+    string | { content: string }
+  >;
   for (const [path, value] of Object.entries(filesRaw as Record<string, unknown>)) {
     if (typeof value === "string") {
       files[path] = value;
@@ -72,6 +78,9 @@ export function summarizeImport(r: ImportMemoryResponse): string {
   if (r.remapped.length > 0) parts.push(`remapped ${r.remapped.length}`);
   return parts.join(" · ");
 }
+
+/** Refuse bundles bigger than this before reading them. */
+export const MAX_BUNDLE_BYTES = 15 * 1024 * 1024;
 
 type Phase =
   | { kind: "idle" }
@@ -122,6 +131,14 @@ export function MemoryImportExport() {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same file
     if (!file) return;
+    if (file.size > MAX_BUNDLE_BYTES) {
+      // JSON.parse of a multi-10MB string freezes the main thread.
+      setPhase({
+        kind: "error",
+        message: `Bundle is ${Math.round(file.size / 1024 / 1024)} MB; the limit is ${MAX_BUNDLE_BYTES / 1024 / 1024} MB. Split it and import in parts.`,
+      });
+      return;
+    }
     void file.text().then(
       (text) => {
         try {
