@@ -115,24 +115,25 @@ export function SessionView({
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
 
-  // Auto-title: fire once per session when we first see an assistant reply
-  // AND the session's title is empty/placeholder. The server enforces the
-  // idempotency ("already titled" → no-op), but tracking a fired-set here
-  // avoids retriggering on every re-render/stream event. Fire-and-forget;
-  // failures are logged but don't block the UI.
+  // Auto-title: fire when we first see an assistant reply on an un-titled
+  // session. The server enforces idempotency (already_titled → no-op) and
+  // may also return `no_messages` if the persisted messages haven't caught
+  // up with the live stream yet — so we only "latch" (stop retrying) when
+  // the server actually wrote a title. `inFlightRef` prevents rapid
+  // re-renders from double-firing while a request is outstanding.
   const qc = useQueryClient();
-  const autoTitleFiredRef = useRef<Set<string>>(new Set());
+  const autoTitleInFlightRef = useRef<Set<string>>(new Set());
   const sessionTitle = session.data?.title?.trim();
   const sessionUntitled = !sessionTitle || sessionTitle === "Untitled session";
-  const hasAssistantReply = stream.messages.some(
+  const assistantReplyCount = stream.messages.filter(
     (m) => m.role === "assistant" && (m.content || m.parts.length > 0),
-  );
+  ).length;
   useEffect(() => {
     if (!session.data) return;
     if (!sessionUntitled) return;
-    if (!hasAssistantReply) return;
-    if (autoTitleFiredRef.current.has(sessionId)) return;
-    autoTitleFiredRef.current.add(sessionId);
+    if (assistantReplyCount === 0) return;
+    if (autoTitleInFlightRef.current.has(sessionId)) return;
+    autoTitleInFlightRef.current.add(sessionId);
     api
       .autoTitleSession(sessionId, effectiveThreadId)
       .then((result) => {
@@ -145,13 +146,17 @@ export function SessionView({
         }
       })
       .catch((err) => {
-        // Roll back the fired flag so a later retrigger (WS reconnect, tab
-        // return) can retry — network hiccup shouldn't permanently disable
-        // titling for this session.
-        autoTitleFiredRef.current.delete(sessionId);
         console.warn("auto-title failed:", err);
+      })
+      .finally(() => {
+        // Clear the in-flight flag either way — a later assistant reply
+        // (bumping assistantReplyCount) re-evaluates the effect. Because
+        // `sessionUntitled` also gates the effect, once the server DOES
+        // write a title the invalidation flips `sessionUntitled` to false
+        // and the effect never runs again for this session.
+        autoTitleInFlightRef.current.delete(sessionId);
       });
-  }, [session.data, sessionUntitled, hasAssistantReply, sessionId, effectiveThreadId, qc]);
+  }, [session.data, sessionUntitled, assistantReplyCount, sessionId, effectiveThreadId, qc]);
 
   if (session.isLoading) {
     return (
