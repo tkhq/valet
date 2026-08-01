@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 /**
- * Assistant-first nav (decision 9): the presence mark renders the name
- * from the mocked info query, "Sessions" links to /sessions, and the old
- * "New session" button is gone from the nav (it moved to the /sessions
- * stub page — see routes/sessions.tsx).
+ * Product-first nav: the logo is always "Valet" (the orchestrator's chosen
+ * name lives in its own title card, not the logo), the presence dot still
+ * reflects the orchestrator's state, "Sessions" links to /sessions, and
+ * the old "New session" button is gone from the nav (it moved to the
+ * /sessions stub page — see routes/sessions.tsx).
  */
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -59,9 +60,10 @@ function renderNav() {
 }
 
 describe("TopNav", () => {
-  it("renders the assistant's name from the info query", async () => {
+  it("renders the Valet logo, not the orchestrator's name", async () => {
     renderNav();
-    expect(await screen.findByText("Echo")).toBeTruthy();
+    expect(await screen.findByText("Valet")).toBeTruthy();
+    expect(screen.queryByText("Echo")).toBeNull();
   });
 
   it("renders a Sessions link", async () => {
@@ -72,7 +74,7 @@ describe("TopNav", () => {
 
   it("does not render a New session button", async () => {
     renderNav();
-    await screen.findByText("Echo");
+    await screen.findByText("Valet");
     expect(screen.queryByText("New session")).toBeNull();
   });
 });

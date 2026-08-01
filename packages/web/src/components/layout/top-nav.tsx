@@ -38,20 +38,23 @@ function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
 
 export function TopNav() {
   const info = useOrchestratorInfo();
-  const name = info.data?.name ?? "Valet";
   const presence = info.data?.presence ?? "idle";
 
+  // The logo is the PRODUCT (Valet), not the orchestrator — the
+  // orchestrator's chosen name shows up in its own title card (session
+  // header) instead. The presence dot stays: it still reflects the
+  // orchestrator's live state at a glance from anywhere in the app.
   return (
     <header className="h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center px-3 gap-4">
       <Link
         to="/"
         className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash"
-        aria-label={`${name} — dashboard`}
+        aria-label="Valet — dashboard"
       >
         <span className="text-moss text-base leading-none" aria-hidden>
           ◈
         </span>
-        <PresenceMark name={name} state={presence} size="nav" />
+        <PresenceMark name="Valet" state={presence} size="nav" />
       </Link>
 
       <div className="flex-1" />

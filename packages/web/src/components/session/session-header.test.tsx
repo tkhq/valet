@@ -30,6 +30,10 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
+vi.mock("~/api/orchestrator", () => ({
+  useOrchestratorInfo: () => ({ data: undefined, isLoading: false, error: null }),
+}));
+
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
 }));

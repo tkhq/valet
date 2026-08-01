@@ -5,6 +5,7 @@ import type { Message, SessionDetail } from "@valet/api/wire";
 import { Badge, Button, Spinner, Tooltip } from "~/components/primitives";
 import { useDeleteSession, usePauseSession, useSetSessionModel } from "~/api/queries";
 import { useMe, useOrg } from "~/api/settings";
+import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 import { ModelPicker } from "./model-picker";
@@ -61,6 +62,7 @@ export function SessionHeader({
   const pause = usePauseSession(session.id);
   const me = useMe();
   const org = useOrg();
+  const orchInfo = useOrchestratorInfo();
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -134,7 +136,13 @@ export function SessionHeader({
   // the subtitle before. Real sessions have friendlier workspace names,
   // but hiding both keeps the visual language consistent and lets the
   // action cluster on the right breathe.
-  const title = session.title || "Untitled session";
+  //
+  // The orchestrator's title card carries the orchestrator's chosen name
+  // (e.g. "Aurora") — the top-nav logo stays "Valet", so this is where
+  // the assistant's identity lives.
+  const isOrchestrator = session.id.startsWith("orchestrator:");
+  const title =
+    (isOrchestrator ? orchInfo.data?.name : undefined) || session.title || "Untitled session";
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
   return (
     <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
