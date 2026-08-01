@@ -272,7 +272,7 @@ export function ModelPicker({
                     }}
                     className={cn(
                       "flex w-full flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
-                      isHighlighted ? "bg-moss/10 text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
+                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
                     )}
                   >
                     <div className="flex items-center gap-2">

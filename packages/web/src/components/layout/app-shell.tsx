@@ -161,7 +161,7 @@ export function AppShell({
                   className={cn(
                     "absolute top-0 right-[-3px] h-full w-[6px] cursor-col-resize z-10",
                     "after:absolute after:top-0 after:left-[2px] after:h-full after:w-px after:bg-[--border]",
-                    dragging ? "after:bg-moss" : "hover:after:bg-moss/60",
+                    dragging ? "after:bg-moss" : "hover:after:bg-moss",
                   )}
                 />
               </aside>

@@ -43,13 +43,13 @@ export function runStatusClasses(status: NodeRunStatus | undefined, selected: bo
   if (selected) return "border-moss ring-2 ring-moss";
   switch (status) {
     case "running":
-      return "border-moss ring-2 ring-moss/50 animate-pulse";
+      return "border-moss ring-2 ring-moss animate-pulse";
     case "succeeded":
       return "border-moss";
     case "failed":
-      return "border-danger-500 ring-1 ring-danger-500/50";
+      return "border-danger-500 ring-1 ring-danger-500";
     case "waiting":
-      return "border-amber ring-2 ring-amber/50";
+      return "border-amber ring-2 ring-amber";
     case "skipped":
       return "border-line opacity-40";
     default:

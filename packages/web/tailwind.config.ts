@@ -69,6 +69,7 @@ export default {
         "ink-wash": "var(--ink-wash)",
         "ink-wash-strong": "var(--ink-wash-strong)",
         "moss-wash": "var(--moss-wash)",
+        "moss-wash-strong": "var(--moss-wash-strong)",
       },
       fontFamily: {
         sans: [

@@ -55,6 +55,7 @@
   --ink-wash: rgba(31, 29, 26, 0.06);
   --ink-wash-strong: rgba(31, 29, 26, 0.1);
   --moss-wash: rgba(62, 107, 79, 0.1);
+  --moss-wash-strong: rgba(62, 107, 79, 0.18);
 }
 
 /* OS-level dark preference — only applies when there's no explicit
@@ -71,6 +72,7 @@
     --ink-wash: rgba(236, 233, 228, 0.08);
     --ink-wash-strong: rgba(236, 233, 228, 0.14);
     --moss-wash: rgba(127, 174, 143, 0.14);
+    --moss-wash-strong: rgba(127, 174, 143, 0.22);
   }
 }
 
@@ -86,6 +88,7 @@
   --ink-wash: rgba(236, 233, 228, 0.08);
   --ink-wash-strong: rgba(236, 233, 228, 0.14);
   --moss-wash: rgba(127, 174, 143, 0.14);
+  --moss-wash-strong: rgba(127, 174, 143, 0.22);
 }
 
 :root[data-theme="light"] {
@@ -99,6 +102,7 @@
   --ink-wash: rgba(31, 29, 26, 0.06);
   --ink-wash-strong: rgba(31, 29, 26, 0.1);
   --moss-wash: rgba(62, 107, 79, 0.1);
+  --moss-wash-strong: rgba(62, 107, 79, 0.18);
 }
 
 /**

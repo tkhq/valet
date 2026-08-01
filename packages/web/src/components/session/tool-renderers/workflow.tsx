@@ -130,13 +130,13 @@ function StatusPill({ status, outcome }: { status: string; outcome?: string }) {
   const label = outcome ?? status;
   const tone =
     outcome === "completed"
-      ? "bg-moss/10 text-moss"
+      ? "bg-moss-wash text-moss"
       : outcome === "failed"
         ? "bg-danger-500/10 text-danger-500"
         : status === "parked"
           ? "bg-amber/10 text-amber"
           : status === "running"
-            ? "bg-moss/10 text-moss"
+            ? "bg-moss-wash text-moss"
             : "bg-neutral-500/10 text-muted";
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${tone}`}>
