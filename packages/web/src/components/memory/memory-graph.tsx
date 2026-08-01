@@ -148,7 +148,7 @@ function GraphDot({ data }: NodeProps<Node<GraphNodeData>>) {
     <div
       className={cn(
         "flex flex-col items-center gap-1 transition-opacity duration-150",
-        dimmed ? "opacity-15" : "opacity-100",
+        dimmed ? "opacity-30" : "opacity-100",
       )}
     >
       <Handle type="target" position={Position.Top} className="!invisible !h-0 !w-0 !min-h-0 !min-w-0" />
@@ -236,8 +236,8 @@ export function MemoryGraphCanvas() {
           focusable: false,
           style:
             e.kind === "containment"
-              ? { stroke: "#94a3b8", strokeDasharray: "2 4", opacity: faded ? 0.04 : 0.25 }
-              : { stroke: "#64748b", opacity: faded ? 0.05 : inSpotlight ? 0.8 : 0.35 },
+              ? { stroke: "#94a3b8", strokeDasharray: "2 4", opacity: faded ? 0.08 : 0.25 }
+              : { stroke: "#64748b", opacity: faded ? 0.1 : inSpotlight ? 0.8 : 0.35 },
         };
       }),
     [filtered.edges, spotlight],
