@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewMode, summarizeDefinition } from "./preview";
+import { canvasHeight, previewMode, summarizeDefinition } from "./preview";
 import type { WorkflowDefinition, WorkflowNode } from "./editor-model";
 
 describe("previewMode", () => {
@@ -7,12 +7,28 @@ describe("previewMode", () => {
     expect(previewMode(0)).toBe("empty");
     expect(previewMode(1)).toBe("empty");
   });
-  it("is 'canvas' for 2..8 nodes", () => {
+  it("is 'canvas' from 2 up to 40 nodes", () => {
     expect(previewMode(2)).toBe("canvas");
     expect(previewMode(8)).toBe("canvas");
+    expect(previewMode(18)).toBe("canvas");
+    expect(previewMode(40)).toBe("canvas");
   });
-  it("is 'summary' above 8 nodes", () => {
-    expect(previewMode(9)).toBe("summary");
+  it("is 'summary' above 40 nodes", () => {
+    expect(previewMode(41)).toBe("summary");
+  });
+});
+
+describe("canvasHeight", () => {
+  it("keeps the baseline for small workflows", () => {
+    expect(canvasHeight(2)).toBe(240);
+    expect(canvasHeight(8)).toBe(240);
+  });
+  it("scales up for medium workflows", () => {
+    expect(canvasHeight(12)).toBe(320);
+    expect(canvasHeight(20)).toBe(400);
+  });
+  it("caps at 480 for large workflows", () => {
+    expect(canvasHeight(40)).toBe(480);
   });
 });
 

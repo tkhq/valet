@@ -17,12 +17,24 @@ const nodeTypes = { workflow: FlowNode };
 
 /**
  * How the preview renders for a given node count: below 2 nodes there is
- * nothing meaningful to draw; above 8 a fit-to-view canvas at card height
- * would be an unreadable postage stamp, so it degrades to a summary strip.
+ * nothing meaningful to draw; above 40 a fit-to-view canvas even at scaled
+ * height would be unreadable, so it degrades to a summary strip. Between
+ * those bounds `canvasHeight` scales the card so bigger DAGs still get a
+ * real diagram.
  */
 export function previewMode(nodeCount: number): "empty" | "canvas" | "summary" {
   if (nodeCount < 2) return "empty";
-  return nodeCount <= 8 ? "canvas" : "summary";
+  return nodeCount <= 40 ? "canvas" : "summary";
+}
+
+/** Card height picked so nodes stay legible as `nodeCount` grows. Default
+ * `baseline` (240px) covers small workflows; scale up to 480px for large.
+ */
+export function canvasHeight(nodeCount: number, baseline = 240): number {
+  if (nodeCount <= 8) return baseline;
+  if (nodeCount <= 16) return Math.max(baseline, 320);
+  if (nodeCount <= 25) return Math.max(baseline, 400);
+  return Math.max(baseline, 480);
 }
 
 /** One-line shape summary for the >8-node degraded mode. */
@@ -48,9 +60,11 @@ export function WorkflowPreview({
   definition,
   statusByNodeId,
   badgeByNodeId,
-  height = 240,
+  height,
 }: WorkflowPreviewProps) {
-  const mode = previewMode(definition.nodes.length);
+  const nodeCount = definition.nodes.length;
+  const mode = previewMode(nodeCount);
+  const resolvedHeight = height ?? canvasHeight(nodeCount);
 
   const flow = useMemo(() => {
     if (mode !== "canvas") return null;
@@ -86,7 +100,7 @@ export function WorkflowPreview({
     return (
       <div
         className="flex items-center justify-center rounded-md border border-line bg-paper text-sm text-muted"
-        style={{ height }}
+        style={{ height: resolvedHeight }}
         data-testid="workflow-preview-empty"
       >
         No steps yet — ask the assistant to add actions.
@@ -109,7 +123,7 @@ export function WorkflowPreview({
   return (
     <div
       className="overflow-hidden rounded-md border border-line bg-[--bg]"
-      style={{ height }}
+      style={{ height: resolvedHeight }}
       data-testid="workflow-preview-canvas"
     >
       <ReactFlow
