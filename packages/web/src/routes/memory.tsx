@@ -1,4 +1,5 @@
 import { Outlet, createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
+import { MemoryImportExport } from "~/components/memory/import-export";
 import { MemorySearchPane } from "~/components/memory/memory-search";
 
 /**
@@ -35,8 +36,11 @@ function MemoryLayout() {
 
   return (
     <div className="flex flex-1 min-h-0 flex-col md:flex-row">
-      <aside className="h-64 shrink-0 border-b border-line overflow-y-auto md:h-auto md:w-72 md:border-b-0 md:border-r">
-        <MemorySearchPane activePath={activePath} onSelect={onSelect} />
+      <aside className="flex h-64 shrink-0 flex-col border-b border-line md:h-auto md:w-72 md:border-b-0 md:border-r">
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <MemorySearchPane activePath={activePath} onSelect={onSelect} />
+        </div>
+        <MemoryImportExport />
       </aside>
       <Outlet />
     </div>

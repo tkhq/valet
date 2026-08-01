@@ -110,7 +110,13 @@ import type {
   UpdateWorkflowResponse,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
-import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
+import type {
+  ExportMemoryResponse,
+  GetMemoryDocResponse,
+  ImportMemoryRequest,
+  ImportMemoryResponse,
+  SearchMemoryResponse,
+} from "./memory-types";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
@@ -228,6 +234,9 @@ export const api = {
     request<GetMemoryDocResponse>("GET", `/memory?path=${encodeURIComponent(path)}`),
   searchMemory: (q: string) =>
     request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
+  exportMemory: () => request<ExportMemoryResponse>("GET", "/memory/export"),
+  importMemory: (body: ImportMemoryRequest) =>
+    request<ImportMemoryResponse>("POST", "/memory/import", body),
 
   // threads + messages (session-scoped)
   listThreads: (sessionId: string) =>

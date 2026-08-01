@@ -92,7 +92,11 @@ export function MemoryCard() {
 
         {empty && (
           <p className="text-sm text-muted">
-            Nothing remembered yet. Talk to {name}, or import a bundle via the API.
+            Nothing remembered yet. Talk to {name}, or import a bundle from the{" "}
+            <Link to="/memory" className="underline hover:text-moss">
+              Memory page
+            </Link>
+            .
           </p>
         )}
 

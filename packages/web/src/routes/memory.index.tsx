@@ -22,7 +22,7 @@ function MemoryIndexPage() {
   return (
     <main className="flex flex-1 min-h-0 items-center justify-center p-8 text-center text-sm text-muted">
       {nothingRemembered ? (
-        <p>Nothing remembered yet. Talk to {name}, or import a bundle via the API.</p>
+        <p>Nothing remembered yet. Talk to {name}, or use Import in the left pane to load a memory bundle.</p>
       ) : (
         <p>Select a file from the tree to read it.</p>
       )}

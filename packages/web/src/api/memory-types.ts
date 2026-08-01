@@ -43,3 +43,26 @@ export interface SearchMemoryResult {
 export interface SearchMemoryResponse {
   results: SearchMemoryResult[];
 }
+
+/**
+ * `GET /api/memory/export` / `POST /api/memory/import` — same boundary
+ * reasoning as above. Export returns the OKF manifest; import accepts
+ * either `{ path → content }` (the V1 bundle shape) or the manifest shape
+ * and reports what it did per file (`ImportResult` in
+ * `packages/api/src/services/memory.ts`).
+ */
+export interface ExportMemoryResponse {
+  files: Record<string, { content: string; hash: string }>;
+}
+
+export interface ImportMemoryRequest {
+  files: Record<string, string | { content: string }>;
+  trusted: boolean;
+}
+
+export interface ImportMemoryResponse {
+  imported: string[];
+  skipped: { path: string; reason: string }[];
+  remapped: { from: string; to: string }[];
+  warnings: string[];
+}
