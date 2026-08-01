@@ -13,7 +13,7 @@
  * show live buttons.
  */
 import { Link } from "@tanstack/react-router";
-import { Workflow } from "lucide-react";
+import { ArrowUpRight, Workflow } from "lucide-react";
 import { useRunDetail, useWorkflow } from "~/api/workflows";
 import { ApprovalCard } from "~/components/workflows/approval-card";
 import {
@@ -103,18 +103,19 @@ function RunBody({ runId }: { runId: string }) {
   const definition = run.definition;
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs text-muted">
-        <span>
-          run <span className="font-mono">{runId}</span> · {run.status}
-          {run.outcome ? ` · ${run.outcome}` : ""}
-        </span>
+    <div className="space-y-2 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-muted">run</span>
+          <span className="font-mono text-ink truncate max-w-[220px]">{runId}</span>
+          <StatusPill status={run.status} outcome={run.outcome ?? undefined} />
+        </div>
         <Link
           to="/workflows/runs/$runId"
           params={{ runId }}
-          className="text-moss hover:underline"
+          className="inline-flex items-center gap-1 text-xs font-medium text-moss hover:text-moss/80 hover:underline"
         >
-          Open run
+          Open run <ArrowUpRight size={12} />
         </Link>
       </div>
       {isWorkflowDefinitionShape(definition) && (
@@ -125,6 +126,25 @@ function RunBody({ runId }: { runId: string }) {
   );
 }
 
+function StatusPill({ status, outcome }: { status: string; outcome?: string }) {
+  const label = outcome ?? status;
+  const tone =
+    outcome === "completed"
+      ? "bg-moss/10 text-moss"
+      : outcome === "failed"
+        ? "bg-danger-500/10 text-danger-500"
+        : status === "parked"
+          ? "bg-amber/10 text-amber"
+          : status === "running"
+            ? "bg-moss/10 text-moss"
+            : "bg-neutral-500/10 text-muted";
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${tone}`}>
+      {label}
+    </span>
+  );
+}
+
 function DefinitionBody({ workflowId }: { workflowId: string }) {
   const { data, isLoading, error } = useWorkflow(workflowId);
   if (isLoading) return <Skeleton label="Loading workflow…" />;
@@ -132,17 +152,20 @@ function DefinitionBody({ workflowId }: { workflowId: string }) {
 
   const definition = data.definition;
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs text-muted">
-        <span>
-          {data.name} · updated {new Date(data.updatedAt).toLocaleString()}
-        </span>
+    <div className="space-y-2 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs min-w-0">
+          <span className="font-medium text-ink truncate">{data.name}</span>
+          <span className="text-muted whitespace-nowrap">
+            updated {new Date(data.updatedAt).toLocaleString()}
+          </span>
+        </div>
         <Link
           to="/workflows/$workflowId"
           params={{ workflowId }}
-          className="text-moss hover:underline"
+          className="inline-flex items-center gap-1 text-xs font-medium text-moss hover:text-moss/80 hover:underline"
         >
-          Open
+          Open <ArrowUpRight size={12} />
         </Link>
       </div>
       {isWorkflowDefinitionShape(definition) ? (
@@ -156,7 +179,7 @@ function DefinitionBody({ workflowId }: { workflowId: string }) {
 
 function Skeleton({ label }: { label: string }) {
   return (
-    <div className="flex h-24 animate-pulse items-center justify-center rounded-md border border-line bg-paper text-xs text-muted">
+    <div className="m-3 flex h-24 animate-pulse items-center justify-center rounded-md border border-line bg-paper text-xs text-muted">
       {label}
     </div>
   );
@@ -164,7 +187,7 @@ function Skeleton({ label }: { label: string }) {
 
 function Missing({ what }: { what: "workflow" | "run" }) {
   return (
-    <div className="rounded-md border border-line bg-paper px-3 py-2 text-xs text-muted">
+    <div className="m-3 rounded-md border border-line bg-paper px-3 py-2 text-xs text-muted">
       This {what} no longer exists.
     </div>
   );
