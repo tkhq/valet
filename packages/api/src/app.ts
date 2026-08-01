@@ -34,6 +34,7 @@ import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
 import { modelsRouter } from "./routes/models.js";
+import { usageRouter } from "./routes/usage.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
@@ -214,6 +215,7 @@ export function createApp(
   app.route("/api/me/github", githubConnectRouter);
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);
+  app.route("/api/usage", usageRouter);
   app.route("/api/org", orgRouter);
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);

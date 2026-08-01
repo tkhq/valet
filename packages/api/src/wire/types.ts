@@ -908,6 +908,30 @@ export interface ListModelsResponse {
   models: ModelInfo[];
 }
 
+// ── REST: usage (`/api/usage/summary`) ─────────────────────────────────
+
+export interface UsageWindow {
+  inputTokens: number;
+  outputTokens: number;
+  /** Estimated USD from the engine's per-turn cost records; 0 when the
+   * model was unpriced. */
+  costUsd: number;
+  /** Assistant turns that reported usage in the window. */
+  turns: number;
+}
+
+export interface UsageMemberSummary extends UsageWindow {
+  userId: string;
+  name: string;
+}
+
+export interface UsageSummaryResponse {
+  me: { day: UsageWindow; week: UsageWindow; month: UsageWindow };
+  /** Present only when the org's `features.organizations` flag is on —
+   * single-user mode never sees comparative usage. */
+  org?: { windowDays: number; members: UsageMemberSummary[] };
+}
+
 // ── REST: org (split-settings design) ──────────────────────────────────
 //
 // Singular `/api/org` shape — single-org is deliberate (spec decision 7);

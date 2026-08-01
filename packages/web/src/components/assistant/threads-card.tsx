@@ -4,9 +4,20 @@ import { Spinner } from "~/components/primitives";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useThreads } from "~/api/queries";
 import { relativeTime } from "~/lib/relative-time";
+import { threadOriginBucket, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { cn } from "~/lib/cn";
 
-const RECENT_LIMIT = 6;
+const RECENT_LIMIT = 20;
+
+/** Origin pill styling — the dashboard's one deliberate splash of color.
+ * Tailwind default-palette colors (alpha-capable), NOT the CSS-var tokens
+ * (whose opacity modifiers silently no-op — see theme.css). */
+const ORIGIN_PILL: Record<Exclude<ThreadOriginBucket, "all">, { label: string; className: string }> = {
+  chat: { label: "chat", className: "bg-sky-500/10 text-sky-700 dark:text-sky-300" },
+  auto: { label: "auto", className: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
+  channel: { label: "channel", className: "bg-violet-500/10 text-violet-700 dark:text-violet-300" },
+  other: { label: "other", className: "bg-neutral-500/10 text-muted" },
+};
 
 export interface ThreadActivity {
   thread: ThreadSummary;
@@ -48,6 +59,20 @@ export function threadActivity(
  * going on": recent threads, newest first, each with its running/settled
  * child counts. Clicking a row opens that thread in /chat.
  */
+function OriginPill({ thread }: { thread: Pick<ThreadSummary, "key"> }) {
+  const pill = ORIGIN_PILL[threadOriginBucket(thread)];
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded-full px-1.5 py-px text-[9px] font-medium uppercase tracking-wide",
+        pill.className,
+      )}
+    >
+      {pill.label}
+    </span>
+  );
+}
+
 export function ThreadsCard() {
   const info = useOrchestratorInfo();
   const sessionId = info.data?.sessionId;
@@ -107,6 +132,7 @@ export function ThreadsCard() {
                 <span className="flex-1 truncate text-sm text-ink">
                   {thread.title || "Untitled thread"}
                 </span>
+                <OriginPill thread={thread} />
                 {running > 0 && (
                   <span className="shrink-0 text-[10px] font-medium text-moss">
                     {running} running

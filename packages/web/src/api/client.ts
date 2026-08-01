@@ -106,6 +106,7 @@ import type {
   TestLlmProviderRequest,
   TestLlmProviderResponse,
   UpdateWorkflowRequest,
+  UsageSummaryResponse,
   UpdateWorkflowResponse,
   WithdrawDecisionRequest,
 } from "@valet/api/wire";
@@ -351,6 +352,7 @@ export const api = {
   getMe: () => request<MeResponse>("GET", "/me"),
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
+  getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
   getOrg: () => request<OrgResponse>("GET", "/org"),
   patchOrg: (body: PatchOrgRequest) => request<PatchOrgResponse>("PATCH", "/org", body),
   getOrgMembers: () => request<OrgMembersResponse>("GET", "/org/members"),

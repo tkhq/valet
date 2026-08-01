@@ -7,7 +7,7 @@ import { ThreadsCard } from "~/components/assistant/threads-card";
 import { IdentityHeader } from "~/components/assistant/identity-header";
 import { IdentityStep } from "~/components/assistant/identity-step";
 import { MemoryCard } from "~/components/assistant/memory-card";
-import { WorkCard } from "~/components/assistant/work-card";
+import { UsageCard } from "~/components/assistant/usage-card";
 import { Spinner } from "~/components/primitives";
 
 /**
@@ -75,7 +75,7 @@ function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
             <ThreadsCard />
           </div>
           <MemoryCard />
-          <WorkCard />
+          <UsageCard />
         </div>
 
         <ActivityStrip

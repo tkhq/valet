@@ -39,8 +39,8 @@ vi.mock("~/components/assistant/threads-card", () => ({
 vi.mock("~/components/assistant/memory-card", () => ({
   MemoryCard: () => <div data-testid="memory-card" />,
 }));
-vi.mock("~/components/assistant/work-card", () => ({
-  WorkCard: () => <div data-testid="work-card" />,
+vi.mock("~/components/assistant/usage-card", () => ({
+  UsageCard: () => <div data-testid="usage-card" />,
 }));
 
 import { Dashboard } from "./index";
@@ -95,7 +95,7 @@ describe("Dashboard", () => {
     expect(screen.getByText("idle")).toBeTruthy();
     expect(screen.getByTestId("threads-card")).toBeTruthy();
     expect(screen.getByTestId("memory-card")).toBeTruthy();
-    expect(screen.getByTestId("work-card")).toBeTruthy();
+    expect(screen.getByTestId("usage-card")).toBeTruthy();
     expect(screen.queryByText("Meet your assistant")).toBeNull();
   });
 
