@@ -23,13 +23,21 @@ export function Markdown({ children, className }: { children: string; className?
         // Headings — small bumps; chat shouldn't have giant h1s.
         "prose-headings:font-semibold prose-headings:tracking-tight",
         "prose-h1:text-base prose-h2:text-base prose-h3:text-sm",
-        // Inline code — pill style, no surrounding backticks.
-        "prose-code:bg-neutral-100 dark:prose-code:bg-neutral-800",
-        "prose-code:rounded prose-code:px-1 prose-code:py-0.5",
-        "prose-code:text-[0.85em] prose-code:font-normal",
+        // Inline code — pill style, no surrounding backticks. Scoped so
+        // the pill styles don't also apply to `<code>` inside fenced blocks
+        // (the inner code element there should be transparent + inherit).
+        "[&_:not(pre)>code]:bg-neutral-100 dark:[&_:not(pre)>code]:bg-neutral-800",
+        "[&_:not(pre)>code]:text-ink",
+        "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5",
+        "[&_:not(pre)>code]:text-[0.85em] [&_:not(pre)>code]:font-normal",
         "prose-code:before:content-none prose-code:after:content-none",
         // Code blocks — outlined card; horizontal scroll for long lines.
+        // `prose-pre:text-ink` (+ dark variant) — without an explicit color
+        // prose defaults `pre code` to `--tw-prose-pre-code` which is a very
+        // light grey on `bg-neutral-100`, i.e. invisible in light mode.
         "prose-pre:bg-neutral-100 dark:prose-pre:bg-neutral-900",
+        "prose-pre:text-ink dark:prose-pre:text-ink",
+        "[&_pre_code]:!text-ink [&_pre_code]:!bg-transparent",
         "prose-pre:border prose-pre:border-[--border]",
         "prose-pre:rounded-md prose-pre:px-3 prose-pre:py-2",
         "prose-pre:text-xs prose-pre:my-2",
