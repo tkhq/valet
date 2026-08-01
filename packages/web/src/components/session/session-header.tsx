@@ -1,12 +1,14 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { Moon, Trash2 } from "lucide-react";
-import type { SessionDetail } from "@valet/api/wire";
+import { Check, ClipboardCopy, Moon, Trash2 } from "lucide-react";
+import type { Message, SessionDetail } from "@valet/api/wire";
 import { Badge, Button, Spinner, Tooltip } from "~/components/primitives";
 import { useDeleteSession, usePauseSession, useSetSessionModel } from "~/api/queries";
+import { useMe } from "~/api/settings";
 import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 import { ModelPicker } from "./model-picker";
+import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
 
 /** Server sends `{ error: "a turn is running" }` / `{ error: "sandbox is not
@@ -26,17 +28,23 @@ export function SessionHeader({
   agentStatus,
   conn,
   sandbox,
+  threadId,
+  messages,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
   conn: ConnectionStatus;
   sandbox?: { state: string; epoch: number };
+  threadId?: string;
+  messages?: Message[];
 }) {
   const navigate = useNavigate();
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
   const pause = usePauseSession(session.id);
+  const me = useMe();
   const [pauseError, setPauseError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   async function destroy() {
     if (!confirm(`Delete session and tear down its sandbox?`)) return;
@@ -54,6 +62,49 @@ export function SessionHeader({
       await pause.mutateAsync();
     } catch (err) {
       setPauseError(extractPauseError(err));
+    }
+  }
+
+  async function copyTranscript() {
+    const transcript = buildTranscript({
+      session,
+      threadId,
+      messages: messages ?? [],
+      agentStatus,
+      conn,
+      sandbox,
+      user: me.data
+        ? { id: me.data.id, email: me.data.email, name: me.data.name }
+        : undefined,
+      org: me.data ? { id: me.data.orgId } : undefined,
+      env: {
+        origin: typeof window !== "undefined" ? window.location.origin : undefined,
+        userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+      },
+    });
+    try {
+      await navigator.clipboard.writeText(transcript);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      // Clipboard permission denied — fall back to a hidden textarea. This
+      // is the sole reason this handler doesn't just await writeText and
+      // trust it; some browsers block programmatic clipboard writes.
+      const el = document.createElement("textarea");
+      el.value = transcript;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      try {
+        document.execCommand("copy");
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      } catch (fallbackErr) {
+        console.error("copy transcript failed:", err, fallbackErr);
+      } finally {
+        document.body.removeChild(el);
+      }
     }
   }
 
@@ -79,6 +130,20 @@ export function SessionHeader({
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
         <AgentStatusBadge status={agentStatus} />
+        <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={copyTranscript}
+            aria-label="Copy transcript"
+          >
+            {copied ? (
+              <Check className="h-4 w-4 text-moss" />
+            ) : (
+              <ClipboardCopy className="h-4 w-4" />
+            )}
+          </Button>
+        </Tooltip>
         <Tooltip content="Pause session — sandbox sleeps until the next message">
           <Button
             variant="ghost"

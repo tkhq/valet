@@ -138,6 +138,8 @@ export function SessionView({
           agentStatus={stream.agentStatus}
           conn={stream.conn}
           sandbox={stream.sandbox}
+          threadId={effectiveThreadId}
+          messages={stream.messages}
         />
       )}
       <SandboxTabs
