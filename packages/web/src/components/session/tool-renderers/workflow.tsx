@@ -23,6 +23,7 @@ import {
 } from "~/components/workflows/run-detail-helpers";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
+import { relativeTime } from "~/lib/relative-time";
 import { resultText, type ToolRenderer, type ToolRendererProps } from "./types";
 import { ToolBody } from "./tool-shell";
 
@@ -54,21 +55,52 @@ export interface WorkflowRefs {
  * `actionResultToToolResult`), so parse the text and pull the id fields the
  * workflows actions always include. Failure/running/malformed → `{}`.
  */
-export function workflowRefsFrom(result: unknown): WorkflowRefs {
+/** Parse a persisted `call_tool` result's JSON payload, or null. */
+export function parsedResultData(result: unknown): Record<string, unknown> | null {
   const text = resultText(result);
-  if (!text) return {};
-  let parsed: unknown;
+  if (!text) return null;
   try {
-    parsed = JSON.parse(text);
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
-    return {};
+    return null;
   }
-  if (typeof parsed !== "object" || parsed === null) return {};
-  const obj = parsed as Record<string, unknown>;
+}
+
+export function workflowRefsFrom(result: unknown): WorkflowRefs {
+  const obj = parsedResultData(result);
+  if (!obj) return {};
   const refs: WorkflowRefs = {};
   if (typeof obj.workflowId === "string") refs.workflowId = obj.workflowId;
   if (typeof obj.runId === "string") refs.runId = obj.runId;
   return refs;
+}
+
+export interface WorkflowListEntry {
+  workflowId: string;
+  name: string;
+  updatedAt?: number;
+}
+
+/** Rows out of a `workflows.list_workflows` result, or null when the
+ * result isn't that shape (failure text, other tools). */
+export function workflowListFrom(result: unknown): WorkflowListEntry[] | null {
+  const obj = parsedResultData(result);
+  if (!obj || !Array.isArray(obj.workflows)) return null;
+  const rows: WorkflowListEntry[] = [];
+  for (const entry of obj.workflows) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.workflowId !== "string" || typeof e.name !== "string") continue;
+    rows.push({
+      workflowId: e.workflowId,
+      name: e.name,
+      ...(typeof e.updatedAt === "number" ? { updatedAt: e.updatedAt } : {}),
+    });
+  }
+  return rows;
 }
 
 /** Fallback refs from the call's own params, so an in-flight or failed call
@@ -193,16 +225,54 @@ function Missing({ what }: { what: "workflow" | "run" }) {
   );
 }
 
+function WorkflowListBody({ rows }: { rows: WorkflowListEntry[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="px-3 py-2 text-xs text-muted">
+        No workflows yet — save one to get started.
+      </div>
+    );
+  }
+  return (
+    <div className="px-3 py-2">
+      <ul className="divide-y divide-line/60 rounded-md border border-line">
+        {rows.map((w) => (
+          <li key={w.workflowId}>
+            <Link
+              to="/workflows/$workflowId"
+              params={{ workflowId: w.workflowId }}
+              className="flex items-center gap-3 px-3 py-1.5 hover:bg-ink-wash/60 transition-colors"
+            >
+              <span className="flex-1 truncate text-sm text-ink">{w.name}</span>
+              <span className="shrink-0 font-mono text-[10px] text-muted/70">{w.workflowId}</span>
+              {w.updatedAt !== undefined && (
+                <span className="shrink-0 text-xs text-muted">{relativeTime(w.updatedAt)}</span>
+              )}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function WorkflowToolBody({ args, result, status, error }: ToolRendererProps) {
   const refs = { ...workflowRefsFromArgs(args), ...workflowRefsFrom(result) };
 
   if (status === "running") {
     return <Skeleton label="Working on the workflow…" />;
   }
+
+  // list_workflows → compact linked table, not raw JSON.
+  if (toolIdSuffix(args) === "list_workflows") {
+    const rows = workflowListFrom(result);
+    if (rows) return <WorkflowListBody rows={rows} />;
+  }
+
   if (refs.runId) return <RunBody runId={refs.runId} />;
   if (refs.workflowId) return <DefinitionBody workflowId={refs.workflowId} />;
 
-  // No ids (e.g. list_workflows, or a failed call) → plain text body.
+  // No ids (e.g. a failed call) → plain text body.
   return <ToolBody>{error ?? resultText(result)}</ToolBody>;
 }
 

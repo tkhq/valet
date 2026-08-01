@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isWorkflowCallTool, workflowRefsFrom, workflowRefsFromArgs } from "./workflow";
+import { isWorkflowCallTool, workflowListFrom, workflowRefsFrom, workflowRefsFromArgs } from "./workflow";
 import { pickRenderer } from "./index";
 
 describe("isWorkflowCallTool", () => {
@@ -60,5 +60,33 @@ describe("workflowRefsFromArgs", () => {
   it("handles absent params", () => {
     expect(workflowRefsFromArgs({ tool_id: "workflows.list_workflows" })).toEqual({});
     expect(workflowRefsFromArgs(undefined)).toEqual({});
+  });
+});
+
+describe("workflowListFrom", () => {
+  it("parses a list_workflows result into rows", () => {
+    const data = {
+      workflows: [
+        { workflowId: "wf1", name: "CI Triage", updatedAt: 1700000000000 },
+        { workflowId: "wf2", name: "Probe" },
+      ],
+    };
+    expect(workflowListFrom({ text: JSON.stringify(data) })).toEqual([
+      { workflowId: "wf1", name: "CI Triage", updatedAt: 1700000000000 },
+      { workflowId: "wf2", name: "Probe" },
+    ]);
+  });
+
+  it("returns null for non-list results and failure text", () => {
+    expect(workflowListFrom({ text: JSON.stringify({ workflowId: "wf1" }) })).toBeNull();
+    expect(workflowListFrom({ text: "workflows.list_workflows failed: nope" })).toBeNull();
+    expect(workflowListFrom(undefined)).toBeNull();
+  });
+
+  it("skips malformed entries", () => {
+    const data = { workflows: [{ name: "no id" }, { workflowId: "wf3", name: "ok" }, 42] };
+    expect(workflowListFrom({ text: JSON.stringify(data) })).toEqual([
+      { workflowId: "wf3", name: "ok" },
+    ]);
   });
 });
