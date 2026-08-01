@@ -177,7 +177,7 @@ export function layoutGraph(
   inDeg?: Map<string, number>,
 ): Map<string, { x: number; y: number }> {
   const dirList = [...new Set(nodes.map((n) => n.topDir ?? "").filter((d) => d !== ""))].sort();
-  const ringRadius = Math.max(260, 40 * Math.sqrt(nodes.length));
+  const ringRadius = Math.max(220, 30 * Math.sqrt(nodes.length));
   const anchors = new Map<string, { x: number; y: number }>();
   if (dirList.length > 1) {
     dirList.forEach((dir, i) => {
@@ -189,7 +189,9 @@ export function layoutGraph(
   const simNodes: SimNode[] = nodes.map((n) => {
     const anchor = anchors.get(n.topDir ?? "") ?? { x: 0, y: 0 };
     const size = dotSize(inDeg?.get(n.id) ?? 0);
-    return { id: n.id, anchorX: anchor.x, anchorY: anchor.y, collideR: size / 2 + 26 };
+    // Tight packing on purpose: a sparse layout turns max zoom into empty
+    // paper with orphan edge lines passing through — "the graph broke".
+    return { id: n.id, anchorX: anchor.x, anchorY: anchor.y, collideR: size / 2 + 15 };
   });
   const simLinks: SimulationLinkDatum<SimNode>[] = edges.map((e) => ({ source: e.from, target: e.to }));
 
@@ -198,10 +200,10 @@ export function layoutGraph(
       "link",
       forceLink<SimNode, SimulationLinkDatum<SimNode>>(simLinks)
         .id((d) => d.id)
-        .distance(70)
+        .distance(55)
         .strength(0.2),
     )
-    .force("charge", forceManyBody().strength(-320))
+    .force("charge", forceManyBody().strength(-220))
     .force("collide", forceCollide<SimNode>((d) => d.collideR))
     .force("x", forceX<SimNode>((d) => d.anchorX).strength(0.14))
     .force("y", forceY<SimNode>((d) => d.anchorY).strength(0.14))
@@ -358,7 +360,7 @@ function MemoryHoverCard({
  */
 const SPOTLIGHT_CSS = `
 .mg-canvas .react-flow__node { transition: opacity 160ms ease; }
-.mg-spot .react-flow__node { opacity: 0.25; }
+.mg-spot .react-flow__node { opacity: 0.45; }
 .mg-spot .react-flow__node.mg-hot { opacity: 1; }
 .mg-spot .react-flow__edge { opacity: 0.06 !important; }
 .mg-spot .react-flow__edge.mg-hot { opacity: 0.9 !important; }
@@ -557,8 +559,10 @@ export function MemoryGraphCanvas() {
         edges={flowEdges}
         nodeTypes={nodeTypes}
         fitView
-        minZoom={0.1}
-        maxZoom={2}
+        minZoom={0.15}
+        // Labels are 10px and fully readable at 1.5×; anything past that
+        // zooms into empty paper between nodes and reads as broken.
+        maxZoom={1.5}
         // The game-breaker fix: without culling, zooming in keeps all
         // ~275 nodes + ~1200 edges in the DOM while nearly all of them
         // are off-viewport at a large scale — the paint cost froze the
