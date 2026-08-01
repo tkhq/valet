@@ -53,6 +53,20 @@ function rowToMemoryFile(row: typeof orchestratorMemoryFiles.$inferSelect): Memo
 
 // ─── Read Operations ────────────────────────────────────────────────────────
 
+/**
+ * Every memory file for a user, full contents — the V1→V2 migration
+ * export (`GET /api/me/memory/export`). Returns rows sorted by path so
+ * the emitted bundle is deterministic.
+ */
+export async function exportAllMemoryFiles(db: AppDb, userId: string): Promise<MemoryFile[]> {
+  const rows = await db
+    .select()
+    .from(orchestratorMemoryFiles)
+    .where(eq(orchestratorMemoryFiles.userId, userId))
+    .all();
+  return rows.map(rowToMemoryFile).sort((a, b) => a.path.localeCompare(b.path));
+}
+
 export async function readMemoryFile(db: AppDb, userId: string, path: string): Promise<MemoryFile | null> {
   const normalized = normalizePath(path);
   const row = await db

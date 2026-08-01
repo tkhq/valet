@@ -239,6 +239,36 @@ orchestratorRouter.delete('/memory', async (c) => {
 });
 
 /**
+ * GET /api/me/memory/export — the V1→V2 migration bundle. Emits the
+ * shape V2's `POST /api/memory/import` accepts directly:
+ * `{ files: { [path]: content } }`, plus format/source metadata for
+ * humans. Plain-markdown contents import fine into V2 (OKF frontmatter
+ * is optional there); files that already carry a title get a minimal
+ * frontmatter block so the title survives the crossing.
+ */
+orchestratorRouter.get('/memory/export', async (c) => {
+  const user = c.get('user');
+  const rows = await db.exportAllMemoryFiles(c.get('db'), user.id);
+
+  const files: Record<string, string> = {};
+  for (const f of rows) {
+    const hasFrontmatter = f.content.startsWith('---\n');
+    files[f.path] =
+      f.title && !hasFrontmatter
+        ? `---\ntitle: ${JSON.stringify(f.title)}\n---\n\n${f.content}`
+        : f.content;
+  }
+
+  return c.json({
+    format: 'valet-memory-bundle@1',
+    source: 'v1',
+    exportedAt: new Date().toISOString(),
+    fileCount: rows.length,
+    files,
+  });
+});
+
+/**
  * GET /api/me/memory/search?query=...&path=...
  */
 orchestratorRouter.get('/memory/search', async (c) => {
