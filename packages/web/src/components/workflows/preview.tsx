@@ -6,7 +6,7 @@
  * provides an "Open" link into the real editor for interaction.
  */
 import { useMemo } from "react";
-import { Background, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import { Background, BackgroundVariant, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { toFlow, type WorkflowDefinition } from "./editor-model";
 import { FlowNode, type NodeRunStatus } from "./editor/flow-node";
@@ -55,17 +55,25 @@ export function WorkflowPreview({
   const flow = useMemo(() => {
     if (mode !== "canvas") return null;
     const state = toFlow(definition);
-    const nodes: Node[] = state.nodes.map((n) => ({
-      ...n,
-      draggable: false,
-      connectable: false,
-      selectable: false,
-      data: {
-        ...n.data,
-        ...(statusByNodeId?.[n.id] ? { runStatus: statusByNodeId[n.id] } : {}),
-        ...(badgeByNodeId?.[n.id] ? { runBadge: badgeByNodeId[n.id] } : {}),
-      },
-    }));
+    const nodes: Node[] = state.nodes.map((n) => {
+      // Preview mode strips the labeled `true`/`false` source handles from
+      // if/approval nodes — the badge overhang looks bad at card scale and
+      // the branch structure is already visible from the edges. The full
+      // editor keeps them; open it for authoring.
+      const { sourceOutputs, ...restData } = n.data;
+      void sourceOutputs;
+      return {
+        ...n,
+        draggable: false,
+        connectable: false,
+        selectable: false,
+        data: {
+          ...restData,
+          ...(statusByNodeId?.[n.id] ? { runStatus: statusByNodeId[n.id] } : {}),
+          ...(badgeByNodeId?.[n.id] ? { runBadge: badgeByNodeId[n.id] } : {}),
+        },
+      };
+    });
     const edges: Edge[] = state.edges.map((e) => ({
       ...e,
       ...(e.data.when ? { label: e.data.when } : {}),
@@ -100,7 +108,7 @@ export function WorkflowPreview({
 
   return (
     <div
-      className="overflow-hidden rounded-md border border-line"
+      className="overflow-hidden rounded-md border border-line bg-[--bg]"
       style={{ height }}
       data-testid="workflow-preview-canvas"
     >
@@ -109,7 +117,7 @@ export function WorkflowPreview({
         edges={flow.edges}
         nodeTypes={nodeTypes}
         fitView
-        fitViewOptions={{ padding: 0.15 }}
+        fitViewOptions={{ padding: 0.08, minZoom: 0.4, maxZoom: 0.95 }}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
@@ -121,7 +129,7 @@ export function WorkflowPreview({
         edgesFocusable={false}
         proOptions={{ hideAttribution: true }}
       >
-        <Background gap={16} size={1} />
+        <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--line)" />
       </ReactFlow>
     </div>
   );
