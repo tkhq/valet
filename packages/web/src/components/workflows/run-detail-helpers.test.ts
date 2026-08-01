@@ -1,5 +1,52 @@
 import { describe, expect, it } from "vitest";
-import { findApprovalPrompt, findPendingApproval, jsonPreview } from "./run-detail-helpers";
+import {
+  findApprovalPrompt,
+  findPendingApproval,
+  jsonPreview,
+  statusByNodeId,
+} from "./run-detail-helpers";
+
+describe("statusByNodeId", () => {
+  it("maps checkpoints + waitingOn to per-node statuses", () => {
+    const { status } = statusByNodeId(
+      {
+        status: "parked",
+        waitingOn: [{ kind: "signal", nodeId: "gate1", signalType: "approval:gate1" }],
+      },
+      [
+        { nodeId: "t1", iteration: 0, status: "completed" },
+        { nodeId: "s1", iteration: 0, status: "failed" },
+        { nodeId: "w1", iteration: 0, status: "intent" },
+        { nodeId: "sk1", iteration: 0, status: "skipped" },
+      ],
+    );
+    expect(status).toEqual({
+      t1: "succeeded",
+      s1: "failed",
+      w1: "running",
+      sk1: "skipped",
+      gate1: "waiting",
+    });
+  });
+
+  it("aggregates multi-iteration nodes and emits a progress badge", () => {
+    const { status, badges } = statusByNodeId({ status: "running" }, [
+      { nodeId: "body", iteration: 0, status: "completed" },
+      { nodeId: "body", iteration: 1, status: "completed" },
+      { nodeId: "body", iteration: 2, status: "intent" },
+    ]);
+    expect(status.body).toBe("running");
+    expect(badges.body).toBe("2/3");
+  });
+
+  it("any failed iteration marks the node failed", () => {
+    const { status } = statusByNodeId({ status: "settled" }, [
+      { nodeId: "body", iteration: 0, status: "completed" },
+      { nodeId: "body", iteration: 1, status: "failed" },
+    ]);
+    expect(status.body).toBe("failed");
+  });
+});
 
 describe("findPendingApproval", () => {
   it("finds an approval signal wait condition", () => {

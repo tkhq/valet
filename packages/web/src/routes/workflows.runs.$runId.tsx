@@ -6,7 +6,10 @@ import {
   findApprovalPrompt,
   findPendingApproval,
   jsonPreview,
+  statusByNodeId,
 } from "~/components/workflows/run-detail-helpers";
+import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
+import { WorkflowPreview } from "~/components/workflows/preview";
 import { Badge, Button, Spinner } from "~/components/primitives";
 
 /**
@@ -75,6 +78,7 @@ export function RunDetailBody({ runId, data, onCancel, cancelPending }: RunDetai
   const pending = run.status === "parked" ? findPendingApproval(run.waitingOn) : undefined;
   const prompt = pending ? findApprovalPrompt(run.definition, pending.nodeId) : undefined;
   const nonTerminal = run.status !== "settled";
+  const nodeStatuses = statusByNodeId(run, checkpoints);
 
   return (
     <>
@@ -94,6 +98,15 @@ export function RunDetailBody({ runId, data, onCancel, cancelPending }: RunDetai
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {isWorkflowDefinitionShape(run.definition) && (
+          <WorkflowPreview
+            definition={run.definition}
+            statusByNodeId={nodeStatuses.status}
+            badgeByNodeId={nodeStatuses.badges}
+            height={320}
+          />
+        )}
+
         {pending && <ApprovalCard runId={runId} nodeId={pending.nodeId} prompt={prompt} />}
 
         <ul className="space-y-2">
