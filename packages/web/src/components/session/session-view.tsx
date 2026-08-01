@@ -115,25 +115,35 @@ export function SessionView({
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
 
-  // Auto-title: fire when we first see an assistant reply on an un-titled
-  // session. The server enforces idempotency (already_titled → no-op) and
-  // may also return `no_messages` if the persisted messages haven't caught
-  // up with the live stream yet — so we only "latch" (stop retrying) when
-  // the server actually wrote a title. `inFlightRef` prevents rapid
-  // re-renders from double-firing while a request is outstanding.
+  // Auto-title: fire whenever we see an assistant reply on either an
+  // un-titled session OR an un-titled active thread. The orchestrator's
+  // own session ships with a fixed "Assistant" title, so a session-only
+  // gate would never trigger there and no thread would ever get named —
+  // hence the split gate. Server is idempotent (already_titled → no-op)
+  // and may return `no_messages` if REST hasn't caught up with the live
+  // stream, so we only latch on real writes. `inFlightRef` prevents
+  // double-firing during a request; the key includes the threadId so
+  // switching threads re-runs the effect for that thread's naming pass.
   const qc = useQueryClient();
   const autoTitleInFlightRef = useRef<Set<string>>(new Set());
   const sessionTitle = session.data?.title?.trim();
   const sessionUntitled = !sessionTitle || sessionTitle === "Untitled session";
+  const activeThreadSummary = threads.data?.threads.find((t) => t.id === effectiveThreadId);
+  const activeThreadTitle = activeThreadSummary?.title?.trim();
+  const activeThreadUntitled = !activeThreadTitle;
   const assistantReplyCount = stream.messages.filter(
-    (m) => m.role === "assistant" && (m.content || m.parts.length > 0),
+    (m) =>
+      m.role === "assistant" &&
+      (m.threadId === effectiveThreadId || !effectiveThreadId) &&
+      (m.content || m.parts.length > 0),
   ).length;
   useEffect(() => {
     if (!session.data) return;
-    if (!sessionUntitled) return;
     if (assistantReplyCount === 0) return;
-    if (autoTitleInFlightRef.current.has(sessionId)) return;
-    autoTitleInFlightRef.current.add(sessionId);
+    if (!sessionUntitled && !activeThreadUntitled) return;
+    const key = `${sessionId}::${effectiveThreadId ?? ""}`;
+    if (autoTitleInFlightRef.current.has(key)) return;
+    autoTitleInFlightRef.current.add(key);
     api
       .autoTitleSession(sessionId, effectiveThreadId)
       .then((result) => {
@@ -149,14 +159,21 @@ export function SessionView({
         console.warn("auto-title failed:", err);
       })
       .finally(() => {
-        // Clear the in-flight flag either way — a later assistant reply
-        // (bumping assistantReplyCount) re-evaluates the effect. Because
-        // `sessionUntitled` also gates the effect, once the server DOES
-        // write a title the invalidation flips `sessionUntitled` to false
-        // and the effect never runs again for this session.
-        autoTitleInFlightRef.current.delete(sessionId);
+        // Clear the in-flight flag either way — once the server actually
+        // writes a title, the invalidation flips the corresponding
+        // `*Untitled` gate to false and the effect stops re-running for
+        // that (session, thread) pair.
+        autoTitleInFlightRef.current.delete(key);
       });
-  }, [session.data, sessionUntitled, assistantReplyCount, sessionId, effectiveThreadId, qc]);
+  }, [
+    session.data,
+    sessionUntitled,
+    activeThreadUntitled,
+    assistantReplyCount,
+    sessionId,
+    effectiveThreadId,
+    qc,
+  ]);
 
   if (session.isLoading) {
     return (
