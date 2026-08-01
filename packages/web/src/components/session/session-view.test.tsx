@@ -11,6 +11,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   RouterProvider,
   createMemoryHistory,
@@ -57,7 +58,14 @@ function renderInRouter(sessionId: string, variant: "full" | "panel" | "standalo
     routeTree: rootRoute.addChildren([]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
-  return render(<RouterProvider router={router} />);
+  // SessionView's auto-title effect needs a QueryClient in scope; provide
+  // a scratch one per render so the effect can call `invalidateQueries`.
+  const qc = new QueryClient();
+  return render(
+    <QueryClientProvider client={qc}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
 }
 
 describe("SessionView variants", () => {

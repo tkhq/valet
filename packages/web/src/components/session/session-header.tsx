@@ -11,6 +11,23 @@ import { ModelPicker } from "./model-picker";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
 
+/** Collapse a long workspace path down to something header-friendly: for
+ * an internal `/root/.valet/orchestrator/user-…` path show just
+ * "orchestrator"; for a real workspace path (`/tmp/valet-loadgen/ws-19`)
+ * show the trailing segment. Falls back to the raw value when it's
+ * already short. */
+function shortenWorkspace(workspace: string): string {
+  if (workspace.length <= 24) return workspace;
+  const parts = workspace.split("/").filter((p) => p.length > 0);
+  if (parts.length === 0) return workspace;
+  // Prefer the second-to-last segment for orchestrator-style paths so the
+  // long user-id tail doesn't survive; otherwise the trailing segment.
+  const lastIsUuidLike = /^(user-|orch-|wf|s_|wfrun_)/.test(parts[parts.length - 1] ?? "");
+  return lastIsUuidLike
+    ? parts[parts.length - 2] ?? parts[parts.length - 1] ?? workspace
+    : parts[parts.length - 1] ?? workspace;
+}
+
 /** Server sends `{ error: "a turn is running" }` / `{ error: "sandbox is not
  * ready to pause" }` for the documented 409s (sandbox hibernation plan, Task
  * 4); fall back to the mutation's own message for anything else (network
@@ -111,15 +128,29 @@ export function SessionHeader({
     }
   }
 
+  // Single-row masthead. The workspace path lives in a hover tooltip on
+  // the title — for orchestrator sessions it's a long internal filesystem
+  // path (`/root/.valet/orchestrator/user-…`) that shouted at users from
+  // the subtitle before. Real sessions have friendlier workspace names,
+  // but hiding both keeps the visual language consistent and lets the
+  // action cluster on the right breathe.
+  const title = session.title || "Untitled session";
+  const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
   return (
-    <header className="border-b border-line bg-paper px-4 py-3 flex items-center gap-3">
-      <div className="min-w-0">
-        <div className="text-sm font-semibold tracking-tight truncate text-ink">
-          {session.title || "Untitled session"}
+    <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
+      <Tooltip content={workspaceHint} delayDuration={400}>
+        <div className="min-w-0 flex items-baseline gap-2 cursor-default">
+          <span className="text-sm font-semibold tracking-tight truncate text-ink font-display">
+            {title}
+          </span>
+          {session.workspace && (
+            <span className="text-[10px] font-mono uppercase tracking-[0.1em] text-muted/70 truncate">
+              {shortenWorkspace(session.workspace)}
+            </span>
+          )}
         </div>
-        <div className="text-xs text-muted font-mono truncate">{session.workspace}</div>
-      </div>
-      <div className="ml-auto flex items-center gap-2">
+      </Tooltip>
+      <div className="ml-auto flex items-center gap-1.5">
         {pauseError && <span className="text-xs text-danger-500">{pauseError}</span>}
         <Tooltip content="Session-default model. Threads inherit unless overridden.">
           <span>

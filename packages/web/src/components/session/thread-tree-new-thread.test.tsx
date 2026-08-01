@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
+import { TooltipProvider } from "~/components/primitives";
 
 const navigate = vi.fn();
 const createThreadMutateAsync = vi.fn().mockResolvedValue({
@@ -51,7 +52,11 @@ import { ThreadTree } from "./thread-tree";
 
 describe("ThreadTree — new thread affordance", () => {
   it("creates a thread and navigates to it", async () => {
-    render(<ThreadTree />);
+    render(
+      <TooltipProvider>
+        <ThreadTree />
+      </TooltipProvider>,
+    );
 
     const button = screen.getByRole("button", { name: /new thread/i });
     await userEvent.click(button);
