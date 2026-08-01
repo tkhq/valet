@@ -23,7 +23,7 @@
         secrets-set secrets-list \
         image-build image-push \
         destroy destroy-worker destroy-d1 destroy-r2 destroy-pages destroy-modal \
-        k8s-sandbox-install k8s-sandbox-uninstall k8s-build k8s-up k8s-down k8s-logs
+        k8s-sandbox-install k8s-sandbox-uninstall k8s-build k8s-build-api k8s-build-fast k8s-up k8s-down k8s-logs
 
 # Configuration
 # =============
@@ -193,7 +193,12 @@ KUBECTL_RANCHER = kubectl --context rancher-desktop
 K8S_API_IMAGE ?= valet-api:dev
 K8S_SANDBOX_IMAGE ?= valet-sandbox:dev
 
-k8s-build: ## Build the api (+ bundled web) and sandbox images for the local k3s reference env
+# BuildKit is what enables the pnpm-store cache mount in Dockerfile.api;
+# every k8s-build* target enables it explicitly so behavior is stable
+# regardless of the developer's DOCKER_BUILDKIT env setting.
+K8S_BUILD_ENV = DOCKER_BUILDKIT=1
+
+k8s-build: ## Build BOTH the api and sandbox images (full rebuild). Slower — prefer k8s-build-api when only the api/web changed.
 	@docker info >/dev/null 2>&1 || { \
 	  echo "$(YELLOW)docker daemon not reachable.$(NC) This target uses plain 'docker build'"; \
 	  echo "  because our reference env runs Rancher Desktop in MOBY mode (decision 2)."; \
@@ -202,10 +207,20 @@ k8s-build: ## Build the api (+ bundled web) and sandbox images for the local k3s
 	  echo "  (and likewise for docker/Dockerfile.sandbox-k8s) so the images reach k3s pods."; \
 	  exit 1; }
 	@echo "$(GREEN)Building $(K8S_API_IMAGE) from docker/Dockerfile.api$(NC)"
-	docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
+	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
 	@echo "$(GREEN)Building $(K8S_SANDBOX_IMAGE) from docker/Dockerfile.sandbox-k8s$(NC)"
-	docker build -f docker/Dockerfile.sandbox-k8s -t $(K8S_SANDBOX_IMAGE) .
+	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.sandbox-k8s -t $(K8S_SANDBOX_IMAGE) .
 	@echo "$(GREEN)Built $(K8S_API_IMAGE) and $(K8S_SANDBOX_IMAGE)$(NC)"
+
+k8s-build-api: ## Build ONLY the api image (skip sandbox). Use for iteration when sandbox contents haven't changed.
+	@docker info >/dev/null 2>&1 || { echo "$(RED)docker daemon not reachable$(NC)"; exit 1; }
+	@echo "$(GREEN)Building $(K8S_API_IMAGE) from docker/Dockerfile.api$(NC)"
+	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
+
+k8s-build-fast: ## Build ONLY the api image WITHOUT the workspace typecheck. Fastest inner loop; run `pnpm typecheck` yourself first.
+	@docker info >/dev/null 2>&1 || { echo "$(RED)docker daemon not reachable$(NC)"; exit 1; }
+	@echo "$(GREEN)Building $(K8S_API_IMAGE) (SKIP_TYPECHECK=1)$(NC)"
+	$(K8S_BUILD_ENV) docker build --build-arg SKIP_TYPECHECK=1 -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
 	@echo "$(YELLOW)Containerd-mode note:$(NC) this target uses plain 'docker build' (Rancher"
 	@echo "  Desktop in moby mode, our default — see decision 2 in the k8s design doc)."
 	@echo "  If you've switched Rancher Desktop to containerd mode instead, these images"
