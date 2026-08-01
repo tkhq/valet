@@ -467,6 +467,49 @@ function findExpressionEnd(source: string, start: number): number {
   return -1;
 }
 
+// ─── Static path collection (validator support) ─────────────────────────────
+
+function collectAstPaths(node: ExprNode, out: string[][]): void {
+  switch (node.kind) {
+    case 'path':
+    case 'exists':
+      out.push(node.segments);
+      return;
+    case 'unary':
+      collectAstPaths(node.operand, out);
+      return;
+    case 'binary':
+      collectAstPaths(node.left, out);
+      collectAstPaths(node.right, out);
+      return;
+    case 'literal':
+      return;
+  }
+}
+
+/**
+ * Parse `source` as a bare expression and return every data path it
+ * dereferences (each as its segment array, e.g. `nodes.gate.result` →
+ * `["nodes","gate","result"]`). Throws `TemplateParseError` on syntax
+ * errors — callers that lint should try/catch and report. Used by the
+ * definition validator to check node references statically.
+ */
+export function collectExpressionPaths(source: string): string[][] {
+  const out: string[][] = [];
+  collectAstPaths(parseExpression(source), out);
+  return out;
+}
+
+/** Template counterpart of {@link collectExpressionPaths} — paths from
+ * every `{{ ... }}` segment in the template. */
+export function collectTemplatePaths(source: string): string[][] {
+  const out: string[][] = [];
+  for (const seg of parseTemplate(source).segments) {
+    if (seg.kind === 'expr' && seg.ast) collectAstPaths(seg.ast, out);
+  }
+  return out;
+}
+
 /**
  * Render a template against a context.
  *

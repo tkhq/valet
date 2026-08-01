@@ -9,6 +9,7 @@
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
+import type { ValidateEnvironment } from "@valet/workflow";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
@@ -21,6 +22,7 @@ import {
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
+import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
@@ -40,18 +42,19 @@ export const workflowsRouter = new Hono<AppEnv>();
 
 function serviceCtx(c: {
   var: { providers: WorkflowServiceDeps; user: { id: string; orgId: string } };
-}): { deps: WorkflowServiceDeps; owner: WorkflowOwner } {
-  const { db, workflowStore, workflowRunHost } = c.var.providers;
+}): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
+  const { db, workflowStore, workflowRunHost, actionPluginByService } = c.var.providers;
   return {
-    deps: { db, workflowStore, workflowRunHost },
+    deps: { db, workflowStore, workflowRunHost, actionPluginByService },
     owner: { userId: c.var.user.id, orgId: c.var.user.orgId },
+    env: buildValidateEnvironment(actionPluginByService),
   };
 }
 
 // ── Definitions ───────────────────────────────────────────────────────────
 
 workflowsRouter.post("/", async (c) => {
-  const { deps, owner } = serviceCtx(c);
+  const { deps, owner, env } = serviceCtx(c);
 
   let body: CreateWorkflowRequest;
   try {
@@ -66,7 +69,7 @@ workflowsRouter.post("/", async (c) => {
     return c.json({ error: "definition is required" }, 400);
   }
 
-  const validation = validateDefinitionInput(body.definition);
+  const validation = validateDefinitionInput(body.definition, env);
   if (!validation.ok) {
     return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
   }
@@ -94,7 +97,7 @@ workflowsRouter.get("/:id", async (c) => {
 });
 
 workflowsRouter.put("/:id", async (c) => {
-  const { deps, owner } = serviceCtx(c);
+  const { deps, owner, env } = serviceCtx(c);
   const id = c.req.param("id");
 
   let body: UpdateWorkflowRequest;
@@ -105,7 +108,7 @@ workflowsRouter.put("/:id", async (c) => {
   }
 
   if (body.definition !== undefined) {
-    const validation = validateDefinitionInput(body.definition);
+    const validation = validateDefinitionInput(body.definition, env);
     if (!validation.ok) {
       return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
     }

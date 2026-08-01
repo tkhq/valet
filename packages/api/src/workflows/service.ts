@@ -8,11 +8,13 @@ import { and, desc, eq } from "drizzle-orm";
 import {
   validateWorkflowDefinition,
   type RunParams,
+  type ValidateEnvironment,
   type WorkflowDefinition,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
+import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
@@ -26,6 +28,10 @@ export interface WorkflowServiceDeps {
   db: AppDb;
   workflowStore: WorkflowStore;
   workflowRunHost: RunHost;
+  /** Plugin catalog index — enables save-time validation of tool nodes'
+   * service/action pairs (validator env hook). Optional so tests that
+   * exercise definition CRUD without a plugin catalog stay lightweight. */
+  actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
 }
 
 export interface WorkflowOwner {
@@ -49,6 +55,7 @@ export function newWorkflowId(prefix: string): string {
  */
 export function validateDefinitionInput(
   value: unknown,
+  env?: ValidateEnvironment,
 ): { ok: true; definition: WorkflowDefinition } | { ok: false; errors: string[] } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { ok: false, errors: ["definition must be an object"] };
@@ -61,7 +68,7 @@ export function validateDefinitionInput(
     return { ok: false, errors: ["definition.edges must be an array"] };
   }
   const definition = value as WorkflowDefinition;
-  const result = validateWorkflowDefinition(definition);
+  const result = validateWorkflowDefinition(definition, env);
   if (!result.ok) return { ok: false, errors: result.errors };
   return { ok: true, definition };
 }

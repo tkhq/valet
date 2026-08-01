@@ -370,7 +370,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     onApprovalPending,
     crashAt: opts.workflowCrashAt,
   });
-  workflowsDepsRef.current = { db, workflowStore, workflowRunHost };
+  workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService };
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called

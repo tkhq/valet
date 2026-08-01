@@ -24,6 +24,16 @@ import {
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "./service.js";
+import { buildValidateEnvironment } from "./validation-env.js";
+
+/** Cap + bullet the validator's lint output for the LLM. The validator can
+ * emit dozens of errors on a badly-shaped definition; the first ~20 are
+ * plenty to act on and keep the tool result readable. */
+export function formatLintErrors(errors: string[], cap = 20): string {
+  const shown = errors.slice(0, cap).map((e) => `- ${e}`);
+  const more = errors.length > cap ? `\n… and ${errors.length - cap} more` : "";
+  return `workflow definition failed validation (fix these and retry):\n${shown.join("\n")}${more}`;
+}
 
 export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null {
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
@@ -124,11 +134,20 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
 
-      const validation = validateDefinitionInput(definition);
+      // The validate env is best-effort: if deps aren't wired (early boot,
+      // or a test that only exercises validation), lint without the
+      // catalog hooks rather than failing the whole call.
+      let catalog: WorkflowServiceDeps["actionPluginByService"];
+      try {
+        catalog = getDeps().actionPluginByService;
+      } catch {
+        catalog = undefined;
+      }
+      const validation = validateDefinitionInput(definition, buildValidateEnvironment(catalog));
       if (!validation.ok) {
         return {
           success: false,
-          error: `invalid workflow definition: ${validation.errors.join("; ")}`,
+          error: formatLintErrors(validation.errors),
         };
       }
 

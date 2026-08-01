@@ -114,7 +114,11 @@ describe('validateWorkflowDefinition', () => {
       definition({
         nodes: [
           { id: 'trigger', type: 'trigger' },
-          { id: 'check', type: 'if', conditions: [] },
+          {
+            id: 'check',
+            type: 'if',
+            conditions: [{ left: 'trigger.data.count', dataType: 'number', operation: 'greaterThan', right: 0 }],
+          },
           { id: 'stop', type: 'stop' },
         ],
         edges: [
@@ -443,7 +447,7 @@ describe('validateWorkflowDefinition', () => {
       const result = validateWorkflowDefinition(foreachDefinition({ items: '' }));
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.errors.some((e) => e.includes('foreach.items must be a non-empty string'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('foreach.items must be a non-empty template string'))).toBe(true);
       }
     });
 
@@ -532,5 +536,293 @@ describe('validateWorkflowDefinition', () => {
     it('accepts concurrency of exactly 10', () => {
       expect(validateWorkflowDefinition(foreachDefinition({ concurrency: 10 }))).toEqual({ ok: true });
     });
+  });
+});
+
+// ─── Linter-grade checks (V1-validator port) ────────────────────────────────
+
+describe('validateWorkflowDefinition — linter checks', () => {
+  function linear(nodes: WorkflowDefinition['nodes'], edges?: WorkflowDefinition['edges']): WorkflowDefinition {
+    return {
+      version: 'dag/v1',
+      nodes,
+      edges:
+        edges ??
+        nodes.slice(0, -1).map((n, i) => ({ from: n.id, to: nodes[i + 1]!.id })),
+    };
+  }
+
+  it('flags fields nested under "config" with a move-them-up hint', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        {
+          id: 'gen',
+          type: 'llm',
+          model: 'claude-haiku-4-5',
+          prompt: 'x',
+          config: { model: 'claude-haiku-4-5', prompt: 'write a haiku' },
+        } as unknown as WorkflowDefinition['nodes'][number],
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('not under "config"') && e.includes('move { model, prompt } up'))).toBe(true);
+    }
+  });
+
+  it('suggests near-miss field names (condition → conditions)', () => {
+    const result = validateWorkflowDefinition(
+      linear(
+        [
+          { id: 'trigger', type: 'trigger' },
+          {
+            id: 'branch',
+            type: 'if',
+            condition: 'x > 1',
+          } as unknown as WorkflowDefinition['nodes'][number],
+          { id: 'stop', type: 'stop' },
+        ],
+        [
+          { from: 'trigger', to: 'branch' },
+          { from: 'branch', to: 'stop', fromOutput: 'true' },
+        ],
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('unknown field "condition"') && e.includes('did you mean "conditions"'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('you wrote "condition"; the field is "conditions"'))).toBe(true);
+    }
+  });
+
+  it('rejects unparseable templates with the parse error', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'gen', type: 'llm', model: 'm', prompt: 'hello {{trigger.data.name' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('prompt template does not parse'))).toBe(true);
+    }
+  });
+
+  it('rejects references to unknown nodes with a did-you-mean', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'classify', type: 'llm', model: 'm', prompt: 'p' },
+        { id: 'gen', type: 'llm', model: 'm', prompt: 'severity: {{nodes.clasify.result}}' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => e.includes('references unknown node "clasify"') && e.includes('did you mean "classify"')),
+      ).toBe(true);
+    }
+  });
+
+  it('hints nodes.<id> when a bare node id is used as a template root', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'classify', type: 'llm', model: 'm', prompt: 'p' },
+        { id: 'gen', type: 'llm', model: 'm', prompt: '{{classify.result}}' },
+        { id: 'stop', type: 'stop' },
+      ]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('unknown root "classify"') && e.includes('nodes.classify'))).toBe(true);
+    }
+  });
+
+  it('requires fromOutput on edges leaving an if node', () => {
+    const result = validateWorkflowDefinition(
+      linear(
+        [
+          { id: 'trigger', type: 'trigger' },
+          {
+            id: 'branch',
+            type: 'if',
+            conditions: [{ left: 'trigger.data.x', dataType: 'number', operation: 'greaterThan', right: 1 }],
+          },
+          { id: 'stop', type: 'stop' },
+        ],
+        [
+          { from: 'trigger', to: 'branch' },
+          { from: 'branch', to: 'stop' },
+        ],
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('must declare fromOutput'))).toBe(true);
+    }
+  });
+
+  it('rejects unsupported if operations with the allowed list', () => {
+    const result = validateWorkflowDefinition(
+      linear(
+        [
+          { id: 'trigger', type: 'trigger' },
+          {
+            id: 'branch',
+            type: 'if',
+            conditions: [{ left: 'trigger.data.x', dataType: 'number', operation: 'contains', right: 1 }],
+          },
+          { id: 'stop', type: 'stop' },
+        ],
+        [
+          { from: 'trigger', to: 'branch' },
+          { from: 'branch', to: 'stop', fromOutput: 'true' },
+        ],
+      ),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('unsupported number operation "contains"') && e.includes('allowed:'))).toBe(true);
+    }
+  });
+
+  it('rejects unreachable nodes', () => {
+    const result = validateWorkflowDefinition({
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+        { id: 'orphan', type: 'set', values: {} },
+        { id: 'stop', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'a' },
+        { from: 'a', to: 'stop' },
+        { from: 'orphan', to: 'stop' },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('"orphan" is unreachable'))).toBe(true);
+    }
+  });
+
+  it('rejects edges out of a stop node and duplicate edges', () => {
+    const result = validateWorkflowDefinition({
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+        { id: 'stop', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'a' },
+        { from: 'a', to: 'stop' },
+        { from: 'a', to: 'stop' },
+        { from: 'stop', to: 'a' },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('duplicate edge'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('stop node "stop" cannot have outgoing edges'))).toBe(true);
+    }
+  });
+
+  it('checks edge.when expressions parse and reference known nodes', () => {
+    const result = validateWorkflowDefinition({
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'a', type: 'set', values: {} },
+        { id: 'stop', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'a' },
+        { from: 'a', to: 'stop', when: 'nodes.missing.result == true' },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('when references unknown node "missing"'))).toBe(true);
+    }
+  });
+
+  it('applies the environment model hook', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'gen', type: 'llm', model: 'claude-42-mega', prompt: 'p' },
+        { id: 'stop', type: 'stop' },
+      ]),
+      { isKnownModel: (spec) => spec === 'claude-haiku-4-5' },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('unknown llm.model "claude-42-mega"'))).toBe(true);
+    }
+  });
+
+  it('applies the environment action hook', () => {
+    const result = validateWorkflowDefinition(
+      linear([
+        { id: 'trigger', type: 'trigger' },
+        { id: 'call', type: 'tool', service: 'githib', action: 'create_issue', params: {} },
+        { id: 'stop', type: 'stop' },
+      ]),
+      { isKnownAction: (service) => (service === 'github' ? 'ok' : 'unknown-service') },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('unknown tool.service "githib"'))).toBe(true);
+    }
+  });
+
+  it('accepts a fully-featured valid workflow (kitchen sink)', () => {
+    const result = validateWorkflowDefinition({
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'seed', type: 'set', values: { threshold: 3, repo: '{{trigger.data.repo}}' } },
+        {
+          id: 'classify',
+          type: 'llm',
+          model: 'claude-haiku-4-5',
+          prompt: 'Classify {{nodes.seed.result.repo}}',
+          maxOutputTokens: 500,
+        },
+        {
+          id: 'branch',
+          type: 'if',
+          conditions: [{ left: 'nodes.classify.result.severity', dataType: 'string', operation: 'equals', right: 'high' }],
+        },
+        { id: 'pause', type: 'wait', mode: 'duration', duration: '30s' },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{nodes.classify.result.failures}}',
+          body: { id: 'loop-body', type: 'set', values: { current: '{{item}}' } },
+          maxItems: 10,
+        },
+        { id: 'gate', type: 'approval', prompt: 'Proceed with {{nodes.classify.result.count}} fixes?' },
+        { id: 'done', type: 'stop', outcome: 'success', message: 'Handled {{nodes.classify.result.count}}' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'seed' },
+        { from: 'seed', to: 'classify' },
+        { from: 'classify', to: 'branch' },
+        { from: 'branch', to: 'pause', fromOutput: 'true' },
+        { from: 'branch', to: 'gate', fromOutput: 'false' },
+        { from: 'pause', to: 'loop' },
+        { from: 'loop', to: 'gate' },
+        { from: 'gate', to: 'done' },
+      ],
+    });
+    expect(result).toEqual({ ok: true });
   });
 });
