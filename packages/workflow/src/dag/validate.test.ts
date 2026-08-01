@@ -250,6 +250,31 @@ describe('validateWorkflowDefinition', () => {
         expect(result.errors.some((e) => e.includes('llm.prompt must be a non-empty string'))).toBe(true);
       }
     });
+
+    it('reports missing model/prompt as errors instead of throwing', () => {
+      // Regression: `.trim()` used to be called unconditionally, so an LLM
+      // node without `model`/`prompt` threw a TypeError before any error
+      // could accumulate. Callers now see a validation error instead.
+      const result = validateWorkflowDefinition(
+        llmDefinition({}) && {
+          version: 'dag/v1',
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            { id: 'ask', type: 'llm' } as unknown as WorkflowDefinition['nodes'][number],
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'ask' },
+            { from: 'ask', to: 'stop' },
+          ],
+        },
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('llm.model must be a non-empty string'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('llm.prompt must be a non-empty string'))).toBe(true);
+      }
+    });
   });
 
   describe('orchestrator node', () => {

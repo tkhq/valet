@@ -157,33 +157,40 @@ function validateStepNodeFields(node: WorkflowNode, errors: string[], label: str
     errors.push(`node ${JSON.stringify(label)}: session wait.timeout is not implemented — omit it`);
   }
   if (node.type === 'llm') {
-    if (node.model.trim() === '') {
+    if (!isNonEmptyString(node.model)) {
       errors.push(`node ${JSON.stringify(label)}: llm.model must be a non-empty string`);
     }
-    if (node.prompt.trim() === '') {
+    if (!isNonEmptyString(node.prompt)) {
       errors.push(`node ${JSON.stringify(label)}: llm.prompt must be a non-empty string`);
     }
   }
   if (node.type === 'orchestrator') {
-    if (node.prompt.trim() === '') {
+    if (!isNonEmptyString(node.prompt)) {
       errors.push(`node ${JSON.stringify(label)}: orchestrator.prompt must be a non-empty string`);
     }
   }
   if (node.type === 'tool') {
-    if (node.service.trim() === '') {
+    if (!isNonEmptyString(node.service)) {
       errors.push(`node ${JSON.stringify(label)}: tool.service must be a non-empty string`);
     }
-    if (node.action.trim() === '') {
+    if (!isNonEmptyString(node.action)) {
       errors.push(`node ${JSON.stringify(label)}: tool.action must be a non-empty string`);
     }
   }
+}
+
+/** True iff `value` is a string with at least one non-whitespace character.
+ * Used so the required-field checks below produce a validation error when
+ * the caller omits a required string, instead of throwing on `.trim()`. */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
 }
 
 /** Reserved template-context keys `itemAlias`/`indexAlias` must not shadow (they're spread last in `resolveTemplateContext`). */
 const RESERVED_ALIAS_NAMES: ReadonlySet<string> = new Set(['trigger', 'nodes']);
 
 function validateForeachNode(node: ForeachNode, nodesById: Map<string, WorkflowNode>, errors: string[]): void {
-  if (node.items.trim() === '') {
+  if (!isNonEmptyString(node.items)) {
     errors.push(`node ${JSON.stringify(node.id)}: foreach.items must be a non-empty string`);
   }
 
