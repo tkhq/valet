@@ -334,14 +334,46 @@ sessionsRouter.patch("/:id", async (c) => {
  * null title fields as "leave the row alone".
  */
 sessionsRouter.post("/:id/auto-title", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
 
   const url = new URL(c.req.url);
   const threadId = url.searchParams.get("threadId") ?? undefined;
 
-  const result = await autoTitle({ db }, { sessionId: id, threadId, userId });
+  // The persistent `messages` table isn't the source of truth today — the
+  // engine owns entries. Route the loader through the same engine session
+  // the messages GET endpoint uses so we see what the UI sees.
+  const rows = await db
+    .select()
+    .from(agentSessions)
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
+    .limit(1);
+  const sessionRow = rows[0];
+  // Session-not-found is handled inside `autoTitle` too, but bail early
+  // here so we don't pay the cost of a sessionFor call on a bad id.
+  if (!sessionRow) return c.json({ error: "session not found" }, 404);
+
+  const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, sessionRow));
+  const defaultThread = await engineSession.ensureDefaultThread();
+
+  const result = await autoTitle(
+    {
+      db,
+      loadMessages: async (_sid, tid) => {
+        const thread = tid ? engineSession.threadById(tid) ?? defaultThread : defaultThread;
+        const entries = await thread.readEntries({ limit: 4 });
+        const out: { role: string; content: string }[] = [];
+        for (const e of entries) {
+          if (e.type !== "message") continue;
+          if (e.role !== "user" && e.role !== "assistant") continue;
+          out.push({ role: e.role, content: e.content ?? "" });
+        }
+        return out;
+      },
+    },
+    { sessionId: id, threadId, userId },
+  );
   if (!result.ok) {
     if (result.reason === "session_not_found") return c.json({ error: "session not found" }, 404);
     // already_titled / no_messages → 200 with nulls; client no-ops.

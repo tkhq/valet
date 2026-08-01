@@ -12,10 +12,10 @@
  * Kept in a dedicated module so the route handler stays HTTP-only and the
  * naming logic is unit-testable without spinning up Hono.
  */
-import { and, asc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, messages as messagesTable, sessionThreads } from "../schema/index.js";
+import { agentSessions, sessionThreads } from "../schema/index.js";
 
 /** Cheap fast model — auto-titling has no reasoning value, and this call
  * is fired once per session lifetime, so use the cheapest option. */
@@ -62,27 +62,17 @@ export function sanitizeTitle(raw: string): string | null {
   return text;
 }
 
-/** Fetch the first N messages for a session (optionally scoped to a thread). */
-async function fetchOpeningMessages(
-  db: AppDb,
-  sessionId: string,
-  threadId: string | undefined,
-): Promise<{ role: string; content: string }[]> {
-  const where = threadId
-    ? and(eq(messagesTable.sessionId, sessionId), eq(messagesTable.threadId, threadId))
-    : eq(messagesTable.sessionId, sessionId);
-  const rows = await db
-    .select({
-      role: messagesTable.role,
-      content: messagesTable.content,
-    })
-    .from(messagesTable)
-    .where(where)
-    .orderBy(asc(messagesTable.createdAt))
-    .limit(MAX_MESSAGES_FOR_TITLE);
-  return rows
-    .filter((r) => r.content && r.content.trim().length > 0)
-    .map((r) => ({ role: r.role, content: r.content.slice(0, MAX_CHARS_PER_MESSAGE) }));
+/** Cap opening-message content to keep the naming prompt bounded. */
+function trimContent(content: string): string {
+  return content.slice(0, MAX_CHARS_PER_MESSAGE);
+}
+
+/** Reader contract — the route injects one that reads from engine entries
+ * (the authoritative message store). The tests inject a fixed array. */
+export interface MessagesLoader {
+  (sessionId: string, threadId: string | undefined): Promise<
+    { role: string; content: string }[]
+  >;
 }
 
 function buildNamingPrompt(msgs: { role: string; content: string }[]): string {
@@ -128,6 +118,7 @@ export const defaultNamer: Namer = async (prompt) => {
 
 export interface AutoTitleDeps {
   db: AppDb;
+  loadMessages: MessagesLoader;
   namer?: Namer;
   /** Clock injected for tests so `updatedAt` is deterministic. */
   now?: () => number;
@@ -161,11 +152,15 @@ export async function autoTitle(
     return { ok: false, reason: "already_titled" };
   }
 
-  const msgs = await fetchOpeningMessages(deps.db, input.sessionId, input.threadId);
+  const loaded = await deps.loadMessages(input.sessionId, input.threadId);
+  const msgs = loaded
+    .filter((m) => m.content && m.content.trim().length > 0)
+    .slice(0, MAX_MESSAGES_FOR_TITLE)
+    .map((m) => ({ role: m.role, content: trimContent(m.content) }));
   if (msgs.length === 0) return { ok: false, reason: "no_messages" };
 
-  const raw = await namer(buildNamingPrompt(msgs));
-  const title = sanitizeTitle(raw);
+  const namerReply = await namer(buildNamingPrompt(msgs));
+  const title = sanitizeTitle(namerReply);
   if (!title) return { ok: true, sessionTitle: null, threadTitle: null };
 
   const ts = now();

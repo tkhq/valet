@@ -31,7 +31,6 @@ describe("sanitizeTitle", () => {
  * the call so the test can assert on writes. */
 function makeStubDb(rows: {
   session?: { id: string; userId: string; title: string | null };
-  messages?: { role: string; content: string }[];
   thread?: { id: string; title: string | null };
 }): { db: AppDb; sessionUpdates: unknown[]; threadUpdates: unknown[] } {
   const sessionUpdates: unknown[] = [];
@@ -48,10 +47,6 @@ function makeStubDb(rows: {
           }
           return [];
         },
-        orderBy: () => ({
-          limit: async () =>
-            table._label === "messages" ? (rows.messages ?? []) : [],
-        }),
       }),
     }),
     _fields: fields,
@@ -75,16 +70,15 @@ function makeStubDb(rows: {
 }
 
 // Match table identity by monkey-labelling the imported symbols.
-import { agentSessions, messages, sessionThreads } from "../schema/index.js";
+import { agentSessions, sessionThreads } from "../schema/index.js";
 (agentSessions as unknown as { _label: string })._label = "session";
-(messages as unknown as { _label: string })._label = "messages";
 (sessionThreads as unknown as { _label: string })._label = "thread";
 
 describe("autoTitle", () => {
   it("404s when the session isn't owned", async () => {
     const { db } = makeStubDb({});
     const result = await autoTitle(
-      { db, namer: async () => "Unused" },
+      { db, loadMessages: async () => [], namer: async () => "Unused" },
       { sessionId: "s1", userId: "u1" },
     );
     expect(result).toEqual({ ok: false, reason: "session_not_found" });
@@ -95,7 +89,7 @@ describe("autoTitle", () => {
       session: { id: "s1", userId: "u1", title: "Deploy the k8s chart" },
     });
     const result = await autoTitle(
-      { db, namer: vi.fn() },
+      { db, loadMessages: async () => [], namer: vi.fn() },
       { sessionId: "s1", userId: "u1" },
     );
     expect(result).toEqual({ ok: false, reason: "already_titled" });
@@ -105,13 +99,17 @@ describe("autoTitle", () => {
     for (const title of [null, "", "Untitled session"]) {
       const { db, sessionUpdates } = makeStubDb({
         session: { id: "s1", userId: "u1", title },
-        messages: [
-          { role: "user", content: "help me fix the CI" },
-          { role: "assistant", content: "looking at the failures now" },
-        ],
       });
       const result = await autoTitle(
-        { db, namer: async () => "Fix the CI", now: () => 42 },
+        {
+          db,
+          loadMessages: async () => [
+            { role: "user", content: "help me fix the CI" },
+            { role: "assistant", content: "looking at the failures now" },
+          ],
+          namer: async () => "Fix the CI",
+          now: () => 42,
+        },
         { sessionId: "s1", userId: "u1" },
       );
       expect(result).toEqual({ ok: true, sessionTitle: "Fix the CI", threadTitle: null });
@@ -122,10 +120,9 @@ describe("autoTitle", () => {
   it("returns no_messages when the session is empty", async () => {
     const { db } = makeStubDb({
       session: { id: "s1", userId: "u1", title: null },
-      messages: [],
     });
     const result = await autoTitle(
-      { db, namer: vi.fn() },
+      { db, loadMessages: async () => [], namer: vi.fn() },
       { sessionId: "s1", userId: "u1" },
     );
     expect(result).toEqual({ ok: false, reason: "no_messages" });
@@ -135,10 +132,14 @@ describe("autoTitle", () => {
     const { db, threadUpdates } = makeStubDb({
       session: { id: "s1", userId: "u1", title: null },
       thread: { id: "th1", title: null },
-      messages: [{ role: "user", content: "hi" }],
     });
     await autoTitle(
-      { db, namer: async () => "Greeting demo", now: () => 1 },
+      {
+        db,
+        loadMessages: async () => [{ role: "user", content: "hi" }],
+        namer: async () => "Greeting demo",
+        now: () => 1,
+      },
       { sessionId: "s1", userId: "u1", threadId: "th1" },
     );
     expect(threadUpdates).toEqual([{ title: "Greeting demo" }]);
@@ -148,10 +149,14 @@ describe("autoTitle", () => {
     const { db, threadUpdates } = makeStubDb({
       session: { id: "s1", userId: "u1", title: null },
       thread: { id: "th1", title: "User-picked name" },
-      messages: [{ role: "user", content: "hi" }],
     });
     await autoTitle(
-      { db, namer: async () => "Something else", now: () => 1 },
+      {
+        db,
+        loadMessages: async () => [{ role: "user", content: "hi" }],
+        namer: async () => "Something else",
+        now: () => 1,
+      },
       { sessionId: "s1", userId: "u1", threadId: "th1" },
     );
     expect(threadUpdates).toEqual([]);
