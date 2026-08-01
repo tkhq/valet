@@ -36,7 +36,9 @@ function baseDefinition(): WorkflowDefinition {
       {
         id: 'branch',
         type: 'if',
-        conditions: [{ left: '{{nodes.start.data.ok}}', dataType: 'boolean', operation: 'equals', right: true }],
+        // `left` is a bare expression, not a `{{…}}` template — the
+        // runtime if-executor calls parseExpression on it directly.
+        conditions: [{ left: 'nodes.start.data.ok', dataType: 'boolean', operation: 'equals', right: true }],
       },
       { id: 'done', type: 'stop', outcome: 'success', message: 'Finished' },
     ],
@@ -73,8 +75,8 @@ describe('NODE_META default nodes', () => {
     );
   });
 
-  it('trigger, set, if, wait, approval, session, stop default nodes validate with zero errors', () => {
-    const noErrorTypes = ['trigger', 'set', 'if', 'wait', 'approval', 'session', 'stop'] as const;
+  it('trigger, set, wait, stop default nodes validate with zero errors', () => {
+    const noErrorTypes = ['trigger', 'set', 'wait', 'stop'] as const;
     for (const type of noErrorTypes) {
       const node = type === 'trigger' ? NODE_META.trigger.defaultNode('trigger') : NODE_META[type].defaultNode('x');
       const definition: WorkflowDefinition = {
@@ -84,6 +86,22 @@ describe('NODE_META default nodes', () => {
       };
       const result = validateWorkflowDefinition(definition);
       expect(result, `${type} should validate cleanly`).toEqual({ ok: true });
+    }
+  });
+
+  it('if, approval, session default nodes each fail on exactly their one empty required field', () => {
+    const cases = [
+      { type: 'if', error: 'node "x": if.conditions must contain at least one condition' },
+      { type: 'approval', error: 'node "x": approval.prompt must be a non-empty string (shown to the approver)' },
+      { type: 'session', error: 'node "x": session.prompt must be a non-empty string' },
+    ] as const;
+    for (const { type, error } of cases) {
+      const definition: WorkflowDefinition = {
+        version: 'dag/v1',
+        nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META[type].defaultNode('x')],
+        edges: [{ from: 'trigger', to: 'x' }],
+      };
+      expect(validateWorkflowDefinition(definition), type).toEqual({ ok: false, errors: [error] });
     }
   });
 
@@ -97,7 +115,7 @@ describe('NODE_META default nodes', () => {
     expect(result).toEqual({
       ok: false,
       errors: [
-        'node "x": llm.model must be a non-empty string',
+        'node "x": llm.model must be a non-empty string (e.g. "claude-haiku-4-5" or "anthropic/claude-haiku-4-5")',
         'node "x": llm.prompt must be a non-empty string',
       ],
     });
@@ -124,8 +142,8 @@ describe('NODE_META default nodes', () => {
     expect(validateWorkflowDefinition(definition)).toEqual({
       ok: false,
       errors: [
-        'node "x": tool.service must be a non-empty string',
-        'node "x": tool.action must be a non-empty string',
+        'node "x": tool.service must be a non-empty string (the plugin service, e.g. "github")',
+        'node "x": tool.action must be a non-empty string (the action name, e.g. "create_issue")',
       ],
     });
   });
@@ -138,7 +156,9 @@ describe('NODE_META default nodes', () => {
     };
     expect(validateWorkflowDefinition(definition)).toEqual({
       ok: false,
-      errors: ['node "loop": foreach.items must be a non-empty string'],
+      errors: [
+        'node "loop": foreach.items must be a non-empty template string resolving to an array (e.g. "{{nodes.fetch.result.runs}}")',
+      ],
     });
   });
 });
@@ -330,12 +350,18 @@ describe('addNode / removeNode / duplicateNode / updateNode', () => {
     expect(dup?.type).toBe('foreach');
     if (dup?.type !== 'foreach') return;
     expect(dup.body.id).toBe(`${result.nodeId}-body`);
-    // The whole point: no cross-foreach body-id collision. The default
-    // factory's empty `items` is the ONLY acceptable complaint.
+    // The whole point: no cross-foreach body-id collision. Acceptable
+    // complaints are the default factory's empty `items` (both copies) and
+    // the duplicate being unreachable (duplicateNode copies no edges).
     const validation = validateWorkflowDefinition(result.definition);
     expect(validation.ok).toBe(false);
     if (validation.ok) return;
-    expect(validation.errors.every((e) => e.includes('foreach.items must be a non-empty string'))).toBe(true);
+    expect(validation.errors.some((e) => e.includes('body id'))).toBe(false);
+    expect(
+      validation.errors.every(
+        (e) => e.includes('foreach.items must be a non-empty template string') || e.includes('is unreachable'),
+      ),
+    ).toBe(true);
   });
 
   it('updates fields on an existing node while pinning id and type', () => {

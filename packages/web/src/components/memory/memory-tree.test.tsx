@@ -3,10 +3,16 @@
  * Memory tree derivation + rendering (Task 6 brief): dirs, pinned marker,
  * journal newest-first ordering, and today's highlight.
  */
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { MemoryTreeEntry } from "@valet/api/wire";
-import { buildMemoryTree, MemoryTree } from "./memory-tree";
+import {
+  ancestorDirs,
+  buildMemoryTree,
+  defaultOpenDirs,
+  EXPAND_ALL_MAX,
+  MemoryTree,
+} from "./memory-tree";
 
 function entry(overrides: Partial<MemoryTreeEntry> = {}): MemoryTreeEntry {
   return {
@@ -16,6 +22,7 @@ function entry(overrides: Partial<MemoryTreeEntry> = {}): MemoryTreeEntry {
     pinned: false,
     updatedAt: Date.now(),
     dir: false,
+    sizeBytes: 100,
     ...overrides,
   };
 }
@@ -88,9 +95,91 @@ describe("buildMemoryTree", () => {
   it("returns an empty tree for no entries", () => {
     expect(buildMemoryTree([])).toEqual([]);
   });
+
+  it("counts files recursively per directory", () => {
+    const entries = [
+      entry({ path: "projects/a.md" }),
+      entry({ path: "projects/valet/b.md" }),
+      entry({ path: "projects/valet/c.md" }),
+    ];
+    const tree = buildMemoryTree(entries);
+    const projects = tree.find((n) => n.kind === "dir" && n.name === "projects");
+    expect(projects?.kind).toBe("dir");
+    if (projects?.kind === "dir") {
+      expect(projects.fileCount).toBe(3);
+      const valet = projects.children.find((c) => c.kind === "dir");
+      if (valet?.kind === "dir") expect(valet.fileCount).toBe(2);
+    }
+  });
+});
+
+describe("defaultOpenDirs", () => {
+  it("opens all top-level dirs for a small tree", () => {
+    const entries = [entry({ path: "journal/a.md" }), entry({ path: "notes/b.md" })];
+    const open = defaultOpenDirs(buildMemoryTree(entries), entries.length);
+    expect(open).toEqual(new Set(["journal", "notes"]));
+  });
+
+  it("opens nothing above EXPAND_ALL_MAX files (large V1 import)", () => {
+    const entries = Array.from({ length: EXPAND_ALL_MAX + 1 }, (_, i) =>
+      entry({ path: `journal/2026-01-${String(i + 1).padStart(2, "0")}.md` }),
+    );
+    const open = defaultOpenDirs(buildMemoryTree(entries), entries.length);
+    expect(open.size).toBe(0);
+  });
+});
+
+describe("ancestorDirs", () => {
+  it("lists every ancestor of a nested path", () => {
+    expect(ancestorDirs("a/b/c.md")).toEqual(["a", "a/b"]);
+  });
+
+  it("is empty for a root-level file", () => {
+    expect(ancestorDirs("note.md")).toEqual([]);
+  });
 });
 
 describe("MemoryTree component", () => {
+  beforeEach(() => {
+    // Clear persisted open-state between tests. Node ≥22 ships a stub
+    // `localStorage` global (methods undefined without --localstorage-file)
+    // that can shadow jsdom's — the component's own storage calls are
+    // try/caught for the same reason.
+    try {
+      window.localStorage.removeItem("valet:memory-tree-open");
+    } catch {
+      // stubbed storage — nothing persisted, nothing to clear
+    }
+  });
+
+  it("starts collapsed for a large tree and expands a dir on click", () => {
+    const entries = Array.from({ length: EXPAND_ALL_MAX + 1 }, (_, i) =>
+      entry({ path: `notes/n${i}.md`, title: `Note ${i}` }),
+    );
+    render(<MemoryTree entries={entries} onSelect={vi.fn()} />);
+    expect(screen.queryByText("Note 0")).toBeNull();
+    fireEvent.click(screen.getByText("notes"));
+    expect(screen.queryByText("Note 0")).toBeTruthy();
+  });
+
+  it("shows a per-directory file count", () => {
+    render(
+      <MemoryTree
+        entries={[entry({ path: "notes/a.md" }), entry({ path: "notes/b.md", title: "B" })]}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("2")).toBeTruthy();
+  });
+
+  it("keeps the active file's ancestors open in a large tree", () => {
+    const entries = Array.from({ length: EXPAND_ALL_MAX + 1 }, (_, i) =>
+      entry({ path: `notes/n${i}.md`, title: `Note ${i}` }),
+    );
+    render(<MemoryTree entries={entries} activePath="notes/n3.md" onSelect={vi.fn()} />);
+    expect(screen.queryByText("Note 3")).toBeTruthy();
+  });
+
   it("marks pinned files with 📌", () => {
     render(
       <MemoryTree

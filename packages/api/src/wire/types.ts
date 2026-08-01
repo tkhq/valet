@@ -660,6 +660,9 @@ export interface MemoryTreeEntry {
   pinned: boolean;
   updatedAt: number;
   dir: boolean;
+  /** Stored content length in UTF-16 code units — display-grade size, not
+   * exact UTF-8 bytes. */
+  sizeBytes: number;
 }
 
 // ── REST: workflows (engine v2 Phase 5) ──────────────────────────────────

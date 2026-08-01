@@ -219,6 +219,7 @@ memoryRouter.get("/tree", async (c) => {
       pinned: r.pinned,
       updatedAt: r.updatedAt,
       dir: false,
+      sizeBytes: r.content.length,
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
 

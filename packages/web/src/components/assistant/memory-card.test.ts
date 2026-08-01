@@ -10,7 +10,7 @@ describe("todayJournalPath", () => {
 });
 
 function entry(path: string, overrides: Partial<MemoryTreeEntry> = {}): MemoryTreeEntry {
-  return { path, title: path, type: "note", pinned: false, updatedAt: 100, dir: false, ...overrides };
+  return { path, title: path, type: "note", pinned: false, updatedAt: 100, dir: false, sizeBytes: 100, ...overrides };
 }
 
 describe("memoryStats", () => {

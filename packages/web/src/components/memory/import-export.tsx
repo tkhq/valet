@@ -1,6 +1,6 @@
 import { useRef, useState, type ChangeEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, Upload } from "lucide-react";
+import { Download, Upload, X } from "lucide-react";
 import { api } from "~/api/client";
 import { qkMemory } from "~/api/memory";
 import type { ImportMemoryResponse } from "~/api/memory-types";
@@ -205,7 +205,17 @@ export function MemoryImportExport() {
 
       {phase.kind === "done" && (
         <div className="space-y-1 px-1 pt-1.5">
-          <p className="text-moss">{summarizeImport(phase.result)}</p>
+          <p className="flex items-center gap-1.5 text-moss">
+            {summarizeImport(phase.result)}
+            <button
+              type="button"
+              onClick={() => setPhase({ kind: "idle" })}
+              aria-label="Dismiss import result"
+              className="ml-auto text-muted hover:text-ink"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </p>
           {phase.result.skipped.slice(0, 3).map((s) => (
             <p key={s.path} className="text-muted truncate" title={`${s.path}: ${s.reason}`}>
               {s.path}: {s.reason}
@@ -216,7 +226,19 @@ export function MemoryImportExport() {
           )}
         </div>
       )}
-      {phase.kind === "error" && <p className="px-1 pt-1.5 text-danger-500">{phase.message}</p>}
+      {phase.kind === "error" && (
+        <p className="flex items-center gap-1.5 px-1 pt-1.5 text-danger-500">
+          {phase.message}
+          <button
+            type="button"
+            onClick={() => setPhase({ kind: "idle" })}
+            aria-label="Dismiss error"
+            className="ml-auto text-muted hover:text-ink"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </p>
+      )}
 
       <input
         ref={fileInputRef}

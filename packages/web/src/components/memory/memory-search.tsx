@@ -1,9 +1,25 @@
 import { useState, type KeyboardEvent } from "react";
 import { Search, X } from "lucide-react";
+import type { MemoryTreeEntry } from "@valet/api/wire";
 import { useMemorySearch, useMemoryTree } from "~/api/memory";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { Badge, Input, Spinner } from "~/components/primitives";
+import { formatBytes } from "~/lib/format-bytes";
 import { MemoryTree } from "./memory-tree";
+
+/** Pure: tree entries → the header stats line, V1-style
+ * ("346 files · 3.8 MB · 35 pinned"; pinned omitted when zero). */
+export function treeStatsLine(entries: readonly MemoryTreeEntry[]): string {
+  let bytes = 0;
+  let pinned = 0;
+  for (const e of entries) {
+    bytes += e.sizeBytes;
+    if (e.pinned) pinned += 1;
+  }
+  const parts = [`${entries.length} file${entries.length === 1 ? "" : "s"}`, formatBytes(bytes)];
+  if (pinned > 0) parts.push(`${pinned} pinned`);
+  return parts.join(" · ");
+}
 
 const DEBOUNCE_MS = 250;
 
@@ -61,6 +77,10 @@ export function MemorySearchPane({ activePath, onSelect }: MemorySearchPaneProps
           </button>
         )}
       </div>
+
+      {!active && treeQ.data && treeQ.data.entries.length > 0 && (
+        <p className="px-4 pb-1.5 text-[11px] text-muted">{treeStatsLine(treeQ.data.entries)}</p>
+      )}
 
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {active ? (
