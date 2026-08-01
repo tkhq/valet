@@ -263,6 +263,10 @@ function GraphDot({ data }: NodeProps<Node<GraphNodeData>>) {
 
 const nodeTypes = { memoryDot: GraphDot };
 
+/** Hover stays suppressed this long after the last pan/zoom event —
+ * nodes sliding under a stationary cursor otherwise strobe the fade. */
+const HOVER_RESUME_MS = 200;
+
 // ─── Canvas ──────────────────────────────────────────────────────────────
 
 export function MemoryGraphCanvas() {
@@ -270,8 +274,11 @@ export function MemoryGraphCanvas() {
   const graphQ = useQuery({ queryKey: ["memory", "graph"], queryFn: () => api.getMemoryGraph() });
   const [filters, setFilters] = useState<GraphFilters>({ journal: false, folders: true });
   const [hoverId, setHoverId] = useState<string | null>(null);
-  // Ref, not state: pan/zoom must not re-render the graph, only gate hover.
-  const viewportMoving = useRef(false);
+  // Timestamp of the last viewport move, not a boolean: programmatic moves
+  // (the initial fitView) can fire onMoveStart without a matching
+  // onMoveEnd, and a stuck flag would gate hover forever. A timestamp
+  // self-heals — hover resumes HOVER_RESUME_MS after the last move event.
+  const lastMoveTs = useRef(0);
 
   const filtered = useMemo(
     () => (graphQ.data ? filterGraph(graphQ.data, filters) : { nodes: [], edges: [] }),
@@ -373,15 +380,14 @@ export function MemoryGraphCanvas() {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
-        onMoveStart={() => {
-          viewportMoving.current = true;
+        onMove={() => {
+          lastMoveTs.current = performance.now();
+          // No-op when already null (React bails on identical state), so
+          // this doesn't re-render on every pan frame.
           setHoverId(null);
         }}
-        onMoveEnd={() => {
-          viewportMoving.current = false;
-        }}
         onNodeMouseEnter={(_, node) => {
-          if (!viewportMoving.current) setHoverId(node.id);
+          if (performance.now() - lastMoveTs.current > HOVER_RESUME_MS) setHoverId(node.id);
         }}
         onNodeMouseLeave={() => setHoverId(null)}
         onNodeClick={(_, node) => {
