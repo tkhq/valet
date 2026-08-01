@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Sparkles } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Button,
   DropdownMenu,
@@ -68,8 +68,26 @@ export function ModelPicker({
   inheritLabel = "Inherit",
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const modelsQ = useModels();
   const models = modelsQ.data?.models ?? [];
+
+  // Default: collapse the Anthropic entries to just the curated set (one row
+  // per newest tier), plus the currently-selected model when it isn't
+  // curated (so a session parked on a legacy id still surfaces its own
+  // row). Non-Anthropic entries always show — a third-party model is never a
+  // duplicate of a Claude tier. "Show all models" reveals the hidden
+  // Anthropic aliases.
+  const visibleModels = useMemo(() => {
+    if (showAll) return models;
+    return models.filter((m) => {
+      if (m.id === currentId) return true;
+      const isAnthropic = m.id.startsWith("anthropic/") || !m.id.includes("/");
+      if (!isAnthropic) return true;
+      return !!curatedForCatalogId(m.id);
+    });
+  }, [models, showAll, currentId]);
+  const hiddenCount = models.length - visibleModels.length;
 
   const triggerLabel = currentId ? labelFor(currentId, models) : inheritLabel;
 
@@ -107,7 +125,10 @@ export function ModelPicker({
           <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[280px]">
+      <DropdownMenuContent
+        align="end"
+        className="min-w-[280px] max-h-[min(70vh,560px)] overflow-y-auto"
+      >
         <DropdownMenuLabel>Model</DropdownMenuLabel>
         {modelsQ.isLoading && (
           <div className="px-2 py-1.5 text-xs text-muted">Loading models…</div>
@@ -115,7 +136,7 @@ export function ModelPicker({
         {!modelsQ.isLoading && models.length === 0 && (
           <div className="px-2 py-1.5 text-xs text-muted">No models available.</div>
         )}
-        {models.map((m) => {
+        {visibleModels.map((m) => {
           const active = m.id === currentId;
           const curated = curatedForCatalogId(m.id);
           return (
@@ -147,6 +168,34 @@ export function ModelPicker({
             </DropdownMenuItem>
           );
         })}
+        {hiddenCount > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={(e) => {
+                // Keep the menu open — this is an in-place filter toggle,
+                // not a model selection. Radix closes the menu by default on
+                // select unless we call preventDefault().
+                e.preventDefault();
+                setShowAll(true);
+              }}
+              className="text-xs text-muted italic"
+            >
+              Show all {models.length} models ({hiddenCount} older/aliases)
+            </DropdownMenuItem>
+          </>
+        )}
+        {showAll && (
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault();
+              setShowAll(false);
+            }}
+            className="text-xs text-muted italic"
+          >
+            Show recommended models only
+          </DropdownMenuItem>
+        )}
         {onClear && (
           <>
             <DropdownMenuSeparator />
