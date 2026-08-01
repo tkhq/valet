@@ -115,6 +115,7 @@ import type {
   GetMemoryDocResponse,
   ImportMemoryRequest,
   ImportMemoryResponse,
+  MemoryGraphResponse,
   SearchMemoryResponse,
 } from "./memory-types";
 
@@ -234,6 +235,7 @@ export const api = {
     request<GetMemoryDocResponse>("GET", `/memory?path=${encodeURIComponent(path)}`),
   searchMemory: (q: string) =>
     request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
+  getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
   exportMemory: () => request<ExportMemoryResponse>("GET", "/memory/export"),
   importMemory: (body: ImportMemoryRequest) =>
     request<ImportMemoryResponse>("POST", "/memory/import", body),

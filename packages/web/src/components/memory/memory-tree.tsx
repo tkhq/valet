@@ -121,10 +121,11 @@ export function ancestorDirs(path: string): string[] {
   return out;
 }
 
-/** Deterministic accent dot for a top-level directory — same
+/** Deterministic accent color for a top-level directory — same
  * default-palette approach as the dashboard's origin pills. Orange rather
  * than amber to stay clearly apart from the `amber` "waiting" token used
- * on status dots. */
+ * on status dots. Class and hex arrays are index-aligned: the tree renders
+ * Tailwind classes, the graph canvas needs raw hex for inline styles. */
 const DIR_DOT_PALETTE = [
   "bg-sky-500",
   "bg-orange-500",
@@ -134,10 +135,27 @@ const DIR_DOT_PALETTE = [
   "bg-indigo-500",
 ];
 
-export function dirDotClass(name: string): string {
+export const DIR_HEX_PALETTE = [
+  "#0ea5e9", // sky-500
+  "#f97316", // orange-500
+  "#8b5cf6", // violet-500
+  "#f43f5e", // rose-500
+  "#14b8a6", // teal-500
+  "#6366f1", // indigo-500
+];
+
+export function dirPaletteIndex(name: string): number {
   let h = 5381;
   for (let i = 0; i < name.length; i++) h = ((h << 5) + h + name.charCodeAt(i)) | 0;
-  return DIR_DOT_PALETTE[Math.abs(h) % DIR_DOT_PALETTE.length];
+  return Math.abs(h) % DIR_DOT_PALETTE.length;
+}
+
+export function dirDotClass(name: string): string {
+  return DIR_DOT_PALETTE[dirPaletteIndex(name)];
+}
+
+export function dirDotHex(name: string): string {
+  return DIR_HEX_PALETTE[dirPaletteIndex(name)];
 }
 
 const OPEN_DIRS_KEY = "valet:memory-tree-open";

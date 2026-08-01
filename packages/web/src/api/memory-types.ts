@@ -45,6 +45,30 @@ export interface SearchMemoryResponse {
 }
 
 /**
+ * `GET /api/memory/graph` — same boundary reasoning as above. Mirrors
+ * `MemoryGraph` in `packages/api/src/lib/memory-graph.ts`.
+ */
+export interface MemoryGraphNode {
+  id: string;
+  kind: "concept" | "dir" | "phantom";
+  path?: string;
+  title?: string;
+  type?: string;
+  topDir?: string;
+}
+
+export interface MemoryGraphEdge {
+  from: string;
+  to: string;
+  kind: "link" | "containment";
+}
+
+export interface MemoryGraphResponse {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+}
+
+/**
  * `GET /api/memory/export` / `POST /api/memory/import` — same boundary
  * reasoning as above. Export returns the OKF manifest; import accepts
  * either `{ path → content }` (the V1 bundle shape) or the manifest shape

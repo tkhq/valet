@@ -25,6 +25,7 @@ import { parsePrincipal } from "@valet/engine";
 import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
+import { buildMemoryGraph } from "../lib/memory-graph.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { memoryFiles } from "../schema/index.js";
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
@@ -363,6 +364,35 @@ memoryRouter.get("/search", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
+});
+
+/**
+ * GET /api/memory/graph — the memory explorer's graph view. Derived per
+ * request from stored content (V2 keeps no links table): concept nodes,
+ * markdown-link edges, top-level directory hubs, capped phantom targets.
+ * Own-scope only, same reasoning as `/tree`.
+ */
+memoryRouter.get("/graph", async (c) => {
+  let scope: MemoryScope;
+  try {
+    scope = resolveScope(c);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+
+  const { db } = c.var.providers;
+  const rows = await db
+    .select()
+    .from(memoryFiles)
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+
+  return c.json(
+    buildMemoryGraph(
+      rows.map((r) => ({ path: r.path, title: r.title, type: r.type, content: r.content })),
+    ),
+  );
 });
 
 memoryRouter.get("/export", async (c) => {
