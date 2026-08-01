@@ -82,7 +82,7 @@ function TextBlock({ text }: { text: string }) {
 }
 
 function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call" }> }) {
-  const renderer = pickRenderer(part.toolName);
+  const renderer = pickRenderer(part.toolName, part.args);
   const target = renderer.formatTarget(part.args);
   const summary = renderer.formatSummary?.(part.args, part.result, part.status);
   const Body = renderer.Body;

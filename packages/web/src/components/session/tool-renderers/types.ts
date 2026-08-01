@@ -28,9 +28,11 @@ export interface ToolRenderer {
   /**
    * Tool names this renderer handles. String for exact match, array for
    * multiple, or function for prefix/regex/etc. matching (e.g. plugin
-   * registers `stripe.*` to its own renderer).
+   * registers `stripe.*` to its own renderer). The function form also
+   * receives the call's args, so a renderer can claim a subset of a shared
+   * tool — e.g. `call_tool` invocations whose `tool_id` is `workflows.*`.
    */
-  matches: string | string[] | ((toolName: string) => boolean);
+  matches: string | string[] | ((toolName: string, args?: unknown) => boolean);
   category: ToolCategory;
   Icon: LucideIcon;
   /**
@@ -48,11 +50,11 @@ export interface ToolRenderer {
   Body: FC<ToolRendererProps>;
 }
 
-export function matches(renderer: ToolRenderer, toolName: string): boolean {
+export function matches(renderer: ToolRenderer, toolName: string, args?: unknown): boolean {
   const m = renderer.matches;
   if (typeof m === "string") return m === toolName;
   if (Array.isArray(m)) return m.includes(toolName);
-  return m(toolName);
+  return m(toolName, args);
 }
 
 /**

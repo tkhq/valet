@@ -14,6 +14,7 @@ import { editRenderer } from "./edit";
 import { fallbackRenderer } from "./fallback";
 import { readRenderer } from "./read";
 import { threadReadRenderer } from "./thread-read";
+import { workflowRenderer } from "./workflow";
 import { writeRenderer } from "./write";
 import { matches, type ToolRenderer } from "./types";
 
@@ -23,13 +24,14 @@ const RENDERERS: ToolRenderer[] = [
   writeRenderer,
   editRenderer,
   threadReadRenderer,
+  workflowRenderer,
   // … add plugin-specific renderers here as the ecosystem grows.
   fallbackRenderer,
 ];
 
-export function pickRenderer(toolName: string): ToolRenderer {
+export function pickRenderer(toolName: string, args?: unknown): ToolRenderer {
   for (const r of RENDERERS) {
-    if (matches(r, toolName)) return r;
+    if (matches(r, toolName, args)) return r;
   }
   return fallbackRenderer;
 }
