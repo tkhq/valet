@@ -4,7 +4,7 @@ import { Check, ClipboardCopy, Moon, Trash2 } from "lucide-react";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import { Badge, Button, Spinner, Tooltip } from "~/components/primitives";
 import { useDeleteSession, usePauseSession, useSetSessionModel } from "~/api/queries";
-import { useMe } from "~/api/settings";
+import { useMe, useOrg } from "~/api/settings";
 import { ApiError } from "~/api/client";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 import { ModelPicker } from "./model-picker";
@@ -43,6 +43,7 @@ export function SessionHeader({
   const setModel = useSetSessionModel(session.id);
   const pause = usePauseSession(session.id);
   const me = useMe();
+  const org = useOrg();
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -76,7 +77,9 @@ export function SessionHeader({
       user: me.data
         ? { id: me.data.id, email: me.data.email, name: me.data.name }
         : undefined,
-      org: me.data ? { id: me.data.orgId } : undefined,
+      org: me.data
+        ? { id: me.data.orgId, name: org.data?.name ?? null }
+        : undefined,
       env: {
         origin: typeof window !== "undefined" ? window.location.origin : undefined,
         userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,

@@ -27,6 +27,7 @@ vi.mock("~/api/queries", () => ({
 vi.mock("~/api/settings", () => ({
   useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
   useMe: () => ({ data: undefined, isLoading: false, error: null }),
+  useOrg: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
