@@ -23,7 +23,8 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.cancel_run` — terminate a run (settles asynchronously; re-check with `get_run`)
 - `workflows.resolve_approval` — approve/deny a gate, ONLY when the user has explicitly told you their decision (the call itself asks the user to confirm)
 - `workflows.list_event_types` — event keys workflows can be triggered by
-- `workflows.create_trigger` / `workflows.list_triggers` / `workflows.delete_trigger` — run a workflow automatically on matching events (event-driven only; no cron yet). Event data arrives as `{{trigger.data.payload...}}`.
+- `workflows.create_trigger` / `workflows.list_triggers` / `workflows.delete_trigger` — run a workflow automatically on matching events. Event data arrives as `{{trigger.data.payload...}}`.
+- `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — run a workflow on a cron schedule (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Static `input` arrives as `{{trigger.data.input...}}`.
 
 Always surface returned `workflowId`/`runId` values — the chat UI uses them to render the diagram and run status.
 

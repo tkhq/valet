@@ -218,6 +218,10 @@ console.log("channel host started");
 // loops so pending/parked runs left over from a prior process pick back up.
 providers.workflowRunHost.startHost();
 
+// Workflow schedule loop: fire cron schedules that came due (including at
+// most one catch-up per schedule for fires missed while down).
+providers.workflowScheduler.start();
+
 // Event dispatcher (event-system plan Task 6): begin the delivery drain loop
 // so pending/failed event_deliveries left over from a prior process (and
 // freshly-ingested ones between nudges) get delivered.
@@ -291,6 +295,11 @@ let closed = false;
 async function close(): Promise<void> {
   if (closed) return;
   closed = true;
+  try {
+    providers.workflowScheduler.stop();
+  } catch (err) {
+    console.error("workflowScheduler.stop failed:", err);
+  }
   try {
     await providers.workflowRunHost.stopHost();
   } catch (err) {

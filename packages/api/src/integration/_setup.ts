@@ -27,6 +27,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
+import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -295,6 +296,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // real deps as buildNodeProviders but NEVER started on its timer — tests
   // drive `providers.eventDispatcher.pollOnce()` themselves (the ingest
   // path's `nudge` still triggers an immediate poll, matching production).
+  // Never started on its timer in tests — drive `tick()` manually if needed.
+  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost });
+
   const eventDispatcher = new EventDispatcher({
     db,
     workflowRunHost,
@@ -331,6 +335,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     channelHost,
     workflowStore,
     workflowRunHost,
+    workflowScheduler,
     eventDispatcher,
     plugins,
     actionPluginByService,

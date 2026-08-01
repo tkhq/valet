@@ -36,6 +36,11 @@ import {
   listEventTypes,
   listWorkflowTriggers,
 } from "./trigger-service.js";
+import {
+  createWorkflowSchedule,
+  deleteWorkflowSchedule,
+  listWorkflowSchedules,
+} from "./schedule-service.js";
 import type { WorkflowDefinition, WorkflowEdge } from "@valet/workflow";
 
 /** Cap + bullet the validator's lint output for the LLM. The validator can
@@ -538,6 +543,72 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const createSchedule = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      name: Type.String(),
+      cron: Type.String({
+        description: '5-field cron expression, e.g. "0 9 * * 1-5" = 9:00 every weekday.',
+      }),
+      timezone: Type.Optional(
+        Type.String({ description: 'IANA timezone name (default "UTC"), e.g. "America/Denver".' }),
+      ),
+      input: Type.Optional(
+        Type.Record(Type.String(), Type.Unknown(), {
+          description: "Static payload delivered to the run as {{trigger.data.input...}}.",
+        }),
+      ),
+    }),
+  )({
+    id: "workflows.create_schedule",
+    name: "Create workflow schedule",
+    description:
+      "Run a workflow on a cron schedule. The scheduler polls every ~30s, so fire times are " +
+      "accurate to about half a minute; missed fires during downtime collapse into one " +
+      "catch-up run. Returns { scheduleId, nextFireAt }.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, name, cron, timezone, input }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await createWorkflowSchedule(
+        getDeps().db,
+        { id: owner.userId, orgId: owner.orgId },
+        { workflowId: workflow_id, name, cron, timezone, input },
+      );
+      if (!result.ok) return { success: false, error: result.error };
+      return { success: true, data: result.schedule };
+    },
+  });
+
+  const listSchedules = action(
+    Type.Object({ workflow_id: Type.Optional(Type.String()) }),
+  )({
+    id: "workflows.list_schedules",
+    name: "List workflow schedules",
+    description: "List cron schedules (optionally one workflow's) with next/last fire times.",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const schedules = await listWorkflowSchedules(getDeps().db, owner.orgId, workflow_id);
+      return { success: true, data: { schedules } };
+    },
+  });
+
+  const deleteSchedule = action(Type.Object({ schedule_id: Type.String() }))({
+    id: "workflows.delete_schedule",
+    name: "Delete workflow schedule",
+    description: "Delete a cron schedule by id (from list_schedules/create_schedule).",
+    riskLevel: "medium",
+    execute: async ({ schedule_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await deleteWorkflowSchedule(getDeps().db, owner.orgId, schedule_id);
+      if (result === "not_found") return { success: false, error: `schedule not found: ${schedule_id}` };
+      return { success: true, data: { scheduleId: schedule_id, deleted: true } };
+    },
+  });
+
   const deleteTrigger = action(Type.Object({ trigger_id: Type.String() }))({
     id: "workflows.delete_trigger",
     name: "Delete workflow trigger",
@@ -572,6 +643,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       createTrigger,
       listTriggers,
       deleteTrigger,
+      createSchedule,
+      listSchedules,
+      deleteSchedule,
     ],
   };
 }

@@ -1,0 +1,133 @@
+/**
+ * Workflow cron schedules — CRUD + next-fire computation. The scheduler
+ * loop (`scheduler.ts`) polls `workflow_schedules` for due rows and starts
+ * runs; this module owns validation and the cron math so both the loop and
+ * the agent tools share one implementation.
+ */
+import { randomUUID } from "node:crypto";
+import { and, eq } from "drizzle-orm";
+import { CronExpressionParser } from "cron-parser";
+import type { AppDb } from "../lib/drizzle.js";
+import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
+
+export interface WorkflowScheduleSummary {
+  scheduleId: string;
+  workflowId: string;
+  name: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  input?: unknown;
+  lastFiredAt: number | null;
+  nextFireAt: number;
+}
+
+/**
+ * Validates a 5-field cron expression + IANA timezone and returns the next
+ * fire time strictly after `from`. Returns an error string instead of
+ * throwing so tool callers surface it as lint-style feedback.
+ */
+export function nextFireAt(
+  cron: string,
+  timezone: string,
+  from: number,
+): { ok: true; at: number } | { ok: false; error: string } {
+  if (cron.trim().split(/\s+/).length !== 5) {
+    return {
+      ok: false,
+      error: `cron must be a 5-field expression (minute hour day-of-month month day-of-week), got ${JSON.stringify(cron)}`,
+    };
+  }
+  try {
+    // Timezone validity check — cron-parser silently falls back on some
+    // invalid tz strings; Intl throws, which is the behavior we want.
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+  } catch {
+    return { ok: false, error: `unknown timezone ${JSON.stringify(timezone)} — use an IANA name like "America/Denver"` };
+  }
+  try {
+    const interval = CronExpressionParser.parse(cron, { currentDate: new Date(from), tz: timezone });
+    return { ok: true, at: interval.next().getTime() };
+  } catch (err) {
+    return { ok: false, error: `invalid cron ${JSON.stringify(cron)}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowScheduleSummary {
+  return {
+    scheduleId: row.id,
+    workflowId: row.workflowId,
+    name: row.name,
+    cron: row.cron,
+    timezone: row.timezone,
+    enabled: row.enabled,
+    input: row.input ?? undefined,
+    lastFiredAt: row.lastFiredAt,
+    nextFireAt: row.nextFireAt,
+  };
+}
+
+export async function createWorkflowSchedule(
+  db: AppDb,
+  user: { id: string; orgId: string },
+  input: { workflowId: string; name: string; cron: string; timezone?: string; input?: unknown },
+  now = Date.now(),
+): Promise<{ ok: true; schedule: WorkflowScheduleSummary } | { ok: false; error: string }> {
+  const timezone = input.timezone ?? "UTC";
+  const next = nextFireAt(input.cron, timezone, now);
+  if (!next.ok) return next;
+
+  const wfRows = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.id, input.workflowId), eq(workflowDefinitions.orgId, user.orgId)))
+    .limit(1);
+  if (wfRows.length === 0) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+
+  const inserted = await db
+    .insert(workflowSchedules)
+    .values({
+      id: randomUUID(),
+      orgId: user.orgId,
+      ownerType: "user",
+      ownerId: user.id,
+      workflowId: input.workflowId,
+      name: input.name,
+      cron: input.cron,
+      timezone,
+      input: input.input ?? null,
+      enabled: true,
+      nextFireAt: next.at,
+      createdBy: user.id,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  return { ok: true, schedule: rowToSummary(inserted[0]!) };
+}
+
+export async function listWorkflowSchedules(
+  db: AppDb,
+  orgId: string,
+  workflowId?: string,
+): Promise<WorkflowScheduleSummary[]> {
+  const rows = await db.select().from(workflowSchedules).where(eq(workflowSchedules.orgId, orgId));
+  return rows
+    .map(rowToSummary)
+    .filter((s) => workflowId === undefined || s.workflowId === workflowId);
+}
+
+export async function deleteWorkflowSchedule(
+  db: AppDb,
+  orgId: string,
+  scheduleId: string,
+): Promise<"ok" | "not_found"> {
+  const rows = await db
+    .select({ id: workflowSchedules.id })
+    .from(workflowSchedules)
+    .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, orgId)))
+    .limit(1);
+  if (rows.length === 0) return "not_found";
+  await db.delete(workflowSchedules).where(eq(workflowSchedules.id, scheduleId));
+  return "ok";
+}

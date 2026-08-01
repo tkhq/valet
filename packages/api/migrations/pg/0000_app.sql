@@ -655,6 +655,28 @@ CREATE TABLE "event_subscriptions" (
 --> statement-breakpoint
 CREATE INDEX "event_subscriptions_org_enabled" ON "event_subscriptions" ("org_id","enabled");
 --> statement-breakpoint
+CREATE TABLE "workflow_schedules" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text DEFAULT 'user' NOT NULL,
+	"owner_id" text NOT NULL,
+	"workflow_id" text NOT NULL,
+	"name" text NOT NULL,
+	"cron" text NOT NULL,
+	"timezone" text DEFAULT 'UTC' NOT NULL,
+	"input" jsonb,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"last_fired_at" bigint,
+	"next_fire_at" bigint NOT NULL,
+	"created_by" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "workflow_schedules_due" ON "workflow_schedules" ("enabled","next_fire_at");
+--> statement-breakpoint
+CREATE INDEX "workflow_schedules_workflow" ON "workflow_schedules" ("workflow_id");
+--> statement-breakpoint
 CREATE TABLE "event_deliveries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"event_id" text NOT NULL,

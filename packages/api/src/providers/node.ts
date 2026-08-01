@@ -23,6 +23,7 @@ import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
@@ -372,6 +373,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };
 
+  // Workflow schedule loop — cron-driven run starts (time-based counterpart
+  // of the event dispatcher's workflow targets). `start()`/`stop()` from
+  // main.ts alongside the dispatcher.
+  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost });
+
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
@@ -406,6 +412,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     channelHost,
     workflowStore,
     workflowRunHost,
+    workflowScheduler,
     eventDispatcher,
     plugins,
     actionPluginByService,

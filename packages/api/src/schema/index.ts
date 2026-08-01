@@ -1015,6 +1015,39 @@ export const eventSubscriptions = pgTable(
   (t) => [index("event_subscriptions_org_enabled").on(t.orgId, t.enabled)],
 );
 
+// Workflow schedules — cron-driven run starts (the time-based counterpart
+// of `{kind:"workflow"}` event subscriptions). `next_fire_at` is
+// PRECOMPUTED at write time and after every fire so the scheduler's poll
+// is one indexed range scan; `cron` is a 5-field expression evaluated in
+// `timezone` (IANA name, default UTC). Missed occurrences (downtime)
+// collapse into ONE catch-up fire — the scheduler advances from `now`, not
+// from the missed slot, so a weekend outage doesn't replay 200 runs.
+export const workflowSchedules = pgTable(
+  "workflow_schedules",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "org"] }).notNull().default("user"),
+    ownerId: text("owner_id").notNull(),
+    workflowId: text("workflow_id").notNull(),
+    name: text("name").notNull(),
+    cron: text("cron").notNull(),
+    timezone: text("timezone").notNull().default("UTC"),
+    /** Optional static payload delivered as `trigger.data.input`. */
+    input: jsonb("input"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastFiredAt: bigint("last_fired_at", { mode: "number" }),
+    nextFireAt: bigint("next_fire_at", { mode: "number" }).notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("workflow_schedules_due").on(t.enabled, t.nextFireAt),
+    index("workflow_schedules_workflow").on(t.workflowId),
+  ],
+);
+
 export const eventDeliveries = pgTable(
   "event_deliveries",
   {

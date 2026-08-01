@@ -23,7 +23,9 @@ describe("workflowsActionPlugin", () => {
     expect(plugin.service).toBe("workflows");
     expect(plugin.actions.map((a) => a.id).sort()).toEqual([
       "workflows.cancel_run",
+      "workflows.create_schedule",
       "workflows.create_trigger",
+      "workflows.delete_schedule",
       "workflows.delete_trigger",
       "workflows.delete_workflow",
       "workflows.get_node_result",
@@ -31,6 +33,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.get_workflow",
       "workflows.list_event_types",
       "workflows.list_runs",
+      "workflows.list_schedules",
       "workflows.list_triggers",
       "workflows.list_workflows",
       "workflows.patch_workflow",

@@ -16,6 +16,7 @@ import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
+import type { WorkflowScheduler } from "../workflows/scheduler.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -63,6 +64,8 @@ export interface Providers {
    * (`events/ingest.ts` callers) passes `nudge` as `onIngest` so delivery
    * latency doesn't ride the 1s poll interval. */
   eventDispatcher: EventDispatcher;
+  /** Cron-driven workflow run starts. `start()`/`stop()` from main.ts. */
+  workflowScheduler: WorkflowScheduler;
 
   // Assembled plugin set (plugin-system-v2 plan Task 4) — bundled registry +
   // node_modules scan (or a test override), deduped and service-indexed.
