@@ -622,10 +622,15 @@ function summarizeNode(node: WorkflowNode): string {
       const count = Object.keys(asRecord(node.values)).length;
       return `${count} value${count === 1 ? '' : 's'}`;
     }
-    case 'if':
-      return `${node.conditions.length} condition${node.conditions.length === 1 ? '' : 's'}`;
+    case 'if': {
+      // Defensive `?? 0`: definitions saved before the validator required
+      // `conditions` may carry an `if` node without the array — a summary
+      // must degrade, not crash the whole canvas.
+      const count = node.conditions?.length ?? 0;
+      return `${count} condition${count === 1 ? '' : 's'}`;
+    }
     case 'wait':
-      return node.duration;
+      return node.duration || 'No duration configured';
     case 'approval':
       return trimSummary(node.summary || node.prompt || 'No prompt configured');
     case 'session':

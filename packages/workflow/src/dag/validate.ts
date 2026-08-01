@@ -99,17 +99,30 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Vali
     errors.push(`cycle detected involving node ${JSON.stringify(cycleNode)}`);
   }
 
-  // Node-level field checks.
+  // Node-level field checks. Every check guards the field's TYPE before
+  // dereferencing it — callers hand us LLM-authored JSON, and a missing
+  // `conditions`/`duration`/`values` must produce a validation error the
+  // author can act on, never a TypeError that crashes the interpreter
+  // (or, downstream, the web canvas).
   for (const node of definition.nodes) {
     if (node.type === 'wait') {
-      if (parseDurationMs(node.duration) === null) {
+      if (typeof node.duration !== 'string' || parseDurationMs(node.duration) === null) {
         errors.push(`node ${JSON.stringify(node.id)}: unparseable wait.duration ${JSON.stringify(node.duration)}`);
       }
     }
     if (node.type === 'approval' && node.timeout !== undefined) {
-      if (parseDurationMs(node.timeout) === null) {
+      if (typeof node.timeout !== 'string' || parseDurationMs(node.timeout) === null) {
         errors.push(`node ${JSON.stringify(node.id)}: unparseable approval.timeout ${JSON.stringify(node.timeout)}`);
       }
+    }
+    if (node.type === 'if' && !Array.isArray(node.conditions)) {
+      errors.push(`node ${JSON.stringify(node.id)}: if.conditions must be an array of conditions`);
+    }
+    if (
+      node.type === 'set' &&
+      (typeof node.values !== 'object' || node.values === null || Array.isArray(node.values))
+    ) {
+      errors.push(`node ${JSON.stringify(node.id)}: set.values must be an object`);
     }
     validateStepNodeFields(node, errors, node.id);
 

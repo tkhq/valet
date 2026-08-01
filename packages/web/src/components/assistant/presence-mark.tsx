@@ -70,13 +70,13 @@ const WRAP_GAP: Record<PresenceSize, string> = {
 };
 
 /**
- * `hero` keeps the signature vertical stack (name in the display face with
- * the living dot breathing beneath it). `nav` lays out horizontally so the
- * dot reads as a small status indicator beside the name rather than
- * dangling orphaned on its own line under it.
+ * Both sizes lay out horizontally — the living dot sits beside the name
+ * as a status indicator rather than dangling orphaned on its own line
+ * under it. `hero` just scales everything up (display face, larger dot,
+ * wider gap).
  */
 const LAYOUT: Record<PresenceSize, string> = {
-  hero: "flex-col items-start",
+  hero: "flex-row items-center",
   nav: "flex-row items-center",
 };
 

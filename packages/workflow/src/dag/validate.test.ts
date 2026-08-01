@@ -251,6 +251,36 @@ describe('validateWorkflowDefinition', () => {
       }
     });
 
+    it('reports missing if.conditions / set.values / wait.duration as errors instead of throwing', () => {
+      // Regression: an LLM-authored `if` node with a `condition` string
+      // (not the `conditions` array) crashed the interpreter's drive loop
+      // AND the web canvas with `undefined.length`. Same class of bug for
+      // set.values and wait.duration (`.trim()` on undefined).
+      const result = validateWorkflowDefinition({
+        version: 'dag/v1',
+        nodes: [
+          { id: 'trigger', type: 'trigger' },
+          { id: 'branch', type: 'if' } as unknown as WorkflowDefinition['nodes'][number],
+          { id: 'vals', type: 'set' } as unknown as WorkflowDefinition['nodes'][number],
+          { id: 'pause', type: 'wait', mode: 'duration' } as unknown as WorkflowDefinition['nodes'][number],
+          { id: 'stop', type: 'stop' },
+        ],
+        edges: [
+          { from: 'trigger', to: 'branch' },
+          { from: 'branch', to: 'vals', fromOutput: 'true' },
+          { from: 'branch', to: 'stop', fromOutput: 'false' },
+          { from: 'vals', to: 'pause' },
+          { from: 'pause', to: 'stop' },
+        ],
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('if.conditions must be an array'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('set.values must be an object'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('unparseable wait.duration'))).toBe(true);
+      }
+    });
+
     it('reports missing model/prompt as errors instead of throwing', () => {
       // Regression: `.trim()` used to be called unconditionally, so an LLM
       // node without `model`/`prompt` threw a TypeError before any error
