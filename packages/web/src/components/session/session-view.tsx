@@ -89,7 +89,13 @@ export function SessionView({
   useSessionWebSocket(sessionId);
   const stream = useSessionStream(sessionId);
 
-  const effectiveThreadId = activeThreadId ?? threads.data?.threads[0]?.id ?? undefined;
+  // No explicit ?thread → land on the MOST RECENT thread (matches the
+  // sidebar's newest-first ordering), not the oldest.
+  const newestThreadId = threads.data?.threads.reduce<{ id: string; createdAt: number } | undefined>(
+    (best, t) => (best === undefined || t.createdAt > best.createdAt ? { id: t.id, createdAt: t.createdAt } : best),
+    undefined,
+  )?.id;
+  const effectiveThreadId = activeThreadId ?? newestThreadId ?? undefined;
 
   // Load this thread's persisted messages from REST and pipe into the
   // stream store. Background refetches are disabled (see `useMessages`) so

@@ -86,7 +86,11 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
   const navigate = useNavigate({ from: "/chat" });
 
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
-  const threads = useMemo(() => threadsQ.data?.threads ?? [], [threadsQ.data]);
+  // Newest first — the thread you were just working in belongs at the top.
+  const threads = useMemo(
+    () => [...(threadsQ.data?.threads ?? [])].sort((a, b) => b.createdAt - a.createdAt),
+    [threadsQ.data],
+  );
   const activeThreadId = search.thread ?? threads[0]?.id;
   const grouped = groupChildrenByThread(childrenQ.data?.children ?? []);
 
