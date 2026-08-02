@@ -333,24 +333,29 @@ function makeListTool(catalog: Catalog): ToolDef {
         if (!plugin?.requiresCredential) continue;
         const credService = plugin.credentialService ?? service;
         let cred: Awaited<ReturnType<typeof ctx.credentials.get>>;
+        let probeReason: string | undefined;
         try {
           cred = await ctx.credentials.get(credService);
-        } catch {
+        } catch (err) {
           // A resolver may throw instead of returning null (e.g. a
           // GitHubAuthError when the org has no installation). Treat that
           // the same as "no credential connected" so one throwing probe
-          // can't abort discovery for every other service.
+          // can't abort discovery for every other service — but surface
+          // the resolver's own message: it names the actual fix (e.g.
+          // "App created but not installed — Install on GitHub").
           cred = null;
+          probeReason = err instanceof Error ? err.message : String(err);
         }
         if (!cred) {
           if (a.service === service) {
-            warnings.push({ service, reason: "no credential connected" });
+            warnings.push({ service, reason: probeReason ?? "no credential connected" });
           } else {
             entries = entries.filter((e) => e.service !== service);
             warnings.push({
               service,
-              reason:
-                "not connected — tools hidden. Connect the integration in Settings, or list with service filter to inspect schemas.",
+              reason: `not connected — tools hidden. ${
+                probeReason ?? "Connect the integration in Settings, or list with service filter to inspect schemas."
+              }`,
             });
           }
         }

@@ -62,7 +62,7 @@ import { and, eq } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { githubInstallations } from "../schema/index.js";
 import { resolveGithubUrl } from "./github-env.js";
-import { loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
+import { discoverInstallations, loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
 
 const GITHUB_CREDENTIAL_SERVICE = "github";
 /** Same 5-minute liveness margin the installation-token cache uses. */
@@ -413,6 +413,39 @@ async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string
   return mintInstallation(deps, orgId, rows[0].accountLogin);
 }
 
+// ── Lazy installation sync ──────────────────────────────────────────────
+
+/** Manual webhook mode records nothing when the admin installs the App on
+ * GitHub — without this, every resolution keeps failing until someone
+ * clicks "Refresh installations". When an App config exists but the
+ * installations table is empty, sync once (throttled per process+org so a
+ * genuinely uninstalled App doesn't hammer GitHub on every tool call). */
+const lastLazyDiscovery = new Map<string, number>();
+const LAZY_DISCOVERY_MIN_INTERVAL_MS = 60_000;
+
+/** Test-only: reset the lazy-discovery throttle between tests. */
+export function _resetLazyDiscoveryThrottleForTests(): void {
+  lastLazyDiscovery.clear();
+}
+
+async function ensureInstallationsSynced(deps: GitHubTokenDeps, orgId: string): Promise<void> {
+  const rows = await deps.db
+    .select({ id: githubInstallations.id })
+    .from(githubInstallations)
+    .where(eq(githubInstallations.orgId, orgId))
+    .limit(1);
+  if (rows.length > 0) return;
+  const last = lastLazyDiscovery.get(orgId) ?? 0;
+  if (Date.now() - last < LAZY_DISCOVERY_MIN_INTERVAL_MS) return;
+  lastLazyDiscovery.set(orgId, Date.now());
+  try {
+    await discoverInstallations(deps, orgId);
+  } catch (err) {
+    // Best-effort: resolution continues and reports its own state.
+    console.error(`github lazy installation discovery failed for org ${orgId}:`, err);
+  }
+}
+
 // ── The resolution function ────────────────────────────────────────────
 
 export async function resolveGitHubToken(
@@ -420,6 +453,7 @@ export async function resolveGitHubToken(
   req: ResolveGitHubTokenRequest,
 ): Promise<ResolvedGitHubToken> {
   const auth = req.auth ?? "auto";
+  await ensureInstallationsSynced(deps, req.orgId);
 
   // ── Explicit selections are strict — no fallback across them. ──
   if (auth === "app") {
@@ -468,6 +502,14 @@ export async function resolveGitHubToken(
   const orgPat = await resolveOrgPatCredential(deps, req.orgId);
   if (orgPat.ok) return { token: orgPat.token, source: "pat", login: orgPat.login };
 
+  // Name the actual gap: an App that exists but has no installations is a
+  // different fix ("Install on GitHub") than no GitHub setup at all.
+  const config = await loadAppConfig(deps, req.orgId).catch(() => null);
+  if (config) {
+    throw new GitHubAuthError(
+      `the GitHub App "${config.appSlug}" is created but not installed on any account — open Settings → Organization → GitHub and click Install on GitHub`,
+    );
+  }
   throw new GitHubAuthError(
     "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
   );
