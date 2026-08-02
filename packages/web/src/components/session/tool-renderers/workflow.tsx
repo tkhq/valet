@@ -103,6 +103,34 @@ export function workflowListFrom(result: unknown): WorkflowListEntry[] | null {
   return rows;
 }
 
+/**
+ * Lint bullets out of a failed save/patch result. The api's
+ * `formatLintErrors` emits `workflow definition failed validation (fix
+ * these and retry):\n- …\n- …` (possibly behind a `workflows.x failed: `
+ * prefix); returns the bullet list, or null when the text isn't that shape.
+ */
+export function parseLintErrors(text: string | undefined): string[] | null {
+  if (!text) return null;
+  const marker = "failed validation (fix these and retry):";
+  const at = text.indexOf(marker);
+  if (at === -1) return null;
+  const bullets = text
+    .slice(at + marker.length)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => (line.startsWith("- ") ? line.slice(2) : line));
+  return bullets.length > 0 ? bullets : null;
+}
+
+/** The definition the agent TRIED to save, from the call's own params —
+ * a failed save still deserves its DAG rendered next to the lint errors. */
+export function attemptedDefinition(args: unknown): unknown {
+  const params = callToolArgs(args).params;
+  if (typeof params !== "object" || params === null) return null;
+  return (params as Record<string, unknown>).definition ?? null;
+}
+
 /** Fallback refs from the call's own params, so an in-flight or failed call
  * can still point at the workflow it targeted. */
 export function workflowRefsFromArgs(args: unknown): WorkflowRefs {
@@ -153,7 +181,71 @@ function RunBody({ runId }: { runId: string }) {
       {isWorkflowDefinitionShape(definition) && (
         <WorkflowPreview definition={definition} statusByNodeId={status} badgeByNodeId={badges} />
       )}
+      <RunFailures checkpoints={checkpoints} />
       {pending && <ApprovalCard runId={runId} nodeId={pending.nodeId} prompt={prompt} />}
+    </div>
+  );
+}
+
+/** Latest failed checkpoint per node, so a failed run SHOWS its error
+ * instead of just a red ring on the canvas. */
+export function latestFailures(
+  checkpoints: { nodeId: string; status: string; error?: string; createdAt: number }[],
+): { nodeId: string; error: string }[] {
+  const byNode = new Map<string, { error: string; createdAt: number }>();
+  for (const cp of checkpoints) {
+    if (cp.status !== "failed" || !cp.error) continue;
+    const prev = byNode.get(cp.nodeId);
+    if (!prev || cp.createdAt >= prev.createdAt) {
+      byNode.set(cp.nodeId, { error: cp.error, createdAt: cp.createdAt });
+    }
+  }
+  return [...byNode.entries()].map(([nodeId, v]) => ({ nodeId, error: v.error }));
+}
+
+function RunFailures({
+  checkpoints,
+}: {
+  checkpoints: { nodeId: string; status: string; error?: string; createdAt: number }[];
+}) {
+  const failures = latestFailures(checkpoints);
+  if (failures.length === 0) return null;
+  return (
+    <div className="rounded-md border border-rose-200 bg-rose-50/70 px-3 py-2 dark:border-rose-900/60 dark:bg-rose-950/40">
+      <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-danger-500">
+        {failures.length === 1 ? "Node failure" : `${failures.length} node failures`}
+      </div>
+      <ul className="space-y-1.5">
+        {failures.map((f) => (
+          <li key={f.nodeId} className="text-xs leading-snug">
+            <span className="font-mono text-ink">{f.nodeId}</span>
+            <span className="text-muted"> — </span>
+            <span className="whitespace-pre-wrap break-words text-danger-500">{f.error}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Rich body for a failed save/patch: the DAG the agent attempted (when it
+ * parses) above the structured lint list — not a wall of raw text. */
+function LintErrorsBody({ errors, attempted }: { errors: string[]; attempted: unknown }) {
+  return (
+    <div className="space-y-2 px-3 py-2">
+      {isWorkflowDefinitionShape(attempted) && <WorkflowPreview definition={attempted} />}
+      <div className="rounded-md border border-rose-200 bg-rose-50/70 px-3 py-2 dark:border-rose-900/60 dark:bg-rose-950/40">
+        <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-danger-500">
+          Validation failed — {errors.length} issue{errors.length === 1 ? "" : "s"}, nothing saved
+        </div>
+        <ul className="list-disc space-y-1 pl-4">
+          {errors.map((e, i) => (
+            <li key={i} className="text-xs leading-snug text-ink">
+              {e}
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }
@@ -267,6 +359,12 @@ function WorkflowToolBody({ args, result, status, error }: ToolRendererProps) {
   if (toolIdSuffix(args) === "list_workflows") {
     const rows = workflowListFrom(result);
     if (rows) return <WorkflowListBody rows={rows} />;
+  }
+
+  // A save/patch rejected by the linter → attempted DAG + structured list.
+  const lintErrors = parseLintErrors(error ?? resultText(result));
+  if (lintErrors) {
+    return <LintErrorsBody errors={lintErrors} attempted={attemptedDefinition(args)} />;
   }
 
   if (refs.runId) return <RunBody runId={refs.runId} />;

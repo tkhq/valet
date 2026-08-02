@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { isWorkflowCallTool, workflowListFrom, workflowRefsFrom, workflowRefsFromArgs } from "./workflow";
+import {
+  attemptedDefinition,
+  isWorkflowCallTool,
+  latestFailures,
+  parseLintErrors,
+  workflowListFrom,
+  workflowRefsFrom,
+  workflowRefsFromArgs,
+} from "./workflow";
 import { pickRenderer } from "./index";
 
 describe("isWorkflowCallTool", () => {
@@ -88,5 +96,55 @@ describe("workflowListFrom", () => {
     expect(workflowListFrom({ text: JSON.stringify(data) })).toEqual([
       { workflowId: "wf3", name: "ok" },
     ]);
+  });
+});
+
+describe("parseLintErrors", () => {
+  it("extracts bullets from a formatLintErrors payload behind the failed: prefix", () => {
+    const text =
+      "workflows.save_workflow failed: workflow definition failed validation (fix these and retry):\n" +
+      '- node "start": unknown field "description" on a "trigger" node\n' +
+      '- node "fetch_prs": tool.service must be a non-empty string (the plugin service, e.g. "github")';
+    expect(parseLintErrors(text)).toEqual([
+      'node "start": unknown field "description" on a "trigger" node',
+      'node "fetch_prs": tool.service must be a non-empty string (the plugin service, e.g. "github")',
+    ]);
+  });
+
+  it("returns null for non-lint failures and successes", () => {
+    expect(parseLintErrors("workflows.get_run failed: run not found: x")).toBeNull();
+    expect(parseLintErrors(undefined)).toBeNull();
+    expect(parseLintErrors('{"workflowId":"wf1"}')).toBeNull();
+  });
+});
+
+describe("attemptedDefinition", () => {
+  it("pulls params.definition from the call args", () => {
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    expect(
+      attemptedDefinition({ tool_id: "workflows.save_workflow", params: { definition } }),
+    ).toEqual(definition);
+  });
+
+  it("returns null when absent", () => {
+    expect(attemptedDefinition({ tool_id: "workflows.save_workflow", params: {} })).toBeNull();
+    expect(attemptedDefinition(undefined)).toBeNull();
+  });
+});
+
+describe("latestFailures", () => {
+  it("keeps the newest failed checkpoint per node, skipping non-failures", () => {
+    expect(
+      latestFailures([
+        { nodeId: "a", status: "failed", error: "old boom", createdAt: 1 },
+        { nodeId: "a", status: "failed", error: "new boom", createdAt: 2 },
+        { nodeId: "b", status: "completed", createdAt: 3 },
+        { nodeId: "c", status: "failed", createdAt: 4 }, // no error text → skipped
+      ]),
+    ).toEqual([{ nodeId: "a", error: "new boom" }]);
+  });
+
+  it("is empty for a clean run", () => {
+    expect(latestFailures([{ nodeId: "a", status: "completed", createdAt: 1 }])).toEqual([]);
   });
 });
