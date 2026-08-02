@@ -292,6 +292,31 @@ describe("GET /api/org/github-app/setup", () => {
     expect(raw).not.toContain("the-webhook-secret");
     expect(raw).not.toContain(TEST_PEM);
   });
+
+  it("accepts a webhook-less conversion (webhook_secret: null) — the no-public-URL path", async () => {
+    api = await bootTestApi();
+    await setupConfiguredOrg(api.baseUrl, {
+      convertManifest: () => ({
+        body: {
+          id: 4242,
+          slug: "valet-acme",
+          name: "Valet Acme",
+          client_id: "Iv1.client",
+          client_secret: "oauth-client-secret",
+          // GitHub returns null here when the manifest omitted
+          // hook_attributes (no public URL / delivery toggled off).
+          webhook_secret: null,
+          pem: TEST_PEM,
+          html_url: "https://github.com/apps/valet-acme",
+        },
+      }),
+    });
+
+    const get = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
+    const body = (await get.json()) as GetGithubAppResponse;
+    expect(body.configured).toBe(true);
+    expect(body.app?.appId).toBe("4242");
+  });
 });
 
 describe("POST /api/org/github-app/refresh", () => {

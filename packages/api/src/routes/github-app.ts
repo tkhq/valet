@@ -156,7 +156,11 @@ function parseManifestConversion(payload: unknown): GithubAppConfig | null {
   if (typeof slug !== "string") return null;
   if (typeof clientId !== "string") return null;
   if (typeof clientSecret !== "string") return null;
-  if (typeof webhookSecret !== "string") return null;
+  // Webhook-less apps (manifest omitted hook_attributes — no public URL,
+  // or delivery toggled off) come back with `webhook_secret: null`.
+  if (typeof webhookSecret !== "string" && webhookSecret !== null && webhookSecret !== undefined) {
+    return null;
+  }
   if (typeof pem !== "string") return null;
   if (typeof htmlUrl !== "string") return null;
   return {
@@ -165,7 +169,7 @@ function parseManifestConversion(payload: unknown): GithubAppConfig | null {
     oauthClientId: clientId,
     htmlUrl,
     oauthClientSecret: clientSecret,
-    webhookSecret,
+    webhookSecret: webhookSecret ?? "",
     privateKeyPem: pem,
   };
 }
@@ -404,6 +408,9 @@ async function findGithubAppOrgId(db: AppQueryable): Promise<string | null> {
 
 function verifyWebhookSignature(rawBody: Uint8Array, header: string | undefined, secret: string): boolean {
   if (!header) return false;
+  // A webhook-less app stores an empty secret — nothing should ever
+  // deliver, and an empty HMAC key must never verify an attacker's guess.
+  if (secret.length === 0) return false;
   const expected = `sha256=${createHmac("sha256", secret).update(Buffer.from(rawBody)).digest("hex")}`;
   const a = Buffer.from(header, "utf8");
   const b = Buffer.from(expected, "utf8");
