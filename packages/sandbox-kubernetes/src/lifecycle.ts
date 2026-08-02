@@ -656,6 +656,14 @@ export interface SandboxPodStatusApi {
   getPodStatus(namespace: string, podName: string): Promise<PodStatusInfo | null>;
 }
 
+/** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to delete
+ * the backing pod for image-drift rolling (`create()` convergence path). */
+export interface SandboxPodDeleteApi {
+  /** Deletes a pod by name. Idempotent: a 404 (already gone) is treated as
+   * success — the controller may have deleted the pod concurrently. */
+  deletePod(namespace: string, podName: string): Promise<void>;
+}
+
 /** Wraps a real `k8s.CoreV1Api` instance. */
 export function podStatusApiAdapter(api: k8s.CoreV1Api): SandboxPodStatusApi {
   return {
@@ -683,6 +691,53 @@ export function podStatusApiAdapter(api: k8s.CoreV1Api): SandboxPodStatusApi {
       return { phase: pod.status?.phase, containerStatuses, conditions };
     },
   };
+}
+
+/** Wraps a real `k8s.CoreV1Api` instance for pod deletion. */
+export function podDeleteApiAdapter(api: k8s.CoreV1Api): SandboxPodDeleteApi {
+  return {
+    async deletePod(namespace, podName) {
+      try {
+        await api.deleteNamespacedPod({ name: podName, namespace });
+      } catch (err) {
+        if (isApiError(err) && err.code === 404) return;
+        throw err;
+      }
+    },
+  };
+}
+
+/**
+ * Reads the live backing pod for `name` and checks whether its first
+ * container's image matches `manifestImage`. Returns `true` when a live pod
+ * exists with a different image (the caller should delete the pod and re-wait
+ * for the controller to reconcile a fresh one). Returns `false` in all other
+ * cases: no live pod yet, images already match, or the pod has no readable
+ * container spec.
+ *
+ * Extracted as a pure-I/O helper (no side effects besides reading) so it is
+ * independently unit-testable — the decision logic stays in `create()` which
+ * calls `podDeleteApi.deletePod` on a `true` result.
+ */
+export async function livePodImageDiffers(
+  objectsApi: SandboxCustomObjectsApi,
+  podsApi: SandboxPodsApi,
+  podStatusApi: SandboxPodStatusApi,
+  cfg: K8sProviderConfig,
+  name: string,
+  manifestImage: string,
+): Promise<{ differs: true; podName: string; liveImage: string } | { differs: false }> {
+  const podName = await resolvePodName(objectsApi, podsApi, cfg, name).catch(() => null);
+  if (!podName) return { differs: false };
+
+  const status = await podStatusApi.getPodStatus(cfg.namespace, podName).catch(() => null);
+  if (!status) return { differs: false };
+
+  const liveImage = status.containerStatuses?.[0]?.image;
+  if (!liveImage) return { differs: false };
+
+  if (liveImage === manifestImage) return { differs: false };
+  return { differs: true, podName, liveImage };
 }
 
 /**

@@ -94,10 +94,13 @@ import {
   applySandbox,
   deleteSandbox,
   getSandbox,
+  livePodImageDiffers,
+  podDeleteApiAdapter,
   resolvePodName,
   sandboxStatus,
   setOperatingMode,
   type SandboxCustomObjectsApi,
+  type SandboxPodDeleteApi,
   type SandboxPodsApi,
   type SandboxPodStatusApi,
 } from "./lifecycle.js";
@@ -445,6 +448,11 @@ export interface KubernetesSandboxProviderDeps {
    * behavior aren't forced to wire a new dep. Production wiring
    * (`packages/api/src/providers/sandbox-backend.ts`) always supplies it. */
   podStatusApi?: SandboxPodStatusApi;
+  /** Optional: enables `create()`'s image-drift convergence path — when the
+   * live pod's image differs from the manifest image, the pod is deleted so
+   * the controller reconciles a fresh one. Omitting it disables the drift
+   * check (pre-task-8 behavior). Production wiring always supplies it. */
+  podDeleteApi?: SandboxPodDeleteApi;
 }
 
 export class KubernetesSandboxProvider implements SandboxProvider {
@@ -478,7 +486,15 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an
    * existing CR of the same name rather than erroring, so the attachment
    * layer's failure-recovery path (which calls `create()` again with the
-   * same opts after `reportFailure`) never fails on "already exists". */
+   * same opts after `reportFailure`) never fails on "already exists".
+   *
+   * Image-drift convergence (Task 8): after `applySandbox`, if a live pod
+   * exists whose first container image differs from the manifest image, this
+   * method deletes that pod. The agent-sandbox controller then reconciles a
+   * fresh pod from the updated CR spec. This method proceeds to `waitReady`
+   * the same way a cold create does — the controller recreates the pod under
+   * the same name, so the label-selector-based readiness poll is unaffected
+   * by the pod name. The workspace PVC is retained (decision 5). */
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     if (!opts.workspace) {
       throw new Error(
@@ -489,6 +505,43 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const name = sandboxCrName(opts.workspace);
     const manifest = buildSandboxManifest(this.cfg, name, opts);
     await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+
+    if (this.deps.podDeleteApi && this.deps.podStatusApi) {
+      const manifestImage = (opts.image ?? this.cfg.defaultImage) as string;
+      const check = await livePodImageDiffers(
+        this.deps.objectsApi,
+        this.deps.podsApi,
+        this.deps.podStatusApi,
+        this.cfg,
+        name,
+        manifestImage,
+      );
+      if (check.differs) {
+        console.log(`k8s sandbox ${name}: rolling pod (image ${check.liveImage} → ${manifestImage})`);
+        // Capture the old pod UID before deletion so the wait-for-fresh loop
+        // below can detect when the controller has reconciled a NEW pod object
+        // (same name, new UID) — rather than racing against a stale
+        // `Ready=True` CR condition left over from the deleted pod.
+        const oldUid = await this.deps.livenessApi.getPodUid(this.cfg.namespace, check.podName);
+        await this.deps.podDeleteApi.deletePod(this.cfg.namespace, check.podName);
+        // Wait for the controller to reconcile a fresh pod (new UID). This
+        // mirrors the conformance suite's `recreate` callback logic. Without
+        // this wait, `waitReady` could observe a stale `Ready=True` CR
+        // condition from the just-deleted pod and return prematurely.
+        const podRollDeadline = Date.now() + READY_TIMEOUT_MS;
+        for (;;) {
+          const newUid = await this.deps.livenessApi.getPodUid(this.cfg.namespace, check.podName);
+          if (newUid !== null && newUid !== oldUid) break;
+          if (Date.now() >= podRollDeadline) {
+            throw new Error(
+              `k8s sandbox ${name}: controller did not reconcile a fresh pod within ${READY_TIMEOUT_MS}ms after image-drift roll`,
+            );
+          }
+          await sleep(READY_POLL_INTERVAL_MS);
+        }
+      }
+    }
+
     await this.waitReady(name);
     return this.makeSandbox(name);
   }

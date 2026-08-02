@@ -25,6 +25,7 @@ import {
   KubernetesSandboxProvider,
   SANDBOX_CR_API_VERSION,
   customObjectsApiAdapter,
+  podDeleteApiAdapter,
   podExecApiAdapter,
   podLivenessApiAdapter,
   podStatusApiAdapter,
@@ -159,11 +160,13 @@ export function buildSandboxProvider(
         throw new Error("VALET_SANDBOX_IMAGE is required when VALET_SANDBOX_BACKEND=kubernetes.");
       }
       const kc = deps.kubeConfig ?? resolveKubeConfig(env);
+      const coreApi = kc.makeApiClient(k8s.CoreV1Api);
       const objectsApi = customObjectsApiAdapter(kc.makeApiClient(k8s.CustomObjectsApi));
-      const podsApi = podsApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
+      const podsApi = podsApiAdapter(coreApi);
       const execApi = podExecApiAdapter(new k8s.Exec(kc));
-      const livenessApi = podLivenessApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
-      const podStatusApi = podStatusApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
+      const livenessApi = podLivenessApiAdapter(coreApi);
+      const podStatusApi = podStatusApiAdapter(coreApi);
+      const podDeleteApi = podDeleteApiAdapter(coreApi);
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
       const cfg: K8sProviderConfig = {
         namespace,
@@ -175,7 +178,7 @@ export function buildSandboxProvider(
         // — nothing to authenticate against an in-cluster insecure registry.
         ...(pullSecret ? { imagePullSecrets: [{ name: pullSecret }] } : {}),
       };
-      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi }, cfg);
+      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi }, cfg);
     }
   }
 }

@@ -31,7 +31,7 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
-import { afterAll, describe } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { runSandboxContract } from "@valet/engine/test-helpers";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
 import type { K8sProviderConfig } from "../src/index.js";
@@ -39,6 +39,8 @@ import {
   RANCHER_DESKTOP_CONTEXT,
   customObjectsApiAdapter,
   loadRancherDesktopKubeConfig,
+  podDeleteApiAdapter,
+  podStatusApiAdapter,
   podsApiAdapter,
 } from "../src/lifecycle.js";
 import { podExecApiAdapter } from "../src/exec.js";
@@ -67,13 +69,15 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
   };
 
   const kc = loadRancherDesktopKubeConfig(k8s.KubeConfig);
-  const objectsApi = customObjectsApiAdapter(kc.makeApiClient(k8s.CustomObjectsApi));
-  const podsApi = podsApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
   const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+  const objectsApi = customObjectsApiAdapter(kc.makeApiClient(k8s.CustomObjectsApi));
+  const podsApi = podsApiAdapter(coreApi);
   const execApi = podExecApiAdapter(new k8s.Exec(kc));
   const livenessApi = podLivenessApiAdapter(coreApi);
+  const podStatusApi = podStatusApiAdapter(coreApi);
+  const podDeleteApi = podDeleteApiAdapter(coreApi);
 
-  const provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi }, cfg);
+  const provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi }, cfg);
 
   kubectl(["create", "namespace", namespace]);
 
@@ -167,4 +171,56 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
     // require the pod to actually become Ready.
     gatewayEndpoint: "null",
   });
+
+  it(
+    "create() with image B after create() with image A rolls the pod and preserves /workspace but not /root",
+    async () => {
+      // imageA is the suite's default image (already in the node's image
+      // cache from prior conformance tests). imageB is a distinct image also
+      // present in the Rancher Desktop containerd cache — no pull latency,
+      // and a different name string than imageA (required for the drift check
+      // to trigger).
+      const imageA = "busybox:stable";
+      const imageB = "rancher/mirrored-library-busybox:1.37.0";
+      const identity = `imgdrift-${randomUUID()}`;
+
+      // Step 1: create with image A and write sentinel files.
+      const sandboxA = await provider.create({ workspace: identity, image: imageA });
+      const name = sandboxA.id;
+
+      await sandboxA.writeFile("/workspace/keep.txt", "persistent");
+      await sandboxA.writeFile("/root/lose.txt", "ephemeral");
+
+      // Confirm imageA is running.
+      const podUidA = await coreApi.readNamespacedPod({ name, namespace }).then((p) => p.metadata?.uid);
+      expect(podUidA).toBeTruthy();
+
+      // Step 2: release (non-terminal — CR and PVC retained).
+      await provider.release(name);
+
+      // Step 3: create() with imageB — the image-drift path must roll the pod.
+      const sandboxB = await provider.create({ workspace: identity, image: imageB });
+      expect(sandboxB.id).toBe(name);
+
+      // The new pod must have a different uid (it's a fresh pod object).
+      const podUidB = await coreApi.readNamespacedPod({ name, namespace }).then((p) => p.metadata?.uid);
+      expect(podUidB).toBeTruthy();
+      expect(podUidB).not.toBe(podUidA);
+
+      // The new pod must run imageB.
+      const podSpec = await coreApi.readNamespacedPod({ name, namespace });
+      const liveImage = podSpec.spec?.containers?.[0]?.image;
+      expect(liveImage).toBe(imageB);
+
+      // /workspace/keep.txt survives (PVC retained across pod roll).
+      const kept = await sandboxB.readFile("/workspace/keep.txt");
+      expect(kept).toBe("persistent");
+
+      // /root/lose.txt is gone (ephemeral rootfs of the new pod).
+      await expect(sandboxB.readFile("/root/lose.txt")).rejects.toThrow();
+
+      await provider.destroy(name);
+    },
+    120_000,
+  );
 });

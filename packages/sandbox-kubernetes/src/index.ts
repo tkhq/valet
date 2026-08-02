@@ -42,6 +42,8 @@ export {
   loadRancherDesktopKubeConfig,
   mapConditionsToStatus,
   parseSandboxCRRead,
+  livePodImageDiffers,
+  podDeleteApiAdapter,
   podsApiAdapter,
   podStatusApiAdapter,
   resolvePodName,
@@ -58,6 +60,7 @@ export {
   type PodStatusInfo,
   type ReplaceSandboxParams,
   type SandboxCustomObjectsApi,
+  type SandboxPodDeleteApi,
   type SandboxPodsApi,
   type SandboxPodStatusApi,
 } from "./lifecycle.js";

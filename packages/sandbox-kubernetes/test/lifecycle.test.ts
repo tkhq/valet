@@ -9,6 +9,7 @@ import {
   deleteSandbox,
   getSandbox,
   listSandboxes,
+  livePodImageDiffers,
   mapConditionsToStatus,
   parseSandboxCRRead,
   resolvePodName,
@@ -773,5 +774,92 @@ describe("SANDBOX_PLURAL / SANDBOX_KIND constants", () => {
   it("match the vendored CRD (sandboxes.agents.x-k8s.io, kind Sandbox)", () => {
     expect(SANDBOX_PLURAL).toBe("sandboxes");
     expect(SANDBOX_KIND).toBe("Sandbox");
+  });
+});
+
+// ── livePodImageDiffers ────────────────────────────────────────────────
+
+/** Minimal annotation-bearing CR read: gives `resolvePodName` a non-null
+ * pod name without needing the ownerReference-scan list fallback. */
+function toCRReadWithPodAnnotation(manifest: SandboxCR, podName: string): SandboxCRRead {
+  return {
+    ...toCRRead(manifest),
+    metadata: {
+      ...toCRRead(manifest).metadata,
+      annotations: { "agents.x-k8s.io/pod-name": podName },
+    },
+  };
+}
+
+describe("livePodImageDiffers", () => {
+  it("returns { differs: false } when the CR has no backing pod yet", async () => {
+    // No pod-name annotation → resolvePodName returns null → no pod.
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", { image: "busybox:stable" });
+    objectsApi.seed(toCRRead(manifest));
+    const podsApi = new FakePodsApi([]);
+    const podStatusApi = new FakePodStatusApi(new Map());
+
+    const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-1", "busybox:stable");
+    expect(result).toEqual({ differs: false });
+  });
+
+  it("returns { differs: false } when the CR does not exist", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const podsApi = new FakePodsApi([]);
+    const podStatusApi = new FakePodStatusApi(new Map());
+
+    const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "missing-cr", "busybox:stable");
+    expect(result).toEqual({ differs: false });
+  });
+
+  it("returns { differs: false } when the live pod runs the same image", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-2", { image: "busybox:stable" });
+    objectsApi.seed(toCRReadWithPodAnnotation(manifest, "sess-2"));
+    const podsApi = new FakePodsApi([]);
+    const podStatusApi = new FakePodStatusApi(
+      new Map([["sess-2", { phase: "Running", containerStatuses: [{ name: "sandbox", image: "busybox:stable" }] }]]),
+    );
+
+    const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-2", "busybox:stable");
+    expect(result).toEqual({ differs: false });
+  });
+
+  it("returns { differs: true, podName, liveImage } when images differ", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-3", { image: "busybox:stable" });
+    objectsApi.seed(toCRReadWithPodAnnotation(manifest, "sess-3"));
+    const podsApi = new FakePodsApi([]);
+    const podStatusApi = new FakePodStatusApi(
+      new Map([["sess-3", { phase: "Running", containerStatuses: [{ name: "sandbox", image: "busybox:1.35" }] }]]),
+    );
+
+    const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-3", "busybox:stable");
+    expect(result).toEqual({ differs: true, podName: "sess-3", liveImage: "busybox:1.35" });
+  });
+
+  it("returns { differs: false } when the pod status has no containerStatuses", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-4", { image: "busybox:stable" });
+    objectsApi.seed(toCRReadWithPodAnnotation(manifest, "sess-4"));
+    const podsApi = new FakePodsApi([]);
+    // Pod exists but reports no container statuses yet (still initializing).
+    const podStatusApi = new FakePodStatusApi(new Map([["sess-4", { phase: "Pending", containerStatuses: [] }]]));
+
+    const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-4", "busybox:stable");
+    expect(result).toEqual({ differs: false });
+  });
+
+  it("returns { differs: false } when getPodStatus returns null (pod not found)", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-5", { image: "busybox:stable" });
+    objectsApi.seed(toCRReadWithPodAnnotation(manifest, "sess-5"));
+    const podsApi = new FakePodsApi([]);
+    // Pod annotation says "sess-5" but the pod itself is already gone (null).
+    const podStatusApi = new FakePodStatusApi(new Map([["sess-5", null]]));
+
+    const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-5", "busybox:stable");
+    expect(result).toEqual({ differs: false });
   });
 });

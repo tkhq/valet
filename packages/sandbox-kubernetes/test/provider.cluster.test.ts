@@ -24,6 +24,7 @@ import {
   applySandbox,
   customObjectsApiAdapter,
   loadRancherDesktopKubeConfig,
+  podDeleteApiAdapter,
   podStatusApiAdapter,
   podsApiAdapter,
 } from "../src/lifecycle.js";
@@ -67,12 +68,14 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
       throw new Error(`failed to create throwaway namespace "${namespace}": ${created.stderr}`);
     }
     const kc = loadRancherDesktopKubeConfig(k8s.KubeConfig);
+    const coreApi = kc.makeApiClient(k8s.CoreV1Api);
     const objectsApi = customObjectsApiAdapter(kc.makeApiClient(k8s.CustomObjectsApi));
-    const podsApi = podsApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
+    const podsApi = podsApiAdapter(coreApi);
     const execApi = podExecApiAdapter(new k8s.Exec(kc));
-    const livenessApi = podLivenessApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
-    const podStatusApi = podStatusApiAdapter(kc.makeApiClient(k8s.CoreV1Api));
-    provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi }, cfg);
+    const livenessApi = podLivenessApiAdapter(coreApi);
+    const podStatusApi = podStatusApiAdapter(coreApi);
+    const podDeleteApi = podDeleteApiAdapter(coreApi);
+    provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi }, cfg);
     rawDeps = { objectsApi, podsApi, execApi, livenessApi };
   }, 30_000);
 
