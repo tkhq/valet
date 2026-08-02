@@ -28,6 +28,7 @@ import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
 import { webDistPath } from "./assets/base.js";
+import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
 
 /** Handle returned by `startServer`: a graceful `close()` plus the resolved
  * values the boot actually used. */
@@ -236,6 +237,18 @@ await providers.prebuildService.start().catch((err) => {
   console.error("prebuildService.start failed:", err);
 });
 
+// Hourly sandbox-token rotation (sandbox-reconciliation plan, Task 12):
+// re-mints tokens for long-running sandboxes whose initial token is > 12 h
+// old, pushing the fresh token via `SandboxProvider.updateCreds` into the
+// live /etc/valet/creds/ mount. A no-op when the provider does not report
+// `credsMount` (docker dev, local). The interval is `.unref()`'d inside
+// `startRotateSweep` so it never prevents process exit on its own.
+const rotateSweep: RotateSweepHandle = startRotateSweep({
+  host: providers.engineHost,
+  provider: providers.sandboxProvider,
+  db: providers.db,
+});
+
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.
 const authWiring: AuthWiring = authConfig
@@ -314,6 +327,11 @@ async function close(): Promise<void> {
     providers.prebuildService.stop();
   } catch (err) {
     console.error("prebuildService.stop failed:", err);
+  }
+  try {
+    rotateSweep.stop();
+  } catch (err) {
+    console.error("rotateSweep.stop failed:", err);
   }
   try {
     await providers.channelHost.stop();

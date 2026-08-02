@@ -287,6 +287,16 @@ export class EngineHost {
    */
   private gatewayTouch = new Map<string, number>();
 
+  /**
+   * In-memory `sessionId -> Date.now()` of the last sandbox-token mint for
+   * that session (sandbox-reconciliation plan, Task 12). Stamped by
+   * `mintSandboxEnv` on every session build (create/restore). Read by
+   * `startRotateSweep` to decide whether a token is older than the rotation
+   * threshold (default 12 h). Cleared in `evictAll` alongside the rest of
+   * the session state.
+   */
+  private tokenMintedAt = new Map<string, number>();
+
   constructor(private readonly opts: EngineHostOpts) {
     const idleMinutes = opts.idleMinutes ?? 0;
     if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
@@ -466,7 +476,7 @@ export class EngineHost {
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
-    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
+    const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
     // and calls this callback. The callback can fire before create/restore
@@ -497,6 +507,13 @@ export class EngineHost {
     // resolve a prebuild image override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
     const image = this.opts.defaultImage;
+    const sandboxOpts = {
+      workspace: meta.workspace,
+      image,
+      env: sandboxMint?.env,
+      profile,
+      ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+    };
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -504,7 +521,7 @@ export class EngineHost {
             userId: meta.userId,
             orgId: meta.orgId,
             workspace: meta.workspace,
-            sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
+            sandbox: sandboxOpts,
             model,
             modelSpec,
             resolveModel,
@@ -521,7 +538,7 @@ export class EngineHost {
           userId: meta.userId,
           orgId: meta.orgId,
           workspace: meta.workspace,
-          sandbox: { workspace: meta.workspace, image, env: sandboxEnv, profile },
+          sandbox: sandboxOpts,
           model,
           modelSpec,
           resolveModel,
@@ -585,16 +602,22 @@ export class EngineHost {
     userId: string,
     orgId: string,
     profile: "headless" | "full",
-  ): Promise<Record<string, string> | undefined> {
+  ): Promise<{ env: Record<string, string>; credsFiles: Record<string, string> } | undefined> {
     if (!this.opts.db) return undefined;
     const { token } = await mintSandboxToken(this.opts.db, { sessionId, userId, orgId });
+    this.tokenMintedAt.set(sessionId, Date.now());
     const secret = deriveSandboxJwtSecret(this.resolveSandboxJwtMaster(), sessionId);
     return {
-      VALET_SANDBOX_TOKEN: token,
-      VALET_API_URL: this.opts.sandboxApiUrl ?? "http://localhost:8788",
-      VALET_SANDBOX_JWT_SECRET: secret,
-      VALET_SESSION_ID: sessionId,
-      VALET_SANDBOX_PROFILE: profile,
+      env: {
+        // Keep env var for fallback: old sandboxes and non-credsMount providers
+        // read VALET_SANDBOX_TOKEN from the process environment.
+        VALET_SANDBOX_TOKEN: token,
+        VALET_API_URL: this.opts.sandboxApiUrl ?? "http://localhost:8788",
+        VALET_SANDBOX_JWT_SECRET: secret,
+        VALET_SESSION_ID: sessionId,
+        VALET_SANDBOX_PROFILE: profile,
+      },
+      credsFiles: { token },
     };
   }
 
@@ -833,7 +856,7 @@ export class EngineHost {
     // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
     const extras = pluginSessionExtras(this.opts.plugins ?? []);
 
-    const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
+    const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
     const sessionOptions = {
       userId: meta.actorUserId,
@@ -843,7 +866,13 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       owner: principal,
       queueMode,
-      sandbox: { workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
+      sandbox: {
+        workspace,
+        image: this.opts.defaultImage,
+        env: sandboxMint?.env,
+        profile: "headless" as const,
+        ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+      },
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
@@ -1027,6 +1056,7 @@ export class EngineHost {
   evictCache(sessionId: string): void {
     this.cache.get(sessionId)?.session.suspendTimers();
     this.cache.delete(sessionId);
+    this.tokenMintedAt.delete(sessionId);
   }
 
   /**
@@ -1068,6 +1098,57 @@ export class EngineHost {
   /** True if a session is currently cached in this process. */
   isLive(sessionId: string): boolean {
     return this.cache.has(sessionId);
+  }
+
+  /**
+   * Narrow accessor for the rotate sweep (sandbox-reconciliation plan, Task
+   * 12). Returns a snapshot of every cached session whose attachment is in a
+   * state the sweep can act on (`ready` or `suspended`). Exposes only the
+   * fields the sweep needs — does NOT export raw cache entries or the
+   * attachment object itself.
+   *
+   * `mintedAt` is the wall-clock ms of the last `mintSandboxEnv` call for
+   * that session (0 when the host has no record — should not happen for a
+   * cached session, but defensive).
+   */
+  listRotatableSessions(): Array<{
+    sessionId: string;
+    sandboxId: string | undefined;
+    state: "ready" | "suspended";
+    mintedAt: number;
+    userId: string;
+    orgId: string;
+  }> {
+    const result: Array<{
+      sessionId: string;
+      sandboxId: string | undefined;
+      state: "ready" | "suspended";
+      mintedAt: number;
+      userId: string;
+      orgId: string;
+    }> = [];
+    for (const [sessionId, entry] of this.cache) {
+      const state = entry.session.attachment.state;
+      if (state !== "ready" && state !== "suspended") continue;
+      result.push({
+        sessionId,
+        sandboxId: entry.session.attachment.sandboxId,
+        state,
+        mintedAt: this.tokenMintedAt.get(sessionId) ?? 0,
+        userId: entry.session.options.userId,
+        orgId: entry.session.options.orgId,
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Records a fresh mint time for a session — called by the rotate sweep
+   * after it mints and pushes a new token via `updateCreds`, so a second
+   * sweep pass within the rotation window is a no-op.
+   */
+  recordTokenMintedAt(sessionId: string, mintedAt: number): void {
+    this.tokenMintedAt.set(sessionId, mintedAt);
   }
 
   /**
@@ -1298,7 +1379,7 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
-    const sandboxEnv = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
+    const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -1309,7 +1390,13 @@ export class EngineHost {
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
-      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
+      sandbox: {
+        workspace: opts.workspace,
+        image: this.opts.defaultImage,
+        env: sandboxMint?.env,
+        profile: "headless" as const,
+        ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+      },
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
@@ -1390,7 +1477,7 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
-    const sandboxEnv = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
+    const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -1399,7 +1486,13 @@ export class EngineHost {
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       owner: opts.owner,
-      sandbox: { workspace: opts.workspace, image: this.opts.defaultImage, env: sandboxEnv, profile: "headless" as const },
+      sandbox: {
+        workspace: opts.workspace,
+        image: this.opts.defaultImage,
+        env: sandboxMint?.env,
+        profile: "headless" as const,
+        ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+      },
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
