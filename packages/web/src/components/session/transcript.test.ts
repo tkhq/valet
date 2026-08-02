@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import { buildTranscript } from "./transcript";
 
-const session = {
+const session: SessionDetail = {
   id: "sess_1",
   title: "Debug demo",
   workspace: "my-repo",
+  status: "active",
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_000_000,
+  messageCount: 2,
   model: "anthropic/claude-haiku-4-5",
   profile: "full",
-} as unknown as SessionDetail;
+};
 
 const messages: Message[] = [
   {

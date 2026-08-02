@@ -248,7 +248,13 @@ describe("AssistantPage", () => {
 describe("AppearancePage", () => {
   afterEach(() => {
     document.documentElement.removeAttribute("data-theme");
-    window.localStorage.clear();
+    try {
+      window.localStorage.clear();
+    } catch {
+      // Node >=22 ships a stub localStorage global (methods undefined
+      // without --localstorage-file) that can shadow jsdom's — a throwing
+      // afterEach here cascaded into un-cleaned DOM for the next test.
+    }
   });
 
   it("selecting Dark sets data-theme on the document root", () => {

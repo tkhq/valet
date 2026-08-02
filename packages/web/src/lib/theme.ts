@@ -72,6 +72,25 @@ function documentRoot(): ThemeRoot {
   return document.documentElement;
 }
 
+/** In-memory fallback when real storage is absent or non-functional —
+ * Node ≥22 ships a stub `localStorage` global whose methods are undefined
+ * without --localstorage-file, and it can shadow jsdom's in tests. */
+const memoryStorage = new Map<string, string>();
+
 function safeLocalStorage(): StorageReader & StorageWriter {
-  return window.localStorage;
+  const candidate: unknown = typeof window !== "undefined" ? window.localStorage : undefined;
+  if (
+    candidate !== null &&
+    typeof candidate === "object" &&
+    typeof (candidate as Partial<Storage>).getItem === "function" &&
+    typeof (candidate as Partial<Storage>).setItem === "function"
+  ) {
+    return candidate as StorageReader & StorageWriter;
+  }
+  return {
+    getItem: (key) => memoryStorage.get(key) ?? null,
+    setItem: (key, value) => {
+      memoryStorage.set(key, value);
+    },
+  };
 }

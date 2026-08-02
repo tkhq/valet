@@ -3,6 +3,14 @@ import { describe, it, expect } from 'vitest';
 import { validateWorkflowDefinition } from './validate.js';
 import type { WorkflowDefinition } from './shape.js';
 
+/** Deliberately-malformed node for linter-behavior tests. The validator's
+ * real-world input is LLM-authored JSON, so tests must hand it shapes the
+ * WorkflowNode union can't type — same unknown-then-single-cast seam as
+ * the api layer's validateDefinitionInput. */
+function rawNode(node: unknown): WorkflowDefinition['nodes'][number] {
+  return node as WorkflowDefinition['nodes'][number];
+}
+
 function definition(overrides: Partial<WorkflowDefinition>): WorkflowDefinition {
   return {
     version: 'dag/v1',
@@ -264,9 +272,9 @@ describe('validateWorkflowDefinition', () => {
         version: 'dag/v1',
         nodes: [
           { id: 'trigger', type: 'trigger' },
-          { id: 'branch', type: 'if' } as unknown as WorkflowDefinition['nodes'][number],
-          { id: 'vals', type: 'set' } as unknown as WorkflowDefinition['nodes'][number],
-          { id: 'pause', type: 'wait', mode: 'duration' } as unknown as WorkflowDefinition['nodes'][number],
+          rawNode({ id: 'branch', type: 'if' }),
+          rawNode({ id: 'vals', type: 'set' }),
+          rawNode({ id: 'pause', type: 'wait', mode: 'duration' }),
           { id: 'stop', type: 'stop' },
         ],
         edges: [
@@ -294,7 +302,7 @@ describe('validateWorkflowDefinition', () => {
           version: 'dag/v1',
           nodes: [
             { id: 'trigger', type: 'trigger' },
-            { id: 'ask', type: 'llm' } as unknown as WorkflowDefinition['nodes'][number],
+            rawNode({ id: 'ask', type: 'llm' }),
             { id: 'stop', type: 'stop' },
           ],
           edges: [
@@ -556,13 +564,13 @@ describe('validateWorkflowDefinition — linter checks', () => {
     const result = validateWorkflowDefinition(
       linear([
         { id: 'trigger', type: 'trigger' },
-        {
+        rawNode({
           id: 'gen',
           type: 'llm',
           model: 'claude-haiku-4-5',
           prompt: 'x',
           config: { model: 'claude-haiku-4-5', prompt: 'write a haiku' },
-        } as unknown as WorkflowDefinition['nodes'][number],
+        }),
         { id: 'stop', type: 'stop' },
       ]),
     );
@@ -577,11 +585,11 @@ describe('validateWorkflowDefinition — linter checks', () => {
       linear(
         [
           { id: 'trigger', type: 'trigger' },
-          {
+          rawNode({
             id: 'branch',
             type: 'if',
             condition: 'x > 1',
-          } as unknown as WorkflowDefinition['nodes'][number],
+          }),
           { id: 'stop', type: 'stop' },
         ],
         [

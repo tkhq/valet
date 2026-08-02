@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
-import { autoTitle, sanitizeTitle } from "./auto-title.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import { agentSessions, sessionThreads } from "../schema/index.js";
+import { autoTitle, sanitizeTitle } from "./auto-title.js";
 
 describe("sanitizeTitle", () => {
   it("strips wrapping quotes, backticks, and asterisks", () => {
@@ -25,72 +28,40 @@ describe("sanitizeTitle", () => {
   });
 });
 
-/** Minimal in-memory Drizzle stub — just enough surface for `autoTitle` to
- * exercise its query shape without a real database. `select().from().where()
- * .limit()` returns a preloaded row set. `update().set().where()` records
- * the call so the test can assert on writes. */
-function makeStubDb(rows: {
-  session?: { id: string; userId: string; title: string | null };
-  thread?: { id: string; title: string | null };
-}): { db: AppDb; sessionUpdates: unknown[]; threadUpdates: unknown[] } {
-  const sessionUpdates: unknown[] = [];
-  const threadUpdates: unknown[] = [];
-  const select = (fields?: unknown) => ({
-    from: (table: { _label?: string }) => ({
-      where: () => ({
-        limit: async () => {
-          if (table._label === "session") {
-            return rows.session ? [rows.session] : [];
-          }
-          if (table._label === "thread") {
-            return rows.thread ? [{ title: rows.thread.title }] : [];
-          }
-          return [];
-        },
-      }),
-    }),
-    _fields: fields,
-  });
-  const update = (table: { _label: string }) => ({
-    set: (patch: unknown) => ({
-      where: async () => {
-        if (table._label === "session") sessionUpdates.push(patch);
-        if (table._label === "thread") threadUpdates.push(patch);
-      },
-    }),
-  });
-  // Auto-title now upserts the thread row (INSERT ... ON CONFLICT DO UPDATE)
-  // instead of a straight UPDATE — the `session_threads` mirror may not have
-  // seen this thread id before. Stub records the incoming values so tests
-  // can still assert on the effective write.
-  const insert = (table: { _label: string }) => ({
-    values: (patch: { title?: string | null }) => ({
-      onConflictDoUpdate: async () => {
-        if (table._label === "thread" && patch.title !== undefined) {
-          threadUpdates.push({ title: patch.title });
-        }
-      },
-    }),
-  });
-  return {
-    db: {
-      select,
-      update,
-      insert,
-    } as unknown as AppDb,
-    sessionUpdates,
-    threadUpdates,
-  };
-}
-
-// Match table identity by monkey-labelling the imported symbols.
-import { agentSessions, sessionThreads } from "../schema/index.js";
-(agentSessions as unknown as { _label: string })._label = "session";
-(sessionThreads as unknown as { _label: string })._label = "thread";
-
+// Real PGlite instead of a stubbed drizzle chain — the fluent-API stub
+// needed banned double-casts and broke whenever autoTitle's query shape
+// changed (exactly the shape drift a stub can't catch).
 describe("autoTitle", () => {
+  let db: AppDb;
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+  });
+
+  async function seedSession(title: string | null, id = "s1", userId = "u1") {
+    await db.insert(agentSessions).values({
+      id,
+      userId,
+      orgId: "org1",
+      workspace: "demo",
+      title,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+  }
+
+  async function sessionTitle(id = "s1"): Promise<string | null> {
+    const [row] = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
+    return row?.title ?? null;
+  }
+
+  async function threadTitle(id: string): Promise<string | null> {
+    const [row] = await db.select().from(sessionThreads).where(eq(sessionThreads.id, id)).limit(1);
+    return row?.title ?? null;
+  }
+
   it("404s when the session isn't owned", async () => {
-    const { db } = makeStubDb({});
+    await seedSession(null, "s1", "someone-else");
     const result = await autoTitle(
       { db, loadMessages: async () => [], namer: async () => "Unused" },
       { sessionId: "s1", userId: "u1" },
@@ -99,21 +70,20 @@ describe("autoTitle", () => {
   });
 
   it("returns already_titled when session has a meaningful title and no thread was asked", async () => {
-    const { db } = makeStubDb({
-      session: { id: "s1", userId: "u1", title: "Deploy the k8s chart" },
-    });
+    await seedSession("Deploy the k8s chart");
+    const namer = vi.fn();
     const result = await autoTitle(
-      { db, loadMessages: async () => [], namer: vi.fn() },
+      { db, loadMessages: async () => [], namer },
       { sessionId: "s1", userId: "u1" },
     );
     expect(result).toEqual({ ok: false, reason: "already_titled" });
+    expect(namer).not.toHaveBeenCalled();
   });
 
   it("treats null / '' / 'Untitled session' as un-titled", async () => {
     for (const title of [null, "", "Untitled session"]) {
-      const { db, sessionUpdates } = makeStubDb({
-        session: { id: "s1", userId: "u1", title },
-      });
+      ({ appDb: db } = await freshTestPgDb());
+      await seedSession(title);
       const result = await autoTitle(
         {
           db,
@@ -127,14 +97,12 @@ describe("autoTitle", () => {
         { sessionId: "s1", userId: "u1" },
       );
       expect(result).toEqual({ ok: true, sessionTitle: "Fix the CI", threadTitle: null });
-      expect(sessionUpdates).toEqual([{ title: "Fix the CI", updatedAt: 42 }]);
+      expect(await sessionTitle()).toBe("Fix the CI");
     }
   });
 
   it("returns no_messages when the session is empty", async () => {
-    const { db } = makeStubDb({
-      session: { id: "s1", userId: "u1", title: null },
-    });
+    await seedSession(null);
     const result = await autoTitle(
       { db, loadMessages: async () => [], namer: vi.fn() },
       { sessionId: "s1", userId: "u1" },
@@ -142,12 +110,10 @@ describe("autoTitle", () => {
     expect(result).toEqual({ ok: false, reason: "no_messages" });
   });
 
-  it("writes thread title only when the thread is un-titled", async () => {
-    const { db, threadUpdates } = makeStubDb({
-      session: { id: "s1", userId: "u1", title: null },
-      thread: { id: "th1", title: null },
-    });
-    await autoTitle(
+  it("writes thread title only when the thread is un-titled (upserts the mirror row)", async () => {
+    await seedSession(null);
+    // No session_threads row for th1 yet — the upsert must create it.
+    const result = await autoTitle(
       {
         db,
         loadMessages: async () => [{ role: "user", content: "hi" }],
@@ -156,15 +122,19 @@ describe("autoTitle", () => {
       },
       { sessionId: "s1", userId: "u1", threadId: "th1" },
     );
-    expect(threadUpdates).toEqual([{ title: "Greeting demo" }]);
+    expect(result).toEqual({ ok: true, sessionTitle: "Greeting demo", threadTitle: "Greeting demo" });
+    expect(await threadTitle("th1")).toBe("Greeting demo");
   });
 
   it("does not overwrite an existing thread title", async () => {
-    const { db, threadUpdates } = makeStubDb({
-      session: { id: "s1", userId: "u1", title: null },
-      thread: { id: "th1", title: "User-picked name" },
+    await seedSession(null);
+    await db.insert(sessionThreads).values({
+      id: "th1",
+      sessionId: "s1",
+      title: "User-picked name",
+      createdAt: 1,
     });
-    await autoTitle(
+    const result = await autoTitle(
       {
         db,
         loadMessages: async () => [{ role: "user", content: "hi" }],
@@ -173,6 +143,8 @@ describe("autoTitle", () => {
       },
       { sessionId: "s1", userId: "u1", threadId: "th1" },
     );
-    expect(threadUpdates).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.threadTitle).toBeNull();
+    expect(await threadTitle("th1")).toBe("User-picked name");
   });
 });

@@ -33,6 +33,12 @@ export default defineConfig({
     // the inner values below (used when running this config directly).
     testTimeout: 120_000,
     hookTimeout: 120_000,
+    // Applied when this package runs as a ROOT-config project (the inner
+    // projects' settings are not — same reason exclude/testTimeout are
+    // duplicated out here). Per-file isolation re-imported the app module
+    // graph (~1.5s) for every file: ~250s of cumulative import, most of
+    // the root sweep's wall time.
+    isolate: false,
     projects: [
       {
         test: {
@@ -43,6 +49,12 @@ export default defineConfig({
           setupFiles: ["./vitest.setup.ts"],
           testTimeout: 120_000,
           hookTimeout: 120_000,
+          // Share the module registry across files in a worker: per-file
+          // isolation re-imported the full app graph (~1.5s) for every one
+          // of ~155 files — ~250s of cumulative import time, the majority
+          // of the suite's cost. Files still run sequentially per worker;
+          // suites here already re-boot their own app/db state per test.
+          isolate: false,
         },
       },
       {

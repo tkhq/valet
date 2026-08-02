@@ -12,7 +12,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer, type AddressInfo } from "node:net";
+import { createServer } from "node:net";
 import {
   VirtualSandboxProvider,
   type ChildSpawner,
@@ -134,21 +134,41 @@ export interface BootTestApiOpts {
   githubApiUrl?: string;
 }
 
-/** Grabs a free ephemeral port by briefly binding and releasing a socket. A
- * small race exists between release and the real `serve()` call below, but
- * it's the same pattern node test harnesses commonly use — `EngineHost`
- * needs its `apiBaseUrl` before `createApp`/`serve` can hand back the port
+/** Pre-allocates a port for the app to bind. `EngineHost` needs its
+ * `apiBaseUrl` before `createApp`/`serve` can hand back the port
  * `serve({ port: 0 })` would otherwise assign, so a pre-allocated port is
- * the only order that works here. */
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
+ * the only order that works here.
+ *
+ * Allocation probes SEQUENTIALLY inside a per-vitest-worker range instead
+ * of `listen(0)` → close → reuse: the OS hands sibling workers the same
+ * ephemeral port in the release window, and the resulting EADDRINUSE
+ * failed whole 10-minute suite runs. Disjoint ranges make cross-worker
+ * collisions impossible; the in-worker cursor never re-probes a port it
+ * already handed out. */
+const PORT_RANGE_BASE = 21000;
+const PORT_RANGE_SIZE = 20000;
+// Seed from the PID, not VITEST_POOL_ID: pool ids restart per vitest
+// project, so two projects' workers could share a "unique" id and probe
+// the same cursor simultaneously. Live processes can't share a PID, and
+// the multiplier scatters cursors so even a mod-collision starts far away.
+let portCursor = PORT_RANGE_BASE + ((process.pid * 137) % PORT_RANGE_SIZE);
+
+function canBind(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
     const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, () => {
-      const port = (srv.address() as AddressInfo).port;
-      srv.close(() => resolve(port));
+    srv.once("error", () => resolve(false));
+    srv.listen(port, () => {
+      srv.close(() => resolve(true));
     });
   });
+}
+
+async function getFreePort(): Promise<number> {
+  for (;;) {
+    if (portCursor >= PORT_RANGE_BASE + PORT_RANGE_SIZE) portCursor = PORT_RANGE_BASE;
+    const candidate = portCursor++;
+    if (await canBind(candidate)) return candidate;
+  }
 }
 
 export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> {

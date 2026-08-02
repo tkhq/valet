@@ -253,12 +253,16 @@ export function describeRunHostContract(makeFixture: MakeRunHostFixture): void {
         const before = await store.getCheckpoints('run-b');
         await host.wake('run-b');
         await host.wake('run-b');
-        await sleep(50); // let any triggered drives finish
+        await sleep(50); // let any triggered drives start
+        // Deadline-based, not a fixed sleep: under load the re-park drive
+        // can take longer than any constant, and sampling mid-drive read
+        // 'running' (flaked real-Postgres runs).
+        await waitFor(async () => (await store.getRun('run-b'))?.status === 'parked', {
+          timeoutMs: 5_000,
+        });
 
         const after = await store.getCheckpoints('run-b');
         expect(after).toHaveLength(before.length);
-        const run = await store.getRun('run-b');
-        expect(run?.status).toBe('parked');
       } finally {
         await host.stopHost();
       }
@@ -291,10 +295,18 @@ export function describeRunHostContract(makeFixture: MakeRunHostFixture): void {
         // the run does not complete early.
         clock.advance(150); // now = t0 + 150 = naturalWakeAt - 50
         await host.wake('run-mf');
-        await sleep(30);
+        // Deadline-based (see the spurious-wake test above). The recomputed
+        // wakeAt proves the re-park came from the node's real timer wait,
+        // not the moved-forward store value.
+        await waitFor(
+          async () => {
+            const r = await store.getRun('run-mf');
+            return r?.status === 'parked' && r?.wakeAt === naturalWakeAt;
+          },
+          { timeoutMs: 5_000 },
+        );
         run = await store.getRun('run-mf');
         expect(run?.status).toBe('parked');
-        // The re-park recomputed wakeAt from the node's real timer wait.
         expect(run?.wakeAt).toBe(naturalWakeAt);
 
         // Reaching the true wakeAt completes the run.
@@ -343,10 +355,14 @@ export function describeRunHostContract(makeFixture: MakeRunHostFixture): void {
         await host.start('run-stop-gate', runParams(), sessionDefinition());
         await waitFor(async () => (await store.getRun('run-stop-gate'))?.status === 'parked');
 
+        await host.stopHost();
+        // Snapshot AFTER stop: between a pre-stop snapshot and stopHost
+        // the poll loop could legitimately fire one more engine call,
+        // which flaked the no-new-calls assertion under load. A short
+        // drain lets any drive that raced stopHost finish writing.
+        await sleep(50);
         const callsBefore = engine.calls.length;
         const checkpointsBefore = await store.getCheckpoints('run-stop-gate');
-
-        await host.stopHost();
 
         // Both a direct `wake()` call and (implicitly) the now-hanging
         // background submission waiter must be no-ops post-stop: neither

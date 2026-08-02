@@ -281,7 +281,10 @@ export function validateWorkflowDefinition(
 
 function lintNodeKeys(node: WorkflowNode, label: string, errors: string[]): void {
   const allowed = ALLOWED_KEYS[node.type];
-  const record = node as unknown as Record<string, unknown>;
+  // Entries round-trip instead of a cast: the node union is interfaces
+  // (no implicit index signature), but we need to walk whatever keys the
+  // LLM actually wrote, including ones the union doesn't know about.
+  const record: Record<string, unknown> = Object.fromEntries(Object.entries(node));
   for (const key of Object.keys(record)) {
     if (allowed.includes(key)) continue;
     if (key === 'config' && typeof record.config === 'object' && record.config !== null) {
