@@ -17,11 +17,16 @@
  * is ground truth, so the generated scripts send `x-valet-sandbox` too.)
  *
  * ── Authorization ────────────────────────────────────────────────────────
- * The session id comes from the verified token, never from the body. The
- * requested `owner` must be one of the session's bound owners (the first
- * path segment of a `session_repos.full_name`, compared case-insensitively)
- * — an unbound owner 403s, so a compromised sandbox cannot mint credentials
- * for repos its session was never granted.
+ * The session id comes from the verified token, never from the body. A
+ * bound owner (first path segment of a `session_repos.full_name`, compared
+ * case-insensitively) resolves with ITS binding's auth mode, exactly as
+ * before. An owner with NO binding — including sessions with no bindings at
+ * all, like orchestrators cloning ad hoc — falls back to org-level `auto`
+ * resolution for hosts we recognize (github.com only today) instead of
+ * 403ing. That grants the sandbox nothing it could not already reach: the
+ * same org-level tiers (App installation → user credential → org PAT) back
+ * the session's own `github.*` plugin tools, and the sandbox principal
+ * carries the same user + org. Unrecognized hosts still 403.
  *
  * ── Resolution ───────────────────────────────────────────────────────────
  * The binding is matched by full `owner/repo` (case-insensitive) when the
@@ -78,37 +83,41 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
   const host = (body as Record<string, unknown> | null)?.host;
-  const owner = (body as Record<string, unknown> | null)?.owner;
+  const rawOwner = (body as Record<string, unknown> | null)?.owner;
   const rawRepo = (body as Record<string, unknown> | null)?.repo;
-  if (!isNonEmptyString(host) || !isNonEmptyString(owner)) {
-    return c.json({ error: "host and owner are required" }, 400);
+  const rawPurpose = (body as Record<string, unknown> | null)?.purpose;
+  if (!isNonEmptyString(host)) {
+    return c.json({ error: "host is required" }, 400);
   }
+  // `owner` is optional: the git helper always derives one from the clone
+  // path, but the `gh` shim can run outside any repo (`gh api /user`,
+  // `gh repo list`) and sends an empty owner — org-level fallback handles it.
+  const owner = isNonEmptyString(rawOwner) ? rawOwner : undefined;
   // `repo` is optional — the helper only carries it when git sent a path with
   // a repo segment. When present, it disambiguates two bindings under the same
   // owner (each may carry a DIFFERENT auth); when absent or unmatched we fall
   // back to the first owner match (the pre-repo behavior).
   const wantRepo = isNonEmptyString(rawRepo) ? rawRepo.toLowerCase() : undefined;
+  // `purpose` picks the resolution ladder (see `services/github-tokens.ts`):
+  // "git" (default; installation-first) for clone/push, "api" (user-first,
+  // sole-installation fallback) for the `gh` shim's REST/GraphQL calls.
+  const purpose = rawPurpose === "api" ? "api" : "git";
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
 
   const bindings = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId));
 
-  const wantOwner = owner.toLowerCase();
+  const wantOwner = owner?.toLowerCase();
   const binding =
-    (wantRepo !== undefined
-      ? bindings.find(
-          (b) =>
-            ownerOf(b.fullName).toLowerCase() === wantOwner && repoOf(b.fullName).toLowerCase() === wantRepo,
-        )
-      : undefined) ?? bindings.find((b) => ownerOf(b.fullName).toLowerCase() === wantOwner);
-  if (!binding) {
-    return c.json({ error: "owner not bound to this session" }, 403);
-  }
-
-  const repoHost = repoHostForUrl(binding.cloneUrl);
-  if (!repoHost) {
-    return c.json({ error: "no credential host for this repo" }, 403);
-  }
+    wantOwner === undefined
+      ? undefined
+      : ((wantRepo !== undefined
+          ? bindings.find(
+              (b) =>
+                ownerOf(b.fullName).toLowerCase() === wantOwner &&
+                repoOf(b.fullName).toLowerCase() === wantRepo,
+            )
+          : undefined) ?? bindings.find((b) => ownerOf(b.fullName).toLowerCase() === wantOwner));
 
   const ctx: RepoHostContext = {
     orgId: sandbox.orgId,
@@ -116,10 +125,37 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) },
   };
 
+  if (!binding) {
+    // No binding for this owner (or no owner at all) — org-level fallback.
+    // `auto` resolution only: it degrades to anonymous rather than erroring,
+    // so a public clone in an unbound sandbox still proceeds tokenless.
+    const repoHost = repoHostForUrl(`https://${host}/`);
+    if (!repoHost) {
+      return c.json({ error: "no credential host for this repo" }, 403);
+    }
+    const result = await repoHost.resolveGitToken(ctx, {
+      owner: owner ?? "",
+      repo: wantRepo ?? "",
+      purpose,
+      auth: "auto",
+    });
+    if (result === null || "anonymous" in result) {
+      const anon: PostSandboxGitCredentialResponse = { anonymous: true };
+      return c.json(anon);
+    }
+    const cred: PostSandboxGitCredentialResponse = { username: result.username, password: result.token };
+    return c.json(cred);
+  }
+
+  const repoHost = repoHostForUrl(binding.cloneUrl);
+  if (!repoHost) {
+    return c.json({ error: "no credential host for this repo" }, 403);
+  }
+
   const result = await repoHost.resolveGitToken(ctx, {
     owner: ownerOf(binding.fullName),
     repo: repoOf(binding.fullName),
-    purpose: "git",
+    purpose,
     auth: binding.auth,
   });
 

@@ -6,10 +6,12 @@
  * involved (a no-expiry/no-refresh credential resolves without a health call
  * — see `services/github-tokens.ts`'s `resolveUserCredential`).
  *
- * Security pins here: unbound owner 403; garbage/missing sandbox token 401;
- * token appears ONLY in the response body (never any console call); an
- * explicit-auth binding with no credential 409s rather than silently
- * downgrading to anonymous; case-insensitive owner match.
+ * Security pins here: garbage/missing sandbox token 401; token appears ONLY
+ * in the response body (never any console call); an explicit-auth binding
+ * with no credential 409s rather than silently downgrading to anonymous;
+ * case-insensitive owner match; an unbound owner falls back to ORG-LEVEL
+ * `auto` resolution (never a binding's explicit auth), degrading to
+ * anonymous when nothing resolves; unrecognized hosts 403.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -157,16 +159,54 @@ describe("POST /api/sandbox/git-credential", () => {
     expect((await unmatchedRes.json()) as PostSandboxGitCredentialResponse).toEqual({ anonymous: true });
   });
 
-  it("403s for an owner not bound to the session", async () => {
+  it("unbound owner falls back to org-level auto resolution (user credential tier)", async () => {
     api = await bootTestApi();
     await bindRepo();
-    await saveUserCredential("ghp_should_not_leak");
+    await saveUserCredential("ghp_org_fallback_token");
+    const token = await mintToken();
+
+    // "someone-else" matches no binding — pre-fallback this 403'd. Now it
+    // resolves through the org-level auto ladder (no installation for that
+    // owner → the user's own credential), so an orchestrator sandbox can
+    // clone repos its session never bound.
+    const res = await post(token, { host: "github.com", owner: "someone-else" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SandboxGitCredential;
+    expect(body.username).toBe("x-access-token");
+    expect(body.password).toBe("ghp_org_fallback_token");
+  });
+
+  it("unbound owner with nothing configured degrades to anonymous (public clone proceeds)", async () => {
+    api = await bootTestApi();
     const token = await mintToken();
 
     const res = await post(token, { host: "github.com", owner: "someone-else" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as PostSandboxGitCredentialResponse).toEqual({ anonymous: true });
+  });
+
+  it("ownerless request (gh shim outside a repo, purpose=api) resolves org-level", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_gh_shim_token", "octocat");
+    const token = await mintToken();
+
+    const res = await post(token, { host: "github.com", purpose: "api" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SandboxGitCredential;
+    // api purpose surfaces the credential's own login as the username.
+    expect(body.username).toBe("octocat");
+    expect(body.password).toBe("ghp_gh_shim_token");
+  });
+
+  it("403s for an unrecognized host with no binding", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_wrong_host");
+    const token = await mintToken();
+
+    const res = await post(token, { host: "gitlab.example.com", owner: "someone" });
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("owner not bound to this session");
+    expect(body.error).toBe("no credential host for this repo");
   });
 
   it("409s (not anonymous) when an explicit-auth binding has no eligible credential", async () => {
@@ -225,11 +265,11 @@ describe("POST /api/sandbox/git-credential", () => {
     }
   });
 
-  it("400s on a body missing host/owner", async () => {
+  it("400s on a body missing host (owner is optional now)", async () => {
     api = await bootTestApi();
     await bindRepo();
     const token = await mintToken();
-    const res = await post(token, { host: "github.com" });
+    const res = await post(token, { owner: "acme" });
     expect(res.status).toBe(400);
   });
 });

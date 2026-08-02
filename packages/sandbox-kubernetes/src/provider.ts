@@ -470,6 +470,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       warmPool: false,
       hibernation: true,
       customImage: true,
+      isolated: true,
       coldStartEstimateMs: 8000,
     };
   }

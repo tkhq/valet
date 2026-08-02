@@ -58,6 +58,10 @@ const STAGING_DIR = ".valet-prep";
  * command strings, never passed to `writeFile` directly. */
 const HELPER_PATH = "/usr/local/bin/git-credential-valet";
 const GH_WRAPPER_PATH = "/usr/local/bin/valet-gh";
+/** The same wrapper script ALSO installs as `gh` itself — /usr/local/bin
+ * precedes /usr/bin on PATH, so a plain `gh` transparently authenticates.
+ * The script locates the real binary by skipping /usr/local/bin. */
+const GH_SHIM_PATH = "/usr/local/bin/gh";
 
 const DEFAULT_USER_NAME = "Valet Agent";
 const DEFAULT_USER_EMAIL = "agent@valet.local";
@@ -179,7 +183,8 @@ async function installCredentialHelper(sandbox: Sandbox, apiUrl: string): Promis
       "mkdir -p /usr/local/bin",
       `cp ${shQuote(stagedHelper)} ${HELPER_PATH}`,
       `cp ${shQuote(stagedGhWrapper)} ${GH_WRAPPER_PATH}`,
-      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH}`,
+      `cp ${shQuote(stagedGhWrapper)} ${GH_SHIM_PATH}`,
+      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH}`,
     ].join(" && "),
   );
   if (install.exitCode !== 0) {
@@ -489,11 +494,35 @@ export async function resolveStartRef(sandbox: Sandbox, dir: string): Promise<Se
 }
 
 /**
+ * Builds the `prepareSandbox` closure for a session WITHOUT repo bindings
+ * (orchestrators, unbound chat sessions). Installs the git credential
+ * helper + `gh` shim and configures the git identity — nothing else, no
+ * clones. Unlike the repo-bound prep, every failure here is logged and
+ * swallowed: an unbound session has no clone that depends on the helper,
+ * so a broken install must not turn into a session startup failure.
+ */
+export function buildCredentialOnlyPrep(opts: {
+  apiUrl: string;
+  userName?: string;
+  userEmail?: string;
+}): (sandbox: Sandbox, epoch: number) => Promise<void> {
+  return async (sandbox: Sandbox) => {
+    try {
+      await installCredentialHelper(sandbox, opts.apiUrl);
+      await configureGitIdentity(sandbox, opts.userName, opts.userEmail);
+    } catch (err) {
+      console.error(
+        "workspace prep: credential-only prep failed — continuing without git/gh auth:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  };
+}
+
+/**
  * Builds the `prepareSandbox` closure for a session with repo bindings.
- * Callers (`EngineHost.buildSession`) only invoke this when
- * `meta.repos` is non-empty — an unbound session passes no
- * `prepareSandbox` at all, keeping the provision path byte-identical to
- * before this task.
+ * Callers (`EngineHost.buildSession`) only invoke this when `meta.repos`
+ * is non-empty; unbound sessions get `buildCredentialOnlyPrep` instead.
  */
 export function buildWorkspacePrep(opts: WorkspacePrepOpts): (sandbox: Sandbox, epoch: number) => Promise<void> {
   return async (sandbox: Sandbox) => {

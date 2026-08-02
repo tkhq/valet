@@ -717,6 +717,16 @@ export interface SandboxCapabilities {
   tunnels: boolean;
   warmPool: boolean;
   /**
+   * Whether the sandbox's filesystem and global state are isolated from the
+   * host process (container/VM backends: docker, kubernetes). When false or
+   * absent (local/virtual and test fakes), `exec` reaches the HOST — prep
+   * steps that mutate global state (`git config --global`, installing into
+   * `/usr/local/bin`) must be skipped for sessions that don't strictly need
+   * them. Optional so existing capability literals stay valid; absent means
+   * NOT isolated.
+   */
+  isolated?: boolean;
+  /**
    * Whether the backend can scale an idle sandbox to zero and later wake it
    * with its workspace intact (hibernation). When true, the provider MUST
    * implement `suspend`/`resume` and the attachment layer's `suspended` state

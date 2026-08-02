@@ -628,6 +628,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       warmPool: false,
       hibernation: false,
       customImage: true,
+      isolated: true,
       coldStartEstimateMs: 8000,
     };
   }

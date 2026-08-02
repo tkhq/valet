@@ -44,8 +44,8 @@ export interface SessionMetaSource {
  * Assemble the COMPLETE {@link SessionMeta} for a session: identity + profile
  * from `src`, plus repo bindings (from `session_repos`, in position order) and
  * git identity (from `users`). Returns empty/absent bindings when the session
- * has none — an orchestrator or unbound session gets no `prepareSandbox`,
- * byte-identical to passing a bare meta.
+ * has none — an orchestrator or unbound session then gets credential-only
+ * prep (helper + `gh` shim, no clones) instead of the full workspace prep.
  */
 export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promise<SessionMeta> {
   const [repoRows, userRows] = await Promise.all([

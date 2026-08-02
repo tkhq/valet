@@ -28,7 +28,7 @@ import type { ValetPlugin } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { buildWorkspacePrep } from "./workspace-prep.js";
+import { buildCredentialOnlyPrep, buildWorkspacePrep } from "./workspace-prep.js";
 import { resolvePrebuildImage, type PrebuildResolution } from "../prebuilds/resolve.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
@@ -210,9 +210,9 @@ export interface SessionMeta {
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a
    * `prepareSandbox` hook (`workspace-prep.ts`) that clones them via the
-   * credential helper on first cold boot. Absent/empty === no prep — the
-   * session's `CreateSessionOptions`/`RestoreSessionOptions` get no
-   * `prepareSandbox` key at all, byte-identical to before this task.
+   * credential helper on first cold boot. Absent/empty === credential-only
+   * prep: the helper + `gh` shim still install (so ad-hoc git/gh in any
+   * sandbox authenticates), but nothing clones.
    */
   repos?: RepoBinding[];
   /**
@@ -609,20 +609,30 @@ export class EngineHost {
   }
 
   /**
-   * Builds the `prepareSandbox` hook for a session with repo bindings
-   * (GitHub/repo integration plan, Task 9), or `undefined` when `meta.repos`
-   * is empty/absent — callers must conditionally spread the result rather
-   * than always setting the key, so an unbound session's
-   * `CreateSessionOptions`/`RestoreSessionOptions` stay byte-identical to
-   * before this task (no `prepareSandbox` key at all, not
-   * `prepareSandbox: undefined`).
+   * Builds the `prepareSandbox` hook (GitHub/repo integration plan, Task 9).
+   * A session with repo bindings gets the full clone prep; a session WITHOUT
+   * bindings (orchestrators, unbound chat) gets credential-only prep — the
+   * git credential helper + `gh` shim + git identity, no clones — so ad-hoc
+   * `git clone` / `gh` inside any sandbox authenticates through the
+   * credential route's org-level fallback instead of running anonymous.
    */
   private buildPrepareSandbox(
     meta: SessionMeta,
     prebuild?: PrebuildResolution | null,
     onStartRef?: (ref: SessionStartRef) => void | Promise<void>,
   ): ((sandbox: Sandbox, epoch: number) => Promise<void>) | undefined {
-    if (!meta.repos || meta.repos.length === 0) return undefined;
+    if (!meta.repos || meta.repos.length === 0) {
+      // Only on ISOLATED backends (docker/kubernetes). Local/virtual
+      // sandboxes exec against the host process — credential-only prep
+      // would rewrite the developer's real `git config --global` and drop
+      // a `gh` shim into the host's /usr/local/bin.
+      if (this.opts.sandboxProvider.capabilities().isolated !== true) return undefined;
+      return buildCredentialOnlyPrep({
+        apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
+        userName: meta.userName,
+        userEmail: meta.userEmail,
+      });
+    }
     return buildWorkspacePrep({
       apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
       repos: meta.repos,

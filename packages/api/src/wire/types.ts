@@ -1286,21 +1286,30 @@ export interface GetReposResponse {
 // ── REST: in-sandbox git credential surface (GitHub/repo integration plan,
 // Task 8) ────────────────────────────────────────────────────────────────
 // `POST /api/sandbox/git-credential` — sandbox-token authed. The in-sandbox
-// git credential helper / `valet-gh` wrapper POST `{host, owner, repo}`; the
-// route resolves the session's bound repo to a usable git credential.
+// git credential helper / `gh` shim POST `{host, owner?, repo?, purpose?}`;
+// the route resolves the session's bound repo — or, for an unbound owner,
+// org-level `auto` resolution — to a usable git credential.
 
 export interface PostSandboxGitCredentialRequest {
-  /** Git host from the credential request (e.g. `github.com`). Informational
-   * — the resolvable host is derived from the matched binding's clone URL. */
+  /** Git host from the credential request (e.g. `github.com`). For a bound
+   * owner the resolvable host is derived from the binding's clone URL; for
+   * the org-level fallback it selects the `RepoHost` directly. */
   host: string;
-  /** Repository owner (org/user login) the credential is wanted for. Must be
-   * one of the session's bound owners (case-insensitive) or the request 403s. */
-  owner: string;
+  /** Repository owner (org/user login) the credential is wanted for. A
+   * session-bound owner (case-insensitive) resolves with its binding's auth
+   * mode; an unbound or absent owner falls back to org-level `auto`
+   * resolution (github.com only). The `gh` shim omits it when run outside
+   * a repo. */
+  owner?: string;
   /** Repository name (no `owner/` prefix, `.git` stripped). Optional — when
    * present it disambiguates two same-owner bindings that carry different
    * `auth`; when absent or unmatched the route falls back to the first owner
    * match. */
   repo?: string;
+  /** Resolution ladder: `"git"` (default; installation-first) for clone and
+   * push, `"api"` (user-first, sole-installation fallback) for the `gh`
+   * shim's REST/GraphQL calls. Anything else is treated as `"git"`. */
+  purpose?: "git" | "api";
 }
 
 /** A usable git credential — `password` is the token, `username` its paired

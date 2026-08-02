@@ -16,8 +16,9 @@
  *   4. `POST /api/sessions` binds a repo (`auth: "auto"`), and the DB write
  *      is visible to every downstream consumer.
  *   5. The sandbox credential-helper route (`POST /api/sandbox/git-credential`,
- *      `purpose: "git"`) mints a token for the bound owner and 403s an
- *      unbound one.
+ *      `purpose: "git"`) mints a token for the bound owner; an unbound owner
+ *      falls back to org-level `auto` resolution (anonymous here — no
+ *      installation/user/PAT tier matches).
  *   6. The action-invoke-level seam — a REAL `EngineHost.sessionFor(...)`
  *      build's `session.credentialProvider().get("github")`
  *      (`purpose: "api"`) — resolves through the SAME binding, proving the
@@ -54,6 +55,7 @@ import type {
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
   SandboxGitCredential,
+  PostSandboxGitCredentialResponse,
 } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -207,14 +209,16 @@ describe("GitHub/repo integration — full API loop e2e (fixture)", () => {
     expect(helperBody.username).toBe("x-access-token");
     expect(helperBody.password).toBe("inst-111");
 
-    // 403 for an unbound owner — the sandbox cannot mint credentials for
-    // repos its session was never granted.
+    // Unbound owner → org-level `auto` fallback (not a 403): no installation
+    // for "someone-else", no user credential connected yet, no org PAT →
+    // degrades to anonymous, so a public clone still proceeds tokenless.
     const unboundRes = await fetch(`${api.baseUrl}/api/sandbox/git-credential`, {
       method: "POST",
       headers: { ...HEADERS, "x-valet-sandbox": sandboxToken },
       body: JSON.stringify({ host: "github.com", owner: "someone-else" }),
     });
-    expect(unboundRes.status).toBe(403);
+    expect(unboundRes.status).toBe(200);
+    expect((await unboundRes.json()) as PostSandboxGitCredentialResponse).toEqual({ anonymous: true });
 
     // ── 6. Action-invoke-level seam, anonymous-org state ────────────────
     // A real `EngineHost.sessionFor(...)` build reads the SAME
