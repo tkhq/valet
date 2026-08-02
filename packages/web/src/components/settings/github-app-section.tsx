@@ -326,9 +326,31 @@ function ConfiguredCard({
   const refresh = useRefreshGithubApp();
   const deleteApp = useDeleteGithubApp();
   const app = data.app;
+  const uninstalled = data.installations.length === 0;
 
   return (
     <div className="space-y-6">
+      {/* The App exists but grants access to NOTHING until it's installed
+          on an account — the step people miss, because GitHub's creation
+          flow ends without prompting for it. Loud on purpose. */}
+      {uninstalled && app && (
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-amber-300 bg-amber-50/70 px-5 py-4 dark:border-amber-700/60 dark:bg-amber-950/40">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-ink">One step left — install the App</div>
+            <p className="mt-0.5 text-xs leading-relaxed text-muted">
+              The App is created, but nothing works until it's installed on a GitHub account
+              and granted repos. After installing, come back — Valet picks it up
+              automatically.
+            </p>
+          </div>
+          <Button asChild>
+            <a href={app.installUrl} target="_blank" rel="noreferrer">
+              Install on GitHub
+            </a>
+          </Button>
+        </div>
+      )}
+
       <div className="space-y-3 rounded-md border border-line p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
@@ -350,10 +372,10 @@ function ConfiguredCard({
           </Badge>
         </div>
         <div className="flex flex-wrap gap-2">
-          {app && (
+          {app && !uninstalled && (
             <Button asChild variant="secondary" size="sm">
               <a href={app.installUrl} target="_blank" rel="noreferrer">
-                Install on GitHub
+                Install on another account
               </a>
             </Button>
           )}
@@ -386,7 +408,9 @@ function ConfiguredCard({
       <div className="space-y-2">
         <h3 className="text-xs font-medium uppercase tracking-wider text-muted">Installations</h3>
         {data.installations.length === 0 ? (
-          <p className="text-sm text-muted">No installations yet.</p>
+          <p className="text-sm text-muted">
+            No installations yet — the App can't reach any repos until it's installed.
+          </p>
         ) : (
           <div className="divide-y divide-line border-t border-line">
             {data.installations.map((inst) => (

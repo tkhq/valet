@@ -190,7 +190,9 @@ describe("GithubAppSection", () => {
       "href",
       "https://github.com/apps/valet-acme",
     );
-    expect(screen.getByRole("link", { name: "Install on GitHub" })).toHaveProperty(
+    // Installed: the loud banner is gone; the quiet add-another link remains.
+    expect(screen.queryByText("One step left — install the App")).toBeNull();
+    expect(screen.getByRole("link", { name: "Install on another account" })).toHaveProperty(
       "href",
       "https://github.com/apps/valet-acme/installations/new",
     );
@@ -200,6 +202,29 @@ describe("GithubAppSection", () => {
     expect(screen.getByText("some-user")).toBeTruthy();
     expect(screen.getByText("Suspended")).toBeTruthy();
     expect(screen.getAllByText("Linked").length).toBeGreaterThan(0);
+  });
+
+  it("configured but uninstalled: shows the loud install banner with the install link", () => {
+    githubAppData = {
+      configured: true,
+      app: {
+        appId: "123",
+        appSlug: "valet-acme",
+        htmlUrl: "https://github.com/apps/valet-acme",
+        installUrl: "https://github.com/apps/valet-acme/installations/new",
+      },
+      installations: [],
+      webhook: { mode: "manual" },
+    };
+    render(<GithubAppSection />);
+
+    expect(screen.getByText("One step left — install the App")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Install on GitHub" })).toHaveProperty(
+      "href",
+      "https://github.com/apps/valet-acme/installations/new",
+    );
+    // The quiet add-another variant only appears once installed.
+    expect(screen.queryByRole("link", { name: "Install on another account" })).toBeNull();
   });
 
   it("Refresh installations fires the refresh mutation", () => {
