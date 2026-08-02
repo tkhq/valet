@@ -357,6 +357,141 @@ describe("SandboxAttachment.reconcile", () => {
     expect(provider.createImages.length).toBe(0);
     expect(att.state).toBe("detached");
   });
+
+  it("deleted applied file + stock session: re-applies in place, rewritten file carries createOpts image not \"\"", async () => {
+    // Regression: observe() previously normalized a null readAppliedState into
+    // { image: "" }, so the rewritten applied file would carry "image":"" —
+    // observed live after a delete-file + reconcile cycle.
+    const provider = new RecordingProvider();
+    const applied: string[] = [];
+    const fake = new FakeSpecProvider({
+      // desired.image is undefined — stock session, no prebuild image requirement.
+      specHash: "h1",
+      steps: [
+        step("s1", "sh1", async () => {
+          applied.push("s1");
+        }),
+      ],
+    });
+    const att = await reachReady(provider, fake, { image: "stock:latest" });
+    applied.length = 0;
+
+    // Simulate the applied-state file being deleted from the sandbox.
+    const sb = att.current();
+    if (!sb) throw new Error("expected ready sandbox");
+    await sb.exec('rm -f /etc/valet/applied.json');
+
+    // Advance past the observation TTL so observe() re-reads the (now missing) file.
+    await new Promise((r) => setTimeout(r, 0));
+    // Manually expire the cache by wiping it through a fresh reconcile after
+    // forcing the observation timestamp to be stale. We do this by running
+    // reconcile with a faked-stale cache via vi.useFakeTimers inside the test.
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(OBSERVE_TTL_MS + 1);
+      // Drift a step so reconcile has something to re-apply in place.
+      fake.spec = {
+        specHash: "h2",
+        steps: [
+          step("s1", "sh1-NEW", async () => {
+            applied.push("s1");
+          }),
+        ],
+      };
+      await att.reconcile();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Steps were re-applied in place (no new provision).
+    expect(provider.createImages.length).toBe(1);
+    expect(applied).toEqual(["s1"]);
+    expect(att.currentEpoch()).toBe(1);
+
+    // The rewritten applied file must carry createOpts.image, not "".
+    const state = await readAppliedState(sb);
+    expect(state).not.toBeNull();
+    expect(state!.image).toBe("stock:latest");
+    // observedImage() must also reflect the real image, not "".
+    expect(att.observedImage()).toBe("stock:latest");
+  });
+
+  it("deleted applied file + desired.image equal to boot image: no replacement, re-applies in place", async () => {
+    // Regression: when desired.image === createOpts.image, the missing file
+    // must NOT be mistaken for image drift. If observe() returns image:"" but
+    // desired.image is "valet-sandbox:dev", the comparison "" !== "valet-sandbox:dev"
+    // would force a full pod replacement after any pod restart, where an
+    // in-place re-apply was sufficient (the restarted pod runs the same image).
+    const provider = new RecordingProvider();
+    const bootImage = "valet-sandbox:dev";
+    const applied: string[] = [];
+    const fake = new FakeSpecProvider({
+      image: bootImage,
+      specHash: "h1",
+      steps: [
+        step("s1", "sh1", async () => {
+          applied.push("s1");
+        }),
+      ],
+    });
+    const att = await reachReady(provider, fake, { image: bootImage });
+    applied.length = 0;
+
+    // Simulate a pod restart: delete the applied-state file.
+    const sb = att.current();
+    if (!sb) throw new Error("expected ready sandbox");
+    await sb.exec('rm -f /etc/valet/applied.json');
+
+    // Expire the observation cache, then drift a step so there is work to do.
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(OBSERVE_TTL_MS + 1);
+      fake.spec = {
+        image: bootImage,
+        specHash: "h2",
+        steps: [
+          step("s1", "sh1-DRIFTED", async () => {
+            applied.push("s1");
+          }),
+        ],
+      };
+      await att.reconcile();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Must NOT have re-provisioned — no new provider.create call.
+    expect(provider.createImages.length).toBe(1);
+    expect(att.currentEpoch()).toBe(1);
+    // Step was re-applied in place.
+    expect(applied).toEqual(["s1"]);
+    expect(att.observedImage()).toBe(bootImage);
+  });
+
+  it("existing behavior pin: desired.image genuinely different from booted image still replaces", async () => {
+    // Confirm the fix does not suppress legitimate image-drift replacements.
+    // When desired.image differs from what createOpts.image was booted with,
+    // reconcile must still bump the epoch and re-provision.
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({
+      image: "img:v1",
+      specHash: "h1",
+      steps: [step("s1", "sh1")],
+    });
+    const att = await reachReady(provider, fake, { image: "img:v1" });
+    expect(provider.createImages).toEqual(["img:v1"]);
+
+    // Change the desired image to a genuinely different value.
+    fake.spec = { image: "img:v2", specHash: "h2", steps: [step("s1", "sh1")] };
+
+    await att.reconcile();
+    // Let the replacement re-provision complete.
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(att.currentEpoch()).toBe(2); // epoch bumped → replacement happened
+    expect(provider.createImages).toEqual(["img:v1", "img:v2"]);
+    expect(att.observedImage()).toBe("img:v2");
+  });
 });
 
 describe("SandboxAttachment wake folding", () => {

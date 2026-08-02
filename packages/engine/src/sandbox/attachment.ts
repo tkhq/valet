@@ -466,7 +466,11 @@ export class SandboxAttachment {
       const pending = diffSteps(desired.steps, observed);
       if (pending.length === 0) return; // no drift — fast path
 
-      const image = observed.image;
+      // observed.image is always the epoch's real boot image after observe()
+      // resolves it (file image non-empty > createOpts.image > ""). The
+      // fallback here is belt-and-suspenders: it prevents writing an empty
+      // image string into the applied file if observe() somehow produced one.
+      const image = observed.image || this.createOpts.image || "";
       await applyPlan(sandbox, desired, image, observed);
       if (this.destroyed || this._state !== "ready" || this._epoch !== epoch) return;
       // Refresh the observation with what the in-place apply landed.
@@ -490,6 +494,15 @@ export class SandboxAttachment {
    * (same epoch, within OBSERVE_TTL_MS) or by reading the applied-state file and
    * refreshing the cache (spec decision 4 throttle). A read that returns null
    * (missing/corrupt file) is treated as empty applied state.
+   *
+   * Image precedence when the applied file is absent or carries an empty image:
+   *   file image (non-empty) > createOpts.image > ""
+   *
+   * `createOpts.image` is the epoch's boot image (spec decision 9 — the replace
+   * and boot paths persist the reconciled image before provisioning). Trusting it
+   * here avoids writing `"image":""` into the applied file after a delete-file +
+   * reconcile cycle, which would otherwise force a spurious full pod replacement
+   * on the next boot for sessions whose desired image IS set (prebuild sessions).
    */
   private async observe(sandbox: Sandbox, epoch: number): Promise<AppliedState> {
     const cache = this.observation;
@@ -497,7 +510,14 @@ export class SandboxAttachment {
       return cache.applied;
     }
     const read = await readAppliedState(sandbox);
-    const applied: AppliedState = read ?? { image: "", specHash: "", steps: {} };
+    // Use the file's image when non-empty (it may know better than createOpts
+    // after an api restart, which rebuilds createOpts from the host default).
+    // Fall back to createOpts.image when the file is absent or has an empty
+    // image string — the epoch was booted with that image (spec decision 9).
+    const resolvedImage = (read?.image || undefined) ?? this.createOpts.image ?? "";
+    const applied: AppliedState = read
+      ? { ...read, image: resolvedImage }
+      : { image: resolvedImage, specHash: "", steps: {} };
     this.observation = { applied, at: Date.now(), epoch };
     return applied;
   }
