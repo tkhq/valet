@@ -436,6 +436,17 @@ CREATE TABLE "workflow_definitions" (
 --> statement-breakpoint
 CREATE INDEX "workflow_definitions_owner" ON "workflow_definitions" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
+CREATE TABLE "workflow_versions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workflow_id" text NOT NULL,
+	"version" integer NOT NULL,
+	"name" text NOT NULL,
+	"definition" jsonb NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "workflow_versions_wf_version" ON "workflow_versions" ("workflow_id","version");
+--> statement-breakpoint
 CREATE TABLE "workflow_runs" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workflow_id" text NOT NULL,

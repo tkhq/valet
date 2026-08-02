@@ -16,7 +16,7 @@ import {
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { workflowDefinitions, workflowRuns, workflowVersions } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import type {
   GetWorkflowRunResponse,
@@ -145,7 +145,86 @@ export async function createWorkflowDefinition(
     createdAt: now,
     updatedAt: now,
   });
+  await snapshotVersion(deps, id, 1, input.name, input.definition, now);
   return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now };
+}
+
+/** Immutable per-save snapshot backing the UI's version history. */
+async function snapshotVersion(
+  deps: WorkflowServiceDeps,
+  workflowId: string,
+  version: number,
+  name: string,
+  definition: unknown,
+  now: number,
+): Promise<void> {
+  await deps.db.insert(workflowVersions).values({
+    id: newWorkflowId("wfv"),
+    workflowId,
+    version,
+    name,
+    definition,
+    createdAt: now,
+  });
+}
+
+async function nextVersionNumber(deps: WorkflowServiceDeps, workflowId: string): Promise<number> {
+  const rows = await deps.db
+    .select({ version: workflowVersions.version })
+    .from(workflowVersions)
+    .where(eq(workflowVersions.workflowId, workflowId))
+    .orderBy(desc(workflowVersions.version))
+    .limit(1);
+  return (rows[0]?.version ?? 0) + 1;
+}
+
+export interface WorkflowVersionSummary {
+  version: number;
+  name: string;
+  createdAt: number;
+}
+
+export interface WorkflowVersionDetail extends WorkflowVersionSummary {
+  definition: unknown;
+}
+
+/** Newest-first version summaries; null when the workflow isn't owned. */
+export async function listWorkflowVersions(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  id: string,
+): Promise<WorkflowVersionSummary[] | null> {
+  const row = await ownedDefinitionRow(deps, owner, id);
+  if (!row) return null;
+  const rows = await deps.db
+    .select({
+      version: workflowVersions.version,
+      name: workflowVersions.name,
+      createdAt: workflowVersions.createdAt,
+    })
+    .from(workflowVersions)
+    .where(eq(workflowVersions.workflowId, id))
+    .orderBy(desc(workflowVersions.version));
+  return rows;
+}
+
+/** One stored version with its definition; null when unowned/missing. */
+export async function getWorkflowVersion(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  id: string,
+  version: number,
+): Promise<WorkflowVersionDetail | null> {
+  const row = await ownedDefinitionRow(deps, owner, id);
+  if (!row) return null;
+  const rows = await deps.db
+    .select()
+    .from(workflowVersions)
+    .where(and(eq(workflowVersions.workflowId, id), eq(workflowVersions.version, version)))
+    .limit(1);
+  const v = rows[0];
+  if (!v) return null;
+  return { version: v.version, name: v.name, createdAt: v.createdAt, definition: v.definition };
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned). */
@@ -170,6 +249,22 @@ export async function updateWorkflowDefinition(
       updatedAt: now,
     })
     .where(eq(workflowDefinitions.id, id));
+
+  // Version history: snapshot only when the definition actually changed —
+  // a rename alone shouldn't mint a version.
+  if (
+    input.definition !== undefined &&
+    definitionVersionId(input.definition) !== definitionVersionId(row.definition)
+  ) {
+    await snapshotVersion(
+      deps,
+      id,
+      await nextVersionNumber(deps, id),
+      input.name ?? row.name,
+      input.definition,
+      now,
+    );
+  }
 
   return {
     id,
@@ -207,6 +302,7 @@ export async function deleteWorkflowDefinition(
   }
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
+  await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
   return "deleted";
 }
 

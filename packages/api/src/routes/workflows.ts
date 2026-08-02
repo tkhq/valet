@@ -15,8 +15,10 @@ import {
   deleteWorkflowDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
+  getWorkflowVersion,
   listWorkflowDefinitions,
   listWorkflowRuns,
+  listWorkflowVersions,
   startWorkflowRun,
   updateWorkflowDefinition,
   validateDefinitionInput,
@@ -29,7 +31,9 @@ import type {
   CreateWorkflowRequest,
   CreateWorkflowResponse,
   GetWorkflowResponse,
+  GetWorkflowVersionResponse,
   ListWorkflowRunsResponse,
+  ListWorkflowVersionsResponse,
   ListWorkflowsResponse,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -164,6 +168,26 @@ workflowsRouter.get("/:id/runs", async (c) => {
   const runs = await listWorkflowRuns(deps, owner, c.req.param("id"));
   if (!runs) return c.json({ error: "workflow not found" }, 404);
   const resp: ListWorkflowRunsResponse = { runs };
+  return c.json(resp);
+});
+
+workflowsRouter.get("/:id/versions", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const versions = await listWorkflowVersions(deps, owner, c.req.param("id"));
+  if (!versions) return c.json({ error: "workflow not found" }, 404);
+  const resp: ListWorkflowVersionsResponse = { versions };
+  return c.json(resp);
+});
+
+workflowsRouter.get("/:id/versions/:version", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const version = Number(c.req.param("version"));
+  if (!Number.isInteger(version) || version < 1) {
+    return c.json({ error: "version must be a positive integer" }, 400);
+  }
+  const detail = await getWorkflowVersion(deps, owner, c.req.param("id"), version);
+  if (!detail) return c.json({ error: "version not found" }, 404);
+  const resp: GetWorkflowVersionResponse = detail;
   return c.json(resp);
 });
 

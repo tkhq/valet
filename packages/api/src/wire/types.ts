@@ -724,6 +724,23 @@ export interface ListWorkflowRunsResponse {
   runs: WorkflowRunSummary[];
 }
 
+// Version history: one immutable snapshot per definition-changing save
+// (v1 = create). Detail includes the stored definition for read-only
+// display and restore.
+export interface WorkflowVersionSummary {
+  version: number;
+  name: string;
+  createdAt: number;
+}
+
+export interface ListWorkflowVersionsResponse {
+  versions: WorkflowVersionSummary[];
+}
+
+export interface GetWorkflowVersionResponse extends WorkflowVersionSummary {
+  definition: unknown;
+}
+
 export interface WorkflowRunCheckpoint {
   nodeId: string;
   iteration: number;

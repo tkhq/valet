@@ -20,6 +20,8 @@ import type {
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
+  GetWorkflowVersionResponse,
+  ListWorkflowVersionsResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
 
@@ -28,6 +30,8 @@ export const qkWorkflows = {
   detail: (id: string) => ["workflows", id] as const,
   runs: (id: string) => ["workflows", id, "runs"] as const,
   run: (runId: string) => ["workflows", "runs", runId] as const,
+  versions: (id: string) => ["workflows", id, "versions"] as const,
+  version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -60,6 +64,31 @@ export function useWorkflowRuns(
     queryKey: qkWorkflows.runs(id),
     queryFn: () => api.listWorkflowRuns(id),
     enabled: !!id,
+    ...opts,
+  });
+}
+
+export function useWorkflowVersions(
+  id: string,
+  opts?: Partial<UseQueryOptions<ListWorkflowVersionsResponse>>,
+) {
+  return useQuery<ListWorkflowVersionsResponse>({
+    queryKey: qkWorkflows.versions(id),
+    queryFn: () => api.listWorkflowVersions(id),
+    enabled: !!id,
+    ...opts,
+  });
+}
+
+export function useWorkflowVersion(
+  id: string,
+  version: number | null,
+  opts?: Partial<UseQueryOptions<GetWorkflowVersionResponse>>,
+) {
+  return useQuery<GetWorkflowVersionResponse>({
+    queryKey: qkWorkflows.version(id, version ?? 0),
+    queryFn: () => api.getWorkflowVersion(id, version ?? 0),
+    enabled: !!id && version !== null,
     ...opts,
   });
 }
@@ -109,6 +138,7 @@ export function useUpdateWorkflow(id: string): UpdateWorkflowMutation {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.list() });
       qc.invalidateQueries({ queryKey: qkWorkflows.detail(id) });
+      qc.invalidateQueries({ queryKey: qkWorkflows.versions(id) });
     },
   });
 }

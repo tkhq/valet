@@ -49,6 +49,24 @@ vi.mock("~/api/workflows", () => ({
     isLoading: false,
     error: null,
   }),
+  useWorkflowVersions: () => ({
+    data: {
+      versions: [
+        { version: 2, name: "Demo", createdAt: 2 },
+        { version: 1, name: "Demo", createdAt: 1 },
+      ],
+    },
+    isLoading: false,
+    error: null,
+  }),
+  useWorkflowVersion: (_id: string, version: number | null) => ({
+    data:
+      version === null
+        ? undefined
+        : { version, name: "Demo", createdAt: 1, definition: workflowData.definition },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 import { WorkflowEditorPage } from "./workflows.$workflowId";
@@ -138,9 +156,29 @@ describe("WorkflowEditorPage", () => {
     );
   });
 
-  it("lists runs in the collapsible runs section once expanded", () => {
+  it("lists runs in the runs drawer", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     fireEvent.click(screen.getByRole("button", { name: /Runs/ }));
     expect(screen.getByText("wfrun_0")).toBeTruthy();
+  });
+
+  it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    expect(screen.getByText("v2")).toBeTruthy();
+    expect(screen.getByText("current")).toBeTruthy();
+
+    // Selecting the current version shows no restore button.
+    fireEvent.click(screen.getByText("v2"));
+    expect(screen.queryByRole("button", { name: /Restore/ })).toBeNull();
+
+    // An older version offers restore, which PUTs its definition back.
+    fireEvent.click(screen.getByText("v1"));
+    fireEvent.click(screen.getByRole("button", { name: "Restore v1" }));
+    await waitFor(() =>
+      expect(updateMutateAsync).toHaveBeenCalledWith({
+        name: "Deploy pipeline",        definition: workflowData.definition,
+      }),
+    );
   });
 });

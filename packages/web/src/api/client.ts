@@ -57,6 +57,8 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
+  ListWorkflowVersionsResponse,
+  GetWorkflowVersionResponse,
   ListWorkflowsResponse,
   MeResponse,
   OrgMembersResponse,
@@ -345,6 +347,13 @@ export const api = {
     ),
   listWorkflowRuns: (id: string) =>
     request<ListWorkflowRunsResponse>("GET", `/workflows/${encodeURIComponent(id)}/runs`),
+  listWorkflowVersions: (id: string) =>
+    request<ListWorkflowVersionsResponse>("GET", `/workflows/${encodeURIComponent(id)}/versions`),
+  getWorkflowVersion: (id: string, version: number) =>
+    request<GetWorkflowVersionResponse>(
+      "GET",
+      `/workflows/${encodeURIComponent(id)}/versions/${version}`,
+    ),
   getWorkflowRun: (runId: string) =>
     request<GetWorkflowRunResponse>("GET", `/workflows/runs/${encodeURIComponent(runId)}`),
   resolveWorkflowApproval: (

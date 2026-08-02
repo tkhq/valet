@@ -661,6 +661,22 @@ export const workflowDefinitions = pgTable(
   (t) => [index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId)],
 );
 
+// Immutable snapshot per save: version 1 on create, +1 on every
+// update/patch. Reads join through `workflow_definitions` for ownership,
+// so no owner columns here.
+export const workflowVersions = pgTable(
+  "workflow_versions",
+  {
+    id: text("id").primaryKey(),
+    workflowId: text("workflow_id").notNull(),
+    version: integer("version").notNull(),
+    name: text("name").notNull(),
+    definition: jsonb("definition").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("workflow_versions_wf_version").on(t.workflowId, t.version)],
+);
+
 export const workflowRuns = pgTable(
   "workflow_runs",
   {
