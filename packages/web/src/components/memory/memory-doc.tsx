@@ -5,6 +5,7 @@ import { useOrchestratorInfo } from "~/api/orchestrator";
 import { api, ApiError } from "~/api/client";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
+import { MarkdownEditor } from "~/components/markdown-editor";
 import { splitFrontmatter } from "~/lib/frontmatter";
 import { relativeTime } from "~/lib/relative-time";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
@@ -131,7 +132,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps)
   }
 
   return (
-    <article className="mx-auto max-w-[65ch] px-6 py-10">
+    <article className={editing ? "mx-auto max-w-6xl px-6 py-10" : "mx-auto max-w-[65ch] px-6 py-10"}>
       <header className="mb-8 space-y-3 border-b border-line pb-6">
         <div className="flex items-start justify-between gap-4">
           <h1 className="font-display text-3xl leading-tight text-ink">
@@ -191,13 +192,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted }: MemoryDocProps)
 
       {editing ? (
         <div className="space-y-3">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            aria-label="Memory content"
-            spellCheck={false}
-            className="min-h-[50vh] w-full resize-y rounded-md border border-line bg-paper p-3 font-mono text-sm leading-relaxed text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
-          />
+          <MarkdownEditor value={draft} onChange={setDraft} ariaLabel="Memory content" autoFocus />
           {saveMutation.error instanceof Error && (
             <p className="text-xs text-danger-500">Save failed: {saveMutation.error.message}</p>
           )}
