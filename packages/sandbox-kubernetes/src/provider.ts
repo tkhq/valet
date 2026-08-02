@@ -216,11 +216,15 @@ function podUnavailableError(sandboxId: string, detail: string): Error {
  * Whole-directory Secrets only — no subPath, no env-from-secret (both break
  * live kubelet updates). */
 export interface SandboxSecretsApi {
-  /** Create or replace a Secret. Replaces if already exists (404-tolerant get + replace, or server-side apply). */
+  /** Create or replace a Secret. Creates on the first call; on 409 (already
+   * exists) fetches `resourceVersion` via GET and then replaces. The GET is
+   * required so the server accepts the PUT (optimistic concurrency). */
   upsertSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
-  /** Replace Secret data in place. The kubelet propagates the change into
-   * mounted volumes automatically — no pod restart required. */
-  patchSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
+  /** Write (create or replace) Secret data. Replaces an existing Secret; on
+   * 404 (Secret missing — e.g. a sandbox predating this feature, or a
+   * manually deleted Secret) creates it instead. The kubelet propagates the
+   * change into mounted volumes automatically — no pod restart required. */
+  writeSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
   /** Delete a Secret. Tolerates 404 (already deleted). */
   deleteSecret(namespace: string, name: string): Promise<void>;
 }
@@ -235,46 +239,78 @@ function encodeSecretData(data: Record<string, string>): Record<string, string> 
 }
 
 /** Production adapter: wraps a real `k8s.CoreV1Api` instance for Secret
- * create/patch/delete. Upsert uses create-then-replace-on-409 to avoid
- * server-side apply requirements. */
+ * create/write/delete. `upsertSecret` uses create-then-replace-on-409 to
+ * avoid server-side apply requirements; it GETs `resourceVersion` before
+ * replace so the optimistic-concurrency check passes. `writeSecret` replaces
+ * an existing Secret and falls back to create on 404. */
 export function sandboxSecretsApiAdapter(api: k8s.CoreV1Api): SandboxSecretsApi {
   return {
     async upsertSecret(namespace, name, data) {
       const encodedData = encodeSecretData(data);
-      const body = {
+      const baseBody = {
         apiVersion: "v1",
         kind: "Secret",
         metadata: { name, namespace },
         data: encodedData,
       };
       try {
-        await api.createNamespacedSecret({ namespace, body });
+        await api.createNamespacedSecret({ namespace, body: baseBody });
       } catch (err) {
-        // 409 = already exists — replace it.
-        if (!isRecord(err) || typeof (err as Record<string, unknown>).code !== "number" || (err as { code: number }).code !== 409) {
+        // 409 = already exists — fetch resourceVersion then replace.
+        if (!isRecord(err) || typeof err.code !== "number" || err.code !== 409) {
           throw err;
         }
-        await api.replaceNamespacedSecret({ name, namespace, body });
+        const existing = await api.readNamespacedSecret({ name, namespace });
+        const resourceVersion = existing.metadata?.resourceVersion;
+        await api.replaceNamespacedSecret({
+          name,
+          namespace,
+          body: {
+            ...baseBody,
+            metadata: { name, namespace, resourceVersion },
+          },
+        });
       }
     },
-    async patchSecret(namespace, name, data) {
+    async writeSecret(namespace, name, data) {
       const encodedData = encodeSecretData(data);
-      await api.replaceNamespacedSecret({
-        name,
-        namespace,
-        body: {
-          apiVersion: "v1",
-          kind: "Secret",
-          metadata: { name, namespace },
-          data: encodedData,
-        },
-      });
+      try {
+        // Try to replace the existing Secret first. The GET for resourceVersion
+        // is needed for optimistic concurrency.
+        const existing = await api.readNamespacedSecret({ name, namespace });
+        const resourceVersion = existing.metadata?.resourceVersion;
+        await api.replaceNamespacedSecret({
+          name,
+          namespace,
+          body: {
+            apiVersion: "v1",
+            kind: "Secret",
+            metadata: { name, namespace, resourceVersion },
+            data: encodedData,
+          },
+        });
+      } catch (err) {
+        // 404 = Secret does not exist yet (e.g. sandbox created before this
+        // feature, or Secret was manually deleted). Create it instead.
+        if (!isRecord(err) || typeof err.code !== "number" || err.code !== 404) {
+          throw err;
+        }
+        await api.createNamespacedSecret({
+          namespace,
+          body: {
+            apiVersion: "v1",
+            kind: "Secret",
+            metadata: { name, namespace },
+            data: encodedData,
+          },
+        });
+      }
     },
     async deleteSecret(namespace, name) {
       try {
         await api.deleteNamespacedSecret({ name, namespace });
       } catch (err) {
-        if (isRecord(err) && typeof (err as Record<string, unknown>).code === "number" && (err as { code: number }).code === 404) {
+        if (isRecord(err) && typeof err.code === "number" && err.code === 404) {
           return;
         }
         throw err;
@@ -554,7 +590,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       customImage: true,
       isolated: true,
       coldStartEstimateMs: 8000,
-      credsMount: true,
+      // Only advertise credsMount when secretsApi is wired. A provider
+      // constructed without secretsApi cannot honor updateCreds().
+      credsMount: Boolean(this.deps.secretsApi),
     };
   }
 
@@ -643,7 +681,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
    * pod + PVC via the controller's owner references. Only the
    * session-deletion path may call this. Also deletes the creds Secret
-   * best-effort — a missing Secret (sandbox never had one) is not an error. */
+   * best-effort — a missing Secret (sandbox never had one) is not an error.
+   *
+   * `id` must be the Sandbox CR name (i.e. `sandbox.id` / the value returned
+   * by `create()`), not the raw workspace key. */
   async destroy(id: string): Promise<void> {
     // Best-effort: delete the creds Secret before the CR (or concurrently).
     // A missing Secret is fine — the sandbox may never have had one.
@@ -715,14 +756,19 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     await this.waitReady(id);
   }
 
-  /** Pushes updated credential files into a running sandbox. Patches the
-   * creds Secret in place — the kubelet propagates the change into the
-   * mounted volume without a pod restart. Requires secretsApi wired. */
+  /** Writes updated credential files into a running sandbox. Replaces the
+   * creds Secret — the kubelet propagates the change into the mounted volume
+   * without a pod restart. On 404 (Secret missing, e.g. a sandbox created
+   * before this feature) creates the Secret instead. Requires secretsApi
+   * wired.
+   *
+   * `id` must be the Sandbox CR name (i.e. `sandbox.id` / the value returned
+   * by `create()`), not the raw workspace key. */
   async updateCreds(id: string, files: Record<string, string>): Promise<void> {
     if (!this.deps.secretsApi) {
       throw new Error(`KubernetesSandboxProvider.updateCreds: secretsApi not wired (sandbox "${id}")`);
     }
-    await this.deps.secretsApi.patchSecret(this.cfg.namespace, credsSecretName(id), files);
+    await this.deps.secretsApi.writeSecret(this.cfg.namespace, credsSecretName(id), files);
   }
 
   private makeSandbox(id: string): KubernetesSandbox {
