@@ -46,15 +46,26 @@ export function IntegrationsPage() {
   const builtIn = plugins
     .filter((p) => !isService(p))
     .sort((a, b) => displayName(a.name).localeCompare(displayName(b.name)));
+  const connectedCount = services.filter((p) => p.services.some((s) => s.connected)).length;
+  const connectableCount = services.filter((p) => p.services.length > 0).length;
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-2xl px-6 py-10">
-        <h1 className="font-display text-2xl text-ink">Integrations</h1>
-        <p className="mt-1 text-sm text-muted">
-          What your assistant can reach. Connect a service with a key; built-in abilities just
-          work.
-        </p>
+      <div className="mx-auto max-w-4xl px-6 py-10">
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <h1 className="font-display text-2xl text-ink">Integrations</h1>
+            <p className="mt-1 text-sm text-muted">
+              What your assistant can reach. Connect a service with a key; built-in abilities just
+              work.
+            </p>
+          </div>
+          {!isLoading && !error && connectableCount > 0 && (
+            <span className="shrink-0 font-mono text-xs text-muted">
+              {connectedCount} of {connectableCount} connected
+            </span>
+          )}
+        </div>
 
         {connectResult?.kind === "connected" && (
           <div
@@ -93,21 +104,21 @@ export function IntegrationsPage() {
               title="Services"
               description="Tools your assistant uses on your behalf — most need a key to connect."
             >
-              <ul className="divide-y divide-line">
+              <div className="grid gap-3 pt-4 sm:grid-cols-2">
                 {services.map((plugin) => (
                   <IntegrationRow key={plugin.name} plugin={plugin} />
                 ))}
-              </ul>
+              </div>
             </Section>
           )}
 
           {!isLoading && !error && builtIn.length > 0 && (
             <Section title="Built in" description="Always available — nothing to set up.">
-              <ul className="divide-y divide-line">
+              <div className="grid gap-3 pt-4 sm:grid-cols-2">
                 {builtIn.map((plugin) => (
                   <BuiltInRow key={plugin.name} plugin={plugin} />
                 ))}
-              </ul>
+              </div>
             </Section>
           )}
         </div>

@@ -1,16 +1,17 @@
 /**
- * Rows for `/integrations` (facelift of the Task-15 connect surface).
+ * Cards for `/integrations` (two-column facelift of the Task-15 connect
+ * surface).
  *
- * One hairline-separated row per plugin, in the settings idiom — no nested
- * cards. The right edge carries a mono "reach" meta line (tool count /
- * "tools load on connect" / "no key needed") plus the connect state; the
- * token-entry reveal is the page's one contained element, mirroring the
- * enable-organizations card's invitation treatment.
+ * One tile per plugin: a brand monogram, name + connection state, the
+ * description, and a footer with the mono "reach" meta (tool count /
+ * "tools load on connect" / "no key needed") and the connect controls.
+ * The token-entry reveal expands INSIDE the tile so connecting never
+ * navigates away. Built-in plugins get quieter wash tiles — present but
+ * visibly not asking anything of you.
  *
- * OAuth connect for services declaring `oauth` metadata; manual token entry
- * remains the fallback. The submit action is named "Connect" end to end
- * (button → form submit), never "Save": the action keeps one name through
- * the whole flow.
+ * OAuth connect for services declaring `oauth` metadata; manual token
+ * entry remains the fallback. The submit action is named "Connect" end to
+ * end (button → form submit), never "Save".
  */
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
@@ -47,110 +48,200 @@ function reachMeta(plugin: PluginSummary): string | null {
   return null;
 }
 
+// ── Brand monograms ──────────────────────────────────────────────────────
+
+/** Recognizable brand hues for the monogram tile; unknown services hash
+ * into a small default palette so third-party plugins still get a stable
+ * color. Full-strength hexes on purpose — the CSS-var tokens can't take
+ * opacity modifiers (theme.css trap). */
+const BRAND_HEX: Record<string, string> = {
+  github: "#24292f",
+  gmail: "#ea4335",
+  "google-calendar": "#4285f4",
+  google_calendar: "#4285f4",
+  "google-workspace": "#34a853",
+  google_workspace: "#34a853",
+  slack: "#611f69",
+  linear: "#5e6ad2",
+  notion: "#111111",
+  sentry: "#362d59",
+  stripe: "#635bff",
+  cloudflare: "#f6821f",
+  deepwiki: "#0ea5e9",
+  typefully: "#1d9bf0",
+  telegram: "#229ed9",
+  figma: "#a259ff",
+  browser: "#64748b",
+  workflows: "#5f7a5a",
+  personas: "#b98a2f",
+  "sandbox-tunnels": "#64748b",
+};
+
+const FALLBACK_HEX = ["#0ea5e9", "#f97316", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1"];
+
+export function brandHex(id: string): string {
+  const known = BRAND_HEX[id];
+  if (known) return known;
+  let h = 5381;
+  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) | 0;
+  return FALLBACK_HEX[Math.abs(h) % FALLBACK_HEX.length];
+}
+
+function Monogram({ id, quiet }: { id: string; quiet?: boolean }) {
+  const label = displayName(id);
+  return (
+    <span
+      aria-hidden="true"
+      className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-semibold text-white"
+      style={{ backgroundColor: quiet ? "#a8a29b" : brandHex(id) }}
+    >
+      {label.charAt(0).toUpperCase()}
+    </span>
+  );
+}
+
+// ── Tiles ────────────────────────────────────────────────────────────────
+
 export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
   const meta = reachMeta(plugin);
   const single = plugin.services.length === 1 ? plugin.services[0] : undefined;
 
   return (
-    <li className="py-4">
+    <div className="flex flex-col rounded-lg border border-line bg-paper p-4 transition-shadow hover:shadow-sm">
       {single ? (
         <ServiceBlock
           service={single}
           title={displayName(plugin.name)}
+          monogramId={plugin.name}
           description={plugin.description}
           meta={meta}
         />
       ) : (
         <>
-          <RowHeading title={displayName(plugin.name)} description={plugin.description} meta={meta} />
+          <CardHeading
+            title={displayName(plugin.name)}
+            monogramId={plugin.name}
+            description={plugin.description}
+          />
+          <CardFooter meta={meta} />
           {/* Multi-service plugins (none in the current fleet, but the manifest
               allows it): each credential service gets its own quiet sub-row. */}
           {plugin.services.length > 1 && (
-            <ul className="mt-2 space-y-2 border-l border-line pl-4">
+            <ul className="mt-3 space-y-3 border-t border-line pt-3">
               {plugin.services.map((service) => (
                 <li key={service.service}>
-                  <ServiceBlock service={service} title={displayName(service.service)} />
+                  <ServiceBlock
+                    service={service}
+                    title={displayName(service.service)}
+                    monogramId={service.service}
+                  />
                 </li>
               ))}
             </ul>
           )}
         </>
       )}
-    </li>
+    </div>
   );
 }
 
 export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
   return (
-    <li className="flex items-start justify-between gap-4 py-3">
-      <div className="min-w-0">
-        <div className="text-sm text-ink">{displayName(plugin.name)}</div>
-        {plugin.description && <p className="mt-0.5 text-xs text-muted">{plugin.description}</p>}
+    <div className="flex items-start gap-3 rounded-lg bg-ink-wash p-4">
+      <Monogram id={plugin.name} quiet />
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium text-ink">{displayName(plugin.name)}</div>
+        {plugin.description && (
+          <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">
+            {plugin.description}
+          </p>
+        )}
       </div>
-      <span className="shrink-0 font-mono text-xs text-muted">built in</span>
-    </li>
+      <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">
+        built in
+      </span>
+    </div>
   );
 }
 
-function RowHeading({
+function CardHeading({
   title,
+  monogramId,
   description,
-  meta,
-  right,
+  state,
 }: {
   title: string;
+  monogramId: string;
   description?: string;
-  meta?: string | null;
-  right?: React.ReactNode;
+  state?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-ink">{title}</div>
-        {description && <p className="mt-0.5 text-xs text-muted">{description}</p>}
-      </div>
-      <div className="flex shrink-0 items-center gap-3">
-        {meta && <span className="font-mono text-xs text-muted">{meta}</span>}
-        {right}
+    <div className="flex items-start gap-3">
+      <Monogram id={monogramId} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-ink">{title}</span>
+          {state}
+        </div>
+        {description && (
+          <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">{description}</p>
+        )}
       </div>
     </div>
   );
 }
 
-/** A service's heading + connect state, owning its own token-reveal state. */
+function CardFooter({ meta, right }: { meta?: string | null; right?: React.ReactNode }) {
+  return (
+    <div className="mt-auto flex items-center justify-between gap-3 pt-4">
+      <span className="font-mono text-xs text-muted">{meta ?? ""}</span>
+      {right}
+    </div>
+  );
+}
+
+/** A service's tile content + connect state, owning its own token-reveal state. */
 function ServiceBlock({
   service,
   title,
+  monogramId,
   description,
   meta,
 }: {
   service: PluginServiceSummary;
   title: string;
+  monogramId: string;
   description?: string;
   meta?: string | null;
 }) {
   const [revealed, setRevealed] = useState(false);
   const disconnect = useDisconnectCredential();
 
-  const right = service.connected ? (
-    <span className="flex items-center gap-2">
-      <Badge variant="success">Connected</Badge>
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={() => {
-          if (!confirm(`Disconnect ${title}?`)) return;
-          void disconnect.mutateAsync(service.service);
-        }}
-        disabled={disconnect.isPending}
+  const controls = service.connected ? (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={() => {
+        if (!confirm(`Disconnect ${title}?`)) return;
+        void disconnect.mutateAsync(service.service);
+      }}
+      disabled={disconnect.isPending}
+    >
+      {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+    </Button>
+  ) : service.connect === "oauth" ? (
+    <span className="flex items-center gap-3">
+      <button
+        type="button"
+        className="text-xs text-muted underline-offset-2 hover:underline"
+        onClick={() => setRevealed((r) => !r)}
       >
-        {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+        Enter token manually
+      </button>
+      <Button size="sm" asChild>
+        <a href={`/api/credentials/${encodeURIComponent(service.service)}/connect`}>Connect</a>
       </Button>
     </span>
-  ) : service.connect === "oauth" ? (
-    <Button size="sm" asChild>
-      <a href={`/api/credentials/${encodeURIComponent(service.service)}/connect`}>Connect</a>
-    </Button>
   ) : (
     <Button size="sm" onClick={() => setRevealed((r) => !r)}>
       Connect
@@ -159,16 +250,13 @@ function ServiceBlock({
 
   return (
     <>
-      <RowHeading title={title} description={description} meta={meta} right={right} />
-      {!service.connected && service.connect === "oauth" && (
-        <button
-          type="button"
-          className="mt-1 text-xs text-muted underline-offset-2 hover:underline"
-          onClick={() => setRevealed((r) => !r)}
-        >
-          Enter token manually
-        </button>
-      )}
+      <CardHeading
+        title={title}
+        monogramId={monogramId}
+        description={description}
+        state={service.connected ? <Badge variant="success">Connected</Badge> : undefined}
+      />
+      <CardFooter meta={meta} right={controls} />
       {revealed && !service.connected && (
         <ConnectForm service={service} onClose={() => setRevealed(false)} />
       )}
