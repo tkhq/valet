@@ -349,26 +349,39 @@ async function poll<T>(fn: () => Promise<T>, ok: (v: T) => boolean, timeoutMs: n
 // ── 4. Credential-unavailable UX (ungated) ─────────────────────────────────
 
 describe("api integration: plugin system exit criteria — credential-unavailable UX (ungated)", () => {
-  it("list_tools output warns 'no credential connected' for a declared-but-unconnected service", async () => {
+  it("list_tools hides a declared-but-unconnected service's tools, with a warning naming the fix", async () => {
     const fixture = makeDemoPingPlugin();
     api = await bootTestApi({ plugins: [fixture.plugin] });
     // Deliberately never save a credential for "demo" — the point of this
-    // test is the unconnected path.
+    // test is the unconnected path. The plugin declares a credential spec,
+    // so assemble infers requiresCredential.
 
     const { tools } = pluginSessionExtras(api.providers.plugins);
     const listTools = tools.find((t) => t.name === "list_tools");
     expect(listTools).toBeDefined();
 
     const ctx = buildMinimalToolContext(api!);
-    const result = await listTools!.execute({}, ctx);
 
+    // Unfiltered listing: tools hidden, warning explains why + the fix.
+    const result = await listTools!.execute({}, ctx);
     const parsed = JSON.parse(result.text) as {
+      tools: Array<{ service: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
-    expect(parsed.warnings).toBeDefined();
+    expect(parsed.tools.filter((t) => t.service === "demo")).toEqual([]);
     const demoWarning = parsed.warnings?.find((w) => w.service === "demo");
-    expect(demoWarning, `warnings: ${JSON.stringify(parsed.warnings)}`).toBeDefined();
-    expect(demoWarning?.reason).toBe("no credential connected");
+    expect(demoWarning?.reason, `warnings: ${JSON.stringify(parsed.warnings)}`).toMatch(
+      /tools hidden/,
+    );
+
+    // Explicit service filter: schemas stay inspectable, warning persists.
+    const filtered = await listTools!.execute({ service: "demo" }, ctx);
+    const filteredParsed = JSON.parse(filtered.text) as {
+      tools: Array<{ tool_id: string }>;
+      warnings?: Array<{ service: string; reason: string }>;
+    };
+    expect(filteredParsed.tools.map((t) => t.tool_id)).toEqual(["demo.ping"]);
+    expect(filteredParsed.warnings?.[0]?.reason).toBe("no credential connected");
   });
 });
 

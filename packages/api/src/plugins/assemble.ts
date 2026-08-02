@@ -96,9 +96,29 @@ export interface PluginSessionExtras {
  * into every other session sharing the plugin set.
  */
 export function pluginSessionExtras(plugins: ValetPlugin[]): PluginSessionExtras {
-  const actionPlugins = plugins.flatMap((p) => p.actions ?? []);
+  const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
   const tools = actionPlugins.length > 0 ? pluginCatalogTools({ plugins: actionPlugins }) : [];
   const skills = plugins.flatMap((p) => p.skills ?? []);
   const roles = plugins.flatMap((p) => p.roles ?? []);
   return { tools, skills, roles };
+}
+
+/**
+ * A plugin that declares a credential spec for a service is saying its
+ * actions need that credential — infer `requiresCredential` so
+ * `list_tools` hides the service's tools while unconnected (the catalog's
+ * unfiltered-listing rule). An explicit `requiresCredential` on the
+ * ActionPlugin wins either way; credential-less plugins (workflows) stay
+ * unflagged and are never probed.
+ */
+function withCredentialRequirement(plugin: ValetPlugin): ActionPlugin[] {
+  const credentialServices = new Set(
+    (plugin.credentials ?? []).map((c) => c.service),
+  );
+  return (plugin.actions ?? []).map((actionPlugin) => {
+    if (actionPlugin.requiresCredential !== undefined) return actionPlugin;
+    const credService = actionPlugin.credentialService ?? actionPlugin.service;
+    if (!credentialServices.has(credService)) return actionPlugin;
+    return { ...actionPlugin, requiresCredential: true };
+  });
 }

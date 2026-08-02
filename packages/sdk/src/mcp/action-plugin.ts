@@ -44,6 +44,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
     service: serviceName,
     description: opts.description,
     actions: [],
+    requiresCredential: !noAuth,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
       const token = await resolveToken(credentials, serviceName, noAuth);
       const tools = await client.listTools(token);

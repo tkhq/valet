@@ -77,6 +77,7 @@ function makeMockPlugin(): {
   const plugin: ActionPlugin = {
     service: "github",
     actions: [getIssue, createIssue, deleteRepo],
+    requiresCredential: true,
   };
   return { plugin, calls };
 }
@@ -137,7 +138,10 @@ describe("pluginCatalogTools: list_tools", () => {
       fauxAssistantMessage("done"),
     ]);
 
-    const { engine, events } = makeEngine();
+    const { engine, events, credentials } = makeEngine();
+    // makeMockPlugin declares requiresCredential — connect it so these
+    // schema/filtering assertions see the full catalog.
+    await credentials.save({ type: "user", id: "u" }, "github", { accessToken: "tok" });
     const session = await engine.createSession({
       userId: "u",
       orgId: "o",
@@ -185,7 +189,9 @@ describe("pluginCatalogTools: list_tools", () => {
       fauxAssistantMessage("done"),
     ]);
 
-    const { engine, events } = makeEngine();
+    const { engine, events, credentials } = makeEngine();
+    // Connected: this test asserts filtering, not the unconnected-hiding.
+    await credentials.save({ type: "user", id: "u" }, "github", { accessToken: "tok" });
     const session = await engine.createSession({
       userId: "u",
       orgId: "o",
@@ -234,14 +240,53 @@ describe("pluginCatalogTools: list_tools", () => {
     const toolEnd = events.find((e) => e.event.type === "tool_end");
     if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
     const payload = JSON.parse(toolEnd.event.result) as {
+      tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
     expect(payload.warnings?.[0]?.service).toBe("github");
+    // requiresCredential + no credential → tools hidden from the
+    // unfiltered listing, and the warning names the fix.
+    expect(payload.tools).toEqual([]);
+    expect(payload.warnings?.[0]?.reason).toMatch(/tools hidden/);
 
     faux.unregister();
   });
 
-  it("survives a throwing credential probe: full catalog + warning for that service, others probed normally", async () => {
+  it("an explicit service filter still returns an unconnected service's tools (schema inspection)", async () => {
+    const { plugin } = makeMockPlugin();
+    const [listTool] = pluginCatalogTools({ plugins: [plugin] });
+
+    const result = await listTool.execute({ service: "github" }, makeCtx());
+    const payload = JSON.parse(result.text) as {
+      tools: Array<{ tool_id: string }>;
+      warnings?: Array<{ service: string; reason: string }>;
+    };
+    expect(payload.tools.length).toBeGreaterThan(0);
+    expect(payload.warnings?.[0]).toEqual({ service: "github", reason: "no credential connected" });
+  });
+
+  it("credential-less plugins are never probed or warned about", async () => {
+    const workflowsAction: PluginAction = {
+      id: "workflows.list_workflows",
+      name: "List Workflows",
+      description: "List workflows.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    const workflowsPlugin: ActionPlugin = { service: "workflows", actions: [workflowsAction] };
+    const [listTool] = pluginCatalogTools({ plugins: [workflowsPlugin] });
+
+    const result = await listTool.execute({}, makeCtx());
+    const payload = JSON.parse(result.text) as {
+      tools: Array<{ tool_id: string }>;
+      warnings?: Array<{ service: string; reason: string }>;
+    };
+    expect(payload.tools.map((t) => t.tool_id)).toEqual(["workflows.list_workflows"]);
+    expect(payload.warnings).toBeUndefined();
+  });
+
+  it("survives a throwing credential probe: that service hides with a warning, others list normally", async () => {
     const { plugin: githubPlugin } = makeMockPlugin();
     const gmailAction: PluginAction = {
       id: "gmail.send",
@@ -251,7 +296,11 @@ describe("pluginCatalogTools: list_tools", () => {
       parameters: Type.Object({ to: Type.String() }),
       execute: async () => ({ success: true, data: {} }),
     };
-    const gmailPlugin: ActionPlugin = { service: "gmail", actions: [gmailAction] };
+    const gmailPlugin: ActionPlugin = {
+      service: "gmail",
+      actions: [gmailAction],
+      requiresCredential: true,
+    };
 
     const [listTool] = pluginCatalogTools({ plugins: [githubPlugin, gmailPlugin] });
     const ctx = makeCtx({
@@ -273,17 +322,13 @@ describe("pluginCatalogTools: list_tools", () => {
       warnings?: Array<{ service: string; reason: string }>;
     };
 
-    // Full catalog still returned — the throwing github probe didn't abort list_tools.
-    expect(payload.tools.map((t) => t.tool_id).sort()).toEqual([
-      "github.create_issue",
-      "github.delete_repo",
-      "github.get_issue",
-      "gmail.send",
-    ]);
+    // The throwing github probe didn't abort list_tools — github hides
+    // (treated as unconnected) while gmail lists normally.
+    expect(payload.tools.map((t) => t.tool_id)).toEqual(["gmail.send"]);
 
-    // github got a warning (probe threw); gmail did not (credential resolved).
+    // github got a hidden-warning (probe threw); gmail did not (credential resolved).
     const githubWarning = payload.warnings?.find((w) => w.service === "github");
-    expect(githubWarning).toBeDefined();
+    expect(githubWarning?.reason).toMatch(/tools hidden/);
     const gmailWarning = payload.warnings?.find((w) => w.service === "gmail");
     expect(gmailWarning).toBeUndefined();
   });
@@ -557,7 +602,18 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     const dynamicPlugin = makeDynamicPlugin("notion", async () => [dynamicAction]);
 
     const [listTool] = pluginCatalogTools({ plugins: [staticPlugin, dynamicPlugin] });
-    const result = await listTool.execute({}, makeCtx());
+    // Connected ctx: the flagged static plugin would otherwise hide.
+    const result = await listTool.execute(
+      {},
+      makeCtx({
+        credentials: {
+          get: async (): Promise<Credential | null> => ({ accessToken: "tok" }),
+          request: async (): Promise<Credential> => {
+            throw new Error("not implemented in test stub");
+          },
+        },
+      }),
+    );
     const payload = JSON.parse(result.text) as { tools: Array<{ tool_id: string }> };
     const ids = payload.tools.map((t) => t.tool_id).sort();
     expect(ids).toEqual([
@@ -575,7 +631,18 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     });
 
     const [listTool] = pluginCatalogTools({ plugins: [staticPlugin, dynamicPlugin] });
-    const result = await listTool.execute({}, makeCtx());
+    // Connected ctx: the flagged static plugin would otherwise hide.
+    const result = await listTool.execute(
+      {},
+      makeCtx({
+        credentials: {
+          get: async (): Promise<Credential | null> => ({ accessToken: "tok" }),
+          request: async (): Promise<Credential> => {
+            throw new Error("not implemented in test stub");
+          },
+        },
+      }),
+    );
     const payload = JSON.parse(result.text) as {
       tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;

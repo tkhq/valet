@@ -89,6 +89,16 @@ export interface ActionPlugin {
   /** Override credential service name (defaults to `service`). */
   credentialService?: string;
   /**
+   * The plugin's actions are unusable without a connected credential.
+   * When set and no credential resolves, `list_tools` HIDES this
+   * service's tools from unfiltered listings (with a warning naming the
+   * fix) — advertising tools that can only fail wastes the agent's turn.
+   * An explicit `service:` filter still returns them, so the agent can
+   * inspect schemas while asking the user to connect. Leave unset for
+   * credential-less plugins (e.g. workflows), which are never probed.
+   */
+  requiresCredential?: boolean;
+  /**
    * Default approval policy. Unset = derived from each action's riskLevel:
    * low/medium → allow; high/critical → require_approval.
    */
@@ -307,17 +317,21 @@ function makeListTool(catalog: Catalog): ToolDef {
         }
       }
 
-      // Per-service auth warnings: probe each represented service's
-      // credentials and report missing ones so the LLM can ask the user.
-      // Covers both statically- and dynamically-sourced services, including
-      // dynamic-only services whose discovery failed above.
+      // Per-service auth handling — only services whose plugin declares
+      // `requiresCredential` are probed (credential-less plugins like
+      // workflows would otherwise produce "no credential connected"
+      // noise). Unconnected services' tools are HIDDEN from unfiltered
+      // listings: advertising tools that can only fail wastes the agent's
+      // turn. An explicit `service:` filter still returns them alongside
+      // the warning, so schemas stay inspectable.
       const services = new Set(entries.map((e) => e.service));
       for (const service of dynamicServicesConsidered) services.add(service);
       for (const service of services) {
-        const credService =
-          catalog.entries.find((e) => e.service === service)?.plugin.credentialService ??
-          catalog.dynamicPlugins.find((p) => p.service === service)?.credentialService ??
-          service;
+        const plugin =
+          catalog.entries.find((e) => e.service === service)?.plugin ??
+          catalog.dynamicPlugins.find((p) => p.service === service);
+        if (!plugin?.requiresCredential) continue;
+        const credService = plugin.credentialService ?? service;
         let cred: Awaited<ReturnType<typeof ctx.credentials.get>>;
         try {
           cred = await ctx.credentials.get(credService);
@@ -328,7 +342,18 @@ function makeListTool(catalog: Catalog): ToolDef {
           // can't abort discovery for every other service.
           cred = null;
         }
-        if (!cred) warnings.push({ service, reason: "no credential connected" });
+        if (!cred) {
+          if (a.service === service) {
+            warnings.push({ service, reason: "no credential connected" });
+          } else {
+            entries = entries.filter((e) => e.service !== service);
+            warnings.push({
+              service,
+              reason:
+                "not connected — tools hidden. Connect the integration in Settings, or list with service filter to inspect schemas.",
+            });
+          }
+        }
       }
 
       const tools = entries.slice(0, limit).map((e) => ({

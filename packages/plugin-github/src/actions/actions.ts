@@ -1573,6 +1573,9 @@ export const githubPlugin: ActionPlugin = {
   service: "github",
   description:
     "GitHub integration: repos, issues, PRs, branches, commits, releases, workflows.",
+  // Statically-listed actions, so without this flag list_tools would
+  // advertise every GitHub tool even when no credential is connected.
+  requiresCredential: true,
   actions: [
     getRepository,
     listRepos,
