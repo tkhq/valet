@@ -156,13 +156,15 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
         )}
       </div>
 
-      <button
-        type="button"
-        onClick={() => setShowAdvanced((v) => !v)}
-        className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
-      >
-        {showAdvanced ? "Hide permissions" : "Configure permissions"}
-      </button>
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
+        >
+          {showAdvanced ? "Hide permissions" : "Configure permissions"}
+        </button>
+      </div>
 
       {showAdvanced && (
         <div className="space-y-4 rounded-md border border-line bg-ink-wash p-4">
