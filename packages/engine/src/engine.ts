@@ -1,6 +1,6 @@
 import { VirtualSandboxProvider } from "./providers/sandbox/virtual.js";
 import { Session } from "./session.js";
-import { SandboxAttachment, type PrepareSandbox } from "./sandbox/attachment.js";
+import { SandboxAttachment } from "./sandbox/attachment.js";
 import { PolicySandbox } from "./sandbox/policy.js";
 import type {
   CreateSessionOptions,
@@ -8,6 +8,7 @@ import type {
   RestoreSessionOptions,
   Sandbox,
   SandboxCreateOpts,
+  SpecProvider,
 } from "./types.js";
 
 let nextId = 1;
@@ -30,7 +31,7 @@ export class Engine {
     const { attachment, sandbox } = await this.materializeSandbox(
       opts.sandbox,
       opts.sandboxReadyTimeoutMs,
-      opts.prepareSandbox,
+      opts.specProvider,
     );
     const session = new Session(id, opts, this.opts.providers, sandbox, attachment);
     this.sessions.set(id, session);
@@ -47,7 +48,7 @@ export class Engine {
     const { attachment, sandbox } = await this.materializeSandbox(
       args.options.sandbox,
       args.options.sandboxReadyTimeoutMs,
-      args.options.prepareSandbox,
+      args.options.specProvider,
     );
     const session = await Session.rehydrate(
       data,
@@ -82,7 +83,7 @@ export class Engine {
   private async materializeSandbox(
     arg: Sandbox | SandboxCreateOpts | undefined,
     readyTimeoutMs: number | undefined,
-    prepareSandbox?: PrepareSandbox,
+    specProvider?: SpecProvider,
   ): Promise<{ attachment: SandboxAttachment; sandbox: Sandbox }> {
     let attachment: SandboxAttachment;
     if (arg && typeof (arg as Sandbox).readFile === "function") {
@@ -92,7 +93,7 @@ export class Engine {
       attachment = SandboxAttachment.forSandbox(arg as Sandbox);
     } else {
       const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
-      attachment = new SandboxAttachment(provider, (arg ?? {}) as SandboxCreateOpts, prepareSandbox);
+      attachment = new SandboxAttachment(provider, (arg ?? {}) as SandboxCreateOpts, specProvider);
     }
     const sandbox = new PolicySandbox(attachment, { readyTimeoutMs });
     return { attachment, sandbox };

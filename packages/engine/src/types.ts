@@ -66,9 +66,9 @@ export interface SessionData {
   parentSessionId?: string;
   parentThreadId?: string;
   /**
-   * Start-ref for the sandbox workspace, captured after `prepareSandbox`
-   * completes. Absent for sessions that predate this field or ran without a
-   * git-backed workspace.
+   * Start-ref for the sandbox workspace, captured after the specProvider's
+   * prep steps complete. Absent for sessions that predate this field or ran
+   * without a git-backed workspace.
    */
   startRef?: SessionStartRef;
   /**
@@ -1205,6 +1205,43 @@ export interface SessionStore {
   deleteSession(id: string): Promise<void>;
 }
 
+// ── Sandbox spec / prep steps ─────────────────────────────────────
+
+/**
+ * One idempotent workspace-preparation step. `id` names the step; `hash`
+ * is a content fingerprint used by the diff/apply machinery in later tasks.
+ * `critical` marks steps whose failure must fail the provision.
+ *
+ * `apply` receives the live {@link Sandbox} handle and runs the step.
+ * Throwing rejects the provision with {@link SandboxPreparationError}.
+ */
+export interface PrepStep {
+  id: string;
+  hash: string;
+  critical: boolean;
+  apply(sandbox: Sandbox): Promise<void>;
+}
+
+/**
+ * The full desired state for a session's sandbox: an optional OCI image ref
+ * (wired in Task 5; ignored by the Task 3 attachment) and an ordered list of
+ * {@link PrepStep}s to apply after provisioning.
+ */
+export interface DesiredSandboxSpec {
+  /** Target OCI image ref. Ignored by the Task 3 attachment — Task 5 wires it. */
+  image?: string;
+  /** Stable content hash across all steps; used by the diff engine in Task 4+. */
+  specHash: string;
+  steps: PrepStep[];
+}
+
+/**
+ * Host-provided factory that returns the desired sandbox spec for a session.
+ * Called once per (sandbox, epoch) after a freshly-created sandbox reports
+ * ready, before any {@link SandboxAttachment} waiter resolves.
+ */
+export type SpecProvider = () => Promise<DesiredSandboxSpec>;
+
 // ── Engine API ─────────────────────────────────────────────────────
 
 export interface RoleSpec {
@@ -1278,7 +1315,7 @@ export interface CreateSessionOptions {
    * Start-ref for this session's workspace (engine traces spec, change 2).
    * Set by the host once the workspace state is known — either resolved
    * before `createSession` (out-of-band clone) or via `Session.setStartRef`
-   * after `prepareSandbox` completes (in-sandbox clone). Persisted verbatim
+   * after the specProvider's steps complete (in-sandbox clone). Persisted verbatim
    * on the session row; treated as opaque by the engine. Absent === no
    * start-ref recorded (this session is not eval-replayable).
    */
@@ -1308,20 +1345,17 @@ export interface CreateSessionOptions {
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   /**
-   * Optional host-provided post-provision prep hook. Absent === no prep —
-   * existing paths unchanged (the provision path executes exactly today's
-   * statements). When present, it runs once per (sandbox, epoch) after a
+   * Optional host-provided spec factory. Absent === no prep — existing paths
+   * unchanged. When present, it is called once per (sandbox, epoch) after a
    * freshly cold-booted sandbox reports ready and BEFORE any `ensureReady`
-   * waiter is resolved: the host receives the live `Sandbox` handle plus the
-   * attachment epoch and may do first-boot setup (e.g. clone a repo into the
-   * workspace). No waiter ever observes an unprepped sandbox. A rejection is
-   * terminal for that provision — waiters reject with
-   * `sandbox preparation failed: {message}`, the attachment lands in `error`,
-   * and the next `ensureReady` re-provisions and re-runs prep. Only the cold
-   * `doProvision` path runs prep; a hibernation wake (`doResume`, same epoch)
-   * does not.
+   * waiter resolves. The engine calls `specProvider()`, then applies each
+   * {@link PrepStep} in order. A step rejection is terminal for that provision
+   * — waiters reject with `sandbox preparation failed: {message}`, the
+   * attachment lands in `error`, and the next `ensureReady` re-provisions and
+   * re-runs all steps. Only the cold `doProvision` path runs steps; a
+   * hibernation wake (`doResume`, same epoch) does not.
    */
-  prepareSandbox?: (sandbox: Sandbox, epoch: number) => Promise<void>;
+  specProvider?: SpecProvider;
   /**
    * Optional host-provided credential resolver. Absent === raw store read —
    * existing paths unchanged (the session-scoped `CredentialProvider`

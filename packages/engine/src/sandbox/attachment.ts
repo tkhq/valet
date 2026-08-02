@@ -1,4 +1,4 @@
-import type { Sandbox, SandboxCreateOpts, SandboxProvider } from "../types.js";
+import type { Sandbox, SandboxCreateOpts, SandboxProvider, SpecProvider } from "../types.js";
 import { markSpanError, withSpan } from "../tracing.js";
 import { recordSandboxProvision } from "../metrics.js";
 import {
@@ -7,13 +7,6 @@ import {
   SandboxUnavailableError,
   WorkspaceProvisioningError,
 } from "../errors.js";
-
-/**
- * Optional host post-provision prep hook. Awaited once per (sandbox, epoch) in
- * `doProvision` after readiness and before any waiter resolves; see
- * `CreateSessionOptions.prepareSandbox`.
- */
-export type PrepareSandbox = (sandbox: Sandbox, epoch: number) => Promise<void>;
 
 /**
  * Attachment lifecycle states (spec decision 2). `detached` = never
@@ -59,7 +52,7 @@ interface Waiter {
 export class SandboxAttachment {
   private provider: SandboxProvider | null;
   private readonly createOpts: SandboxCreateOpts;
-  private readonly prepare: PrepareSandbox | undefined;
+  private readonly specProvider: SpecProvider | undefined;
   private readonly estimateMs: number | undefined;
   private noProvider: boolean;
 
@@ -72,10 +65,10 @@ export class SandboxAttachment {
   private readonly waiters = new Set<Waiter>();
   private readonly listeners = new Set<StatusListener>();
 
-  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, prepare?: PrepareSandbox) {
+  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider) {
     this.provider = provider;
     this.createOpts = createOpts;
-    this.prepare = prepare;
+    this.specProvider = specProvider;
     this.estimateMs = provider.capabilities().coldStartEstimateMs;
     this.noProvider = false;
   }
@@ -420,7 +413,7 @@ export class SandboxAttachment {
 
   private async doProvision(): Promise<void> {
     // Traced (distributed tracing): the whole cold boot — provider.create +
-    // the host prepareSandbox hook — as one `sandbox.provision` span, so
+    // the specProvider steps — as one `sandbox.provision` span, so
     // cold-start latency is directly attributable in traces (a concurrent
     // sandbox.exec span's wait is explained by this one).
     return withSpan(
@@ -457,17 +450,23 @@ export class SandboxAttachment {
         await provider.destroy(sandbox.id).catch(() => {});
         return;
       }
-      // Post-provision prep (host `prepareSandbox` seam). Runs once per
-      // (sandbox, epoch) AFTER the sandbox reports ready and BEFORE we mark
-      // `ready`/flush waiters — no waiter may ever observe an unprepped
-      // sandbox (`_sandbox` is still null and `_state` still `provisioning`
-      // throughout, so `current()`/the ensureReady fast-path both miss).
-      // Absent hook: this block is skipped and the path below is byte-identical
-      // to the pre-seam behavior. Only the cold `doProvision` runs prep — a
+      // Post-provision prep (specProvider seam). Runs once per (sandbox, epoch)
+      // AFTER the sandbox reports ready and BEFORE we mark `ready`/flush
+      // waiters — no waiter may ever observe an unprepped sandbox (`_sandbox`
+      // is still null and `_state` still `provisioning` throughout, so
+      // `current()`/the ensureReady fast-path both miss). Absent specProvider:
+      // this block is skipped and the path below is byte-identical to the
+      // pre-seam behavior. Only the cold `doProvision` runs prep — a
       // hibernation wake (`doResume`, same epoch) deliberately does not.
-      if (this.prepare) {
+      //
+      // NOTE: `desired.image` is intentionally ignored here — Task 5 wires
+      // image selection into the provision flow.
+      if (this.specProvider) {
         try {
-          await this.prepare(sandbox, this._epoch);
+          const desired = await this.specProvider();
+          for (const step of desired.steps) {
+            await step.apply(sandbox);
+          }
         } catch (prepErr) {
           // Terminal for this provision. Best-effort destroy the unprepped
           // sandbox unconditionally so the handle never leaks — even if a

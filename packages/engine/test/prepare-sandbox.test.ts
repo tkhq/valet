@@ -9,6 +9,7 @@ import {
   type SandboxProvider,
   type SandboxStatus,
 } from "../src/index.js";
+import type { SpecProvider, DesiredSandboxSpec } from "../src/index.js";
 
 // ── Fakes ────────────────────────────────────────────────────────────
 
@@ -105,8 +106,24 @@ class FakeProvider implements SandboxProvider {
   }
 }
 
-describe("SandboxAttachment prepareSandbox seam", () => {
-  it("absent hook: provision path is unchanged — ready at epoch 1, no prep", async () => {
+/** Build a single-step {@link SpecProvider} whose step calls `applyFn`. */
+function makeSpecProvider(applyFn: (sandbox: Sandbox) => Promise<void>): SpecProvider {
+  const spec: DesiredSandboxSpec = {
+    specHash: "test-hash",
+    steps: [
+      {
+        id: "test-step",
+        hash: "step-hash",
+        critical: true,
+        apply: applyFn,
+      },
+    ],
+  };
+  return async () => spec;
+}
+
+describe("SandboxAttachment specProvider seam", () => {
+  it("absent specProvider: provision path is unchanged — ready at epoch 1, no prep", async () => {
     const provider = new FakeProvider();
     const attachment = new SandboxAttachment(provider, {});
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
@@ -117,42 +134,42 @@ describe("SandboxAttachment prepareSandbox seam", () => {
     expect(attachment.currentEpoch()).toBe(1);
   });
 
-  it("prep runs exactly once, with the live sandbox + epoch, before any waiter resolves", async () => {
+  it("step runs exactly once, with the live sandbox, before any waiter resolves", async () => {
     const provider = new FakeProvider();
     const sb = makeFakeSandbox("sb-1");
-    const prepareSandbox = vi.fn(async (_sandbox: Sandbox, _epoch: number) => {});
-    const attachment = new SandboxAttachment(provider, {}, prepareSandbox);
+    const applyFn = vi.fn(async (_sandbox: Sandbox) => {});
+    const attachment = new SandboxAttachment(provider, {}, makeSpecProvider(applyFn));
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
 
     provider.nextDeferred().resolve(sb);
     await wrapper.readFile("/x.txt");
 
-    expect(prepareSandbox).toHaveBeenCalledTimes(1);
-    expect(prepareSandbox).toHaveBeenCalledWith(sb, 1);
+    expect(applyFn).toHaveBeenCalledTimes(1);
+    expect(applyFn).toHaveBeenCalledWith(sb);
   });
 
-  it("ordering pin: a marker prep writes is visible to the first waiter's read", async () => {
+  it("ordering pin: a marker the step writes is visible to the first waiter's read", async () => {
     const provider = new FakeProvider();
     const sb = makeStatefulSandbox("sb-1");
-    const prepareSandbox = vi.fn(async (sandbox: Sandbox, _epoch: number) => {
+    const applyFn = vi.fn(async (sandbox: Sandbox) => {
       await sandbox.writeFile("/prep-marker", "prepped");
     });
-    const attachment = new SandboxAttachment(provider, {}, prepareSandbox);
+    const attachment = new SandboxAttachment(provider, {}, makeSpecProvider(applyFn));
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
 
     provider.nextDeferred().resolve(sb);
-    // If prep had not completed before this read is dispatched, the marker
+    // If the step had not completed before this read is dispatched, the marker
     // would be missing and readFile would throw ENOENT.
     await expect(wrapper.readFile("/prep-marker")).resolves.toBe("prepped");
   });
 
-  it("no waiter observes the sandbox mid-prep: current() is null while prep runs", async () => {
+  it("no waiter observes the sandbox mid-prep: current() is null while step runs", async () => {
     const provider = new FakeProvider();
     const prepGate = defer<void>();
-    const prepareSandbox = vi.fn(async (_sandbox: Sandbox, _epoch: number) => {
+    const applyFn = vi.fn(async (_sandbox: Sandbox) => {
       await prepGate.promise;
     });
-    const attachment = new SandboxAttachment(provider, {}, prepareSandbox);
+    const attachment = new SandboxAttachment(provider, {}, makeSpecProvider(applyFn));
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
 
     provider.nextDeferred().resolve(makeFakeSandbox("sb-1"));
@@ -167,12 +184,13 @@ describe("SandboxAttachment prepareSandbox seam", () => {
     expect(attachment.state).toBe("ready");
   });
 
-  it("prep rejection: waiters reject with `sandbox preparation failed: …`, attachment -> error, no leak", async () => {
+  it("step rejection: waiters reject with `sandbox preparation failed: …`, attachment -> error, no leak", async () => {
     const provider = new FakeProvider();
-    // huge timeout so a fast rejection proves the fail path, not the timeout
-    const attachment = new SandboxAttachment(provider, {}, async () => {
+    // Huge timeout so a fast rejection proves the fail path, not the timeout.
+    const specProvider = makeSpecProvider(async () => {
       throw new Error("clone failed");
     });
+    const attachment = new SandboxAttachment(provider, {}, specProvider);
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 60_000 });
 
     provider.nextDeferred().resolve(makeFakeSandbox("sb-1"));
@@ -184,24 +202,25 @@ describe("SandboxAttachment prepareSandbox seam", () => {
     expect(provider.destroyCalls).toContain("sb-1");
   });
 
-  it("prep rejection surfaces a SandboxPreparationError instance", async () => {
+  it("step rejection surfaces a SandboxPreparationError instance", async () => {
     const provider = new FakeProvider();
-    const attachment = new SandboxAttachment(provider, {}, async () => {
+    const specProvider = makeSpecProvider(async () => {
       throw new Error("boom");
     });
+    const attachment = new SandboxAttachment(provider, {}, specProvider);
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 60_000 });
     provider.nextDeferred().resolve(makeFakeSandbox("sb-1"));
     await expect(wrapper.readFile("/x.txt")).rejects.toBeInstanceOf(SandboxPreparationError);
   });
 
-  it("re-provision after prep failure re-runs prep and can succeed", async () => {
+  it("re-provision after step failure re-runs all steps and can succeed", async () => {
     const provider = new FakeProvider();
     let calls = 0;
-    const prepareSandbox = vi.fn(async (_sandbox: Sandbox, _epoch: number) => {
+    const applyFn = vi.fn(async (_sandbox: Sandbox) => {
       calls++;
       if (calls === 1) throw new Error("first attempt failed");
     });
-    const attachment = new SandboxAttachment(provider, {}, prepareSandbox);
+    const attachment = new SandboxAttachment(provider, {}, makeSpecProvider(applyFn));
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 60_000 });
 
     provider.nextDeferred().resolve(makeFakeSandbox("sb-1"));
@@ -211,15 +230,16 @@ describe("SandboxAttachment prepareSandbox seam", () => {
     provider.nextDeferred().resolve(makeFakeSandbox("sb-2"));
     await expect(wrapper.readFile("/y.txt")).resolves.toBe("content");
     expect(attachment.state).toBe("ready");
-    expect(prepareSandbox).toHaveBeenCalledTimes(2);
+    expect(applyFn).toHaveBeenCalledTimes(2);
   });
 
   it("destroy during prep: the created sandbox is torn down and no waiter is left with a handle", async () => {
     const provider = new FakeProvider();
     const prepGate = defer<void>();
-    const attachment = new SandboxAttachment(provider, {}, async () => {
+    const specProvider = makeSpecProvider(async () => {
       await prepGate.promise;
     });
+    const attachment = new SandboxAttachment(provider, {}, specProvider);
     const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 5000 });
 
     provider.nextDeferred().resolve(makeFakeSandbox("sb-1"));
