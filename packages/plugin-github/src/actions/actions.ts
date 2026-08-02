@@ -105,6 +105,17 @@ const getRepository = action(Type.Object({
 });
 
 const listRepos = action(Type.Object({
+    scope: Type.Optional(
+      Type.Union(
+        [Type.Literal("auto"), Type.Literal("user"), Type.Literal("installation")],
+        {
+          description:
+            'Which listing to use: "user" (GET /user/repos — needs a user OAuth credential), ' +
+            '"installation" (GET /installation/repositories — the org\'s GitHub App grant), or ' +
+            '"auto" (default: try user, fall back to installation on 403).',
+        },
+      ),
+    ),
     sort: Type.Optional(
       Type.Union(
         [
@@ -113,7 +124,7 @@ const listRepos = action(Type.Object({
           Type.Literal("pushed"),
           Type.Literal("full_name"),
         ],
-        { description: "Sort field" },
+        { description: "Sort field (user scope only — the installation endpoint has no sort)" },
       ),
     ),
     perPage: Type.Optional(
@@ -123,11 +134,29 @@ const listRepos = action(Type.Object({
   }))({
   id: "github.list_repos",
   name: "List Repositories",
-  description: "List repositories accessible to the authenticated credential.",
+  description:
+    "List repositories accessible to the authenticated credential — a user OAuth " +
+    "credential lists the user's repos; the org's GitHub App installation token lists " +
+    "the repos the App was granted.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
+    const scope = args.scope ?? "auto";
+
+    // GET /user/repos is user-token-only; an App installation token gets
+    // "403 Resource not accessible by integration" there and must use
+    // GET /installation/repositories instead. "auto" makes the tool work
+    // regardless of which credential tier resolution handed us.
+    async function listInstallation() {
+      const { data } = await octokit.request("GET /installation/repositories", {
+        per_page: args.perPage,
+        page: args.page,
+      });
+      return { success: true as const, data: data.repositories };
+    }
+
     try {
+      if (scope === "installation") return await listInstallation();
       const { data } = await octokit.request("GET /user/repos", {
         sort: args.sort,
         per_page: args.perPage,
@@ -135,10 +164,28 @@ const listRepos = action(Type.Object({
       });
       return { success: true, data };
     } catch (err) {
+      if (scope === "auto" && isForbidden(err)) {
+        try {
+          return await listInstallation();
+        } catch (fallbackErr) {
+          return handleOctokitError(fallbackErr, "github.list_repos", "List repos (installation)");
+        }
+      }
       return handleOctokitError(err, "github.list_repos", "List repos");
     }
   },
 });
+
+/** Octokit request errors carry `status`; 403 from /user/repos with an
+ * installation token means "wrong endpoint for this credential tier". */
+function isForbidden(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "status" in err &&
+    (err as { status: unknown }).status === 403
+  );
+}
 
 const getIssue = action(Type.Object({
     owner: Type.String(),
