@@ -383,7 +383,10 @@ describeDocker("DockerSandbox", () => {
   it("credsFiles: create mounts creds, updateCreds propagates immediately, destroy removes host dir", async () => {
     const sb = await makeSandbox({ credsFiles: { token: "aaa" } });
     const sbId = sb.id;
-    const credsDir = join(homedir(), ".valet", "creds", sbId);
+    // credsHostDir is keyed by containerName (includes timestamp) — use the
+    // stored path from the sandbox itself rather than reconstructing it.
+    const credsDir = sb.credsHostDir!;
+    expect(credsDir).toBeTruthy();
     try {
       // Initial creds visible in the container.
       const first = await sb.exec("cat /etc/valet/creds/token");
@@ -401,6 +404,35 @@ describeDocker("DockerSandbox", () => {
 
     // After destroy, the host creds dir must be gone.
     await expect(access(credsDir)).rejects.toThrow();
+  });
+
+  it("updateCreds removes files absent from the new map (stale key rotation)", async () => {
+    // Create with two creds files: cred-a and cred-b.
+    // Use same-length values for initial and updated cred-a so a VirtioFS
+    // propagation delay (macOS Docker Desktop) can't produce a partial read
+    // that looks like stale content.
+    const sb = await makeSandbox({ credsFiles: { "cred-a": "aaa", "cred-b": "bbb" } });
+    const sbId = sb.id;
+    try {
+      // Confirm both are visible in-container.
+      expect((await sb.exec("cat /etc/valet/creds/cred-a")).stdout.trim()).toBe("aaa");
+      expect((await sb.exec("cat /etc/valet/creds/cred-b")).stdout.trim()).toBe("bbb");
+
+      // Rotate: only keep cred-a (updated to "zzz"), drop cred-b.
+      await provider.updateCreds(sbId, { "cred-a": "zzz" });
+
+      // cred-a is updated — same length as old value so VirtioFS serves it
+      // without a propagation-delay partial-read window.
+      const aResult = await sb.exec("cat /etc/valet/creds/cred-a");
+      expect(aResult.exitCode).toBe(0);
+      expect(aResult.stdout.trim()).toBe("zzz");
+
+      // cred-b is gone — cat must fail (deletion propagates immediately).
+      const bResult = await sb.exec("cat /etc/valet/creds/cred-b");
+      expect(bResult.exitCode).not.toBe(0);
+    } finally {
+      await provider.destroy(sbId);
+    }
   });
 
   it("capabilities() reports credsMount: true", () => {

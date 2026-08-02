@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { buildDockerRunArgs } from "../src/sandbox.js";
+import { mkdtemp, rm, access } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { buildDockerRunArgs, writeCredsFiles } from "../src/sandbox.js";
 
 const baseOpts = {
   containerName: "valet-sandbox-test",
@@ -123,5 +126,41 @@ describe("buildDockerRunArgs (pure)", () => {
     // Exactly two -v flags total.
     const allVFlags = args.reduce((n, a) => n + (a === "-v" ? 1 : 0), 0);
     expect(allVFlags).toBe(2);
+  });
+});
+
+describe("writeCredsFiles (pure — no Docker required)", () => {
+  let tmp: string;
+
+  beforeEach(async () => {
+    tmp = await mkdtemp(join(tmpdir(), "valet-creds-unit-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it('rejects traversal key "../evil" before writing any file', async () => {
+    await expect(writeCredsFiles(tmp, { "../evil": "x" })).rejects.toThrow(
+      /unsafe key.*\.\.\/evil/,
+    );
+    // Nothing must have been written — the evil path should not exist.
+    await expect(access(join(tmp, "..", "evil"))).rejects.toThrow();
+  });
+
+  it("rejects keys containing path separators", async () => {
+    await expect(writeCredsFiles(tmp, { "a/b": "x" })).rejects.toThrow(/unsafe key.*a\/b/);
+  });
+
+  it("rejects '.' and '..' as keys", async () => {
+    await expect(writeCredsFiles(tmp, { ".": "x" })).rejects.toThrow(/unsafe key/);
+    await expect(writeCredsFiles(tmp, { "..": "x" })).rejects.toThrow(/unsafe key/);
+  });
+
+  it("accepts plain filenames and writes them with mode 0600", async () => {
+    await expect(writeCredsFiles(tmp, { token: "abc", other: "def" })).resolves.toBeUndefined();
+    // Both files exist; no error thrown on access.
+    await expect(access(join(tmp, "token"))).resolves.toBeUndefined();
+    await expect(access(join(tmp, "other"))).resolves.toBeUndefined();
   });
 });

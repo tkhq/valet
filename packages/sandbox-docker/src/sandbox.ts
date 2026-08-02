@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, posix, resolve } from "node:path";
+import { basename, isAbsolute, join, posix, resolve } from "node:path";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -638,11 +638,29 @@ function credsHostDir(sandboxId: string): string {
 }
 
 /** Write credential files into the given directory (mode 0600). Creates the
- * directory (mkdir -p equivalent) before writing. */
-async function writeCredsFiles(dir: string, files: Record<string, string>): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
+ * directory (mode 0700, mkdir -p equivalent) before writing.
+ *
+ * Throws if any key is not a plain filename (e.g. "../evil" or "a/b") to
+ * prevent path-traversal writes outside the creds dir.
+ *
+ * Exported for unit testing. */
+export async function writeCredsFiles(dir: string, files: Record<string, string>): Promise<void> {
+  for (const name of Object.keys(files)) {
+    if (name === "." || name === ".." || basename(name) !== name) {
+      throw new Error(
+        `writeCredsFiles: unsafe key "${name}" — keys must be plain filenames with no path separators`,
+      );
+    }
+  }
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   for (const [name, content] of Object.entries(files)) {
-    await fs.writeFile(join(dir, name), content, { encoding: "utf8", mode: 0o600 });
+    // Write to a sibling temp file then rename so the container-side bind
+    // mount always sees a fully written file (avoids partial-read races on
+    // macOS Docker Desktop where the FUSE/VirtioFS layer reflects file writes
+    // as they happen rather than after flush).
+    const tmp = join(dir, `.${name}.tmp`);
+    await fs.writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
+    await fs.rename(tmp, join(dir, name));
   }
 }
 
@@ -698,10 +716,13 @@ export class DockerSandboxProvider implements SandboxProvider {
 
     // Write creds files to the host dir BEFORE docker run so the bind is
     // populated at container start. Only when credsFiles is provided and
-    // non-empty. The dir is keyed by sandbox id (stable, pre-assigned).
+    // non-empty. The dir uses containerName (which embeds a timestamp) so
+    // the path is always unique — Docker Desktop on macOS silently fails to
+    // propagate file-system changes into a bind-mount whose host path was
+    // previously removed and re-created at the same location.
     let sandboxCredsDir: string | undefined;
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
-      sandboxCredsDir = credsHostDir(id);
+      sandboxCredsDir = credsHostDir(containerName);
       await writeCredsFiles(sandboxCredsDir, opts.credsFiles);
     }
 
@@ -743,8 +764,16 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   /** Rewrites the credential files on the host bind dir. The bind mount is
    * read-only from the container's view, but the host write propagates
-   * instantly — no restart needed. Throws when the sandbox is not found or
-   * was created without a creds dir. */
+   * instantly — no restart needed. Files present in the existing dir but
+   * absent from `files` are deleted so stale credentials do not survive key
+   * rotation. Throws when the sandbox is not found or was created without a
+   * creds dir.
+   *
+   * Known limitation: restore() cannot call updateCreds after an API restart
+   * because the in-memory sandbox map is empty — no on-disk inventory lets us
+   * reconstruct credsHostDir. The sandbox-replacement path covers this case
+   * (new create writes fresh creds); a future design may add a persistent
+   * index. */
   async updateCreds(id: string, files: Record<string, string>): Promise<void> {
     const sb = this.sandboxes.get(id);
     if (!sb) throw new Error(`DockerSandboxProvider.updateCreds: sandbox not found: ${id}`);
@@ -753,7 +782,22 @@ export class DockerSandboxProvider implements SandboxProvider {
         `DockerSandboxProvider.updateCreds: sandbox "${id}" was not created with credsFiles`,
       );
     }
-    await writeCredsFiles(sb.credsHostDir, files);
+    const dir = sb.credsHostDir;
+    // Remove files that are no longer in the new map before writing the new
+    // set. This prevents stale credentials from persisting across rotations.
+    let existing: string[] = [];
+    try {
+      existing = await fs.readdir(dir);
+    } catch {
+      // Dir may not exist yet if the initial write was skipped — treat as empty.
+    }
+    const incoming = new Set(Object.keys(files));
+    await Promise.all(
+      existing
+        .filter((f) => !incoming.has(f))
+        .map((f) => fs.unlink(join(dir, f)).catch(() => undefined)),
+    );
+    await writeCredsFiles(dir, files);
   }
 
   async destroy(id: string): Promise<void> {
