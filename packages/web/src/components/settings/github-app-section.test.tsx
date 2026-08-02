@@ -62,7 +62,7 @@ describe("GithubAppSection", () => {
         hook_attributes: { url: "https://api.example.com/webhooks/github-app" },
         public: false,
         default_events: [],
-        permissions: { contents: "write" },
+        default_permissions: { contents: "write" },
       },
       state: "signed-state-value",
     };
@@ -81,6 +81,69 @@ describe("GithubAppSection", () => {
     expect(form.getAttribute("method")).toBe("post");
     const hiddenInput = form.querySelector('input[name="manifest"]') as HTMLInputElement;
     expect(hiddenInput.value).toBe(JSON.stringify(manifestResponse.manifest));
+  });
+
+  it("org toggle gates the button until a name is entered and sends target org:{login}", async () => {
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    createManifestMutateAsync.mockResolvedValue({
+      url: "https://github.com/organizations/acme/settings/apps/new",
+      manifest: {
+        name: "valet-acme",
+        url: "https://api.example.com",
+        redirect_url: "https://api.example.com/api/org/github-app/setup",
+        hook_attributes: { url: "https://api.example.com/webhooks/github-app" },
+        public: false,
+        default_events: [],
+        default_permissions: { contents: "write" },
+      },
+      state: "s",
+    });
+    render(<GithubAppSection />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "Create under a GitHub organization" }));
+    const createBtn = screen.getByRole("button", { name: "Create GitHub App" }) as HTMLButtonElement;
+    expect(createBtn.disabled).toBe(true); // org on + no name
+
+    fireEvent.change(screen.getByLabelText("GitHub organization"), { target: { value: "acme" } });
+    expect(createBtn.disabled).toBe(false);
+    fireEvent.click(createBtn);
+    await waitFor(() =>
+      expect(createManifestMutateAsync).toHaveBeenCalledWith({ target: "org:acme" }),
+    );
+  });
+
+  it("advanced picker sends the FULL permission map (deselections stick) and chosen events", async () => {
+    githubAppData = { configured: false, installations: [], webhook: { mode: "manual" } };
+    createManifestMutateAsync.mockResolvedValue({
+      url: "https://github.com/settings/apps/new",
+      manifest: {
+        name: "valet-acme",
+        url: "https://api.example.com",
+        redirect_url: "https://api.example.com/api/org/github-app/setup",
+        hook_attributes: { url: "https://api.example.com/webhooks/github-app" },
+        public: false,
+        default_events: [],
+        default_permissions: { contents: "read" },
+      },
+      state: "s",
+    });
+    render(<GithubAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure permissions" }));
+    // Drop `actions` entirely, downgrade contents to read, untick pull_request.
+    fireEvent.change(screen.getByLabelText("Actions permission"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Repository contents permission"), { target: { value: "read" } });
+    fireEvent.click(screen.getByLabelText("pull_request"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Create GitHub App" }));
+    await waitFor(() => expect(createManifestMutateAsync).toHaveBeenCalled());
+    const body = createManifestMutateAsync.mock.calls[0][0] as {
+      permissions: Record<string, string>;
+      events: string[];
+    };
+    expect(body.permissions.actions).toBeUndefined();
+    expect(body.permissions.contents).toBe("read");
+    expect(body.events).toEqual(["push", "issue_comment"]);
   });
 
   it("configured: renders the app card, installations table, and webhook badge", () => {

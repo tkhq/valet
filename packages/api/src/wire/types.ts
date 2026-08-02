@@ -1212,6 +1212,12 @@ export interface PostGithubAppManifestRequest {
   /** `"org:{login}"` to create the app under a GitHub organization, or
    * `"personal"`/omitted for the caller's personal GitHub account. */
   target?: string;
+  /** Full permission map (`{contents: "write", ...}`) — replaces the
+   * server defaults when present, so deselecting a permission sticks. */
+  permissions?: Record<string, string>;
+  /** Webhook event names — replaces the plugin-derived defaults when
+   * present. Only delivered in public-webhook mode. */
+  events?: string[];
 }
 
 /** GitHub's app-manifest schema (https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) — only the fields this flow sets. */
@@ -1222,7 +1228,9 @@ export interface GithubAppManifestWire {
   hook_attributes: { url: string; active?: boolean };
   public: boolean;
   default_events: string[];
-  permissions: Record<string, string>;
+  /** GitHub's manifest schema names this `default_permissions` — a bare
+   * `permissions` key is REJECTED by the app-creation form. */
+  default_permissions: Record<string, string>;
 }
 
 export interface PostGithubAppManifestResponse {

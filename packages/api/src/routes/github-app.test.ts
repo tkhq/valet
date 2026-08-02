@@ -152,7 +152,7 @@ describe("POST /api/org/github-app/manifest", () => {
     expect(body.manifest.hook_attributes.active).toBe(false);
     expect(body.manifest.hook_attributes.url).toContain("/webhooks/github-app");
     expect(body.manifest.public).toBe(false);
-    expect(body.manifest.permissions).toEqual({
+    expect(body.manifest.default_permissions).toEqual({
       contents: "write",
       metadata: "read",
       pull_requests: "write",
@@ -163,6 +163,31 @@ describe("POST /api/org/github-app/manifest", () => {
     });
     expect(body.manifest.redirect_url).toContain("/api/org/github-app/setup");
     expect(typeof body.state).toBe("string");
+  });
+
+  it("permission/event overrides replace the defaults verbatim, bad levels 400", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target: "org:acme",
+        permissions: { contents: "read", metadata: "read" },
+        events: ["push"],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PostGithubAppManifestResponse;
+    expect(body.url).toBe("https://github.com/organizations/acme/settings/apps/new");
+    // Replace-not-merge: deselected defaults stay off.
+    expect(body.manifest.default_permissions).toEqual({ contents: "read", metadata: "read" });
+
+    const bad = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ permissions: { contents: "sudo" } }),
+    });
+    expect(bad.status).toBe(400);
   });
 
   it("builds a public-mode manifest when VALET_PUBLIC_URL is set: non-empty default_events, active hook", async () => {

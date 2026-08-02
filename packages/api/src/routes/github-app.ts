@@ -192,6 +192,32 @@ githubAppRouter.post("/manifest", async (c) => {
   }
   const target = typeof body.target === "string" ? body.target : undefined;
 
+  // Optional permission/event overrides (V1 parity: the advanced picker
+  // sends the FULL map, so a deselected permission actually stays off).
+  const PERMISSION_LEVELS = new Set(["read", "write", "admin"]);
+  let permissionOverride: Record<string, string> | undefined;
+  if (body.permissions !== undefined) {
+    if (typeof body.permissions !== "object" || body.permissions === null || Array.isArray(body.permissions)) {
+      return c.json({ error: "permissions must be an object of {permission: level}" }, 400);
+    }
+    for (const [key, level] of Object.entries(body.permissions)) {
+      if (!/^[a-z_]+$/.test(key) || typeof level !== "string" || !PERMISSION_LEVELS.has(level)) {
+        return c.json(
+          { error: `invalid permission ${JSON.stringify(key)}=${JSON.stringify(level)} — levels are read/write/admin` },
+          400,
+        );
+      }
+    }
+    permissionOverride = body.permissions;
+  }
+  let eventsOverride: string[] | undefined;
+  if (body.events !== undefined) {
+    if (!Array.isArray(body.events) || body.events.some((e) => typeof e !== "string" || !/^[a-z_]+$/.test(e))) {
+      return c.json({ error: "events must be an array of snake_case event names" }, 400);
+    }
+    eventsOverride = body.events;
+  }
+
   const { db, encryptionKey, plugins } = c.var.providers;
   const [orgRow] = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const slug = slugifyOrgName(orgRow?.name ?? orgId);
@@ -232,8 +258,12 @@ githubAppRouter.post("/manifest", async (c) => {
     redirect_url: `${apiBase}/api/org/github-app/setup`,
     hook_attributes: publicUrl ? { url: webhookUrl } : { url: webhookUrl, active: false },
     public: false,
-    default_events: publicUrl ? ["installation", "installation_repositories", ...triggerEvents] : [],
-    permissions: {
+    default_events: publicUrl
+      ? ["installation", "installation_repositories", ...(eventsOverride ?? triggerEvents)]
+      : [],
+    // GitHub's manifest schema key is `default_permissions` — a bare
+    // `permissions` key makes the app-creation form reject the manifest.
+    default_permissions: permissionOverride ?? {
       contents: "write",
       metadata: "read",
       pull_requests: "write",

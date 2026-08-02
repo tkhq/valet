@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { GithubAppInstallationSummary, PostGithubAppManifestResponse } from "@valet/api/wire";
-import { Badge, Button, Spinner } from "~/components/primitives";
+import { Badge, Button, Input, Spinner, Switch } from "~/components/primitives";
 import {
   useCreateGithubAppManifest,
   useDeleteGithubApp,
@@ -39,14 +39,65 @@ export function GithubAppSection() {
   );
 }
 
+// GitHub App permissions the picker offers (V1 parity), with the levels
+// GitHub actually supports per permission.
+const AVAILABLE_PERMISSIONS: { key: string; label: string; levels: string[] }[] = [
+  { key: "contents", label: "Repository contents", levels: ["read", "write"] },
+  { key: "metadata", label: "Metadata", levels: ["read"] },
+  { key: "pull_requests", label: "Pull requests", levels: ["read", "write"] },
+  { key: "issues", label: "Issues", levels: ["read", "write"] },
+  { key: "actions", label: "Actions", levels: ["read", "write"] },
+  { key: "checks", label: "Checks", levels: ["read", "write"] },
+  { key: "statuses", label: "Commit statuses", levels: ["read", "write"] },
+  { key: "deployments", label: "Deployments", levels: ["read", "write"] },
+  { key: "environments", label: "Environments", levels: ["read", "write"] },
+  { key: "pages", label: "Pages", levels: ["read", "write"] },
+  { key: "workflows", label: "Workflows", levels: ["write"] },
+  { key: "members", label: "Organization members", levels: ["read"] },
+  { key: "administration", label: "Administration", levels: ["read", "write"] },
+];
+
+const AVAILABLE_EVENTS = [
+  "push", "pull_request", "issues", "issue_comment",
+  "create", "delete", "release", "workflow_run",
+  "check_run", "check_suite", "status",
+];
+
+// Mirror the server defaults so opening the picker shows what an untouched
+// create would request.
+const DEFAULT_PERMISSIONS: Record<string, string> = {
+  contents: "write",
+  metadata: "read",
+  pull_requests: "write",
+  issues: "write",
+  actions: "write",
+  checks: "read",
+  statuses: "read",
+};
+
+const DEFAULT_EVENTS = ["push", "pull_request", "issue_comment"];
+
 function NotConfiguredCard() {
   const createManifest = useCreateGithubAppManifest();
   const [manifest, setManifest] = useState<PostGithubAppManifestResponse | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
+  // Target: personal account by default; switch on to create the App
+  // under a GitHub organization instead.
+  const [underOrg, setUnderOrg] = useState(false);
+  const [githubOrg, setGithubOrg] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [permissions, setPermissions] = useState<Record<string, string>>(DEFAULT_PERMISSIONS);
+  const [events, setEvents] = useState<string[]>(DEFAULT_EVENTS);
+
+  const orgMissing = underOrg && githubOrg.trim().length === 0;
+
   async function create() {
     try {
-      const res = await createManifest.mutateAsync();
+      const res = await createManifest.mutateAsync({
+        ...(underOrg && githubOrg.trim() ? { target: `org:${githubOrg.trim()}` } : {}),
+        ...(showAdvanced ? { permissions, events } : {}),
+      });
       setManifest(res);
     } catch {
       // useMutation surfaces the error via `createManifest.error`.
@@ -54,12 +105,100 @@ function NotConfiguredCard() {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <p className="text-sm text-muted">
         Create a GitHub App for this organization to let the assistant clone and push to your
         repos.
       </p>
-      <Button type="button" onClick={() => void create()} disabled={createManifest.isPending}>
+
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <Switch checked={underOrg} onCheckedChange={setUnderOrg} aria-label="Create under a GitHub organization" />
+          Create under a GitHub organization
+        </label>
+        {underOrg && (
+          <div className="max-w-xs space-y-1 pl-11">
+            <Input
+              value={githubOrg}
+              onChange={(e) => setGithubOrg(e.target.value)}
+              placeholder="acme-corp"
+              aria-label="GitHub organization"
+            />
+            <p className="text-xs text-muted">
+              The GitHub organization the App is created and installed under. Off → your
+              personal account.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setShowAdvanced((v) => !v)}
+        className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
+      >
+        {showAdvanced ? "Hide permissions" : "Configure permissions"}
+      </button>
+
+      {showAdvanced && (
+        <div className="space-y-4 rounded-md border border-line bg-ink-wash p-4">
+          <div>
+            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">Permissions</p>
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {AVAILABLE_PERMISSIONS.map((perm) => (
+                <label key={perm.key} className="flex items-center gap-2 text-xs text-ink">
+                  <select
+                    value={permissions[perm.key] ?? ""}
+                    aria-label={`${perm.label} permission`}
+                    onChange={(e) => {
+                      setPermissions((prev) => {
+                        const next = { ...prev };
+                        if (e.target.value) next[perm.key] = e.target.value;
+                        else delete next[perm.key];
+                        return next;
+                      });
+                    }}
+                    className="rounded border border-line bg-paper px-1.5 py-0.5 text-xs"
+                  >
+                    <option value="">none</option>
+                    {perm.levels.map((level) => (
+                      <option key={level} value={level}>
+                        {level}
+                      </option>
+                    ))}
+                  </select>
+                  {perm.label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">Webhook events</p>
+            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+              {AVAILABLE_EVENTS.map((event) => (
+                <label key={event} className="flex items-center gap-1.5 font-mono text-xs text-ink">
+                  <input
+                    type="checkbox"
+                    checked={events.includes(event)}
+                    onChange={(e) => {
+                      setEvents((prev) =>
+                        e.target.checked ? [...prev, event] : prev.filter((ev) => ev !== event),
+                      );
+                    }}
+                  />
+                  {event}
+                </label>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-muted">
+              Events only deliver when the server has a public URL; without one the App is
+              created with its webhook disabled.
+            </p>
+          </div>
+        </div>
+      )}
+
+      <Button type="button" onClick={() => void create()} disabled={createManifest.isPending || orgMissing}>
         {createManifest.isPending ? "Creating…" : "Create GitHub App"}
       </Button>
       {createManifest.error && (
