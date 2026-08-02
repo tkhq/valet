@@ -5,21 +5,36 @@
  * this" footer seeds the composer-prefill store before navigating.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { ApiError } from "~/api/client";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
+import { ApiError, api } from "~/api/client";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const docMock = vi.fn();
 
-vi.mock("~/api/memory", () => ({
-  useMemoryDoc: (path: string) => docMock(path),
-}));
+vi.mock("~/api/memory", async (importOriginal) => {
+  const original = await importOriginal<typeof import("~/api/memory")>();
+  return {
+    ...original,
+    useMemoryDoc: (path: string) => docMock(path),
+  };
+});
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({ data: { name: "Nova" } }),
 }));
 
 import { MemoryDoc, memoryDocPrefillText } from "./memory-doc";
+
+// The component uses react-query mutations now — every render needs a
+// provider. Retries off so mutation errors surface synchronously.
+function renderWithClient(ui: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
 
 function renderedDoc(rendered: string) {
   return {
@@ -59,7 +74,7 @@ describe("MemoryDoc", () => {
 
     docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
 
-    render(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: /Writing style/ })).toBeTruthy();
     expect(screen.getByText("preference")).toBeTruthy();
@@ -76,7 +91,7 @@ describe("MemoryDoc", () => {
     const rendered = '---\ntype: "note"\ntitle: "Plain"\n---\n\nJust text.\n';
     docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
 
-    render(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
     expect(screen.getByText("note")).toBeTruthy();
     expect(screen.queryByText("shareable")).toBeNull();
     expect(screen.queryByText("user-stated")).toBeNull();
@@ -89,7 +104,7 @@ describe("MemoryDoc", () => {
       data: undefined,
       refetch: vi.fn(),
     });
-    render(<MemoryDoc path="journal/2026-07-13.md" onNavigateToChat={vi.fn()} />);
+    renderWithClient(<MemoryDoc path="journal/2026-07-13.md" onNavigateToChat={vi.fn()} />);
     expect(screen.getByText(/Talk to Nova/)).toBeTruthy();
   });
 
@@ -101,7 +116,7 @@ describe("MemoryDoc", () => {
       data: undefined,
       refetch,
     });
-    render(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
     screen.getByText("Retry").click();
     expect(refetch).toHaveBeenCalled();
   });
@@ -111,13 +126,74 @@ describe("MemoryDoc", () => {
     docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
     const onNavigateToChat = vi.fn();
 
-    render(<MemoryDoc path="preferences/style.md" onNavigateToChat={onNavigateToChat} />);
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={onNavigateToChat} />);
     screen.getByText("Ask Nova to update this").click();
 
     expect(useComposerPrefillStore.getState().text).toBe(
       "Update memory file preferences/style.md: ",
     );
     expect(onNavigateToChat).toHaveBeenCalled();
+  });
+
+  it("edits: textarea seeds from stored content, save PUTs and exits edit mode", async () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+    const write = vi.spyOn(api, "writeMemoryDoc").mockResolvedValue({});
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Edit"));
+
+    const textarea = screen.getByLabelText("Memory content") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("body"); // file.content, not the rendered doc
+    fireEvent.change(textarea, { target: { value: "new body" } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() =>
+      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", content: "new body" }),
+    );
+    await waitFor(() => expect(screen.queryByLabelText("Memory content")).toBeNull());
+    write.mockRestore();
+  });
+
+  it("save is disabled when the draft is empty (delete is the way to clear)", () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Edit"));
+    fireEvent.change(screen.getByLabelText("Memory content"), { target: { value: "  " } });
+    expect((screen.getByText("Save") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("delete is confirm-gated and calls onDeleted after the DELETE succeeds", async () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+    const del = vi.spyOn(api, "deleteMemoryDoc").mockResolvedValue({});
+    const onDeleted = vi.fn();
+
+    renderWithClient(
+      <MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} onDeleted={onDeleted} />,
+    );
+    fireEvent.click(screen.getByText("Delete"));
+    expect(del).not.toHaveBeenCalled(); // first click only arms the confirm
+    fireEvent.click(screen.getByText("Confirm delete"));
+
+    await waitFor(() => expect(del).toHaveBeenCalledWith("preferences/style.md"));
+    await waitFor(() => expect(onDeleted).toHaveBeenCalled());
+    del.mockRestore();
+  });
+
+  it("delete confirm can be cancelled without calling the API", () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+    const del = vi.spyOn(api, "deleteMemoryDoc").mockResolvedValue({});
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Delete"));
+    fireEvent.click(screen.getByText("Cancel"));
+    expect(screen.queryByText("Confirm delete")).toBeNull();
+    expect(del).not.toHaveBeenCalled();
+    del.mockRestore();
   });
 });
 

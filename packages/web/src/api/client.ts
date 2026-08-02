@@ -236,6 +236,10 @@ export const api = {
   searchMemory: (q: string) =>
     request<SearchMemoryResponse>("GET", `/memory/search?q=${encodeURIComponent(q)}`),
   getMemoryGraph: () => request<MemoryGraphResponse>("GET", "/memory/graph"),
+  writeMemoryDoc: (body: { path: string; content: string }) =>
+    request<unknown>("PUT", "/memory", body),
+  deleteMemoryDoc: (path: string) =>
+    request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}`),
   exportMemory: () => request<ExportMemoryResponse>("GET", "/memory/export"),
   importMemory: (body: ImportMemoryRequest) =>
     request<ImportMemoryResponse>("POST", "/memory/import", body),
