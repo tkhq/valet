@@ -206,6 +206,37 @@ async function runVirtualCommand(
     }
   }
 
+  // mkdir [-p] <path> — create directory and any missing parents; always succeeds
+  const mkdirMatch = trimmed.match(/^mkdir\s+(?:-p\s+)?(\S+)$/);
+  if (mkdirMatch) {
+    await sb.mkdir(resolveRel(cwd, mkdirMatch[1]));
+    return ok("");
+  }
+
+  // printf '%s' '<content>' > <path>
+  // Supports POSIX single-quote escape: \'\' inside the quoted string embeds a literal single quote.
+  const printfMatch = trimmed.match(/^printf\s+'%s'\s+'([\s\S]*)'\s+>\s+(\S+)$/);
+  if (printfMatch) {
+    // Unescape POSIX \'\' → ' (end-quote + literal-quote + reopen-quote → single quote)
+    const fileContent = printfMatch[1].replace(/\'\'/g, "\'");
+    const target = resolveRel(cwd, printfMatch[2]);
+    await sb.writeFile(target, fileContent);
+    return ok("");
+  }
+
+  // Compound command: cmd1 && cmd2 — runs left, then right only on success
+  const andMatch = trimmed.match(/^([\s\S]+?)\s*&&\s*([\s\S]+)$/);
+  if (andMatch) {
+    const left = await runVirtualCommand(sb, andMatch[1].trim(), cwd, env);
+    if (left.exitCode !== 0) return left;
+    const right = await runVirtualCommand(sb, andMatch[2].trim(), cwd, env);
+    return {
+      stdout: left.stdout + right.stdout,
+      stderr: left.stderr + right.stderr,
+      exitCode: right.exitCode,
+    };
+  }
+
   const lsMatch = trimmed.match(/^ls(?:\s+(\S+))?$/);
   if (lsMatch) {
     const target = lsMatch[1] ? resolveRel(cwd, lsMatch[1]) : cwd;

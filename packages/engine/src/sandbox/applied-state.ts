@@ -5,6 +5,12 @@
  * /workspace. This is intentional: the file must die with the pod/container
  * so the next cold boot re-evaluates the full desired spec.
  *
+ * All applied-file I/O is exec-based. Provider readFile/writeFile semantics
+ * differ for container-fs paths outside /workspace: docker resolves them on
+ * the HOST filesystem, and kubernetes writeFileInPod throws when the parent
+ * directory is absent. Only VirtualSandbox's file methods work reliably at
+ * arbitrary paths — exec is the common denominator across all providers.
+ *
  * The specHash written mid-plan is the DESIRED spec's hash. It only reflects
  * "true" observed state when all planned steps have landed. Partial progress
  * is visible: the `steps` record contains only the ids that completed
@@ -28,23 +34,40 @@ export interface AppliedState {
 }
 
 /**
- * Read the applied-state file from the sandbox.
- * Returns null when the file is missing or contains corrupt JSON.
+ * Read the applied-state file from the sandbox via exec.
+ * Returns null when the file is missing, unreadable, or contains invalid JSON.
+ *
+ * Uses exec("cat ...") rather than sandbox.readFile so the path resolves
+ * inside the container filesystem on all provider implementations.
  */
 export async function readAppliedState(sandbox: Sandbox): Promise<AppliedState | null> {
-  let raw: string;
-  try {
-    raw = await sandbox.readFile(APPLIED_PATH);
-  } catch {
-    // File missing — treat as no applied state
+  const result = await sandbox.exec(`cat ${APPLIED_PATH}`);
+  if (result.exitCode !== 0) {
+    // File missing or unreadable — treat as no applied state
     return null;
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(raw) as AppliedState;
+    parsed = JSON.parse(result.stdout);
   } catch {
     // Corrupt JSON — treat as no applied state (spec decision 3: full re-apply)
     return null;
   }
+  // Shape validation: guard against partial writes or schema drift
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as Record<string, unknown>).image !== "string" ||
+    typeof (parsed as Record<string, unknown>).specHash !== "string" ||
+    typeof (parsed as Record<string, unknown>).steps !== "object" ||
+    (parsed as Record<string, unknown>).steps === null ||
+    !Object.values((parsed as { steps: Record<string, unknown> }).steps).every(
+      (v) => typeof v === "string",
+    )
+  ) {
+    return null;
+  }
+  return parsed as AppliedState;
 }
 
 /**
@@ -65,19 +88,34 @@ export function diffSteps(desired: PrepStep[], applied: AppliedState | null): Pr
 }
 
 /**
- * Write the full applied-state file.
- * Creates /etc/valet via exec first — some providers' writeFile has no parent
- * directory creation (the virtual sandbox's writeFile does create parents, but
- * real container providers such as docker and kubernetes do not guarantee it).
+ * Escape a string for use inside POSIX single quotes: replace each ' with '\''.
+ */
+function posixSingleQuoteEscape(s: string): string {
+  return s.replace(/'/g, "'\\''");
+}
+
+/**
+ * Write the full applied-state file via a single exec.
+ *
+ * The command does `mkdir -p /etc/valet` and writes the JSON in one shot
+ * using printf. Non-zero exit is treated as a real error and re-thrown.
+ *
+ * Uses exec exclusively (not sandbox.writeFile) so the write lands inside the
+ * container filesystem on docker and kubernetes providers.
  */
 async function writeAppliedState(
   sandbox: Sandbox,
   state: AppliedState,
 ): Promise<void> {
-  // mkdir -p is best-effort: real container sandboxes need it; virtual sandbox
-  // writeFile creates parents automatically so this exec returning 127 is safe.
-  await sandbox.exec("mkdir -p /etc/valet");
-  await sandbox.writeFile(APPLIED_PATH, JSON.stringify(state));
+  const json = posixSingleQuoteEscape(JSON.stringify(state));
+  const result = await sandbox.exec(
+    `mkdir -p /etc/valet && printf '%s' '${json}' > ${APPLIED_PATH}`,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `[applied-state] failed to write applied state (exit ${result.exitCode}): ${result.stderr}`,
+    );
+  }
 }
 
 /**

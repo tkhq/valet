@@ -1,7 +1,10 @@
 /**
  * Tests for the applied-state module (packages/engine/src/sandbox/applied-state.ts).
  *
- * Uses VirtualSandbox so no containers are needed.
+ * Uses VirtualSandbox so no containers are needed. File seeding uses exec so
+ * the tests exercise the same code path as the real implementation — which is
+ * exec-based because provider readFile/writeFile semantics differ for
+ * container-fs paths outside /workspace.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
@@ -38,7 +41,28 @@ function makeSpec(steps: PrepStep[], specHash = "spec-hash-1"): DesiredSandboxSp
   return { specHash, steps };
 }
 
-// ── Test 1: full apply when applied state is null ─────────────────────
+/**
+ * Seed the applied-state file via exec so tests exercise the same path as
+ * the real implementation (which uses exec, not writeFile).
+ */
+async function seedAppliedState(sb: VirtualSandbox, state: AppliedState): Promise<void> {
+  const json = JSON.stringify(state).replace(/'/g, "'\\''");
+  const result = await sb.exec(`mkdir -p /etc/valet && printf '%s' '${json}' > ${APPLIED_PATH}`);
+  if (result.exitCode !== 0) {
+    throw new Error(`seedAppliedState exec failed (exit ${result.exitCode}): ${result.stderr}`);
+  }
+}
+
+/**
+ * Seed raw (potentially corrupt) content via exec.
+ */
+async function seedRawContent(sb: VirtualSandbox, content: string): Promise<void> {
+  // Use writeFile directly for raw/corrupt content — this is test infrastructure only.
+  // The content may be intentionally corrupt so we bypass the normal write path.
+  await sb.writeFile(APPLIED_PATH, content);
+}
+
+// ── readAppliedState ──────────────────────────────────────────────────
 
 describe("readAppliedState", () => {
   it("returns null when file is missing", async () => {
@@ -49,9 +73,21 @@ describe("readAppliedState", () => {
 
   it("returns null when file contains corrupt JSON", async () => {
     const sb = makeSandbox();
-    await sb.writeFile(APPLIED_PATH, "not valid json {{{{");
+    await seedRawContent(sb, "not valid json {{{{");
     const result = await readAppliedState(sb);
     expect(result).toBeNull();
+  });
+
+  it("returns null when parsed object fails shape validation", async () => {
+    const sb = makeSandbox();
+    // Valid JSON but missing required fields
+    await seedRawContent(sb, JSON.stringify({ image: "img:v1" }));
+    expect(await readAppliedState(sb)).toBeNull();
+
+    // steps contains a non-string value
+    const sb2 = makeSandbox();
+    await seedRawContent(sb2, JSON.stringify({ image: "img:v1", specHash: "h", steps: { a: 42 } }));
+    expect(await readAppliedState(sb2)).toBeNull();
   });
 
   it("returns parsed state when file is valid", async () => {
@@ -61,13 +97,13 @@ describe("readAppliedState", () => {
       specHash: "abc123",
       steps: { step1: "hash-a", step2: "hash-b" },
     };
-    await sb.writeFile(APPLIED_PATH, JSON.stringify(state));
+    await seedAppliedState(sb, state);
     const result = await readAppliedState(sb);
     expect(result).toEqual(state);
   });
 });
 
-// ── Test 2: diffSteps ──────────────────────────────────────────────────
+// ── diffSteps ──────────────────────────────────────────────────────────
 
 describe("diffSteps", () => {
   it("returns all steps when applied is null", () => {
@@ -106,7 +142,7 @@ describe("diffSteps", () => {
   });
 });
 
-// ── Test 3: applyPlan — full apply on null applied ────────────────────
+// ── applyPlan — full apply on null applied ────────────────────────────
 
 describe("applyPlan — full apply on null applied", () => {
   it("runs all steps and writes applied file after each one", async () => {
@@ -132,7 +168,7 @@ describe("applyPlan — full apply on null applied", () => {
   });
 });
 
-// ── Test 4: subset re-run when one hash drifts ─────────────────────────
+// ── applyPlan — subset re-run when one hash drifts ─────────────────────
 
 describe("applyPlan — subset re-run", () => {
   it("only re-runs the step whose hash changed", async () => {
@@ -144,7 +180,7 @@ describe("applyPlan — subset re-run", () => {
       specHash: "spec-old",
       steps: { s1: "h1", s2: "h2-STALE" },
     };
-    await sb.writeFile(APPLIED_PATH, JSON.stringify(prior));
+    await seedAppliedState(sb, prior);
 
     const applied: string[] = [];
     const steps = [
@@ -165,7 +201,7 @@ describe("applyPlan — subset re-run", () => {
   });
 });
 
-// ── Test 5: per-step persistence (kill after step 2 of 3) ─────────────
+// ── applyPlan — per-step persistence (kill after step 2 of 3) ──────────
 
 describe("applyPlan — per-step persistence", () => {
   it("writes applied file after each step so partial progress survives a kill", async () => {
@@ -174,10 +210,10 @@ describe("applyPlan — per-step persistence", () => {
 
     const steps = [
       makeStep("s1", "h1", false, async () => {
-        // Snapshot state AFTER step 1 would write
+        // s1 runs; writeAppliedState is called after this returns
       }),
       makeStep("s2", "h2", false, async () => {
-        // Snapshot mid-plan to verify s1 was already persisted
+        // When s2 runs, s1 must already be persisted
         const state = await readAppliedState(sb);
         if (state) snapshots.push({ ...state.steps });
       }),
@@ -195,7 +231,7 @@ describe("applyPlan — per-step persistence", () => {
   });
 });
 
-// ── Test 6: critical throw stops plan, applied keeps successes ─────────
+// ── applyPlan — critical failure ────────────────────────────────────────
 
 describe("applyPlan — critical failure", () => {
   it("throws on critical step failure and applied file retains prior successes", async () => {
@@ -255,23 +291,36 @@ describe("applyPlan — critical failure", () => {
   });
 });
 
-// ── Test 7: corrupt file → full re-apply ──────────────────────────────
+// ── applyPlan — corrupt applied file (e2e) ────────────────────────────
 
-describe("applyPlan — corrupt applied file", () => {
-  it("treats corrupt JSON as null and re-applies all steps", async () => {
+describe("applyPlan — corrupt applied file e2e", () => {
+  it("seeds corrupt content, reads null, re-applies all steps, then reads valid rewritten state", async () => {
     const sb = makeSandbox();
-    await sb.writeFile(APPLIED_PATH, "{{corrupt");
 
+    // Seed corrupt content directly (simulates a partial write or schema mismatch)
+    await seedRawContent(sb, "{{corrupt");
+
+    // Caller reads the file and gets null
+    const readResult = await readAppliedState(sb);
+    expect(readResult).toBeNull();
+
+    // Caller passes null to applyPlan — all steps must re-run
     const applied: string[] = [];
     const steps = [
       makeStep("s1", "h1", false, async () => { applied.push("s1"); }),
       makeStep("s2", "h2", false, async () => { applied.push("s2"); }),
     ];
-    const spec = makeSpec(steps, "spec-corrupt");
+    const spec = makeSpec(steps, "spec-corrupt-recovery");
 
-    // Pass null as applied (caller read null from corrupt file)
     await applyPlan(sb, spec, "img:v1", null);
 
     expect(applied).toEqual(["s1", "s2"]);
+
+    // After applyPlan, the file must be overwritten with valid state
+    const recovered = await readAppliedState(sb);
+    expect(recovered).not.toBeNull();
+    expect(recovered!.image).toBe("img:v1");
+    expect(recovered!.specHash).toBe("spec-corrupt-recovery");
+    expect(recovered!.steps).toEqual({ s1: "h1", s2: "h2" });
   });
 });
