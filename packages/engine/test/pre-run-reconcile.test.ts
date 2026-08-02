@@ -131,22 +131,27 @@ describe("pre-run reconcile window", () => {
   });
 
   it("does NOT call reconcile when another thread has an active run", async () => {
-    // Two threads: A starts a slow turn (via a gate-pauseable response), B
-    // then starts a turn. We verify that reconcile was NOT called for B's
-    // run-start because A is still mid-turn.
-    //
-    // Simpler approach: we control `hasOtherActiveRuns` by checking real
-    // thread concurrency. Use a deferred faux response to hold thread A open
-    // while thread B's turn runs.
+    // Thread A uses a deferred faux factory that blocks until signalled.
+    // Sequence: submit A → A enters factory (A is mid-run) → submit B →
+    // B settles (reconcile suppressed because A is active) → release A → A settles.
+    // A's reconcile fires once at its own run-start; B's is suppressed → total = 1.
     const provider = faux("reconcile-concurrent");
 
-    // We can't use a deferred here easily via the faux provider, so instead
-    // we verify the method under test directly: `hasOtherActiveRuns` and the
-    // guard logic. The real integration test is: spy on reconcile, start two
-    // concurrent prompts on different threads, verify call count ≤ 1 (only
-    // the first thread to run can be idle).
+    // Deferred for thread A: factory resolves when released; signals back
+    // when A has entered the factory (and is therefore mid-run).
+    let releaseA!: () => void;
+    let aEntered!: () => void;
+    const aEnteredPromise = new Promise<void>((res) => { aEntered = res; });
+    const aReleasePromise = new Promise<void>((res) => { releaseA = res; });
+
     provider.setResponses([
-      fauxAssistantMessage("A done"),
+      // Thread A's response: block mid-run until released.
+      async () => {
+        aEntered();
+        await aReleasePromise;
+        return fauxAssistantMessage("A done");
+      },
+      // Thread B's response: immediate.
       fauxAssistantMessage("B done"),
     ]);
 
@@ -154,7 +159,6 @@ describe("pre-run reconcile window", () => {
     const session = await makeSession(engine, provider);
 
     let reconcileCalls = 0;
-    // Spy — the reconcile runs when idle; count invocations.
     vi.spyOn(session.attachment, "reconcile").mockImplementation(async () => {
       reconcileCalls++;
     });
@@ -162,27 +166,30 @@ describe("pre-run reconcile window", () => {
     const tA = session.thread("task:A");
     const tB = session.thread("task:B");
 
-    // Submit both simultaneously — only one can be mid-run when the other's
-    // kickLoop reaches the reconcile window. The guard suppresses the call on
-    // whichever thread sees the other as active.
+    // Submit A and wait until A's factory is executing (A is mid-run).
     void tA.submitPrompt("hello A", {});
+    await aEnteredPromise;
+
+    // A's run-start reconcile already fired (before the model call).
+    // Now submit B. B's reconcile check sees A active → skips reconcile.
     void tB.submitPrompt("hello B", {});
+    await waitForStatus(events, tB.id, "idle");
 
-    await Promise.all([
-      waitForStatus(events, tA.id, "idle"),
-      waitForStatus(events, tB.id, "idle"),
-    ]);
+    // B's turn is done. Reconcile count must be exactly 1 (A's only).
+    expect(reconcileCalls).toBe(1);
 
-    // At most one reconcile per thread: since one may start before the other
-    // is active, reconcile may fire 1 or 2 times (depending on scheduling).
-    // What must NOT happen: more calls than threads.
-    expect(reconcileCalls).toBeGreaterThanOrEqual(0);
-    expect(reconcileCalls).toBeLessThanOrEqual(2);
+    // Release A.
+    releaseA();
+    await waitForStatus(events, tA.id, "idle");
+
+    // A's run did not trigger a second reconcile (it fired before the model
+    // call, not after). Total remains 1.
+    expect(reconcileCalls).toBe(1);
   });
 
   it("does NOT call reconcile when hasOtherActiveRuns returns true", async () => {
-    // Direct unit test of the guard: verify that Session.hasOtherActiveRuns
-    // correctly detects a concurrent thread's active run state.
+    // Unit test of the guard initial state: before any run, neither thread
+    // reports the other as active.
     const provider = faux("reconcile-guard-unit");
     provider.setResponses([fauxAssistantMessage("done")]);
 
@@ -192,27 +199,68 @@ describe("pre-run reconcile window", () => {
     const tA = session.thread("task:A");
     const tB = session.thread("task:B");
 
-    // Nothing running — neither thread should report active for the other.
     expect(session.hasOtherActiveRuns(tA.id)).toBe(false);
     expect(session.hasOtherActiveRuns(tB.id)).toBe(false);
   });
 
   it("does NOT call reconcile when there is a pending exec job", async () => {
-    // Verify that Session.pendingJobCount() plumbs through when PolicySandbox
-    // has pending jobs. The reconcile guard skips when count > 0.
+    // Vend a real job through the session's PolicySandbox so pendingJobCount()
+    // returns 1. Then submit a prompt — the reconcile guard must suppress the
+    // call because the job is pending. Cancel the job (count drops to 0),
+    // then submit again — reconcile must fire.
     //
-    // We test this by controlling the reconcile call path: if pendingJobCount
-    // were > 0 at run start, the window should suppress the call.
-    // Since we can't inject a pending job in a real run easily, we verify the
-    // guard contract through Session.pendingJobCount() directly.
+    // We use a deferred factory to serialize the two turns: turn 1 blocks on
+    // a deferred, so the spy on pendingJobCount can be swapped between turns.
     const provider = faux("reconcile-pending-jobs");
-    provider.setResponses([fauxAssistantMessage("done")]);
 
-    const { engine } = makeEngine();
+    let releaseTurn1!: () => void;
+    let turn1Entered!: () => void;
+    const turn1EnteredPromise = new Promise<void>((res) => { turn1Entered = res; });
+    const turn1ReleasePromise = new Promise<void>((res) => { releaseTurn1 = res; });
+
+    provider.setResponses([
+      async () => {
+        turn1Entered();
+        await turn1ReleasePromise;
+        return fauxAssistantMessage("turn with pending job");
+      },
+      fauxAssistantMessage("turn after job done"),
+    ]);
+
+    const { engine, events } = makeEngine();
     const session = await makeSession(engine, provider);
 
-    // Without any execJob calls, the count must be 0.
+    // Vend a job so pendingJobCount() is truly 1.
+    const handle = await session.sandbox.execJob?.("echo hi");
+    if (!handle) throw new Error("VirtualSandbox must support execJob");
+    expect(session.pendingJobCount()).toBe(1);
+
+    const reconcileSpy = vi.spyOn(session.attachment, "reconcile").mockResolvedValue();
+
+    // Submit turn 1. Wait until the factory is executing (turn 1 is mid-run,
+    // past the reconcile check). Because pendingJobCount() === 1, reconcile
+    // was suppressed at turn 1's run-start.
+    void session.prompt("first");
+    await turn1EnteredPromise;
+    expect(reconcileSpy).toHaveBeenCalledTimes(0);
+
+    // While turn 1 is held: cancel the job so pendingJobCount() drops to 0.
+    await session.sandbox.cancelJob?.(handle.execId);
     expect(session.pendingJobCount()).toBe(0);
+
+    // Submit turn 2 NOW, while turn 1 is still running. Turn 2 is queued.
+    void session.prompt("second");
+
+    // Release turn 1. The kickLoop will settle turn 1 then process turn 2.
+    // Turn 2's reconcile check sees pendingJobCount() === 0 and no other
+    // active runs → reconcile fires.
+    releaseTurn1();
+
+    // Wait for turn 2 to settle.
+    await waitFor(
+      () => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length >= 2,
+    );
+    expect(reconcileSpy).toHaveBeenCalledTimes(1);
   });
 
   it("reconcile rejection does NOT fail the turn", async () => {
@@ -243,17 +291,48 @@ describe("pre-run reconcile window", () => {
   });
 
   it("PolicySandbox.pendingJobCount() tracks execJob/pollJob lifecycle", async () => {
-    // Unit test for PolicySandbox job tracking — no full session needed.
-    // Drive execJob + pollJob directly through a PolicySandbox over a fake
-    // attachment to verify the counter increments and decrements correctly.
+    // Unit test for PolicySandbox job tracking: vend a job, assert count
+    // increments, poll to terminal status, assert count returns to 0.
     const { PolicySandbox, SandboxAttachment, VirtualSandbox } = await import("../src/index.js");
 
     const rawSandbox = new VirtualSandbox("test-sandbox");
     const attachment = SandboxAttachment.forSandbox(rawSandbox);
     const policy = new PolicySandbox(attachment);
 
-    // The VirtualSandbox does not implement execJob — verify the count stays
-    // 0 when no jobs are vended.
+    expect(policy.pendingJobCount()).toBe(0);
+
+    // Vend a job — VirtualSandbox execJob runs it inline, stores a terminal
+    // result, but the PolicySandbox pendingJobs counter tracks until pollJob
+    // returns a terminal status.
+    const handle = await policy.execJob("echo hi");
+    expect(policy.pendingJobCount()).toBe(1);
+
+    // Poll to terminal (status === "done") — counter drops to 0.
+    const poll = await policy.pollJob(handle.execId, 0);
+    expect(poll.status).toBe("done");
+    expect(policy.pendingJobCount()).toBe(0);
+  });
+
+  it("PolicySandbox.pendingJobCount() drops to 0 when pollJob dispatch rejects", async () => {
+    // Regression: a pollJob rejection (SandboxUnavailableError on transport
+    // failure, SandboxSupersededError on epoch bump) must clear the pending
+    // entry so the reconcile window is not permanently blocked.
+    const { PolicySandbox, SandboxAttachment, VirtualSandbox, SandboxSupersededError } =
+      await import("../src/index.js");
+
+    const rawSandbox = new VirtualSandbox("test-sandbox");
+    const attachment = SandboxAttachment.forSandbox(rawSandbox);
+    const policy = new PolicySandbox(attachment);
+
+    // Vend a job to put an entry in pendingJobs.
+    const handle = await policy.execJob("echo hi");
+    expect(policy.pendingJobCount()).toBe(1);
+
+    // Patch the raw sandbox's pollJob to simulate an epoch-superseded rejection.
+    rawSandbox.pollJob = async () => { throw new SandboxSupersededError(0); };
+
+    // pollJob on the policy must rethrow and also clear the pending entry.
+    await expect(policy.pollJob(handle.execId, 0)).rejects.toBeInstanceOf(SandboxSupersededError);
     expect(policy.pendingJobCount()).toBe(0);
   });
 
@@ -321,21 +400,45 @@ describe("Thread.hasActiveRun", () => {
 
   it("returns true while a turn is in progress", async () => {
     const provider = faux("has-active-running");
-    // We cannot easily hook the mid-run state without a deferred response.
-    // Instead verify via the reconcile spy: if hasActiveRun were always false,
-    // the self-exclusion test above would pass trivially. Here we just verify
-    // the accessor exists and returns the correct type.
-    provider.setResponses([fauxAssistantMessage("ok")]);
+
+    let midRunHasActiveRun: boolean | undefined;
+    let capturedThread: { hasActiveRun: boolean } | undefined;
+    let releaseRun!: () => void;
+    let runEntered!: () => void;
+    const runEnteredPromise = new Promise<void>((res) => { runEntered = res; });
+    const releasePromise = new Promise<void>((res) => { releaseRun = res; });
+
+    provider.setResponses([
+      async () => {
+        runEntered();
+        await releasePromise;
+        return fauxAssistantMessage("ok");
+      },
+    ]);
 
     const { engine, events } = makeEngine();
     const session = await makeSession(engine, provider);
 
     const thread = session.thread("task:run");
-    expect(typeof thread.hasActiveRun).toBe("boolean");
+    capturedThread = thread;
 
-    const receipt = await thread.submitPrompt("hi", {});
+    // Before submission: idle.
+    expect(thread.hasActiveRun).toBe(false);
+
+    void thread.submitPrompt("hi", {});
+
+    // Wait until the factory is executing (thread is mid-run).
+    await runEnteredPromise;
+    midRunHasActiveRun = capturedThread.hasActiveRun;
+
+    releaseRun();
+    const receipt = await thread.submitPrompt("noop", {});
+    // Wait for the thread to settle fully.
     await waitForStatus(events, receipt.threadId, "idle");
 
+    // The accessor returned true while the factory was blocking.
+    expect(midRunHasActiveRun).toBe(true);
+    // After completion: idle again.
     expect(thread.hasActiveRun).toBe(false);
   });
 });

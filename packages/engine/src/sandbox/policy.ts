@@ -175,10 +175,20 @@ export class PolicySandbox implements Sandbox {
   }
 
   async pollJob(execId: string, offset: number): Promise<JobPoll> {
-    const poll = await this.dispatch((sb) => {
-      if (!sb.pollJob) throw jobUnsupportedError();
-      return sb.pollJob(execId, offset);
-    });
+    let poll: JobPoll;
+    try {
+      poll = await this.dispatch((sb) => {
+        if (!sb.pollJob) throw jobUnsupportedError();
+        return sb.pollJob(execId, offset);
+      });
+    } catch (err) {
+      // A transport failure (SandboxUnavailableError) or epoch bump
+      // (SandboxSupersededError) means the job will never reach a terminal
+      // poll on this sandbox instance. Remove the entry so the pending-job
+      // counter does not stall the reconcile window indefinitely.
+      this.pendingJobs.delete(execId);
+      throw err;
+    }
     // Remove on terminal status — the job is no longer running.
     if (poll.status === "done" || poll.status === "failed") {
       this.pendingJobs.delete(execId);
@@ -197,7 +207,7 @@ export class PolicySandbox implements Sandbox {
 
   /**
    * Number of exec jobs that have been vended but have not yet reached a
-   * terminal poll status (`done`, `error`, or `cancelled`) or been cancelled.
+   * terminal poll status (`done` or `failed`) or been cancelled.
    * Used by the run-start reconcile window (spec decision 4) to gate whether
    * the sandbox is idle enough for convergence.
    */
