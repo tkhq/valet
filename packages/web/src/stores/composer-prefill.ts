@@ -16,17 +16,25 @@ import { create } from "zustand";
  */
 interface ComposerPrefillState {
   text: string | null;
+  /** Monotonic counter: each `requestFocus()` bump asks the mounted
+   * Composer to focus its input (thread-tree's New thread button). A
+   * counter instead of a boolean so repeated requests always re-trigger
+   * the subscriber effect. */
+  focusNonce: number;
   set: (text: string) => void;
   /** Reads and clears in one step — a second call returns `null`. */
   consume: () => string | null;
+  requestFocus: () => void;
 }
 
 export const useComposerPrefillStore = create<ComposerPrefillState>((set, get) => ({
   text: null,
+  focusNonce: 0,
   set: (text) => set({ text }),
   consume: () => {
     const current = get().text;
     if (current !== null) set({ text: null });
     return current;
   },
+  requestFocus: () => set((s) => ({ focusNonce: s.focusNonce + 1 })),
 }));

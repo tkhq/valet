@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Send, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
@@ -27,6 +27,14 @@ export function Composer({
   // subscription — a later `set()` elsewhere shouldn't yank the draft out
   // from under whatever the user is typing.
   const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Focus-on-request (New thread button): reactive on purpose, unlike the
+  // prefill text — the Composer is usually already mounted when the
+  // request fires, so a mount-time consume would miss it.
+  const focusNonce = useComposerPrefillStore((s) => s.focusNonce);
+  useEffect(() => {
+    if (focusNonce > 0) inputRef.current?.focus();
+  }, [focusNonce]);
   const send = useSendPrompt(sessionId);
   const abort = useAbortThread(sessionId);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
@@ -95,6 +103,7 @@ export function Composer({
       <QueueIndicator queueState={queueState} />
       <div className="flex gap-2 items-end">
         <Textarea
+          ref={inputRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}

@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { MessageSquare, Plus, Search, X } from "lucide-react";
 import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import { useCreateThread, useThreads } from "~/api/queries";
+import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
@@ -126,6 +127,9 @@ function ThreadTreeInner({ sessionId }: { sessionId: string }) {
   async function createAndNavigate() {
     const thread = await createThread.mutateAsync();
     navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
+    // Land the cursor in the composer — a fresh thread exists to be
+    // typed into.
+    useComposerPrefillStore.getState().requestFocus();
   }
 
   return (
