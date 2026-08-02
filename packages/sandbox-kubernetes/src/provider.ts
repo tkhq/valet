@@ -620,6 +620,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
+    if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0 && !this.deps.secretsApi) {
+      console.error(
+        `k8s sandbox ${name}: credsFiles provided but secretsApi is not wired — creds mount will be empty`,
+      );
+    }
     if (this.deps.secretsApi && opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
       await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
     }

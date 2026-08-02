@@ -81,6 +81,20 @@ describe("buildSandboxProvider", () => {
     expect(provider.backend).toBe("kubernetes");
   });
 
+  it("kubernetes path wires secretsApi: capabilities().credsMount is true", () => {
+    // Regression: KubernetesSandboxProvider was constructed without secretsApi,
+    // so capabilities().credsMount was always false and creds Secrets were never
+    // created in production.
+    const provider = buildSandboxProvider(
+      {
+        VALET_SANDBOX_BACKEND: "kubernetes",
+        VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+      },
+      { kubeConfig: fakeKubeConfig() },
+    );
+    expect(provider.capabilities().credsMount).toBe(true);
+  });
+
   it("defaults the kubernetes namespace when VALET_SANDBOX_NAMESPACE is unset", () => {
     // Construction succeeding (no throw) is the assertion here — the
     // namespace/image aren't otherwise observable from outside the

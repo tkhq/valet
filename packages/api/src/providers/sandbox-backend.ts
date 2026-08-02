@@ -30,6 +30,7 @@ import {
   podLivenessApiAdapter,
   podStatusApiAdapter,
   podsApiAdapter,
+  sandboxSecretsApiAdapter,
   type K8sProviderConfig,
 } from "@valet/sandbox-kubernetes";
 
@@ -178,7 +179,8 @@ export function buildSandboxProvider(
         // — nothing to authenticate against an in-cluster insecure registry.
         ...(pullSecret ? { imagePullSecrets: [{ name: pullSecret }] } : {}),
       };
-      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi }, cfg);
+      const secretsApi = sandboxSecretsApiAdapter(coreApi);
+      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
     }
   }
 }

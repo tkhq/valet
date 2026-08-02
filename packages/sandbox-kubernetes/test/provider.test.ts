@@ -304,4 +304,21 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
     );
     expect(provider.capabilities().credsMount).toBe(false);
   });
+
+  it("create() logs a loud error when credsFiles provided but secretsApi absent", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const provider = new KubernetesSandboxProvider(
+      {
+        objectsApi: new FakeObjectsApi(),
+        podsApi: new FakePodsApi(),
+        execApi: fakePodExecApi,
+        livenessApi: new FakeLivenessApi(),
+        // secretsApi intentionally absent
+      },
+      providerCfg,
+    );
+    await provider.create({ workspace: "test-sandbox", credsFiles: { token: "abc" } });
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/credsFiles provided but secretsApi is not wired/));
+    errorSpy.mockRestore();
+  });
 });
