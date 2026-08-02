@@ -91,12 +91,13 @@ function makeIsolatedProvider(opts: { customImage?: boolean } = {}): SandboxProv
   };
 }
 
-function makeNonIsolatedProvider(): SandboxProvider {
+function makeNonIsolatedProvider(): SandboxProvider & { execs: string[] } {
   const sandboxes = new Map<string, RecordingSandbox>();
   let nextId = 1;
   const execs: string[] = [];
   return {
     backend: "recording-non-isolated",
+    execs,
     capabilities(): SandboxCapabilities {
       return {
         snapshot: "none",
@@ -234,14 +235,15 @@ describe("EngineHost buildSpecProvider", () => {
     });
     await session.attachment.ensureReady({ timeoutMs: 5_000 });
 
-    // No sandbox prep should have run — provider is non-isolated
-    const sb = (provider as { execs?: string[] }).execs;
-    // The non-isolated provider's RecordingSandbox execs is the local array
-    // we check: no git config or install commands
-    // (We check by casting — the execs array is on the shared RecordingSandbox)
-    // Since we can't easily access the execs here, validate via absence of prep
-    // by checking the session came up successfully without errors thrown.
+    // The sandbox came up successfully despite no spec-provider.
     expect(session.attachment.state).toBe("ready");
+
+    // No git config or credential-install commands ran — the non-isolated
+    // path skips all prep (buildSpecProvider returns undefined when
+    // capabilities().isolated !== true).
+    expect(provider.execs.some((c) => c.includes("git-credential-valet"))).toBe(false);
+    expect(provider.execs.some((c) => c.includes("git config"))).toBe(false);
+    expect(provider.execs).toHaveLength(0);
   });
 
   it("repo session on isolated+customImage provider: newer pushed prebuild produces different image ref", async () => {
