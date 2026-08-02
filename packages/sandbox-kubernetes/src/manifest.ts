@@ -12,6 +12,7 @@ import type {
   ResourceList,
   SandboxContainer,
   SandboxCR,
+  Volume,
 } from "./types.js";
 
 const MAX_NAME_LENGTH = 63;
@@ -29,6 +30,16 @@ export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
 export const SANDBOX_CONTAINER_NAME = "sandbox";
+
+/** Mount path for the per-sandbox credential files (see `SandboxCreateOpts.credsFiles`). */
+export const CREDS_MOUNT_PATH = "/etc/valet/creds";
+/** Volume name for the per-sandbox credential Secret volume. */
+export const CREDS_VOLUME_NAME = "valet-creds";
+
+/** Returns the name of the Kubernetes Secret backing the creds volume for a sandbox. */
+export function credsSecretName(sandboxName: string): string {
+  return `valet-creds-${sandboxName}`;
+}
 
 /** Lowercases and strips everything outside `[a-z0-9-]`, collapsing runs of
  * dashes and trimming leading/trailing dashes. Does NOT enforce the length
@@ -133,12 +144,31 @@ export function buildSandboxManifest(
     container.command = FULL_PROFILE_COMMAND;
   }
 
+  // Creds volume mount — whole-directory mount (no subPath). subPath breaks
+  // kubelet live-reload; the whole directory must be mounted for Secret
+  // updates to propagate into a running pod without restart.
+  const hasCredsFiles = opts.credsFiles && Object.keys(opts.credsFiles).length > 0;
+  if (hasCredsFiles) {
+    container.volumeMounts = [
+      ...(container.volumeMounts ?? []),
+      { name: CREDS_VOLUME_NAME, mountPath: CREDS_MOUNT_PATH },
+    ];
+  }
+
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     containers: [container],
     restartPolicy: "Always",
   };
   if (cfg.imagePullSecrets && cfg.imagePullSecrets.length > 0) {
     podSpec.imagePullSecrets = cfg.imagePullSecrets;
+  }
+
+  if (hasCredsFiles) {
+    const credsVolume: Volume = {
+      name: CREDS_VOLUME_NAME,
+      secret: { secretName: credsSecretName(name), optional: true },
+    };
+    podSpec.volumes = [credsVolume];
   }
 
   const spec: SandboxCR["spec"] = {

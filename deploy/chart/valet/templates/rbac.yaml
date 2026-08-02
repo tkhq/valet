@@ -58,12 +58,14 @@ rules:
   # Secret holds the per-build git clone token (see k8s-builder.ts's
   # docblock: created only for non-tokenless builds, deleted as soon as
   # `status()` observes a terminal build state, or immediately on cancel —
-  # never left standing after the Job it was minted for finishes). No `get`
-  # verb: the api never reads a Secret's contents back, only creates and
-  # deletes them by name.
+  # never left standing after the Job it was minted for finishes). Also used
+  # for the per-sandbox creds Secret (SandboxCreateOpts.credsFiles /
+  # SandboxProvider.updateCreds): upsert needs get (read resourceVersion for
+  # replace), patch/update needed for live credential refresh, delete for
+  # cleanup on sandbox destroy.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "delete"]
+    verbs: ["create", "get", "patch", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

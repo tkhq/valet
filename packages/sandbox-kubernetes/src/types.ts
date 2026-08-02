@@ -79,6 +79,20 @@ export interface VolumeMount {
   mountPath: string;
 }
 
+/** `corev1.Volume` subset — only the secret-backed volume shape the
+ * manifest builder emits for the creds mount. */
+export interface SecretVolumeSource {
+  /** Name of the Secret object in the same namespace. */
+  secretName: string;
+  /** When true, a missing Secret does not block pod scheduling. */
+  optional?: boolean;
+}
+
+export interface Volume {
+  name: string;
+  secret?: SecretVolumeSource;
+}
+
 /** `corev1.Container` subset — only the fields the manifest builder sets. */
 export interface SandboxContainer {
   name: string;
@@ -105,6 +119,9 @@ export interface SandboxPodSpec {
   restartPolicy?: "Always" | "OnFailure" | "Never";
   /** See `K8sProviderConfig.imagePullSecrets`'s docblock. */
   imagePullSecrets?: { name: string }[];
+  /** `corev1.PodSpec.volumes` — volumes available to containers in this pod.
+   * The manifest builder adds the creds volume when credsFiles are requested. */
+  volumes?: Volume[];
 }
 
 export interface SandboxPodTemplate {

@@ -16,16 +16,21 @@ export {
   type SandboxCRStatus,
   type SandboxPodSpec,
   type SandboxPodTemplate,
+  type SecretVolumeSource,
+  type Volume,
   type VolumeClaimTemplate,
   type VolumeMount,
 } from "./types.js";
 
 export {
+  CREDS_MOUNT_PATH,
+  CREDS_VOLUME_NAME,
   SANDBOX_CONTAINER_NAME,
   SESSION_LABEL_KEY,
   WORKSPACE_MOUNT_PATH,
   WORKSPACE_VOLUME_NAME,
   buildSandboxManifest,
+  credsSecretName,
   sandboxCrName,
 } from "./manifest.js";
 
@@ -115,9 +120,11 @@ export {
   assertSafeExecId,
   looksSignalKilled,
   podLivenessApiAdapter,
+  sandboxSecretsApiAdapter,
   type KubernetesSandboxDeps,
   type KubernetesSandboxProviderDeps,
   type PodLivenessApi,
+  type SandboxSecretsApi,
 } from "./provider.js";
 
 export {

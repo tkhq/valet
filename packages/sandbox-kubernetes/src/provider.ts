@@ -104,7 +104,7 @@ import {
   type SandboxPodsApi,
   type SandboxPodStatusApi,
 } from "./lifecycle.js";
-import { buildSandboxManifest, SANDBOX_CONTAINER_NAME, sandboxCrName } from "./manifest.js";
+import { buildSandboxManifest, credsSecretName, SANDBOX_CONTAINER_NAME, sandboxCrName } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
@@ -210,6 +210,77 @@ export function assertSafeExecId(execId: string): void {
  * pattern's literal alternatives. */
 function podUnavailableError(sandboxId: string, detail: string): Error {
   return new Error(`No such container: sandbox "${sandboxId}" is not running (${detail})`);
+}
+
+/** Narrow interface over CoreV1Api for per-sandbox creds Secret lifecycle.
+ * Whole-directory Secrets only — no subPath, no env-from-secret (both break
+ * live kubelet updates). */
+export interface SandboxSecretsApi {
+  /** Create or replace a Secret. Replaces if already exists (404-tolerant get + replace, or server-side apply). */
+  upsertSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
+  /** Replace Secret data in place. The kubelet propagates the change into
+   * mounted volumes automatically — no pod restart required. */
+  patchSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
+  /** Delete a Secret. Tolerates 404 (already deleted). */
+  deleteSecret(namespace: string, name: string): Promise<void>;
+}
+
+/** Encodes Secret data values to base64, as Kubernetes requires for `.data`. */
+function encodeSecretData(data: Record<string, string>): Record<string, string> {
+  const encoded: Record<string, string> = {};
+  for (const [key, value] of Object.entries(data)) {
+    encoded[key] = Buffer.from(value, "utf8").toString("base64");
+  }
+  return encoded;
+}
+
+/** Production adapter: wraps a real `k8s.CoreV1Api` instance for Secret
+ * create/patch/delete. Upsert uses create-then-replace-on-409 to avoid
+ * server-side apply requirements. */
+export function sandboxSecretsApiAdapter(api: k8s.CoreV1Api): SandboxSecretsApi {
+  return {
+    async upsertSecret(namespace, name, data) {
+      const encodedData = encodeSecretData(data);
+      const body = {
+        apiVersion: "v1",
+        kind: "Secret",
+        metadata: { name, namespace },
+        data: encodedData,
+      };
+      try {
+        await api.createNamespacedSecret({ namespace, body });
+      } catch (err) {
+        // 409 = already exists — replace it.
+        if (!isRecord(err) || typeof (err as Record<string, unknown>).code !== "number" || (err as { code: number }).code !== 409) {
+          throw err;
+        }
+        await api.replaceNamespacedSecret({ name, namespace, body });
+      }
+    },
+    async patchSecret(namespace, name, data) {
+      const encodedData = encodeSecretData(data);
+      await api.replaceNamespacedSecret({
+        name,
+        namespace,
+        body: {
+          apiVersion: "v1",
+          kind: "Secret",
+          metadata: { name, namespace },
+          data: encodedData,
+        },
+      });
+    },
+    async deleteSecret(namespace, name) {
+      try {
+        await api.deleteNamespacedSecret({ name, namespace });
+      } catch (err) {
+        if (isRecord(err) && typeof (err as Record<string, unknown>).code === "number" && (err as { code: number }).code === 404) {
+          return;
+        }
+        throw err;
+      }
+    },
+  };
 }
 
 export interface KubernetesSandboxDeps {
@@ -453,6 +524,9 @@ export interface KubernetesSandboxProviderDeps {
    * the controller reconciles a fresh one. Omitting it disables the drift
    * check (pre-task-8 behavior). Production wiring always supplies it. */
   podDeleteApi?: SandboxPodDeleteApi;
+  /** Optional: enables credsMount — create/patch/delete the per-sandbox
+   * creds Secret. When absent, credsFiles in SandboxCreateOpts is ignored. */
+  secretsApi?: SandboxSecretsApi;
 }
 
 export class KubernetesSandboxProvider implements SandboxProvider {
@@ -480,6 +554,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       customImage: true,
       isolated: true,
       coldStartEstimateMs: 8000,
+      credsMount: true,
     };
   }
 
@@ -504,6 +579,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
     const name = sandboxCrName(opts.workspace);
     const manifest = buildSandboxManifest(this.cfg, name, opts);
+
+    // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
+    // reads the volume reference at start; the Secret must exist first.
+    if (this.deps.secretsApi && opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
+      await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
+    }
+
     await applySandbox(this.deps.objectsApi, this.cfg, manifest);
 
     if (this.deps.podDeleteApi && this.deps.podStatusApi) {
@@ -560,8 +642,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
   /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
    * pod + PVC via the controller's owner references. Only the
-   * session-deletion path may call this. */
+   * session-deletion path may call this. Also deletes the creds Secret
+   * best-effort — a missing Secret (sandbox never had one) is not an error. */
   async destroy(id: string): Promise<void> {
+    // Best-effort: delete the creds Secret before the CR (or concurrently).
+    // A missing Secret is fine — the sandbox may never have had one.
+    if (this.deps.secretsApi) {
+      await this.deps.secretsApi.deleteSecret(this.cfg.namespace, credsSecretName(id)).catch(() => {});
+    }
     await deleteSandbox(this.deps.objectsApi, this.cfg, id);
   }
 
@@ -625,6 +713,16 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   async resume(id: string): Promise<void> {
     await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Running");
     await this.waitReady(id);
+  }
+
+  /** Pushes updated credential files into a running sandbox. Patches the
+   * creds Secret in place — the kubelet propagates the change into the
+   * mounted volume without a pod restart. Requires secretsApi wired. */
+  async updateCreds(id: string, files: Record<string, string>): Promise<void> {
+    if (!this.deps.secretsApi) {
+      throw new Error(`KubernetesSandboxProvider.updateCreds: secretsApi not wired (sandbox "${id}")`);
+    }
+    await this.deps.secretsApi.patchSecret(this.cfg.namespace, credsSecretName(id), files);
   }
 
   private makeSandbox(id: string): KubernetesSandbox {

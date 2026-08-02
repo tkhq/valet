@@ -44,7 +44,12 @@ import {
   podsApiAdapter,
 } from "../src/lifecycle.js";
 import { podExecApiAdapter } from "../src/exec.js";
-import { KubernetesSandbox, KubernetesSandboxProvider, podLivenessApiAdapter } from "../src/provider.js";
+import {
+  KubernetesSandbox,
+  KubernetesSandboxProvider,
+  podLivenessApiAdapter,
+  sandboxSecretsApiAdapter,
+} from "../src/provider.js";
 
 function kubectl(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("kubectl", ["--context", RANCHER_DESKTOP_CONTEXT, ...args], { encoding: "utf8" });
@@ -76,8 +81,9 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
   const livenessApi = podLivenessApiAdapter(coreApi);
   const podStatusApi = podStatusApiAdapter(coreApi);
   const podDeleteApi = podDeleteApiAdapter(coreApi);
+  const secretsApi = sandboxSecretsApiAdapter(coreApi);
 
-  const provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi }, cfg);
+  const provider = new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
 
   kubectl(["create", "namespace", namespace]);
 
@@ -220,6 +226,48 @@ describe.skipIf(!isClusterReady)("kubernetes sandbox contract (live rancher-desk
       await expect(sandboxB.readFile("/root/lose.txt")).rejects.toThrow();
 
       await provider.destroy(name);
+    },
+    120_000,
+  );
+
+  it(
+    "credsFiles → mount at /etc/valet/creds, updateCreds propagates into running pod",
+    async () => {
+      const identity = `creds-${randomUUID()}`;
+
+      // Step 1: create sandbox with initial token.
+      const sandbox = await provider.create({
+        workspace: identity,
+        image: "busybox:stable",
+        credsFiles: { token: "aaa" },
+      });
+      const name = sandbox.id;
+
+      try {
+        // Confirm the initial token is mounted.
+        const initial = await sandbox.exec("cat /etc/valet/creds/token");
+        expect(initial.stdout.trim()).toBe("aaa");
+
+        // Step 2: update the token via updateCreds.
+        await provider.updateCreds(name, { token: "bbb" });
+
+        // Step 3: poll until the kubelet propagates the updated Secret.
+        // The kubelet sync period is typically 60s; allow up to 90s.
+        const deadline = Date.now() + 90_000;
+        let final = "";
+        for (;;) {
+          const r = await sandbox.exec("cat /etc/valet/creds/token");
+          final = r.stdout.trim();
+          if (final === "bbb") break;
+          if (Date.now() >= deadline) {
+            throw new Error(`creds propagation timed out after 90s; last value: ${final}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+        }
+        expect(final).toBe("bbb");
+      } finally {
+        await provider.destroy(name);
+      }
     },
     120_000,
   );

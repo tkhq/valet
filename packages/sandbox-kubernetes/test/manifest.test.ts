@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { SandboxCreateOpts } from "@valet/engine";
 import {
+  CREDS_MOUNT_PATH,
+  CREDS_VOLUME_NAME,
   SANDBOX_CR_API_VERSION,
   buildSandboxManifest,
+  credsSecretName,
   sandboxCrName,
   SESSION_LABEL_KEY,
   WORKSPACE_MOUNT_PATH,
@@ -228,6 +231,48 @@ describe("buildSandboxManifest", () => {
       const headless = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "headless" });
       expect(omitted.spec.podTemplate.spec.containers[0]?.command).toEqual(["sh", "-c", "tail -f /dev/null"]);
       expect(headless.spec.podTemplate.spec.containers[0]?.command).toEqual(["sh", "-c", "tail -f /dev/null"]);
+    });
+  });
+
+  describe("credsFiles", () => {
+    it("adds the valet-creds volume and mount when credsFiles is provided", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {
+        ...opts,
+        credsFiles: { token: "abc123" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      // Volume mount present
+      expect(container?.volumeMounts).toContainEqual({
+        name: CREDS_VOLUME_NAME,
+        mountPath: CREDS_MOUNT_PATH,
+      });
+      // Pod-level volume present
+      expect(manifest.spec.podTemplate.spec.volumes).toContainEqual({
+        name: CREDS_VOLUME_NAME,
+        secret: { secretName: credsSecretName("sess-1"), optional: true },
+      });
+    });
+
+    it("does not add the creds volume when credsFiles is absent", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      const hasCredsMount = container?.volumeMounts?.some((m) => m.name === CREDS_VOLUME_NAME) ?? false;
+      expect(hasCredsMount).toBe(false);
+      const hasCredsVol = manifest.spec.podTemplate.spec.volumes?.some((v) => v.name === CREDS_VOLUME_NAME) ?? false;
+      expect(hasCredsVol).toBe(false);
+    });
+
+    it("does not add the creds volume when credsFiles is an empty object", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, credsFiles: {} });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      const hasCredsMount = container?.volumeMounts?.some((m) => m.name === CREDS_VOLUME_NAME) ?? false;
+      expect(hasCredsMount).toBe(false);
+    });
+
+    it("is byte-identical to no-credsFiles when credsFiles is absent (regression pin)", () => {
+      const without = buildSandboxManifest(baseConfig, "sess-1", opts);
+      const alsoWithout = buildSandboxManifest(baseConfig, "sess-1", { ...opts });
+      expect(without).toEqual(alsoWithout);
     });
   });
 });

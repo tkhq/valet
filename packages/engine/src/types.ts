@@ -704,6 +704,17 @@ export interface SandboxCreateOpts {
   /** Interactive-service profile. Default "headless" (agent-only). "full"
    * additionally runs ttyd + code-server + the auth gateway. */
   profile?: "headless" | "full";
+  /**
+   * Credential files to mount at /etc/valet/creds/ inside the sandbox.
+   * Keys are file names. Values are file contents (plain strings — tokens,
+   * keys, etc.). The provider writes the data into a Kubernetes Secret and
+   * mounts it as a whole-directory volume. Updates propagate into running
+   * sandboxes without restart or replacement — the kubelet refreshes the
+   * mount automatically (see SandboxProvider.updateCreds).
+   *
+   * Absent: no creds volume is mounted.
+   */
+  credsFiles?: Record<string, string>;
 }
 
 /**
@@ -745,6 +756,14 @@ export interface SandboxCapabilities {
    */
   customImage: boolean;
   coldStartEstimateMs?: number;
+  /**
+   * Whether the provider supports live-mount credential files via
+   * SandboxCreateOpts.credsFiles and SandboxProvider.updateCreds. When
+   * true, the provider mounts /etc/valet/creds/ from a Kubernetes Secret
+   * and updates propagate into running sandboxes without restart. When
+   * false or absent, credsFiles is ignored.
+   */
+  credsMount?: boolean;
 }
 
 export interface SandboxStatus {
@@ -784,6 +803,15 @@ export interface SandboxProvider {
    */
   suspend?(id: string): Promise<void>;
   resume?(id: string): Promise<void>;
+  /**
+   * Push updated credential files into a running sandbox. The provider
+   * writes the new data to the backing store (e.g. a Kubernetes Secret)
+   * and the sandbox's /etc/valet/creds/ mount reflects the change without
+   * restart. Call order matters: call create() first, then updateCreds().
+   * Absent on providers that do not support live credential mounts
+   * (SandboxCapabilities.credsMount is false or absent).
+   */
+  updateCreds?(id: string, files: Record<string, string>): Promise<void>;
 }
 
 // ── Blob store ─────────────────────────────────────────────────────
