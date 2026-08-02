@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, readFile, writeFile, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, mkdtemp, rm, readFile, writeFile, symlink } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DockerSandboxProvider, type DockerSandboxCreateOpts } from "../src/index.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
@@ -329,7 +329,9 @@ describeDocker("DockerSandbox", () => {
       warmPool: false,
       hibernation: false,
       customImage: true,
+      isolated: true,
       coldStartEstimateMs: 8000,
+      credsMount: true,
     });
   });
 
@@ -376,5 +378,32 @@ describeDocker("DockerSandbox", () => {
     const sb = await makeSandbox({ profile: "full", image });
     await provider.destroy(sb.id);
     await expect(sb.gatewayEndpoint()).resolves.toBeNull();
+  });
+
+  it("credsFiles: create mounts creds, updateCreds propagates immediately, destroy removes host dir", async () => {
+    const sb = await makeSandbox({ credsFiles: { token: "aaa" } });
+    const sbId = sb.id;
+    const credsDir = join(homedir(), ".valet", "creds", sbId);
+    try {
+      // Initial creds visible in the container.
+      const first = await sb.exec("cat /etc/valet/creds/token");
+      expect(first.exitCode).toBe(0);
+      expect(first.stdout.trim()).toBe("aaa");
+
+      // updateCreds rewrites the host file; the bind mount is instant.
+      await provider.updateCreds(sbId, { token: "bbb" });
+      const second = await sb.exec("cat /etc/valet/creds/token");
+      expect(second.exitCode).toBe(0);
+      expect(second.stdout.trim()).toBe("bbb");
+    } finally {
+      await provider.destroy(sbId);
+    }
+
+    // After destroy, the host creds dir must be gone.
+    await expect(access(credsDir)).rejects.toThrow();
+  });
+
+  it("capabilities() reports credsMount: true", () => {
+    expect(provider.capabilities().credsMount).toBe(true);
   });
 });

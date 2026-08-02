@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { isAbsolute, posix, resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, posix, resolve } from "node:path";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -127,6 +128,9 @@ export interface DockerSandboxOptions {
   containerWorkspace: string;
   /** Image used to start the container. */
   image: string;
+  /** Absolute host path for the creds bind mount (~/.valet/creds/<sandboxId>/).
+   * Present only when the sandbox was created with credsFiles. */
+  credsHostDir?: string;
 }
 
 const CONTAINER_WORKSPACE = "/workspace";
@@ -147,6 +151,11 @@ export interface BuildDockerRunArgsOpts {
    * port so `DockerSandbox.gatewayEndpoint()` can resolve it via `docker
    * inspect`. */
   profile?: "headless" | "full";
+  /** Absolute host path for the creds bind mount. When set, the directory is
+   * mounted read-only at /etc/valet/creds inside the container. The caller
+   * (create()) is responsible for writing the files BEFORE invoking docker run.
+   * When absent, no creds volume is added. */
+  credsHostDir?: string;
 }
 
 /**
@@ -161,6 +170,7 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   const runArgs: string[] = ["run", "-d", "--name", opts.containerName];
   runArgs.push("--workdir", CONTAINER_WORKSPACE);
   runArgs.push("-v", `${opts.workspaceHostPath}:${CONTAINER_WORKSPACE}`);
+  if (opts.credsHostDir) runArgs.push("-v", `${opts.credsHostDir}:/etc/valet/creds:ro`);
   if (opts.network !== "bridge") runArgs.push("--network", opts.network);
   if (opts.env) {
     for (const [k, v] of Object.entries(opts.env)) {
@@ -207,6 +217,7 @@ export class DockerSandbox implements Sandbox {
   readonly containerId: string;
   readonly containerWorkspace: string;
   readonly image: string;
+  readonly credsHostDir?: string;
   private jobs = new Map<string, DockerJobState>();
   private nextJobId = 1;
 
@@ -216,6 +227,7 @@ export class DockerSandbox implements Sandbox {
     this.workspace = opts.workspace;
     this.containerWorkspace = opts.containerWorkspace;
     this.image = opts.image;
+    this.credsHostDir = opts.credsHostDir;
   }
 
   /**
@@ -370,6 +382,10 @@ export class DockerSandbox implements Sandbox {
       await execProcess("docker", ["rm", "-f", this.containerId], {});
     } catch {
       // already gone
+    }
+    // Remove the host-side creds dir. Best-effort: a missing dir is not an error.
+    if (this.credsHostDir) {
+      await fs.rm(this.credsHostDir, { recursive: true, force: true });
     }
   }
 
@@ -615,6 +631,21 @@ function execProcess(
 
 // ── Provider ──────────────────────────────────────────────────────
 
+/** Absolute host path for the creds dir of a given sandbox id.
+ * e.g. ~/.valet/creds/dsb-1/ */
+function credsHostDir(sandboxId: string): string {
+  return join(homedir(), ".valet", "creds", sandboxId);
+}
+
+/** Write credential files into the given directory (mode 0600). Creates the
+ * directory (mkdir -p equivalent) before writing. */
+async function writeCredsFiles(dir: string, files: Record<string, string>): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  for (const [name, content] of Object.entries(files)) {
+    await fs.writeFile(join(dir, name), content, { encoding: "utf8", mode: 0o600 });
+  }
+}
+
 export class DockerSandboxProvider implements SandboxProvider {
   readonly backend = "docker";
   private sandboxes = new Map<string, DockerSandbox>();
@@ -630,6 +661,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       customImage: true,
       isolated: true,
       coldStartEstimateMs: 8000,
+      credsMount: true,
     };
   }
 
@@ -664,6 +696,15 @@ export class DockerSandboxProvider implements SandboxProvider {
       await ensureImage(image);
     }
 
+    // Write creds files to the host dir BEFORE docker run so the bind is
+    // populated at container start. Only when credsFiles is provided and
+    // non-empty. The dir is keyed by sandbox id (stable, pre-assigned).
+    let sandboxCredsDir: string | undefined;
+    if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
+      sandboxCredsDir = credsHostDir(id);
+      await writeCredsFiles(sandboxCredsDir, opts.credsFiles);
+    }
+
     const runArgs = buildDockerRunArgs({
       containerName,
       image,
@@ -672,6 +713,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       env: dockerOpts.env,
       resources: opts.resources,
       profile: opts.profile,
+      credsHostDir: sandboxCredsDir,
     });
 
     const startResult = await execProcess("docker", runArgs, {});
@@ -687,6 +729,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       workspace: abs,
       containerWorkspace: CONTAINER_WORKSPACE,
       image,
+      credsHostDir: sandboxCredsDir,
     });
     this.sandboxes.set(id, sb);
     return sb;
@@ -696,6 +739,21 @@ export class DockerSandboxProvider implements SandboxProvider {
     const sb = this.sandboxes.get(id);
     if (!sb) throw new Error(`DockerSandbox not found: ${id}`);
     return sb;
+  }
+
+  /** Rewrites the credential files on the host bind dir. The bind mount is
+   * read-only from the container's view, but the host write propagates
+   * instantly — no restart needed. Throws when the sandbox is not found or
+   * was created without a creds dir. */
+  async updateCreds(id: string, files: Record<string, string>): Promise<void> {
+    const sb = this.sandboxes.get(id);
+    if (!sb) throw new Error(`DockerSandboxProvider.updateCreds: sandbox not found: ${id}`);
+    if (!sb.credsHostDir) {
+      throw new Error(
+        `DockerSandboxProvider.updateCreds: sandbox "${id}" was not created with credsFiles`,
+      );
+    }
+    await writeCredsFiles(sb.credsHostDir, files);
   }
 
   async destroy(id: string): Promise<void> {

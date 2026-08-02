@@ -91,4 +91,37 @@ describe("buildDockerRunArgs (pure)", () => {
     const second = buildDockerRunArgs({ ...baseOpts, profile: "full", env: { A: "1" } });
     expect(first).toEqual(second);
   });
+
+  it("without credsHostDir — output is byte-identical to the baseline (regression pin)", () => {
+    const withoutCreds = buildDockerRunArgs(baseOpts);
+    const baseline = [
+      "run",
+      "-d",
+      "--name",
+      "valet-sandbox-test",
+      "--workdir",
+      "/workspace",
+      "-v",
+      "/tmp/valet-ws:/workspace",
+      "alpine:3.20",
+      "sh",
+      "-c",
+      "tail -f /dev/null",
+    ];
+    expect(withoutCreds).toEqual(baseline);
+  });
+
+  it("with credsHostDir — adds exactly one -v flag for /etc/valet/creds:ro after the workspace volume", () => {
+    const args = buildDockerRunArgs({ ...baseOpts, credsHostDir: "/home/user/.valet/creds/dsb-1" });
+    const wsIdx = args.indexOf("-v");
+    // The workspace volume is first.
+    expect(args[wsIdx + 1]).toBe("/tmp/valet-ws:/workspace");
+    // The creds volume is the very next -v flag.
+    const credsIdx = args.indexOf("-v", wsIdx + 1);
+    expect(credsIdx).toBeGreaterThan(wsIdx);
+    expect(args[credsIdx + 1]).toBe("/home/user/.valet/creds/dsb-1:/etc/valet/creds:ro");
+    // Exactly two -v flags total.
+    const allVFlags = args.reduce((n, a) => n + (a === "-v" ? 1 : 0), 0);
+    expect(allVFlags).toBe(2);
+  });
 });
