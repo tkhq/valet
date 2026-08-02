@@ -134,6 +134,21 @@ export function dotSize(inLinks: number): number {
   return Math.min(26, Math.round(9 + 3.4 * Math.sqrt(inLinks)));
 }
 
+/** The flow node's box per kind — the box IS the dot (labels hang below,
+ * absolutely positioned), so edges attach to dot centers. */
+export function nodeBoxSize(node: MemoryGraphNode, inLinks: number): number {
+  if (node.kind === "dir") return 16;
+  if (node.kind === "phantom") return 10;
+  return dotSize(inLinks);
+}
+
+/** Estimated on-canvas label width in px (10px font, ~5.6px/char, capped
+ * by the label's max-w). Pure so the layout's collide radius can be
+ * label-aware without measuring DOM. */
+export function labelWidth(node: MemoryGraphNode): number {
+  return Math.min(150, Math.round(shortLabel(node).length * 5.6) + 10);
+}
+
 /** Above this many nodes, only well-linked nodes keep persistent labels. */
 export const LABEL_ALL_MAX = 60;
 /** Persistent-label threshold on large graphs (incoming links). */
@@ -175,6 +190,9 @@ export function layoutGraph(
   nodes: MemoryGraphNode[],
   edges: MemoryGraphEdge[],
   inDeg?: Map<string, number>,
+  /** Nodes with always-visible labels get label-aware collide radii so
+   * their label chips don't overlap at rest. */
+  labeledIds?: Set<string>,
 ): Map<string, { x: number; y: number }> {
   const dirList = [...new Set(nodes.map((n) => n.topDir ?? "").filter((d) => d !== ""))].sort();
   const ringRadius = Math.max(220, 30 * Math.sqrt(nodes.length));
@@ -188,10 +206,14 @@ export function layoutGraph(
 
   const simNodes: SimNode[] = nodes.map((n) => {
     const anchor = anchors.get(n.topDir ?? "") ?? { x: 0, y: 0 };
-    const size = dotSize(inDeg?.get(n.id) ?? 0);
+    const size = nodeBoxSize(n, inDeg?.get(n.id) ?? 0);
     // Tight packing on purpose: a sparse layout turns max zoom into empty
     // paper with orphan edge lines passing through — "the graph broke".
-    return { id: n.id, anchorX: anchor.x, anchorY: anchor.y, collideR: size / 2 + 15 };
+    // Labeled nodes need horizontal room for their chip (plus a little
+    // vertical, since a circle is the only shape forceCollide speaks).
+    const labelR = labeledIds?.has(n.id) ? labelWidth(n) / 2 + 4 : 0;
+    const collideR = Math.max(size / 2 + 15, labelR);
+    return { id: n.id, anchorX: anchor.x, anchorY: anchor.y, collideR };
   });
   const simLinks: SimulationLinkDatum<SimNode>[] = edges.map((e) => ({ source: e.from, target: e.to }));
 
@@ -243,35 +265,53 @@ function shortLabel(node: MemoryGraphNode): string {
  * per toggle, which read as whole-canvas flashing when sweeping the
  * cursor across the graph.
  */
+/** Both handles sit at the dot's center so straight edges connect dot
+ * centers — with the label inside the flow box, edges attached to the
+ * box's top/bottom and visibly missed the dot. */
+const CENTER_HANDLE_STYLE = {
+  left: "50%",
+  top: "50%",
+  transform: "translate(-50%, -50%)",
+  opacity: 0,
+  width: 1,
+  height: 1,
+  minWidth: 0,
+  minHeight: 0,
+  border: "none",
+} as const;
+
 function GraphDot({ data }: NodeProps<Node<GraphNodeData>>) {
   const { node, size, labelAlways } = data;
   const color = node.topDir !== undefined && node.topDir !== "" ? dirDotHex(node.topDir) : "#64748b";
 
+  // The flow box IS the dot (layout positions are dot centers); the label
+  // hangs below, absolutely positioned so it never grows the box. It stays
+  // a child of the node element, so hover/click on the label still count.
   return (
-    <div className="flex flex-col items-center gap-1">
-      <Handle type="target" position={Position.Top} className="!invisible !h-0 !w-0 !min-h-0 !min-w-0" />
-      <Handle type="source" position={Position.Bottom} className="!invisible !h-0 !w-0 !min-h-0 !min-w-0" />
+    <div className="relative" style={{ width: size, height: size }}>
+      <Handle type="target" position={Position.Top} style={CENTER_HANDLE_STYLE} />
+      <Handle type="source" position={Position.Bottom} style={CENTER_HANDLE_STYLE} />
       {node.kind === "dir" ? (
         <span
-          className="h-4 w-4 rounded-sm border-2 bg-paper"
+          className="block h-full w-full rounded-sm border-2 bg-paper"
           style={{ borderColor: color }}
           aria-hidden="true"
         />
       ) : node.kind === "phantom" ? (
         <span
-          className="h-2.5 w-2.5 rounded-full border border-dashed border-neutral-400 bg-transparent"
+          className="block h-full w-full rounded-full border border-dashed border-neutral-400 bg-transparent"
           aria-hidden="true"
         />
       ) : (
         <span
-          className="rounded-full"
-          style={{ backgroundColor: color, width: size, height: size }}
+          className="block h-full w-full rounded-full"
+          style={{ backgroundColor: color }}
           aria-hidden="true"
         />
       )}
       <span
         className={cn(
-          "mg-label max-w-[150px] truncate rounded px-1 text-[10px] leading-tight",
+          "mg-label absolute left-1/2 top-full mt-1 max-w-[150px] -translate-x-1/2 truncate rounded px-1 text-[10px] leading-tight",
           node.kind === "phantom" ? "italic text-muted" : "text-ink",
           !labelAlways && "invisible",
         )}
@@ -399,7 +439,10 @@ export function MemoryGraphCanvas() {
 
   const inDeg = useMemo(() => linkInDegree(filtered.edges), [filtered.edges]);
   const labeled = useMemo(() => persistentLabelIds(filtered.nodes, inDeg), [filtered.nodes, inDeg]);
-  const positions = useMemo(() => layoutGraph(filtered.nodes, filtered.edges, inDeg), [filtered, inDeg]);
+  const positions = useMemo(
+    () => layoutGraph(filtered.nodes, filtered.edges, inDeg, labeled),
+    [filtered, inDeg, labeled],
+  );
   const hoverIndex = useMemo(() => buildHoverIndex(filtered.edges), [filtered.edges]);
   // Hover-card metadata — the tree query is cached from the Files pane.
   const metaByPath = useMemo(() => {
@@ -412,18 +455,25 @@ export function MemoryGraphCanvas() {
 
   const flowNodes: Node<GraphNodeData>[] = useMemo(
     () =>
-      filtered.nodes.map((n) => ({
-        id: n.id,
-        type: "memoryDot",
-        position: positions.get(n.id) ?? { x: 0, y: 0 },
-        data: {
-          node: n,
-          size: dotSize(inDeg.get(n.id) ?? 0),
-          labelAlways: labeled.has(n.id),
-        },
-        draggable: false,
-        connectable: false,
-      })),
+      filtered.nodes.map((n) => {
+        const size = nodeBoxSize(n, inDeg.get(n.id) ?? 0);
+        const center = positions.get(n.id) ?? { x: 0, y: 0 };
+        return {
+          id: n.id,
+          type: "memoryDot",
+          // Layout coordinates are dot CENTERS; xyflow positions are the
+          // box's top-left corner. Off-center edge attachment came from
+          // treating centers as corners.
+          position: { x: center.x - size / 2, y: center.y - size / 2 },
+          data: {
+            node: n,
+            size,
+            labelAlways: labeled.has(n.id),
+          },
+          draggable: false,
+          connectable: false,
+        };
+      }),
     [filtered.nodes, positions, inDeg, labeled],
   );
 

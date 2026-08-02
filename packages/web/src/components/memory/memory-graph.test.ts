@@ -6,6 +6,7 @@ import {
   filterGraph,
   LABEL_ALL_MAX,
   LABEL_MIN_IN_LINKS,
+  labelWidth,
   layoutGraph,
   linkInDegree,
   persistentLabelIds,
@@ -109,6 +110,25 @@ describe("persistentLabelIds", () => {
 });
 
 describe("layoutGraph", () => {
+  it("labeled nodes get label-aware spacing (chips don't overlap at rest)", () => {
+    const nodes = Array.from({ length: 4 }, (_, i) => ({
+      id: `n/${i}.md`,
+      kind: "concept" as const,
+      title: "A reasonably long memory title",
+      topDir: "n",
+    }));
+    const labeled = new Set(nodes.map((n) => n.id));
+    const pos = layoutGraph(nodes, [], undefined, labeled);
+    const minGap = labelWidth(nodes[0]); // two half-widths
+    const pts = [...pos.values()];
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        const d = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+        expect(d, `${i}↔${j}`).toBeGreaterThan(minGap * 0.85); // collide is soft
+      }
+    }
+  });
+
   it("clusters nodes near their directory anchor", () => {
     // Two directories, no cross-links: each family should stay coherent —
     // every node closer to its own family's centroid than to the other's.
