@@ -251,6 +251,11 @@ describe("SandboxAttachment specProvider seam", () => {
     const result = await op;
     expect(result).toBeInstanceOf(Error);
     expect(attachment.state).toBe("released");
+    // The waiter is rejected the instant destroy() runs, but the raced prep now
+    // finishes its post-step applied-state write (one exec) before the
+    // post-prep `if (destroyed)` tears the sandbox down — one extra microtask
+    // hop vs. the pre-applyPlan path. Flush it so the teardown is observable.
+    await new Promise((r) => setTimeout(r, 20));
     expect(provider.destroyCalls).toContain("sb-1");
   });
 });

@@ -79,6 +79,7 @@ export {
 export { VirtualSandbox, VirtualSandboxProvider } from "./providers/sandbox/virtual.js";
 export {
   SandboxAttachment,
+  OBSERVE_TTL_MS,
   type AttachmentState,
   type AttachmentStatus,
 } from "./sandbox/attachment.js";
