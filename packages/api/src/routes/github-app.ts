@@ -260,6 +260,7 @@ githubAppRouter.post("/manifest", async (c) => {
     name: `valet-${slug}`,
     url: apiBase,
     redirect_url: `${apiBase}/api/org/github-app/setup`,
+    callback_urls: [`${apiBase}/api/me/github/callback`],
     ...(webhookOn ? { hook_attributes: { url: `${apiBase}/webhooks/github-app` } } : {}),
     public: false,
     default_events: webhookOn

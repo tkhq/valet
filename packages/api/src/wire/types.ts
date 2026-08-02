@@ -1233,6 +1233,11 @@ export interface GithubAppManifestWire {
    * hook_attributes.url reachability even with active: false, so a
    * localhost placeholder gets the whole manifest rejected. */
   hook_attributes?: { url: string; active?: boolean };
+  /** OAuth callback URLs for USER authorization (`/api/me/github/callback`)
+   * — distinct from `redirect_url`, which only serves the manifest flow.
+   * Without this the created App has no callback registered and user
+   * connects fail at GitHub's authorize step. */
+  callback_urls: string[];
   public: boolean;
   default_events: string[];
   /** GitHub's manifest schema names this `default_permissions` — a bare

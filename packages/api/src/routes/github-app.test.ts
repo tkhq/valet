@@ -153,6 +153,10 @@ describe("POST /api/org/github-app/manifest", () => {
     // hook URL reachability even with active:false, so a localhost
     // placeholder got the whole manifest rejected.
     expect(body.manifest.hook_attributes).toBeUndefined();
+    // User-OAuth callback registered at creation (distinct from
+    // redirect_url) — without it the App can't do user connects at all.
+    expect(body.manifest.callback_urls).toHaveLength(1);
+    expect(body.manifest.callback_urls[0]).toContain("/api/me/github/callback");
     expect(body.manifest.public).toBe(false);
     expect(body.manifest.default_permissions).toEqual({
       contents: "write",

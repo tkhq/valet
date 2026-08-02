@@ -133,6 +133,10 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
+vi.mock("~/api/repos", () => ({
+  useConnectGithub: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+}));
+
 vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: currentPluginsData, isLoading: false, error: null }),
   useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),

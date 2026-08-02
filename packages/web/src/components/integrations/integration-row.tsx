@@ -17,6 +17,7 @@ import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 import { Badge, Button, Textarea } from "~/components/primitives";
 import { useConnectCredential, useDisconnectCredential } from "~/api/integrations";
+import { useConnectGithub } from "~/api/repos";
 import { displayName } from "./display-name";
 
 const TOKEN_FIELD_LABEL: Record<PluginServiceSummary["type"], string> = {
@@ -216,6 +217,22 @@ function ServiceBlock({
 }) {
   const [revealed, setRevealed] = useState(false);
   const disconnect = useDisconnectCredential();
+  // GitHub connects through the org's GitHub App OAuth (POST
+  // /api/me/github/connect → GitHub authorize → callback saves the user
+  // credential) — not the generic per-service token flow. The manifest
+  // declares no oauth metadata for github on purpose, so without this the
+  // card fell back to manual token paste.
+  const isGithub = service.service === "github";
+  const connectGithub = useConnectGithub();
+
+  async function startGithubOauth() {
+    try {
+      const res = await connectGithub.mutateAsync();
+      window.location.href = res.url;
+    } catch {
+      // Error (e.g. no App configured) surfaces via connectGithub.error.
+    }
+  }
 
   const controls = service.connected ? (
     <Button
@@ -229,6 +246,19 @@ function ServiceBlock({
     >
       {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
     </Button>
+  ) : isGithub ? (
+    <span className="flex items-center gap-3">
+      <button
+        type="button"
+        className="text-xs text-muted underline-offset-2 hover:underline"
+        onClick={() => setRevealed((r) => !r)}
+      >
+        Enter token manually
+      </button>
+      <Button size="sm" onClick={() => void startGithubOauth()} disabled={connectGithub.isPending}>
+        {connectGithub.isPending ? "Connecting…" : "Connect"}
+      </Button>
+    </span>
   ) : service.connect === "oauth" ? (
     <span className="flex items-center gap-3">
       <button
@@ -257,6 +287,9 @@ function ServiceBlock({
         state={service.connected ? <Badge variant="success">Connected</Badge> : undefined}
       />
       <CardFooter meta={meta} right={controls} />
+      {isGithub && connectGithub.error && (
+        <p className="mt-2 text-xs text-danger-500">{connectGithub.error.message}</p>
+      )}
       {revealed && !service.connected && (
         <ConnectForm service={service} onClose={() => setRevealed(false)} />
       )}
