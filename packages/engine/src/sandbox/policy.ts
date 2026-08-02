@@ -56,6 +56,8 @@ interface DispatchOptions {
 export class PolicySandbox implements Sandbox {
   private readonly attachment: SandboxAttachment;
   private readonly readyTimeoutMs: number;
+  /** execJob handles that have been vended but not yet reached a terminal poll (spec decision 4). */
+  private readonly pendingJobs = new Set<string>();
 
   constructor(attachment: SandboxAttachment, opts?: PolicySandboxOptions) {
     this.attachment = attachment;
@@ -165,23 +167,42 @@ export class PolicySandbox implements Sandbox {
           return sb.execJob(command, effectiveOpts);
         }, { signal: opts?.signal });
         recordSandboxExec(Date.now() - startedAt, true);
+        // Track as pending until a terminal poll or cancelJob clears it.
+        this.pendingJobs.add(handle.execId);
         return handle;
       },
     );
   }
 
   async pollJob(execId: string, offset: number): Promise<JobPoll> {
-    return this.dispatch((sb) => {
+    const poll = await this.dispatch((sb) => {
       if (!sb.pollJob) throw jobUnsupportedError();
       return sb.pollJob(execId, offset);
     });
+    // Remove on terminal status — the job is no longer running.
+    if (poll.status === "done" || poll.status === "failed") {
+      this.pendingJobs.delete(execId);
+    }
+    return poll;
   }
 
   async cancelJob(execId: string): Promise<void> {
-    return this.dispatch((sb) => {
+    await this.dispatch((sb) => {
       if (!sb.cancelJob) throw jobUnsupportedError();
       return sb.cancelJob(execId);
     });
+    // Cancellation is a terminal outcome — the job will not run further.
+    this.pendingJobs.delete(execId);
+  }
+
+  /**
+   * Number of exec jobs that have been vended but have not yet reached a
+   * terminal poll status (`done`, `error`, or `cancelled`) or been cancelled.
+   * Used by the run-start reconcile window (spec decision 4) to gate whether
+   * the sandbox is idle enough for convergence.
+   */
+  pendingJobCount(): number {
+    return this.pendingJobs.size;
   }
 
   // ── internals ──────────────────────────────────────────────────────

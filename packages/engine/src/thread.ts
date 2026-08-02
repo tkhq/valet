@@ -1184,6 +1184,11 @@ export class Thread {
     return this.runningItem?.id;
   }
 
+  /** True when this thread is mid-turn (a submission is claimed and running). */
+  get hasActiveRun(): boolean {
+    return this.runningItem != null;
+  }
+
   /**
    * The claim loop. Drives the thread's durable queue: repeatedly claim the
    * thread's runnable head from the store, run the turn under a write fence,
@@ -1270,6 +1275,13 @@ export class Thread {
       this.staleFenceDetected = false;
       this.session.ensureTimers();
       await this.emitQueueState();
+
+      // Run-start reconcile window (sandbox reconcile spec, decision 4): the only
+      // place convergence may act. Idle = no other thread mid-run and no pending
+      // exec jobs. Errors degrade to running stale — never fail the turn.
+      if (!this.session.hasOtherActiveRuns(this.id) && this.session.pendingJobCount() === 0) {
+        try { await this.session.attachment.reconcile(); } catch (err) { console.error("[thread] reconcile failed, continuing:", err); }
+      }
 
       let turnFailed = false;
       let turnError: unknown;

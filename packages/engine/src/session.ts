@@ -2,6 +2,7 @@ import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
+import type { PolicySandbox } from "./sandbox/policy.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
 import { recordCredentialRead } from "./metrics.js";
@@ -116,6 +117,14 @@ export class Session {
   private destroyed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * The `PolicySandbox` wrapper when the session's sandbox was constructed via
+   * the engine's normal materialization path. `null` when the session was
+   * created with a pre-provisioned concrete `Sandbox` (e.g. in tests that pass
+   * a bare VirtualSandbox). Used by the run-start reconcile window (spec
+   * decision 4) to query pending exec-job count.
+   */
+  private readonly policySandbox: PolicySandbox | null;
 
   constructor(
     id: string,
@@ -123,12 +132,14 @@ export class Session {
     providers: ProviderBundle,
     sandbox: Sandbox,
     attachment: SandboxAttachment,
+    policySandbox?: PolicySandbox,
   ) {
     this.id = id;
     this.options = options;
     this.providers = providers;
     this.sandbox = sandbox;
     this.attachment = attachment;
+    this.policySandbox = policySandbox ?? null;
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.parentSessionId = options.parentSessionId;
     this.parentThreadId = options.parentThreadId;
@@ -305,8 +316,9 @@ export class Session {
     providers: ProviderBundle,
     sandbox: Sandbox,
     attachment: SandboxAttachment,
+    policySandbox?: PolicySandbox,
   ): Promise<Session> {
-    const session = new Session(data.id, options, providers, sandbox, attachment);
+    const session = new Session(data.id, options, providers, sandbox, attachment, policySandbox);
     // The host's restore-time options usually don't re-supply `owner` (it's
     // not something callers round-trip through CreateSessionOptions on
     // every restart) — preserve the persisted value in that case rather
@@ -538,6 +550,29 @@ export class Session {
 
   listThreads(): Thread[] {
     return [...this.threads.values()];
+  }
+
+  /**
+   * Returns true when any thread OTHER than `excludeThreadId` currently has
+   * an active run (i.e. is mid-turn). Used by the run-start reconcile window
+   * (spec decision 4) to determine whether the session is idle enough for
+   * sandbox convergence.
+   */
+  hasOtherActiveRuns(excludeThreadId: string): boolean {
+    for (const t of this.threads.values()) {
+      if (t.id !== excludeThreadId && t.hasActiveRun) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Number of exec jobs that have been vended to the PolicySandbox but have
+   * not yet reached a terminal poll status. Returns 0 when the session was
+   * constructed without a PolicySandbox (bare-sandbox test harnesses).
+   * Used by the run-start reconcile window (spec decision 4).
+   */
+  pendingJobCount(): number {
+    return this.policySandbox?.pendingJobCount() ?? 0;
   }
 
   // ── public API ──────────────────────────────────────────────────
