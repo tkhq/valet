@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SANDBOX_CR_API_VERSION, buildSandboxManifest } from "../src/index.js";
+import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest } from "../src/index.js";
 import type { K8sProviderConfig, SandboxCondition, SandboxCR, SandboxCRRead } from "../src/index.js";
 import {
   SANDBOX_KIND,
@@ -861,5 +861,33 @@ describe("livePodImageDiffers", () => {
 
     const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-5", "busybox:stable");
     expect(result).toEqual({ differs: false });
+  });
+
+  it("finds the sandbox container by name even when a sidecar appears at index 0", async () => {
+    // Sidecar-injection puts a sidecar container BEFORE the sandbox container;
+    // a positional [0] lookup would read the sidecar's image, not the sandbox's.
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-6", { image: "busybox:stable" });
+    objectsApi.seed(toCRReadWithPodAnnotation(manifest, "sess-6"));
+    const podsApi = new FakePodsApi([]);
+    const podStatusApi = new FakePodStatusApi(
+      new Map([
+        [
+          "sess-6",
+          {
+            phase: "Running",
+            containerStatuses: [
+              // Sidecar at index 0 — positional lookup would report its image.
+              { name: "sidecar", image: "sidecar:v1" },
+              { name: SANDBOX_CONTAINER_NAME, image: "old-image:v1" },
+            ],
+          },
+        ],
+      ]),
+    );
+
+    // manifestImage differs from old-image:v1 → should report differs=true.
+    const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-6", "new-image:v2");
+    expect(result).toEqual({ differs: true, podName: "sess-6", liveImage: "old-image:v1" });
   });
 });

@@ -100,6 +100,7 @@
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
 import type { SandboxStatus } from "@valet/engine";
+import { SANDBOX_CONTAINER_NAME } from "./manifest.js";
 import type {
   K8sProviderConfig,
   PodOwnerReference,
@@ -733,7 +734,8 @@ export async function livePodImageDiffers(
   const status = await podStatusApi.getPodStatus(cfg.namespace, podName).catch(() => null);
   if (!status) return { differs: false };
 
-  const liveImage = status.containerStatuses?.[0]?.image;
+  // Name-keyed lookup — position 0 is wrong when sidecars are injected first.
+  const liveImage = status.containerStatuses?.find((cs) => cs.name === SANDBOX_CONTAINER_NAME)?.image;
   if (!liveImage) return { differs: false };
 
   if (liveImage === manifestImage) return { differs: false };
