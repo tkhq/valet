@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import type { Sandbox } from "@valet/engine";
-import { buildWorkspacePrep } from "./workspace-prep.js";
+import { installCredentialHelper, configureGitIdentity, prepBinding, prepPrebuiltBinding, computeTargetDirs } from "./workspace-prep.js";
 import { DockerImageBuilder } from "../prebuilds/docker-builder.js";
 import type { RepoBinding } from "../wire/types.js";
 
@@ -122,12 +122,10 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
     async () => {
       sandbox = await provider.create({ workspace: tmp, image: IMAGE_REF });
 
-      const prep = buildWorkspacePrep({
-        apiUrl: "http://127.0.0.1:1", // unreachable — tokenless public repo
-        repos: [binding],
-        prebuild: { bakedSha, recipe: [] },
-      });
-      await prep(sandbox, 1);
+      const dirs = computeTargetDirs([binding]);
+      await installCredentialHelper(sandbox, "http://127.0.0.1:1"); // unreachable — tokenless public repo
+      await configureGitIdentity(sandbox);
+      await prepPrebuiltBinding(sandbox, dirs[0], binding, { bakedSha, recipe: [] });
 
       // The repo landed in the workspace root (single binding → ".").
       const head = await sandbox.exec("git rev-parse HEAD");
@@ -198,15 +196,13 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
         auth: "auto",
         ref: "main",
       };
-      const prep = buildWorkspacePrep({
-        apiUrl: "http://127.0.0.1:1", // unreachable — local file remote needs no creds
-        repos: [localBinding],
-        prebuild: {
-          bakedSha: bakedShaLocal,
-          recipe: [{ id: "marker", lockfile: "lock.txt", command: "sh -c 'printf done > REINSTALL_MARKER.txt'" }],
-        },
+      const dirs = computeTargetDirs([localBinding]);
+      await installCredentialHelper(sandbox, "http://127.0.0.1:1"); // unreachable — local file remote needs no creds
+      await configureGitIdentity(sandbox);
+      await prepPrebuiltBinding(sandbox, dirs[0], localBinding, {
+        bakedSha: bakedShaLocal,
+        recipe: [{ id: "marker", lockfile: "lock.txt", command: "sh -c 'printf done > REINSTALL_MARKER.txt'" }],
       });
-      await prep(sandbox, 1);
 
       // The workspace advanced to origin's head (commit B), NOT the baked A.
       const head = await sandbox.exec("git rev-parse HEAD");
@@ -226,11 +222,10 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
     async () => {
       sandbox = await provider.create({ workspace: tmp, image: BASE_IMAGE });
 
-      const prep = buildWorkspacePrep({
-        apiUrl: "http://127.0.0.1:1",
-        repos: [binding],
-      });
-      await prep(sandbox, 1);
+      const dirs = computeTargetDirs([binding]);
+      await installCredentialHelper(sandbox, "http://127.0.0.1:1");
+      await configureGitIdentity(sandbox);
+      await prepBinding(sandbox, dirs[0], binding);
 
       const log = await sandbox.exec("git log -1 --format=%H");
       expect(log.exitCode).toBe(0);

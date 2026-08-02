@@ -15,7 +15,6 @@ import {
   type EventStream,
   type Principal,
   type CredentialOwner,
-  type Sandbox,
   type SandboxProvider,
   type Session,
   type SessionData,
@@ -28,8 +27,9 @@ import type { ValetPlugin } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { buildCredentialOnlyPrep, buildWorkspacePrep } from "./workspace-prep.js";
-import { resolvePrebuildImage, type PrebuildResolution } from "../prebuilds/resolve.js";
+import { resolveSnapshot } from "./resolve-snapshot.js";
+import { computeSpec, specHash } from "./sandbox-spec.js";
+import { buildPrepSteps } from "./prep-steps.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -208,11 +208,10 @@ export interface SessionMeta {
   profile?: "headless" | "full";
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
-   * in position order. When non-empty, `buildSession` wires a
-   * `prepareSandbox` hook (`workspace-prep.ts`) that clones them via the
-   * credential helper on first cold boot. Absent/empty === credential-only
-   * prep: the helper + `gh` shim still install (so ad-hoc git/gh in any
-   * sandbox authenticates), but nothing clones.
+   * in position order. When non-empty, `buildSession` wires a `specProvider`
+   * that clones them via the credential helper on first cold boot. Absent/empty
+   * === credential-only prep: the helper + `gh` shim still install (so ad-hoc
+   * git/gh in any sandbox authenticates), but nothing clones.
    */
   repos?: RepoBinding[];
   /**
@@ -468,27 +467,14 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxEnv = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
-    // Prebuild resolution (sandbox images v2, Task 4): when the primary repo
-    // binding matches a config with a `pushed` image and the provider supports
-    // custom images, boot from that image and refresh it via fetch-on-start
-    // prep. `resolvePrebuildImage` never throws — any failure falls back to the
-    // stock `defaultImage`, so session build is never blocked on it.
-    const prebuild = await resolvePrebuildImage(
-      this.opts.db,
-      meta,
-      this.opts.sandboxProvider,
-      this.opts.prebuildPreflight,
-    );
-    const image = prebuild?.imageRef ?? this.opts.defaultImage;
-    if (prebuild) await this.recordPrebuildId(sessionId, prebuild.prebuildId);
-    // Start-ref sink (engine traces spec, change 2 — host pattern B): prep
-    // resolves the primary clone's ref inside the sandbox, and this callback
-    // lands it on the session. `prepareSandbox` can run before create/restore
-    // returns (attachment provisioning races the build), so a ref that
-    // arrives early is parked and flushed right after the session exists.
-    // Best-effort throughout: a session that already carries a start-ref
-    // keeps it (start conditions are immutable; a later epoch's re-clone may
-    // legitimately sit at a newer SHA and must not overwrite).
+    // Start-ref sink (engine traces spec, change 2 — host pattern B): the
+    // specProvider closure resolves the primary clone's ref inside the sandbox
+    // and calls this callback. The callback can fire before create/restore
+    // returns (attachment provisioning races the build), so a ref that arrives
+    // early is parked and flushed right after the session exists. Best-effort
+    // throughout: a session that already carries a start-ref keeps it (start
+    // conditions are immutable; a later epoch's re-clone may legitimately sit
+    // at a newer SHA and must not overwrite).
     let builtSession: Session | undefined;
     let pendingStartRef: SessionStartRef | undefined;
     const onStartRef = async (ref: SessionStartRef) => {
@@ -505,8 +491,12 @@ export class EngineHost {
         );
       });
     };
-    const prepareSandbox = this.buildPrepareSandbox(meta, prebuild, onStartRef);
+    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
+    // Initial sandbox image: the stock default. The specProvider closure may
+    // resolve a prebuild image override at provision time — the engine applies
+    // DesiredSandboxSpec.image when the specProvider returns one.
+    const image = this.opts.defaultImage;
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -522,7 +512,7 @@ export class EngineHost {
             tools: extras.tools.length ? extras.tools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
-            ...(prepareSandbox ? { prepareSandbox } : {}),
+            ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
           },
         })
@@ -539,7 +529,7 @@ export class EngineHost {
           tools: extras.tools.length ? extras.tools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
-          ...(prepareSandbox ? { prepareSandbox } : {}),
+          ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
         });
 
@@ -609,45 +599,63 @@ export class EngineHost {
   }
 
   /**
-   * Builds the `prepareSandbox` hook (GitHub/repo integration plan, Task 9).
-   * A session with repo bindings gets the full clone prep; a session WITHOUT
-   * bindings (orchestrators, unbound chat) gets credential-only prep — the
-   * git credential helper + `gh` shim + git identity, no clones — so ad-hoc
-   * `git clone` / `gh` inside any sandbox authenticates through the
-   * credential route's org-level fallback instead of running anonymous.
+   * Builds the `SpecProvider` closure for a session (sandbox-reconciliation
+   * plan, Task 6). Returns `undefined` when the sandbox provider is not
+   * isolated — local/virtual sandboxes exec against the host process, so
+   * credential-only prep would rewrite the developer's real git config.
+   *
+   * The returned closure: calls `resolveSnapshot` (Task 2) + `computeSpec`
+   * (Task 1) on every invocation (lazy staleness read), pairs the resulting
+   * `StepSpec[]` with apply closures via `buildPrepSteps` (Task 6 prep-steps),
+   * and returns the fully populated `DesiredSandboxSpec`. The image field
+   * overrides the initial stock image the sandbox was provisioned with when a
+   * fresh prebuild is available; the engine applies it at provision time.
+   *
+   * Prebuild recording (`agent_sessions.prebuild_id`) is best-effort: the
+   * closure records the bake id whenever the snapshot resolves a fresh
+   * repoBake, mirroring the old eager-recording behavior.
    */
-  private buildPrepareSandbox(
+  private async buildSpecProvider(
+    sessionId: string,
     meta: SessionMeta,
-    prebuild?: PrebuildResolution | null,
     onStartRef?: (ref: SessionStartRef) => void | Promise<void>,
-  ): ((sandbox: Sandbox, epoch: number) => Promise<void>) | undefined {
-    if (!meta.repos || meta.repos.length === 0) {
-      // Only on ISOLATED backends (docker/kubernetes). Local/virtual
-      // sandboxes exec against the host process — credential-only prep
-      // would rewrite the developer's real `git config --global` and drop
-      // a `gh` shim into the host's /usr/local/bin.
-      if (this.opts.sandboxProvider.capabilities().isolated !== true) return undefined;
-      return buildCredentialOnlyPrep({
-        apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
-        userName: meta.userName,
-        userEmail: meta.userEmail,
+  ): Promise<import("@valet/engine").SpecProvider | undefined> {
+    const hasRepos = meta.repos && meta.repos.length > 0;
+    // Non-isolated providers (local/virtual) exec against the host process.
+    // Credential-only prep (unbound sessions) would rewrite the developer's
+    // real git config and drop a `gh` shim into the host's /usr/local/bin —
+    // so skip it when not isolated. Repo-bound sessions always get prep
+    // regardless of isolation, same as the old `buildWorkspacePrep` behavior.
+    if (!hasRepos && this.opts.sandboxProvider.capabilities().isolated !== true) return undefined;
+
+    const host = this;
+    const apiUrl = this.opts.sandboxApiUrl ?? "http://localhost:8788";
+    const stockImage = this.opts.defaultImage ?? "";
+
+    return async () => {
+      const snap = await resolveSnapshot({
+        db: host.opts.db,
+        provider: host.opts.sandboxProvider,
+        meta,
+        apiUrl,
+        stockImage,
+        preflight: host.opts.prebuildPreflight,
       });
-    }
-    return buildWorkspacePrep({
-      apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
-      repos: meta.repos,
-      userName: meta.userName,
-      userEmail: meta.userEmail,
-      ...(onStartRef ? { onStartRef } : {}),
-      // When the session booted from a prebuilt image, the PRIMARY (position-0)
-      // binding's repo is baked into the image; fetch-on-start prep stages it
-      // out of the image rather than cloning, then conditionally re-installs.
-      // `resolvePrebuildImage` only returns non-null when `meta.repos[0]` is
-      // that repo, so this always describes the primary binding.
-      ...(prebuild
-        ? { prebuild: { bakedSha: prebuild.bakedSha, recipe: prebuild.recipe } }
-        : {}),
-    });
+
+      // Best-effort prebuild-id recording — same as the old eager path.
+      if (snap.repoBake) {
+        await host.recordPrebuildId(sessionId, snap.repoBake.bakeId);
+      }
+
+      const spec = computeSpec(snap);
+      const steps = buildPrepSteps(snap, spec.steps, onStartRef);
+
+      return {
+        image: spec.image !== stockImage ? spec.image : undefined,
+        specHash: specHash(spec),
+        steps,
+      };
+    };
   }
 
   /**

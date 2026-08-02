@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import type { Sandbox } from "@valet/engine";
-import { buildWorkspacePrep } from "./workspace-prep.js";
+import { installCredentialHelper, configureGitIdentity, prepBinding, computeTargetDirs } from "./workspace-prep.js";
 
 function dockerAvailable(): boolean {
   const r = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe" });
@@ -59,19 +59,21 @@ describeDocker("buildWorkspacePrep (docker)", () => {
       const install = await sandbox.exec("apk add --no-cache git curl");
       expect(install.exitCode).toBe(0);
 
-      const prep = buildWorkspacePrep({
-        apiUrl: "http://127.0.0.1:1", // unreachable — never hit for a tokenless clone of a public repo
-        repos: [
-          {
-            host: "github",
-            fullName: "octocat/Hello-World",
-            cloneUrl: "https://github.com/octocat/Hello-World.git",
-            auth: "auto",
-          },
-        ],
-      });
+      const repos = [
+        {
+          host: "github" as const,
+          fullName: "octocat/Hello-World",
+          cloneUrl: "https://github.com/octocat/Hello-World.git",
+          auth: "auto" as const,
+        },
+      ];
+      const dirs = computeTargetDirs(repos);
 
-      await prep(sandbox, 1);
+      await installCredentialHelper(sandbox, "http://127.0.0.1:1"); // unreachable — never hit for a tokenless clone of a public repo
+      await configureGitIdentity(sandbox);
+      for (let i = 0; i < repos.length; i++) {
+        await prepBinding(sandbox, dirs[i], repos[i]);
+      }
 
       // No explicit cwd: the sandbox's default cwd is already the workspace
       // root — where the single binding cloned into (relative '.'). Passing

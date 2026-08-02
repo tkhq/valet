@@ -66,37 +66,6 @@ const GH_SHIM_PATH = "/usr/local/bin/gh";
 const DEFAULT_USER_NAME = "Valet Agent";
 const DEFAULT_USER_EMAIL = "agent@valet.local";
 
-export interface WorkspacePrepOpts {
-  /** This process's externally-reachable API base URL — baked into the
-   * generated scripts (not secret; the token they use is read from the
-   * sandbox's own env at call time). */
-  apiUrl: string;
-  /** Repo bindings, in position order. Must be non-empty — callers only
-   * build this closure when bindings exist. */
-  repos: RepoBinding[];
-  userName?: string;
-  userEmail?: string;
-  /**
-   * Set when the session booted from a prebuilt image (sandbox images v2,
-   * Task 4). Describes the PRIMARY (position-0) binding, whose repo is baked
-   * into the image at {@link PREBUILT_REPO_PATH}. On a cold workspace, prep
-   * stages that baked repo out of the image (`cp -a` — preserving the
-   * untracked `node_modules`/venv the baked installs produced, which a local
-   * `git clone` would drop) instead of cloning fresh, then refreshes `origin`
-   * and re-runs any install whose lockfile drifted between `bakedSha` and the
-   * fetched head. Only the index-0 binding is prebuilt; any others clone
-   * normally. Absent === no prebuild, every binding clones as before
-   * (byte-identical).
-   */
-  prebuild?: { bakedSha: string; recipe: RecipeStep[] };
-  /**
-   * Start-ref sink (engine traces spec, change 2 — host pattern B). Called
-   * once per successful prep with the PRIMARY (position-0) binding's resolved
-   * `{ repoUrl, branch, commitSha }`. Best-effort: resolution or callback
-   * failure is logged and never fails prep. Absent === no capture.
-   */
-  onStartRef?: (ref: SessionStartRef) => void | Promise<void>;
-}
 
 /** POSIX single-quote escaping for values interpolated into `sh` command
  * strings passed to `Sandbox.exec`. */
@@ -171,7 +140,7 @@ function execFailureMessage(label: string, result: ExecResult): string {
  * wires git to use the helper for every host (`credential.helper` + the
  * hard prerequisite `credential.useHttpPath`). Throws on any failure — an
  * unconfigured sandbox can't authenticate any clone below. */
-async function installCredentialHelper(sandbox: Sandbox, apiUrl: string): Promise<void> {
+export async function installCredentialHelper(sandbox: Sandbox, apiUrl: string): Promise<void> {
   await sandbox.mkdir(STAGING_DIR);
   const stagedHelper = posixJoin(STAGING_DIR, "git-credential-valet");
   const stagedGhWrapper = posixJoin(STAGING_DIR, "valet-gh");
@@ -219,7 +188,7 @@ async function installCredentialHelper(sandbox: Sandbox, apiUrl: string): Promis
   }
 }
 
-async function configureGitIdentity(sandbox: Sandbox, userName?: string, userEmail?: string): Promise<void> {
+export async function configureGitIdentity(sandbox: Sandbox, userName?: string, userEmail?: string): Promise<void> {
   const name = userName?.trim() || DEFAULT_USER_NAME;
   const email = userEmail?.trim() || DEFAULT_USER_EMAIL;
 
@@ -358,7 +327,7 @@ async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): 
   }
 }
 
-async function prepBinding(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
+export async function prepBinding(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
   const hasGit = await dirHasGit(sandbox, dir);
   if (hasGit) {
     await refreshExistingClone(sandbox, dir, binding);
@@ -439,7 +408,7 @@ async function conditionalReinstall(
  * conditionally re-run drifted installs — but ONLY when the fetch succeeded (an
  * offline fetch leaves HEAD at `bakedSha`, so there is nothing to reinstall).
  */
-async function prepPrebuiltBinding(
+export async function prepPrebuiltBinding(
   sandbox: Sandbox,
   dir: string,
   binding: RepoBinding,
@@ -493,67 +462,3 @@ export async function resolveStartRef(sandbox: Sandbox, dir: string): Promise<Se
   };
 }
 
-/**
- * Builds the `prepareSandbox` closure for a session WITHOUT repo bindings
- * (orchestrators, unbound chat sessions). Installs the git credential
- * helper + `gh` shim and configures the git identity — nothing else, no
- * clones. Unlike the repo-bound prep, every failure here is logged and
- * swallowed: an unbound session has no clone that depends on the helper,
- * so a broken install must not turn into a session startup failure.
- */
-export function buildCredentialOnlyPrep(opts: {
-  apiUrl: string;
-  userName?: string;
-  userEmail?: string;
-}): (sandbox: Sandbox, epoch: number) => Promise<void> {
-  return async (sandbox: Sandbox) => {
-    try {
-      await installCredentialHelper(sandbox, opts.apiUrl);
-      await configureGitIdentity(sandbox, opts.userName, opts.userEmail);
-    } catch (err) {
-      console.error(
-        "workspace prep: credential-only prep failed — continuing without git/gh auth:",
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  };
-}
-
-/**
- * Builds the `prepareSandbox` closure for a session with repo bindings.
- * Callers (`EngineHost.buildSession`) only invoke this when `meta.repos`
- * is non-empty; unbound sessions get `buildCredentialOnlyPrep` instead.
- */
-export function buildWorkspacePrep(opts: WorkspacePrepOpts): (sandbox: Sandbox, epoch: number) => Promise<void> {
-  return async (sandbox: Sandbox) => {
-    await installCredentialHelper(sandbox, opts.apiUrl);
-    await configureGitIdentity(sandbox, opts.userName, opts.userEmail);
-
-    const dirs = computeTargetDirs(opts.repos);
-    for (let index = 0; index < opts.repos.length; index++) {
-      // The prebuilt image only bakes the PRIMARY (index-0) binding's repo;
-      // any other binding clones normally.
-      if (index === 0 && opts.prebuild) {
-        await prepPrebuiltBinding(sandbox, dirs[index], opts.repos[index], opts.prebuild);
-      } else {
-        await prepBinding(sandbox, dirs[index], opts.repos[index]);
-      }
-    }
-
-    // Start-ref capture (engine traces spec, change 2) — after every binding
-    // prepped, from the PRIMARY clone. Best-effort: a failure here must never
-    // fail prep (the workspace is fine; only the trace loses replayability).
-    if (opts.onStartRef) {
-      try {
-        const ref = await resolveStartRef(sandbox, dirs[0]);
-        if (ref) await opts.onStartRef(ref);
-        else console.error("workspace prep: start-ref unresolvable for primary binding — continuing");
-      } catch (err) {
-        console.error(
-          "workspace prep: start-ref capture failed — continuing:",
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    }
-  };
-}
