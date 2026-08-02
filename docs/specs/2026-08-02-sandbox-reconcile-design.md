@@ -78,6 +78,14 @@ One sentence: **a sandbox is a cache materialization of a pure spec over a durab
 
 15. **Content-addressing is the contract between paths.** Every image ref the sandbox path consumes is a content-addressed output of the generation path (bake tags derive from identity + commit SHA), so "did the image change" is a string compare. Degraded corner: an org with no builder falls back to the raw stock ref, where a same-tag rebuild is invisible to reconcile — documented; deployments that care pin a digest in `VALET_SANDBOX_IMAGE`.
 
+## Topology
+
+The unit of reconciliation is the **attachment**, not the session. All per-sandbox state (epoch, observed state, backoff memo, creds mount, target spec) lives in the attachment; sessions hold attachments. Keep it that way — no new code may key sandbox state by session id where it means attachment id.
+
+- **A session owns a set of sandbox slots; today exactly one (`default`).** `SpecProvider` computes a spec per slot. Multi-sandbox agents are a future composition of attachments, not a lifecycle change — the blocked work is the tool surface (bash targeting, per-sandbox terminals, event dimensions), which is out of scope here.
+- **Many repos in one sandbox is the encouraged topology for cross-repo work**, and reconcile improves it: clone steps are per-binding, so binding a repo to a RUNNING session is a spec diff that converges at the next window — dynamic repo attach with no session recreate. Removing a binding drops the step but leaves the directory (convergence never deletes user state). Bakes cover the primary binding only; composite multi-repo bakes are out of scope (combinatorial identity explosion).
+- **Single-writer invariant: exactly one attachment owns a sandbox.** Shared sandboxes across agents have no natural owner for the convergence window and invite concurrent checkout corruption; cross-agent collaboration composes through repos (topology above) or git, not shared pods.
+
 ## Named risks (verify FIRST in phase 3)
 
 Both live in the vendored agent-sandbox controller (`deploy/`), which we own and can extend:
@@ -122,3 +130,4 @@ On the local k8s deploy: edit a shim script, deploy — next prompt on a running
 - Push-webhook-triggered bakes (nightly + manual only, per user decision).
 - Migrating gateway env consumers (ttyd/code-server auth) to the creds mount.
 - Warm pools keyed on current resolution (Stage 2 of the hibernation spec; noted so pool keys use source identity, not raw image refs).
+- Multi-sandbox sessions (slots stay singular this pass) and composite multi-repo bakes.
