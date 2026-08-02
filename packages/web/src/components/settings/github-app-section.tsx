@@ -111,126 +111,189 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
   }
 
   return (
-    <div className="space-y-4">
-      <p className="text-sm text-muted">
-        Create a GitHub App for this organization to let the assistant clone and push to your
-        repos.
-      </p>
-
-      <div className="space-y-2">
-        <label className="flex items-center gap-2 text-sm text-ink">
-          <Switch checked={underOrg} onCheckedChange={setUnderOrg} aria-label="Create under a GitHub organization" />
-          Create under a GitHub organization
-        </label>
-        {underOrg && (
-          <div className="max-w-xs space-y-1 pl-11">
-            <Input
-              value={githubOrg}
-              onChange={(e) => setGithubOrg(e.target.value)}
-              placeholder="acme-corp"
-              aria-label="GitHub organization"
-            />
-            <p className="text-xs text-muted">
-              The GitHub organization the App is created and installed under. Off → your
-              personal account.
+    <div className="max-w-2xl space-y-4">
+      <div className="rounded-lg border border-line bg-paper">
+        {/* Header */}
+        <div className="flex items-start gap-3 border-b border-line px-6 py-5">
+          <span
+            aria-hidden="true"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-base font-semibold text-white"
+            style={{ backgroundColor: "#24292f" }}
+          >
+            G
+          </span>
+          <div className="min-w-0">
+            <div className="font-display text-base text-ink">Create a GitHub App</div>
+            <p className="mt-0.5 text-sm leading-relaxed text-muted">
+              One click sets up an App the assistant uses to clone and push to your repos —
+              GitHub walks you through the final confirmation.
             </p>
           </div>
-        )}
-      </div>
-
-      <div className="space-y-1">
-        <label className="flex items-center gap-2 text-sm text-ink">
-          <Switch
-            checked={webhookPossible && webhookOn}
-            onCheckedChange={setWebhookOn}
-            disabled={!webhookPossible}
-            aria-label="Deliver webhook events"
-          />
-          Deliver webhook events
-        </label>
-        {!webhookPossible && (
-          <p className="pl-11 text-xs text-muted">
-            Needs a public URL GitHub can reach — set VALET_PUBLIC_URL (e.g. a tunnel) and
-            reload. Without it the App is created with no webhook.
-          </p>
-        )}
-      </div>
-
-      <div>
-        <button
-          type="button"
-          onClick={() => setShowAdvanced((v) => !v)}
-          className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline"
-        >
-          {showAdvanced ? "Hide permissions" : "Configure permissions"}
-        </button>
-      </div>
-
-      {showAdvanced && (
-        <div className="space-y-4 rounded-md border border-line bg-ink-wash p-4">
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">Permissions</p>
-            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-              {AVAILABLE_PERMISSIONS.map((perm) => (
-                <label key={perm.key} className="flex items-center gap-2 text-xs text-ink">
-                  <select
-                    value={permissions[perm.key] ?? ""}
-                    aria-label={`${perm.label} permission`}
-                    onChange={(e) => {
-                      setPermissions((prev) => {
-                        const next = { ...prev };
-                        if (e.target.value) next[perm.key] = e.target.value;
-                        else delete next[perm.key];
-                        return next;
-                      });
-                    }}
-                    className="rounded border border-line bg-paper px-1.5 py-0.5 text-xs"
-                  >
-                    <option value="">none</option>
-                    {perm.levels.map((level) => (
-                      <option key={level} value={level}>
-                        {level}
-                      </option>
-                    ))}
-                  </select>
-                  {perm.label}
-                </label>
-              ))}
-            </div>
-          </div>
-          {webhookPossible && webhookOn && (
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">Webhook events</p>
-            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-              {AVAILABLE_EVENTS.map((event) => (
-                <label key={event} className="flex items-center gap-1.5 font-mono text-xs text-ink">
-                  <input
-                    type="checkbox"
-                    checked={events.includes(event)}
-                    onChange={(e) => {
-                      setEvents((prev) =>
-                        e.target.checked ? [...prev, event] : prev.filter((ev) => ev !== event),
-                      );
-                    }}
-                  />
-                  {event}
-                </label>
-              ))}
-            </div>
-          </div>
-          )}
         </div>
-      )}
 
-      <Button type="button" onClick={() => void create()} disabled={createManifest.isPending || orgMissing}>
-        {createManifest.isPending ? "Creating…" : "Create GitHub App"}
-      </Button>
+        {/* Options */}
+        <div className="divide-y divide-line/60 px-6">
+          <div className="space-y-3 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <label htmlFor="gh-under-org" className="text-sm font-medium text-ink">
+                  Create under a GitHub organization
+                </label>
+                <p className="mt-0.5 text-xs leading-relaxed text-muted">
+                  Off — the App is created on your personal GitHub account.
+                </p>
+              </div>
+              <Switch
+                id="gh-under-org"
+                checked={underOrg}
+                onCheckedChange={setUnderOrg}
+                aria-label="Create under a GitHub organization"
+              />
+            </div>
+            {underOrg && (
+              <div className="max-w-xs space-y-1.5">
+                <Input
+                  value={githubOrg}
+                  onChange={(e) => setGithubOrg(e.target.value)}
+                  placeholder="acme-corp"
+                  aria-label="GitHub organization"
+                />
+                <p className="text-xs text-muted">
+                  The GitHub organization the App is created and installed under.
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-start justify-between gap-4 py-4">
+            <div className="min-w-0">
+              <label htmlFor="gh-webhook" className="text-sm font-medium text-ink">
+                Deliver webhook events
+              </label>
+              <p className="mt-0.5 text-xs leading-relaxed text-muted">
+                {webhookPossible
+                  ? "GitHub pushes repo events to this server as they happen."
+                  : "Needs a public URL GitHub can reach — set VALET_PUBLIC_URL (e.g. a tunnel) and reload. Without it the App is created with no webhook."}
+              </p>
+            </div>
+            <Switch
+              id="gh-webhook"
+              checked={webhookPossible && webhookOn}
+              onCheckedChange={setWebhookOn}
+              disabled={!webhookPossible}
+              aria-label="Deliver webhook events"
+            />
+          </div>
+
+          <div className="py-4">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              aria-expanded={showAdvanced}
+              className="text-xs font-medium text-muted underline-offset-2 hover:text-ink hover:underline"
+            >
+              {showAdvanced ? "Hide permissions" : "Configure permissions"}
+            </button>
+
+            {showAdvanced && (
+              <div className="mt-4 space-y-5">
+                <div>
+                  <p className="mb-2.5 text-[10px] font-medium uppercase tracking-wider text-muted">
+                    Permissions
+                  </p>
+                  <div className="grid grid-cols-1 gap-x-8 gap-y-2 sm:grid-cols-2">
+                    {AVAILABLE_PERMISSIONS.map((perm) => (
+                      <label
+                        key={perm.key}
+                        className="flex items-center justify-between gap-3 text-xs text-ink"
+                      >
+                        <span className="truncate">{perm.label}</span>
+                        <select
+                          value={permissions[perm.key] ?? ""}
+                          aria-label={`${perm.label} permission`}
+                          onChange={(e) => {
+                            setPermissions((prev) => {
+                              const next = { ...prev };
+                              if (e.target.value) next[perm.key] = e.target.value;
+                              else delete next[perm.key];
+                              return next;
+                            });
+                          }}
+                          className={
+                            "w-20 shrink-0 rounded-md border border-line px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss " +
+                            ((permissions[perm.key] ?? "") === ""
+                              ? "bg-paper text-muted"
+                              : "bg-moss-wash font-medium text-ink")
+                          }
+                        >
+                          <option value="">none</option>
+                          {perm.levels.map((level) => (
+                            <option key={level} value={level}>
+                              {level}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {webhookPossible && webhookOn && (
+                  <div>
+                    <p className="mb-2.5 text-[10px] font-medium uppercase tracking-wider text-muted">
+                      Webhook events
+                    </p>
+                    <div className="grid grid-cols-2 gap-x-8 gap-y-1.5 sm:grid-cols-3">
+                      {AVAILABLE_EVENTS.map((event) => (
+                        <label
+                          key={event}
+                          className="flex items-center gap-2 font-mono text-xs text-ink"
+                        >
+                          <input
+                            type="checkbox"
+                            className="accent-[--moss]"
+                            checked={events.includes(event)}
+                            onChange={(e) => {
+                              setEvents((prev) =>
+                                e.target.checked
+                                  ? [...prev, event]
+                                  : prev.filter((ev) => ev !== event),
+                              );
+                            }}
+                          />
+                          {event}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between gap-4 border-t border-line px-6 py-4">
+          <p className="text-xs text-muted">
+            You review everything on GitHub before the App is created.
+          </p>
+          <Button
+            type="button"
+            onClick={() => void create()}
+            disabled={createManifest.isPending || orgMissing}
+          >
+            {createManifest.isPending ? "Creating…" : "Create GitHub App"}
+          </Button>
+        </div>
+      </div>
+
       {createManifest.error && (
         <p className="text-sm text-danger-500">{createManifest.error.message}</p>
       )}
+
       {manifest && (
-        <div className="space-y-2 rounded-md border border-line bg-ink-wash p-4">
-          <p className="text-xs text-muted">
+        <div className="space-y-3 rounded-lg border border-line bg-ink-wash p-5">
+          <p className="text-sm text-ink">
             Ready — continue to GitHub to finish creating the app.
           </p>
           {/* GitHub's manifest-creation flow requires a real browser POST
