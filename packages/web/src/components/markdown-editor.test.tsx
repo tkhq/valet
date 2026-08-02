@@ -1,7 +1,40 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { MarkdownEditor } from "./markdown-editor";
+import { MarkdownEditor, syncedScrollTop } from "./markdown-editor";
+
+describe("syncedScrollTop", () => {
+  it("maps the scroll ratio onto the destination's scrollable range", () => {
+    // Source halfway (100/200 scrollable) → destination halfway (300/600).
+    expect(
+      syncedScrollTop(
+        { scrollTop: 100, scrollHeight: 400, clientHeight: 200 },
+        { scrollHeight: 800, clientHeight: 200 },
+      ),
+    ).toBe(300);
+  });
+
+  it("pins to the ends", () => {
+    const dst = { scrollHeight: 800, clientHeight: 200 };
+    expect(syncedScrollTop({ scrollTop: 0, scrollHeight: 400, clientHeight: 200 }, dst)).toBe(0);
+    expect(syncedScrollTop({ scrollTop: 200, scrollHeight: 400, clientHeight: 200 }, dst)).toBe(600);
+  });
+
+  it("returns 0 when either pane has nothing to scroll", () => {
+    expect(
+      syncedScrollTop(
+        { scrollTop: 0, scrollHeight: 100, clientHeight: 200 },
+        { scrollHeight: 800, clientHeight: 200 },
+      ),
+    ).toBe(0);
+    expect(
+      syncedScrollTop(
+        { scrollTop: 100, scrollHeight: 400, clientHeight: 200 },
+        { scrollHeight: 100, clientHeight: 200 },
+      ),
+    ).toBe(0);
+  });
+});
 
 describe("MarkdownEditor", () => {
   it("renders the value in the textarea and a live preview", () => {
