@@ -108,7 +108,7 @@ describe("GithubAppSection", () => {
     expect(createBtn.disabled).toBe(false);
     fireEvent.click(createBtn);
     await waitFor(() =>
-      expect(createManifestMutateAsync).toHaveBeenCalledWith({ target: "org:acme" }),
+      expect(createManifestMutateAsync).toHaveBeenCalledWith({ webhook: false, target: "org:acme" }),
     );
   });
 
@@ -130,20 +130,25 @@ describe("GithubAppSection", () => {
     render(<GithubAppSection />);
 
     fireEvent.click(screen.getByRole("button", { name: "Configure permissions" }));
-    // Drop `actions` entirely, downgrade contents to read, untick pull_request.
+    // Manual webhook mode: the webhook switch is disabled-off and the
+    // events checkboxes are hidden (nothing would deliver anyway).
+    const webhookSwitch = screen.getByRole("switch", { name: "Deliver webhook events" }) as HTMLButtonElement;
+    expect(webhookSwitch.disabled).toBe(true);
+    expect(screen.queryByLabelText("pull_request")).toBeNull();
+
+    // Drop `actions` entirely, downgrade contents to read.
     fireEvent.change(screen.getByLabelText("Actions permission"), { target: { value: "" } });
     fireEvent.change(screen.getByLabelText("Repository contents permission"), { target: { value: "read" } });
-    fireEvent.click(screen.getByLabelText("pull_request"));
 
     fireEvent.click(screen.getByRole("button", { name: "Create GitHub App" }));
     await waitFor(() => expect(createManifestMutateAsync).toHaveBeenCalled());
     const body = createManifestMutateAsync.mock.calls[0][0] as {
+      webhook: boolean;
       permissions: Record<string, string>;
-      events: string[];
     };
+    expect(body.webhook).toBe(false);
     expect(body.permissions.actions).toBeUndefined();
     expect(body.permissions.contents).toBe("read");
-    expect(body.events).toEqual(["push", "issue_comment"]);
   });
 
   it("configured: renders the app card, installations table, and webhook badge", () => {

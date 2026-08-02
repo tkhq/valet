@@ -1212,6 +1212,10 @@ export interface PostGithubAppManifestRequest {
   /** `"org:{login}"` to create the app under a GitHub organization, or
    * `"personal"`/omitted for the caller's personal GitHub account. */
   target?: string;
+  /** Deliver webhook events. Only honored when the server has a public
+   * URL — without one the manifest omits the webhook entirely (GitHub
+   * rejects unreachable hook URLs even when marked inactive). */
+  webhook?: boolean;
   /** Full permission map (`{contents: "write", ...}`) — replaces the
    * server defaults when present, so deselecting a permission sticks. */
   permissions?: Record<string, string>;
@@ -1225,7 +1229,10 @@ export interface GithubAppManifestWire {
   name: string;
   url: string;
   redirect_url: string;
-  hook_attributes: { url: string; active?: boolean };
+  /** Omitted entirely when webhooks are off/impossible — GitHub validates
+   * hook_attributes.url reachability even with active: false, so a
+   * localhost placeholder gets the whole manifest rejected. */
+  hook_attributes?: { url: string; active?: boolean };
   public: boolean;
   default_events: string[];
   /** GitHub's manifest schema names this `default_permissions` — a bare

@@ -210,6 +210,7 @@ githubAppRouter.post("/manifest", async (c) => {
     }
     permissionOverride = body.permissions;
   }
+  const webhookRequested = body.webhook !== false;
   let eventsOverride: string[] | undefined;
   if (body.events !== undefined) {
     if (!Array.isArray(body.events) || body.events.some((e) => typeof e !== "string" || !/^[a-z_]+$/.test(e))) {
@@ -240,25 +241,24 @@ githubAppRouter.post("/manifest", async (c) => {
     ? `${githubUrl}/organizations/${encodeURIComponent(target.slice("org:".length))}/settings/apps/new`
     : `${githubUrl}/settings/apps/new`;
 
-  // Public mode: GitHub can reach us, so the manifest both declares a live
-  // webhook (default_events non-empty, hook_attributes.url reachable, no
-  // `active` override needed — GitHub defaults a present hook to active).
-  // Manual mode: GitHub's manifest schema still requires SOME
-  // `hook_attributes.url` whenever the field is present, even though
-  // there's nowhere reachable to put it yet — send the (unreachable) API
-  // base as a placeholder and set `active: false` so GitHub never attempts
-  // delivery against it; the org can wire a real webhook manually later.
+  // Webhook on: GitHub can reach us (public URL) and the caller didn't
+  // turn it off — declare a live webhook and subscribe the events.
+  // Webhook off/impossible: OMIT hook_attributes entirely. GitHub
+  // validates the hook URL's public reachability even with
+  // `active: false` ("Hook url is not supported because it isn't
+  // reachable over the public Internet (localhost)"), so a placeholder
+  // URL gets the whole manifest rejected.
   const publicUrl = publicUrlFromEnv(process.env);
   const apiBase = publicUrl ?? new URL(c.req.url).origin;
-  const webhookUrl = `${apiBase}/webhooks/github-app`;
+  const webhookOn = Boolean(publicUrl) && webhookRequested;
 
   const manifest: GithubAppManifestWire = {
     name: `valet-${slug}`,
     url: apiBase,
     redirect_url: `${apiBase}/api/org/github-app/setup`,
-    hook_attributes: publicUrl ? { url: webhookUrl } : { url: webhookUrl, active: false },
+    ...(webhookOn ? { hook_attributes: { url: `${apiBase}/webhooks/github-app` } } : {}),
     public: false,
-    default_events: publicUrl
+    default_events: webhookOn
       ? ["installation", "installation_repositories", ...(eventsOverride ?? triggerEvents)]
       : [],
     // GitHub's manifest schema key is `default_permissions` — a bare

@@ -149,8 +149,10 @@ describe("POST /api/org/github-app/manifest", () => {
     const body = (await res.json()) as PostGithubAppManifestResponse;
     expect(body.url).toBe("https://github.com/settings/apps/new");
     expect(body.manifest.default_events).toEqual([]);
-    expect(body.manifest.hook_attributes.active).toBe(false);
-    expect(body.manifest.hook_attributes.url).toContain("/webhooks/github-app");
+    // No public URL → hook_attributes omitted entirely: GitHub validates
+    // hook URL reachability even with active:false, so a localhost
+    // placeholder got the whole manifest rejected.
+    expect(body.manifest.hook_attributes).toBeUndefined();
     expect(body.manifest.public).toBe(false);
     expect(body.manifest.default_permissions).toEqual({
       contents: "write",

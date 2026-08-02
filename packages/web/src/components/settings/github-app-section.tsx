@@ -35,7 +35,7 @@ export function GithubAppSection() {
   return githubAppQ.data.configured ? (
     <ConfiguredCard data={githubAppQ.data} />
   ) : (
-    <NotConfiguredCard />
+    <NotConfiguredCard webhookMode={githubAppQ.data.webhook.mode} />
   );
 }
 
@@ -77,7 +77,7 @@ const DEFAULT_PERMISSIONS: Record<string, string> = {
 
 const DEFAULT_EVENTS = ["push", "pull_request", "issue_comment"];
 
-function NotConfiguredCard() {
+function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }) {
   const createManifest = useCreateGithubAppManifest();
   const [manifest, setManifest] = useState<PostGithubAppManifestResponse | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -89,12 +89,18 @@ function NotConfiguredCard() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [permissions, setPermissions] = useState<Record<string, string>>(DEFAULT_PERMISSIONS);
   const [events, setEvents] = useState<string[]>(DEFAULT_EVENTS);
+  // Webhook delivery: only possible when the server has a public URL —
+  // GitHub rejects manifests whose hook URL isn't publicly reachable,
+  // so the switch is forced off and disabled in manual mode.
+  const webhookPossible = webhookMode === "public";
+  const [webhookOn, setWebhookOn] = useState(webhookPossible);
 
   const orgMissing = underOrg && githubOrg.trim().length === 0;
 
   async function create() {
     try {
       const res = await createManifest.mutateAsync({
+        webhook: webhookPossible && webhookOn,
         ...(underOrg && githubOrg.trim() ? { target: `org:${githubOrg.trim()}` } : {}),
         ...(showAdvanced ? { permissions, events } : {}),
       });
@@ -129,6 +135,24 @@ function NotConfiguredCard() {
               personal account.
             </p>
           </div>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <Switch
+            checked={webhookPossible && webhookOn}
+            onCheckedChange={setWebhookOn}
+            disabled={!webhookPossible}
+            aria-label="Deliver webhook events"
+          />
+          Deliver webhook events
+        </label>
+        {!webhookPossible && (
+          <p className="pl-11 text-xs text-muted">
+            Needs a public URL GitHub can reach — set VALET_PUBLIC_URL (e.g. a tunnel) and
+            reload. Without it the App is created with no webhook.
+          </p>
         )}
       </div>
 
@@ -172,6 +196,7 @@ function NotConfiguredCard() {
               ))}
             </div>
           </div>
+          {webhookPossible && webhookOn && (
           <div>
             <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">Webhook events</p>
             <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
@@ -190,11 +215,8 @@ function NotConfiguredCard() {
                 </label>
               ))}
             </div>
-            <p className="mt-2 text-xs text-muted">
-              Events only deliver when the server has a public URL; without one the App is
-              created with its webhook disabled.
-            </p>
           </div>
+          )}
         </div>
       )}
 
