@@ -27,6 +27,13 @@ import {
 const orgId = "org1";
 const NOW = 1_700_000_000_000;
 
+// The recipe the fixture resolves for `acme/widgets`: only `package-lock.json`
+// is present, so the resolved recipe is the single npm-ci step.
+const RESOLVED_NPM_RECIPE = {
+  recipe: [{ id: "npm-ci", lockfile: "package-lock.json", command: "npm ci" }],
+  setup: [] as string[],
+};
+
 class FakeImageBuilder implements ImageBuilder {
   readonly backend = "docker";
   readonly specs: PrebuildSpec[] = [];
@@ -193,9 +200,13 @@ describe("SourceService", () => {
   let service: SourceService;
   let currentSha = "headsha1";
   let idSeq = 0;
+  // When true, expose a second lockfile so the resolved recipe changes (used to
+  // move a repo's identity without moving its head sha).
+  let lockfilePresent = false;
 
   function contentsFor(path: string): GithubFixtureResponse {
     if (path === "package-lock.json") return { body: { content: b64("{}"), encoding: "base64" } };
+    if (lockfilePresent && path === "yarn.lock") return { body: { content: b64("{}"), encoding: "base64" } };
     return { status: 404, body: { message: "Not Found" } };
   }
 
@@ -231,6 +242,7 @@ describe("SourceService", () => {
     await seedOrg(db, credentials);
     currentSha = "headsha1";
     idSeq = 0;
+    lockfilePresent = false;
     fixture = startGithubFixture({
       getRepo: () => ({ body: { default_branch: "main" } }),
       getCommit: () => ({ body: { sha: currentSha } }),
@@ -245,6 +257,14 @@ describe("SourceService", () => {
     service.stop();
     await fixture.close();
   });
+
+  // Bake a source at the current head + identity, then drive it to `pushed`.
+  async function pushCurrentBake(srcId: string): Promise<void> {
+    const row = await service.startBake(srcId);
+    builder.setState(builder.buildIds[builder.buildIds.length - 1], { state: "pushed" });
+    await service.syncActiveBuilds();
+    expect((await db.select().from(bakes).where(eq(bakes.id, row.id)))[0].status).toBe("pushed");
+  }
 
   // ── identity hashing + chain ──────────────────────────────────────────
 
@@ -346,17 +366,29 @@ describe("SourceService", () => {
       expect(spec.setup).toEqual(["apt-get install -y jq"]);
     });
 
-    it("repo bakes FROM its parent base source's current pushed bake ref", async () => {
+    it("repo bakes FROM its parent base source's current CONSISTENT pushed bake ref", async () => {
       const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      const [base] = await db.select().from(imageSources).where(eq(imageSources.id, baseId));
+      // The base's pushed bake identity MUST match its computed identity, else
+      // the repo child defers instead of baking (derivation invariant).
+      const baseIdentity = service.identityHash(base, null);
       await seedBake(db, baseId, {
         id: "base_bake",
         commitSha: null,
         imageRef: "valet-prebuild/base/base:abc",
-        identityHash: "base-ident",
+        identityHash: baseIdentity,
       });
       const srcId = await seedRepoSource(db, { parentId: baseId });
-      await service.startBake(srcId);
+      const row = await service.startBake(srcId);
       expect(builder.specs[0].baseImage).toBe("valet-prebuild/base/base:abc");
+      // The recorded identity derives from the SAME base bake's identity_hash
+      // and the resolved recipe (package-lock.json → npm-ci step).
+      const expectedIdentity = service.identityHash(
+        (await db.select().from(imageSources).where(eq(imageSources.id, srcId)))[0],
+        baseIdentity,
+        RESOLVED_NPM_RECIPE,
+      );
+      expect(row.identityHash).toBe(expectedIdentity);
     });
 
     it("throws PrebuildUnavailableError when no builder is wired", async () => {
@@ -378,15 +410,6 @@ describe("SourceService", () => {
   // ── skip matrix ───────────────────────────────────────────────────────
 
   describe("runSchedulerPass skip matrix (repo)", () => {
-    async function pushCurrentBake(srcId: string): Promise<void> {
-      // Bake at the current head + identity, then transition to pushed.
-      const row = await service.startBake(srcId);
-      builder.setState(builder.buildIds[builder.buildIds.length - 1], { state: "pushed" });
-      await service.syncActiveBuilds();
-      // Confirm it landed.
-      expect((await db.select().from(bakes).where(eq(bakes.id, row.id)))[0].status).toBe("pushed");
-    }
-
     it("skips when the newest pushed bake has the same commit sha AND identity", async () => {
       const srcId = await seedRepoSource(db);
       await pushCurrentBake(srcId);
@@ -405,18 +428,17 @@ describe("SourceService", () => {
       expect(builder.specs[builder.specs.length - 1].commitSha).toBe("headsha2");
     });
 
-    it("bakes when the identity has moved (parent base identity changed)", async () => {
-      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
-      await seedBake(db, baseId, { id: "b1", commitSha: null, imageRef: "reg/base:1", identityHash: "old-base-ident" });
-      const srcId = await seedRepoSource(db, { parentId: baseId });
+    it("bakes when the identity has moved (repo recipe changed under a consistent base)", async () => {
+      // A stand-alone repo with a consistent pushed bake rebakes when only its
+      // resolved recipe changes (identity moves, head sha unchanged).
+      const srcId = await seedRepoSource(db);
       await pushCurrentBake(srcId);
       const before = builder.specs.length;
-      // Change the base's current pushed bake identity → repo identity moves.
-      await db.update(bakes).set({ identityHash: "new-base-ident" }).where(eq(bakes.id, "b1"));
+      // Force a recipe change: expose a lockfile the first pass did not see.
+      lockfilePresent = true;
       await service.runSchedulerPass();
-      // base gets rebaked too (its identity != current pushed), plus repo.
-      const repoSpecs = builder.specs.slice(before).filter((s) => s.kind === "repo");
-      expect(repoSpecs.length).toBe(1);
+      expect(builder.specs.length).toBe(before + 1);
+      expect(builder.specs[builder.specs.length - 1].kind).toBe("repo");
     });
 
     it("base: skips when the identity is unchanged", async () => {
@@ -443,19 +465,125 @@ describe("SourceService", () => {
     });
   });
 
-  // ── parent-first ordering ─────────────────────────────────────────────
+  // ── parent-first defer + same-night cascade ───────────────────────────
 
-  describe("runSchedulerPass parent-first ordering", () => {
-    it("dispatches the base bake BEFORE its dependent repo bake in one pass", async () => {
+  describe("runSchedulerPass parent-first defer (derivation invariant)", () => {
+    it("DEFERS the repo when its base parent has no pushed bake — only the base dispatches", async () => {
       const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
       await seedRepoSource(db, { id: "repo1", parentId: baseId });
-      // Both stale (no pushed bakes) → both should bake, base first.
+      // Both stale, but the base has no pushed bake — the repo MUST defer so it
+      // never FROMs stock while recording the new base identity.
       await service.runSchedulerPass();
-      expect(builder.specs.length).toBe(2);
+      expect(builder.specs).toHaveLength(1);
       expect(builder.specs[0].kind).toBe("base");
       expect(builder.specs[0].configId).toBe(baseId);
-      expect(builder.specs[1].kind).toBe("repo");
-      expect(builder.specs[1].configId).toBe("repo1");
+    });
+
+    it("kicks the deferred repo once the base bake is pushed (same-night cascade)", async () => {
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      await seedRepoSource(db, { id: "repo1", parentId: baseId });
+      // Pass 1: base dispatches, repo defers.
+      await service.runSchedulerPass();
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0].kind).toBe("base");
+
+      // Drive the base bake to pushed via the poll-sync path.
+      const baseBuildId = builder.buildIds[builder.buildIds.length - 1];
+      builder.setState(baseBuildId, { state: "pushed" });
+      await service.syncActiveBuilds();
+
+      // The cascade kicked the repo child.
+      const repoSpecs = builder.specs.filter((s) => s.kind === "repo");
+      expect(repoSpecs).toHaveLength(1);
+      expect(repoSpecs[0].configId).toBe("repo1");
+
+      // FROM derives from the base bake's imageRef; identity derives from the
+      // base bake's identity_hash — the SAME base bake.
+      const [baseBake] = await db.select().from(bakes).where(eq(bakes.sourceId, baseId));
+      expect(repoSpecs[0].baseImage).toBe(baseBake.imageRef);
+      const [repoRow] = await db
+        .select()
+        .from(bakes)
+        .where(eq(bakes.sourceId, "repo1"));
+      const [repoSrc] = await db.select().from(imageSources).where(eq(imageSources.id, "repo1"));
+      const expectedIdentity = service.identityHash(repoSrc, baseBake.identityHash, RESOLVED_NPM_RECIPE);
+      expect(repoRow.identityHash).toBe(expectedIdentity);
+    });
+
+    it("stale-base edit: repo defers in the pass; base re-pushes; kick rebakes repo FROM the new ref", async () => {
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      const [base] = await db.select().from(imageSources).where(eq(imageSources.id, baseId));
+      // Seed a CONSISTENT pushed base bake (identity = computed identity).
+      const oldIdentity = service.identityHash(base, null);
+      await seedBake(db, baseId, {
+        id: "base_old",
+        commitSha: null,
+        imageRef: "reg/base:old",
+        identityHash: oldIdentity,
+      });
+      await seedRepoSource(db, { id: "repo1", parentId: baseId });
+      // Bake the repo FROM the old base ref and push it.
+      await pushCurrentBake("repo1");
+      const [repoOld] = await db.select().from(bakes).where(eq(bakes.sourceId, "repo1"));
+      expect(repoOld.imageRef).toBeTruthy();
+
+      // Edit the base commands → the base's computed identity moves. Its newest
+      // pushed bake (base_old) is now stale.
+      await db
+        .update(imageSources)
+        .set({ setupCommands: ["apt-get install -y jq", "apt-get install -y ripgrep"] })
+        .where(eq(imageSources.id, baseId));
+
+      const beforeRepo = builder.specs.filter((s) => s.kind === "repo").length;
+      await service.runSchedulerPass();
+      // The base rebakes (identity moved); the repo DEFERS (base not consistent).
+      const baseSpecsAfter = builder.specs.filter((s) => s.kind === "base");
+      expect(baseSpecsAfter).toHaveLength(1);
+      expect(builder.specs.filter((s) => s.kind === "repo").length).toBe(beforeRepo);
+
+      // Drive the base rebake to pushed → cascade kicks the repo.
+      const baseBuildId = builder.buildIds[builder.buildIds.length - 1];
+      builder.setState(baseBuildId, { state: "pushed" });
+      await service.syncActiveBuilds();
+
+      const repoSpecs = builder.specs.filter((s) => s.kind === "repo");
+      expect(repoSpecs.length).toBe(beforeRepo + 1);
+      const newBaseBake = await service.currentBake(baseId);
+      expect(newBaseBake?.imageRef).not.toBe("reg/base:old");
+      expect(repoSpecs[repoSpecs.length - 1].baseImage).toBe(newBaseBake?.imageRef);
+    });
+
+    it("does NOT defer a repo with no parent — it bakes immediately", async () => {
+      await seedRepoSource(db, { id: "repo1", parentId: null });
+      await service.runSchedulerPass();
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0].kind).toBe("repo");
+    });
+
+    it("does NOT defer a repo whose parent is external — it bakes FROM the external ref", async () => {
+      await db.insert(imageSources).values({
+        id: "ext1",
+        orgId,
+        kind: "external",
+        parentId: null,
+        name: "ext",
+        externalRef: "ghcr.io/acme/base:1",
+        pullSecretName: null,
+        setupCommands: null,
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "off",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      });
+      await seedRepoSource(db, { id: "repo1", parentId: "ext1" });
+      await service.runSchedulerPass();
+      const repoSpecs = builder.specs.filter((s) => s.kind === "repo");
+      expect(repoSpecs).toHaveLength(1);
+      expect(repoSpecs[0].baseImage).toBe("ghcr.io/acme/base:1");
     });
   });
 
@@ -510,6 +638,35 @@ describe("SourceService", () => {
         .from(imageSources)
         .where(eq(imageSources.kind, "repo"));
       expect(src.parentId).toBe(baseId);
+    });
+
+    it("first-bake DEFERS when the org base has no pushed bake — source upserts, no dispatch", async () => {
+      await seedBaseSource(db, ["apt-get install -y jq"]);
+      await service.ensureRepoSource(orgId, repo);
+      const sources = await db.select().from(imageSources).where(eq(imageSources.kind, "repo"));
+      expect(sources).toHaveLength(1);
+      // Repo defers behind the un-pushed base; the base itself is not baked by
+      // ensureRepoSource (only the nightly scheduler bakes bases).
+      expect(builder.specs.filter((s) => s.kind === "repo")).toHaveLength(0);
+    });
+
+    it("after the base pushes, the cascade fires the deferred first bake", async () => {
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      // ensureRepoSource upserts + defers the repo.
+      await service.ensureRepoSource(orgId, repo);
+      expect(builder.specs.filter((s) => s.kind === "repo")).toHaveLength(0);
+
+      // The nightly scheduler bakes the base; drive it to pushed.
+      await service.runSchedulerPass();
+      const baseBuildId = builder.buildIds[builder.buildIds.length - 1];
+      builder.setState(baseBuildId, { state: "pushed" });
+      await service.syncActiveBuilds();
+
+      // The cascade kicked the repo first bake.
+      const repoSpecs = builder.specs.filter((s) => s.kind === "repo");
+      expect(repoSpecs).toHaveLength(1);
+      const baseBake = await service.currentBake(baseId);
+      expect(repoSpecs[0].baseImage).toBe(baseBake?.imageRef);
     });
 
     it("no org GitHub credential → source still upserted, no bake fired", async () => {

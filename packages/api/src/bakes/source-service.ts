@@ -421,38 +421,85 @@ export class SourceService {
     return rows[0] ?? null;
   }
 
+  /**
+   * Evaluates a source's PARENT for the derivation invariant: a repo bake's
+   * recorded identity and its FROM image MUST derive from the SAME base bake.
+   *
+   * Returns a discriminated result:
+   *   - `{ status: "none" }` — no parent (repo FROMs stock, identity uses
+   *     stock as the parent contribution).
+   *   - `{ status: "external", ref }` — external parent (ref is both the FROM
+   *     image AND the identity contribution).
+   *   - `{ status: "ready", bake }` — base parent with a CONSISTENT pushed
+   *     bake (its `identity_hash` matches the parent's currently-computed
+   *     identity). Both FROM (`bake.imageRef`) and identity
+   *     (`bake.identityHash`) read from THAT bake — never recompute from
+   *     commands.
+   *   - `{ status: "defer" }` — base parent that is NOT ready: no pushed bake,
+   *     or the newest pushed bake's identity is stale vs. the parent's
+   *     currently-computed identity. A repo child MUST defer.
+   */
+  private async resolveParentBase(source: ImageSourceRow): Promise<
+    | { status: "none" }
+    | { status: "external"; ref: string | null }
+    | { status: "ready"; bake: BakeRow }
+    | { status: "defer" }
+  > {
+    const parent = await this.loadParent(source);
+    if (!parent) return { status: "none" };
+    if (parent.kind === "external") return { status: "external", ref: parent.externalRef ?? null };
+    if (parent.kind === "base") {
+      const parentBake = await this.currentBake(parent.id);
+      if (!parentBake) return { status: "defer" };
+      // The base parent's newest pushed bake must reflect the base's CURRENT
+      // identity — otherwise the base has a pending rebake and the repo child
+      // would FROM a stale layer while recording the fresh identity.
+      const parentIdentity = this.baseIdentity(parent, await this.grandparentIdentity(parent));
+      if (parentBake.identityHash !== parentIdentity) return { status: "defer" };
+      return { status: "ready", bake: parentBake };
+    }
+    return { status: "none" };
+  }
+
+  /** The identity contribution of a BASE source's own parent (external ref /
+   * grandparent base bake / stock). Used only to recompute a base's current
+   * identity for the consistency check in `resolveParentBase`. */
+  private async grandparentIdentity(base: ImageSourceRow): Promise<string | null> {
+    const gp = await this.loadParent(base);
+    if (!gp) return null;
+    if (gp.kind === "external") return gp.externalRef ?? null;
+    if (gp.kind === "base") {
+      const gpBake = await this.currentBake(gp.id);
+      return gpBake ? gpBake.identityHash : this.baseIdentity(gp, null);
+    }
+    return null;
+  }
+
   /** Resolves the base image ref a bake FROMs. Priority:
    *  1. `override` — `.valet/prebuild.yaml`'s `image` (repo only).
    *  2. The parent source: external → its `external_ref`; base → its current
-   *     pushed bake's `image_ref` (chained bake); repo parents are ignored.
+   *     CONSISTENT pushed bake's `image_ref` (chained bake). A non-ready base
+   *     parent falls through to stock (callers must have already deferred).
    *  3. `resolveDefaultImage(env)` (`VALET_SANDBOX_IMAGE`).
    *  4. `FALLBACK_BASE_IMAGE`. */
   private async resolveBaseImage(source: ImageSourceRow, override: string | undefined): Promise<string> {
     if (override) return override;
-    const parent = await this.loadParent(source);
-    if (parent) {
-      if (parent.kind === "external" && parent.externalRef) return parent.externalRef;
-      if (parent.kind === "base") {
-        const parentBake = await this.currentBake(parent.id);
-        if (parentBake) return parentBake.imageRef;
-        // A base parent with no pushed bake yet — fall through to stock so the
-        // repo child still bakes (it will pick the base up on a later pass).
-      }
-    }
+    const parentBase = await this.resolveParentBase(source);
+    if (parentBase.status === "external" && parentBase.ref) return parentBase.ref;
+    if (parentBase.status === "ready") return parentBase.bake.imageRef;
     return resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
   }
 
   /** The identity that a PARENT source contributes to its child's identity
-   * hash — the parent's current pushed bake identity when it has one,
-   * external ref for external parents, else null (falls to stock). */
+   * hash. Reads from the SAME consistent base bake `resolveBaseImage` FROMs:
+   *   - external parent → its ref.
+   *   - base parent with a consistent pushed bake → that bake's identity_hash.
+   *   - no parent OR a non-ready base parent → null (falls to stock). Callers
+   *     that must not diverge (repo bakes) defer before reaching this state. */
   private async parentIdentity(source: ImageSourceRow): Promise<string | null> {
-    const parent = await this.loadParent(source);
-    if (!parent) return null;
-    if (parent.kind === "external") return parent.externalRef ?? null;
-    if (parent.kind === "base") {
-      const bake = await this.currentBake(parent.id);
-      return bake ? bake.identityHash : this.baseIdentity(parent, null);
-    }
+    const parentBase = await this.resolveParentBase(source);
+    if (parentBase.status === "external") return parentBase.ref;
+    if (parentBase.status === "ready") return parentBase.bake.identityHash;
     return null;
   }
 
@@ -537,6 +584,17 @@ export class SourceService {
       imageRef,
     };
     return this.dispatch(builder, row, spec);
+  }
+
+  /** True when a repo source must DEFER its bake because its parent is a base
+   * source without a consistent pushed bake. Deferring keeps a repo's recorded
+   * identity and its FROM image derived from the SAME base bake — a repo baked
+   * while its base is un-pushed would FROM stock but record the new base
+   * identity, then skip forever with the base layer never landing. */
+  private async repoBakeDefers(source: ImageSourceRow): Promise<boolean> {
+    if (source.kind !== "repo") return false;
+    const parentBase = await this.resolveParentBase(source);
+    return parentBase.status === "defer";
   }
 
   private async startRepoBake(source: ImageSourceRow): Promise<BakeRow> {
@@ -655,6 +713,7 @@ export class SourceService {
           .set({ status: "pushed", logTail: status.logTail ?? null, finishedAt: this.now() })
           .where(eq(bakes.id, row.id));
         await this.applyRetention(row.sourceId, builder.backend);
+        await this.cascadeBaseChildren(row.sourceId);
       } else {
         await this.db
           .update(bakes)
@@ -680,6 +739,51 @@ export class SourceService {
     const staleRefs = [...new Set(stale.map((r) => r.imageRef).filter((ref) => !keptRefs.has(ref)))];
     if (staleRefs.length === 0) return;
     await this.retention(backend, staleRefs);
+  }
+
+  /**
+   * Same-night cascade (spec decision 14): when a base bake flips to `pushed`,
+   * immediately evaluate that base's ENABLED repo children and start a bake for
+   * each stale one. A base build takes minutes, so its dependents land the same
+   * night rather than waiting for the next 10-min scheduler tick (which would
+   * also fire — this is the belt). Uses the same skip/defer rules as the
+   * scheduler; per-child failures are isolated.
+   */
+  private async cascadeBaseChildren(sourceId: string): Promise<void> {
+    const parentRows = await this.db.select().from(imageSources).where(eq(imageSources.id, sourceId)).limit(1);
+    const parent = parentRows[0];
+    if (!parent || parent.kind !== "base") return;
+
+    const children = await this.db
+      .select()
+      .from(imageSources)
+      .where(and(eq(imageSources.parentId, sourceId), eq(imageSources.kind, "repo")));
+
+    for (const child of children) {
+      try {
+        if (this.schedulingBlocked(child)) continue;
+        // Defer if the just-pushed base bake is still not consistent (e.g. the
+        // base already has a newer pending rebake).
+        if (await this.repoBakeDefers(child)) continue;
+
+        const owner = ownerOf(child.repoFullName ?? "");
+        const repo = repoOf(child.repoFullName ?? "");
+        const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, child.orgId, owner, repo);
+        const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
+        const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
+        const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
+        const parentIdent = await this.parentIdentity(child);
+        const identity = this.identityHash(child, parentIdent, snapshot);
+
+        const current = await this.currentBake(child.id);
+        if (current && current.commitSha === head.sha && current.identityHash === identity) continue;
+
+        console.log(`prebuild cascade: kick ${child.name}: base bake pushed`);
+        await this.startBake(child.id);
+      } catch (err) {
+        console.error(`prebuild cascade: child ${child.id} (${child.repoFullName ?? child.name}) failed:`, err);
+      }
+    }
   }
 
   /** True when a live (active/hibernated) session has `repoFullName` bound. */
@@ -746,6 +850,13 @@ export class SourceService {
 
   private async maybeScheduleRepo(source: ImageSourceRow): Promise<void> {
     if (this.schedulingBlocked(source)) return;
+
+    // Defer when the parent base has no consistent pushed bake yet — the
+    // push-kick in `syncActiveBuilds` (or the next scheduler tick) rebakes.
+    if (await this.repoBakeDefers(source)) {
+      console.log(`prebuild scheduler: defer ${source.name}: waiting for base bake`);
+      return;
+    }
 
     const repoHost = source.repoHost ?? "github";
     const repoFullName = source.repoFullName ?? "";
@@ -887,6 +998,18 @@ export class SourceService {
     }
     if (!hasOrgCredential) {
       console.log(`ensureRepoSource: no org GitHub credential — skipping first bake of ${repo.fullName}`);
+      return;
+    }
+    // Defer when the parent base has no consistent pushed bake yet — the base
+    // bake's push-kick (or the next scheduler tick) fires this repo bake.
+    let source: ImageSourceRow;
+    try {
+      source = await this.loadSource(sourceId);
+    } catch {
+      return;
+    }
+    if (await this.repoBakeDefers(source)) {
+      console.log(`ensureRepoSource: defer ${repo.fullName}: waiting for base bake`);
       return;
     }
     try {
