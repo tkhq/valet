@@ -66,3 +66,4 @@ packages/client/*.js.map
 workspaces/*
 !workspaces/.gitkeep
 .worktrees/
+.superpowers/
