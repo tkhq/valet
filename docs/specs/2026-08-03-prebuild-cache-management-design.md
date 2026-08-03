@@ -25,21 +25,31 @@ Dockerfile order (per repo bake): `FROM base → clone → WORKDIR /prebuilt/rep
 
 ## Part 2 — Cache management (to build)
 
-The live dogfood filled the single-node cluster's disk: cumulative baking → DiskPressure → kubelet image GC evicted the api's local-only image → api `ImagePullBackOff`, everything stalled. Baked images accumulate in the bundled registry and the node store; a lean base + many repos still grows without bound. Policy: a per-source retention floor plus a global size ceiling, with a working registry GC.
+**Primary goal: a local dev machine / single-user Valet must never fill its disk from prebuild activity, with zero manual cleanup.** The incident that motivated this was NOT registry images — it was **64 GB of moby build cache** accumulated from iterating (`docker build` runs), which nothing bounds today. A fix that requires the user to remember a prune command fails the goal. So the design leads with automatic build-cache bounding, makes the **docker builder** path (what `dev-local` / single-user uses) first-class, and treats the k8s registry path as the secondary (multi-user/deploy) surface.
+
+Three distinct things accumulate:
+1. **moby/docker build cache** — from `docker build` (the api image on every `make k8s-build`, AND every docker-builder bake). The 64 GB killer. Untouched today.
+2. **baked images** — docker local image store (docker backend) or the bundled registry + node store (k8s backend). Retention keeps 2/source but there is no global ceiling.
+3. **BuildKit job cache** (k8s) — already ephemeral (`emptyDir`), no accumulation.
 
 ### Decisions (locked)
 
-1. **Per-source retention floor.** Keep the newest `N = 2` pushed bakes per source (existing `applyRetention`) — every source always has a current image plus one rollback.
+1. **Auto-bound the build cache (the priority; automatic, no manual step).** Cap moby build cache to `VALET_PREBUILD_BUILD_CACHE_GB` (default `10`) via `docker builder prune --keep-storage=<cap> -f` (or `--filter until=` where `--keep-storage` is unavailable), run automatically at two seams:
+   - **Runtime, docker builder** (single-user local): the docker `ImageBuilder` prunes after each bake. A single-user user never accumulates cache — the daemon self-bounds.
+   - **Dev tooling**: `make k8s-build` / `k8s-build-fast` prune after building, so the maintainer's iteration loop (the actual 64 GB source) self-bounds too.
+   No cron, no reminder — pruning rides the same actions that create the cache.
 
-2. **Global size ceiling.** `VALET_PREBUILD_CACHE_BUDGET_GB` (default `40`). After any bake pushes, if the summed size of all pushed bake images exceeds the budget, evict oldest-first until under budget. NEVER evict: (a) a source's current (newest pushed) bake, or (b) a bake referenced by a live session (`agent_sessions.bake_id` of an `active`/`hibernated` session). Eviction = delete the registry tag + the `bakes` row. If the budget cannot be met without touching protected bakes, stop and log (a visible "over budget, all remaining protected" warning — never delete a protected image).
+2. **Per-source retention floor.** Keep the newest `N = 2` pushed bakes per source (existing `applyRetention`, both backends) — every source always has a current image plus one rollback.
 
-3. **Bake size recorded at push.** New nullable `bakes.size_bytes BIGINT`, set from the registry manifest (sum of layer sizes) when a bake flips to `pushed`. The ceiling sums this column.
+3. **Global size ceiling on baked images (both backends).** `VALET_PREBUILD_CACHE_BUDGET_GB` (default `20` — modest, local-friendly). After any bake pushes, if the summed size of all pushed bake images exceeds the budget, evict oldest-first until under budget. NEVER evict (a) a source's current (newest pushed) bake, or (b) a bake referenced by a live session (`agent_sessions.bake_id` of an `active`/`hibernated` session). Eviction deletes the image (docker `rmi`; k8s registry tag delete) AND the `bakes` row. If the budget cannot be met without touching protected bakes, stop and log a visible warning — never delete a protected image.
 
-4. **Registry GC actually reclaims.** The bundled `registry-gc` CronJob was erroring (observed: `Error` pods). Fix it so `registry garbage-collect` runs and reclaims blob bytes — deleting a tag/manifest frees nothing until GC runs. Retention + ceiling delete tags; GC reclaims the blobs.
+4. **Bake size recorded at push.** New nullable `bakes.size_bytes BIGINT`, set when a bake flips to `pushed` — docker: `docker image inspect --format {{.Size}}`; k8s: sum of registry manifest layer sizes. The ceiling sums this column.
 
-5. **BuildKit job cache stays ephemeral.** One buildkitd per job over an `emptyDir` context — no cross-build accumulation. Accepted tradeoff: no cross-bake layer reuse. Not changing this pass.
+5. **Registry GC actually reclaims (k8s only).** The bundled `registry-gc` CronJob was erroring (observed: `Error` pods). Fix it so `registry garbage-collect` runs — deleting a tag frees nothing until GC runs. Retention + ceiling delete tags; GC reclaims blobs. (Docker backend needs no GC — `rmi` frees immediately.)
 
-6. **Dev api-image fragility — documented, not code-fixed.** On Rancher Desktop the api image is a local-only tag; kubelet image GC under pressure can evict it and it cannot re-pull (no registry), taking the api down. Dev-only (prod pulls from a registry). Mitigations: a runbook note in `deploy/README.md`, and a `make prune-build-cache` helper for the local moby build cache (the 64 GB dev-loop accumulation that triggered the incident — distinct from the product's registry cache).
+6. **BuildKit job cache stays ephemeral** (`emptyDir`, one buildkitd per job). No change.
+
+7. **Dev api-image fragility — documented, not code-fixed.** On Rancher Desktop the api image is a local-only tag; kubelet image GC under pressure can evict it and it cannot re-pull, taking the api down. Dev-only (prod pulls from a registry). Decision 1 (bounded build cache) prevents the DiskPressure that triggers this in the first place; a `deploy/README.md` note covers the residual.
 
 ### Data model (pre-1.0, edit `0000_app.sql` + Drizzle in place)
 
@@ -47,22 +57,23 @@ The live dogfood filled the single-node cluster's disk: cumulative baking → Di
 
 ### Components (independently testable)
 
-- `SourceService.enforceCacheCeiling(orgId)` — after a push: sum `size_bytes`, evict oldest non-current, non-live-referenced bakes until under `VALET_PREBUILD_CACHE_BUDGET_GB`; log when blocked by protected bakes.
-- Bake push path — record `size_bytes` from the registry manifest (extend the existing pushed-transition in `syncActiveBuilds`).
-- `applyRetention` — unchanged (floor); the ceiling runs after it.
+- Build-cache prune helper — a small pure `buildCachePruneArgs(capGb)` → argv, plus the wiring: docker `ImageBuilder` calls it after a bake; `make` targets call `docker builder prune` post-build. `VALET_PREBUILD_BUILD_CACHE_GB` config.
+- `SourceService.enforceCacheCeiling(orgId)` — after a push: sum `size_bytes`, evict oldest non-current/non-live bakes until under `VALET_PREBUILD_CACHE_BUDGET_GB`; log when blocked by protected bakes. Backend-agnostic (delegates image delete to the existing `RetentionFn`).
+- Bake push path — record `size_bytes` on the pushed transition (docker inspect / registry manifest), then run `applyRetention` (floor) then `enforceCacheCeiling` (ceiling).
 - Registry GC — fix the CronJob command/manifest in the chart.
-- `deploy/README.md` note + `make prune-build-cache`.
+- `deploy/README.md` note.
 
 ### Testing
 
-- **Ceiling unit:** over-budget evicts oldest first; NEVER a source's current bake or a live-session-referenced bake; stops + logs when only protected bakes remain; under-budget is a no-op. `size_bytes` summed correctly.
-- **Size recording:** a pushed bake gets `size_bytes` from the (fixture) registry manifest.
-- **Retention floor still holds** alongside the ceiling (N=2 per source preserved).
-- **Chart:** registry-gc CronJob golden (fixed command); `VALET_PREBUILD_CACHE_BUDGET_GB` plumbed.
-- **Live (exit criteria):** drive bakes past a small budget → oldest non-protected images evict, registry GC reclaims bytes, current + live-referenced bakes survive; disk stays bounded.
+- **Build-cache prune unit:** `buildCachePruneArgs(10)` → correct argv; docker builder invokes prune after a bake (spy the spawn); make-target smoke (documented, not unit).
+- **Ceiling unit:** over-budget evicts oldest first; NEVER a source's current or a live-session-referenced bake; stops + logs when only protected remain; under-budget no-op; `size_bytes` summed correctly; delegates delete to the backend `RetentionFn`.
+- **Size recording:** a pushed docker bake records `size_bytes` from inspect; k8s from the fixture manifest.
+- **Retention floor still holds** alongside the ceiling (N=2 per source).
+- **Chart:** registry-gc CronJob golden (fixed command); both `VALET_PREBUILD_*` budgets plumbed.
+- **Live (exit criteria, both backends):** iterate builds → moby build cache stays under the cap automatically (no manual prune); drive bakes past a small image budget → oldest non-protected images evict, current + live-referenced survive; k8s registry GC reclaims bytes; disk stays bounded across a full iteration session.
 
 ## Non-goals
 
 - Named/per-language base images (rejected).
 - Persistent/shared BuildKit layer cache.
-- Code-fixing the dev-only api-image eviction.
+- Code-fixing the dev-only api-image eviction (prevented indirectly by decision 1).
