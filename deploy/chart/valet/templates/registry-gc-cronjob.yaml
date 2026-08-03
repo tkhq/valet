@@ -1,26 +1,25 @@
 {{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
-# Registry garbage-collect CronJob. The upstream `registry garbage-collect`
-# command reclaims blobs orphaned by the retention seam's manifest deletes
-# (packages/api/src/prebuilds/service.ts's `registryManifestDelete` only
-# deletes the MANIFEST; the underlying layer blobs are only reclaimed by a
-# separate `garbage-collect` pass against the storage directory).
+# Registry garbage-collect CronJob.
 #
-# ── Read-only-registry caveat ────────────────────────────────────────────
-# The standard `registry garbage-collect` invocation walks the storage
-# directory directly and is NOT safe to run concurrently with writes to
-# that same directory (the upstream docs recommend running it against a
-# registry started with `-r`/read-only mode, or otherwise ensuring no
-# concurrent pushes). This CronJob does NOT put the running registry
-# StatefulSet into read-only mode first — it mounts the SAME PVC in a
-# separate one-off pod and runs GC directly against it while the live
-# registry Pod keeps serving read/write traffic. This is a known-imperfect
-# simplification (disclosed, not hidden): a push landing mid-GC-run could
-# theoretically race a blob deletion. Acceptable for the pre-1.0 bundled
-# registry (low write volume: prebuild pushes are infrequent, scheduled
-# nightly rebuilds + occasional manual triggers) — revisit before this
-# registry sees meaningful concurrent write traffic, e.g. by draining to a
-# maintenance window or a --readonly flip via a ConfigMap-mounted
-# config.yml the live StatefulSet also reads.
+# The upstream `registry garbage-collect --delete-untagged=true` command
+# reclaims two categories of storage:
+#   1. Blobs orphaned by the retention seam's manifest deletes
+#      (registryManifestDelete in packages/api/src/prebuilds/service.ts
+#      removes the manifest ref; layer blobs are freed only by a GC pass).
+#   2. Untagged manifests — intermediate layers from superseded builds that
+#      were never given a tag but still consume storage.
+#
+# ── RWO PVC / live-registry caveat ──────────────────────────────────────
+# This CronJob mounts the same RWO PVC as the live registry StatefulSet.
+# On a single-node cluster (Rancher Desktop, k3s) the kubelet allows a
+# second pod to bind a RWO volume on the same node, so the mount succeeds.
+# GC walks the storage directory while the registry Pod serves read/write
+# traffic. A push landing mid-GC-run can race a blob deletion. This race
+# is low-risk given the low write volume (infrequent scheduled rebuilds and
+# occasional manual triggers). Accept this trade-off for the pre-1.0
+# bundled registry. Before this registry sees meaningful concurrent write
+# traffic, add a maintenance window or a --readonly flip via a
+# ConfigMap-mounted config.yml that the live StatefulSet also reads.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -45,7 +44,7 @@ spec:
           containers:
             - name: registry-gc
               image: "{{ .Values.registry.image.repository }}:{{ .Values.registry.image.tag }}"
-              command: ["registry", "garbage-collect", "/etc/docker/registry/config.yml"]
+              command: ["registry", "garbage-collect", "--delete-untagged=true", "/etc/docker/registry/config.yml"]
               env:
                 - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
                   value: /var/lib/registry
