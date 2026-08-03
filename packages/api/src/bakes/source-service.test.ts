@@ -191,6 +191,28 @@ async function seedLiveSession(
   });
 }
 
+// Seeds a session that booted from `bakeId` with the given status — exercises
+// the enforceCacheCeiling live-bake protection (agent_sessions.bake_id).
+async function seedBakeSession(
+  db: AppDb,
+  bakeId: string,
+  status: "active" | "hibernated" | "archived" | "deleted",
+): Promise<void> {
+  await db.insert(agentSessions).values({
+    id: `s_${Math.random().toString(36).slice(2)}`,
+    userId: "u1",
+    orgId,
+    workspace: "/workspace",
+    status,
+    ownerType: "user",
+    ownerId: "u1",
+    profile: "headless",
+    bakeId,
+    createdAt: NOW,
+    updatedAt: NOW,
+  });
+}
+
 describe("SourceService", () => {
   let db: AppDb;
   let credentials: PgCredentialStore;
@@ -832,6 +854,196 @@ describe("SourceService", () => {
       await expect(service.syncActiveBuilds()).resolves.not.toThrow();
       const bakeRow = (await db.select().from(bakes).where(eq(bakes.id, row.id)))[0];
       expect(bakeRow?.status).toBe("pushed");
+    });
+  });
+
+  // ── global size ceiling (spec decision 3) ──────────────────────────────
+  describe("enforceCacheCeiling (via syncActiveBuilds pushed branch)", () => {
+    const GB = 1_000_000_000;
+
+    // Drives a fresh queued bake for `srcId` to pushed, which fires
+    // applyRetention + enforceCacheCeiling. Stamps `size` on that new bake and
+    // seeds `currentSha` so it lands a distinct imageRef.
+    async function pushBakeWithSize(
+      svc: SourceService,
+      srcId: string,
+      sha: string,
+      size: number,
+    ): Promise<string> {
+      currentSha = sha;
+      const row = await svc.startBake(srcId);
+      builder.setState(builder.buildIds[builder.buildIds.length - 1], { state: "pushed" });
+      await db.update(bakes).set({ sizeBytes: size }).where(eq(bakes.id, row.id));
+      await svc.syncActiveBuilds();
+      return row.id;
+    }
+
+    async function idsRemaining(): Promise<Set<string>> {
+      const rows = await db.select({ id: bakes.id }).from(bakes);
+      return new Set(rows.map((r) => r.id));
+    }
+
+    it("over budget → evicts oldest-first down to ≤ budget", async () => {
+      // budget 3 GB. Seed a second source so the source-under-test's newest is
+      // NOT the only protected bake distorting the math.
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3" } });
+      const srcId = await seedRepoSource(db, { id: "src_a" });
+      // Three old pushed bakes, 2 GB each, on a DIFFERENT source so none is the
+      // source-under-test's protected newest.
+      const otherId = await seedRepoSource(db, { id: "src_b", name: "b", repoFullName: "acme/other" });
+      await seedBake(db, otherId, { id: "old1", imageRef: "ref/old1", sizeBytes: 2 * GB, createdAt: NOW - 5000 });
+      await seedBake(db, otherId, { id: "old2", imageRef: "ref/old2", sizeBytes: 2 * GB, createdAt: NOW - 4000 });
+      // otherId's newest (protected): 2 GB.
+      await seedBake(db, otherId, { id: "newest_b", imageRef: "ref/newb", sizeBytes: 2 * GB, createdAt: NOW - 1000 });
+      retentionCalls = [];
+
+      // Push a new bake on src_a (fires the ceiling). Total before eviction:
+      // old1+old2+newest_b (6) + src_a newest (2) = 8 GB > 3 GB budget.
+      await pushBakeWithSize(svc, srcId, "sha-a", 2 * GB);
+
+      const remaining = await idsRemaining();
+      // old1, old2 evict (oldest-first). newest_b and src_a newest protected.
+      expect(remaining.has("old1")).toBe(false);
+      expect(remaining.has("old2")).toBe(false);
+      expect(remaining.has("newest_b")).toBe(true);
+      // Retention called for exactly the evicted refs, oldest first.
+      const evictedRefs = retentionCalls.flatMap((c) => c.imageRefs);
+      expect(evictedRefs).toEqual(["ref/old1", "ref/old2"]);
+    });
+
+    it("a source's NEWEST pushed bake is never evicted even if it's the oldest overall", async () => {
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3" } });
+      const srcA = await seedRepoSource(db, { id: "src_a", repoFullName: "acme/a" });
+      // src_a has exactly one (very old) bake — it is its newest → protected.
+      await seedBake(db, srcA, { id: "a_only", imageRef: "ref/a", sizeBytes: 2 * GB, createdAt: NOW - 99999 });
+      retentionCalls = [];
+
+      // Push a big bake on src_b to blow the budget. src_a's a_only is oldest
+      // overall but protected.
+      const srcB = await seedRepoSource(db, { id: "src_b", repoFullName: "acme/b" });
+      await pushBakeWithSize(svc, srcB, "sha-b", 4 * GB);
+
+      const remaining = await idsRemaining();
+      expect(remaining.has("a_only")).toBe(true);
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).not.toContain("ref/a");
+    });
+
+    it("bakes referenced by active/hibernated sessions are never evicted; a terminated-session bake IS evictable", async () => {
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3" } });
+      // Seed the session-referenced bakes on their OWN source so per-source
+      // applyRetention (keeps newest 2) leaves them alone — this isolates the
+      // ceiling's behavior. Each is its source's newest, so protection here is
+      // driven by the live-session reference, not the newest-per-source rule.
+      const srcRef = await seedRepoSource(db, { id: "src_ref", repoFullName: "acme/ref" });
+      await seedBake(db, srcRef, { id: "b_active", imageRef: "ref/act", sizeBytes: 2 * GB, createdAt: NOW - 5000 });
+      const srcRef2 = await seedRepoSource(db, { id: "src_ref2", repoFullName: "acme/ref2" });
+      await seedBake(db, srcRef2, { id: "b_hib", imageRef: "ref/hib", sizeBytes: 2 * GB, createdAt: NOW - 4000 });
+      const srcRef3 = await seedRepoSource(db, { id: "src_ref3", repoFullName: "acme/ref3" });
+      await seedBake(db, srcRef3, { id: "b_dead", imageRef: "ref/dead", sizeBytes: 2 * GB, createdAt: NOW - 3000 });
+      await seedBakeSession(db, "b_active", "active");
+      await seedBakeSession(db, "b_hib", "hibernated");
+      await seedBakeSession(db, "b_dead", "archived");
+      // b_dead's source needs a NEWER bake so b_dead is not its source's
+      // protected newest — otherwise newest-per-source would protect it.
+      await seedBake(db, srcRef3, { id: "dead_newer", imageRef: "ref/deadnew", sizeBytes: 0, createdAt: NOW - 2000 });
+      retentionCalls = [];
+
+      // Push a big bake on a dedicated trigger source to blow the budget.
+      const srcTrigger = await seedRepoSource(db, { id: "src_trigger", repoFullName: "acme/trigger" });
+      await pushBakeWithSize(svc, srcTrigger, "sha-new", 2 * GB);
+
+      const remaining = await idsRemaining();
+      expect(remaining.has("b_active")).toBe(true);
+      expect(remaining.has("b_hib")).toBe(true);
+      // b_dead (archived session, not its source's newest) is the only
+      // evictable protected-set miss — the ceiling deletes it.
+      expect(remaining.has("b_dead")).toBe(false);
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).toEqual(["ref/dead"]);
+    });
+
+    it("all-protected over budget → warns once, zero retention calls, zero row deletes", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "1" } });
+        // Two sources, each with a single (newest → protected) bake, 2 GB each.
+        const srcA = await seedRepoSource(db, { id: "src_a", repoFullName: "acme/a" });
+        await seedBake(db, srcA, { id: "a1", imageRef: "ref/a", sizeBytes: 2 * GB, createdAt: NOW - 5000 });
+        retentionCalls = [];
+        // Push a bake on src_b; total = a1(2) + src_b newest(2) = 4 > 1, both
+        // protected (each is its source's newest).
+        const srcB = await seedRepoSource(db, { id: "src_b", repoFullName: "acme/b" });
+        await pushBakeWithSize(svc, srcB, "sha-b", 2 * GB);
+
+        const remaining = await idsRemaining();
+        expect(remaining.has("a1")).toBe(true);
+        expect(remaining.size).toBe(2);
+        expect(retentionCalls).toHaveLength(0);
+        const overBudgetWarns = warn.mock.calls.filter((c) => String(c[0]).includes("over budget"));
+        expect(overBudgetWarns).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("under budget → no eviction, no retention", async () => {
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "100" } });
+      const srcId = await seedRepoSource(db, { id: "src_a", repoFullName: "acme/a" });
+      await seedBake(db, srcId, { id: "old", imageRef: "ref/old", sizeBytes: 2 * GB, createdAt: NOW - 5000 });
+      retentionCalls = [];
+      await pushBakeWithSize(svc, srcId, "sha-new", 2 * GB);
+      const remaining = await idsRemaining();
+      expect(remaining.has("old")).toBe(true);
+      // Only applyRetention could call retention; with 2 pushed bakes it keeps
+      // both, so no ceiling eviction and no retention from the ceiling.
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).not.toContain("ref/old");
+    });
+
+    it("dedupe: evicting a bake sharing a ref with a KEPT bake deletes the row but not the image", async () => {
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3" } });
+      // Shared-ref bakes on their own source (with a newer protected sibling)
+      // so per-source applyRetention never runs on them — isolates the ceiling.
+      const srcData = await seedRepoSource(db, { id: "src_data", repoFullName: "acme/data" });
+      // Two OLD bakes sharing "ref/shared"; one is protected via an active
+      // session so it stays, forcing the other's eviction to hit dedupe.
+      await seedBake(db, srcData, { id: "shared_evict", imageRef: "ref/shared", sizeBytes: 2 * GB, createdAt: NOW - 6000 });
+      await seedBake(db, srcData, { id: "shared_keep", imageRef: "ref/shared", sizeBytes: 2 * GB, createdAt: NOW - 5000 });
+      await seedBake(db, srcData, { id: "data_newest", imageRef: "ref/datanew", sizeBytes: 0, createdAt: NOW - 4000 });
+      await seedBakeSession(db, "shared_keep", "active");
+      retentionCalls = [];
+
+      const srcTrigger = await seedRepoSource(db, { id: "src_trigger", repoFullName: "acme/trigger" });
+      await pushBakeWithSize(svc, srcTrigger, "sha-new", 2 * GB);
+
+      const remaining = await idsRemaining();
+      // shared_evict evicted (row gone), shared_keep protected (stays).
+      expect(remaining.has("shared_evict")).toBe(false);
+      expect(remaining.has("shared_keep")).toBe(true);
+      // The shared ref is NOT deleted because shared_keep still references it.
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).not.toContain("ref/shared");
+    });
+
+    it("null sizeBytes counts as 0 in the total", async () => {
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3" } });
+      // Data bakes on their own source (with a newer protected sibling) so
+      // per-source applyRetention never runs on them — isolates the ceiling.
+      const srcData = await seedRepoSource(db, { id: "src_data", repoFullName: "acme/data" });
+      await seedBake(db, srcData, { id: "nullsize", imageRef: "ref/null", sizeBytes: null, createdAt: NOW - 6000 });
+      await seedBake(db, srcData, { id: "sized", imageRef: "ref/sized", sizeBytes: 2 * GB, createdAt: NOW - 5000 });
+      await seedBake(db, srcData, { id: "data_newest", imageRef: "ref/datanew", sizeBytes: 0, createdAt: NOW - 4000 });
+      retentionCalls = [];
+
+      // Trigger on a dedicated source: total = null(0) + sized(2) + data_newest(0)
+      // + trigger newest(2) = 4 GB > 3 GB budget.
+      const srcTrigger = await seedRepoSource(db, { id: "src_trigger", repoFullName: "acme/trigger" });
+      await pushBakeWithSize(svc, srcTrigger, "sha-new", 2 * GB);
+
+      // Evict oldest-first: nullsize contributes 0, so evicting it does NOT
+      // reduce total below budget → sized evicts too. data_newest is protected.
+      const remaining = await idsRemaining();
+      expect(remaining.has("nullsize")).toBe(false);
+      expect(remaining.has("sized")).toBe(false);
+      expect(remaining.has("data_newest")).toBe(true);
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).toEqual(["ref/null", "ref/sized"]);
     });
   });
 });

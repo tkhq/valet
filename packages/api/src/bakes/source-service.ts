@@ -376,6 +376,9 @@ export class SourceService {
   private readonly schedulerIntervalMs: number;
   private readonly retention: RetentionFn;
   private readonly env: NodeJS.ProcessEnv;
+  /** Global baked-image cache budget in GB (spec decision 3). Enforced by
+   * `enforceCacheCeiling` after each per-source retention pass. */
+  private readonly cacheBudgetGb: number;
   private readonly activeBuildIds = new Map<string, string>();
   private readonly registryInsecure: boolean;
   private readonly registryPushHost: string | undefined;
@@ -394,6 +397,11 @@ export class SourceService {
     this.registryInsecure = deps.registryInsecure ?? this.env.VALET_PREBUILD_REGISTRY_INSECURE === "true";
     this.registryPushHost = deps.registryPushHost ?? (this.env.VALET_PREBUILD_REGISTRY_PUSH || undefined);
     this.retention = deps.retention ?? defaultRetention(undefined, undefined, this.registryInsecure, this.registryPushHost);
+    // Guard: Number("") === 0 and Number(undefined) === NaN; an empty env or a
+    // non-positive value must NOT collapse the budget to 0 (which would evict
+    // every unprotected bake). Fall back to the 20 GB default instead.
+    const budget = Number(this.env.VALET_PREBUILD_CACHE_BUDGET_GB ?? 20);
+    this.cacheBudgetGb = Number.isFinite(budget) && budget > 0 ? budget : 20;
   }
 
   /** The wired builder's backend id, or `null` when prebuilds are
@@ -746,6 +754,8 @@ export class SourceService {
           // best-effort — size measurement never blocks the push transition
         }
         await this.applyRetention(row.sourceId, builder.backend);
+        const src = (await this.db.select().from(imageSources).where(eq(imageSources.id, row.sourceId)).limit(1))[0];
+        if (src) await this.enforceCacheCeiling(src.orgId, builder.backend);
         await this.cascadeBaseChildren(row.sourceId);
       } else {
         await this.db
@@ -772,6 +782,91 @@ export class SourceService {
     const staleRefs = [...new Set(stale.map((r) => r.imageRef).filter((ref) => !keptRefs.has(ref)))];
     if (staleRefs.length === 0) return;
     await this.retention(backend, staleRefs);
+  }
+
+  /**
+   * Global size ceiling (spec decision 3): evicts OLD baked images across an
+   * org until the total pushed-bake size is at or under the configured budget
+   * (`VALET_PREBUILD_CACHE_BUDGET_GB`, default 20). Two bake sets are NEVER
+   * evicted:
+   *   1. Each source's NEWEST pushed bake (its current image).
+   *   2. Any bake a LIVE (active/hibernated) session booted from
+   *      (`agent_sessions.bake_id`).
+   * Evicts oldest-first: for each victim it deletes the image via
+   * `this.retention` (skipping the image delete when a KEPT or not-yet-evicted
+   * bake still references the same ref — but ALWAYS deleting the row) and
+   * subtracts its size. If the org is still over budget but only protected
+   * bakes remain, it warns ONCE and stops. Never throws.
+   */
+  private async enforceCacheCeiling(orgId: string, backend: string): Promise<void> {
+    try {
+      const rows = await this.db
+        .select({
+          id: bakes.id,
+          sourceId: bakes.sourceId,
+          imageRef: bakes.imageRef,
+          sizeBytes: bakes.sizeBytes,
+          createdAt: bakes.createdAt,
+        })
+        .from(bakes)
+        .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+        .where(and(eq(imageSources.orgId, orgId), eq(bakes.status, "pushed")))
+        .orderBy(bakes.createdAt);
+
+      if (rows.length === 0) return;
+
+      const budget = this.cacheBudgetGb * 1_000_000_000;
+      let total = rows.reduce((sum, r) => sum + (r.sizeBytes ?? 0), 0);
+      if (total <= budget) return;
+
+      // Protected: each source's newest pushed bake id.
+      const protectedIds = new Set<string>();
+      const newestPerSource = new Map<string, { id: string; createdAt: number }>();
+      for (const r of rows) {
+        const cur = newestPerSource.get(r.sourceId);
+        if (!cur || r.createdAt > cur.createdAt) {
+          newestPerSource.set(r.sourceId, { id: r.id, createdAt: r.createdAt });
+        }
+      }
+      for (const v of newestPerSource.values()) protectedIds.add(v.id);
+
+      // Protected: any bake a live (active/hibernated) session booted from.
+      const liveBakeRows = await this.db
+        .select({ bakeId: agentSessions.bakeId })
+        .from(agentSessions)
+        .where(and(eq(agentSessions.orgId, orgId), inArray(agentSessions.status, ["active", "hibernated"])));
+      for (const s of liveBakeRows) {
+        if (s.bakeId) protectedIds.add(s.bakeId);
+      }
+
+      // Remaining rows still in the cache (kept OR not-yet-evicted). Used to
+      // decide whether an evicted ref is still referenced elsewhere.
+      const remaining = new Set(rows.map((r) => r.id));
+
+      for (const victim of rows) {
+        if (total <= budget) break;
+        if (protectedIds.has(victim.id)) continue;
+
+        remaining.delete(victim.id);
+        // Skip the image delete when any OTHER remaining bake (kept or pending
+        // eviction) still references the same ref — but always delete the row.
+        const refStillUsed = rows.some((r) => remaining.has(r.id) && r.imageRef === victim.imageRef);
+        if (!refStillUsed) {
+          await this.retention(backend, [victim.imageRef]);
+        }
+        await this.db.delete(bakes).where(eq(bakes.id, victim.id));
+        total -= victim.sizeBytes ?? 0;
+      }
+
+      if (total > budget) {
+        const gb = (n: number) => (n / 1_000_000_000).toFixed(2);
+        console.warn(
+          `prebuild cache over budget (${gb(total)}gb > ${gb(budget)}gb) but all remaining bakes are protected`,
+        );
+      }
+    } catch (err) {
+      console.error(`prebuild cache ceiling for org ${orgId} failed:`, err);
+    }
   }
 
   /**
