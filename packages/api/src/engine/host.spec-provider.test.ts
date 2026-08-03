@@ -145,18 +145,20 @@ async function insertSession(db: TestApi["providers"]["db"], sessionId: string):
   });
 }
 
-const primaryBinding: RepoBinding = {
+const primaryBinding: RepoBinding & { targetDir: string } = {
   host: "github",
   fullName: "acme/widgets",
   cloneUrl: "https://github.com/acme/widgets.git",
   auth: "auto",
+  targetDir: "widgets",
 };
 
-const secondaryBinding: RepoBinding = {
+const secondaryBinding: RepoBinding & { targetDir: string } = {
   host: "github",
   fullName: "acme/gadgets",
   cloneUrl: "https://github.com/acme/gadgets.git",
   auth: "auto",
+  targetDir: "gadgets",
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────────

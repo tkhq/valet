@@ -49,11 +49,12 @@ function fakeProvider(customImage: boolean): SandboxProvider {
 }
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
-  const primary: RepoBinding = {
+  const primary: RepoBinding & { targetDir: string } = {
     host: "github",
     fullName: REPO,
     cloneUrl: "https://github.com/acme/widgets.git",
     auth: "auto",
+    targetDir: "widgets",
   };
   return {
     userId: "u1",
@@ -136,7 +137,7 @@ describe("resolveSnapshot", () => {
     expect(snap.userEmail).toBe("test@example.com");
     // Single repo binds to "." (computeTargetDirs semantics)
     expect(snap.repos).toHaveLength(1);
-    expect(snap.repos[0]?.targetDir).toBe(".");
+    expect(snap.repos[0]?.targetDir).toBe("widgets");
     expect(snap.repos[0]?.fullName).toBe(REPO);
   });
 
@@ -191,11 +192,11 @@ describe("resolveSnapshot", () => {
     expect(snap.repoBake).toBeNull();
   });
 
-  it("multiple repos: targetDirs computed per computeTargetDirs (non-colliding → plain names)", async () => {
+  it("multiple repos: targetDirs from meta (non-colliding → plain names supplied by caller)", async () => {
     const m = meta({
       repos: [
-        { host: "github", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", auth: "auto" },
-        { host: "github", fullName: "acme/web", cloneUrl: "https://github.com/acme/web.git", auth: "auto" },
+        { host: "github", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", auth: "auto", targetDir: "api" },
+        { host: "github", fullName: "acme/web", cloneUrl: "https://github.com/acme/web.git", auth: "auto", targetDir: "web" },
       ],
     });
     const snap = await resolveSnapshot({

@@ -221,7 +221,7 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
         userId: "local-user",
         orgId: "local-org",
         workspace: join(tmp, "bound-workspace"),
-        repos: [{ host: "github", fullName: REPO_FULL_NAME, cloneUrl: CLONE_URL, auth: "auto" }],
+        repos: [{ host: "github", fullName: REPO_FULL_NAME, cloneUrl: CLONE_URL, auth: "auto", targetDir: "Hello-World" }],
       });
       await engineSession.attachment.ensureReady({ timeoutMs: 60_000 });
 
@@ -233,10 +233,12 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
 
       const sandbox = engineSession.attachment.current();
       expect(sandbox).not.toBeNull();
-      const head = await sandbox!.exec("git rev-parse HEAD");
+      // Repo clones into "Hello-World" subdir (spec decision 15: single-repo
+      // sessions always clone into <repoName>/, not the workspace root).
+      const head = await sandbox!.exec("git rev-parse HEAD", { cwd: "Hello-World" });
       expect(head.exitCode).toBe(0);
       expect(head.stdout.trim()).toBe(bakedSha);
-      const origin = await sandbox!.exec("git remote get-url origin");
+      const origin = await sandbox!.exec("git remote get-url origin", { cwd: "Hello-World" });
       expect(origin.stdout.trim()).toBe(CLONE_URL);
 
       // ── 5. Cold-path control: unbound session ignores the catalog ──────

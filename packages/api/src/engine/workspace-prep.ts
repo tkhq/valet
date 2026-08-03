@@ -96,18 +96,22 @@ function disambiguatedDirOf(fullName: string): string {
 
 /**
  * Workspace-relative target clone dir for every binding, in position order.
- * A single binding clones into the workspace root itself (`.`, the sandbox's
- * default cwd). With multiple bindings each gets its own subdir named for its
- * repo (`<repoName>`) — EXCEPT when two or more bindings share a repo name
- * (`acme/widgets` + `beta/widgets` both → `widgets`), which would silently
- * make the second clone target the first's dir (fetch the wrong remote). Every
- * binding in a colliding group is disambiguated to `<owner>__<repo>`
- * deterministically; non-colliding bindings keep the plain `<repo>` name.
+ * Every binding gets its own subdir named for its repo (`<repoName>`) —
+ * EXCEPT when two or more bindings share a repo name (`acme/widgets` +
+ * `beta/widgets` both → `widgets`), which would silently make the second clone
+ * target the first's dir (fetch the wrong remote). Every binding in a colliding
+ * group is disambiguated to `<owner>__<repo>` deterministically; non-colliding
+ * bindings keep the plain `<repo>` name.
  *
- * Exported for direct unit coverage of the collision layout.
+ * Spec decision 15: single-repo sessions always clone into `<repo>/`, never
+ * into the workspace root `.`. This is the NEW behavior for sessions created
+ * after this change; sessions with `target_dir NULL` keep the old layout via
+ * `legacyTargetDirs` in session-meta.ts.
+ *
+ * Exported for direct unit coverage of the collision layout and for bind-time
+ * persistence in the session-create route.
  */
 export function computeTargetDirs(repos: RepoBinding[]): string[] {
-  if (repos.length === 1) return ["."];
   const nameCounts = new Map<string, number>();
   for (const r of repos) {
     const name = repoNameOf(r.fullName);

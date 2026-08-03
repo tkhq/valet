@@ -162,8 +162,8 @@ describe("configureGitIdentity", () => {
 });
 
 describe("computeTargetDirs (layout)", () => {
-  it("single binding clones into the workspace root itself (relative '.')", () => {
-    expect(computeTargetDirs([binding()])).toEqual(["."]);
+  it("single binding clones into its own subdir (spec decision 15: always <repoName>)", () => {
+    expect(computeTargetDirs([binding()])).toEqual(["widgets"]);
   });
 
   it("multiple bindings clone each into <repoName> (relative), in position order", () => {

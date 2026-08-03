@@ -258,6 +258,28 @@ describe("POST /api/sessions: repo bindings", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("persists target_dir='widgets' on the session_repos row for a single-repo session (spec decision 15)", async () => {
+    api = await bootTestApi();
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-create-target-dir-"));
+    const { db } = api.providers;
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        workspace,
+        repo: { fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+
+    const rows = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, body.id));
+    expect(rows).toHaveLength(1);
+    // Single-repo sessions now always clone into <repoName>/, not ".".
+    expect(rows[0]?.targetDir).toBe("widgets");
+  });
+
   it("400s on an invalid `auth` value", async () => {
     api = await bootTestApi();
     const workspace = await mkdtemp(join(tmpdir(), "valet-session-create-repo-badauth-"));

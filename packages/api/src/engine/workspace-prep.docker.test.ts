@@ -75,13 +75,9 @@ describeDocker("buildWorkspacePrep (docker)", () => {
         await prepBinding(sandbox, dirs[i], repos[i]);
       }
 
-      // No explicit cwd: the sandbox's default cwd is already the workspace
-      // root — where the single binding cloned into (relative '.'). Passing
-      // the host-side `tmp` path here would be wrong: `DockerSandboxProvider`
-      // realpath's the workspace at create time (e.g. macOS /tmp ->
-      // /private/tmp), so an unresolved host path doesn't reliably map back
-      // to the container path.
-      const log = await sandbox.exec("git log -1 --format=%H");
+      // Run in the cloned subdir (spec decision 15: single-repo sessions clone
+      // into <repoName>/, not the workspace root). `dirs[0]` is "Hello-World".
+      const log = await sandbox.exec("git log -1 --format=%H", { cwd: dirs[0] });
       expect(log.exitCode).toBe(0);
       expect(log.stdout.trim().length).toBe(40); // a real commit sha landed
 

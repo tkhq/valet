@@ -127,19 +127,20 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
       await configureGitIdentity(sandbox);
       await prepPrebuiltBinding(sandbox, dirs[0], binding, { bakedSha, recipe: [] });
 
-      // The repo landed in the workspace root (single binding → ".").
-      const head = await sandbox.exec("git rev-parse HEAD");
+      // The repo landed in its subdir (spec decision 15: single-repo sessions
+      // clone into <repoName>/, not the workspace root). `dirs[0]` is "Hello-World".
+      const head = await sandbox.exec("git rev-parse HEAD", { cwd: dirs[0] });
       expect(head.exitCode).toBe(0);
       expect(head.stdout.trim()).toBe(bakedSha);
 
       // The untracked marker the baked setup produced survived the `cp -a`
       // staging — proof we did NOT re-clone (which would lose it).
-      const marker = await sandbox.exec("cat BAKED_MARKER.txt");
+      const marker = await sandbox.exec("cat BAKED_MARKER.txt", { cwd: dirs[0] });
       expect(marker.exitCode).toBe(0);
       expect(marker.stdout.trim()).toBe(MARKER);
 
       // origin was reset to the real clone url.
-      const origin = await sandbox.exec("git remote get-url origin");
+      const origin = await sandbox.exec("git remote get-url origin", { cwd: dirs[0] });
       expect(origin.stdout.trim()).toBe(CLONE_URL);
     },
     180_000,
@@ -205,12 +206,13 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
       });
 
       // The workspace advanced to origin's head (commit B), NOT the baked A.
-      const head = await sandbox.exec("git rev-parse HEAD");
+      // `dirs[0]` is "repo" (repoNameOf("seed/repo")).
+      const head = await sandbox.exec("git rev-parse HEAD", { cwd: dirs[0] });
       expect(head.exitCode).toBe(0);
       expect(head.stdout.trim()).toBe(headShaLocal);
 
       // The lockfile drift (A→B) drove the conditional reinstall.
-      const marker = await sandbox.exec("cat REINSTALL_MARKER.txt");
+      const marker = await sandbox.exec("cat REINSTALL_MARKER.txt", { cwd: dirs[0] });
       expect(marker.exitCode).toBe(0);
       expect(marker.stdout.trim()).toBe("done");
     },
@@ -227,11 +229,12 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
       await configureGitIdentity(sandbox);
       await prepBinding(sandbox, dirs[0], binding);
 
-      const log = await sandbox.exec("git log -1 --format=%H");
+      // `dirs[0]` is "Hello-World" (repoNameOf("octocat/Hello-World")).
+      const log = await sandbox.exec("git log -1 --format=%H", { cwd: dirs[0] });
       expect(log.exitCode).toBe(0);
       expect(log.stdout.trim().length).toBe(40);
       // No baked marker on the cold path — it was a fresh clone.
-      const marker = await sandbox.exec("test -f BAKED_MARKER.txt");
+      const marker = await sandbox.exec(`test -f ${dirs[0]}/BAKED_MARKER.txt`);
       expect(marker.exitCode).not.toBe(0);
     },
     120_000,

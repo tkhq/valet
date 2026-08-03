@@ -212,8 +212,13 @@ export interface SessionMeta {
    * that clones them via the credential helper on first cold boot. Absent/empty
    * === credential-only prep: the helper + `gh` shim still install (so ad-hoc
    * git/gh in any sandbox authenticates), but nothing clones.
+   *
+   * `targetDir` is the workspace-relative clone destination, computed ONCE at
+   * bind time and persisted on `session_repos.target_dir` (spec decision 15).
+   * `loadSessionMeta` supplies it; callers that build `SessionMeta` directly
+   * (tests, orchestrator/child paths) must include it.
    */
-  repos?: RepoBinding[];
+  repos?: (RepoBinding & { targetDir: string })[];
   /**
    * Git identity (`user.name`/`user.email`) configured sandbox-global by
    * workspace prep, from the session owner's profile. Only consulted when

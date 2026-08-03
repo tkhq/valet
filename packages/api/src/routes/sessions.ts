@@ -5,6 +5,7 @@ import { isAbsolute } from "node:path";
 import { parseOrchestratorSessionId } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { autoTitle } from "../sessions/auto-title.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -206,6 +207,11 @@ sessionsRouter.post("/", async (c) => {
       });
 
     if (repos.length > 0) {
+      // Compute target dirs once at bind time (spec decision 15): each binding
+      // gets a persistent subdirectory name derived from its repo name. This
+      // value is stored on the row so later loads never recompute (and
+      // convergence never relocates an existing clone).
+      const targetDirs = computeTargetDirs(repos);
       await tx.insert(sessionRepos).values(
         repos.map((repo, position) => ({
           sessionId: id,
@@ -215,6 +221,7 @@ sessionsRouter.post("/", async (c) => {
           ref: repo.ref ?? null,
           auth: repo.auth ?? "auto",
           position,
+          targetDir: targetDirs[position] ?? null,
         })),
       );
     }

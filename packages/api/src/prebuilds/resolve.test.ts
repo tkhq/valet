@@ -42,11 +42,12 @@ function fakeProvider(customImage: boolean, backend = "fake"): SandboxProvider {
 }
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
-  const primary: RepoBinding = {
+  const primary: RepoBinding & { targetDir: string } = {
     host: "github",
     fullName: REPO,
     cloneUrl: "https://github.com/acme/widgets.git",
     auth: "auto",
+    targetDir: "widgets",
   };
   return {
     userId: "u1",
@@ -230,7 +231,7 @@ describe("resolvePrebuildImage", () => {
       createdAt: NOW,
     });
     const other = meta({
-      repos: [{ host: "github", fullName: "acme/other", cloneUrl: "https://github.com/acme/other.git", auth: "auto" }],
+      repos: [{ host: "github", fullName: "acme/other", cloneUrl: "https://github.com/acme/other.git", auth: "auto", targetDir: "other" }],
     });
     expect(await resolvePrebuildImage(db, other, fakeProvider(true))).toBeNull();
   });
@@ -336,8 +337,8 @@ describe("resolvePrebuildImage", () => {
     });
     const m = meta({
       repos: [
-        { host: "github", fullName: "acme/other", cloneUrl: "https://github.com/acme/other.git", auth: "auto" },
-        { host: "github", fullName: REPO, cloneUrl: "https://github.com/acme/widgets.git", auth: "auto" },
+        { host: "github", fullName: "acme/other", cloneUrl: "https://github.com/acme/other.git", auth: "auto", targetDir: "other" },
+        { host: "github", fullName: REPO, cloneUrl: "https://github.com/acme/widgets.git", auth: "auto", targetDir: "widgets" },
       ],
     });
     expect(await resolvePrebuildImage(db, m, fakeProvider(true))).toBeNull();

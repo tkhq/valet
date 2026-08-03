@@ -15,13 +15,17 @@ import type { RepoBinding } from "./wire/types.js";
  * `SessionMeta` (GitHub/repo integration plan, Task 9's `repos`/
  * `userName`/`userEmail` addition, following the `profile` precedent) but
  * declared locally so this module stays importable without pulling in
- * `engine/host.ts`. */
+ * `engine/host.ts`.
+ *
+ * `targetDir` on each repo is required (spec decision 15): it is computed
+ * once at bind time and persisted on `session_repos.target_dir`. Rows with
+ * a NULL column use the legacy fallback in `loadSessionMeta`. */
 export interface RestoreSessionMeta {
   userId: string;
   orgId: string;
   workspace: string;
   profile: "headless" | "full";
-  repos?: RepoBinding[];
+  repos?: (RepoBinding & { targetDir: string })[];
   userName?: string;
   userEmail?: string;
 }

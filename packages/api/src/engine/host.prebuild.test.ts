@@ -138,11 +138,12 @@ describe("EngineHost prebuild resolution at session create", () => {
     });
   }
 
-  const primary: RepoBinding = {
+  const primary: RepoBinding & { targetDir: string } = {
     host: "github",
     fullName: REPO,
     cloneUrl: "https://github.com/acme/widgets.git",
     auth: "auto",
+    targetDir: "widgets",
   };
 
   it("boots the sandbox from the pushed prebuild image and persists prebuild_id", async () => {
