@@ -368,6 +368,35 @@ describe("DockerImageBuilder lifecycle", () => {
     expect(calls[1]!.command).toBe("docker");
     expect(calls[1]!.args).toEqual(["builder", "prune", "-f", "--keep-storage", "10GB"]);
   });
+
+  it("triggers a builder prune spawn even when the bake fails (non-zero exit)", async () => {
+    // Prune runs in the `finally` block — it must fire on failure paths too,
+    // not only on success. The bake spawn exits 1; the prune spawn exits 0.
+    const { spawnFn, calls } = fakeSpawnFn((child, call) => {
+      if (call.args[0] === "build") {
+        child.emit("close", 1, null); // bake fails
+      } else {
+        child.emit("close", 0, null); // prune succeeds
+      }
+    });
+    const builder = new DockerImageBuilder({ spawnFn, buildCacheCapGb: 10 });
+
+    const { buildId } = await builder.build(baseSpec());
+    await waitForTerminal(builder, buildId);
+
+    // Wait for the prune spawn — fired async in `finally` after the failed bake.
+    const spawnDeadline = Date.now() + 5000;
+    while (calls.length < 2) {
+      if (Date.now() > spawnDeadline) throw new Error("prune was never spawned after failed bake");
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // Build must have reported failed; prune must still have been spawned.
+    const status = await builder.status(buildId);
+    expect(status.state).toBe("failed");
+    expect(calls[1]!.command).toBe("docker");
+    expect(calls[1]!.args).toEqual(["builder", "prune", "-f", "--keep-storage", "10GB"]);
+  });
 });
 
 /** Skip the docker-gated suite entirely when the daemon isn't reachable. */

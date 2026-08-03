@@ -44,7 +44,20 @@ export function pruneBuildCache(spawnFn: SpawnFn, capGb: number): Promise<void> 
       return;
     }
 
+    // Drain stdout/stderr so the child never blocks on a full pipe buffer.
+    // `builder prune` output can exceed Node's ~64 KB pipe buffer; without a
+    // consumer the child stalls on write(), `close` never fires, and the whole
+    // build queue stalls waiting for pruneBuildCache to resolve.
+    child.stdout?.resume();
+    child.stderr?.resume();
+
+    // Track whether the `error` handler already logged and resolved so the
+    // subsequent `close` event (which Node also emits after `error`) does not
+    // produce a second console.error line.
+    let errored = false;
+
     child.on("error", (err) => {
+      errored = true;
       console.error(
         `[valet] build-cache prune failed (process error): ${err.message}`,
       );
@@ -52,6 +65,7 @@ export function pruneBuildCache(spawnFn: SpawnFn, capGb: number): Promise<void> 
     });
 
     child.on("close", (code) => {
+      if (errored) return;
       if (code !== 0) {
         console.error(
           `[valet] build-cache prune exited with code ${code} — cache may exceed ${capGb}GB`,

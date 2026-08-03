@@ -115,4 +115,19 @@ describe("pruneBuildCache — best-effort (never rejects)", () => {
     await expect(pruneBuildCache(throwingSpawn, 10)).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalledOnce();
   });
+
+  it("logs exactly once when the child emits error then close (ENOENT / spawn-fail pattern)", async () => {
+    // Node emits `error` followed by `close` (code null) for ENOENT.  Without
+    // the `errored` guard both events would log — this test pins the fix.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { spawnFn } = fakeSpawnFn((child) => {
+      child.emit("error", new Error("spawn ENOENT"));
+      // Node emits close with code null after an error event.
+      child.emit("close", null, null);
+    });
+
+    await expect(pruneBuildCache(spawnFn, 10)).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledOnce();
+  });
 });

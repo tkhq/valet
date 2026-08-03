@@ -74,10 +74,14 @@ export function resolveImageBuilder(
   const backend = parseImageBuilderBackend(env.VALET_IMAGE_BUILDER) ?? defaultBackendFor(parseSandboxBackend(env.VALET_SANDBOX_BACKEND));
   switch (backend) {
     case "docker": {
-      const buildCacheCapGb = Number(env.VALET_PREBUILD_BUILD_CACHE_GB ?? 10);
+      const raw = Number(env.VALET_PREBUILD_BUILD_CACHE_GB);
+      // Guard: Number("") === 0 and Number(undefined) === NaN; an explicit "0"
+      // would prune ALL cache on every bake (the opposite of the goal). Any
+      // non-positive or non-finite value falls back to the 10 GB default.
+      const buildCacheCapGb = Number.isFinite(raw) && raw > 0 ? raw : 10;
       return new DockerImageBuilder({
         spawnFn: deps.spawnFn,
-        buildCacheCapGb: Number.isFinite(buildCacheCapGb) ? buildCacheCapGb : 10,
+        buildCacheCapGb,
       });
     }
     case "kubernetes": {

@@ -237,9 +237,9 @@ export class DockerImageBuilder implements ImageBuilder {
       // briefly; a failed `rm` here is accepted as an OS temp-dir leak that
       // the host's normal temp GC will reclaim, not something we retry.
       if (tmpDir) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-      // Bound the moby build cache on every bake (success or failure). A
-      // prune failure never propagates — `pruneBuildCache` always resolves.
-      await pruneBuildCache(this.spawnFn, this.buildCacheCapGb).catch(() => {});
+      // Bound the moby build cache on every bake (success or failure).
+      // `pruneBuildCache` always resolves — the `.catch` would be dead code.
+      await pruneBuildCache(this.spawnFn, this.buildCacheCapGb);
     }
 
     if (outcome.ok) {
