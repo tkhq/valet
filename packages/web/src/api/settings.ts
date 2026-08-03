@@ -14,22 +14,14 @@ import {
 } from "@tanstack/react-query";
 import type {
   AddTeamMemberRequest,
-  CreateImageCatalogRequest,
-  CreateImageCatalogResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
-  CreatePrebuildConfigRequest,
-  CreatePrebuildConfigResponse,
   CreateTeamRequest,
   CreateTeamResponse,
   GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
-  GetPrebuildsMetaResponse,
-  ListImageCatalogResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
-  ListPrebuildBuildsResponse,
-  ListPrebuildConfigsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   MeResponse,
@@ -44,8 +36,6 @@ import type {
   PatchOrgMemberResponse,
   PatchOrgRequest,
   PatchOrgResponse,
-  PatchPrebuildConfigRequest,
-  PatchPrebuildConfigResponse,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   ProbeLlmProviderResponse,
@@ -53,7 +43,6 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
-  RebuildPrebuildResponse,
   SetTeamMemberRoleRequest,
   TestLlmProviderRequest,
   TestLlmProviderResponse,
@@ -73,10 +62,6 @@ export const qkSettings = {
   teams: () => ["settings", "teams"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
   githubApp: () => ["settings", "githubApp"] as const,
-  imageCatalog: () => ["settings", "imageCatalog"] as const,
-  prebuildsMeta: () => ["settings", "prebuildsMeta"] as const,
-  prebuildConfigs: () => ["settings", "prebuildConfigs"] as const,
-  prebuildBuilds: (configId: string) => ["settings", "prebuildConfigs", configId, "builds"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -394,96 +379,3 @@ export function useDeleteGithubApp() {
   });
 }
 
-// ── Sandbox image prebuilds (sandbox images v2 plan, Task 6) — org-admin ──
-
-export function useImageCatalog(opts?: UseQueryOptions<ListImageCatalogResponse>) {
-  return useQuery<ListImageCatalogResponse>({
-    queryKey: qkSettings.imageCatalog(),
-    queryFn: () => api.listImageCatalog(),
-    ...opts,
-  });
-}
-
-export function useCreateImageCatalogEntry() {
-  const qc = useQueryClient();
-  return useMutation<CreateImageCatalogResponse, Error, CreateImageCatalogRequest>({
-    mutationFn: (body) => api.createImageCatalogEntry(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.imageCatalog() });
-    },
-  });
-}
-
-export function useDeleteImageCatalogEntry() {
-  const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, string>({
-    mutationFn: (id) => api.deleteImageCatalogEntry(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.imageCatalog() });
-    },
-  });
-}
-
-export function usePrebuildsMeta(opts?: UseQueryOptions<GetPrebuildsMetaResponse>) {
-  return useQuery<GetPrebuildsMetaResponse>({
-    queryKey: qkSettings.prebuildsMeta(),
-    queryFn: () => api.getPrebuildsMeta(),
-    ...opts,
-  });
-}
-
-export function usePrebuildConfigs(opts?: UseQueryOptions<ListPrebuildConfigsResponse>) {
-  return useQuery<ListPrebuildConfigsResponse>({
-    queryKey: qkSettings.prebuildConfigs(),
-    queryFn: () => api.listPrebuildConfigs(),
-    ...opts,
-  });
-}
-
-export function useCreatePrebuildConfig() {
-  const qc = useQueryClient();
-  return useMutation<CreatePrebuildConfigResponse, Error, CreatePrebuildConfigRequest>({
-    mutationFn: (body) => api.createPrebuildConfig(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.prebuildConfigs() });
-    },
-  });
-}
-
-export function usePatchPrebuildConfig() {
-  const qc = useQueryClient();
-  return useMutation<PatchPrebuildConfigResponse, Error, { id: string; body: PatchPrebuildConfigRequest }>({
-    mutationFn: ({ id, body }) => api.patchPrebuildConfig(id, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.prebuildConfigs() });
-    },
-  });
-}
-
-export function useDeletePrebuildConfig() {
-  const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, string>({
-    mutationFn: (id) => api.deletePrebuildConfig(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.prebuildConfigs() });
-    },
-  });
-}
-
-export function useRebuildPrebuildConfig() {
-  const qc = useQueryClient();
-  return useMutation<RebuildPrebuildResponse, Error, string>({
-    mutationFn: (id) => api.rebuildPrebuildConfig(id),
-    onSuccess: (_data, id) => {
-      qc.invalidateQueries({ queryKey: qkSettings.prebuildBuilds(id) });
-    },
-  });
-}
-
-export function usePrebuildBuilds(configId: string, opts?: UseQueryOptions<ListPrebuildBuildsResponse>) {
-  return useQuery<ListPrebuildBuildsResponse>({
-    queryKey: qkSettings.prebuildBuilds(configId),
-    queryFn: () => api.listPrebuildBuilds(configId),
-    ...opts,
-  });
-}

@@ -10,10 +10,11 @@ import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
   CancelWorkflowRunResponse,
-  CreateImageCatalogRequest,
-  CreateImageCatalogResponse,
-  CreatePrebuildConfigRequest,
-  CreatePrebuildConfigResponse,
+  CreateSourceResponse,
+  ListBakesResponse,
+  ListSourcesResponse,
+  PatchSourceResponse,
+  TriggerBakeResponse,
   CreateSessionRequest,
   CreateSessionResponse,
   CreateTeamRequest,
@@ -31,7 +32,6 @@ import type {
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
   GetPrebuildForRepoResponse,
-  GetPrebuildsMetaResponse,
   GetReposResponse,
   GetSessionResponse,
   GetWorkflowResponse,
@@ -39,10 +39,7 @@ import type {
   ListCredentialsResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
-  ListImageCatalogResponse,
   ListInvitesResponse,
-  ListPrebuildBuildsResponse,
-  ListPrebuildConfigsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
@@ -74,8 +71,6 @@ import type {
   PatchIdentityLinkRequest,
   PatchOrgRequest,
   PatchOrgResponse,
-  PatchPrebuildConfigRequest,
-  PatchPrebuildConfigResponse,
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
@@ -92,7 +87,6 @@ import type {
   PutLlmProviderKeyResponse,
   PutLlmProviderPreferencesRequest,
   PutLlmProviderPreferencesResponse,
-  RebuildPrebuildResponse,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -473,60 +467,21 @@ export const api = {
   // the caller has access to — only `github` today.
   getRepos: () => request<GetReposResponse>("GET", "/repos"),
 
-  // sandbox image sources (sandbox-reconciliation plan, Task 17): org-admin
-  // CRUD for all source kinds (external/base/repo) and bake history, plus the
-  // one member-accessible read (`getPrebuildForRepo`, mounted at `/sources`).
-  //
-  // Legacy method names kept so web components (Task 18) can migrate
-  // incrementally. Endpoints now point to /api/org/sources.
-  listImageCatalog: () =>
-    request<ListImageCatalogResponse>("GET", "/org/sources").then((r) => ({
-      images: (r as unknown as { sources: ListImageCatalogResponse["images"] }).sources.filter(
-        (s) => s.kind === "external",
-      ),
-    })),
-  createImageCatalogEntry: (body: CreateImageCatalogRequest) =>
-    request<{ source: CreateImageCatalogResponse["image"] }>("POST", "/org/sources", {
-      kind: "external",
-      name: body.name,
-      externalRef: body.ref,
-      pullSecretName: body.pullSecretName,
-    }).then((r) => ({ image: r.source })),
-  deleteImageCatalogEntry: (id: string) =>
-    request<{ ok: true }>("DELETE", `/org/sources/${encodeURIComponent(id)}`),
-  getPrebuildsMeta: () =>
-    request<{ sources: unknown[]; builderAvailable: boolean }>("GET", "/org/sources").then((r) => ({
-      builder: r.builderAvailable ? "docker" : null,
-    })) as Promise<GetPrebuildsMetaResponse>,
-  listPrebuildConfigs: () =>
-    request<{ sources: ListPrebuildConfigsResponse["configs"] }>("GET", "/org/sources").then((r) => ({
-      configs: (r.sources as unknown[]).filter((s) => (s as { kind: string }).kind === "repo") as ListPrebuildConfigsResponse["configs"],
-    })),
-  createPrebuildConfig: (body: CreatePrebuildConfigRequest) =>
-    request<CreatePrebuildConfigResponse>("POST", "/org/prebuilds/configs", body),
-  patchPrebuildConfig: (id: string, body: PatchPrebuildConfigRequest) =>
-    request<{ source: PatchPrebuildConfigResponse["config"] }>(
-      "PATCH",
-      `/org/sources/${encodeURIComponent(id)}`,
-      body,
-    ).then((r) => ({ config: r.source })),
-  deletePrebuildConfig: (id: string) =>
-    request<{ ok: true }>("DELETE", `/org/sources/${encodeURIComponent(id)}`),
-  rebuildPrebuildConfig: (id: string) =>
-    request<{ bake: RebuildPrebuildResponse["prebuild"] }>(
-      "POST",
-      `/org/sources/${encodeURIComponent(id)}/bake`,
-    ).then((r) => ({ prebuild: r.bake })),
-  listPrebuildBuilds: (id: string) =>
-    request<{ bakes: ListPrebuildBuildsResponse["builds"] }>(
-      "GET",
-      `/org/sources/${encodeURIComponent(id)}/bakes`,
-    ).then((r) => ({ builds: r.bakes })),
   getPrebuildForRepo: (fullName: string) =>
     request<GetPrebuildForRepoResponse>(
       "GET",
       `/sources/for-repo?fullName=${encodeURIComponent(fullName)}`,
     ),
+
+  // sandbox image sources (sandbox-reconciliation plan, Task 18): org-admin
+  // CRUD for all source kinds (external/base/repo) and bake history.
+  listSources: () => request<ListSourcesResponse>("GET", "/org/sources"),
+  createSource: (body: Record<string, unknown>) => request<CreateSourceResponse>("POST", "/org/sources", body),
+  patchSource: (id: string, body: Record<string, unknown>) =>
+    request<PatchSourceResponse>("PATCH", `/org/sources/${encodeURIComponent(id)}`, body),
+  deleteSource: (id: string) => request<{ ok: true }>("DELETE", `/org/sources/${encodeURIComponent(id)}`),
+  bakeSource: (id: string) => request<TriggerBakeResponse>("POST", `/org/sources/${encodeURIComponent(id)}/bake`),
+  listSourceBakes: (id: string) => request<ListBakesResponse>("GET", `/org/sources/${encodeURIComponent(id)}/bakes`),
 
   // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated
   getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),

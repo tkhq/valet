@@ -1,11 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ImageCatalogSection } from "~/components/settings/image-catalog-section";
-import { PrebuildsSection } from "~/components/settings/prebuilds-section";
+import { SourcesSection } from "~/components/settings/sources-section";
 
 /**
  * `/settings/organization/sandbox-images` — Organization · Sandbox images
- * (sandbox images v2 plan, Task 6). Base-image catalog above, per-repo
- * prebuild configs + build history below. Renders inside
+ * (sandbox-reconciliation plan, Task 18). Three groups on one page: base
+ * image, repository images, external images. Renders inside
  * `/settings/organization`'s `OrgRouteGuard` — no per-page admin re-check.
  */
 export const Route = createFileRoute("/settings/organization/sandbox-images")({
@@ -15,8 +14,7 @@ export const Route = createFileRoute("/settings/organization/sandbox-images")({
 export function OrganizationSandboxImagesPage() {
   return (
     <div className="space-y-10">
-      <ImageCatalogSection />
-      <PrebuildsSection />
+      <SourcesSection />
     </div>
   );
 }
