@@ -43,7 +43,7 @@ async function getOwnedSource(
   const rows = await db
     .select()
     .from(imageSources)
-    .where(and(eq(imageSources.id, id), eq(imageSources.orgId, orgId)))
+    .where(and(eq(imageSources.id, id), eq(imageSources.orgId, orgId), eq(imageSources.kind, "repo")))
     .limit(1);
   return rows[0];
 }

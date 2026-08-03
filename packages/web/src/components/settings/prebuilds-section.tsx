@@ -63,7 +63,7 @@ export function PrebuildsSection() {
           {configs.map((config) => (
             <PrebuildConfigCard key={config.id} config={config} catalog={catalog} />
           ))}
-          <CreatePrebuildConfigRow existingFullNames={configs.map((c) => c.repoFullName)} />
+          <CreatePrebuildConfigRow existingFullNames={configs.map((c) => c.repoFullName).filter((n): n is string => n !== null)} />
         </div>
       )}
     </Section>
@@ -140,7 +140,7 @@ function PrebuildConfigCard({
           </label>
           <select
             id={`base-image-${config.id}`}
-            value={config.baseImageId ?? ""}
+            value={config.parentId ?? ""}
             onChange={(e) =>
               patchConfig.mutate({ id: config.id, body: { baseImageId: e.target.value || null } })
             }
@@ -211,7 +211,7 @@ function BuildHistoryTable({ builds, loading }: { builds: PrebuildWire[]; loadin
                 <td className="py-1.5 pr-3">
                   <Badge variant={STATUS_VARIANT[build.status]}>{build.status}</Badge>
                 </td>
-                <td className="py-1.5 pr-3 font-mono text-ink">{shortSha(build.commitSha)}</td>
+                <td className="py-1.5 pr-3 font-mono text-ink">{build.commitSha ? shortSha(build.commitSha) : "—"}</td>
                 <td className="py-1.5 pr-3 text-muted">
                   {build.finishedAt
                     ? relativeTime(build.finishedAt)

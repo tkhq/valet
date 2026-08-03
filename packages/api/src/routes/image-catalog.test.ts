@@ -105,6 +105,30 @@ describe("DELETE /api/org/image-catalog/:id", () => {
     expect(res.status).toBe(404);
   });
 
+  it("404s when id belongs to a repo-kind prebuild config, not an external image", async () => {
+    api = await bootTestApi();
+    // Create a repo-kind config via the prebuilds endpoint.
+    const cfgRes = await fetch(`${api.baseUrl}/api/org/prebuilds/configs`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ repoFullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" }),
+    });
+    expect(cfgRes.status).toBe(201);
+    const { config } = (await cfgRes.json()) as { config: { id: string } };
+
+    // Attempt to DELETE via the image-catalog endpoint — must 404, not delete the config.
+    const delRes = await fetch(`${api.baseUrl}/api/org/image-catalog/${config.id}`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(404);
+
+    // Config must still exist.
+    const listRes = await fetch(`${api.baseUrl}/api/org/prebuilds/configs`, { headers: HEADERS });
+    const body = (await listRes.json()) as { configs: { id: string }[] };
+    expect(body.configs.some((c) => c.id === config.id)).toBe(true);
+  });
+
   it("deletes a row the caller's org owns", async () => {
     api = await bootTestApi();
     const createRes = await fetch(`${api.baseUrl}/api/org/image-catalog`, {

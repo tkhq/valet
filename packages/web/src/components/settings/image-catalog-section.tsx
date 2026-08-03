@@ -55,7 +55,7 @@ function ImageCatalogRow({ image }: { image: ImageCatalogEntryWire }) {
           <span className="truncate text-sm font-medium text-ink">{image.name}</span>
           {image.pullSecretName && <Badge variant="neutral">{image.pullSecretName}</Badge>}
         </div>
-        <span className="block truncate text-xs text-muted">{image.ref}</span>
+        <span className="block truncate text-xs text-muted">{image.externalRef}</span>
       </div>
       <Button
         type="button"

@@ -161,6 +161,26 @@ describe("prebuild configs CRUD", () => {
     expect(res.status).toBe(404);
   });
 
+  it("PATCH 404s when id belongs to an external image-catalog entry, not a repo config", async () => {
+    api = await bootTestApi();
+    // Create an external-kind image via the image-catalog endpoint.
+    const imgRes = await fetch(`${api.baseUrl}/api/org/image-catalog`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ name: "Base", ref: "ghcr.io/acme/base:latest" }),
+    });
+    expect(imgRes.status).toBe(201);
+    const { image } = (await imgRes.json()) as { image: { id: string } };
+
+    // Attempt to PATCH via the prebuilds/configs endpoint — must 404, not mutate.
+    const patchRes = await fetch(`${api.baseUrl}/api/org/prebuilds/configs/${image.id}`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(patchRes.status).toBe(404);
+  });
+
   it("DELETEs a config", async () => {
     api = await bootTestApi();
     const config = await createConfig(api.baseUrl);

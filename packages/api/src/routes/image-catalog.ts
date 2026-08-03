@@ -103,7 +103,7 @@ imageCatalogRouter.delete("/:id", async (c) => {
   const existing = await db
     .select()
     .from(imageSources)
-    .where(and(eq(imageSources.id, id), eq(imageSources.orgId, c.var.user.orgId)))
+    .where(and(eq(imageSources.id, id), eq(imageSources.orgId, c.var.user.orgId), eq(imageSources.kind, "external")))
     .limit(1);
   if (existing.length === 0) return c.json({ error: "image not found" }, 404);
 
