@@ -230,7 +230,7 @@ This is the moby build-cache budget in GiB. The api prunes the build cache to th
 
 **`VALET_PREBUILD_CACHE_BUDGET_GB`** (default `20`)
 
-This is the global baked-image size ceiling in GiB. When total bake size exceeds this ceiling, the api evicts the oldest bakes first. It keeps at least 2 bakes per source (the retention floor) and never evicts the current or live bake for any source.
+This is the global baked-image size ceiling in GiB. When total bake size exceeds this ceiling, the api runs two passes. The per-source retention pass keeps the 2 newest pushed bakes per source. The global size ceiling pass protects only the newest pushed bake per source plus any bake a live session is using — under disk pressure it can trim a source to its single newest bake.
 
 Registry GC runs nightly as a k8s CronJob. It calls the registry with `--delete-untagged` and reclaims blobs for bakes that the api has already evicted.
 
