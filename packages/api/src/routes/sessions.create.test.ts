@@ -349,8 +349,8 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     });
     const elapsed = Date.now() - t0;
     expect(res.status).toBe(201);
-    // The route must not block on bake work; 5 s is a loose upper bound.
-    expect(elapsed).toBeLessThan(5_000);
+    // The route must not block on bake work; 1.5 s is a tight upper bound.
+    expect(elapsed).toBeLessThan(1_500);
   });
 
   it("with builder + org GitHub credential: upserts enabled repo source and queues a first bake", async () => {
@@ -376,22 +376,43 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     });
     expect(res.status).toBe(201);
 
-    // Give the fire-and-forget task a moment to complete.
-    await new Promise((r) => setTimeout(r, 100));
+    // Poll until the image_sources row exists.
+    let sourceId: string;
+    await vi.waitFor(
+      async () => {
+        const sources = await db
+          .select()
+          .from(imageSources)
+          .where(eq(imageSources.repoFullName, "acme/widgets"));
+        expect(sources).toHaveLength(1);
+      },
+      { timeout: 3000 },
+    );
 
     const sources = await db
       .select()
       .from(imageSources)
       .where(eq(imageSources.repoFullName, "acme/widgets"));
-    expect(sources).toHaveLength(1);
     expect(sources[0]?.kind).toBe("repo");
     expect(sources[0]?.enabled).toBe(true);
+    sourceId = sources[0]!.id;
+
+    // Poll until bakes exist for the source.
+    await vi.waitFor(
+      async () => {
+        const bakeRows = await db
+          .select()
+          .from(bakes)
+          .where(eq(bakes.sourceId, sourceId));
+        expect(bakeRows.length).toBeGreaterThanOrEqual(1);
+      },
+      { timeout: 3000 },
+    );
 
     const bakeRows = await db
       .select()
       .from(bakes)
-      .where(eq(bakes.sourceId, sources[0]!.id));
-    expect(bakeRows.length).toBeGreaterThanOrEqual(1);
+      .where(eq(bakes.sourceId, sourceId));
     expect(bakeRows.every((b) => b.status === "queued" || b.status === "building")).toBe(true);
   });
 
@@ -408,13 +429,22 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     });
     expect(res.status).toBe(201);
 
-    await new Promise((r) => setTimeout(r, 100));
+    // Poll until the image_sources row exists (proves ensure ran).
+    await vi.waitFor(
+      async () => {
+        const sources = await db
+          .select()
+          .from(imageSources)
+          .where(eq(imageSources.repoFullName, "acme/widgets"));
+        expect(sources).toHaveLength(1);
+      },
+      { timeout: 3000 },
+    );
 
     const sources = await db
       .select()
       .from(imageSources)
       .where(eq(imageSources.repoFullName, "acme/widgets"));
-    expect(sources).toHaveLength(1);
     expect(sources[0]?.kind).toBe("repo");
     expect(sources[0]?.enabled).toBe(true);
 
@@ -444,13 +474,22 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     });
     expect(res.status).toBe(201);
 
-    await new Promise((r) => setTimeout(r, 100));
+    // Poll until the image_sources row exists (proves ensure ran).
+    await vi.waitFor(
+      async () => {
+        const sources = await db
+          .select()
+          .from(imageSources)
+          .where(eq(imageSources.repoFullName, "acme/widgets"));
+        expect(sources).toHaveLength(1);
+      },
+      { timeout: 3000 },
+    );
 
     const sources = await db
       .select()
       .from(imageSources)
       .where(eq(imageSources.repoFullName, "acme/widgets"));
-    expect(sources).toHaveLength(1);
 
     const bakeRows = await db
       .select()
