@@ -227,3 +227,31 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
 
   return lines.join("\n");
 }
+
+export interface GenerateBaseDockerfileOpts {
+  baseImage: string;
+  /** Setup commands run in order on top of `baseImage` — one `RUN` each. */
+  setup: string[];
+}
+
+/**
+ * Renders a deterministic Dockerfile for a `base` source bake (spec decision
+ * 12): `FROM <parent image or stock>` + one `RUN` per setup command. No
+ * clone, no git secret, no `WORKDIR` — a base source layers org-wide tools
+ * (python3, jq, cc) onto the stock image, it never checks out a repo. Same
+ * byte-for-byte determinism as `generateDockerfile` so a golden test can pin
+ * it and the identity hash stays stable across processes. */
+export function generateBaseDockerfile(opts: GenerateBaseDockerfileOpts): string {
+  const { baseImage, setup } = opts;
+  const lines: string[] = [];
+  lines.push(`FROM ${baseImage}`);
+  for (const cmd of setup) {
+    lines.push("");
+    lines.push(`RUN ${cmd}`);
+  }
+  const identityHash = createHash("sha256").update(canonicalRecipeJson([], setup)).digest("hex");
+  lines.push("");
+  lines.push(`LABEL valet.prebuild.identity="${baseImage}|base|${identityHash}"`);
+  lines.push("");
+  return lines.join("\n");
+}

@@ -6,7 +6,7 @@
  * exactly like a nonexistent id.
  *
  * `POST /configs/:id/rebuild` and the poll/scheduler loop (wired from
- * `main.ts`) both delegate to `prebuilds/service.ts`'s `PrebuildService` —
+ * `main.ts`) both delegate to `bakes/source-service.ts`'s `SourceService` —
  * this file has no build-orchestration logic of its own beyond mapping the
  * service's typed errors to HTTP status codes.
  *
@@ -23,7 +23,7 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
-import { PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../prebuilds/service.js";
+import { PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../bakes/source-service.js";
 
 export const prebuildsRouter = new Hono<AppEnv>();
 

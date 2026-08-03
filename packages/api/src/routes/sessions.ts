@@ -141,7 +141,7 @@ sessionsRouter.get("/", async (c) => {
 // ── Create ────────────────────────────────────────────────────────────────
 
 sessionsRouter.post("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, prebuildService } = c.var.providers;
   const user = c.var.user;
   let body: CreateSessionRequest;
   try {
@@ -226,6 +226,18 @@ sessionsRouter.post("/", async (c) => {
       );
     }
   });
+
+  // Zero-config generation (spec decision 13): after the bindings land,
+  // upsert each repo's image source + touch its `last_bound_at` and kick a
+  // first bake in the background. Fire-and-forget — session create never
+  // waits on a bake, and `ensureRepoSource` never throws.
+  for (const repo of repos) {
+    void prebuildService.ensureRepoSource(user.orgId, {
+      host: repo.host ?? "github",
+      fullName: repo.fullName,
+      cloneUrl: repo.cloneUrl,
+    });
+  }
 
   const detail: CreateSessionResponse = {
     id,

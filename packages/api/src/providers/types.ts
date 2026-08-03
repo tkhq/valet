@@ -9,7 +9,7 @@ import type {
 } from "@valet/engine";
 import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
-import type { PrebuildService } from "../prebuilds/service.js";
+import type { SourceService } from "../bakes/source-service.js";
 import type { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
@@ -44,7 +44,7 @@ export interface Providers {
    * Every method treats `imageBuilder: null` as "prebuilds unavailable"
    * internally; routes don't need to branch on `imageBuilder` themselves
    * except for `GET /api/org/prebuilds/meta`. */
-  prebuildService: PrebuildService;
+  prebuildService: SourceService;
 
   // Per-process Engine cache. Lives only on the server, not in engine.
   engineHost: EngineHost;

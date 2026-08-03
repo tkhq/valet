@@ -38,6 +38,13 @@ export interface ImageBuilder {
 }
 
 export interface PrebuildSpec {
+  /** Which source shape this build is for (sandbox-reconcile, Task 15).
+   * `"base"` bakes an org base source: `FROM <parent>` + one `RUN` per
+   * `setup` command, NO clone (`cloneUrl`/`commitSha` are empty, `gitToken`
+   * absent). `"repo"` (default) is the clone + recipe build. Data-only —
+   * the `ImageBuilder` port methods are unchanged; builders branch their
+   * Dockerfile generation on this. */
+  kind?: "repo" | "base";
   /** Caller-assigned identifier for the prebuild config this build is for. */
   configId: string;
   /** The PERSISTED `prebuilds` ROW id this build is for. Backends that name

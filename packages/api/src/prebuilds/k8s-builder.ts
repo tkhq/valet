@@ -28,7 +28,7 @@
 import type { V1Job } from "@kubernetes/client-node";
 import type { SandboxBatchJobsApi } from "@valet/sandbox-kubernetes";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "./builder.js";
-import { generateDockerfile } from "./recipe.js";
+import { generateBaseDockerfile, generateDockerfile } from "./recipe.js";
 
 /** Pinned BuildKit rootless image tag — bump deliberately, never `:latest`
  * (reproducibility: two builds of the same recipe should use the same
@@ -507,13 +507,16 @@ export class KubernetesImageBuilder implements ImageBuilder {
 
   private async dispatch(buildId: string, rec: BuildRecord): Promise<void> {
     try {
-      const dockerfile = generateDockerfile({
-        baseImage: rec.spec.baseImage,
-        cloneUrl: rec.spec.cloneUrl,
-        commitSha: rec.spec.commitSha,
-        recipe: rec.spec.recipe,
-        setup: rec.spec.setup,
-      });
+      const dockerfile =
+        rec.spec.kind === "base"
+          ? generateBaseDockerfile({ baseImage: rec.spec.baseImage, setup: rec.spec.setup ?? [] })
+          : generateDockerfile({
+              baseImage: rec.spec.baseImage,
+              cloneUrl: rec.spec.cloneUrl,
+              commitSha: rec.spec.commitSha,
+              recipe: rec.spec.recipe,
+              setup: rec.spec.setup,
+            });
 
       await this.jobsApi.createConfigMap({
         namespace: this.namespace,

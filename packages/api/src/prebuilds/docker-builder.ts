@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "./builder.js";
-import { generateDockerfile } from "./recipe.js";
+import { generateBaseDockerfile, generateDockerfile } from "./recipe.js";
 
 /** Ring buffer cap for retained build log lines (`BuildStatus.logTail`). */
 const LOG_RING_LIMIT = 200;
@@ -198,13 +198,16 @@ export class DockerImageBuilder implements ImageBuilder {
     let tmpDir: string | undefined;
     let outcome: { ok: true } | { ok: false; error: string };
     try {
-      const dockerfile = generateDockerfile({
-        baseImage: spec.baseImage,
-        cloneUrl: spec.cloneUrl,
-        commitSha: spec.commitSha,
-        recipe: spec.recipe,
-        setup: spec.setup,
-      });
+      const dockerfile =
+        spec.kind === "base"
+          ? generateBaseDockerfile({ baseImage: spec.baseImage, setup: spec.setup ?? [] })
+          : generateDockerfile({
+              baseImage: spec.baseImage,
+              cloneUrl: spec.cloneUrl,
+              commitSha: spec.commitSha,
+              recipe: spec.recipe,
+              setup: spec.setup,
+            });
 
       tmpDir = await this.mkdtempFn(join(tmpdir(), "valet-prebuild-"));
       const secretPath = join(tmpDir, "git-token");

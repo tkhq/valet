@@ -39,7 +39,7 @@ import { orgMembers, orgs, users } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { createApp, type AuthWiring } from "../app.js";
-import { PrebuildService } from "../prebuilds/service.js";
+import { SourceService } from "../bakes/source-service.js";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { Providers } from "../providers/types.js";
 import { loadAuthConfig } from "../auth/config.js";
@@ -334,7 +334,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here); routes must treat this as
   // "unavailable", same as a `local` sandbox-backend boot.
-  const prebuildService = new PrebuildService({
+  const prebuildService = new SourceService({
     db,
     builder: opts.imageBuilder ?? null,
     githubTokenDeps: {

@@ -33,7 +33,7 @@ import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import { buildSandboxProvider, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
-import { PrebuildService } from "../prebuilds/service.js";
+import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -393,7 +393,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
   // in this file builds (`{ db, credentials: engineCredentials, key }`).
   // `start()`/`stop()` are called from `main.ts`.
-  const prebuildService = new PrebuildService({
+  const prebuildService = new SourceService({
     db,
     builder: imageBuilder,
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
