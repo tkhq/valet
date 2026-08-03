@@ -31,6 +31,11 @@ export interface ResolveSnapshotDeps {
  * Follows the same degradation contract as `resolvePrebuildImage`: a broken
  * registry or missing base bake must degrade to null (stock), never brick
  * provisioning. Never throws.
+ *
+ * Freshness skew between this base ref and the repo bake is inert: `computeSpec`
+ * applies repo-first precedence, so when a repo bake exists it wins and the base
+ * ref is unused. The base ref only takes effect when no repo bake is available,
+ * so a stale base relative to the repo bake can never select the wrong image.
  */
 async function resolveBaseImage(
   db: AppDb,

@@ -14,6 +14,11 @@
  * never invalidates the previous one, so a token push that races an in-flight
  * API call from the sandbox is always safe.
  *
+ * SCOPE: only the sandbox API token rotates here. The per-session JWT signing
+ * secret is deliberately stable — it never rotates, so a token minted earlier
+ * stays verifiable for its full lifetime. This sweep re-mints and re-pushes the
+ * token value; it does not re-key the signer.
+ *
  * NOTE: The env var (`VALET_SANDBOX_TOKEN`) baked into the running pod's
  * environment at provision time is NOT updated here — that is impossible
  * without a pod restart. The env var is a fallback for sandboxes and providers

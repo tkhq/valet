@@ -876,9 +876,9 @@ export const sessionRepos = pgTable(
       .default("auto"),
     position: integer("position").notNull(),
     // Target directory inside the sandbox workspace for this repo binding.
-    // Null until Task 14 populates it during workspace prep. The engine's
-    // `computeTargetDirs` logic assigns the actual value at session create time;
-    // this column persists the resolved path for later reference.
+    // Set ONCE at bind time by the session-create route and never relocated
+    // afterward (decision 15 — a binding's target dir is stable for its life).
+    // NULL marks a legacy binding created before decision 15 landed.
     targetDir: text("target_dir"),
   },
   (t) => [
