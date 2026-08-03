@@ -64,6 +64,7 @@
  * applies.
  */
 import type * as k8s from "@kubernetes/client-node";
+import { setHeaderOptions } from "@kubernetes/client-node";
 import { CONTAINER_DEATH_PATTERN, SandboxStartupError } from "@valet/engine";
 import type {
   ExecJobHandle,
@@ -97,6 +98,7 @@ import {
   livePodImageDiffers,
   podDeleteApiAdapter,
   resolvePodName,
+  SANDBOX_KIND,
   sandboxStatus,
   setOperatingMode,
   type SandboxCustomObjectsApi,
@@ -227,6 +229,15 @@ export interface SandboxSecretsApi {
   writeSecret(namespace: string, name: string, data: Record<string, string>): Promise<void>;
   /** Delete a Secret. Tolerates 404 (already deleted). */
   deleteSecret(namespace: string, name: string): Promise<void>;
+  /** Best-effort: set the Secret's single `ownerReference` to the Sandbox CR
+   * (by name + uid) so an external CR delete garbage-collects the Secret.
+   * Idempotent — patching an already-set ownerReference is a no-op. Tolerates
+   * 404 (Secret gone). Every other failure is the caller's to swallow. */
+  patchOwnerReference(
+    namespace: string,
+    name: string,
+    owner: { apiVersion: string; kind: string; name: string; uid: string },
+  ): Promise<void>;
 }
 
 /** Encodes Secret data values to base64, as Kubernetes requires for `.data`. */
@@ -309,6 +320,37 @@ export function sandboxSecretsApiAdapter(api: k8s.CoreV1Api): SandboxSecretsApi 
     async deleteSecret(namespace, name) {
       try {
         await api.deleteNamespacedSecret({ name, namespace });
+      } catch (err) {
+        if (isRecord(err) && typeof err.code === "number" && err.code === 404) {
+          return;
+        }
+        throw err;
+      }
+    },
+    async patchOwnerReference(namespace, name, owner) {
+      // Strategic-merge patch of just the ownerReferences array. A
+      // whole-array set is idempotent: re-patching the same single owner is a
+      // no-op. Tolerates 404 (Secret already gone).
+      try {
+        await api.patchNamespacedSecret(
+          {
+            name,
+            namespace,
+            body: {
+              metadata: {
+                ownerReferences: [
+                  {
+                    apiVersion: owner.apiVersion,
+                    kind: owner.kind,
+                    name: owner.name,
+                    uid: owner.uid,
+                  },
+                ],
+              },
+            },
+          },
+          setHeaderOptions("Content-Type", "application/merge-patch+json"),
+        );
       } catch (err) {
         if (isRecord(err) && typeof err.code === "number" && err.code === 404) {
           return;
@@ -629,7 +671,15 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
     }
 
-    await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+    const applied = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+
+    // Best-effort: adopt the creds Secret under the Sandbox CR so an external CR
+    // delete garbage-collects the Secret. Never fatal — the terminal
+    // `destroy()` path also deletes the Secret explicitly, so a failed patch
+    // only forgoes GC-on-external-delete, not correctness.
+    if (this.deps.secretsApi && opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
+      await this.adoptCredsSecret(name, applied.metadata.uid);
+    }
 
     if (this.deps.podDeleteApi && this.deps.podStatusApi) {
       const manifestImage = (opts.image ?? this.cfg.defaultImage) as string;
@@ -774,6 +824,39 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       throw new Error(`KubernetesSandboxProvider.updateCreds: secretsApi not wired (sandbox "${id}")`);
     }
     await this.deps.secretsApi.writeSecret(this.cfg.namespace, credsSecretName(id), files);
+    // Best-effort: adopt the Secret under the Sandbox CR. writeSecret's
+    // 404-create path (a pre-feature or manually-deleted Secret) makes a fresh
+    // Secret with no ownerReference; the CR exists at this point (updateCreds is
+    // only ever called against a live sandbox), so fetch its uid and patch the
+    // ownerReference for GC-on-external-delete. Idempotent for the replace path.
+    // Never fatal.
+    try {
+      const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+      await this.adoptCredsSecret(id, cr?.metadata.uid);
+    } catch (err) {
+      console.error(`k8s sandbox ${id}: updateCreds ownerReference adopt failed (non-fatal)`, err);
+    }
+  }
+
+  /**
+   * Best-effort: patch the creds Secret's ownerReference to the Sandbox CR
+   * named `crName` so an external CR delete garbage-collects the Secret.
+   * `uid` is the CR's `metadata.uid`. A missing `uid` or `secretsApi`, or any
+   * patch failure, is logged and swallowed — never fatal (the terminal
+   * `destroy()` path deletes the Secret explicitly regardless).
+   */
+  private async adoptCredsSecret(crName: string, uid: string | undefined): Promise<void> {
+    if (!this.deps.secretsApi || !uid) return;
+    try {
+      await this.deps.secretsApi.patchOwnerReference(this.cfg.namespace, credsSecretName(crName), {
+        apiVersion: this.cfg.apiVersion,
+        kind: SANDBOX_KIND,
+        name: crName,
+        uid,
+      });
+    } catch (err) {
+      console.error(`k8s sandbox ${crName}: creds Secret ownerReference patch failed (non-fatal)`, err);
+    }
   }
 
   private makeSandbox(id: string): KubernetesSandbox {

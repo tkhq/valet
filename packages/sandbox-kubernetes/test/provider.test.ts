@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
-import { credsSecretName } from "../src/manifest.js";
+import { credsSecretName, sandboxCrName } from "../src/manifest.js";
 import type { K8sProviderConfig } from "../src/types.js";
 import type {
   CreateSandboxParams,
@@ -85,7 +85,13 @@ const providerCfg: K8sProviderConfig = {
 
 /** Minimal fake SandboxSecretsApi that records all calls in order. */
 class FakeSecretsApi implements SandboxSecretsApi {
-  calls: { method: string; namespace: string; name: string; data?: Record<string, string> }[] = [];
+  calls: {
+    method: string;
+    namespace: string;
+    name: string;
+    data?: Record<string, string>;
+    owner?: { apiVersion: string; kind: string; name: string; uid: string };
+  }[] = [];
 
   async upsertSecret(namespace: string, name: string, data: Record<string, string>): Promise<void> {
     this.calls.push({ method: "upsert", namespace, name, data });
@@ -97,6 +103,14 @@ class FakeSecretsApi implements SandboxSecretsApi {
 
   async deleteSecret(namespace: string, name: string): Promise<void> {
     this.calls.push({ method: "delete", namespace, name });
+  }
+
+  async patchOwnerReference(
+    namespace: string,
+    name: string,
+    owner: { apiVersion: string; kind: string; name: string; uid: string },
+  ): Promise<void> {
+    this.calls.push({ method: "patchOwner", namespace, name, owner });
   }
 }
 
@@ -110,7 +124,7 @@ class FakeObjectsApi implements SandboxCustomObjectsApi {
     return {
       apiVersion: params.body.apiVersion,
       kind: params.body.kind,
-      metadata: { name: params.body.metadata.name, resourceVersion: "1" },
+      metadata: { name: params.body.metadata.name, uid: "cr-uid-123", resourceVersion: "1" },
       spec: params.body.spec,
       status: { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] },
     };
@@ -120,7 +134,7 @@ class FakeObjectsApi implements SandboxCustomObjectsApi {
     return {
       apiVersion: SANDBOX_CR_API_VERSION,
       kind: "Sandbox",
-      metadata: { name: params.name, resourceVersion: "1" },
+      metadata: { name: params.name, uid: "cr-uid-123", resourceVersion: "1" },
       spec: { podTemplate: {}, volumeClaimTemplates: [] },
       status: { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] },
     };
@@ -199,13 +213,47 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
 
     expect(callOrder[0]).toBe("upsert");
     expect(callOrder[1]).toBe("create");
-    expect(secretsApi.calls).toHaveLength(1);
+    // upsert (before CR create) + patchOwnerReference (after applySandbox).
     expect(secretsApi.calls[0]).toMatchObject({
       method: "upsert",
       namespace: providerCfg.namespace,
       name: credsSecretName("test-sandbox"),
       data: { token: "abc" },
     });
+  });
+
+  it("create() with credsFiles adopts the Secret under the CR (ownerReference) — I4", async () => {
+    const secretsApi = new FakeSecretsApi();
+    const provider = makeProvider(secretsApi);
+    await provider.create({ workspace: "test-sandbox", credsFiles: { token: "abc" } });
+
+    const patch = secretsApi.calls.find((c) => c.method === "patchOwner");
+    expect(patch).toBeDefined();
+    expect(patch?.name).toBe(credsSecretName("test-sandbox"));
+    expect(patch?.owner).toEqual({
+      apiVersion: SANDBOX_CR_API_VERSION,
+      kind: "Sandbox",
+      name: sandboxCrName("test-sandbox"),
+      uid: "cr-uid-123",
+    });
+  });
+
+  it("create() without credsFiles does NOT patch an ownerReference — I4", async () => {
+    const secretsApi = new FakeSecretsApi();
+    const provider = makeProvider(secretsApi);
+    await provider.create({ workspace: "test-sandbox" });
+    expect(secretsApi.calls.find((c) => c.method === "patchOwner")).toBeUndefined();
+  });
+
+  it("create() succeeds even when the ownerReference patch fails (best-effort) — I4", async () => {
+    const secretsApi = new FakeSecretsApi();
+    secretsApi.patchOwnerReference = async () => {
+      throw new Error("patch boom");
+    };
+    const provider = makeProvider(secretsApi);
+    await expect(
+      provider.create({ workspace: "test-sandbox", credsFiles: { token: "abc" } }),
+    ).resolves.toBeDefined();
   });
 
   it("create() without credsFiles does not call upsertSecret", async () => {
@@ -219,13 +267,15 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
     const secretsApi = new FakeSecretsApi();
     const provider = makeProvider(secretsApi);
     await provider.updateCreds("test-sandbox", { token: "newtoken" });
-    expect(secretsApi.calls).toHaveLength(1);
+    // write first, then a best-effort ownerReference adopt.
     expect(secretsApi.calls[0]).toMatchObject({
       method: "write",
       namespace: providerCfg.namespace,
       name: credsSecretName("test-sandbox"),
       data: { token: "newtoken" },
     });
+    const patch = secretsApi.calls.find((c) => c.method === "patchOwner");
+    expect(patch?.owner).toMatchObject({ name: "test-sandbox", uid: "cr-uid-123" });
   });
 
   it("updateCreds() creates the Secret when writeSecret reports 404 (pre-feature sandbox)", async () => {
@@ -243,6 +293,7 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
         // and does not throw.
       }),
       deleteSecret: vi.fn(),
+      patchOwnerReference: vi.fn(),
     };
     const provider = makeProvider(secretsApi);
     await expect(provider.updateCreds("test-sandbox", { token: "x" })).resolves.toBeUndefined();
@@ -280,6 +331,7 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
       upsertSecret: vi.fn(),
       writeSecret: vi.fn(),
       deleteSecret: vi.fn().mockRejectedValue(new Error("not found")),
+      patchOwnerReference: vi.fn(),
     };
     const provider = makeProvider(secretsApi);
     // Should NOT throw even though deleteSecret rejects.
