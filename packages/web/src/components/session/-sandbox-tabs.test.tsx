@@ -61,6 +61,37 @@ describe("SandboxTabs", () => {
     expect(screen.getByRole("tab", { name: "VS Code" })).toBeTruthy();
   });
 
+  it("chat tab: the root does not grow (shrink-0), so the message list keeps the pane", () => {
+    // Regression: a `flex-1` root on the Chat tab competes with the sibling
+    // MessageList for height, splitting the pane 50/50 and leaving a large
+    // empty gap above the messages. The Chat tab has no gateway body to grow.
+    const { container } = renderTabs({
+      sessionId: "sess-1",
+      profile: "full",
+      activeTab: "chat",
+      onTabChange: () => {},
+      sandbox: { state: "ready", epoch: 1 },
+    });
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className).toContain("shrink-0");
+    expect(root.className).not.toContain("flex-1");
+  });
+
+  it("terminal tab: the root grows (flex-1) to host the iframe", () => {
+    mintSandboxJwt.mockResolvedValue({ token: "tok-123", expiresAt: Date.now() + 60_000 });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
+    const { container } = renderTabs({
+      sessionId: "sess-1",
+      profile: "full",
+      activeTab: "terminal",
+      onTabChange: () => {},
+      sandbox: { state: "ready", epoch: 1 },
+    });
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className).toContain("flex-1");
+    expect(root.className).not.toContain("shrink-0");
+  });
+
   it("full session + ready sandbox on the terminal tab: mints a JWT and renders the iframe", async () => {
     mintSandboxJwt.mockResolvedValue({ token: "tok-123", expiresAt: Date.now() + 60_000 });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));

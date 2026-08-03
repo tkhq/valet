@@ -47,8 +47,14 @@ export function SandboxTabs({
 }: SandboxTabsProps) {
   if (profile !== "full") return null;
 
+  // Grow to fill the pane ONLY when a gateway pane (Terminal/VS Code) renders
+  // below the tab strip. On the Chat tab the body is empty — the chat message
+  // list is a sibling in `session-view` — so a growing wrapper here would claim
+  // half the pane as dead space and squash the messages. `shrink-0` keeps it at
+  // the tab strip's natural height and lets the sibling MessageList fill the rest.
+  const showsGatewayPane = activeTab !== "chat";
   return (
-    <div className="flex flex-1 min-h-0 flex-col">
+    <div className={cn("flex min-h-0 flex-col", showsGatewayPane ? "flex-1" : "shrink-0")}>
       <div role="tablist" aria-label="Session view" className="flex items-center gap-1 border-b border-line px-4">
         {TABS.map((t) => (
           <button
@@ -68,7 +74,7 @@ export function SandboxTabs({
           </button>
         ))}
       </div>
-      {activeTab !== "chat" && (
+      {showsGatewayPane && (
         <GatewayPane sessionId={sessionId} tab={activeTab} sandbox={sandbox} />
       )}
     </div>
