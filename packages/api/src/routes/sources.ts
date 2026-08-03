@@ -118,7 +118,7 @@ sourcesRouter.post("/", async (c) => {
       typeof body.externalRef !== "string" ||
       body.externalRef.trim() === ""
     ) {
-      return c.json({ error: "name and externalRef are required" }, 400);
+      return c.json({ error: "Provide name and externalRef when you create an external image source." }, 400);
     }
     const pullSecretName =
       typeof body.pullSecretName === "string" && body.pullSecretName.trim() !== ""
@@ -301,7 +301,24 @@ sourcesRouter.get("/:id/bakes", async (c) => {
   const source = await getOwnedSource(db, id, c.var.user.orgId);
   if (!source) return c.json({ error: "source not found" }, 404);
 
-  const rows = await db.select().from(bakes).where(eq(bakes.sourceId, id)).orderBy(desc(bakes.createdAt));
+  const rows = await db
+    .select({
+      id: bakes.id,
+      sourceId: bakes.sourceId,
+      identityHash: bakes.identityHash,
+      commitSha: bakes.commitSha,
+      imageRef: bakes.imageRef,
+      status: bakes.status,
+      builderBackend: bakes.builderBackend,
+      error: bakes.error,
+      logTail: bakes.logTail,
+      startedAt: bakes.startedAt,
+      finishedAt: bakes.finishedAt,
+      createdAt: bakes.createdAt,
+    })
+    .from(bakes)
+    .where(eq(bakes.sourceId, id))
+    .orderBy(desc(bakes.createdAt));
   return c.json({ bakes: rows });
 });
 

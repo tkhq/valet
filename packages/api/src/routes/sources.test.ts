@@ -395,7 +395,7 @@ describe("PATCH /api/org/sources/:id", () => {
     expect(body.source.externalRef).toBe("registry.io/updated:v2");
   });
 
-  it("cross-kind isolation: external id 404s on patch attempting repo-kind field", async () => {
+  it("cross-kind isolation: external id 400s on patch attempting repo-kind field", async () => {
     api = await bootTestApi();
     // Create an external source, then try to use its id for a parentId patch
     // (which is repo-only) — 400 because external kind rejects parentId.
@@ -413,6 +413,16 @@ describe("PATCH /api/org/sources/:id", () => {
 // ── DELETE /api/org/sources/:id ───────────────────────────────────────────────
 
 describe("DELETE /api/org/sources/:id", () => {
+  it("403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const source = await createExternal(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
+      method: "DELETE",
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(403);
+  });
+
   it("404s for a nonexistent id", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/sources/nonexistent`, {
@@ -459,6 +469,16 @@ describe("DELETE /api/org/sources/:id", () => {
 // ── POST /api/org/sources/:id/bake ───────────────────────────────────────────
 
 describe("POST /api/org/sources/:id/bake", () => {
+  it("403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const source = await seedRepoSource(api);
+    const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bake`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(403);
+  });
+
   it("404s for a nonexistent source", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/sources/nonexistent/bake`, {
@@ -512,6 +532,15 @@ describe("POST /api/org/sources/:id/bake", () => {
 // ── GET /api/org/sources/:id/bakes ───────────────────────────────────────────
 
 describe("GET /api/org/sources/:id/bakes", () => {
+  it("403s for a non-admin org member", async () => {
+    api = await bootTestApi();
+    const source = await seedRepoSource(api);
+    const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bakes`, {
+      headers: MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(403);
+  });
+
   it("404s for a nonexistent source", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/sources/nonexistent/bakes`, { headers: HEADERS });
