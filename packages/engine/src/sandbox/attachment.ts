@@ -662,26 +662,16 @@ export class SandboxAttachment {
         superseded = true;
         return;
       }
-      // Push credential files into the sandbox after resume (hibernate wake
-      // path). A pod woken from hibernation mounts the CURRENT Secret when one
-      // exists, but a sandbox suspended before the creds-mount feature was
-      // deployed has no Secret. updateCreds is upsert-shaped (writeSecret
-      // creates on 404), so this materializes the missing Secret and is
-      // idempotent for sandboxes that already have one. Best-effort: a push
-      // failure must never strand a wake — the env-var fallback covers 24h.
-      // Docker updateCreds throws "not found" after an API restart (the
-      // in-memory map is empty). Docker resume also throws "not found" on that
-      // same path, so this branch is unreachable for docker post-restart.
-      if (
-        provider.updateCreds &&
-        provider.capabilities().credsMount &&
-        this.createOpts.credsFiles &&
-        Object.keys(this.createOpts.credsFiles).length > 0
-      ) {
-        await provider.updateCreds(sandbox.id, this.createOpts.credsFiles).catch((err) => {
-          console.error("SandboxAttachment: updateCreds after resume failed (non-fatal)", err);
-        });
-      }
+      // Push credential files after resume. provider.create() owns the cold
+      // path (k8s upserts the Secret inside create()). The resume path exists
+      // because a pre-feature pod suspended before credsMount was deployed has
+      // no Secret; updateCreds is upsert-shaped, so this materializes the
+      // missing Secret and is idempotent for pods that already have one.
+      // Best-effort: a push failure must never strand a wake — the 24h env-var
+      // fallback covers the sandbox. Docker resume throws "not found" after an
+      // API restart (in-memory map is gone), so this branch is unreachable for
+      // docker post-restart.
+      await this.pushCredsBestEffort(sandbox, "resume");
       // The raw handle is reused as-is — resume wakes the same sandbox.
       this._state = "ready";
       this.emitStatus();
@@ -770,26 +760,6 @@ export class SandboxAttachment {
         await provider.destroy(sandbox.id).catch(() => {});
         return;
       }
-      // Push credential files into the sandbox after create (restore path).
-      // provider.create() on k8s is upsert-shaped and already writes the
-      // Secret, so this is idempotent — but a session restored across an API
-      // restart that was created before the creds-mount feature has no Secret.
-      // updateCreds is upsert-shaped (writeSecret creates on 404), so this
-      // materializes the missing Secret. Best-effort: a push failure must never
-      // fail a provision — the 24h env-var fallback still covers the sandbox.
-      // Docker updateCreds requires the in-memory sandbox map populated by
-      // create(), which is always the case here (docker sandbox was just
-      // created), so docker is reachable but idempotent on this path too.
-      if (
-        provider.updateCreds &&
-        provider.capabilities().credsMount &&
-        this.createOpts.credsFiles &&
-        Object.keys(this.createOpts.credsFiles).length > 0
-      ) {
-        await provider.updateCreds(sandbox.id, this.createOpts.credsFiles).catch((err) => {
-          console.error("SandboxAttachment: updateCreds after create failed (non-fatal)", err);
-        });
-      }
       if (desired) {
         try {
           const appliedImage = bootImage ?? "";
@@ -846,6 +816,28 @@ export class SandboxAttachment {
     } finally {
       this.inFlight = null;
     }
+  }
+
+  /**
+   * Push credential files into `sandbox` best-effort. Guards on
+   * `provider.updateCreds`, `capabilities().credsMount`, and non-empty
+   * `credsFiles`. A failure is logged and swallowed — the 24h env-var
+   * fallback still covers the sandbox. `context` names the call site for the
+   * log message.
+   */
+  private async pushCredsBestEffort(sandbox: Sandbox, context: string): Promise<void> {
+    const provider = this.provider;
+    if (
+      !provider?.updateCreds ||
+      !provider.capabilities().credsMount ||
+      !this.createOpts.credsFiles ||
+      Object.keys(this.createOpts.credsFiles).length === 0
+    ) {
+      return;
+    }
+    await provider.updateCreds(sandbox.id, this.createOpts.credsFiles).catch((err) => {
+      console.error(`SandboxAttachment: updateCreds after ${context} failed (non-fatal)`, err);
+    });
   }
 
   /** Resolves every pending `ensureReady` waiter with the now-ready sandbox. */
