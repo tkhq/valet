@@ -109,15 +109,14 @@ SECRETS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"secrets"' | grep -m1 'verbs:')
 for verb in create delete; do
   echo "$SECRETS_VERBS" | grep -q "\"$verb\"" || fail "secrets rule missing verb: $verb"
 done
-# Secrets grant is deliberately narrower than configmaps: no `get` — the api
-# never reads a Secret's contents back (see rbac.yaml's comment).
-if echo "$SECRETS_VERBS" | grep -q '"get"'; then
-  fail "secrets rule grants 'get' — the api never reads Secret contents back, keep this grant minimal"
-fi
+# Secrets grant: `get` is REQUIRED (Task 9). writeSecret/upsertSecret GET the
+# Secret for its resourceVersion before replace (optimistic concurrency) — the
+# api reads the metadata, never the decoded contents. `list`/`watch` stay
+# forbidden: nothing enumerates or watches Secrets.
 if echo "$SECRETS_VERBS" | grep -qE '"list"|"watch"'; then
   fail "secrets rule grants list/watch — unnecessary, keep this grant minimal"
 fi
-pass "Role has the expected configmaps/secrets verbs, both grants kept minimal (create/delete only, no get/list/watch)"
+pass "Role has the expected configmaps/secrets verbs (secrets: create/get/patch/update/delete for optimistic-concurrency writes, no list/watch; configmaps: create/delete only)"
 
 # --- DATABASE_URL wiring: bundled vs external ---------------------------
 grep -q 'name: DATABASE_URL' "$TMP_DIR/bundled.yaml" || fail "bundled render: api Deployment missing DATABASE_URL env"

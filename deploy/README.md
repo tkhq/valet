@@ -81,6 +81,58 @@ Postgres StatefulSet's readiness, because the api runs migrations at boot.
 `helm upgrade --install --wait` therefore returns only once the api pod is
 `Running` and `Ready`.
 
+## Pre-deploy DDL — sandbox-reconcile schema restructure
+
+Run this DDL ONCE against the live database before you roll the api to the
+sandbox-reconcile release. Fresh installs skip it — the boot migration creates
+these tables. It matters only for a live cluster that predates the restructure,
+where the old `prebuild_configs`/`prebuilds` tables must give way to
+`image_sources`/`bakes`. Apply it with `psql "$DATABASE_URL" -f -`, or paste it
+into a `psql` session, while the old api is still running; then roll the api.
+
+```sql
+DROP TABLE IF EXISTS "prebuilds";
+DROP TABLE IF EXISTS "prebuild_configs";
+
+CREATE TABLE "image_sources" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"kind" text NOT NULL CHECK (kind IN ('external','base','repo')),
+	"parent_id" text REFERENCES image_sources(id),
+	"name" text NOT NULL,
+	"external_ref" text,
+	"pull_secret_name" text,
+	"setup_commands" jsonb,
+	"repo_host" text,
+	"repo_full_name" text,
+	"clone_url" text,
+	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
+	"enabled" boolean NOT NULL DEFAULT TRUE,
+	"last_bound_at" bigint,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+CREATE UNIQUE INDEX "image_sources_org_repo" ON "image_sources" ("org_id","repo_host","repo_full_name") WHERE kind = 'repo';
+CREATE UNIQUE INDEX "image_sources_org_base" ON "image_sources" ("org_id") WHERE kind = 'base';
+
+CREATE TABLE "bakes" (
+	"id" text PRIMARY KEY NOT NULL,
+	"source_id" text NOT NULL REFERENCES image_sources(id) ON DELETE CASCADE,
+	"identity_hash" text NOT NULL,
+	"commit_sha" text,
+	"image_ref" text NOT NULL,
+	"status" text NOT NULL CHECK (status IN ('queued','building','pushed','failed')),
+	"builder_backend" text,
+	"recipe" jsonb,
+	"error" text,
+	"log_tail" text,
+	"started_at" bigint,
+	"finished_at" bigint,
+	"created_at" bigint NOT NULL
+);
+CREATE INDEX "bakes_source_status_created" ON "bakes" ("source_id","status","created_at");
+```
+
 ## Reach the api
 
 Port-forward is the simplest option, and the one CI and scripted
