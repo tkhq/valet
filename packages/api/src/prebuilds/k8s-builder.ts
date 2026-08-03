@@ -42,9 +42,13 @@ export const PREBUILD_LABEL_KEY = "valet.dev/prebuild";
 
 const GIT_TOKEN_SECRET_KEY = "token";
 const DOCKERFILE_CONFIGMAP_KEY = "Dockerfile";
+const BUILDKITD_TOML_KEY = "buildkitd.toml";
 const GIT_TOKEN_MOUNT_PATH = "/run/valet/git-token";
 const DOCKERFILE_MOUNT_DIR = "/dockerfile";
 const CONTEXT_MOUNT_DIR = "/ctx";
+/** Mount path for the buildkitd config file inside the container.
+ * Mounted from the same ConfigMap as the Dockerfile via `subPath`. */
+const BUILDKITD_TOML_MOUNT_PATH = "/buildkitd/buildkitd.toml";
 const LOG_TAIL_LINES = 200;
 const BUILDKIT_CONTAINER_NAME = "buildkit";
 /** Belt-and-suspenders for the poll-side Secret/ConfigMap cleanup and the
@@ -131,6 +135,23 @@ export interface BuildKitJobSpec {
 }
 
 /**
+ * Generate a minimal `buildkitd.toml` that marks `host` as a plain-HTTP
+ * registry. Only called when `registryInsecure` is true (the bundled
+ * in-cluster registry). Pure, no I/O.
+ *
+ * `buildctl-daemonless.sh` starts a short-lived buildkitd in the background
+ * and passes `$BUILDKITD_FLAGS` as extra flags. Appending
+ * `--config=<path>` points buildkitd at this file, which makes it resolve
+ * FROM pulls (and any cache imports) over HTTP rather than HTTPS — the same
+ * trust boundary already applied to the output push via `registry.insecure=true`
+ * in `--output`. Without this, BuildKit attempts HTTPS for the base-image
+ * pull and fails with "server gave HTTP response to HTTPS client".
+ */
+export function buildkitdToml(host: string): string {
+  return `[registry."${host}"]\n  http = true\n`;
+}
+
+/**
  * Pure manifest builder (no I/O) — the shape asserted by the unit tests.
  * `backoffLimit: 0` (a failed build should surface as failed immediately,
  * not silently retry with a fresh pod that resets the log tail) and
@@ -160,10 +181,24 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
   if (spec.registryInsecure) outputOpts.push("registry.insecure=true");
   args.push("--output", outputOpts.join(","));
 
-  const volumeMounts = [
+  // When the registry is insecure (bundled in-cluster registry), buildkitd
+  // needs a config file to resolve FROM pulls over HTTP. The toml is stored as
+  // a second key in the Dockerfile ConfigMap and mounted via subPath so it
+  // does not interfere with the Dockerfile mount. BUILDKITD_FLAGS is extended
+  // to point buildctl-daemonless.sh's background buildkitd at the config file.
+  // A TLS external registry must never get http=true — this block is gated on
+  // the same `registryInsecure` flag that gates `registry.insecure=true` on
+  // the output side.
+  const volumeMounts: { name: string; mountPath: string; subPath?: string }[] = [
     { name: "dockerfile", mountPath: DOCKERFILE_MOUNT_DIR },
     { name: "ctx", mountPath: CONTEXT_MOUNT_DIR },
   ];
+  if (spec.registryInsecure) {
+    // Mount only the toml key from the ConfigMap — the Dockerfile key is already
+    // mounted at the directory level above. subPath mounts survive ConfigMap
+    // updates and do not expose other keys.
+    volumeMounts.push({ name: "dockerfile", mountPath: BUILDKITD_TOML_MOUNT_PATH, subPath: BUILDKITD_TOML_KEY });
+  }
 
   const podVolumes: { name: string; configMap?: { name: string }; secret?: { secretName: string }; emptyDir?: Record<string, never> }[] = [
     { name: "dockerfile", configMap: { name: configMapName(spec.id) } },
@@ -173,6 +208,15 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
     volumeMounts.push({ name: "git-token", mountPath: GIT_TOKEN_MOUNT_PATH });
     podVolumes.push({ name: "git-token", secret: { secretName: secretName(spec.id) } });
   }
+
+  // `buildctl-daemonless.sh` passes BUILDKITD_FLAGS to the backgrounded
+  // buildkitd process. When insecure, append `--config=` so buildkitd reads
+  // the toml that marks the push host as HTTP — this covers FROM pulls, cache
+  // imports, and any other registry interaction buildkitd makes, not just the
+  // output push (which is covered by `registry.insecure=true` in --output).
+  const buildkitdFlags = spec.registryInsecure
+    ? `--oci-worker-no-process-sandbox --config=${BUILDKITD_TOML_MOUNT_PATH}`
+    : "--oci-worker-no-process-sandbox";
 
   return {
     apiVersion: "batch/v1",
@@ -223,7 +267,7 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
               // with "runc run failed: ... error mounting proc to rootfs at
               // /proc: operation not permitted" (moby/buildkit rootless
               // docs/examples).
-              env: [{ name: "BUILDKITD_FLAGS", value: "--oci-worker-no-process-sandbox" }],
+              env: [{ name: "BUILDKITD_FLAGS", value: buildkitdFlags }],
               ...(spec.resources ? { resources: spec.resources } : {}),
               volumeMounts,
             },
@@ -525,10 +569,28 @@ export class KubernetesImageBuilder implements ImageBuilder {
               setup: rec.spec.setup,
             });
 
+      // When the registry is insecure, include a buildkitd.toml in the ConfigMap
+      // so BuildKit can resolve FROM pulls over HTTP. The push host drives the
+      // toml — it is the host BuildKit contacts for all registry operations
+      // (output push AND base-image pull), so it must be marked http=true.
+      // When no push host is configured, fall back to the pull host extracted
+      // from imageRef (push == pull host in that case). Gate on registryInsecure
+      // so a TLS external registry never gets an http=true entry.
+      const configMapData: Record<string, string> = { [DOCKERFILE_CONFIGMAP_KEY]: dockerfile };
+      if (this.registryInsecure) {
+        const tomlHost =
+          this.registryPushHost ??
+          (() => {
+            const slash = rec.spec.imageRef.indexOf("/");
+            return slash >= 0 ? rec.spec.imageRef.slice(0, slash) : rec.spec.imageRef;
+          })();
+        configMapData[BUILDKITD_TOML_KEY] = buildkitdToml(tomlHost);
+      }
+
       await this.jobsApi.createConfigMap({
         namespace: this.namespace,
         name: configMapName(rec.resourceId),
-        data: { [DOCKERFILE_CONFIGMAP_KEY]: dockerfile },
+        data: configMapData,
         labels: { [PREBUILD_LABEL_KEY]: rec.resourceId },
       });
       if (this.cancelled.has(buildId)) {

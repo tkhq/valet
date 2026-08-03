@@ -13,7 +13,7 @@ import type {
   SandboxBatchJobsApi,
 } from "@valet/sandbox-kubernetes";
 import type { PrebuildSpec } from "./builder.js";
-import { BUILDKIT_IMAGE, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor } from "./k8s-builder.js";
+import { BUILDKIT_IMAGE, buildkitdToml, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor } from "./k8s-builder.js";
 
 function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
   return {
@@ -61,6 +61,20 @@ describe("pushRefFor", () => {
     // `valet-prebuild/foo:sha` DOES have a slash — a truly hostless ref is one
     // with no slash at all; defensive, never reached for k8s refs.
     expect(pushRefFor("no-slash-ref:tag", "push-host:5000")).toBe("no-slash-ref:tag");
+  });
+});
+
+// ── buildkitdToml (pure) ────────────────────────────────────────────────
+
+describe("buildkitdToml", () => {
+  it("produces a valid TOML snippet that marks the host as HTTP", () => {
+    const toml = buildkitdToml("valet-registry.valet-sandboxes.svc.cluster.local:5000");
+    expect(toml).toBe('[registry."valet-registry.valet-sandboxes.svc.cluster.local:5000"]\n  http = true\n');
+  });
+
+  it("works for a simple host:port without DNS subdomain", () => {
+    const toml = buildkitdToml("localhost:30500");
+    expect(toml).toBe('[registry."localhost:30500"]\n  http = true\n');
   });
 });
 
@@ -227,6 +241,59 @@ describe("buildKitJobManifest", () => {
     expect(job.spec?.template.spec?.containers[0].env).toMatchObject([
       { name: "BUILDKITD_FLAGS", value: "--oci-worker-no-process-sandbox" },
     ]);
+  });
+
+  it("insecure registry: BUILDKITD_FLAGS includes --config= pointing at the mounted toml", () => {
+    const job = buildKitJobManifest({
+      id: "14",
+      namespace: "ns",
+      imageRef: "localhost:30500/foo:bar",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: true,
+      registryPushHost: "valet-registry.valet-sandboxes.svc.cluster.local:5000",
+    });
+    const flags = job.spec?.template.spec?.containers[0].env?.find((e) => e.name === "BUILDKITD_FLAGS")?.value ?? "";
+    expect(flags).toContain("--oci-worker-no-process-sandbox");
+    expect(flags).toContain("--config=/buildkitd/buildkitd.toml");
+  });
+
+  it("insecure registry: container mounts buildkitd.toml from the ConfigMap via subPath", () => {
+    const job = buildKitJobManifest({
+      id: "15",
+      namespace: "ns",
+      imageRef: "localhost:30500/foo:bar",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: true,
+      registryPushHost: "valet-registry.valet-sandboxes.svc.cluster.local:5000",
+    });
+    const mounts = job.spec?.template.spec?.containers[0].volumeMounts ?? [];
+    const tomlMount = mounts.find((m) => m.mountPath === "/buildkitd/buildkitd.toml");
+    expect(tomlMount).toBeDefined();
+    expect(tomlMount?.subPath).toBe("buildkitd.toml");
+    // Reuses the "dockerfile" volume — no extra volume is added for TLS.
+    expect(tomlMount?.name).toBe("dockerfile");
+    // A secure registry must not have this mount.
+  });
+
+  it("secure/external registry: no buildkitd.toml mount and BUILDKITD_FLAGS unchanged", () => {
+    const job = buildKitJobManifest({
+      id: "16",
+      namespace: "ns",
+      imageRef: "registry.example.com/foo:bar",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: false,
+    });
+    const flags = job.spec?.template.spec?.containers[0].env?.find((e) => e.name === "BUILDKITD_FLAGS")?.value ?? "";
+    expect(flags).toBe("--oci-worker-no-process-sandbox");
+    expect(flags).not.toContain("--config=");
+    const mounts = job.spec?.template.spec?.containers[0].volumeMounts ?? [];
+    expect(mounts.some((m) => m.subPath === "buildkitd.toml")).toBe(false);
   });
 
   it("sets the AppArmor-unconfined pod annotation for the buildkit container (rootless requirement)", () => {
@@ -700,5 +767,46 @@ describe("KubernetesImageBuilder", () => {
 
     const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
     expect(dockerfile).toContain("FROM localhost:30500/valet-sandbox:dev");
+  });
+
+  // ── buildkitd.toml ConfigMap injection (insecure registry) ──────────────
+
+  it("insecure registry with push host: ConfigMap includes buildkitd.toml keyed on the push host", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryInsecure: true,
+      registryPushHost: "valet-registry.valet-sandboxes.svc.cluster.local:5000",
+    });
+    await builder.build(baseSpec({ imageRef: "localhost:30500/octocat-hello-world:abc123" }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const cm = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile");
+    expect(cm?.data?.["buildkitd.toml"]).toBe(
+      '[registry."valet-registry.valet-sandboxes.svc.cluster.local:5000"]\n  http = true\n',
+    );
+    expect(cm?.data?.["Dockerfile"]).toBeDefined();
+  });
+
+  it("insecure registry without push host: ConfigMap includes buildkitd.toml keyed on the pull host", async () => {
+    // When push host is absent, push == pull. The toml host is extracted from
+    // imageRef so the correct registry gets the http=true entry.
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, { registryInsecure: true });
+    await builder.build(baseSpec({ imageRef: "valet-registry:5000/octocat-hello-world:abc123" }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const cm = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile");
+    expect(cm?.data?.["buildkitd.toml"]).toBe('[registry."valet-registry:5000"]\n  http = true\n');
+  });
+
+  it("secure/external registry: ConfigMap contains only Dockerfile (no buildkitd.toml)", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, { registryInsecure: false });
+    await builder.build(baseSpec({ imageRef: "registry.example.com/acme-widgets:abc123" }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const cm = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile");
+    expect(cm?.data?.["buildkitd.toml"]).toBeUndefined();
+    expect(cm?.data?.["Dockerfile"]).toBeDefined();
   });
 });
