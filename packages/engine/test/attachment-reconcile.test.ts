@@ -37,6 +37,7 @@ class RecordingProvider implements SandboxProvider {
   sandboxes: VirtualSandbox[] = [];
   private nextId = 1;
   private hibernation: boolean;
+  private isolated: boolean;
   // Optional seams: assigned as instance properties ONLY when enabled so the
   // attachment's `provider.release ?`/`provider.resume ?` capability checks see
   // them as absent otherwise (deleting a prototype method would not work).
@@ -44,8 +45,12 @@ class RecordingProvider implements SandboxProvider {
   suspend?: (id: string) => Promise<void>;
   resume?: (id: string) => Promise<void>;
 
-  constructor(opts: { hibernation?: boolean; release?: boolean } = {}) {
+  constructor(opts: { hibernation?: boolean; release?: boolean; isolated?: boolean } = {}) {
     this.hibernation = opts.hibernation ?? false;
+    // Default isolated:true so existing image-drift tests still exercise the
+    // pod-replace branch (decision 8 gates it on isolation). A non-isolated
+    // provider (opts.isolated:false) must never pod-replace.
+    this.isolated = opts.isolated ?? true;
     if (opts.release) {
       this.release = async (id: string) => {
         this.releaseCalls.push(id);
@@ -69,6 +74,7 @@ class RecordingProvider implements SandboxProvider {
       warmPool: false,
       hibernation: this.hibernation,
       customImage: true,
+      isolated: this.isolated,
       coldStartEstimateMs: 0,
     };
   }
@@ -491,6 +497,106 @@ describe("SandboxAttachment.reconcile", () => {
     expect(att.currentEpoch()).toBe(2); // epoch bumped → replacement happened
     expect(provider.createImages).toEqual(["img:v1", "img:v2"]);
     expect(att.observedImage()).toBe("img:v2");
+  });
+
+  it("non-isolated backend never pod-replaces on image drift; steps still converge (decision 8, I5)", async () => {
+    // A non-isolated provider (docker/local/virtual shape) must skip the
+    // image-replace branch entirely even when desired.image differs, and fall
+    // through to step-drift convergence in place.
+    const provider = new RecordingProvider({ isolated: false });
+    const applied: string[] = [];
+    const mkSteps = () => [
+      step("s1", "sh1", async () => {
+        applied.push("s1");
+      }),
+    ];
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: mkSteps() });
+    const att = await reachReady(provider, fake, { image: "img:v1" });
+    expect(provider.createImages).toEqual(["img:v1"]);
+    applied.length = 0;
+
+    // Drift BOTH the image and a step hash. The image drift must be ignored
+    // (non-isolated), but the step drift must still converge in place.
+    fake.spec = {
+      image: "img:v2",
+      specHash: "h2",
+      steps: [
+        step("s1", "sh1-NEW", async () => {
+          applied.push("s1");
+        }),
+      ],
+    };
+
+    await att.reconcile();
+
+    expect(att.currentEpoch()).toBe(1); // NO replace → epoch unchanged
+    expect(provider.createImages).toEqual(["img:v1"]); // no second create
+    expect(applied).toEqual(["s1"]); // step drift converged in place
+  });
+
+  it("failed non-critical step is NOT cache-applied and re-runs on the next reconcile within TTL (decision 10)", async () => {
+    // C1 regression: step A succeeds, step B fails non-critically on the first
+    // reconcile. A second reconcile WITHIN OBSERVE_TTL_MS (trusting the cache,
+    // no file re-read) must RE-RUN step B rather than treat it as applied. Once
+    // B succeeds, the cache and the applied file agree.
+    const provider = new RecordingProvider();
+    const aCalls: number[] = [];
+    let bAttempts = 0;
+    let bShouldFail = true;
+    const nonCritical = (id: string, hash: string, apply: (sb: Sandbox) => Promise<void>): PrepStep => ({
+      id,
+      hash,
+      critical: false,
+      apply,
+    });
+    const mkSteps = () => [
+      nonCritical("a", "ah1", async () => {
+        aCalls.push(bAttempts);
+      }),
+      nonCritical("b", "bh1", async () => {
+        bAttempts++;
+        if (bShouldFail) throw new Error("step b transient failure");
+      }),
+    ];
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: mkSteps() });
+    // Boot with no desired steps applied yet: use createOpts.image only, then
+    // drift the spec so reconcile runs the full plan (a fresh boot already ran
+    // the plan once, so start from an empty applied file for clarity).
+    const att = new SandboxAttachment(provider, { image: "img:v1" }, fake.provider());
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    // Wipe the applied file so the next reconcile diffs against empty state and
+    // runs both steps. (The boot apply already ran a=ok, b=fail once.)
+    const sb = att.current();
+    if (!sb) throw new Error("expected a ready sandbox");
+    await sb.exec("rm -f /etc/valet/applied.json");
+    // Force the cached observation to be re-read from the (now empty) file by
+    // pushing its timestamp past the TTL is not exposed; instead drift the spec
+    // hash so diffSteps runs the steps regardless of the stale cache read.
+    fake.spec = { image: "img:v1", specHash: "h2", steps: mkSteps() };
+
+    aCalls.length = 0;
+    bAttempts = 0;
+
+    // First reconcile: a ok, b fails non-critically.
+    await att.reconcile();
+    expect(bAttempts).toBe(1); // b ran once and failed
+
+    // The applied file must NOT record b (it failed non-critically); a is there.
+    const stateAfterFail = await readAppliedState(sb);
+    expect(stateAfterFail?.steps.a).toBe("ah1");
+    expect(stateAfterFail?.steps.b).toBeUndefined();
+
+    // Second reconcile WITHIN the TTL — trusts the in-memory cache (no file
+    // re-read). Because the cache reflects the ACTUAL applied state (b absent),
+    // b MUST be re-run. Make it succeed this time.
+    bShouldFail = false;
+    await att.reconcile();
+    expect(bAttempts).toBe(2); // b re-ran — the whole point of the fix
+
+    // Now the cache and the file agree: both a and b are applied.
+    const stateAfterSuccess = await readAppliedState(sb);
+    expect(stateAfterSuccess?.steps).toEqual({ a: "ah1", b: "bh1" });
   });
 });
 

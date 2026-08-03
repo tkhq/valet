@@ -129,19 +129,29 @@ async function writeAppliedState(
  *    so skipped steps are not erased from the record.
  * 4. Non-critical step failure: logs one line via console.error and continues.
  * 5. Critical step failure: re-throws (caller maps to SandboxPreparationError).
+ *
+ * Returns the ACTUAL applied state — the last state written to the file, which
+ * includes prior applied steps merged with the steps this call landed. A step
+ * that failed non-critically is NOT in the returned `steps`, so the caller's
+ * observation cache reflects the true on-disk state and re-runs that step on
+ * the next reconcile within the TTL (spec decision 10). When no step ran, the
+ * return echoes the prior applied state (or an empty state) unchanged.
  */
 export async function applyPlan(
   sandbox: Sandbox,
   desired: DesiredSandboxSpec,
   image: string,
   applied: AppliedState | null,
-): Promise<void> {
-  const pending = diffSteps(desired.steps, applied);
-  if (pending.length === 0) return;
-
+): Promise<AppliedState> {
   // Start with whatever was already successfully applied (skipped steps keep
   // their recorded hashes so we don't erase prior work from the file).
   const completedSteps: Record<string, string> = applied ? { ...applied.steps } : {};
+  const pending = diffSteps(desired.steps, applied);
+  if (pending.length === 0) {
+    // No step ran — echo the prior applied state (or an empty state) so the
+    // caller always builds its cache from the real on-disk truth.
+    return { image, specHash: applied?.specHash ?? desired.specHash, steps: completedSteps };
+  }
 
   for (const step of pending) {
     try {
@@ -166,4 +176,14 @@ export async function applyPlan(
       steps: { ...completedSteps },
     });
   }
+
+  // The last state written to the file. `specHash` is the desired hash whenever
+  // any step landed; when every pending step failed non-critically nothing was
+  // written, so fall back to the prior applied hash (state on disk unchanged).
+  const anyLanded = Object.keys(completedSteps).length > (applied ? Object.keys(applied.steps).length : 0);
+  return {
+    image,
+    specHash: anyLanded ? desired.specHash : (applied?.specHash ?? desired.specHash),
+    steps: completedSteps,
+  };
 }

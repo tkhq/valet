@@ -407,7 +407,14 @@ export class SandboxAttachment {
       if (this.destroyed || this._state !== "ready" || this._epoch !== epoch) return;
 
       // ── Image drift → replace ──────────────────────────────────────
-      if (desired.image !== undefined && desired.image !== observed.image) {
+      // Decision 8: only an isolated backend may pod-replace on image drift. A
+      // non-isolated backend (docker/local/virtual — shared host, no per-pod
+      // image) must NEVER tear down and re-provision, so it skips this branch
+      // and falls through to step-drift-only convergence. Today this is inert
+      // because desired.image is undefined for those backends; the guard makes
+      // the invariant explicit and holds even if a desired.image ever leaks in.
+      const isolated = this.provider?.capabilities().isolated === true;
+      if (isolated && desired.image !== undefined && desired.image !== observed.image) {
         // Backoff: skip the replace when the SAME desired spec already failed
         // to replace within its exponential window (spec decision 6). A
         // repeatedly-failing image must not re-provision on every idle sweep.
@@ -471,18 +478,13 @@ export class SandboxAttachment {
       // fallback here is belt-and-suspenders: it prevents writing an empty
       // image string into the applied file if observe() somehow produced one.
       const image = observed.image || this.createOpts.image || "";
-      await applyPlan(sandbox, desired, image, observed);
+      const landed = await applyPlan(sandbox, desired, image, observed);
       if (this.destroyed || this._state !== "ready" || this._epoch !== epoch) return;
-      // Refresh the observation with what the in-place apply landed.
-      this.observation = {
-        applied: {
-          image,
-          specHash: desired.specHash,
-          steps: Object.fromEntries(desired.steps.map((s) => [s.id, s.hash])),
-        },
-        at: Date.now(),
-        epoch,
-      };
+      // Refresh the observation with what the in-place apply ACTUALLY landed —
+      // a step that failed non-critically is absent from `landed.steps`, so it
+      // is not cache-"applied" and gets re-run on the next reconcile within the
+      // TTL (spec decision 10).
+      this.observation = this.observationFromApplied(landed, epoch);
     } catch (err) {
       // reconcile never throws — the existing failure paths own degradation.
       console.error("SandboxAttachment.reconcile failed", err);
@@ -504,6 +506,17 @@ export class SandboxAttachment {
    * reconcile cycle, which would otherwise force a spurious full pod replacement
    * on the next boot for sessions whose desired image IS set (prebuild sessions).
    */
+  /**
+   * Build a fresh observation cache entry from the state `applyPlan` returned
+   * (spec decision 10). Both the cold-provision and step-drift reconcile paths
+   * use this so the cache always reflects what was ACTUALLY written to the
+   * applied file — including the exclusion of any step that failed
+   * non-critically — never the full desired step list. Stamps `at` to now.
+   */
+  private observationFromApplied(applied: AppliedState, epoch: number): ObservationCache {
+    return { applied, at: Date.now(), epoch };
+  }
+
   private async observe(sandbox: Sandbox, epoch: number): Promise<AppliedState> {
     const cache = this.observation;
     if (cache && cache.epoch === epoch && Date.now() - cache.at < OBSERVE_TTL_MS) {
@@ -763,19 +776,13 @@ export class SandboxAttachment {
       if (desired) {
         try {
           const appliedImage = bootImage ?? "";
-          await applyPlan(sandbox, desired, appliedImage, null);
-          // Cache what the fresh container now has applied (spec decision 4):
-          // a full apply of the desired spec against the boot image. reconcile
-          // trusts this within OBSERVE_TTL_MS instead of re-reading the file.
-          this.observation = {
-            applied: {
-              image: appliedImage,
-              specHash: desired.specHash,
-              steps: Object.fromEntries(desired.steps.map((s) => [s.id, s.hash])),
-            },
-            at: Date.now(),
-            epoch: this._epoch,
-          };
+          const landed = await applyPlan(sandbox, desired, appliedImage, null);
+          // Cache what the fresh container ACTUALLY has applied (spec decision
+          // 4): the state applyPlan last wrote, which excludes any step that
+          // failed non-critically. reconcile trusts this within OBSERVE_TTL_MS
+          // instead of re-reading the file, and re-runs a failed step next pass
+          // (spec decision 10) instead of treating it as applied.
+          this.observation = this.observationFromApplied(landed, this._epoch);
         } catch (prepErr) {
           // Terminal for this provision. Best-effort destroy the unprepped
           // sandbox unconditionally so the handle never leaks — even if a
