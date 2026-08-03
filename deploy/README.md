@@ -220,6 +220,22 @@ kubectl --context rancher-desktop delete ns valet-sandboxes --ignore-not-found
 That is not part of an ordinary reset — the controller is shared
 infrastructure that other experiments on the cluster may depend on.
 
+## Cache management
+
+Two environment variables control how much local disk the prebuild system uses.
+
+**`VALET_PREBUILD_BUILD_CACHE_GB`** (default `10`)
+
+This is the moby build-cache budget in GiB. The api prunes the build cache to this ceiling after each docker bake and after `make k8s-build*`. Pruning keeps Rancher Desktop from accumulating unbounded BuildKit cache between bakes.
+
+**`VALET_PREBUILD_CACHE_BUDGET_GB`** (default `20`)
+
+This is the global baked-image size ceiling in GiB. When total bake size exceeds this ceiling, the api evicts the oldest bakes first. It keeps at least 2 bakes per source (the retention floor) and never evicts the current or live bake for any source.
+
+Registry GC runs nightly as a k8s CronJob. It calls the registry with `--delete-untagged` and reclaims blobs for bakes that the api has already evicted.
+
+**Dev-only note (Rancher Desktop):** k3s may evict the local `valet-api:dev` image under DiskPressure. A bounded build cache prevents pressure from accumulating. If the image is evicted anyway, run `make k8s-build-fast` and then roll the api deployment to restore it.
+
 ## Troubleshooting
 
 - **api pod stuck in `Init:0/1`**: the `wait-for-postgres` initContainer
