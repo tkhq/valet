@@ -171,7 +171,10 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
     `dockerfile=${DOCKERFILE_MOUNT_DIR}`,
   ];
   if (spec.hasGitToken) {
-    args.push("--secret", `id=git-token,src=${GIT_TOKEN_MOUNT_PATH}`);
+    // A k8s Secret volume mounts as a DIRECTORY (one file per data key), so the
+    // BuildKit secret `src` must point at the token FILE, not the mount dir —
+    // `src=<dir>` fails the RUN with "read <dir>: is a directory".
+    args.push("--secret", `id=git-token,src=${GIT_TOKEN_MOUNT_PATH}/${GIT_TOKEN_SECRET_KEY}`);
   }
   // Push target = the PULL ref with its host swapped for the in-cluster PUSH
   // host (BuildKit reaches the registry over Service DNS, not the node-facing

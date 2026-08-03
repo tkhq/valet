@@ -113,7 +113,9 @@ describe("buildKitJobManifest", () => {
     });
     const container = job.spec?.template.spec?.containers[0];
     expect(container?.args).toContain("--secret");
-    expect(container?.args).toContain("id=git-token,src=/run/valet/git-token");
+    // src must be the token FILE inside the mount dir, not the dir itself —
+    // a k8s Secret volume mounts as a directory (key-per-file).
+    expect(container?.args).toContain("id=git-token,src=/run/valet/git-token/token");
     const secretMount = container?.volumeMounts?.find((m) => m.mountPath === "/run/valet/git-token");
     expect(secretMount).toBeDefined();
     const secretVolume = job.spec?.template.spec?.volumes?.find((v) => v.name === secretMount?.name);
