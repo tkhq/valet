@@ -87,7 +87,11 @@ sandbox:
   # Same CI-publishing story as api.image: for remote clusters use
   # ghcr.io/<owner>/valet-sandbox pinned to a sha-<shortsha> tag.
   image:
-    repository: valet-sandbox
+    # Pull-hosted through the bundled registry (NodePort) so BuildKit base
+    # bakes can FROM the stock image via the push-host rewrite, and so the
+    # stock ref is content-addressed for reconcile. `make k8s-build` pushes
+    # the image here.
+    repository: localhost:30500/valet-sandbox
     tag: dev
 
 service:

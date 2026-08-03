@@ -210,6 +210,8 @@ k8s-build: ## Build BOTH the api and sandbox images (full rebuild). Slower — p
 	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
 	@echo "$(GREEN)Building $(K8S_SANDBOX_IMAGE) from docker/Dockerfile.sandbox-k8s$(NC)"
 	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.sandbox-k8s -t $(K8S_SANDBOX_IMAGE) .
+	docker tag $(K8S_SANDBOX_IMAGE) localhost:30500/$(K8S_SANDBOX_IMAGE)
+	docker push localhost:30500/$(K8S_SANDBOX_IMAGE)
 	@echo "$(GREEN)Built $(K8S_API_IMAGE) and $(K8S_SANDBOX_IMAGE)$(NC)"
 
 k8s-build-api: ## Build ONLY the api image (skip sandbox). Use for iteration when sandbox contents haven't changed.
