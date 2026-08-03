@@ -138,11 +138,20 @@ describe("DockerImageBuilder lifecycle", () => {
       releaseFirst = resolve;
     });
 
-    const { spawnFn, calls } = fakeSpawnFn((child, call) => {
-      if (calls.length === 1) {
-        // First build: wait for the test to release it.
-        void firstGate.then(() => child.emit("close", 0, null));
+    // Count only docker build spawns (args[0] === "build"), not prune spawns.
+    const buildCalls: RecordedCall[] = [];
+    const { spawnFn } = fakeSpawnFn((child, call) => {
+      const isBuild = call.args[0] === "build";
+      if (isBuild) {
+        buildCalls.push(call);
+        if (buildCalls.length === 1) {
+          // First build: wait for the test to release it.
+          void firstGate.then(() => child.emit("close", 0, null));
+        } else {
+          child.emit("close", 0, null);
+        }
       } else {
+        // Prune spawn — resolve immediately.
         child.emit("close", 0, null);
       }
     });
@@ -151,14 +160,14 @@ describe("DockerImageBuilder lifecycle", () => {
     const first = await builder.build(baseSpec({ configId: "cfg-1" }));
     const second = await builder.build(baseSpec({ configId: "cfg-2" }));
 
-    // Wait until the first spawn actually happens (real fs I/O precedes it).
+    // Wait until the first build spawn actually happens (real fs I/O precedes it).
     const spawnDeadline = Date.now() + 5000;
-    while (calls.length < 1) {
+    while (buildCalls.length < 1) {
       if (Date.now() > spawnDeadline) throw new Error("first build never spawned");
       await new Promise((r) => setTimeout(r, 10));
     }
-    // Second must still be queued — only one spawn has happened.
-    expect(calls.length).toBe(1);
+    // Second must still be queued — only one build spawn has happened.
+    expect(buildCalls.length).toBe(1);
     const secondStatusBefore = await builder.status(second.buildId);
     expect(secondStatusBefore.state).toBe("queued");
 
@@ -166,26 +175,31 @@ describe("DockerImageBuilder lifecycle", () => {
     const firstStatus = await waitForTerminal(builder, first.buildId);
     const secondStatus = await waitForTerminal(builder, second.buildId);
 
-    expect(calls.length).toBe(2);
+    expect(buildCalls.length).toBe(2);
     expect(firstStatus.state).toBe("pushed");
     expect(secondStatus.state).toBe("pushed");
   });
 
   it("cancel kills the in-flight child and reports failed(cancelled)", async () => {
-    let spawnedChild: FakeChild | undefined;
-    const spawnFn: SpawnFn = (command, args) => {
+    let buildChild: FakeChild | undefined;
+    const spawnFn: SpawnFn = (_command, args) => {
       const child = new FakeChild();
       child.stdin.on("data", () => {});
-      spawnedChild = child;
-      // Never closes on its own — only via kill().
+      if (args[0] === "build") {
+        // Build spawn: captured for cancel — never closes on its own.
+        buildChild = child;
+      } else {
+        // Prune spawn: resolve immediately so the finally can complete.
+        setImmediate(() => child.emit("close", 0, null));
+      }
       return child;
     };
     const builder = new DockerImageBuilder({ spawnFn });
 
     const { buildId } = await builder.build(baseSpec());
-    // Wait for the fake process to actually be spawned (real fs I/O precedes it).
+    // Wait for the build process to be spawned (real fs I/O precedes it).
     const spawnDeadline = Date.now() + 5000;
-    while (!spawnedChild) {
+    while (!buildChild) {
       if (Date.now() > spawnDeadline) throw new Error("build never spawned a child");
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -193,7 +207,7 @@ describe("DockerImageBuilder lifecycle", () => {
     await builder.cancel(buildId);
     const status = await waitForTerminal(builder, buildId);
 
-    expect(spawnedChild.killed).toBe(true);
+    expect(buildChild.killed).toBe(true);
     expect(status.state).toBe("failed");
     expect(status.error).toBe("cancelled");
   });
@@ -201,10 +215,12 @@ describe("DockerImageBuilder lifecycle", () => {
   it("writes the git token to a 0600 temp file and cleans it up afterward", async () => {
     let capturedSecretPath: string | undefined;
     const { spawnFn } = fakeSpawnFn((child, call) => {
-      const secretArg = call.args.find((a) => a.startsWith("--secret"));
-      const idx = call.args.indexOf(secretArg ?? "");
-      const srcArg = call.args[idx + 1] ?? "";
-      capturedSecretPath = srcArg.replace("id=git-token,src=", "");
+      if (call.args[0] === "build") {
+        const secretArg = call.args.find((a) => a.startsWith("--secret"));
+        const idx = call.args.indexOf(secretArg ?? "");
+        const srcArg = call.args[idx + 1] ?? "";
+        capturedSecretPath = srcArg.replace("id=git-token,src=", "");
+      }
       child.emit("close", 0, null);
     });
     const builder = new DockerImageBuilder({ spawnFn });
@@ -220,16 +236,21 @@ describe("DockerImageBuilder lifecycle", () => {
   it("pins the git-token secret file to mode 0600 during the build", async () => {
     let statedMode: number | undefined;
     const { spawnFn } = fakeSpawnFn((child, call) => {
-      const secretArg = call.args.find((a) => a.startsWith("--secret"));
-      const idx = call.args.indexOf(secretArg ?? "");
-      const srcArg = call.args[idx + 1] ?? "";
-      const secretPath = srcArg.replace("id=git-token,src=", "");
-      // Inspect the file's mode while the build is still "in flight" (the
-      // fake spawn callback runs before the test emits `close`).
-      void stat(secretPath).then((st) => {
-        statedMode = st.mode & 0o777;
+      if (call.args[0] === "build") {
+        const secretArg = call.args.find((a) => a.startsWith("--secret"));
+        const idx = call.args.indexOf(secretArg ?? "");
+        const srcArg = call.args[idx + 1] ?? "";
+        const secretPath = srcArg.replace("id=git-token,src=", "");
+        // Inspect the file's mode while the build is still "in flight" (the
+        // fake spawn callback runs before the test emits `close`).
+        void stat(secretPath).then((st) => {
+          statedMode = st.mode & 0o777;
+          child.emit("close", 0, null);
+        });
+      } else {
+        // Prune spawn: resolve immediately.
         child.emit("close", 0, null);
-      });
+      }
     });
     const builder = new DockerImageBuilder({ spawnFn });
 
@@ -267,7 +288,10 @@ describe("DockerImageBuilder lifecycle", () => {
       const ok = await builder.build(baseSpec({ configId: "cfg-ok" }));
       const okStatus = await waitForTerminal(builder, ok.buildId);
       expect(okStatus.state).toBe("pushed");
-      expect(calls.length).toBe(1); // only the second (successful) build ever spawned docker
+      // Only the second (successful) build + its prune ever spawned docker —
+      // the first build failed before spawn (mkdtemp ENOSPC).
+      const buildSpawnCount = calls.filter((c) => c.args[0] === "build").length;
+      expect(buildSpawnCount).toBe(1);
 
       // Give any stray unhandled-rejection microtask a turn to surface.
       await new Promise((r) => setTimeout(r, 10));
@@ -283,8 +307,15 @@ describe("DockerImageBuilder lifecycle", () => {
       releaseFirst = resolve;
     });
 
-    const { spawnFn, calls } = fakeSpawnFn((child) => {
-      void firstGate.then(() => child.emit("close", 0, null));
+    // Count only build spawns; prune spawns close immediately.
+    const buildCalls: RecordedCall[] = [];
+    const { spawnFn } = fakeSpawnFn((child, call) => {
+      if (call.args[0] === "build") {
+        buildCalls.push(call);
+        void firstGate.then(() => child.emit("close", 0, null));
+      } else {
+        child.emit("close", 0, null);
+      }
     });
     const builder = new DockerImageBuilder({ spawnFn });
 
@@ -294,7 +325,7 @@ describe("DockerImageBuilder lifecycle", () => {
     // Wait until the first build actually spawns, confirming the second is
     // still sitting in the queue (never having spawned).
     const spawnDeadline = Date.now() + 5000;
-    while (calls.length < 1) {
+    while (buildCalls.length < 1) {
       if (Date.now() > spawnDeadline) throw new Error("first build never spawned");
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -311,7 +342,31 @@ describe("DockerImageBuilder lifecycle", () => {
     expect(firstStatus.state).toBe("pushed");
 
     // The cancelled queued build never reached spawn — only the first build did.
-    expect(calls.length).toBe(1);
+    expect(buildCalls.length).toBe(1);
+  });
+
+  it("triggers a builder prune spawn after a completed bake", async () => {
+    // The bake spawn (call 0) closes with exit 0; the prune spawn (call 1)
+    // closes with exit 0. Both use the same fake spawnFn.
+    const { spawnFn, calls } = fakeSpawnFn((child) => {
+      child.emit("close", 0, null);
+    });
+    const builder = new DockerImageBuilder({ spawnFn, buildCacheCapGb: 10 });
+
+    const { buildId } = await builder.build(baseSpec());
+    await waitForTerminal(builder, buildId);
+
+    // Wait for the prune spawn — it is fired async in the `finally` after the
+    // bake resolves, so the build may already be "pushed" before it spawns.
+    const spawnDeadline = Date.now() + 5000;
+    while (calls.length < 2) {
+      if (Date.now() > spawnDeadline) throw new Error("prune was never spawned");
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // First spawn: docker build; second spawn: docker builder prune.
+    expect(calls[1]!.command).toBe("docker");
+    expect(calls[1]!.args).toEqual(["builder", "prune", "-f", "--keep-storage", "10GB"]);
   });
 });
 

@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "./builder.js";
+import { pruneBuildCache } from "./build-cache.js";
 import { generateBaseDockerfile, generateDockerfile } from "./recipe.js";
 
 /** Ring buffer cap for retained build log lines (`BuildStatus.logTail`). */
@@ -83,6 +84,10 @@ export interface DockerImageBuilderOpts {
    * substitute a rejecting fake to exercise pre-spawn failure paths (e.g.
    * ENOSPC/EMFILE) without needing to actually exhaust host resources. */
   mkdtempFn?: (prefix: string) => Promise<string>;
+  /** Maximum moby build-cache size in GB. After each bake the builder runs
+   * `docker builder prune --keep-storage=<n>GB` to keep the local daemon
+   * from filling the disk. Default: 10. */
+  buildCacheCapGb?: number;
 }
 
 export class DockerImageBuilder implements ImageBuilder {
@@ -90,6 +95,7 @@ export class DockerImageBuilder implements ImageBuilder {
 
   private readonly spawnFn: SpawnFn;
   private readonly mkdtempFn: (prefix: string) => Promise<string>;
+  private readonly buildCacheCapGb: number;
   private readonly builds = new Map<string, BuildRecord>();
   private readonly pendingSpecs = new Map<string, PrebuildSpec>();
   private readonly queue: string[] = [];
@@ -99,6 +105,7 @@ export class DockerImageBuilder implements ImageBuilder {
   constructor(opts: DockerImageBuilderOpts = {}) {
     this.spawnFn = opts.spawnFn ?? spawn;
     this.mkdtempFn = opts.mkdtempFn ?? mkdtemp;
+    this.buildCacheCapGb = opts.buildCacheCapGb ?? 10;
   }
 
   async build(spec: PrebuildSpec): Promise<{ buildId: string }> {
@@ -230,6 +237,9 @@ export class DockerImageBuilder implements ImageBuilder {
       // briefly; a failed `rm` here is accepted as an OS temp-dir leak that
       // the host's normal temp GC will reclaim, not something we retry.
       if (tmpDir) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      // Bound the moby build cache on every bake (success or failure). A
+      // prune failure never propagates — `pruneBuildCache` always resolves.
+      await pruneBuildCache(this.spawnFn, this.buildCacheCapGb).catch(() => {});
     }
 
     if (outcome.ok) {

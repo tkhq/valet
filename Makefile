@@ -197,6 +197,9 @@ K8S_SANDBOX_IMAGE ?= valet-sandbox:dev
 # every k8s-build* target enables it explicitly so behavior is stable
 # regardless of the developer's DOCKER_BUILDKIT env setting.
 K8S_BUILD_ENV = DOCKER_BUILDKIT=1
+# Moby build-cache cap: after each docker build the prune step keeps at most
+# this many GB, preventing disk exhaustion from repeated local bakes.
+VALET_BUILD_CACHE_GB ?= 10
 
 k8s-build: ## Build BOTH the api and sandbox images (full rebuild). Slower — prefer k8s-build-api when only the api/web changed.
 	@docker info >/dev/null 2>&1 || { \
@@ -208,8 +211,10 @@ k8s-build: ## Build BOTH the api and sandbox images (full rebuild). Slower — p
 	  exit 1; }
 	@echo "$(GREEN)Building $(K8S_API_IMAGE) from docker/Dockerfile.api$(NC)"
 	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
+	docker builder prune -f --keep-storage=$(VALET_BUILD_CACHE_GB)GB || true
 	@echo "$(GREEN)Building $(K8S_SANDBOX_IMAGE) from docker/Dockerfile.sandbox-k8s$(NC)"
 	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.sandbox-k8s -t $(K8S_SANDBOX_IMAGE) .
+	docker builder prune -f --keep-storage=$(VALET_BUILD_CACHE_GB)GB || true
 	docker tag $(K8S_SANDBOX_IMAGE) localhost:30500/$(K8S_SANDBOX_IMAGE)
 	docker push localhost:30500/$(K8S_SANDBOX_IMAGE)
 	@echo "$(GREEN)Built $(K8S_API_IMAGE) and $(K8S_SANDBOX_IMAGE)$(NC)"
@@ -218,11 +223,13 @@ k8s-build-api: ## Build ONLY the api image (skip sandbox). Use for iteration whe
 	@docker info >/dev/null 2>&1 || { echo "$(RED)docker daemon not reachable$(NC)"; exit 1; }
 	@echo "$(GREEN)Building $(K8S_API_IMAGE) from docker/Dockerfile.api$(NC)"
 	$(K8S_BUILD_ENV) docker build -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
+	docker builder prune -f --keep-storage=$(VALET_BUILD_CACHE_GB)GB || true
 
 k8s-build-fast: ## Build ONLY the api image WITHOUT the workspace typecheck. Fastest inner loop; run `pnpm typecheck` yourself first.
 	@docker info >/dev/null 2>&1 || { echo "$(RED)docker daemon not reachable$(NC)"; exit 1; }
 	@echo "$(GREEN)Building $(K8S_API_IMAGE) (SKIP_TYPECHECK=1)$(NC)"
 	$(K8S_BUILD_ENV) docker build --build-arg SKIP_TYPECHECK=1 -f docker/Dockerfile.api -t $(K8S_API_IMAGE) .
+	docker builder prune -f --keep-storage=$(VALET_BUILD_CACHE_GB)GB || true
 	@echo "$(YELLOW)Containerd-mode note:$(NC) this target uses plain 'docker build' (Rancher"
 	@echo "  Desktop in moby mode, our default — see decision 2 in the k8s design doc)."
 	@echo "  If you've switched Rancher Desktop to containerd mode instead, these images"

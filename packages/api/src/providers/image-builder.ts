@@ -73,8 +73,13 @@ export function resolveImageBuilder(
 ): ImageBuilder | null {
   const backend = parseImageBuilderBackend(env.VALET_IMAGE_BUILDER) ?? defaultBackendFor(parseSandboxBackend(env.VALET_SANDBOX_BACKEND));
   switch (backend) {
-    case "docker":
-      return new DockerImageBuilder({ spawnFn: deps.spawnFn });
+    case "docker": {
+      const buildCacheCapGb = Number(env.VALET_PREBUILD_BUILD_CACHE_GB ?? 10);
+      return new DockerImageBuilder({
+        spawnFn: deps.spawnFn,
+        buildCacheCapGb: Number.isFinite(buildCacheCapGb) ? buildCacheCapGb : 10,
+      });
+    }
     case "kubernetes": {
       const namespace = env.VALET_SANDBOX_NAMESPACE ?? "valet-sandboxes";
       const kc = deps.kubeConfig ?? resolveKubeConfig(env);
