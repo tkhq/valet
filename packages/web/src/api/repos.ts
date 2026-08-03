@@ -49,8 +49,8 @@ export function useConnectGithub() {
   });
 }
 
-/** `GET /api/prebuilds/for-repo` — member-accessible (sandbox images v2
- * plan, Task 6). Powers the new-session dialog's "prebuilt" badge; `enabled`
+/** `GET /api/sources/for-repo` — member-accessible (sandbox-reconciliation
+ * plan, Task 17). Powers the new-session dialog's "prebuilt" badge; `enabled`
  * gates it so it only fires once a repo is actually selected. */
 export function useRepoPrebuild(fullName: string | undefined) {
   return useQuery<GetPrebuildForRepoResponse>({

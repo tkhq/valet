@@ -2,6 +2,11 @@
  * POST /api/sessions — Task 5 (sandbox auth gateway plan): create accepts
  * an optional `profile` ("headless" | "full"), persists it, and returns it.
  * Omitting `profile` defaults to "headless".
+ *
+ * Also covers zero-config repo sources (sandbox-reconciliation plan, Task 19):
+ * binding a repo at session-create time fires `ensureRepoSource` fire-and-forget,
+ * upserts an enabled kind='repo' image_sources row, and queues a first bake when
+ * an org GitHub credential and image builder are available.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtemp } from "node:fs/promises";
@@ -9,8 +14,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, sessionRepos } from "../schema/index.js";
+import { startGithubFixture } from "../test-helpers/github-fixture.js";
+import { agentSessions, sessionRepos, imageSources, bakes } from "../schema/index.js";
+import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import type { CreateSessionResponse, GetSessionResponse } from "../wire/types.js";
+
+// Minimal fake builder for zero-config source tests.
+class FakeImageBuilder implements ImageBuilder {
+  readonly backend = "docker";
+  readonly specs: PrebuildSpec[] = [];
+  private nextId = 1;
+
+  async build(spec: PrebuildSpec): Promise<{ buildId: string }> {
+    this.specs.push(spec);
+    return { buildId: `fake-${this.nextId++}` };
+  }
+
+  async status(): Promise<BuildStatus> {
+    return { state: "building" };
+  }
+}
 
 describe("POST /api/sessions: profile", () => {
   let api: TestApi | undefined;
@@ -297,5 +320,142 @@ describe("POST /api/sessions: repo bindings", () => {
       }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+// ── Zero-config repo sources (sandbox-reconciliation plan, Task 19) ──────────
+
+describe("POST /api/sessions: zero-config repo sources", () => {
+  let api: TestApi | undefined;
+  let fixture: Awaited<ReturnType<typeof startGithubFixture>> | undefined;
+  const REPO = { fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" };
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+    await fixture?.close();
+    fixture = undefined;
+  });
+
+  it("session create returns 201 immediately — ensureRepoSource is fire-and-forget", async () => {
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-fast-"));
+
+    const t0 = Date.now();
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, repo: REPO }),
+    });
+    const elapsed = Date.now() - t0;
+    expect(res.status).toBe(201);
+    // The route must not block on bake work; 5 s is a loose upper bound.
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  it("with builder + org GitHub credential: upserts enabled repo source and queues a first bake", async () => {
+    const builder = new FakeImageBuilder();
+    // Wire a GitHub fixture so resolveHeadSha (inside startRepoBake) succeeds
+    // without hitting the real GitHub API.
+    fixture = startGithubFixture();
+    api = await bootTestApi({ imageBuilder: builder, githubApiUrl: fixture.url });
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-bake-"));
+    const { db, engineCredentials } = api.providers;
+
+    // Seed an org-scoped GitHub credential so ensureRepoSource can fire the bake.
+    await engineCredentials.save({ type: "org", id: "local-org" }, "github", {
+      type: "api_key",
+      accessToken: "test-pat",
+      metadata: { login: "test-bot" },
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, repo: REPO }),
+    });
+    expect(res.status).toBe(201);
+
+    // Give the fire-and-forget task a moment to complete.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const sources = await db
+      .select()
+      .from(imageSources)
+      .where(eq(imageSources.repoFullName, "acme/widgets"));
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.kind).toBe("repo");
+    expect(sources[0]?.enabled).toBe(true);
+
+    const bakeRows = await db
+      .select()
+      .from(bakes)
+      .where(eq(bakes.sourceId, sources[0]!.id));
+    expect(bakeRows.length).toBeGreaterThanOrEqual(1);
+    expect(bakeRows.every((b) => b.status === "queued" || b.status === "building")).toBe(true);
+  });
+
+  it("without org GitHub credential: source row upserted but no bake queued", async () => {
+    // No credential saved — ensureRepoSource must silently skip the bake.
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-nocred-"));
+    const { db } = api.providers;
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, repo: REPO }),
+    });
+    expect(res.status).toBe(201);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const sources = await db
+      .select()
+      .from(imageSources)
+      .where(eq(imageSources.repoFullName, "acme/widgets"));
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.kind).toBe("repo");
+    expect(sources[0]?.enabled).toBe(true);
+
+    const bakeRows = await db
+      .select()
+      .from(bakes)
+      .where(eq(bakes.sourceId, sources[0]!.id));
+    expect(bakeRows).toHaveLength(0);
+  });
+
+  it("without builder: source row upserted but no bake queued", async () => {
+    // builder: null — ensureRepoSource must silently skip the bake.
+    api = await bootTestApi({ imageBuilder: null });
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-nobuilder-"));
+    const { db, engineCredentials } = api.providers;
+
+    await engineCredentials.save({ type: "org", id: "local-org" }, "github", {
+      type: "api_key",
+      accessToken: "test-pat",
+      metadata: { login: "test-bot" },
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, repo: REPO }),
+    });
+    expect(res.status).toBe(201);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const sources = await db
+      .select()
+      .from(imageSources)
+      .where(eq(imageSources.repoFullName, "acme/widgets"));
+    expect(sources).toHaveLength(1);
+
+    const bakeRows = await db
+      .select()
+      .from(bakes)
+      .where(eq(bakes.sourceId, sources[0]!.id));
+    expect(bakeRows).toHaveLength(0);
   });
 });
