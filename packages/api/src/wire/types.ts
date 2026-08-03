@@ -1329,14 +1329,78 @@ export interface SandboxGitAnonymous {
 
 export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGitAnonymous;
 
-// ── REST: sandbox image prebuilds (sandbox images v2 plan, Task 6) ───────
+// ── REST: sandbox image sources + bakes (sandbox-reconciliation plan, Task 17) ──
 //
-// `/api/org/image-catalog` + `/api/org/prebuilds/*` — org-admin CRUD, see
-// `routes/image-catalog.ts` / `routes/prebuilds.ts`. Row shapes are
-// returned verbatim (no secret material lives on either table) so these
-// wire types mirror the Drizzle row types 1:1. `/api/prebuilds/for-repo` is
-// the one member-accessible (non-admin-gated) read in this group — its
-// response is deliberately narrow (see `GetPrebuildForRepoResponse`).
+// `/api/org/sources` — org-admin CRUD for all image source kinds
+// (external/base/repo) and their bake history. Replaces the split
+// `/api/org/image-catalog` + `/api/org/prebuilds/*` surfaces.
+// `/api/sources/for-repo` is the one member-accessible (non-admin-gated)
+// read — deliberately narrow (see `GetPrebuildForRepoResponse`).
+//
+// SourceSummary mirrors the `image_sources` row; BakeSummary mirrors `bakes`.
+// The legacy types below (ImageCatalogEntryWire, PrebuildConfigWire, etc.)
+// are kept while web components migrate in Task 18.
+
+// ── New unified types (/api/org/sources) ────────────────────────────────────
+
+/** Mirrors the `image_sources` row for all kinds (external/base/repo). */
+export interface SourceSummary {
+  id: string;
+  orgId: string;
+  kind: "external" | "base" | "repo";
+  parentId: string | null;
+  name: string;
+  externalRef: string | null;
+  pullSecretName: string | null;
+  setupCommands: string[] | null;
+  repoHost: string | null;
+  repoFullName: string | null;
+  cloneUrl: string | null;
+  schedule: "nightly" | "off";
+  enabled: boolean;
+  lastBoundAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Mirrors the `bakes` row. */
+export interface BakeSummary {
+  id: string;
+  sourceId: string;
+  identityHash: string;
+  commitSha: string | null;
+  imageRef: string;
+  status: "queued" | "building" | "pushed" | "failed";
+  builderBackend: string | null;
+  error: string | null;
+  logTail: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  createdAt: number;
+}
+
+export interface ListSourcesResponse {
+  sources: SourceSummary[];
+  builderAvailable: boolean;
+}
+
+export interface CreateSourceResponse {
+  source: SourceSummary;
+}
+
+export interface PatchSourceResponse {
+  source: SourceSummary;
+}
+
+export interface ListBakesResponse {
+  bakes: BakeSummary[];
+}
+
+export interface TriggerBakeResponse {
+  bake: BakeSummary;
+}
+
+// ── Legacy types kept for web-component backward compatibility (Task 18 migrates) ──
 
 // `image_sources` row (kind='external') — replaces the old image_catalog
 // entry. `externalRef` is the image URI that was previously `ref`.

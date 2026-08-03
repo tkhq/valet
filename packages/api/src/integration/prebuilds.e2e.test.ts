@@ -50,11 +50,7 @@ import { startGithubFixture, type GithubFixture } from "../test-helpers/github-f
 import { DockerImageBuilder } from "../prebuilds/docker-builder.js";
 import { agentSessions, bakes } from "../schema/index.js";
 import type {
-  CreateImageCatalogResponse,
-  CreatePrebuildConfigResponse,
   CreateSessionResponse,
-  ListPrebuildBuildsResponse,
-  RebuildPrebuildResponse,
 } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -169,36 +165,48 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
         metadata: { login: "org-pat" },
       });
 
-      // ── 1. Catalog entry ────────────────────────────────────────────────
-      const catalogRes = await fetch(`${api.baseUrl}/api/org/image-catalog`, {
+      // ── 1. External source (replaces old image-catalog entry) ────────────
+      const catalogRes = await fetch(`${api.baseUrl}/api/org/sources`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ name: "t7-e2e-base", ref: BASE_IMAGE }),
+        body: JSON.stringify({ kind: "external", name: "t7-e2e-base", externalRef: BASE_IMAGE }),
       });
       expect(catalogRes.status).toBe(201);
-      const { image: catalogImage } = (await catalogRes.json()) as CreateImageCatalogResponse;
+      const { source: catalogImage } = (await catalogRes.json()) as { source: { id: string } };
 
-      // ── 2. Prebuild config ───────────────────────────────────────────────
-      const configRes = await fetch(`${api.baseUrl}/api/org/prebuilds/configs`, {
-        method: "POST",
-        headers: HEADERS,
-        body: JSON.stringify({
-          repoFullName: REPO_FULL_NAME,
-          cloneUrl: CLONE_URL,
-          baseImageId: catalogImage.id,
-          schedule: "off",
-        }),
-      });
-      expect(configRes.status).toBe(201);
-      const { config } = (await configRes.json()) as CreatePrebuildConfigResponse;
+      // ── 2. Repo source (replaces old prebuild config) ────────────────────
+      // Repo sources are auto-created on session bind; for this e2e we insert
+      // directly via the DB to avoid wiring a full bind flow here.
+      const { imageSources } = await import("../schema/index.js");
+      const { randomUUID } = await import("node:crypto");
+      const repoSourceRow = {
+        id: `src_${randomUUID()}`,
+        orgId: "local-org",
+        kind: "repo" as const,
+        parentId: catalogImage.id,
+        name: REPO_FULL_NAME,
+        externalRef: null,
+        pullSecretName: null,
+        setupCommands: null,
+        repoHost: "github",
+        repoFullName: REPO_FULL_NAME,
+        cloneUrl: CLONE_URL,
+        schedule: "off" as const,
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      await api.providers.db.insert(imageSources).values(repoSourceRow);
+      const config = repoSourceRow;
 
       // ── 3. Real build #1 (via the route + real docker daemon) ──────────
-      const rebuildRes = await fetch(`${api.baseUrl}/api/org/prebuilds/configs/${config.id}/rebuild`, {
+      const rebuildRes = await fetch(`${api.baseUrl}/api/org/sources/${config.id}/bake`, {
         method: "POST",
         headers: HEADERS,
       });
       expect(rebuildRes.status).toBe(202);
-      const { prebuild: firstBuild } = (await rebuildRes.json()) as RebuildPrebuildResponse;
+      const { bake: firstBuild } = (await rebuildRes.json()) as { bake: { status: string } };
       expect(firstBuild.status).toBe("queued");
 
       const firstPushed = await waitForConfigPushed(api, config.id, 180_000);
@@ -324,7 +332,7 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
         },
       ]);
 
-      const rebuild2Res = await fetch(`${api.baseUrl}/api/org/prebuilds/configs/${config.id}/rebuild`, {
+      const rebuild2Res = await fetch(`${api.baseUrl}/api/org/sources/${config.id}/bake`, {
         method: "POST",
         headers: HEADERS,
       });
@@ -346,10 +354,10 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
       const kept2 = spawnSync("docker", ["image", "inspect", secondPushed.imageRef], { stdio: "pipe" });
       expect(kept2.status).toBe(0);
 
-      const allBuilds = await fetch(`${api.baseUrl}/api/org/prebuilds/configs/${config.id}/builds`, {
+      const allBuilds = await fetch(`${api.baseUrl}/api/org/sources/${config.id}/bakes`, {
         headers: HEADERS,
       });
-      const { builds } = (await allBuilds.json()) as ListPrebuildBuildsResponse;
+      const { bakes: builds } = (await allBuilds.json()) as { bakes: unknown[] };
       // All 4 ROWS survive (retention deletes images, never rows).
       expect(builds).toHaveLength(4);
     },
@@ -361,19 +369,29 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
  * `bootTestApi`) until the config's NEWEST build (excluding `skipId`, used
  * on the second rebuild so the poll doesn't false-positive on the
  * already-pushed first build) reaches `pushed`/`failed`. */
+interface BakeRow {
+  id: string;
+  status: string;
+  commitSha: string | null;
+  imageRef: string;
+  error: string | null;
+  logTail: string | null;
+  createdAt: number;
+}
+
 async function waitForConfigPushed(
   testApi: TestApi,
   configId: string,
   timeoutMs: number,
   skipId?: string,
-) {
+): Promise<BakeRow> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await testApi.providers.prebuildService.syncActiveBuilds();
-    const res = await fetch(`${testApi.baseUrl}/api/org/prebuilds/configs/${configId}/builds`, {
+    const res = await fetch(`${testApi.baseUrl}/api/org/sources/${configId}/bakes`, {
       headers: HEADERS,
     });
-    const { builds } = (await res.json()) as ListPrebuildBuildsResponse;
+    const { bakes: builds } = (await res.json()) as { bakes: BakeRow[] };
     const newest = builds.find((b) => b.id !== skipId);
     if (newest?.status === "pushed") return newest;
     if (newest?.status === "failed") throw new Error(`prebuild failed: ${newest.error}\n${newest.logTail ?? ""}`);
