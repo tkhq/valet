@@ -507,11 +507,18 @@ export class KubernetesImageBuilder implements ImageBuilder {
 
   private async dispatch(buildId: string, rec: BuildRecord): Promise<void> {
     try {
+      // Rewrite the base image's pull host to the push host so BuildKit can
+      // fetch it over in-cluster Service DNS rather than the node-local pull
+      // host (unreachable from a BuildKit pod). Mirrors the output-ref rewrite
+      // (`pushRefFor` on `imageRef` → `--output name=`) applied below in
+      // `buildKitJobManifest`. Host-agnostic generation stays in recipe.ts —
+      // the rewrite lives here at the builder boundary only.
+      const baseImage = pushRefFor(rec.spec.baseImage, this.registryPushHost);
       const dockerfile =
         rec.spec.kind === "base"
-          ? generateBaseDockerfile({ baseImage: rec.spec.baseImage, setup: rec.spec.setup ?? [] })
+          ? generateBaseDockerfile({ baseImage, setup: rec.spec.setup ?? [] })
           : generateDockerfile({
-              baseImage: rec.spec.baseImage,
+              baseImage,
               cloneUrl: rec.spec.cloneUrl,
               commitSha: rec.spec.commitSha,
               recipe: rec.spec.recipe,

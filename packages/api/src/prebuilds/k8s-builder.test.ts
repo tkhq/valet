@@ -640,4 +640,65 @@ describe("KubernetesImageBuilder", () => {
     };
     await expect(builder.cleanupOrphan("pb_never_existed")).resolves.toBeUndefined();
   });
+
+  // ── base-image FROM rewriting (builder boundary, not recipe.ts) ─────────
+
+  it("base bake: Dockerfile FROM uses push host when base image is pull-hosted", async () => {
+    // A base bake whose baseImage is `localhost:30500/valet-sandbox:dev`
+    // (the pull ref, stored on the row) must become
+    // `valet-registry.ns.svc:5000/valet-sandbox:dev` in the generated
+    // Dockerfile so BuildKit can fetch it via in-cluster DNS, not the
+    // node-local pull host that's unreachable from the BuildKit pod.
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryPushHost: "valet-registry.ns.svc:5000",
+    });
+    await builder.build(
+      baseSpec({
+        kind: "base",
+        baseImage: "localhost:30500/valet-sandbox:dev",
+        imageRef: "localhost:30500/valet-sandbox:custom",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
+    expect(dockerfile).toContain("FROM valet-registry.ns.svc:5000/valet-sandbox:dev");
+    expect(dockerfile).not.toContain("FROM localhost:30500/");
+  });
+
+  it("base bake: Dockerfile FROM is untouched for a public base image with no matching pull host", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi, {
+      registryPushHost: "valet-registry.ns.svc:5000",
+    });
+    await builder.build(
+      baseSpec({
+        kind: "base",
+        baseImage: "node:20-bookworm",
+        imageRef: "localhost:30500/valet-sandbox:node20",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
+    expect(dockerfile).toContain("FROM node:20-bookworm");
+  });
+
+  it("base bake: Dockerfile FROM is untouched when no push host is configured", async () => {
+    const jobsApi = new FakeJobsApi();
+    // No registryPushHost — push and pull host are the same (or external registry).
+    const builder = newBuilder(jobsApi);
+    await builder.build(
+      baseSpec({
+        kind: "base",
+        baseImage: "localhost:30500/valet-sandbox:dev",
+        imageRef: "localhost:30500/valet-sandbox:custom",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dockerfile = jobsApi.configMaps.get("valet-prebuild-pb-1-dockerfile")?.data?.["Dockerfile"] ?? "";
+    expect(dockerfile).toContain("FROM localhost:30500/valet-sandbox:dev");
+  });
 });
