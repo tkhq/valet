@@ -510,6 +510,27 @@ describe("SourceService", () => {
       expect(repoRow.identityHash).toBe(expectedIdentity);
     });
 
+    it("cascade dispatches a child; a scheduler pass while the child is queued does NOT double-dispatch (I3)", async () => {
+      const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      await seedRepoSource(db, { id: "repo1", parentId: baseId });
+      // Pass 1: base dispatches, repo defers.
+      await service.runSchedulerPass();
+
+      // Drive the base bake to pushed → cascade dispatches the repo child.
+      const baseBuildId = builder.buildIds[builder.buildIds.length - 1];
+      builder.setState(baseBuildId, { state: "pushed" });
+      await service.syncActiveBuilds();
+
+      const repoSpecsAfterCascade = builder.specs.filter((s) => s.kind === "repo").length;
+      expect(repoSpecsAfterCascade).toBe(1); // cascade dispatched the child
+
+      // The child bake is now `queued` (dispatched, not yet pushed). A scheduler
+      // pass in this window must NOT dispatch a second bake for the same child.
+      await service.runSchedulerPass();
+      const repoSpecsAfterScheduler = builder.specs.filter((s) => s.kind === "repo").length;
+      expect(repoSpecsAfterScheduler).toBe(1); // no second dispatch
+    });
+
     it("stale-base edit: repo defers in the pass; base re-pushes; kick rebakes repo FROM the new ref", async () => {
       const baseId = await seedBaseSource(db, ["apt-get install -y jq"]);
       const [base] = await db.select().from(imageSources).where(eq(imageSources.id, baseId));
@@ -707,12 +728,12 @@ describe("SourceService", () => {
     });
 
     it("never throws on a DB error", async () => {
-      const brokenDb = {
-        select: () => {
-          throw new Error("db down");
-        },
-      } as unknown as AppDb;
-      const brokenService = makeService({ db: brokenDb });
+      // Use the real db but make its first read throw, so ensureRepoSource's
+      // try/catch is exercised against a genuine AppDb shape (no double-cast).
+      const brokenService = makeService({ db });
+      vi.spyOn(db, "select").mockImplementationOnce(() => {
+        throw new Error("db down");
+      });
       await expect(brokenService.ensureRepoSource(orgId, repo)).resolves.toBeUndefined();
     });
   });

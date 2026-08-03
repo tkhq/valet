@@ -58,7 +58,9 @@ import { resolveGithubApiUrl } from "../services/github-env.js";
 export class PrebuildUnavailableError extends Error {
   readonly statusCode = 409;
   constructor() {
-    super("prebuilds are unavailable on this deployment (no image builder is configured)");
+    super(
+      "Image builds are unavailable on this deployment. Ask your operator to configure an image builder.",
+    );
     this.name = "PrebuildUnavailableError";
   }
 }
@@ -172,7 +174,7 @@ async function registryManifestDelete(imageRef: string, fetchImpl: typeof fetch,
 }
 
 export function defaultRetention(
-  spawnFn: SpawnFn = spawn as unknown as SpawnFn,
+  spawnFn: SpawnFn = spawn,
   fetchImpl: typeof fetch = fetch,
   registryInsecure = false,
   registryPushHost?: string,
@@ -408,6 +410,19 @@ export class SourceService {
     if (!source.parentId) return null;
     const rows = await this.db.select().from(imageSources).where(eq(imageSources.id, source.parentId)).limit(1);
     return rows[0] ?? null;
+  }
+
+  /** True when a source already has a bake in flight (`queued` or `building`).
+   * Consulted before every dispatch (cascade, scheduler, first-bake) so a
+   * cascade-then-scheduler (or two scheduler passes) never double-dispatch a
+   * second bake while the first is still running. */
+  async hasActiveBake(sourceId: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ id: bakes.id })
+      .from(bakes)
+      .where(and(eq(bakes.sourceId, sourceId), inArray(bakes.status, ["queued", "building"])))
+      .limit(1);
+    return rows.length > 0;
   }
 
   /** Newest `pushed` bake for a source, or null. */
@@ -777,6 +792,9 @@ export class SourceService {
 
         const current = await this.currentBake(child.id);
         if (current && current.commitSha === head.sha && current.identityHash === identity) continue;
+        // Skip when a bake is already in flight — the scheduler tick may race
+        // this cascade for the same child.
+        if (await this.hasActiveBake(child.id)) continue;
 
         console.log(`prebuild cascade: kick ${child.name}: base bake pushed`);
         await this.startBake(child.id);
@@ -845,6 +863,12 @@ export class SourceService {
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
       return;
     }
+    // Skip when a base bake is already in flight — a prior scheduler tick may
+    // have dispatched one that has not pushed yet.
+    if (await this.hasActiveBake(source.id)) {
+      console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
+      return;
+    }
     await this.startBake(source.id);
   }
 
@@ -887,6 +911,12 @@ export class SourceService {
     const current = await this.currentBake(source.id);
     if (current && current.commitSha === head.sha && current.identityHash === identity) {
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
+      return;
+    }
+    // Skip when a bake is already in flight — a cascade (or a prior scheduler
+    // tick) may have dispatched a bake for this source that has not pushed yet.
+    if (await this.hasActiveBake(source.id)) {
+      console.log(`prebuild scheduler: skip ${source.name}: bake already in flight`);
       return;
     }
     // Reuse the resolved head/recipe by baking through startRepoBake, which
@@ -1010,6 +1040,12 @@ export class SourceService {
     }
     if (await this.repoBakeDefers(source)) {
       console.log(`ensureRepoSource: defer ${repo.fullName}: waiting for base bake`);
+      return;
+    }
+    // Skip when a bake is already in flight — a cascade or scheduler tick may
+    // have dispatched one between the caller's currentBake check and here.
+    if (await this.hasActiveBake(sourceId)) {
+      console.log(`ensureRepoSource: skip ${repo.fullName}: bake already in flight`);
       return;
     }
     try {
