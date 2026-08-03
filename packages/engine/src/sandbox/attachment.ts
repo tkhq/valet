@@ -662,6 +662,26 @@ export class SandboxAttachment {
         superseded = true;
         return;
       }
+      // Push credential files into the sandbox after resume (hibernate wake
+      // path). A pod woken from hibernation mounts the CURRENT Secret when one
+      // exists, but a sandbox suspended before the creds-mount feature was
+      // deployed has no Secret. updateCreds is upsert-shaped (writeSecret
+      // creates on 404), so this materializes the missing Secret and is
+      // idempotent for sandboxes that already have one. Best-effort: a push
+      // failure must never strand a wake — the env-var fallback covers 24h.
+      // Docker updateCreds throws "not found" after an API restart (the
+      // in-memory map is empty). Docker resume also throws "not found" on that
+      // same path, so this branch is unreachable for docker post-restart.
+      if (
+        provider.updateCreds &&
+        provider.capabilities().credsMount &&
+        this.createOpts.credsFiles &&
+        Object.keys(this.createOpts.credsFiles).length > 0
+      ) {
+        await provider.updateCreds(sandbox.id, this.createOpts.credsFiles).catch((err) => {
+          console.error("SandboxAttachment: updateCreds after resume failed (non-fatal)", err);
+        });
+      }
       // The raw handle is reused as-is — resume wakes the same sandbox.
       this._state = "ready";
       this.emitStatus();
@@ -749,6 +769,26 @@ export class SandboxAttachment {
       if (this.destroyed) {
         await provider.destroy(sandbox.id).catch(() => {});
         return;
+      }
+      // Push credential files into the sandbox after create (restore path).
+      // provider.create() on k8s is upsert-shaped and already writes the
+      // Secret, so this is idempotent — but a session restored across an API
+      // restart that was created before the creds-mount feature has no Secret.
+      // updateCreds is upsert-shaped (writeSecret creates on 404), so this
+      // materializes the missing Secret. Best-effort: a push failure must never
+      // fail a provision — the 24h env-var fallback still covers the sandbox.
+      // Docker updateCreds requires the in-memory sandbox map populated by
+      // create(), which is always the case here (docker sandbox was just
+      // created), so docker is reachable but idempotent on this path too.
+      if (
+        provider.updateCreds &&
+        provider.capabilities().credsMount &&
+        this.createOpts.credsFiles &&
+        Object.keys(this.createOpts.credsFiles).length > 0
+      ) {
+        await provider.updateCreds(sandbox.id, this.createOpts.credsFiles).catch((err) => {
+          console.error("SandboxAttachment: updateCreds after create failed (non-fatal)", err);
+        });
       }
       if (desired) {
         try {
