@@ -133,3 +133,15 @@ On the local k8s deploy: edit a shim script, deploy — next prompt on a running
 - Migrating gateway env consumers (ttyd/code-server auth) to the creds mount.
 - Warm pools keyed on current resolution (Stage 2 of the hibernation spec; noted so pool keys use source identity, not raw image refs).
 - Multi-sandbox sessions (slots stay singular this pass) and composite multi-repo bakes.
+
+## Deviations from this spec (recorded during implementation)
+
+**`applyPlan` returns the actual applied map** (commit 76823092). The spec (decision 10) assumed the observation cache is built from the desired plan list. The implementation builds it from `applyPlan`'s real return value instead. A failed non-critical step is therefore not cached as applied and re-runs at the next window — closing a hole in decision 10 found during final review.
+
+**Base bakes need registry-hosted FROM and insecure pull** (commits 108f2e71, 9be6a30d; stock image push to bundled registry). BuildKit resolves FROM refs through registries, so: (a) the stock sandbox image must be pushed to the bundled registry, and `VALET_SANDBOX_IMAGE` must point at the NodePort pull host; (b) the k8s builder rewrites a pull-host FROM ref to the in-cluster push host before sending the build context; (c) an insecure (HTTP) registry requires a `buildkitd.toml` `http = true` entry for pulls, mirroring the insecure flag already used for output pushes. Consequence: pointing the stock ref at the registry changes it, so every running sandbox replaces (workspace-preserving) at the next prompt — exercising the reconcile rollout path for real.
+
+**Creds Secret adopted under the Sandbox CR** (commit fe6e20ea). `updateCreds`/create best-effort set an `ownerReference` on the creds Secret so that deleting the Sandbox CR garbage-collects the Secret. This closes the rotate-sweep orphan risk not addressed in the spec.
+
+**DDL runbook lives in `deploy/README.md`** (commit 215c4ca8). The pre-1.0 restructure (`image_sources`/`bakes`) requires manual DDL on live clusters. The runnable block is in `deploy/README.md`; the commit-body placeholder was not executable.
+
+**Deferred items still open.** Cascade + scheduler double-dispatch guard landed (I3). The `packages/web` package is not yet in the root `tsc --build` graph (CI follow-up tracked separately). The manual-rebuild path uses the stock ref as FROM when no base bake exists — documented escape hatch, not a spec violation.

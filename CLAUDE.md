@@ -99,10 +99,11 @@ Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/mig
 
 ### Sandbox gotchas
 
-- The default dev sandbox image has no ttyd/code-server/gateway; point `VALET_SANDBOX_IMAGE` at an image built from `docker/Dockerfile.sandbox-k8s` to exercise the Terminal/VS Code tabs on the docker backend.
+- The default dev sandbox image has no ttyd/code-server/gateway; point `VALET_SANDBOX_IMAGE` at an image built from `docker/Dockerfile.sandbox-k8s` to exercise the Terminal/VS Code tabs on the docker backend. On the k8s backend, `VALET_SANDBOX_IMAGE` must be registry-hosted (pushed to the bundled registry / NodePort pull host) because base bakes use it as their FROM ref via BuildKit — see `docs/specs/2026-08-02-sandbox-reconcile-design.md` Deviations.
+- The engine no longer uses a `prepareSandbox` closure. Sandbox prep is declarative: an injected `SpecProvider` returns ordered `PrepStep[]`; `attachment.reconcile` converges them at each run-start window. The old `prebuild_configs`/`prebuilds` tables are replaced by `image_sources` + `bakes`. See `docs/specs/2026-08-02-sandbox-reconcile-design.md`.
 - The in-sandbox gateway enforces `sid === VALET_SESSION_ID` from JWT claims — one session's JWT is rejected in another session's sandbox.
 - `VALET_SANDBOX_IDLE_MINUTES` (default 30) only matters on the kubernetes backend; hibernation is a no-op elsewhere.
-- **An api restart revokes running sandboxes' tokens without telling them**: cache rebuilds mint a fresh `VALET_SANDBOX_TOKEN` and revoke the old one, but nothing pushes the new value into a still-running sandbox — in-sandbox consumers (git-credential helper, `valet-gh`) 403 until the sandbox is recreated. See the GitHub integration design's Deviations section.
+- **An api restart revokes running sandboxes' tokens without telling them**: on providers without a creds mount, cache rebuilds mint a fresh `VALET_SANDBOX_TOKEN` and revoke the old one, but nothing pushes the new value into a still-running sandbox — in-sandbox consumers (git-credential helper, `valet-gh`) 403 until the sandbox is recreated. The `credsMount`-capable providers (kubernetes Secret volume; docker host-dir bind mount) close this gap via the rotate sweep. See the GitHub integration design's Deviations section.
 
 ### Kubernetes context safety (binding)
 
