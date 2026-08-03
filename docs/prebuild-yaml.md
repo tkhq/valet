@@ -33,7 +33,7 @@ Use `skipDetect` when your repo brings its own toolchain that the base image doe
 The bake produces a Dockerfile in this order:
 
 1. `FROM <base image>` — org base (or the `image` override).
-2. Clone the repo into `/prebuilt/repo`. The clone runs inside a single `RUN --mount=type=secret,id=git-token` instruction, so the git token is never written to an image layer. The instruction writes an ASKPASS helper, clones, sets `WORKDIR /prebuilt/repo`, checks out the commit SHA, and removes the helper — all in one layer.
+2. Clone the repo into `/prebuilt/repo`. The clone runs inside a single `RUN --mount=type=secret,id=git-token` instruction that writes an ASKPASS helper, clones the repo, and removes the helper — all in one layer, so the git token is never written to an image layer. A separate `WORKDIR /prebuilt/repo` directive follows, then a separate `RUN git checkout <sha>` layer checks out the target commit outside the secret mount.
 3. Auto-detected install steps — one `RUN` per matched lockfile, unless `skipDetect: true`.
 4. `setup` commands — one `RUN` per entry, in list order.
 5. `LABEL valet.prebuild.identity="..."` — the identity hash that the cache lookup uses.
