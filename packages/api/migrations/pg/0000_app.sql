@@ -620,6 +620,7 @@ CREATE TABLE "bakes" (
 	"log_tail" text,
 	"started_at" bigint,
 	"finished_at" bigint,
+	"size_bytes" BIGINT,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint

@@ -51,6 +51,7 @@ import type { ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { pushRefFor } from "../prebuilds/k8s-builder.js";
 import { headRegistryManifest, parseRegistryImageRef } from "../prebuilds/registry.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
+import { measureBakeSize } from "../prebuilds/bake-size.js";
 
 /** Thrown by `startBake` when no `ImageBuilder` is wired
  * (`Providers.imageBuilder === null`) — routes map this to a 409 with an
@@ -376,6 +377,8 @@ export class SourceService {
   private readonly retention: RetentionFn;
   private readonly env: NodeJS.ProcessEnv;
   private readonly activeBuildIds = new Map<string, string>();
+  private readonly registryInsecure: boolean;
+  private readonly registryPushHost: string | undefined;
   private pollTimer?: ReturnType<typeof setInterval>;
   private schedulerTimer?: ReturnType<typeof setInterval>;
 
@@ -388,9 +391,9 @@ export class SourceService {
     this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.schedulerIntervalMs = deps.schedulerIntervalMs ?? DEFAULT_SCHEDULER_INTERVAL_MS;
     this.env = deps.env ?? process.env;
-    const registryInsecure = deps.registryInsecure ?? this.env.VALET_PREBUILD_REGISTRY_INSECURE === "true";
-    const registryPushHost = deps.registryPushHost ?? (this.env.VALET_PREBUILD_REGISTRY_PUSH || undefined);
-    this.retention = deps.retention ?? defaultRetention(undefined, undefined, registryInsecure, registryPushHost);
+    this.registryInsecure = deps.registryInsecure ?? this.env.VALET_PREBUILD_REGISTRY_INSECURE === "true";
+    this.registryPushHost = deps.registryPushHost ?? (this.env.VALET_PREBUILD_REGISTRY_PUSH || undefined);
+    this.retention = deps.retention ?? defaultRetention(undefined, undefined, this.registryInsecure, this.registryPushHost);
   }
 
   /** The wired builder's backend id, or `null` when prebuilds are
@@ -583,6 +586,7 @@ export class SourceService {
       logTail: null,
       startedAt: now,
       finishedAt: null,
+      sizeBytes: null,
       createdAt: now,
     };
     await this.db.insert(bakes).values(row);
@@ -649,6 +653,7 @@ export class SourceService {
       logTail: null,
       startedAt: now,
       finishedAt: null,
+      sizeBytes: null,
       createdAt: now,
     };
     await this.db.insert(bakes).values(row);
@@ -727,6 +732,19 @@ export class SourceService {
           .update(bakes)
           .set({ status: "pushed", logTail: status.logTail ?? null, finishedAt: this.now() })
           .where(eq(bakes.id, row.id));
+        try {
+          const size = await measureBakeSize(builder.backend, row.imageRef, {
+            spawnFn: spawn,
+            fetchImpl: fetch,
+            registryInsecure: this.registryInsecure,
+            registryPushHost: this.registryPushHost,
+          });
+          if (size !== null) {
+            await this.db.update(bakes).set({ sizeBytes: size }).where(eq(bakes.id, row.id));
+          }
+        } catch {
+          // best-effort — size measurement never blocks the push transition
+        }
         await this.applyRetention(row.sourceId, builder.backend);
         await this.cascadeBaseChildren(row.sourceId);
       } else {

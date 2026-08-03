@@ -989,6 +989,7 @@ export const bakes = pgTable(
     logTail: text("log_tail"),
     startedAt: bigint("started_at", { mode: "number" }),
     finishedAt: bigint("finished_at", { mode: "number" }),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("bakes_source_status_created").on(t.sourceId, t.status, t.createdAt)],
