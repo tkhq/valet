@@ -682,21 +682,21 @@ export class EngineHost {
   }
 
   /**
-   * Persist `agent_sessions.prebuild_id` for a session that resolved to a
+   * Persist `agent_sessions.bake_id` for a session that resolved to a
    * prebuilt image (sandbox images v2, Task 4). Best-effort: a write failure
    * is logged, never thrown — the sandbox already points at the right image
    * regardless of whether the bookkeeping row updates, and session build must
    * never fail on prebuild resolution. Skipped when no app db is wired.
    */
-  private async recordPrebuildId(sessionId: string, prebuildId: string): Promise<void> {
+  private async recordPrebuildId(sessionId: string, bakeId: string): Promise<void> {
     if (!this.opts.db) return;
     try {
       await this.opts.db
         .update(agentSessions)
-        .set({ prebuildId })
+        .set({ bakeId })
         .where(eq(agentSessions.id, sessionId));
     } catch (err) {
-      console.error(`EngineHost: recording prebuild_id for session ${sessionId} failed:`, err);
+      console.error(`EngineHost: recording bake_id for session ${sessionId} failed:`, err);
     }
   }
 

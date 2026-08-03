@@ -21,7 +21,7 @@ import {
 } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, prebuildConfigs, prebuilds } from "../schema/index.js";
+import { agentSessions, imageSources, bakes } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 
 /** Minimal `Sandbox` that returns success for every exec and no-ops the fs
@@ -103,20 +103,28 @@ describe("EngineHost prebuild resolution at session create", () => {
 
   async function seedPrebuild(db: TestApi["providers"]["db"], enabled = true): Promise<void> {
     const now = Date.now();
-    await db.insert(prebuildConfigs).values({
+    await db.insert(imageSources).values({
       id: "cfg1",
       orgId: ORG,
+      kind: "repo",
+      parentId: null,
+      name: REPO,
+      externalRef: null,
+      pullSecretName: null,
+      setupCommands: null,
       repoHost: "github",
       repoFullName: REPO,
       cloneUrl: "https://github.com/acme/widgets.git",
       schedule: "nightly",
       enabled,
+      lastBoundAt: null,
       createdAt: now,
       updatedAt: now,
     });
-    await db.insert(prebuilds).values({
+    await db.insert(bakes).values({
       id: "pb1",
-      configId: "cfg1",
+      sourceId: "cfg1",
+      identityHash: "",
       commitSha: "sha1",
       imageRef: IMAGE_REF,
       status: "pushed",
@@ -173,7 +181,7 @@ describe("EngineHost prebuild resolution at session create", () => {
       .select()
       .from(agentSessions)
       .where(eq(agentSessions.id, sessionId));
-    expect(rows[0]?.prebuildId).toBe("pb1");
+    expect(rows[0]?.bakeId).toBe("pb1");
   });
 
   it("falls back to the stock image (and leaves prebuild_id null) when the config is disabled", async () => {
@@ -211,6 +219,6 @@ describe("EngineHost prebuild resolution at session create", () => {
       .select()
       .from(agentSessions)
       .where(eq(agentSessions.id, sessionId));
-    expect(rows[0]?.prebuildId ?? null).toBeNull();
+    expect(rows[0]?.bakeId ?? null).toBeNull();
   });
 });

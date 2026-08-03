@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SandboxCapabilities, SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { prebuildConfigs, prebuilds } from "../schema/index.js";
+import { imageSources, bakes } from "../schema/index.js";
 import type { SessionMeta } from "./host.js";
 import type { RepoBinding } from "../wire/types.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
@@ -68,24 +68,32 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 
 async function seedConfig(db: AppDb): Promise<string> {
   const id = "cfg1";
-  await db.insert(prebuildConfigs).values({
+  await db.insert(imageSources).values({
     id,
     orgId: ORG,
+    kind: "repo",
+    parentId: null,
+    name: REPO,
+    externalRef: null,
+    pullSecretName: null,
+    setupCommands: null,
     repoHost: "github",
     repoFullName: REPO,
     cloneUrl: "https://github.com/acme/widgets.git",
     schedule: "nightly",
     enabled: true,
+    lastBoundAt: null,
     createdAt: NOW,
     updatedAt: NOW,
   });
   return id;
 }
 
-async function seedPushedPrebuild(db: AppDb, configId: string): Promise<void> {
-  await db.insert(prebuilds).values({
+async function seedPushedPrebuild(db: AppDb, sourceId: string): Promise<void> {
+  await db.insert(bakes).values({
     id: "pb-1",
-    configId,
+    sourceId,
+    identityHash: "",
     commitSha: "abc123",
     imageRef: "valet-prebuild/acme-widgets:abc123",
     status: "pushed",

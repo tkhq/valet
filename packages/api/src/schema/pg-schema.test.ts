@@ -342,6 +342,7 @@ describe("pg app schema + migrations", () => {
         ref: "main",
         auth: "auto",
         position: 0,
+        targetDir: null,
       });
       expect(rows[1]?.fullName).toBe("acme/sprockets");
       expect(rows[1]?.ref).toBeNull();

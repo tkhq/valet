@@ -11,7 +11,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs, prebuildConfigs, prebuilds, imageCatalog } from "../schema/index.js";
+import { orgs, imageSources, bakes } from "../schema/index.js";
 import { GitHubAuthError, type GitHubTokenDeps } from "../services/github-tokens.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "./builder.js";
 import {
@@ -85,18 +85,24 @@ async function seedOrg(db: AppDb, credentials: PgCredentialStore): Promise<void>
 
 async function seedConfig(
   db: AppDb,
-  overrides: Partial<typeof prebuildConfigs.$inferInsert> = {},
+  overrides: Partial<typeof imageSources.$inferInsert> = {},
 ): Promise<string> {
-  const id = overrides.id ?? `pbc_${Math.random().toString(36).slice(2)}`;
-  await db.insert(prebuildConfigs).values({
+  const id = overrides.id ?? `src_${Math.random().toString(36).slice(2)}`;
+  await db.insert(imageSources).values({
     id,
     orgId,
+    kind: "repo",
+    parentId: null,
+    name: "acme/widgets",
+    externalRef: null,
+    pullSecretName: null,
+    setupCommands: null,
     repoHost: "github",
     repoFullName: "acme/widgets",
     cloneUrl: "https://github.com/acme/widgets.git",
-    baseImageId: null,
     schedule: "nightly",
     enabled: true,
+    lastBoundAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -186,7 +192,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
 
       // Persisted row never carries the git token.
       expect(JSON.stringify(row)).not.toContain("org-pat-token");
-      const dbRows = await db.select().from(prebuilds);
+      const dbRows = await db.select().from(bakes);
       expect(dbRows).toHaveLength(1);
       expect(JSON.stringify(dbRows[0])).not.toContain("org-pat-token");
     });
@@ -198,17 +204,27 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       expect(builder.specs).toHaveLength(0);
     });
 
-    it("prefers the image_catalog base image when there is no .valet/prebuild.yaml override", async () => {
-      await db.insert(imageCatalog).values({
+    it("prefers the parent image source's externalRef when there is no .valet/prebuild.yaml override", async () => {
+      // Seed an external-kind source that acts as the parent/base image.
+      await db.insert(imageSources).values({
         id: "img_1",
         orgId,
+        kind: "external",
+        parentId: null,
         name: "Custom base",
-        ref: "ghcr.io/acme/base:latest",
+        externalRef: "ghcr.io/acme/base:latest",
         pullSecretName: null,
-        kind: "base",
+        setupCommands: null,
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
         createdAt: NOW,
+        updatedAt: NOW,
       });
-      const configId = await seedConfig(db, { baseImageId: "img_1" });
+      const configId = await seedConfig(db, { parentId: "img_1" });
       await service.startBuild(configId);
       expect(builder.specs[0].baseImage).toBe("ghcr.io/acme/base:latest");
     });
@@ -245,7 +261,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
 
       await expect(throwingService.startBuild(configId)).rejects.toThrow(/boom: docker daemon unreachable/);
 
-      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      const rows = await db.select().from(bakes).where(eq(bakes.sourceId, configId));
       expect(rows).toHaveLength(1);
       expect(rows[0].status).toBe("failed");
       expect(rows[0].error).toContain("boom: docker daemon unreachable");
@@ -314,7 +330,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
         );
         await expect(privateService.startBuild(configId)).rejects.toBeInstanceOf(GitHubAuthError);
 
-        const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+        const rows = await db.select().from(bakes).where(eq(bakes.sourceId, configId));
         expect(rows).toHaveLength(0); // never dispatched — failed before the row was inserted
       } finally {
         await privateFixture.close();
@@ -330,7 +346,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
 
       await service.syncActiveBuilds();
 
-      const [updated] = await db.select().from(prebuilds).where(eq(prebuilds.id, row.id));
+      const [updated] = await db.select().from(bakes).where(eq(bakes.id, row.id));
       expect(updated.status).toBe("pushed");
       expect(updated.finishedAt).toBe(NOW);
       expect(updated.logTail).toBe("done");
@@ -343,7 +359,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
 
       await service.syncActiveBuilds();
 
-      const [updated] = await db.select().from(prebuilds).where(eq(prebuilds.id, row.id));
+      const [updated] = await db.select().from(bakes).where(eq(bakes.id, row.id));
       expect(updated.status).toBe("failed");
       expect(updated.error).toBe("docker build exited with code 1");
       expect(updated.finishedAt).toBe(NOW);
@@ -356,7 +372,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
 
       await service.syncActiveBuilds();
 
-      const [updated] = await db.select().from(prebuilds).where(eq(prebuilds.id, row.id));
+      const [updated] = await db.select().from(bakes).where(eq(bakes.id, row.id));
       expect(updated.status).toBe("building");
       expect(updated.finishedAt).toBeNull();
     });
@@ -393,7 +409,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       expect(retentionCalls[0].imageRefs).toEqual([imageRefs[0]]);
 
       // Rows are history — never deleted, only the images are pruned.
-      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      const rows = await db.select().from(bakes).where(eq(bakes.sourceId, configId));
       expect(rows.filter((r) => r.status === "pushed")).toHaveLength(3);
     });
 
@@ -431,7 +447,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       // still referenced by kept rowA2, so nothing should be deleted.
       expect(retentionCalls).toHaveLength(0);
 
-      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      const rows = await db.select().from(bakes).where(eq(bakes.sourceId, configId));
       expect(rows.filter((r) => r.status === "pushed")).toHaveLength(3);
     });
   });
@@ -439,9 +455,10 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
   describe("start()", () => {
     it("sweeps queued/building rows to failed (interrupted by restart) before starting the poll/scheduler intervals", async () => {
       const configId = await seedConfig(db);
-      await db.insert(prebuilds).values({
+      await db.insert(bakes).values({
         id: "pb_stuck_building",
-        configId,
+        sourceId: configId,
+        identityHash: "",
         commitSha: "stuckbuilding",
         imageRef: "valet-prebuild/acme-widgets:stuckbuilding",
         status: "building",
@@ -453,9 +470,10 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
         finishedAt: null,
         createdAt: NOW,
       });
-      await db.insert(prebuilds).values({
+      await db.insert(bakes).values({
         id: "pb_stuck_queued",
-        configId,
+        sourceId: configId,
+        identityHash: "",
         commitSha: "stuckqueued",
         imageRef: "valet-prebuild/acme-widgets:stuckqueued",
         status: "queued",
@@ -468,9 +486,10 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
         createdAt: NOW,
       });
       // A pushed row from a prior process must be left alone by the sweep.
-      await db.insert(prebuilds).values({
+      await db.insert(bakes).values({
         id: "pb_already_pushed",
-        configId,
+        sourceId: configId,
+        identityHash: "",
         commitSha: "donesha",
         imageRef: "valet-prebuild/acme-widgets:donesha",
         status: "pushed",
@@ -485,7 +504,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
 
       await service.start();
 
-      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      const rows = await db.select().from(bakes).where(eq(bakes.sourceId, configId));
       const byId = new Map(rows.map((r) => [r.id, r]));
       expect(byId.get("pb_stuck_building")?.status).toBe("failed");
       expect(byId.get("pb_stuck_building")?.error).toBe("interrupted by restart");
@@ -522,9 +541,10 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
 
       const configId = await seedConfig(db);
       for (const id of ["pb_k8s_building", "pb_k8s_boom"]) {
-        await db.insert(prebuilds).values({
+        await db.insert(bakes).values({
           id,
-          configId,
+          sourceId: configId,
+          identityHash: "",
           commitSha: id,
           imageRef: `valet-registry:5000/acme-widgets:${id}`,
           status: "building",
@@ -541,7 +561,7 @@ describe("PrebuildService.startBuild / syncActiveBuilds", () => {
       await k8sService.start();
       k8sService.stop();
 
-      const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, configId));
+      const rows = await db.select().from(bakes).where(eq(bakes.sourceId, configId));
       const byId = new Map(rows.map((r) => [r.id, r]));
       // Both rows failed despite one cleanup throwing.
       expect(byId.get("pb_k8s_building")?.status).toBe("failed");
@@ -591,10 +611,11 @@ describe("PrebuildService.runSchedulerPass", () => {
     await fixture.close();
   });
 
-  async function seedBuild(configId: string, overrides: Partial<typeof prebuilds.$inferInsert> = {}): Promise<void> {
-    await db.insert(prebuilds).values({
+  async function seedBuild(sourceId: string, overrides: Partial<typeof bakes.$inferInsert> = {}): Promise<void> {
+    await db.insert(bakes).values({
       id: overrides.id ?? `pb_${Math.random().toString(36).slice(2)}`,
-      configId,
+      sourceId,
+      identityHash: "",
       commitSha: "stale-sha",
       imageRef: "valet-prebuild/acme-widgets:stale-sha",
       status: "pushed",

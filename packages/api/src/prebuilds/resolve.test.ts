@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SandboxCapabilities, SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { prebuildConfigs, prebuilds } from "../schema/index.js";
+import { imageSources, bakes } from "../schema/index.js";
 import type { SessionMeta } from "../engine/host.js";
 import type { RepoBinding } from "../wire/types.js";
 import { resolvePrebuildImage } from "./resolve.js";
@@ -59,14 +59,21 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 
 async function seedConfig(db: AppDb, opts: { enabled?: boolean } = {}): Promise<string> {
   const id = "cfg1";
-  await db.insert(prebuildConfigs).values({
+  await db.insert(imageSources).values({
     id,
     orgId: ORG,
+    kind: "repo",
+    parentId: null,
+    name: REPO,
+    externalRef: null,
+    pullSecretName: null,
+    setupCommands: null,
     repoHost: "github",
     repoFullName: REPO,
     cloneUrl: "https://github.com/acme/widgets.git",
     schedule: "nightly",
     enabled: opts.enabled ?? true,
+    lastBoundAt: null,
     createdAt: NOW,
     updatedAt: NOW,
   });
@@ -75,7 +82,7 @@ async function seedConfig(db: AppDb, opts: { enabled?: boolean } = {}): Promise<
 
 async function seedPrebuild(
   db: AppDb,
-  configId: string,
+  sourceId: string,
   opts: {
     id: string;
     status: "queued" | "building" | "pushed" | "failed";
@@ -85,9 +92,10 @@ async function seedPrebuild(
     recipe?: unknown;
   },
 ): Promise<void> {
-  await db.insert(prebuilds).values({
+  await db.insert(bakes).values({
     id: opts.id,
-    configId,
+    sourceId,
+    identityHash: "",
     commitSha: opts.commitSha,
     imageRef: opts.imageRef,
     status: opts.status,

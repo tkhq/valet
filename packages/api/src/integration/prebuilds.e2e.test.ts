@@ -48,7 +48,7 @@ import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { DockerImageBuilder } from "../prebuilds/docker-builder.js";
-import { agentSessions, prebuilds } from "../schema/index.js";
+import { agentSessions, bakes } from "../schema/index.js";
 import type {
   CreateImageCatalogResponse,
   CreatePrebuildConfigResponse,
@@ -229,7 +229,7 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
         .select()
         .from(agentSessions)
         .where(eq(agentSessions.id, boundSession.id));
-      expect(boundRows[0]?.prebuildId).toBe(firstPushed.id);
+      expect(boundRows[0]?.bakeId).toBe(firstPushed.id);
 
       const sandbox = engineSession.attachment.current();
       expect(sandbox).not.toBeNull();
@@ -259,7 +259,7 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
         .select()
         .from(agentSessions)
         .where(eq(agentSessions.id, unboundSession.id));
-      expect(unboundRows[0]?.prebuildId ?? null).toBeNull();
+      expect(unboundRows[0]?.bakeId ?? null).toBeNull();
 
       // ── 6. Retention: seed two older real "pushed" builds, then a real
       // rebuild pushes a third — the oldest of the three must be deleted. ──
@@ -289,10 +289,11 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
       // `startBuild` call below, whose `createdAt` is `Date.now()` at that
       // point — always later than these fixed offsets).
       const seedBase = firstPushed.createdAt;
-      await api.providers.db.insert(prebuilds).values([
+      await api.providers.db.insert(bakes).values([
         {
           id: "pb-t7-old1",
-          configId: config.id,
+          sourceId: config.id,
+          identityHash: "",
           commitSha: "seed-sha-1",
           imageRef: oldRefs[0]!,
           status: "pushed",
@@ -306,7 +307,8 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
         },
         {
           id: "pb-t7-old2",
-          configId: config.id,
+          sourceId: config.id,
+          identityHash: "",
           commitSha: "seed-sha-2",
           imageRef: oldRefs[1]!,
           status: "pushed",

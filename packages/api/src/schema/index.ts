@@ -323,12 +323,12 @@ export const agentSessions = pgTable(
     // web-created interactive sessions may request "full" — orchestrator,
     // child, and workflow sessions always hardcode "headless".
     profile: text("profile", { enum: ["headless", "full"] }).notNull().default("headless"),
-    // The `prebuilds.id` this session's sandbox booted from, when session
-    // create resolved the primary repo binding to a `pushed` prebuild image
+    // The `bakes.id` this session's sandbox booted from, when session
+    // create resolved the primary repo binding to a `pushed` bake image
     // (sandbox images v2 plan, Task 4). Null for cold-start sessions (no
-    // matching config/prebuild, or a `customImage: false` provider). Nullable
-    // — the vast majority of sessions never resolve a prebuild.
-    prebuildId: text("prebuild_id"),
+    // matching source/bake, or a `customImage: false` provider). Nullable
+    // — the vast majority of sessions never resolve a bake.
+    bakeId: text("bake_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -875,6 +875,11 @@ export const sessionRepos = pgTable(
       .notNull()
       .default("auto"),
     position: integer("position").notNull(),
+    // Target directory inside the sandbox workspace for this repo binding.
+    // Null until Task 14 populates it during workspace prep. The engine's
+    // `computeTargetDirs` logic assigns the actual value at session create time;
+    // this column persists the resolved path for later reference.
+    targetDir: text("target_dir"),
   },
   (t) => [
     index("session_repos_session").on(t.sessionId),
@@ -910,73 +915,83 @@ export const githubInstallations = pgTable(
   ],
 );
 
-// ─── Sandbox image prebuilds (sandbox images v2 plan, Task 1) ──────────────
+// ─── Sandbox image sources + bakes (sandbox-reconciliation plan, Task 13) ──
 //
-// Three tables: `image_catalog` (admin-registered base images an org can
-// pin a prebuild config to), `prebuild_configs` (one row per repo an org
-// has opted into nightly/manual prebuilds for), `prebuilds` (one row per
-// build attempt — `recipe` snapshots the RESOLVED `RecipeStep[]` at build
-// time, per `packages/api/src/prebuilds/recipe.ts`, so a later change to
-// detection logic never retroactively changes what an already-built image
-// claims to contain).
+// Two tables replace the old image_catalog/prebuild_configs/prebuilds trio:
+//
+// `image_sources` — one row per named image source an org has registered.
+//   kind='external': a plain external image ref (replaces image_catalog).
+//   kind='base': the org's single base image layer (partial unique index).
+//   kind='repo': a repo-tied source whose nightly/manual bakes produce the
+//     prebuilt sandbox image (replaces prebuild_configs). Partial unique
+//     index on (org_id, repo_host, repo_full_name) for kind='repo' only.
+//   `parent_id` chains sources (e.g. repo source → base source). Nullable;
+//   Task 15 owns real parent-first resolution.
+//
+// `bakes` — one row per build attempt for a source (replaces prebuilds).
+//   `identity_hash` is the recipe-content hash used to detect unnecessary
+//   rebuilds; Task 15 populates it with a real hash. This task uses "".
+//   `recipe`/`builder_backend` are nullable (unlike old prebuilds) because
+//   kind='external'/'base' sources may never bake. `commit_sha` is optional
+//   for the same reason.
 
-export const imageCatalog = pgTable(
-  "image_catalog",
+export const imageSources = pgTable(
+  "image_sources",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
+    kind: text("kind", { enum: ["external", "base", "repo"] }).notNull(),
+    parentId: text("parent_id"),
     name: text("name").notNull(),
-    ref: text("ref").notNull(),
+    // kind='external' fields
+    externalRef: text("external_ref"),
     pullSecretName: text("pull_secret_name"),
-    kind: text("kind", { enum: ["base"] })
-      .notNull()
-      .default("base"),
-    createdAt: bigint("created_at", { mode: "number" }).notNull(),
-  },
-  (t) => [index("image_catalog_org").on(t.orgId)],
-);
-
-export const prebuildConfigs = pgTable(
-  "prebuild_configs",
-  {
-    id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    repoHost: text("repo_host").notNull().default("github"),
-    repoFullName: text("repo_full_name").notNull(),
-    cloneUrl: text("clone_url").notNull(),
-    baseImageId: text("base_image_id"),
+    // kind='base' fields
+    setupCommands: jsonb("setup_commands"),
+    // kind='repo' fields
+    repoHost: text("repo_host"),
+    repoFullName: text("repo_full_name"),
+    cloneUrl: text("clone_url"),
+    // Shared scheduling/state
     schedule: text("schedule", { enum: ["nightly", "off"] })
       .notNull()
       .default("nightly"),
     enabled: boolean("enabled").notNull().default(true),
+    lastBoundAt: bigint("last_bound_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [
-    index("prebuild_configs_org").on(t.orgId),
-    uniqueIndex("prebuild_configs_org_repo").on(t.orgId, t.repoHost, t.repoFullName),
-  ],
+  // Partial unique indexes are not expressible via Drizzle's uniqueIndex()
+  // with a WHERE clause — declared in migrations/pg/0000_app.sql instead
+  // (same pattern as llm_providers_org_kind_singleton).
+  () => [],
 );
 
-export const prebuilds = pgTable(
-  "prebuilds",
+export const bakes = pgTable(
+  "bakes",
   {
     id: text("id").primaryKey(),
-    configId: text("config_id").notNull(),
-    commitSha: text("commit_sha").notNull(),
+    // ON DELETE CASCADE: dropping a source purges its build history.
+    sourceId: text("source_id").notNull(),
+    // Recipe-content hash for redundant-rebuild detection (Task 15 owns real
+    // hash; this task seeds "" as a placeholder).
+    identityHash: text("identity_hash").notNull(),
+    // Nullable: kind='external'/'base' bakes may have no commit.
+    commitSha: text("commit_sha"),
     imageRef: text("image_ref").notNull(),
     status: text("status", {
       enum: ["queued", "building", "pushed", "failed"],
     }).notNull(),
-    builderBackend: text("builder_backend").notNull(),
-    recipe: jsonb("recipe").notNull(),
+    // Nullable to match DDL (base/external sources may omit builder details).
+    builderBackend: text("builder_backend"),
+    recipe: jsonb("recipe"),
     error: text("error"),
     logTail: text("log_tail"),
     startedAt: bigint("started_at", { mode: "number" }),
     finishedAt: bigint("finished_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("prebuilds_config_status_created").on(t.configId, t.status, t.createdAt)],
+  (t) => [index("bakes_source_status_created").on(t.sourceId, t.status, t.createdAt)],
 );
 
 // ─── Event system (event-system plan, Task 3) ───────────────────────────────
@@ -1147,9 +1162,8 @@ export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
 export type SessionRepoRow = typeof sessionRepos.$inferSelect;
 export type GithubInstallationRow = typeof githubInstallations.$inferSelect;
-export type ImageCatalogRow = typeof imageCatalog.$inferSelect;
-export type PrebuildConfigRow = typeof prebuildConfigs.$inferSelect;
-export type PrebuildRow = typeof prebuilds.$inferSelect;
+export type ImageSourceRow = typeof imageSources.$inferSelect;
+export type BakeRow = typeof bakes.$inferSelect;
 export type EventRow = typeof events.$inferSelect;
 export type EventSubscriptionRow = typeof eventSubscriptions.$inferSelect;
 export type EventDeliveryRow = typeof eventDeliveries.$inferSelect;

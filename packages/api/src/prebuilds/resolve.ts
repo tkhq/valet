@@ -35,7 +35,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { prebuildConfigs, prebuilds } from "../schema/index.js";
+import { imageSources, bakes } from "../schema/index.js";
 import type { RecipeStep } from "./recipe.js";
 import { prebuildImagePullable, type PrebuildPreflightOpts } from "./registry.js";
 import type { SessionMeta } from "../engine/host.js";
@@ -91,25 +91,26 @@ export async function resolvePrebuildImage(
     if (!primary) return null;
 
     const host = primary.host ?? "github";
-    const configRows = await db
+    const sourceRows = await db
       .select()
-      .from(prebuildConfigs)
+      .from(imageSources)
       .where(
         and(
-          eq(prebuildConfigs.orgId, meta.orgId),
-          eq(prebuildConfigs.repoHost, host),
-          eq(prebuildConfigs.repoFullName, primary.fullName),
+          eq(imageSources.orgId, meta.orgId),
+          eq(imageSources.kind, "repo"),
+          eq(imageSources.repoHost, host),
+          eq(imageSources.repoFullName, primary.fullName),
         ),
       )
       .limit(1);
-    const config = configRows[0];
-    if (!config || !config.enabled) return null;
+    const source = sourceRows[0];
+    if (!source || !source.enabled) return null;
 
     const pushedRows = await db
       .select()
-      .from(prebuilds)
-      .where(and(eq(prebuilds.configId, config.id), eq(prebuilds.status, "pushed")))
-      .orderBy(desc(prebuilds.createdAt))
+      .from(bakes)
+      .where(and(eq(bakes.sourceId, source.id), eq(bakes.status, "pushed")))
+      .orderBy(desc(bakes.createdAt))
       .limit(1);
     const prebuild = pushedRows[0];
     if (!prebuild) return null;
@@ -127,6 +128,11 @@ export async function resolvePrebuildImage(
         return null;
       }
     }
+
+    // `commitSha` is nullable in the `bakes` schema (kind='external'/'base'
+    // bakes may omit it), but a kind='repo' bake always carries a sha. Treat
+    // a missing sha as "no prebuild" — same degraded-to-cold-start contract.
+    if (!prebuild.commitSha) return null;
 
     return {
       imageRef: prebuild.imageRef,

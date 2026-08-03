@@ -83,7 +83,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { imageCatalog, prebuildConfigs, prebuilds, type PrebuildConfigRow, type PrebuildRow } from "../schema/index.js";
+import { imageSources, bakes, type ImageSourceRow, type BakeRow } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
@@ -107,8 +107,8 @@ export class PrebuildUnavailableError extends Error {
 
 export class PrebuildConfigNotFoundError extends Error {
   readonly statusCode = 404;
-  constructor(configId: string) {
-    super(`prebuild config not found: ${configId}`);
+  constructor(sourceId: string) {
+    super(`image source not found: ${sourceId}`);
     this.name = "PrebuildConfigNotFoundError";
   }
 }
@@ -472,59 +472,72 @@ export class PrebuildService {
     return this.builder?.backend ?? null;
   }
 
-  private async loadConfig(configId: string): Promise<PrebuildConfigRow> {
-    const rows = await this.db.select().from(prebuildConfigs).where(eq(prebuildConfigs.id, configId)).limit(1);
-    const config = rows[0];
-    if (!config) throw new PrebuildConfigNotFoundError(configId);
-    return config;
+  private async loadConfig(sourceId: string): Promise<ImageSourceRow> {
+    const rows = await this.db.select().from(imageSources).where(eq(imageSources.id, sourceId)).limit(1);
+    const source = rows[0];
+    if (!source) throw new PrebuildConfigNotFoundError(sourceId);
+    return source;
   }
 
-  private async resolveBaseImage(config: PrebuildConfigRow, override: string | undefined): Promise<string> {
+  /** Resolves the base image ref for a bake. Priority:
+   *  1. `override` — the `.valet/prebuild.yaml` image field from the recipe.
+   *  2. The source's `parent_id` — a linked base/external source whose
+   *     `external_ref` (kind='external') or newest `pushed` bake's `image_ref`
+   *     (kind='base') provides the base. This task uses only `external_ref`
+   *     (direct external ref lookup); full parent-first base bake resolution
+   *     is Task 15's job.
+   *  3. `resolveDefaultImage(env)` — `VALET_SANDBOX_IMAGE`.
+   *  4. `FALLBACK_BASE_IMAGE` — hardcoded `node:20-bookworm`. */
+  private async resolveBaseImage(source: ImageSourceRow, override: string | undefined): Promise<string> {
     if (override) return override;
-    if (config.baseImageId) {
+    if (source.parentId) {
       const rows = await this.db
         .select()
-        .from(imageCatalog)
-        .where(eq(imageCatalog.id, config.baseImageId))
+        .from(imageSources)
+        .where(eq(imageSources.id, source.parentId))
         .limit(1);
-      if (rows[0]) return rows[0].ref;
+      const parent = rows[0];
+      if (parent?.externalRef) return parent.externalRef;
     }
     return resolveDefaultImage(this.env) ?? FALLBACK_BASE_IMAGE;
   }
 
-  /** Starts a build for `configId`: resolves head sha + recipe via the
-   * GitHub Contents API, records a `queued` `prebuilds` row with the
+  /** Starts a build for `sourceId`: resolves head sha + recipe via the
+   * GitHub Contents API, records a `queued` `bakes` row with the
    * resolved-recipe snapshot, mints a fresh git clone token, and dispatches
    * to the builder. Throws `PrebuildUnavailableError` when no builder is
-   * wired, `PrebuildConfigNotFoundError` when `configId` doesn't exist, and
+   * wired, `PrebuildConfigNotFoundError` when `sourceId` doesn't exist, and
    * propagates `GitHubAuthError` from token resolution unchanged. */
-  async startBuild(configId: string): Promise<PrebuildRow> {
+  async startBuild(sourceId: string): Promise<BakeRow> {
     if (!this.builder) throw new PrebuildUnavailableError();
     const builder = this.builder;
-    const config = await this.loadConfig(configId);
-    const owner = ownerOf(config.repoFullName);
-    const repo = repoOf(config.repoFullName);
+    const source = await this.loadConfig(sourceId);
+    const repoFullName = source.repoFullName ?? "";
+    const owner = ownerOf(repoFullName);
+    const repo = repoOf(repoFullName);
 
-    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, config.orgId, owner, repo);
+    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
 
     const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
     const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
-    const baseImage = await this.resolveBaseImage(config, resolved.image);
+    const baseImage = await this.resolveBaseImage(source, resolved.image);
 
     const gitToken = await resolveGitHubToken(this.githubTokenDeps, {
-      orgId: config.orgId,
+      orgId: source.orgId,
       purpose: "git",
       repo: { owner, name: repo },
     });
 
-    const imageRef = imageRefFor(builder.backend, config.id, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
+    const imageRef = imageRefFor(builder.backend, source.id, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
     const now = this.now();
-    const row: PrebuildRow = {
+    const row: BakeRow = {
       id: newPrebuildId(this.newId),
-      configId: config.id,
+      sourceId: source.id,
       commitSha: head.sha,
       imageRef,
       status: "queued",
+      // `identity_hash` placeholder — Task 15 computes the real recipe hash.
+      identityHash: "",
       builderBackend: builder.backend,
       recipe: { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image },
       error: null,
@@ -533,12 +546,12 @@ export class PrebuildService {
       finishedAt: null,
       createdAt: now,
     };
-    await this.db.insert(prebuilds).values(row);
+    await this.db.insert(bakes).values(row);
 
     const spec: PrebuildSpec = {
-      configId: config.id,
+      configId: source.id,
       prebuildId: row.id,
-      cloneUrl: config.cloneUrl,
+      cloneUrl: source.cloneUrl ?? "",
       commitSha: head.sha,
       baseImage,
       recipe: resolved.recipe,
@@ -556,9 +569,9 @@ export class PrebuildService {
       // that looks otherwise fine in the DB.
       const message = err instanceof Error ? err.message : String(err);
       await this.db
-        .update(prebuilds)
+        .update(bakes)
         .set({ status: "failed", error: message, finishedAt: this.now() })
-        .where(eq(prebuilds.id, row.id));
+        .where(eq(bakes.id, row.id));
       throw new Error(`prebuild build dispatch failed: ${message}`);
     }
     this.activeBuildIds.set(row.id, buildId);
@@ -576,8 +589,8 @@ export class PrebuildService {
     const builder = this.builder;
     const activeRows = await this.db
       .select()
-      .from(prebuilds)
-      .where(inArray(prebuilds.status, ["queued", "building"]));
+      .from(bakes)
+      .where(inArray(bakes.status, ["queued", "building"]));
 
     for (const row of activeRows) {
       const buildId = this.activeBuildIds.get(row.id);
@@ -593,9 +606,9 @@ export class PrebuildService {
       if (status.state === "queued" || status.state === "building") {
         if (status.state !== row.status || status.logTail !== row.logTail) {
           await this.db
-            .update(prebuilds)
+            .update(bakes)
             .set({ status: status.state, logTail: status.logTail ?? null })
-            .where(eq(prebuilds.id, row.id));
+            .where(eq(bakes.id, row.id));
         }
         continue;
       }
@@ -603,32 +616,32 @@ export class PrebuildService {
       this.activeBuildIds.delete(row.id);
       if (status.state === "pushed") {
         await this.db
-          .update(prebuilds)
+          .update(bakes)
           .set({ status: "pushed", logTail: status.logTail ?? null, finishedAt: this.now() })
-          .where(eq(prebuilds.id, row.id));
-        await this.applyRetention(row.configId, builder.backend);
+          .where(eq(bakes.id, row.id));
+        await this.applyRetention(row.sourceId, builder.backend);
       } else {
         await this.db
-          .update(prebuilds)
+          .update(bakes)
           .set({ status: "failed", error: status.error ?? null, logTail: status.logTail ?? null, finishedAt: this.now() })
-          .where(eq(prebuilds.id, row.id));
+          .where(eq(bakes.id, row.id));
       }
     }
   }
 
-  /** Keeps the newest 2 `pushed` builds per config; deletes the images
+  /** Keeps the newest 2 `pushed` bakes per source; deletes the images
    * (never the rows) for the rest via `this.retention`. A stale row's
    * `imageRef` is excluded from deletion when a KEPT row shares the same ref
    * — a repeated-sha rebuild (re-running a build for a commit that's already
    * pushed) produces a fresh row with the same `imageRefFor(...)` value as
    * an earlier row for that sha; without this dedup, pruning the older row
    * would delete the image the kept row still points at. */
-  private async applyRetention(configId: string, backend: string): Promise<void> {
+  private async applyRetention(sourceId: string, backend: string): Promise<void> {
     const pushedRows = await this.db
       .select()
-      .from(prebuilds)
-      .where(and(eq(prebuilds.configId, configId), eq(prebuilds.status, "pushed")))
-      .orderBy(desc(prebuilds.createdAt));
+      .from(bakes)
+      .where(and(eq(bakes.sourceId, sourceId), eq(bakes.status, "pushed")))
+      .orderBy(desc(bakes.createdAt));
     const kept = pushedRows.slice(0, 2);
     const stale = pushedRows.slice(2);
     if (stale.length === 0) return;
@@ -638,52 +651,54 @@ export class PrebuildService {
     await this.retention(backend, staleRefs);
   }
 
-  /** One scheduler pass: for every enabled `schedule: "nightly"` config,
-   * starts a rebuild when the newest build (any status) is >24h old AND the
-   * current head sha differs from the newest PUSHED build's sha. A no-op
-   * when no builder is wired. Per-config failures are logged and isolated —
-   * one bad repo/credential never blocks the rest of the pass. */
+  /** One scheduler pass: for every enabled kind='repo' source with
+   * `schedule: "nightly"`, starts a rebuild when the newest bake (any
+   * status) is >24h old AND the current head sha differs from the newest
+   * PUSHED bake's sha. A no-op when no builder is wired. Per-source
+   * failures are logged and isolated — one bad repo/credential never blocks
+   * the rest of the pass. */
   async runSchedulerPass(): Promise<void> {
     if (!this.builder) return;
-    const configs = await this.db
+    const sources = await this.db
       .select()
-      .from(prebuildConfigs)
-      .where(and(eq(prebuildConfigs.enabled, true), eq(prebuildConfigs.schedule, "nightly")));
+      .from(imageSources)
+      .where(and(eq(imageSources.enabled, true), eq(imageSources.schedule, "nightly"), eq(imageSources.kind, "repo")));
 
-    for (const config of configs) {
+    for (const source of sources) {
       try {
-        await this.maybeScheduleNightly(config);
+        await this.maybeScheduleNightly(source);
       } catch (err) {
-        console.error(`prebuild scheduler: config ${config.id} (${config.repoFullName}) failed:`, err);
+        console.error(`prebuild scheduler: source ${source.id} (${source.repoFullName ?? "?"}) failed:`, err);
       }
     }
   }
 
-  private async maybeScheduleNightly(config: PrebuildConfigRow): Promise<void> {
+  private async maybeScheduleNightly(source: ImageSourceRow): Promise<void> {
     const newestRows = await this.db
       .select()
-      .from(prebuilds)
-      .where(eq(prebuilds.configId, config.id))
-      .orderBy(desc(prebuilds.createdAt))
+      .from(bakes)
+      .where(eq(bakes.sourceId, source.id))
+      .orderBy(desc(bakes.createdAt))
       .limit(1);
     const newest = newestRows[0];
     if (newest && this.now() - newest.createdAt < NIGHTLY_MIN_AGE_MS) return; // fresh — skip
 
     const pushedRows = await this.db
       .select()
-      .from(prebuilds)
-      .where(and(eq(prebuilds.configId, config.id), eq(prebuilds.status, "pushed")))
-      .orderBy(desc(prebuilds.createdAt))
+      .from(bakes)
+      .where(and(eq(bakes.sourceId, source.id), eq(bakes.status, "pushed")))
+      .orderBy(desc(bakes.createdAt))
       .limit(1);
     const lastPushedSha = pushedRows[0]?.commitSha;
 
-    const owner = ownerOf(config.repoFullName);
-    const repo = repoOf(config.repoFullName);
-    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, config.orgId, owner, repo);
+    const repoFullName = source.repoFullName ?? "";
+    const owner = ownerOf(repoFullName);
+    const repo = repoOf(repoFullName);
+    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
     const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
     if (head.sha === lastPushedSha) return; // no change — skip
 
-    await this.startBuild(config.id);
+    await this.startBuild(source.id);
   }
 
   /** Marks every `queued`/`building` row `failed` at boot. `activeBuildIds`
@@ -695,15 +710,15 @@ export class PrebuildService {
    * row this sweep is about to fail. */
   private async sweepOrphanedBuilds(): Promise<void> {
     const orphaned = await this.db
-      .select({ id: prebuilds.id })
-      .from(prebuilds)
-      .where(inArray(prebuilds.status, ["queued", "building"]));
+      .select({ id: bakes.id })
+      .from(bakes)
+      .where(inArray(bakes.status, ["queued", "building"]));
     if (orphaned.length === 0) return;
 
     await this.db
-      .update(prebuilds)
+      .update(bakes)
       .set({ status: "failed", error: "interrupted by restart", finishedAt: this.now() })
-      .where(inArray(prebuilds.status, ["queued", "building"]));
+      .where(inArray(bakes.status, ["queued", "building"]));
 
     // Best-effort: an interrupted build may have left durable cluster
     // resources (BuildKit Job + git-token Secret + Dockerfile ConfigMap)

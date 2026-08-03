@@ -1338,14 +1338,17 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 // the one member-accessible (non-admin-gated) read in this group — its
 // response is deliberately narrow (see `GetPrebuildForRepoResponse`).
 
+// `image_sources` row (kind='external') — replaces the old image_catalog
+// entry. `externalRef` is the image URI that was previously `ref`.
 export interface ImageCatalogEntryWire {
   id: string;
   orgId: string;
+  kind: "external";
   name: string;
-  ref: string;
+  externalRef: string | null;
   pullSecretName: string | null;
-  kind: "base";
   createdAt: number;
+  updatedAt: number;
 }
 
 export interface ListImageCatalogResponse {
@@ -1364,13 +1367,17 @@ export interface CreateImageCatalogResponse {
 
 export type PrebuildScheduleWire = "nightly" | "off";
 
+// `image_sources` row (kind='repo') — replaces the old prebuild_configs entry.
+// `parentId` is the linked base/external source id (previously `baseImageId`).
 export interface PrebuildConfigWire {
   id: string;
   orgId: string;
-  repoHost: string;
-  repoFullName: string;
-  cloneUrl: string;
-  baseImageId: string | null;
+  kind: "repo";
+  parentId: string | null;
+  name: string;
+  repoHost: string | null;
+  repoFullName: string | null;
+  cloneUrl: string | null;
   schedule: PrebuildScheduleWire;
   enabled: boolean;
   createdAt: number;
@@ -1385,6 +1392,7 @@ export interface CreatePrebuildConfigRequest {
   repoFullName: string;
   cloneUrl: string;
   repoHost?: string;
+  /** Linked base/external source id. Previously `baseImageId`. */
   baseImageId?: string | null;
   schedule?: PrebuildScheduleWire;
   enabled?: boolean;
@@ -1396,6 +1404,7 @@ export interface CreatePrebuildConfigResponse {
 
 export interface PatchPrebuildConfigRequest {
   cloneUrl?: string;
+  /** Linked base/external source id. Previously `baseImageId`. */
   baseImageId?: string | null;
   schedule?: PrebuildScheduleWire;
   enabled?: boolean;
@@ -1407,13 +1416,16 @@ export interface PatchPrebuildConfigResponse {
 
 export type PrebuildStatusWire = "queued" | "building" | "pushed" | "failed";
 
+// `bakes` row — replaces the old prebuilds entry.
+// `sourceId` is the linked image_sources id (previously `configId`).
 export interface PrebuildWire {
   id: string;
-  configId: string;
-  commitSha: string;
+  sourceId: string;
+  identityHash: string;
+  commitSha: string | null;
   imageRef: string;
   status: PrebuildStatusWire;
-  builderBackend: string;
+  builderBackend: string | null;
   error: string | null;
   logTail: string | null;
   startedAt: number | null;

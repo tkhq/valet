@@ -21,7 +21,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
-import { prebuildConfigs, prebuilds, type PrebuildConfigRow } from "../schema/index.js";
+import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../prebuilds/service.js";
 
@@ -31,19 +31,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function newPrebuildConfigId(): string {
-  return `pbc_${randomUUID()}`;
+function newImageSourceId(): string {
+  return `src_${randomUUID()}`;
 }
 
-async function getOwnedConfig(
+async function getOwnedSource(
   db: AppEnv["Variables"]["providers"]["db"],
   id: string,
   orgId: string,
-): Promise<PrebuildConfigRow | undefined> {
+): Promise<ImageSourceRow | undefined> {
   const rows = await db
     .select()
-    .from(prebuildConfigs)
-    .where(and(eq(prebuildConfigs.id, id), eq(prebuildConfigs.orgId, orgId)))
+    .from(imageSources)
+    .where(and(eq(imageSources.id, id), eq(imageSources.orgId, orgId)))
     .limit(1);
   return rows[0];
 }
@@ -59,7 +59,10 @@ prebuildsRouter.get("/configs", async (c) => {
   const gate = await requireOrgAdmin(c);
   if (gate) return gate;
   const { db } = c.var.providers;
-  const rows = await db.select().from(prebuildConfigs).where(eq(prebuildConfigs.orgId, c.var.user.orgId));
+  const rows = await db
+    .select()
+    .from(imageSources)
+    .where(and(eq(imageSources.orgId, c.var.user.orgId), eq(imageSources.kind, "repo")));
   return c.json({ configs: rows });
 });
 
@@ -80,24 +83,30 @@ prebuildsRouter.post("/configs", async (c) => {
   const repoHost = typeof body.repoHost === "string" && body.repoHost.trim() !== "" ? body.repoHost : "github";
   const schedule: "nightly" | "off" = body.schedule === "off" ? "off" : "nightly";
   const enabled = typeof body.enabled === "boolean" ? body.enabled : true;
-  const baseImageId = typeof body.baseImageId === "string" && body.baseImageId.trim() !== "" ? body.baseImageId : null;
+  const parentId = typeof body.baseImageId === "string" && body.baseImageId.trim() !== "" ? body.baseImageId : null;
 
   const { db } = c.var.providers;
   const now = Date.now();
   const row = {
-    id: newPrebuildConfigId(),
+    id: newImageSourceId(),
     orgId: c.var.user.orgId,
+    kind: "repo" as const,
+    parentId,
+    name: body.repoFullName as string,
+    externalRef: null,
+    pullSecretName: null,
+    setupCommands: null,
     repoHost,
-    repoFullName: body.repoFullName,
-    cloneUrl: body.cloneUrl,
-    baseImageId,
+    repoFullName: body.repoFullName as string,
+    cloneUrl: body.cloneUrl as string,
     schedule,
     enabled,
+    lastBoundAt: null,
     createdAt: now,
     updatedAt: now,
   };
   try {
-    await db.insert(prebuildConfigs).values(row);
+    await db.insert(imageSources).values(row);
   } catch (err) {
     if (isPgUniqueViolation(err)) {
       return c.json({ error: "a prebuild config for this repo already exists" }, 409);
@@ -113,13 +122,13 @@ prebuildsRouter.patch("/configs/:id", async (c) => {
 
   const { db } = c.var.providers;
   const id = c.req.param("id");
-  const existing = await getOwnedConfig(db, id, c.var.user.orgId);
+  const existing = await getOwnedSource(db, id, c.var.user.orgId);
   if (!existing) return c.json({ error: "prebuild config not found" }, 404);
 
   const body: unknown = await c.req.json().catch(() => null);
   if (!isRecord(body)) return c.json({ error: "invalid request body" }, 400);
 
-  const patch: Partial<typeof prebuildConfigs.$inferInsert> = { updatedAt: Date.now() };
+  const patch: Partial<typeof imageSources.$inferInsert> = { updatedAt: Date.now() };
   if (body.cloneUrl !== undefined) {
     if (typeof body.cloneUrl !== "string" || body.cloneUrl.trim() === "") {
       return c.json({ error: "cloneUrl must be a non-empty string" }, 400);
@@ -142,11 +151,11 @@ prebuildsRouter.patch("/configs/:id", async (c) => {
     if (body.baseImageId !== null && typeof body.baseImageId !== "string") {
       return c.json({ error: "baseImageId must be a string or null" }, 400);
     }
-    patch.baseImageId = body.baseImageId;
+    patch.parentId = body.baseImageId;
   }
 
-  await db.update(prebuildConfigs).set(patch).where(eq(prebuildConfigs.id, id));
-  const updated = await getOwnedConfig(db, id, c.var.user.orgId);
+  await db.update(imageSources).set(patch).where(eq(imageSources.id, id));
+  const updated = await getOwnedSource(db, id, c.var.user.orgId);
   return c.json({ config: updated });
 });
 
@@ -156,10 +165,10 @@ prebuildsRouter.delete("/configs/:id", async (c) => {
 
   const { db } = c.var.providers;
   const id = c.req.param("id");
-  const existing = await getOwnedConfig(db, id, c.var.user.orgId);
+  const existing = await getOwnedSource(db, id, c.var.user.orgId);
   if (!existing) return c.json({ error: "prebuild config not found" }, 404);
 
-  await db.delete(prebuildConfigs).where(eq(prebuildConfigs.id, id));
+  await db.delete(imageSources).where(eq(imageSources.id, id));
   return c.json({ ok: true });
 });
 
@@ -169,8 +178,8 @@ prebuildsRouter.post("/configs/:id/rebuild", async (c) => {
 
   const { db, prebuildService } = c.var.providers;
   const id = c.req.param("id");
-  const config = await getOwnedConfig(db, id, c.var.user.orgId);
-  if (!config) return c.json({ error: "prebuild config not found" }, 404);
+  const source = await getOwnedSource(db, id, c.var.user.orgId);
+  if (!source) return c.json({ error: "prebuild config not found" }, 404);
 
   try {
     const row = await prebuildService.startBuild(id);
@@ -195,10 +204,10 @@ prebuildsRouter.get("/configs/:id/builds", async (c) => {
 
   const { db } = c.var.providers;
   const id = c.req.param("id");
-  const config = await getOwnedConfig(db, id, c.var.user.orgId);
-  if (!config) return c.json({ error: "prebuild config not found" }, 404);
+  const source = await getOwnedSource(db, id, c.var.user.orgId);
+  if (!source) return c.json({ error: "prebuild config not found" }, 404);
 
-  const rows = await db.select().from(prebuilds).where(eq(prebuilds.configId, id)).orderBy(desc(prebuilds.createdAt));
+  const rows = await db.select().from(bakes).where(eq(bakes.sourceId, id)).orderBy(desc(bakes.createdAt));
   return c.json({ builds: rows });
 });
 
@@ -219,19 +228,25 @@ prebuildsPublicRouter.get("/for-repo", async (c) => {
   }
 
   const { db } = c.var.providers;
-  const configRows = await db
-    .select({ id: prebuildConfigs.id })
-    .from(prebuildConfigs)
-    .where(and(eq(prebuildConfigs.orgId, c.var.user.orgId), eq(prebuildConfigs.repoFullName, fullName)))
+  const sourceRows = await db
+    .select({ id: imageSources.id })
+    .from(imageSources)
+    .where(
+      and(
+        eq(imageSources.orgId, c.var.user.orgId),
+        eq(imageSources.kind, "repo"),
+        eq(imageSources.repoFullName, fullName),
+      ),
+    )
     .limit(1);
-  const config = configRows[0];
-  if (!config) return c.json({ prebuild: null });
+  const source = sourceRows[0];
+  if (!source) return c.json({ prebuild: null });
 
   const buildRows = await db
-    .select({ commitSha: prebuilds.commitSha, finishedAt: prebuilds.finishedAt })
-    .from(prebuilds)
-    .where(and(eq(prebuilds.configId, config.id), eq(prebuilds.status, "pushed")))
-    .orderBy(desc(prebuilds.finishedAt))
+    .select({ commitSha: bakes.commitSha, finishedAt: bakes.finishedAt })
+    .from(bakes)
+    .where(and(eq(bakes.sourceId, source.id), eq(bakes.status, "pushed")))
+    .orderBy(desc(bakes.finishedAt))
     .limit(1);
   const build = buildRows[0];
   if (!build || build.finishedAt === null) return c.json({ prebuild: null });

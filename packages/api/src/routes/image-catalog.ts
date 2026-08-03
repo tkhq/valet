@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
-import { imageCatalog } from "../schema/index.js";
+import { imageSources } from "../schema/index.js";
 
 export const imageCatalogRouter = new Hono<AppEnv>();
 
@@ -35,7 +35,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function newImageCatalogId(): string {
+function newImageSourceId(): string {
   return `img_${randomUUID()}`;
 }
 
@@ -43,7 +43,13 @@ imageCatalogRouter.get("/", async (c) => {
   const gate = await requireOrgAdmin(c);
   if (gate) return gate;
   const { db } = c.var.providers;
-  const rows = await db.select().from(imageCatalog).where(eq(imageCatalog.orgId, c.var.user.orgId));
+  // Return external-type sources — these are the admin-registered base images
+  // that were previously in image_catalog (kind='external' replaces 'base'
+  // in the old single-kind catalog).
+  const rows = await db
+    .select()
+    .from(imageSources)
+    .where(and(eq(imageSources.orgId, c.var.user.orgId), eq(imageSources.kind, "external")));
   return c.json({ images: rows });
 });
 
@@ -65,16 +71,26 @@ imageCatalogRouter.post("/", async (c) => {
     typeof body.pullSecretName === "string" && body.pullSecretName.trim() !== "" ? body.pullSecretName : null;
 
   const { db } = c.var.providers;
+  const now = Date.now();
   const row = {
-    id: newImageCatalogId(),
+    id: newImageSourceId(),
     orgId: c.var.user.orgId,
-    name: body.name,
-    ref: body.ref,
+    kind: "external" as const,
+    parentId: null,
+    name: body.name as string,
+    externalRef: body.ref as string,
     pullSecretName,
-    kind: "base" as const,
-    createdAt: Date.now(),
+    setupCommands: null,
+    repoHost: null,
+    repoFullName: null,
+    cloneUrl: null,
+    schedule: "nightly" as const,
+    enabled: true,
+    lastBoundAt: null,
+    createdAt: now,
+    updatedAt: now,
   };
-  await db.insert(imageCatalog).values(row);
+  await db.insert(imageSources).values(row);
   return c.json({ image: row }, 201);
 });
 
@@ -86,11 +102,11 @@ imageCatalogRouter.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const existing = await db
     .select()
-    .from(imageCatalog)
-    .where(and(eq(imageCatalog.id, id), eq(imageCatalog.orgId, c.var.user.orgId)))
+    .from(imageSources)
+    .where(and(eq(imageSources.id, id), eq(imageSources.orgId, c.var.user.orgId)))
     .limit(1);
   if (existing.length === 0) return c.json({ error: "image not found" }, 404);
 
-  await db.delete(imageCatalog).where(eq(imageCatalog.id, id));
+  await db.delete(imageSources).where(eq(imageSources.id, id));
   return c.json({ ok: true });
 });

@@ -219,7 +219,7 @@ CREATE TABLE "agent_sessions" (
 	"owner_type" text DEFAULT 'user' NOT NULL,
 	"owner_id" text DEFAULT '' NOT NULL,
 	"profile" text DEFAULT 'headless' NOT NULL,
-	"prebuild_id" text,
+	"bake_id" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -557,7 +557,8 @@ CREATE TABLE "session_repos" (
 	"clone_url" text NOT NULL,
 	"ref" text,
 	"auth" text DEFAULT 'auto' NOT NULL,
-	"position" integer NOT NULL
+	"position" integer NOT NULL,
+	"target_dir" text
 );
 --> statement-breakpoint
 CREATE INDEX "session_repos_session" ON "session_repos" ("session_id");
@@ -583,43 +584,38 @@ CREATE UNIQUE INDEX "github_installations_org_installation" ON "github_installat
 --> statement-breakpoint
 CREATE INDEX "github_installations_org_account" ON "github_installations" ("org_id","account_login");
 --> statement-breakpoint
-CREATE TABLE "image_catalog" (
+CREATE TABLE "image_sources" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
+	"kind" text NOT NULL CHECK (kind IN ('external','base','repo')),
+	"parent_id" text REFERENCES image_sources(id),
 	"name" text NOT NULL,
-	"ref" text NOT NULL,
+	"external_ref" text,
 	"pull_secret_name" text,
-	"kind" text DEFAULT 'base' NOT NULL,
-	"created_at" bigint NOT NULL
-);
---> statement-breakpoint
-CREATE INDEX "image_catalog_org" ON "image_catalog" ("org_id");
---> statement-breakpoint
-CREATE TABLE "prebuild_configs" (
-	"id" text PRIMARY KEY NOT NULL,
-	"org_id" text NOT NULL,
-	"repo_host" text DEFAULT 'github' NOT NULL,
-	"repo_full_name" text NOT NULL,
-	"clone_url" text NOT NULL,
-	"base_image_id" text,
-	"schedule" text DEFAULT 'nightly' NOT NULL,
-	"enabled" boolean DEFAULT true NOT NULL,
+	"setup_commands" jsonb,
+	"repo_host" text,
+	"repo_full_name" text,
+	"clone_url" text,
+	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
+	"enabled" boolean NOT NULL DEFAULT TRUE,
+	"last_bound_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "prebuild_configs_org" ON "prebuild_configs" ("org_id");
+CREATE UNIQUE INDEX "image_sources_org_repo" ON "image_sources" ("org_id","repo_host","repo_full_name") WHERE kind = 'repo';
 --> statement-breakpoint
-CREATE UNIQUE INDEX "prebuild_configs_org_repo" ON "prebuild_configs" ("org_id","repo_host","repo_full_name");
+CREATE UNIQUE INDEX "image_sources_org_base" ON "image_sources" ("org_id") WHERE kind = 'base';
 --> statement-breakpoint
-CREATE TABLE "prebuilds" (
+CREATE TABLE "bakes" (
 	"id" text PRIMARY KEY NOT NULL,
-	"config_id" text NOT NULL,
-	"commit_sha" text NOT NULL,
+	"source_id" text NOT NULL REFERENCES image_sources(id) ON DELETE CASCADE,
+	"identity_hash" text NOT NULL,
+	"commit_sha" text,
 	"image_ref" text NOT NULL,
-	"status" text NOT NULL,
-	"builder_backend" text NOT NULL,
-	"recipe" jsonb NOT NULL,
+	"status" text NOT NULL CHECK (status IN ('queued','building','pushed','failed')),
+	"builder_backend" text,
+	"recipe" jsonb,
 	"error" text,
 	"log_tail" text,
 	"started_at" bigint,
@@ -627,7 +623,7 @@ CREATE TABLE "prebuilds" (
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "prebuilds_config_status_created" ON "prebuilds" ("config_id","status","created_at");
+CREATE INDEX "bakes_source_status_created" ON "bakes" ("source_id","status","created_at");
 --> statement-breakpoint
 CREATE TABLE "events" (
 	"id" text PRIMARY KEY NOT NULL,

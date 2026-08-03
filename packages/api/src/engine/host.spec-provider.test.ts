@@ -16,7 +16,7 @@ import {
   type SandboxStatus,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, prebuildConfigs, prebuilds } from "../schema/index.js";
+import { agentSessions, imageSources, bakes } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 
 const ORG = "local-org";
@@ -250,22 +250,30 @@ describe("EngineHost buildSpecProvider", () => {
     const provider = makeIsolatedProvider({ customImage: true });
     api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
 
-    // Seed a prebuild config + pushed prebuild.
+    // Seed an image source + pushed bake.
     const now = Date.now();
-    await api.providers.db.insert(prebuildConfigs).values({
+    await api.providers.db.insert(imageSources).values({
       id: "sp-cfg1",
       orgId: ORG,
+      kind: "repo",
+      parentId: null,
+      name: "acme/widgets",
+      externalRef: null,
+      pullSecretName: null,
+      setupCommands: null,
       repoHost: "github",
       repoFullName: "acme/widgets",
       cloneUrl: "https://github.com/acme/widgets.git",
       schedule: "nightly",
       enabled: true,
+      lastBoundAt: null,
       createdAt: now,
       updatedAt: now,
     });
-    await api.providers.db.insert(prebuilds).values({
+    await api.providers.db.insert(bakes).values({
       id: "sp-pb1",
-      configId: "sp-cfg1",
+      sourceId: "sp-cfg1",
+      identityHash: "",
       commitSha: "sha1",
       imageRef: "valet-prebuild/acme-widgets:sha1",
       status: "pushed",

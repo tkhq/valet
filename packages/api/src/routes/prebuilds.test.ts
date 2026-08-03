@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
-import { prebuilds } from "../schema/index.js";
+import { bakes } from "../schema/index.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -18,10 +18,12 @@ const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-
 interface PrebuildConfigJson {
   id: string;
   orgId: string;
-  repoHost: string;
-  repoFullName: string;
-  cloneUrl: string;
-  baseImageId: string | null;
+  kind: string;
+  parentId: string | null;
+  name: string;
+  repoHost: string | null;
+  repoFullName: string | null;
+  cloneUrl: string | null;
   schedule: string;
   enabled: boolean;
 }
@@ -277,10 +279,11 @@ describe("GET /api/prebuilds/for-repo", () => {
     api = await bootTestApi();
     const config = await createConfig(api.baseUrl);
     const { db } = api.providers;
-    await db.insert(prebuilds).values([
+    await db.insert(bakes).values([
       {
         id: `pb_${randomUUID()}`,
-        configId: config.id,
+        sourceId: config.id,
+        identityHash: "",
         commitSha: "olderc1",
         imageRef: "registry.local/acme-widgets:olderc1",
         status: "pushed",
@@ -292,7 +295,8 @@ describe("GET /api/prebuilds/for-repo", () => {
       },
       {
         id: `pb_${randomUUID()}`,
-        configId: config.id,
+        sourceId: config.id,
+        identityHash: "",
         commitSha: "newestc2",
         imageRef: "registry.local/acme-widgets:newestc2",
         status: "pushed",
@@ -304,7 +308,8 @@ describe("GET /api/prebuilds/for-repo", () => {
       },
       {
         id: `pb_${randomUUID()}`,
-        configId: config.id,
+        sourceId: config.id,
+        identityHash: "",
         commitSha: "failedc3",
         imageRef: "registry.local/acme-widgets:failedc3",
         status: "failed",

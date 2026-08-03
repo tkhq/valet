@@ -11,11 +11,12 @@ const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-
 interface ImageCatalogRowJson {
   id: string;
   orgId: string;
-  name: string;
-  ref: string;
-  pullSecretName: string | null;
   kind: string;
+  name: string;
+  externalRef: string | null;
+  pullSecretName: string | null;
   createdAt: number;
+  updatedAt: number;
 }
 
 let api: TestApi | undefined;
@@ -44,7 +45,7 @@ describe("GET /api/org/image-catalog", () => {
     const body = (await res.json()) as { images: ImageCatalogRowJson[] };
     expect(body.images).toHaveLength(1);
     expect(body.images[0].name).toBe("Base");
-    expect(body.images[0].ref).toBe("ghcr.io/acme/base:latest");
+    expect(body.images[0].externalRef).toBe("ghcr.io/acme/base:latest");
   });
 });
 
@@ -89,7 +90,7 @@ describe("POST /api/org/image-catalog", () => {
     expect(res.status).toBe(201);
     const body = (await res.json()) as { image: ImageCatalogRowJson };
     expect(body.image.pullSecretName).toBe("regcred");
-    expect(body.image.kind).toBe("base");
+    expect(body.image.kind).toBe("external");
     expect(typeof body.image.id).toBe("string");
   });
 });
