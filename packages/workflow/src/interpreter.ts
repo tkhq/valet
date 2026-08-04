@@ -111,10 +111,26 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
   const { store, engine, clock, onApprovalPending, onBeginTerminalize } = deps;
   const executors = deps.executors ?? createDefaultNodeExecutors();
 
+  // `valet.workflow.id` is fixed for a run's whole lifetime (written once by
+  // `createRun`), so it only needs setting once — as soon as the first
+  // successful `store.getRun` makes it knowable — not on every pass of the
+  // loop below (the loop itself must still re-fetch `run` every pass; see
+  // its own comment). This flag guards that single `setAttribute` call.
+  // If `store.getRun` throws or returns `null` on every pass (the run
+  // genuinely doesn't exist, or a store-level fault), the span never gets
+  // `valet.workflow.id` — there is no way to know it without a successful
+  // fetch. This is an accepted gap: `valet.workflow.run.id`/`.attempt`,
+  // set at span creation before any store call, remain available to
+  // correlate the error.
+  let workflowIdKnown = false;
+
   while (true) {
     const run = await store.getRun(runId);
     if (!run) throw new Error(`workflow run not found: ${runId}`);
-    span.setAttribute('valet.workflow.id', run.params.workflowId);
+    if (!workflowIdKnown) {
+      span.setAttribute('valet.workflow.id', run.params.workflowId);
+      workflowIdKnown = true;
+    }
 
     // A reclaimed `terminalizing` run (crash between `beginTerminalize` and
     // `settleRun`) MUST resume settlement directly, never re-enter the wave
