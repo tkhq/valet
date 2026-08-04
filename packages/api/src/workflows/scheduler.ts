@@ -180,9 +180,15 @@ export class WorkflowScheduler {
         triggerId: schedule.id,
         input: trigger,
       };
+      // Bill the WORKFLOW's own owner, not `schedule.ownerType`/`ownerId`
+      // (whoever created the schedule) — those can differ, since schedule
+      // creation only checks org membership (`schedule-service.ts`), and
+      // `def` (the workflow definition row) is already fetched above.
+      // Matches `events/dispatcher.ts`'s workflow-target fire, which
+      // never had this bug.
       await workflowRunHost.start(runId, params, def.definition, {
-        ownerType: schedule.ownerType,
-        ownerId: schedule.ownerId,
+        ownerType: def.ownerType,
+        ownerId: def.ownerId,
       });
     }
 

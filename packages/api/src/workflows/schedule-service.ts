@@ -8,7 +8,8 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { CronExpressionParser } from "cron-parser";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import { workflowSchedules } from "../schema/index.js";
+import { ownedDefinitionRow } from "./service.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
@@ -100,12 +101,14 @@ export async function createWorkflowSchedule(
   }
 
   if (hasWorkflow) {
-    const wfRows = await db
-      .select({ id: workflowDefinitions.id })
-      .from(workflowDefinitions)
-      .where(and(eq(workflowDefinitions.id, input.workflowId!), eq(workflowDefinitions.orgId, user.orgId)))
-      .limit(1);
-    if (wfRows.length === 0) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+    // Owner-scoped, not just org-scoped: checking only `orgId` let any org
+    // member wire a schedule onto a workflow they don't own — and because
+    // `scheduler.ts` used to bill the SCHEDULE's owner (this function's
+    // `user`) rather than the workflow's, that org member became the
+    // owner of runs against someone else's resource. See `scheduler.ts`'s
+    // `fire()` for the matching run-ownership fix.
+    const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
+    if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
   }
 
   const inserted = await db

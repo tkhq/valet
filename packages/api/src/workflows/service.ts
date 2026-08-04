@@ -86,8 +86,11 @@ function rowToDefinition(row: typeof workflowDefinitions.$inferSelect): Workflow
   };
 }
 
-/** Exported so other workflow-domain services (`webhook-service.ts`) share
- * this exact ownership check instead of hand-duplicating it — a query this
+/** Exported so other workflow-domain services (`webhook-service.ts`,
+ * `schedule-service.ts`, `trigger-service.ts`) share this exact ownership
+ * check instead of hand-duplicating it or checking `orgId` alone (which
+ * lets any org member act on a workflow they don't own — see those
+ * callers' own comments for the incident this closes). A query this
  * security-relevant should have exactly one definition. */
 export async function ownedDefinitionRow(
   db: AppDb,
