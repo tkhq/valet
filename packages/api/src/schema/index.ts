@@ -1089,6 +1089,23 @@ export const workflowSchedules = pgTable(
   ],
 );
 
+// The bearer secret IS the primary key: `id` is the opaque hookId minted
+// into the trigger URL (`POST /api/hooks/workflows/:workflowId/:hookId`),
+// not a surrogate row id. `workflow_id` is unique — one active hook per
+// workflow — so minting again replaces the row and invalidates the old
+// URL (overhaul design decision 5's "regenerable").
+export const workflowWebhooks = pgTable(
+  "workflow_webhooks",
+  {
+    id: text("id").primaryKey(),
+    workflowId: text("workflow_id").notNull(),
+    orgId: text("org_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("workflow_webhooks_workflow").on(t.workflowId)],
+);
+
 export const eventDeliveries = pgTable(
   "event_deliveries",
   {

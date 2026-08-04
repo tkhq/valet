@@ -16,7 +16,7 @@ import {
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions, workflowRuns, workflowVersions } from "../schema/index.js";
+import { workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import type {
   GetWorkflowRunResponse,
@@ -86,12 +86,15 @@ function rowToDefinition(row: typeof workflowDefinitions.$inferSelect): Workflow
   };
 }
 
-async function ownedDefinitionRow(
-  deps: WorkflowServiceDeps,
+/** Exported so other workflow-domain services (`webhook-service.ts`) share
+ * this exact ownership check instead of hand-duplicating it — a query this
+ * security-relevant should have exactly one definition. */
+export async function ownedDefinitionRow(
+  db: AppDb,
   owner: WorkflowOwner,
   id: string,
 ): Promise<typeof workflowDefinitions.$inferSelect | null> {
-  const rows = await deps.db
+  const rows = await db
     .select()
     .from(workflowDefinitions)
     .where(
@@ -124,7 +127,7 @@ export async function getWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<WorkflowDefinitionSummary | null> {
-  const row = await ownedDefinitionRow(deps, owner, id);
+  const row = await ownedDefinitionRow(deps.db, owner, id);
   return row ? rowToDefinition(row) : null;
 }
 
@@ -194,7 +197,7 @@ export async function listWorkflowVersions(
   owner: WorkflowOwner,
   id: string,
 ): Promise<WorkflowVersionSummary[] | null> {
-  const row = await ownedDefinitionRow(deps, owner, id);
+  const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
   const rows = await deps.db
     .select({
@@ -215,7 +218,7 @@ export async function getWorkflowVersion(
   id: string,
   version: number,
 ): Promise<WorkflowVersionDetail | null> {
-  const row = await ownedDefinitionRow(deps, owner, id);
+  const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
   const rows = await deps.db
     .select()
@@ -234,7 +237,7 @@ export async function updateWorkflowDefinition(
   id: string,
   input: { name?: string; definition?: unknown },
 ): Promise<WorkflowDefinitionSummary | null> {
-  const row = await ownedDefinitionRow(deps, owner, id);
+  const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
 
   const now = Date.now();
@@ -289,7 +292,7 @@ export async function deleteWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<DeleteWorkflowResult> {
-  const row = await ownedDefinitionRow(deps, owner, id);
+  const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return "not_found";
 
   const runRows = await deps.db
@@ -303,6 +306,12 @@ export async function deleteWorkflowDefinition(
 
   await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
   await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
+  // No FK/cascade on workflow_webhooks (it's keyed by workflowId, a plain
+  // text column) — without this, a deleted workflow's hookId secret would
+  // sit in the table forever, unreachable through any owner-facing route
+  // (every webhook-service.ts entry point re-checks ownedDefinitionRow,
+  // which is now gone) but never actually removed.
+  await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
   return "deleted";
 }
 
@@ -313,7 +322,7 @@ export async function startWorkflowRun(
   workflowId: string,
   input?: Record<string, unknown>,
 ): Promise<{ runId: string } | null> {
-  const row = await ownedDefinitionRow(deps, owner, workflowId);
+  const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
   const definition = row.definition;
@@ -344,7 +353,7 @@ export async function listWorkflowRuns(
   owner: WorkflowOwner,
   workflowId: string,
 ): Promise<WorkflowRunSummary[] | null> {
-  const row = await ownedDefinitionRow(deps, owner, workflowId);
+  const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
   // `WorkflowStore` has no "list runs by workflowId" method — it's a small,

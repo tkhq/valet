@@ -687,6 +687,16 @@ CREATE INDEX "workflow_schedules_due" ON "workflow_schedules" ("enabled","next_f
 --> statement-breakpoint
 CREATE INDEX "workflow_schedules_workflow" ON "workflow_schedules" ("workflow_id");
 --> statement-breakpoint
+CREATE TABLE "workflow_webhooks" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workflow_id" text NOT NULL,
+	"org_id" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "workflow_webhooks_workflow" ON "workflow_webhooks" ("workflow_id");
+--> statement-breakpoint
 CREATE TABLE "event_deliveries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"event_id" text NOT NULL,
