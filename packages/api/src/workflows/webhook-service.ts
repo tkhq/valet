@@ -135,9 +135,16 @@ export async function resolveWebhookTarget(
   const hook = hookRows[0];
   if (!hook) return null;
 
-  const expected = Buffer.from(hook.id, "utf8");
-  const candidate = Buffer.from(candidateHookId, "utf8");
-  if (expected.length !== candidate.length || !timingSafeEqual(expected, candidate)) return null;
+  // `hook.id` is always a 64-char lowercase hex string (`newHookId()`
+  // above). Decoding both sides as hex — rather than utf8 — makes the
+  // constant-time comparison operate on the actual 32 secret bytes instead
+  // of their ASCII encoding, so a candidate containing non-hex or
+  // multi-byte characters can't produce a byte-length mismatch that the
+  // `!==` short-circuit would leak in variable time.
+  if (!/^[0-9a-f]{64}$/.test(candidateHookId)) return null;
+  const expected = Buffer.from(hook.id, "hex");
+  const candidate = Buffer.from(candidateHookId, "hex");
+  if (!timingSafeEqual(expected, candidate)) return null;
 
   const defRows = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId)).limit(1);
   const def = defRows[0];
