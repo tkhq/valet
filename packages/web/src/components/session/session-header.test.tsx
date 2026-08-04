@@ -18,11 +18,22 @@ const setModelMutate = vi.fn();
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 
-vi.mock("~/api/queries", () => ({
-  useDeleteSession: () => ({ isPending: false, mutateAsync: deleteMutateAsync }),
-  useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
-  usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
-}));
+// importOriginal, not a bare replacement: vitest.config.ts sets
+// `isolate: false` to share the module registry across test files in a
+// worker (perf — avoids re-importing React/Radix/xyflow per file). Under
+// that setting an incomplete `vi.mock("~/api/queries", ...)` in ANY file
+// can end up governing the module for OTHER files sharing the worker —
+// spreading the real module keeps every export present no matter whose
+// factory the shared registry ends up using.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useDeleteSession: () => ({ isPending: false, mutateAsync: deleteMutateAsync }),
+    useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
+    usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
+  };
+});
 
 vi.mock("~/api/settings", () => ({
   useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),

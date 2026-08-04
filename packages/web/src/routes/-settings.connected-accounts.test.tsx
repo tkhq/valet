@@ -30,12 +30,18 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
-vi.mock("~/api/queries", () => ({
-  useIdentityLinks: () => ({ data: linksData, isLoading, error: isError ? new Error("boom") : null }),
-  useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, isPending: false }),
-  useSetLinkNotify: () => ({ mutate: setNotifyMutate }),
-  useUnlinkIdentity: () => ({ mutate: unlinkMutate, isPending: false }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx for why a bare
+// replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useIdentityLinks: () => ({ data: linksData, isLoading, error: isError ? new Error("boom") : null }),
+    useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+    useSetLinkNotify: () => ({ mutate: setNotifyMutate }),
+    useUnlinkIdentity: () => ({ mutate: unlinkMutate, isPending: false }),
+  };
+});
 
 vi.mock("~/api/repos", () => ({
   useConnectGithub: () => ({ mutateAsync: connectGithubMutateAsync, isPending: false }),
@@ -51,9 +57,15 @@ vi.mock("~/api/integrations", () => ({
   useDisconnectCredential: () => ({ mutate: disconnectCredentialMutate, isPending: false }),
 }));
 
-vi.mock("~/api/settings", () => ({
-  useGithubApp: () => ({ data: githubAppData, isLoading: false, error: null }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useGithubApp: () => ({ data: githubAppData, isLoading: false, error: null }),
+  };
+});
 
 import { ConnectedAccountsPage } from "./settings.connected-accounts";
 

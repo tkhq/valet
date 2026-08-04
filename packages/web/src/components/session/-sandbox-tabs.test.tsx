@@ -27,9 +27,15 @@ function renderTabs(props: SandboxTabsProps) {
 }
 
 const mintSandboxJwt = vi.fn();
-vi.mock("~/api/queries", () => ({
-  useSandboxJwt: () => ({ mutateAsync: mintSandboxJwt }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx for why a bare
+// replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useSandboxJwt: () => ({ mutateAsync: mintSandboxJwt }),
+  };
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

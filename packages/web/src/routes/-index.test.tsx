@@ -24,14 +24,20 @@ vi.mock("~/api/orchestrator", () => ({
   useSaveIdentity: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 
-vi.mock("~/api/queries", () => ({
-  useNotifications: () => ({
-    data: { notifications: [] },
-    isLoading: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx for why a bare
+// replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useNotifications: () => ({
+      data: { notifications: [] },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    }),
+  };
+});
 
 vi.mock("~/components/assistant/threads-card", () => ({
   ThreadsCard: () => <div data-testid="threads-card" />,

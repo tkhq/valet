@@ -90,24 +90,30 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigateMock,
 }));
 
-vi.mock("~/api/settings", () => ({
-  useOrg: () => ({ data: orgData, isLoading: false, error: null }),
-  usePatchOrg: () => ({
-    mutate: patchOrgMutate,
-    mutateAsync: patchOrgMutateAsync,
-    isPending: false,
-    error: null,
-  }),
-  useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
-  useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
-  useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
-  useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
-  useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
-  useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
-  useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
-  useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
-  useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useOrg: () => ({ data: orgData, isLoading: false, error: null }),
+    usePatchOrg: () => ({
+      mutate: patchOrgMutate,
+      mutateAsync: patchOrgMutateAsync,
+      isPending: false,
+      error: null,
+    }),
+    useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
+    useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
+    useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+    useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
+    useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
+    useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
+    useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
+    useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
+    useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
+  };
+});
 
 vi.mock("~/api/invites", () => ({
   useInvites: () => ({ data: invitesData, isLoading: false, error: null }),

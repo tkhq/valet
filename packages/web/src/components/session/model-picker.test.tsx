@@ -15,9 +15,15 @@ import type { ModelInfo } from "@valet/api/wire";
 let modelsData: { models: ModelInfo[] } | undefined;
 let isLoading = false;
 
-vi.mock("~/api/settings", () => ({
-  useModels: () => ({ data: modelsData, isLoading, error: null }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
+// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useModels: () => ({ data: modelsData, isLoading, error: null }),
+  };
+});
 
 import { ModelPicker } from "./model-picker";
 

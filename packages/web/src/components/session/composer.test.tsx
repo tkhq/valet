@@ -13,10 +13,16 @@ import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 
-vi.mock("~/api/queries", () => ({
-  useSendPrompt: () => ({ isPending: false, mutateAsync: vi.fn() }),
-  useAbortThread: () => ({ isPending: false, mutateAsync: abortMutateAsync }),
-}));
+// importOriginal: see -new-session-dialog.test.tsx for why a bare
+// replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useSendPrompt: () => ({ isPending: false, mutateAsync: vi.fn() }),
+    useAbortThread: () => ({ isPending: false, mutateAsync: abortMutateAsync }),
+  };
+});
 
 vi.mock("~/stores/stream", () => ({
   useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
