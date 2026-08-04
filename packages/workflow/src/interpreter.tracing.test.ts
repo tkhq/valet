@@ -269,6 +269,48 @@ describe('driveUntilPark tracing', () => {
     expect(promptTraceparent).toBe(`00-${ctx.traceId}-${ctx.spanId}-01`);
   });
 
+  it('attaches the completion usage to the workflow.node.llm span', async () => {
+    const engine = makeFakeEngineDeps();
+    engine.llmComplete = vi.fn(async () => ({
+      text: 'hi there',
+      usage: {
+        inputTokens: 120,
+        outputTokens: 45,
+        cacheReadTokens: 30,
+        cacheWriteTokens: 0,
+        totalTokens: 165,
+        costUsd: 0.0021,
+      },
+    }));
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'l', type: 'llm', model: 'anthropic:claude-sonnet-5', prompt: 'hi' },
+      ],
+      edges: [{ from: 't', to: 'l' }],
+    };
+    const park = await drive(new InMemoryWorkflowStore(), definition, engine);
+    expect(park.outcome).toBe('completed');
+
+    const nodeSpans = spansByName('workflow.node.llm');
+    expect(nodeSpans).toHaveLength(1);
+    const attrs = nodeSpans[0].attributes;
+    expect(attrs['valet.workflow.node.llm.usage.input_tokens']).toBe(120);
+    expect(attrs['valet.workflow.node.llm.usage.output_tokens']).toBe(45);
+    expect(attrs['valet.workflow.node.llm.usage.cache_read_tokens']).toBe(30);
+    expect(attrs['valet.workflow.node.llm.usage.cache_write_tokens']).toBe(0);
+    expect(attrs['valet.workflow.node.llm.usage.total_tokens']).toBe(165);
+    expect(attrs['valet.workflow.node.llm.usage.cost_usd']).toBe(0.0021);
+  });
+
+  it('does not set llm usage attributes on a non-llm node span', async () => {
+    await drive(new InMemoryWorkflowStore(), linearDefinition());
+    const setSpans = spansByName('workflow.node.set');
+    expect(setSpans).toHaveLength(1);
+    expect(setSpans[0].attributes['valet.workflow.node.llm.usage.total_tokens']).toBeUndefined();
+  });
+
   it('records a parked drive with the wait kinds it parked on', async () => {
     const definition: WorkflowDefinition = {
       version: 'dag/v1',

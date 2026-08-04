@@ -63,6 +63,40 @@ export interface LlmResult {
   usage: WorkflowLlmUsage;
 }
 
+/**
+ * Narrows a completed `llm` node's opaque `NodeExecuteResult.result` back
+ * to its usage, for the interpreter's tracing wrapper to attach as span
+ * attributes. `result` is `unknown` at that call site — `NodeExecuteResult`
+ * is shared across every node type and isn't parameterized by `node.type` —
+ * so this checks the real shape instead of trusting the caller's node-type
+ * narrowing alone.
+ */
+export function llmUsageSpanAttributes(result: unknown): Record<string, number> | undefined {
+  if (typeof result !== 'object' || result === null || !('usage' in result)) return undefined;
+  const usage = (result as { usage: unknown }).usage;
+  if (
+    typeof usage !== 'object' ||
+    usage === null ||
+    typeof (usage as Partial<WorkflowLlmUsage>).inputTokens !== 'number' ||
+    typeof (usage as Partial<WorkflowLlmUsage>).outputTokens !== 'number' ||
+    typeof (usage as Partial<WorkflowLlmUsage>).cacheReadTokens !== 'number' ||
+    typeof (usage as Partial<WorkflowLlmUsage>).cacheWriteTokens !== 'number' ||
+    typeof (usage as Partial<WorkflowLlmUsage>).totalTokens !== 'number' ||
+    typeof (usage as Partial<WorkflowLlmUsage>).costUsd !== 'number'
+  ) {
+    return undefined;
+  }
+  const u = usage as WorkflowLlmUsage;
+  return {
+    'valet.workflow.node.llm.usage.input_tokens': u.inputTokens,
+    'valet.workflow.node.llm.usage.output_tokens': u.outputTokens,
+    'valet.workflow.node.llm.usage.cache_read_tokens': u.cacheReadTokens,
+    'valet.workflow.node.llm.usage.cache_write_tokens': u.cacheWriteTokens,
+    'valet.workflow.node.llm.usage.total_tokens': u.totalTokens,
+    'valet.workflow.node.llm.usage.cost_usd': u.costUsd,
+  };
+}
+
 function sumUsage(a: WorkflowLlmUsage, b: WorkflowLlmUsage): WorkflowLlmUsage {
   return {
     inputTokens: a.inputTokens + b.inputTokens,

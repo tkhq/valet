@@ -43,6 +43,7 @@ import type { WorkflowDefinition, WorkflowEdge } from './dag/shape.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import {
   createDefaultNodeExecutors,
+  llmUsageSpanAttributes,
   type NodeExecuteResult,
   type NodeExecutorArgs,
   type NodeExecutorRegistry,
@@ -363,6 +364,15 @@ function earliestTimerWake(waitingOn: RunWaitCondition[]): number | undefined {
  * `failed` / `parked`); a `failed` outcome marks the span ERROR with the
  * executor's error message. Executor throws (fence errors, contract
  * violations) propagate — `withSpan` records them as ERROR and rethrows.
+ *
+ * A completed `llm` node also gets its usage/cost attached as span
+ * attributes, so per-node cost is visible in traces without a DB join.
+ * Usage on a *failed* llm node (a repair round that billed a real call
+ * before validation failed it) isn't mirrored here — it's persisted in
+ * the node's checkpoint `effects` for cost reconciliation, but the
+ * `NodeExecuteResult` the trace wrapper sees on failure carries no usage
+ * (see `llm.ts`'s `fail()`), and giving the shared, node-type-agnostic
+ * result type an llm-specific field isn't worth it for that one path.
  */
 async function invokeExecutorTraced(
   node: WorkflowNode,
@@ -383,6 +393,12 @@ async function invokeExecutorTraced(
       const outcome = await invokeExecutor(node, executors, argsBase);
       span.setAttribute('valet.workflow.node.status', outcome.status);
       if (outcome.status === 'failed') markSpanError(span, outcome.error);
+      if (node.type === 'llm' && outcome.status === 'completed') {
+        const usageAttrs = llmUsageSpanAttributes(outcome.result);
+        if (usageAttrs) {
+          for (const [key, value] of Object.entries(usageAttrs)) span.setAttribute(key, value);
+        }
+      }
       return outcome;
     },
   );
