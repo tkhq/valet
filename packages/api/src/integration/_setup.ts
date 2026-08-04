@@ -38,6 +38,7 @@ import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
 import { createApp, type AuthWiring } from "../app.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { ImageBuilder } from "../prebuilds/builder.js";
@@ -69,6 +70,9 @@ export interface BootTestApiOpts {
    * the poll/sweep loops.
    */
   workflowRunHost?: RunHost;
+  /** Overrides the default 30-per-60s `webhookRateLimiter` — rate-limit
+   * tests set a tiny limit so they don't have to race a wall-clock window. */
+  webhookRateLimit?: WorkflowWebhookRateLimiterOptions;
   /** Plugin set for the assembled `Providers.plugins`/`actionPluginByService`
    * — tests never scan node_modules; default `[]`. */
   plugins?: ValetPlugin[];
@@ -331,6 +335,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
   });
 
+  const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });
+
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here); routes must treat this as
   // "unavailable", same as a `local` sandbox-backend boot.
@@ -361,6 +367,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    webhookRateLimiter,
     eventDispatcher,
     plugins,
     actionPluginByService,

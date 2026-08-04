@@ -25,11 +25,17 @@ import {
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
+import {
+  deleteWorkflowWebhook,
+  getWorkflowWebhook,
+  mintOrRotateWorkflowWebhook,
+} from "../workflows/webhook-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   CancelWorkflowRunResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
+  DeleteWorkflowWebhookResponse,
   GetWorkflowResponse,
   GetWorkflowVersionResponse,
   ListWorkflowRunsResponse,
@@ -41,6 +47,7 @@ import type {
   StartWorkflowRunResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
+  WorkflowWebhookResponse,
 } from "../wire/types.js";
 
 export const workflowsRouter = new Hono<AppEnv>();
@@ -188,6 +195,37 @@ workflowsRouter.get("/:id/versions/:version", async (c) => {
   const detail = await getWorkflowVersion(deps, owner, c.req.param("id"), version);
   if (!detail) return c.json({ error: "version not found" }, 404);
   const resp: GetWorkflowVersionResponse = detail;
+  return c.json(resp);
+});
+
+// ── Webhook trigger (overhaul design decision 5) ────────────────────────────
+// The bearer secret itself is minted/rotated/revoked here, owner-scoped like
+// every other route in this file. The secret is CONSUMED at
+// `POST /api/hooks/workflows/:workflowId/:hookId` (`routes/workflow-hooks.ts`),
+// an intentionally unauthenticated route mounted before `buildAuthMiddleware`.
+
+workflowsRouter.post("/:id/webhook", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await mintOrRotateWorkflowWebhook(deps.db, owner, c.req.param("id"));
+  if (!result.ok) return c.json({ error: result.error }, 404);
+  const resp: WorkflowWebhookResponse = result.webhook;
+  return c.json(resp);
+});
+
+workflowsRouter.get("/:id/webhook", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
+  if (!result.ok) return c.json({ error: "workflow not found" }, 404);
+  if (!result.webhook) return c.json({ error: "no webhook configured for this workflow" }, 404);
+  const resp: WorkflowWebhookResponse = result.webhook;
+  return c.json(resp);
+});
+
+workflowsRouter.delete("/:id/webhook", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await deleteWorkflowWebhook(deps.db, owner, c.req.param("id"));
+  if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
+  const resp: DeleteWorkflowWebhookResponse = { deleted: result === "deleted" };
   return c.json(resp);
 });
 

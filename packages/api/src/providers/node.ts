@@ -24,6 +24,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
+import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
@@ -379,6 +380,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const deliverToOrchestrator = buildOrchestratorTarget({ db, engineHost });
   const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
 
+  // Coarse per-workflow cap for the public webhook-trigger route — bounds
+  // what an unauthenticated caller holding a leaked/guessed URL can force
+  // us to start, without needing a shared rate-limit store.
+  const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
+
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
@@ -414,6 +420,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    webhookRateLimiter,
     eventDispatcher,
     plugins,
     actionPluginByService,

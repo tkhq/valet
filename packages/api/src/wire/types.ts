@@ -782,6 +782,22 @@ export interface CancelWorkflowRunResponse {
   ok: true;
 }
 
+// Arbitrary-URL webhook triggers (overhaul design decision 5). `hookId` is
+// the bearer secret in `POST /api/hooks/workflows/:workflowId/:hookId` —
+// minting/rotating returns it once; `GetWorkflowWebhookResponse` also
+// returns it since the management surface is owner-scoped and re-showing
+// the URL (not just "a hook exists") is the point of a status check.
+export interface WorkflowWebhookResponse {
+  workflowId: string;
+  hookId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DeleteWorkflowWebhookResponse {
+  deleted: boolean;
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
 }

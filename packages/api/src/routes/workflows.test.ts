@@ -11,10 +11,12 @@ import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type {
   CreateWorkflowResponse,
+  DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   StartWorkflowRunResponse,
+  WorkflowWebhookResponse,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -286,5 +288,81 @@ describe("GET /api/workflows/:id/runs", () => {
     expect(res.status).toBe(200);
     const { runs } = (await res.json()) as ListWorkflowRunsResponse;
     expect(runs.map((r) => r.runId)).toEqual([runId]);
+  });
+});
+
+describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
+  it("mints a hookId, then reads it back via GET", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const minted = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    expect(minted.status).toBe(200);
+    const mintedBody = (await minted.json()) as WorkflowWebhookResponse;
+    expect(mintedBody.workflowId).toBe(created.id);
+    expect(mintedBody.hookId).toMatch(/^[0-9a-f]{64}$/);
+
+    const fetched = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(fetched.status).toBe(200);
+    const fetchedBody = (await fetched.json()) as WorkflowWebhookResponse;
+    expect(fetchedBody.hookId).toBe(mintedBody.hookId);
+  });
+
+  it("GET 404s when the workflow has no webhook yet", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(res.status).toBe(404);
+  });
+
+  it("POST/GET/DELETE all 404 against another owner's workflow", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    const headers = { "x-valet-test-user-id": "test-member" };
+
+    const post = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST", headers });
+    expect(post.status).toBe(404);
+
+    const get = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { headers });
+    expect(get.status).toBe(404);
+
+    const del = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE", headers });
+    expect(del.status).toBe(404);
+  });
+
+  it("rotating changes the hookId", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const first = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    const firstBody = (await first.json()) as WorkflowWebhookResponse;
+    const second = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+    const secondBody = (await second.json()) as WorkflowWebhookResponse;
+    expect(secondBody.hookId).not.toBe(firstBody.hookId);
+  });
+
+  it("DELETE removes an existing hook and returns deleted:true", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+    await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "POST" });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeleteWorkflowWebhookResponse;
+    expect(body.deleted).toBe(true);
+
+    const afterDelete = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
+    expect(afterDelete.status).toBe(404);
+  });
+
+  it("DELETE on an owned workflow with no hook returns deleted:false (not a 404 — the workflow itself is fine)", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DeleteWorkflowWebhookResponse;
+    expect(body.deleted).toBe(false);
   });
 });

@@ -48,6 +48,7 @@ import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { channelsRouter } from "./routes/channels.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
@@ -136,6 +137,15 @@ export function createApp(
   // user; verification is signature-level (plugin `TriggerDef.verify` over
   // the raw bytes) inside the router itself, not the auth gate below.
   app.route("/webhooks/events", eventWebhooksRouter);
+
+  // PUBLIC arbitrary-URL workflow trigger ingress (overhaul design decision
+  // 5) — same reasoning as the mounts above: the hookId in the URL IS the
+  // credential (no logged-in Valet user), verified constant-time inside the
+  // router itself (`workflow-hooks.ts`), not the auth gate below. This IS
+  // under `/api/*`, so mounting it here, before `buildAuthMiddleware`'s
+  // `/api/*` registration, is what keeps it public — do not move it below
+  // that line.
+  app.route("/api/hooks", workflowHooksRouter);
 
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
