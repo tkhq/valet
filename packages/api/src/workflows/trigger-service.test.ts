@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ValetPlugin } from "@valet/engine";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions } from "../schema/index.js";
-import { createWorkflowTrigger } from "./trigger-service.js";
+import { createWorkflowTrigger, deleteWorkflowTrigger, listWorkflowTriggers } from "./trigger-service.js";
 
 const FIXTURE_PLUGINS: ValetPlugin[] = [
   {
@@ -88,5 +88,24 @@ describe("createWorkflowTrigger authorization", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.trigger.workflowId).toBe("wf_1");
+  });
+});
+
+describe("listWorkflowTriggers / deleteWorkflowTrigger scope (documented, deliberately unchanged by this fix)", () => {
+  it("any org member can list and delete a trigger they didn't create — org-shared visibility, matching event_subscriptions' own documented model everywhere else in this route family, NOT the creation-time ownership bug fixed above", async () => {
+    await seedWorkflow("wf_1", "owner-user", "org-1");
+    const created = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "owner-user", orgId: "org-1" }, {
+      workflowId: "wf_1",
+      name: "trig",
+      eventKeys: ["fixture.thing_happened"],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const listedByOther = await listWorkflowTriggers(db, "org-1");
+    expect(listedByOther.map((t) => t.triggerId)).toContain(created.trigger.triggerId);
+
+    const deletedByOther = await deleteWorkflowTrigger(db, "org-1", created.trigger.triggerId);
+    expect(deletedByOther).toBe("ok");
   });
 });

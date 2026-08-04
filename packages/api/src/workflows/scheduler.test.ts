@@ -1,11 +1,17 @@
 /**
  * `WorkflowScheduler` — previously zero direct test coverage. Scoped here
  * to the run-ownership bug: a fired schedule must bill the WORKFLOW
- * definition's own owner, not whoever created the schedule (which can be
- * a different org member than the workflow's owner since schedule
- * creation is org-scoped, not owner-scoped — see
- * `schedule-service.test.ts`'s authorization suite for the creation-time
- * half of this fix).
+ * definition's own owner, not whoever created the schedule.
+ *
+ * The fixture below seeds a `workflow_schedules` row directly (not through
+ * `createWorkflowSchedule`, which — post-fix — refuses to create a row
+ * shaped this way: see `schedule-service.test.ts`'s authorization suite).
+ * The scenario still matters because the fix is forward-only: any schedule
+ * created before it shipped, where the creator differs from the target
+ * workflow's owner, persists in the database untouched. This test proves
+ * the FIRE-time behavior is correct for such a row regardless of how it
+ * got there — new rows can no longer be created this way, but the
+ * scheduler must still bill correctly for the ones that already exist.
  */
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
