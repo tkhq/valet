@@ -44,6 +44,7 @@ import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { LlmNode } from '../dag/nodes.js';
 import type { NodeCheckpoint } from '../store.js';
 import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
+import type { WorkflowLlmUsage } from '../engine-deps.js';
 
 const MAX_OUTPUT_TOKENS_CEILING = 16_384;
 const MAX_RESULT_BYTES = 512 * 1024;
@@ -51,6 +52,26 @@ const MAX_RESULT_BYTES = 512 * 1024;
 export interface LlmResult {
   text: string;
   output?: unknown;
+  /** Summed across BOTH calls when a repair round ran in the same drive
+   * (both were real billed completions — reporting only the repair call
+   * would silently undercount, the exact failure mode this field exists
+   * to fix). On resume after a crash between the first call and the
+   * repair-decision checkpoint, only the repair call's usage is
+   * recoverable — the first call's cost is genuinely gone, the same
+   * accepted at-least-once gap this executor's docstring already covers
+   * for duplicate dispatch. */
+  usage: WorkflowLlmUsage;
+}
+
+function sumUsage(a: WorkflowLlmUsage, b: WorkflowLlmUsage): WorkflowLlmUsage {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+    cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+    costUsd: a.costUsd + b.costUsd,
+  };
 }
 
 interface LlmEffects {
@@ -80,6 +101,13 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
   const systemText = node.system !== undefined ? renderText(node.system, templateContext) : undefined;
   const maxOutputTokens = clampMaxOutputTokens(node.maxOutputTokens);
 
+  // Carries the first call's usage into the repair branch below (same
+  // drive only — a resume that re-enters with `effects.repairAttempted`
+  // already true skips this block entirely, so `firstCallUsage` stays
+  // `undefined` and only the repair call's usage is reported; see
+  // `LlmResult.usage`'s doc comment).
+  let firstCallUsage: WorkflowLlmUsage | undefined;
+
   if (!effects.repairAttempted) {
     let completion;
     try {
@@ -91,16 +119,18 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
         maxOutputTokens,
       });
     } catch (err) {
+      // No completion happened — nothing was billed, nothing to report.
       return await fail(args, effects, errorMessage(err));
     }
+    firstCallUsage = completion.usage;
 
     if (node.outputSchema === undefined) {
-      return await complete(args, effects, { text: completion.text });
+      return await complete(args, effects, { text: completion.text, usage: completion.usage });
     }
 
     const extracted = extractStructuredOutput(completion.text, node.outputSchema);
     if (extracted.output !== undefined) {
-      return await complete(args, effects, { text: completion.text, output: extracted.output });
+      return await complete(args, effects, { text: completion.text, output: extracted.output, usage: completion.usage });
     }
 
     // Schema validation failed: persist the repair decision (+ the
@@ -137,16 +167,25 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
       maxOutputTokens,
     });
   } catch (err) {
-    return await fail(args, effects, errorMessage(err));
+    // The repair call itself never returned, but the FIRST call (if this
+    // drive made one) genuinely happened and was billed — report it
+    // rather than treating "the terminal call failed" as "nothing cost
+    // anything."
+    return await fail(args, effects, errorMessage(err), firstCallUsage);
   }
+
+  const usage = firstCallUsage ? sumUsage(firstCallUsage, repairCompletion.usage) : repairCompletion.usage;
 
   const repairExtracted = extractStructuredOutput(repairCompletion.text, schema);
   if (repairExtracted.output !== undefined) {
-    return await complete(args, effects, { text: repairCompletion.text, output: repairExtracted.output });
+    return await complete(args, effects, { text: repairCompletion.text, output: repairExtracted.output, usage });
   }
 
   const error = repairExtracted.error ?? `llm node "${node.id}" result did not match outputSchema after repair`;
-  return await fail(args, effects, error);
+  // Both calls were real, billed completions even though validation
+  // failed twice — `usage` (already summed above) must not be discarded
+  // just because the node's OUTCOME is failure.
+  return await fail(args, effects, error, usage);
 }
 
 async function complete(args: NodeExecutorArgs<LlmNode>, effects: LlmEffects, result: LlmResult): Promise<NodeExecuteResult> {
@@ -154,7 +193,15 @@ async function complete(args: NodeExecutorArgs<LlmNode>, effects: LlmEffects, re
 
   const bytes = new TextEncoder().encode(JSON.stringify(result)).length;
   if (bytes > MAX_RESULT_BYTES) {
-    return await fail(args, effects, `llm node "${node.id}" result exceeds ${MAX_RESULT_BYTES} bytes (${bytes} bytes)`);
+    // The completion itself is real and billed — only the text was too
+    // large to persist as a `result`, which is a reason to reject the
+    // node output, not the usage that produced it.
+    return await fail(
+      args,
+      effects,
+      `llm node "${node.id}" result exceeds ${MAX_RESULT_BYTES} bytes (${bytes} bytes)`,
+      result.usage,
+    );
   }
 
   await store.completeCheckpoint(run.runId, node.id, iteration, attempt, {
@@ -170,15 +217,31 @@ async function complete(args: NodeExecutorArgs<LlmNode>, effects: LlmEffects, re
   return { status: 'completed', result };
 }
 
-async function fail(args: NodeExecutorArgs<LlmNode>, effects: LlmEffects, error: string): Promise<NodeExecuteResult> {
+/** `usage` is optional because most failure paths never completed a call
+ * (a throw before any completion) and genuinely have nothing to report —
+ * but when a real, billed completion DID happen before the node's outcome
+ * ended up `failed` (a repair round that also fails validation, or a
+ * repair call that throws after the first call succeeded), the caller
+ * passes it here so it isn't discarded. Stashed in `effects` rather than
+ * `LlmResult` — a failed checkpoint has no `result`, and `effects` is
+ * already this executor's home for terminal diagnostic data that isn't
+ * itself the node's output. */
+async function fail(
+  args: NodeExecutorArgs<LlmNode>,
+  effects: LlmEffects,
+  error: string,
+  usage?: WorkflowLlmUsage,
+): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock } = args;
+  const effectsRecord = effectsToRecord(effects);
+  if (usage !== undefined) effectsRecord.usage = usage;
   await store.completeCheckpoint(run.runId, node.id, iteration, attempt, {
     runId: run.runId,
     nodeId: node.id,
     iteration,
     status: 'failed',
     error,
-    effects: effectsToRecord(effects),
+    effects: effectsRecord,
     attempt,
     createdAt: clock(),
   });

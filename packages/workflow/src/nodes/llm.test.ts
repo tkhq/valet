@@ -2,11 +2,29 @@ import { describe, expect, it } from 'vitest';
 
 import type { LlmNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
-import type { WorkflowEngineDeps, WorkflowLlmCompleteRequest, WorkflowLlmCompleteResult } from '../engine-deps.js';
+import type {
+  WorkflowEngineDeps,
+  WorkflowLlmCompleteRequest,
+  WorkflowLlmCompleteResult,
+  WorkflowLlmUsage,
+} from '../engine-deps.js';
 import { driveUntilPark } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
 import { executeLlm } from './llm.js';
+
+/** Fixture default — most tests don't care about usage values, only that
+ * SOME usage is captured and threaded through. Tests that specifically
+ * cover usage capture (below) use distinct non-zero values per call so a
+ * repair round's SUM is distinguishable from either call alone. */
+const ZERO_USAGE: WorkflowLlmUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  totalTokens: 0,
+  costUsd: 0,
+};
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -57,9 +75,12 @@ interface RecordedCall {
   req: WorkflowLlmCompleteRequest;
 }
 
-/** A scriptable, call-recording fake `WorkflowEngineDeps` for the llm node. */
+/** A scriptable, call-recording fake `WorkflowEngineDeps` for the llm node.
+ * Response literals may omit `usage` — it defaults to `ZERO_USAGE` — so
+ * the majority of fixtures below that don't care about usage values stay
+ * untouched; tests that DO care supply it explicitly. */
 function makeEngine(
-  responses: Array<Omit<WorkflowLlmCompleteResult, never> | Error> = [{ text: 'ok' }],
+  responses: Array<({ text: string; usage?: WorkflowLlmUsage }) | Error> = [{ text: 'ok' }],
 ): { engine: WorkflowEngineDeps; calls: RecordedCall[] } {
   const calls: RecordedCall[] = [];
   const queue = [...responses];
@@ -68,7 +89,7 @@ function makeEngine(
     const value = queue.length > 1 ? queue.shift() : queue[0];
     if (value === undefined) throw new Error('scripted queue exhausted');
     if (value instanceof Error) throw value;
-    return value;
+    return { text: value.text, usage: value.usage ?? ZERO_USAGE };
   }
 
   const engine: WorkflowEngineDeps = {
@@ -121,7 +142,28 @@ describe('executeLlm: happy path, no outputSchema', () => {
 
     const byNode = new Map((await store.getCheckpoints('run-1')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('l')?.status).toBe('completed');
-    expect(byNode.get('l')?.result).toEqual({ text: 'the summary' });
+    expect(byNode.get('l')?.result).toEqual({ text: 'the summary', usage: ZERO_USAGE });
+  });
+
+  it('captures the completion usage into the checkpoint result, not just text', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const usage: WorkflowLlmUsage = {
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 150,
+      costUsd: 0.0042,
+    };
+    const { engine } = makeEngine([{ text: 'the summary', usage }]);
+
+    await store.createRun('run-1b', runParams(), llmDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-1b');
+    await driveUntilPark('run-1b', attempt, { store, engine, clock: clock.now });
+
+    const byNode = new Map((await store.getCheckpoints('run-1b')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('l')?.result).toEqual({ text: 'the summary', usage });
   });
 });
 
@@ -144,7 +186,11 @@ describe('executeLlm: outputSchema set and valid on first try', () => {
 
     const byNode = new Map((await store.getCheckpoints('run-2')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('l')?.status).toBe('completed');
-    expect(byNode.get('l')?.result).toEqual({ text: '```json\n{"answer":"42"}\n```', output: { answer: '42' } });
+    expect(byNode.get('l')?.result).toEqual({
+      text: '```json\n{"answer":"42"}\n```',
+      output: { answer: '42' },
+      usage: ZERO_USAGE,
+    });
   });
 });
 
@@ -173,8 +219,155 @@ describe('executeLlm: schema invalid, then valid after one repair', () => {
 
     const byNode = new Map((await store.getCheckpoints('run-3')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('l')?.status).toBe('completed');
-    expect(byNode.get('l')?.result).toEqual({ text: '{"answer":"42"}', output: { answer: '42' } });
+    expect(byNode.get('l')?.result).toEqual({ text: '{"answer":"42"}', output: { answer: '42' }, usage: ZERO_USAGE });
     expect(byNode.get('l')?.effects?.repairAttempted).toBe(true);
+  });
+
+  it('sums usage across BOTH calls — the first (failed-validation) call was still a real billed completion', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const firstUsage: WorkflowLlmUsage = {
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 120,
+      costUsd: 0.001,
+    };
+    const repairUsage: WorkflowLlmUsage = {
+      inputTokens: 150,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 160,
+      costUsd: 0.002,
+    };
+    const { engine } = makeEngine([
+      { text: 'not json at all', usage: firstUsage },
+      { text: '{"answer":"42"}', usage: repairUsage },
+    ]);
+
+    await store.createRun('run-3b', runParams(), llmDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-3b');
+    await driveUntilPark('run-3b', attempt, { store, engine, clock: clock.now });
+
+    const byNode = new Map((await store.getCheckpoints('run-3b')).map((cp) => [cp.nodeId, cp]));
+    const result = byNode.get('l')?.result as { usage: WorkflowLlmUsage } | undefined;
+    expect(result?.usage).toEqual({
+      inputTokens: 250,
+      outputTokens: 30,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 280,
+      costUsd: 0.003,
+    });
+  });
+
+  it('on resume after a crash AFTER the repair decision was persisted (only the repair call\'s TERMINAL checkpoint was lost), only the repair call\'s usage is reported', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const repairUsage: WorkflowLlmUsage = {
+      inputTokens: 150,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 160,
+      costUsd: 0.002,
+    };
+
+    // Seeds the state a resume sees when `effects.repairAttempted` was
+    // ALREADY checkpointed before the crash (llm.ts's own docstring,
+    // "resumed after a crash before the repair call's result was
+    // checkpointed"). `executeLlm` reads `repairAttempted: true` and skips
+    // the `!effects.repairAttempted` block (llm.ts:111) entirely, so
+    // `firstCallUsage` stays undefined by construction — the first call's
+    // usage was already spent and never re-derivable from this state,
+    // which is what makes it genuinely unrecoverable (not a crash-mechanics
+    // gap this test needs to replay — see test 8 for that).
+    const definition = llmDefinition({ outputSchema });
+    await store.createRun('run-3c', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-3c');
+    await store.putIntent({
+      runId: 'run-3c',
+      nodeId: 'l',
+      iteration: 0,
+      status: 'intent',
+      attempt,
+      createdAt: clock.now(),
+      effects: { repairAttempted: true, firstError: 'result did not match the schema' },
+    });
+
+    const { engine } = makeEngine([{ text: '{"answer":"42"}', usage: repairUsage }]);
+    await driveUntilPark('run-3c', attempt, { store, engine, clock: clock.now });
+
+    const byNode = new Map((await store.getCheckpoints('run-3c')).map((cp) => [cp.nodeId, cp]));
+    const result = byNode.get('l')?.result as { usage: WorkflowLlmUsage } | undefined;
+    expect(result?.usage).toEqual(repairUsage);
+  });
+
+  it('on resume BEFORE the repair decision was ever persisted, the crash just duplicates the first call — its (new) usage is captured normally, nothing is lost', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+
+    // Distinct from the test above: here the crash happens BEFORE
+    // `effects.repairAttempted` was ever checkpointed. `executeLlm`'s only
+    // persisted state on resume is the pre-call intent (written at
+    // llm.ts:88-98, `repairAttempted: false`) — so it reads
+    // `!effects.repairAttempted` as true and calls `engine.llmComplete`
+    // AGAIN, exactly like test 8's documented at-least-once duplicate.
+    // The resulting completion becomes THIS invocation's `firstCallUsage`
+    // and is captured normally — this crash point produces a duplicate
+    // billed call (the accepted cost test 8 already covers), not a usage
+    // GAP, which is the distinction the fix's docstring draws.
+    const definition = llmDefinition({ outputSchema });
+    await store.createRun('run-3d', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-3d');
+    await store.putIntent({
+      runId: 'run-3d',
+      nodeId: 'l',
+      iteration: 0,
+      status: 'intent',
+      attempt,
+      createdAt: clock.now(),
+      effects: { repairAttempted: false },
+    });
+
+    const duplicateFirstUsage: WorkflowLlmUsage = {
+      inputTokens: 70,
+      outputTokens: 8,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 78,
+      costUsd: 0.0009,
+    };
+    const repairUsage: WorkflowLlmUsage = {
+      inputTokens: 150,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 160,
+      costUsd: 0.002,
+    };
+    const { engine, calls } = makeEngine([
+      { text: 'nope', usage: duplicateFirstUsage },
+      { text: '{"answer":"42"}', usage: repairUsage },
+    ]);
+    await driveUntilPark('run-3d', attempt, { store, engine, clock: clock.now });
+
+    expect(calls).toHaveLength(2);
+    const byNode = new Map((await store.getCheckpoints('run-3d')).map((cp) => [cp.nodeId, cp]));
+    const result = byNode.get('l')?.result as { usage: WorkflowLlmUsage } | undefined;
+    expect(result?.usage).toEqual({
+      inputTokens: 220,
+      outputTokens: 18,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 238,
+      costUsd: 0.0029,
+    });
   });
 });
 
@@ -200,6 +393,49 @@ describe('executeLlm: schema invalid twice', () => {
     expect(byNode.get('l')?.effects?.repairAttempted).toBe(true);
     expect(byNode.get('l')?.error).toBeDefined();
   });
+
+  it('still reports the summed usage of BOTH real billed calls, even though the node ultimately fails', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const firstUsage: WorkflowLlmUsage = {
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 120,
+      costUsd: 0.01,
+    };
+    const repairUsage: WorkflowLlmUsage = {
+      inputTokens: 90,
+      outputTokens: 15,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 105,
+      costUsd: 0.02,
+    };
+    const { engine } = makeEngine([
+      { text: 'nope', usage: firstUsage },
+      { text: 'still nope', usage: repairUsage },
+    ]);
+
+    await store.createRun('run-4b', runParams(), llmDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-4b');
+    await driveUntilPark('run-4b', attempt, { store, engine, clock: clock.now });
+
+    const byNode = new Map((await store.getCheckpoints('run-4b')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('l')?.status).toBe('failed');
+    // Both calls were real, billed completions — a failed node must not
+    // report $0 for work that actually happened.
+    expect(byNode.get('l')?.effects?.usage).toEqual({
+      inputTokens: 190,
+      outputTokens: 35,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 225,
+      costUsd: 0.03,
+    });
+  });
 });
 
 // ─── 5. llmComplete throws → node failed with the message ───────────────────
@@ -220,6 +456,35 @@ describe('executeLlm: llmComplete throws', () => {
     const byNode = new Map((await store.getCheckpoints('run-5')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('l')?.status).toBe('failed');
     expect(byNode.get('l')?.error).toBe('model unavailable');
+  });
+
+  it('reports the first call\'s usage when the FIRST call succeeded but the REPAIR call throws', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const firstUsage: WorkflowLlmUsage = {
+      inputTokens: 80,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 90,
+      costUsd: 0.005,
+    };
+    const { engine } = makeEngine([
+      { text: 'nope', usage: firstUsage },
+      new Error('model unavailable during repair'),
+    ]);
+
+    await store.createRun('run-5b', runParams(), llmDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-5b');
+    await driveUntilPark('run-5b', attempt, { store, engine, clock: clock.now });
+
+    const byNode = new Map((await store.getCheckpoints('run-5b')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('l')?.status).toBe('failed');
+    expect(byNode.get('l')?.error).toBe('model unavailable during repair');
+    // The first call was real and billed even though the repair call
+    // itself never returned a completion to sum against.
+    expect(byNode.get('l')?.effects?.usage).toEqual(firstUsage);
   });
 });
 

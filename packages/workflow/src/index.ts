@@ -64,6 +64,7 @@ export type {
   WorkflowInvokeActionResult,
   WorkflowLlmCompleteRequest,
   WorkflowLlmCompleteResult,
+  WorkflowLlmUsage,
   WorkflowPromptOptions,
   WorkflowPromptOrchestratorOptions,
   WorkflowPromptOrchestratorResult,
