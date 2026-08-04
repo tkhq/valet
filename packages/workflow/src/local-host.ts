@@ -54,6 +54,8 @@
  * mid-write.
  */
 
+import { detachedFromTrace } from '@valet/engine';
+
 import { driveUntilPark } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import type { NodeExecutorRegistry, OnApprovalPending } from './nodes/index.js';
@@ -197,9 +199,11 @@ export class LocalRunHost implements RunHost {
   startHost(): void {
     if (this.running) return;
     this.running = true;
-    this.pollTimer = setInterval(() => this.nudge(), this.pollMs);
+    // Detached (tracing): an interval armed inside an ambient span context
+    // inherits it on every tick forever (see engine tracing.ts).
+    this.pollTimer = setInterval(() => detachedFromTrace(() => this.nudge()), this.pollMs);
     this.sweepTimer = setInterval(() => {
-      void this.sweepOnce();
+      void detachedFromTrace(() => this.sweepOnce());
     }, this.sweepMs);
     this.nudge();
   }
@@ -256,7 +260,13 @@ export class LocalRunHost implements RunHost {
   private claimAndDrive(runId: string): void {
     if (this.inFlight.has(runId)) return;
     this.inFlight.add(runId);
-    const p = this.driveRun(runId).finally(() => {
+    // Detached (tracing): a nudge often fires inside a request handler's
+    // active span. A drive is minutes-long, and one poll pass can claim
+    // OTHER runnable runs — parenting under the caller's span would append
+    // the whole drive tree (and unrelated runs) to an ended request trace.
+    // `workflow.drive` is always a trace root; linking the triggering
+    // request needs per-run traceparent storage and is future work.
+    const p = detachedFromTrace(() => this.driveRun(runId)).finally(() => {
       this.inFlight.delete(runId);
     });
     this.activeDrives.add(p);
@@ -325,25 +335,29 @@ export class LocalRunHost implements RunHost {
     const key = `${runId}:${wait.queueItemId}`;
     if (this.submissionWaiters.has(key)) return;
     this.submissionWaiters.add(key);
-    const p = this.engine
-      .awaitResult(wait.sessionId, wait.threadId, wait.queueItemId)
-      .then(() => {
-        // Gate on `running`: after `stopHost()`, a waiter that resolves
-        // must not trigger a new drive. `wake()` already no-ops when
-        // `!running`, but checking here too avoids even the wasted
-        // store round-trip a no-op `wake()` call would still make.
-        if (!this.running) return;
-        return this.wake(runId);
-      })
-      .catch(() => {
-        // Best-effort: a waiter failure (e.g. the engine handle went away)
-        // is not fatal — the lost-wake sweep's `isSettled` check is the
-        // backstop for exactly this case.
-      })
-      .finally(() => {
-        this.submissionWaiters.delete(key);
-        this.waiterPromises.delete(p);
-      });
+    // Detached (tracing): the waiter's continuation can fire hours after
+    // the context it was created in ended — without detaching, the wake's
+    // drive would resurrect that dead trace.
+    const p = detachedFromTrace(() =>
+      this.engine
+        .awaitResult(wait.sessionId, wait.threadId, wait.queueItemId)
+        .then(() => {
+          // Gate on `running`: after `stopHost()`, a waiter that resolves
+          // must not trigger a new drive. `wake()` already no-ops when
+          // `!running`, but checking here too avoids even the wasted
+          // store round-trip a no-op `wake()` call would still make.
+          if (!this.running) return;
+          return this.wake(runId);
+        })
+        .catch(() => {
+          // Best-effort: a waiter failure (e.g. the engine handle went away)
+          // is not fatal — the lost-wake sweep's `isSettled` check is the
+          // backstop for exactly this case.
+        }),
+    ).finally(() => {
+      this.submissionWaiters.delete(key);
+      this.waiterPromises.delete(p);
+    });
     this.waiterPromises.add(p);
   }
 
