@@ -4,7 +4,7 @@
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import {
   validateWorkflowDefinition,
   type RunParams,
@@ -15,9 +15,11 @@ import {
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
+import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
+import { isTeamMember, listTeamsForUser, lockTeamForWorkflowOwnership } from "../services/teams.js";
 import type {
   GetWorkflowRunResponse,
   WorkflowDefinitionSummary,
@@ -83,7 +85,37 @@ function rowToDefinition(row: typeof workflowDefinitions.$inferSelect): Workflow
     definition: row.definition,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    ownerType: row.ownerType === "team" ? "team" : "user",
+    ownerId: row.ownerId,
   };
+}
+
+/** True when `owner` (the caller) may act on `row` — either the row's
+ * direct user owner, or a live member of the row's owning team.
+ * Membership is re-checked on every call, never cached: per the
+ * orchestrator spec's access model, leaving a team must drop access on
+ * the caller's very next request, not at the next snapshot. */
+async function isAuthorizedFor(
+  db: AppDb,
+  owner: WorkflowOwner,
+  row: typeof workflowDefinitions.$inferSelect,
+): Promise<boolean> {
+  return isAuthorizedForOwner(db, owner, row);
+}
+
+/** Shared by definitions (`isAuthorizedFor` above) and runs (`ownedRun`,
+ * `getWorkflowRunDetail` below) — a run started against a team-owned
+ * workflow carries the SAME `{ownerType, ownerId}` shape (scheduler.ts /
+ * events/dispatcher.ts copy it straight from the definition row at start
+ * time), so both need the identical direct-or-team-member check. */
+async function isAuthorizedForOwner(
+  db: AppDb,
+  owner: WorkflowOwner,
+  target: { ownerType: string; ownerId: string },
+): Promise<boolean> {
+  if (target.ownerType === "user") return target.ownerId === owner.userId;
+  if (target.ownerType === "team") return isTeamMember(db, target.ownerId, owner.userId);
+  return false;
 }
 
 /** Exported so other workflow-domain services (`webhook-service.ts`,
@@ -97,30 +129,27 @@ export async function ownedDefinitionRow(
   owner: WorkflowOwner,
   id: string,
 ): Promise<typeof workflowDefinitions.$inferSelect | null> {
-  const rows = await db
-    .select()
-    .from(workflowDefinitions)
-    .where(
-      and(
-        eq(workflowDefinitions.id, id),
-        eq(workflowDefinitions.ownerType, "user"),
-        eq(workflowDefinitions.ownerId, owner.userId),
-      ),
-    )
-    .limit(1);
-  return rows[0] ?? null;
+  const rows = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, id)).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
 export async function listWorkflowDefinitions(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
 ): Promise<WorkflowDefinitionSummary[]> {
+  const myTeams = await listTeamsForUser(deps.db, owner.userId);
+  const teamIds = myTeams.map((t) => t.id);
+  const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
+  const teamMatch =
+    teamIds.length > 0
+      ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, teamIds))
+      : undefined;
   const rows = await deps.db
     .select()
     .from(workflowDefinitions)
-    .where(
-      and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId)),
-    )
+    .where(teamMatch ? or(ownerMatch, teamMatch) : ownerMatch)
     .orderBy(desc(workflowDefinitions.updatedAt));
   return rows.map(rowToDefinition);
 }
@@ -137,22 +166,49 @@ export async function getWorkflowDefinition(
 export async function createWorkflowDefinition(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
-  input: { name: string; definition: unknown },
+  input: { name: string; definition: unknown; teamId?: string },
 ): Promise<WorkflowDefinitionSummary> {
   const now = Date.now();
   const id = newWorkflowId("wf");
-  await deps.db.insert(workflowDefinitions).values({
-    id,
-    orgId: owner.orgId,
-    ownerType: "user",
-    ownerId: owner.userId,
-    name: input.name,
-    definition: input.definition,
-    createdAt: now,
-    updatedAt: now,
-  });
+  const values = { id, orgId: owner.orgId, name: input.name, definition: input.definition, createdAt: now, updatedAt: now };
+
+  let ownerType: "user" | "team" = "user";
+  let ownerId = owner.userId;
+
+  // `typeof === "string"`, not `!== undefined`: `input` ultimately comes
+  // from an unchecked JSON body cast at the route (`CreateWorkflowRequest`
+  // isn't runtime-validated), so an explicit `teamId: null` from a client
+  // that always sends the field is a real, expected shape — it must fall
+  // through to a personal workflow, not misroute into the team branch and
+  // 404 with a confusing "team null not found".
+  if (typeof input.teamId === "string") {
+    const teamId = input.teamId;
+    // The membership check and the insert happen inside one transaction
+    // holding `lockTeamForWorkflowOwnership`'s advisory lock, so this
+    // can't race `deleteTeam` (`services/teams.ts`) — without it, a
+    // workflow could be inserted for a team whose membership/team rows
+    // are deleted in the gap between this check and the insert, stranding
+    // it permanently (see that lock's own doc comment for why
+    // `db.transaction` alone isn't enough here).
+    await deps.db.transaction(async (tx) => {
+      await lockTeamForWorkflowOwnership(tx, teamId);
+      // Non-member and unknown-team look identical here (both a plain
+      // `false`) — same "cross-owner access 404s, never 403s" convention
+      // as the rest of this file, so a team's existence is never leaked
+      // to a non-member's probe.
+      if (!(await isTeamMember(tx, teamId, owner.userId))) {
+        throw new NotFoundError("team", teamId);
+      }
+      await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
+    });
+    ownerType = "team";
+    ownerId = teamId;
+  } else {
+    await deps.db.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
+  }
+
   await snapshotVersion(deps, id, 1, input.name, input.definition, now);
-  return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now };
+  return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
 }
 
 /** Immutable per-save snapshot backing the UI's version history. */
@@ -278,6 +334,8 @@ export async function updateWorkflowDefinition(
     definition: input.definition !== undefined ? input.definition : row.definition,
     createdAt: row.createdAt,
     updatedAt: now,
+    ownerType: row.ownerType === "team" ? "team" : "user",
+    ownerId: row.ownerId,
   };
 }
 
@@ -390,7 +448,7 @@ export async function listWorkflowRuns(
 /** Owner-gated run lookup shared by cancel/approval below. */
 async function ownedRun(deps: WorkflowServiceDeps, owner: WorkflowOwner, runId: string) {
   const run = await deps.workflowStore.getRun(runId);
-  if (!run || !run.owner || run.owner.ownerType !== "user" || run.owner.ownerId !== owner.userId) {
+  if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
     return null;
   }
   return run;
@@ -436,7 +494,7 @@ export async function getWorkflowRunDetail(
   runId: string,
 ): Promise<GetWorkflowRunResponse | null> {
   const run = await deps.workflowStore.getRun(runId);
-  if (!run || !run.owner || run.owner.ownerType !== "user" || run.owner.ownerId !== owner.userId) {
+  if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
     return null;
   }
 

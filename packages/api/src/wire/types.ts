@@ -675,11 +675,17 @@ export interface WorkflowDefinitionSummary {
   definition: unknown;
   createdAt: number;
   updatedAt: number;
+  ownerType: "user" | "team";
+  ownerId: string;
 }
 
 export interface CreateWorkflowRequest {
   name: string;
   definition: unknown;
+  /** Create as a team-owned workflow instead of personal. Caller must be a
+   * current member of the team; a non-member or unknown id 404s, same as
+   * any other cross-owner access (decision 18's own-rows convention). */
+  teamId?: string;
 }
 
 export interface ValidationErrorResponse {

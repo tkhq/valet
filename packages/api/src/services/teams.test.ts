@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, teams, users } from "../schema/index.js";
+import { orgMembers, orgs, teams, users, workflowDefinitions } from "../schema/index.js";
 import {
   addMember,
   createTeam,
@@ -15,6 +15,7 @@ import {
   removeMember,
   setRole,
   TeamNameConflictError,
+  TeamOwnsWorkflowsError,
 } from "./teams.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
@@ -147,12 +148,31 @@ describe("teams service", () => {
     expect(teams.map((t) => t.id)).toEqual([t1.id]);
   });
 
-  it("deleteTeam removes the team and its memberships (no-op workflow guard)", async () => {
+  it("deleteTeam removes the team and its memberships when it owns no workflows", async () => {
     const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
     await deleteTeam(db, { teamId: team.id });
 
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(0);
+  });
+
+  it("deleteTeam rejects deletion while the team owns a workflow", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_1",
+      orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "team workflow",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    await expect(deleteTeam(db, { teamId: team.id })).rejects.toThrow(TeamOwnsWorkflowsError);
+
+    const teams = await listTeamsForUser(db, "u1");
+    expect(teams).toHaveLength(1);
   });
 
   it("addMember rejects a userId with no org_members row in the team's org", async () => {

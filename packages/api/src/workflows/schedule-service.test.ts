@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules, nextFireAt } from "./schedule-service.js";
 import { scheduledRunId } from "./scheduler.js";
 
@@ -68,7 +68,9 @@ describe("createWorkflowSchedule authorization", () => {
   });
 
   beforeEach(async () => {
-    await buildAppQueryable(pglite).query(`TRUNCATE workflow_definitions, workflow_schedules RESTART IDENTITY CASCADE`);
+    await buildAppQueryable(pglite).query(
+      `TRUNCATE workflow_definitions, workflow_schedules, teams, team_members RESTART IDENTITY CASCADE`,
+    );
   });
 
   async function seedWorkflow(id: string, ownerId: string, orgId = "org-1"): Promise<void> {
@@ -108,6 +110,51 @@ describe("createWorkflowSchedule authorization", () => {
     );
 
     expect(result.ok).toBe(true);
+  });
+
+  it("allows a team member (not just the workflow's creator) to schedule a team-owned workflow", async () => {
+    await db.insert(teams).values({ id: "team_1", orgId: "org-1", name: "Platform", createdAt: 1_000 });
+    await db.insert(teamMembers).values({ teamId: "team_1", userId: "member-user", role: "member" });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_1",
+      orgId: "org-1",
+      ownerType: "team",
+      ownerId: "team_1",
+      name: "target",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    const result = await createWorkflowSchedule(
+      db,
+      { id: "member-user", orgId: "org-1" },
+      { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects scheduling a team-owned workflow for a non-member", async () => {
+    await db.insert(teams).values({ id: "team_1", orgId: "org-1", name: "Platform", createdAt: 1_000 });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_1",
+      orgId: "org-1",
+      ownerType: "team",
+      ownerId: "team_1",
+      name: "target",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    const result = await createWorkflowSchedule(
+      db,
+      { id: "outsider-user", orgId: "org-1" },
+      { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
+    );
+
+    expect(result.ok).toBe(false);
   });
 });
 
