@@ -264,6 +264,40 @@ describe('executeLlm: schema invalid, then valid after one repair', () => {
     });
   });
 
+  it('rounds summed costUsd to avoid floating-point drift — 0.1 + 0.2 must report exactly 0.3, not 0.30000000000000004', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const firstUsage: WorkflowLlmUsage = {
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 120,
+      costUsd: 0.1,
+    };
+    const repairUsage: WorkflowLlmUsage = {
+      inputTokens: 150,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 160,
+      costUsd: 0.2,
+    };
+    const { engine } = makeEngine([
+      { text: 'not json at all', usage: firstUsage },
+      { text: '{"answer":"42"}', usage: repairUsage },
+    ]);
+
+    await store.createRun('run-3e', runParams(), llmDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-3e');
+    await driveUntilPark('run-3e', attempt, { store, engine, clock: clock.now });
+
+    const byNode = new Map((await store.getCheckpoints('run-3e')).map((cp) => [cp.nodeId, cp]));
+    const result = byNode.get('l')?.result as { usage: WorkflowLlmUsage } | undefined;
+    expect(result?.usage.costUsd).toBe(0.3);
+  });
+
   it('on resume after a crash AFTER the repair decision was persisted (only the repair call\'s TERMINAL checkpoint was lost), only the repair call\'s usage is reported', async () => {
     const clock = makeClock();
     const store = new InMemoryWorkflowStore(clock.now);

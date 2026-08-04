@@ -97,6 +97,17 @@ export function llmUsageSpanAttributes(result: unknown): Record<string, number> 
   };
 }
 
+/** Rounded to 1e-10 USD (0.1 nano-dollar) — far finer than any real per-token
+ * price, so no genuine cost precision is lost. This only clips the IEEE 754
+ * binary-decimal noise that a plain `+` can introduce (e.g. `0.1 + 0.2 ===
+ * 0.30000000000000004`), which would otherwise leak into billing/tracing
+ * data and into every downstream `JSON.stringify` of this result. */
+const COST_USD_PRECISION = 1e10;
+
+function roundCostUsd(value: number): number {
+  return Math.round(value * COST_USD_PRECISION) / COST_USD_PRECISION;
+}
+
 function sumUsage(a: WorkflowLlmUsage, b: WorkflowLlmUsage): WorkflowLlmUsage {
   return {
     inputTokens: a.inputTokens + b.inputTokens,
@@ -104,7 +115,7 @@ function sumUsage(a: WorkflowLlmUsage, b: WorkflowLlmUsage): WorkflowLlmUsage {
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
     totalTokens: a.totalTokens + b.totalTokens,
-    costUsd: a.costUsd + b.costUsd,
+    costUsd: roundCostUsd(a.costUsd + b.costUsd),
   };
 }
 
