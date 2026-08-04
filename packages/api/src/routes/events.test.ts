@@ -190,7 +190,12 @@ describe("POST /api/event-subscriptions", () => {
       }),
     });
     expect(wfRes.status).toBe(201);
-    const wf = (await wfRes.json()) as { id: string };
+    const wf = (await wfRes.json()) as { id: string; ownerId: string };
+    // The workflow is created with no auth header, so it's owned by the
+    // default stub identity ("local-user"), not "test-member" — pin that
+    // here so the 400 below is provably a cross-user rejection, not a
+    // vacuous pass from the two identities accidentally coinciding.
+    expect(wf.ownerId).toBe("local-user");
 
     const res = await postSubscription(
       a.baseUrl,
