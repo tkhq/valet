@@ -1,8 +1,8 @@
 # Agent Skills Design — the skill format V2 targets
 
 **Date:** 2026-08-05
-**Status:** Implemented for the format, layout, validation, and the `skill` tool. The skill importer is not built.
-**Scope:** Records which skill format Valet V2 uses, how a skill reaches the model, and which parts of the format are not implemented yet.
+**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, and authoring. The repository importer is not built.
+**Scope:** Records which skill format Valet V2 uses, where a skill is stored, how a skill reaches the model, and which parts of the format are not implemented yet.
 
 ## Context
 
@@ -65,9 +65,49 @@ Skills use progressive disclosure, as the spec describes:
 2. The model calls `skill` with a name, and the tool returns that skill's markdown body.
 3. The body stays in context: `"skill"` is in `DEFAULT_PROTECTED_TOOLS` and the ToolDef sets `protectedFromPruning`, so compaction cannot drop the instructions the turn is following.
 
-`packages/api/src/plugins/skill-tool.ts` builds the tool. `pluginSessionExtras` appends it to the session's tools whenever the plugin set ships at least one skill, and rejects two plugins that ship the same skill name — a duplicate name makes one of the two unreachable.
+`packages/api/src/plugins/skill-tool.ts` builds the tool. `pluginSessionExtras` appends it to the session's tools whenever the assembled set holds at least one skill.
 
-`GET /api/skills` and the web Skills tab read the same assembled set, so the catalog a person browses is the catalog the agent can request.
+`GET /api/skills` and the web Skills tab read the same two sources a session build reads, so the catalog a person browses is the catalog the agent can request.
+
+## Storage
+
+A skill has two possible homes. A plugin skill lives in a plugin package and is the same for everyone. A stored skill lives in the `skills` table and belongs to one owner.
+
+The table splits the markdown in two: `content` holds the body, and `frontmatter` holds the parsed frontmatter map. The split is what keeps a bad row from breaking a session. Delivery reads `name`, `description`, and `content` as plain columns, so it never parses and never throws. Every frontmatter rule is checked once, on write, through the same `validateSkillFrontmatter` the plugin loader uses.
+
+`origin` says where a stored skill came from: `local` for one written in the product, `repo` for one synced from a repository. Only `local` skills can be edited here. A `repo` skill belongs to its repository, and an edit here would be overwritten by the next sync.
+
+Access follows workflow definitions exactly (`packages/api/src/services/skills.ts`): your own rows, plus the rows of every team you belong to, with membership re-read on every call. A row another owner holds is reported as not found, never as forbidden, so an owned row and a missing row stay indistinguishable.
+
+A UNIQUE index on `(org_id, owner_type, owner_id, name)` stops two stored skills sharing a name inside one owner scope.
+
+## Delivery
+
+`EngineHost.sessionExtras` is the one seam that assembles a session's skills. All four session builders call it, and each passes the session's OWN principal:
+
+| Builder | Principal | Why |
+|---|---|---|
+| `buildSession` | `{ user, meta.userId }` | `SessionMeta` carries no principal, and the builder passes no `owner`, so the engine defaults the session's principal to exactly this. |
+| `buildOrchestratorSession` | the `principal` argument | The session belongs to that principal and is shared by everyone who can reach it, same as its memory snapshot. |
+| `buildChildSession` | `opts.owner` | The child's own principal, copied from its parent. |
+| `buildWorkflowSession` | `opts.owner` | The run's principal, copied from the workflow definition at start time. |
+
+A `user` principal reads its own skills plus its teams' skills. A `team` or `org` principal reads only that team's or org's skills, so one member's personal skills never appear in a session other members read.
+
+## Two skills, one name
+
+A skill name is a lookup key, so only one skill can hold a name. A repeated name has two rules, and they differ on purpose:
+
+- Two PLUGINS shipping one skill name THROWS. We ship the plugins, so a repeated name is a build-time bug and must be loud.
+- A STORED skill that repeats a name is SHADOWED. The row stays, and it drops out of the assembled set. It never throws: no session builder has a try/catch, so a throw would stop that person from starting any session at all.
+
+Precedence: a plugin skill wins over a stored skill, and a personal skill wins over a team skill. `partitionByName` (`packages/api/src/plugins/assemble.ts`) applies the rule, and `/api/skills` calls the same function, so the rows the page marks `shadowed` are the rows a session drops. The Skills tab shows the warning on the card and tells the author to rename the skill.
+
+## Authoring
+
+`POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one. The routes take a row id, not a name: a shadowed skill shares its name with the skill that shadows it, so only the id can reach it.
+
+The Skills tab holds the form. It has three fields — name, description, and the playbook body — because those are the whole skill. The server checks the name and the description against the spec, and the form shows the server's message.
 
 ## Valet extensions
 
@@ -83,5 +123,6 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 - **Bundled resources.** A spec skill may ship `scripts/`, `references/`, and `assets/`. Valet reads `SKILL.md` and nothing else. A skill body that points at `references/REFERENCE.md` leaves the agent with a path it cannot open.
 - **Resource-level progressive disclosure.** Point 3 of the spec's disclosure model (load a bundled file when it is needed) needs the resource loading above.
 - **`allowed-tools` enforcement.** The field is parsed and carried. Nothing acts on it. The spec marks it experimental.
-- **Skill import, persistence, and sync.** There is no skills table and no importer. `github.list_repo_directory` plus `github.read_repo_file` are the read primitives an importer will compose: list the repository root to find skill directories, then read each `<directory>/SKILL.md`.
-- **Authoring in the product.** The Skills tab is read-only. Skills arrive with plugins.
+- **Repository import and sync.** The `skills` table carries `origin='repo'`, `source_id`, and `upstream_path` for it, but there is no `skill_sources` table, no importer, and no scheduler. Nothing writes a `repo` row today. `github.list_repo_directory` plus `github.read_repo_file` are the read primitives an importer will compose: list the repository root to find skill directories, then read each `<directory>/SKILL.md`. An importer must call `validateSkillFrontmatter` itself and skip the skills that fail, because `loadSkillFromMarkdown` throws.
+- **Org-wide skills.** `owner_type` accepts `org`, and delivery reads an `org` principal's rows, but no route creates one. An org-wide skill needs an admin gate first.
+- **`argsSchema` on a stored skill.** Only a plugin can supply one, because it is code, not frontmatter. A stored skill takes no arguments.
