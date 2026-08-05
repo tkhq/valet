@@ -857,6 +857,37 @@ export interface ListPluginsResponse {
   plugins: PluginSummary[];
 }
 
+// ── REST: skills ─────────────────────────────────────────────────────────
+
+/**
+ * One plugin-supplied skill — a markdown playbook the agent can pull into a
+ * turn through the `skill` tool. Skills have no database table: the list is
+ * whatever the assembled plugin set declares, so it changes only when the
+ * plugin set changes.
+ */
+export interface SkillSummary {
+  /** The identifier the agent passes to the `skill` tool. Unique across the
+   * whole plugin set — `pluginSessionExtras` rejects a duplicate. */
+  name: string;
+  description?: string;
+  /** Name of the plugin that ships this skill. */
+  plugin: string;
+  /** True when the skill declares an `argsSchema`, so the caller must supply
+   * values for the `{{placeholder}}` names in its body. */
+  takesArgs: boolean;
+}
+
+export interface ListSkillsResponse {
+  skills: SkillSummary[];
+}
+
+/** A skill plus its markdown body (frontmatter already removed by the
+ * plugin's `loadSkillFromMarkdown`). Placeholders stay unfilled — this
+ * route reads the skill, it does not invoke it. */
+export interface GetSkillResponse extends SkillSummary {
+  content: string;
+}
+
 export interface CredentialSummary {
   service: string;
   type: CredentialKind;
