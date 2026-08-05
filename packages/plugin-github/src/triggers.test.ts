@@ -209,3 +209,213 @@ describe("github toEvent", () => {
     }
   });
 });
+
+// ─── Review event families ──────────────────────────────────────────────────
+
+const REVIEW_SUBMITTED_PAYLOAD = {
+  action: "submitted",
+  review: {
+    id: 2626884,
+    user: { login: "octocat", id: 583231 },
+    body: "Two nits",
+    // The webhook delivers a LOWERCASE state; the REST API returns uppercase.
+    state: "changes_requested",
+    submitted_at: "2026-07-05T12:00:00Z",
+    commit_id: "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+  },
+  pull_request: { number: 42, title: "Add feature", updated_at: "2026-07-05T13:00:00Z" },
+  repository: { full_name: "acme/widgets" },
+  sender: { login: "octocat", id: 583231 },
+};
+
+const REVIEW_COMMENT_PAYLOAD = {
+  action: "created",
+  comment: {
+    id: 993,
+    path: "source/rest/handler.go",
+    line: 12,
+    side: "RIGHT",
+    body: "Close the response body",
+    created_at: "2026-07-05T12:05:00Z",
+    updated_at: "2026-07-05T12:05:00Z",
+    user: { login: "octocat", id: 583231 },
+    pull_request_review_id: 2626884,
+  },
+  pull_request: { number: 42, updated_at: "2026-07-05T13:00:00Z" },
+  repository: { full_name: "acme/widgets" },
+  sender: { login: "octocat", id: 583231 },
+};
+
+const REVIEW_THREAD_PAYLOAD = {
+  action: "resolved",
+  thread: { node_id: "PRRT_kwDO", comments: [{ id: 993, path: "source/rest/handler.go" }] },
+  pull_request: { number: 42, updated_at: "2026-07-05T13:00:00Z" },
+  repository: { full_name: "acme/widgets" },
+  sender: { login: "octocat", id: 583231 },
+};
+
+/**
+ * Mirrors `resolvePath` in `packages/api/src/events/match.ts`, which the
+ * subscription filter matcher uses on the raw payload. plugin-github must not
+ * import from the api package, so the walk is copied here to prove that each
+ * declared catalog `path` resolves to a scalar on a real payload. A path that
+ * resolves to undefined makes the filter silently fail to match.
+ */
+function resolveDotPath(payload: unknown, path: string): unknown {
+  let cur: unknown = payload;
+  for (const segment of path.split(".")) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[segment];
+  }
+  return cur;
+}
+
+/** `filtersMatch` coerces with `asString`, which accepts string and number only. */
+function isFilterableScalar(value: unknown): boolean {
+  return typeof value === "string" || typeof value === "number";
+}
+
+function catalogEntry(triggerId: string, key: string) {
+  const def = githubTriggerDefs.find((t) => t.id === triggerId);
+  if (!def) throw new Error(`no trigger def for ${triggerId}`);
+  const entry = def.catalog.find((e) => e.key === key);
+  if (!entry) throw new Error(`no catalog entry ${key} on ${triggerId}`);
+  return entry;
+}
+
+describe("github review event families", () => {
+  it("declares a trigger def for each review event family", () => {
+    for (const eventType of [
+      "pull_request_review",
+      "pull_request_review_comment",
+      "pull_request_review_thread",
+    ]) {
+      expect(githubTriggerDefs.map((t) => t.id)).toContain(`github.${eventType}`);
+    }
+  });
+
+  it("verifies a pull_request_review webhook", async () => {
+    const trigger = findTrigger("pull_request_review");
+    const rawBody = encode(REVIEW_SUBMITTED_PAYLOAD);
+    const headers = {
+      "X-Hub-Signature-256": sign(rawBody),
+      "X-GitHub-Event": "pull_request_review",
+      "X-GitHub-Delivery": "delivery-review-1",
+    };
+
+    const event = await trigger.verify({ headers, rawBody }, { webhookSecret: SECRET });
+
+    expect(event).not.toBeNull();
+    expect(event?.eventType).toBe("pull_request_review");
+    expect(event?.deliveryId).toBe("delivery-review-1");
+  });
+
+  it("does not let the pull_request def swallow a pull_request_review delivery", async () => {
+    const trigger = findTrigger("pull_request");
+    const rawBody = encode(REVIEW_SUBMITTED_PAYLOAD);
+    const headers = {
+      "X-Hub-Signature-256": sign(rawBody),
+      "X-GitHub-Event": "pull_request_review",
+      "X-GitHub-Delivery": "delivery-review-2",
+    };
+
+    const event = await trigger.verify({ headers, rawBody }, { webhookSecret: SECRET });
+
+    expect(event).toBeNull();
+  });
+
+  it("normalizes review events to action-qualified keys", () => {
+    const review = findTrigger("pull_request_review").toEvent({
+      eventType: "pull_request_review",
+      deliveryId: "d-review",
+      payload: REVIEW_SUBMITTED_PAYLOAD,
+    });
+    expect(review.key).toBe("github.pull_request_review.submitted");
+    expect(review.refs.repo).toBe("acme/widgets");
+    // review.submitted_at, not pull_request.updated_at.
+    expect(review.occurredAt).toBe("2026-07-05T12:00:00Z");
+
+    const comment = findTrigger("pull_request_review_comment").toEvent({
+      eventType: "pull_request_review_comment",
+      deliveryId: "d-review-comment",
+      payload: REVIEW_COMMENT_PAYLOAD,
+    });
+    expect(comment.key).toBe("github.pull_request_review_comment.created");
+    expect(comment.occurredAt).toBe("2026-07-05T12:05:00Z");
+
+    const thread = findTrigger("pull_request_review_thread").toEvent({
+      eventType: "pull_request_review_thread",
+      deliveryId: "d-review-thread",
+      payload: REVIEW_THREAD_PAYLOAD,
+    });
+    expect(thread.key).toBe("github.pull_request_review_thread.resolved");
+    // No thread timestamp exists, so the PR's own timestamp is the fallback.
+    expect(thread.occurredAt).toBe("2026-07-05T13:00:00Z");
+  });
+
+  it("catalogs the documented actions for each review family", () => {
+    const keysOf = (id: string) => githubTriggerDefs.find((t) => t.id === id)!.catalog.map((e) => e.key);
+
+    expect(keysOf("github.pull_request_review")).toEqual([
+      "github.pull_request_review.submitted",
+      "github.pull_request_review.edited",
+      "github.pull_request_review.dismissed",
+    ]);
+    expect(keysOf("github.pull_request_review_comment")).toEqual([
+      "github.pull_request_review_comment.created",
+      "github.pull_request_review_comment.edited",
+      "github.pull_request_review_comment.deleted",
+    ]);
+    expect(keysOf("github.pull_request_review_thread")).toEqual([
+      "github.pull_request_review_thread.resolved",
+      "github.pull_request_review_thread.unresolved",
+    ]);
+  });
+
+  it("declares review_state and pr_number filters on pull_request_review", () => {
+    const entry = catalogEntry("github.pull_request_review", "github.pull_request_review.submitted");
+    const byField = new Map(entry.filters.map((f) => [f.field, f.path]));
+
+    expect(byField.get("repo")).toBe("repository.full_name");
+    expect(byField.get("sender")).toBe("sender.login");
+    expect(byField.get("review_state")).toBe("review.state");
+    expect(byField.get("pr_number")).toBe("pull_request.number");
+  });
+
+  it("declares a path filter on pull_request_review_comment for folder scoping", () => {
+    const entry = catalogEntry(
+      "github.pull_request_review_comment",
+      "github.pull_request_review_comment.created",
+    );
+    const byField = new Map(entry.filters.map((f) => [f.field, f.path]));
+
+    expect(byField.get("path")).toBe("comment.path");
+    expect(byField.get("pr_number")).toBe("pull_request.number");
+  });
+
+  it("resolves every declared filter path to a scalar on a real payload", () => {
+    const cases: [string, string, unknown][] = [
+      ["github.pull_request_review", "github.pull_request_review.submitted", REVIEW_SUBMITTED_PAYLOAD],
+      [
+        "github.pull_request_review_comment",
+        "github.pull_request_review_comment.created",
+        REVIEW_COMMENT_PAYLOAD,
+      ],
+      [
+        "github.pull_request_review_thread",
+        "github.pull_request_review_thread.resolved",
+        REVIEW_THREAD_PAYLOAD,
+      ],
+    ];
+
+    for (const [triggerId, key, payload] of cases) {
+      for (const filter of catalogEntry(triggerId, key).filters) {
+        const resolved = resolveDotPath(payload, filter.path);
+        expect(
+          isFilterableScalar(resolved),
+          `${key} filter "${filter.field}" path "${filter.path}" resolved to ${JSON.stringify(resolved)}`,
+        ).toBe(true);
+      }
+    }
+  });
+});
