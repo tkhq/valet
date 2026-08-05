@@ -683,6 +683,32 @@ function reviewMarker(updateKey: string): string {
   return `<!-- valet-review:${updateKey} -->`;
 }
 
+/**
+ * Reads every review on a pull request, in pages of at most 100. GitHub
+ * returns reviews oldest-first, so a single first page holds none of ours on
+ * a pull request with more than 100 reviews — `updateExisting` would then add
+ * another review instead of replacing one, on exactly the pull requests that
+ * accumulate reviews fastest. Paged the same way as the file list rather than
+ * via `octokit.paginate`, which needs `Link` headers.
+ */
+async function fetchPullRequestReviews(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+): Promise<{ id: number; body?: string | null }[]> {
+  const reviews: { id: number; body?: string | null }[] = [];
+  for (let page = 1; ; page++) {
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+      { owner, repo, pull_number: pullNumber, per_page: GITHUB_MAX_PER_PAGE, page },
+    );
+    reviews.push(...data);
+    if (data.length < GITHUB_MAX_PER_PAGE) break;
+  }
+  return reviews;
+}
+
 const REVIEW_COMMENT_SIDE = Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]);
 
 interface ReviewCommentInput {
@@ -858,9 +884,11 @@ const createReview = action(Type.Object({
       // again is what narrows it to a string for the update endpoint, which
       // has no bodyless form.
       if (args.updateExisting && body !== undefined) {
-        const { data: priorReviews } = await octokit.request(
-          "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-          { owner: args.owner, repo: args.repo, pull_number: args.pullNumber, per_page: 100 },
+        const priorReviews = await fetchPullRequestReviews(
+          octokit,
+          args.owner,
+          args.repo,
+          args.pullNumber,
         );
         // Newest first: a re-review updates the latest of our reviews, not the
         // first one we ever left on this pull request.

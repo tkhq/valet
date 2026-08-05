@@ -527,6 +527,36 @@ describe("github.create_review", () => {
     expect(writes[0].method).toBe("POST");
   });
 
+  it("updateExisting finds our review past the first page of 100", async () => {
+    // GitHub returns reviews oldest-first. A bot that re-reviews on every
+    // push is exactly what pushes its own review off page 1, so a
+    // single-page read would stop updating and start stacking duplicates.
+    const older = Array.from({ length: 100 }, (_, i) => ({
+      id: i + 1,
+      state: "COMMENTED",
+      body: "a human review",
+      user: { login: "conner" },
+    }));
+    const ours = { id: 999, state: "COMMENTED", body: `Stale findings.\n\n${MARKER}`, user: { login: "valet[bot]" } };
+    const all = [...older, ours];
+    const server = useFixture({
+      listReviews: (_ref, query) => {
+        const perPage = Number(query.per_page ?? "30");
+        const page = Number(query.page ?? "1");
+        const start = (page - 1) * perPage;
+        return { body: all.slice(start, start + perPage) };
+      },
+    });
+
+    const result = await createReview({ body: "Fresh findings.", updateExisting: true });
+
+    expect(result.success).toBe(true);
+    const writes = reviewWrites(server);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].method).toBe("PUT");
+    expect(writes[0].path).toBe("/repos/acme/widgets/pulls/7/reviews/999");
+  });
+
   it("updateExisting replaces the body of our previous review in place", async () => {
     const server = useFixture({
       listReviews: () => ({

@@ -47,8 +47,9 @@ export interface GithubFixtureHandlers {
   /** `GET /repos/:owner/:repo/pulls/:pull_number/files` — receives the parsed
    * query so a fixture can serve real pages. */
   listPullFiles?: (ref: PullRef, query: Record<string, string>) => GithubFixtureResponse;
-  /** `GET /repos/:owner/:repo/pulls/:pull_number/reviews` */
-  listReviews?: (ref: PullRef) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/pulls/:pull_number/reviews` — receives the
+   * parsed query so a fixture can serve real pages. */
+  listReviews?: (ref: PullRef, query: Record<string, string>) => GithubFixtureResponse;
   /** `POST /repos/:owner/:repo/pulls/:pull_number/reviews` */
   createReview?: (ref: PullRef, body: unknown) => GithubFixtureResponse;
   /** `PUT /repos/:owner/:repo/pulls/:pull_number/reviews/:review_id` */
@@ -157,7 +158,7 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
   app.get("/repos/:owner/:repo/pulls/:pull_number/reviews", (c) => {
     const ref = pullRef(c);
     record(c, asParams(ref));
-    const { status, body } = handlers.listReviews(ref);
+    const { status, body } = handlers.listReviews(ref, c.req.query());
     return c.json(body as object, status ?? 200);
   });
 
