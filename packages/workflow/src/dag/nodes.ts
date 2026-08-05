@@ -144,6 +144,12 @@ export interface ToolNode {
    * Identity the action acts as. Omit it to keep the host's default
    * precedence — every definition written before this field existed reads
    * as `auto`.
+   *
+   * `params` are template-rendered before the host resolves this, so a
+   * definition can derive the target of an `app` credential from the trigger
+   * payload. A host MUST therefore resolve the application identity only
+   * within the run owner's own tenant. Prefer a literal target over a
+   * template when the workflow runs unattended.
    */
   credential?: ToolCredentialMode;
 }

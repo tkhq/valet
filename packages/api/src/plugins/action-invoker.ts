@@ -318,6 +318,11 @@ function buildGithubCredentialProvider(
         now: tokenDeps.now,
       };
       const selection = req.credential ?? "auto";
+      // `params` are template-rendered, so a webhook payload can choose this
+      // repo. That is safe only because `mintInstallationToken` looks an
+      // installation up by `(orgId, accountLogin)` — the reachable set is
+      // the caller's own org. Keep that scoping: a global installation
+      // lookup would turn this node into cross-tenant access.
       const repo = selection === "app" ? repoFromParams(req.params) : undefined;
       if (selection === "app" && !repo) {
         throw new Error(
