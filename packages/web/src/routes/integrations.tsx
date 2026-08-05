@@ -7,13 +7,13 @@ import { IntegrationRow, BuiltInRow, isService } from "~/components/integrations
 import { displayName } from "~/components/integrations/display-name";
 
 /**
- * `/integrations` — what the assistant can reach. Two groups in the
- * settings visual idiom (open hairline stacks, no card boxes): Services
- * (plugins with tools and/or credentials — connectable) and Built in
- * (content-only plugins that just work). OAuth connect for services
- * declaring `oauth` metadata redirects to `/api/credentials/:service/connect`
- * and lands back here with `?connected=` or `?error=`; manual token entry
- * remains the fallback for everything else.
+ * `/integrations` — two groups in the settings visual idiom (open hairline
+ * stacks, no card boxes): Services (plugins with tools and/or credentials,
+ * so they are connectable) and Built in (content-only plugins, nothing to
+ * connect). OAuth connect for services declaring `oauth` metadata redirects
+ * to `/api/credentials/:service/connect` and lands back here with
+ * `?connected=` or `?error=`; manual token entry remains the fallback for
+ * everything else.
  */
 export const Route = createFileRoute("/integrations")({
   component: IntegrationsPage,
@@ -53,13 +53,7 @@ export function IntegrationsPage() {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl px-6 py-10">
         <div className="flex items-end justify-between gap-4">
-          <div>
-            <h1 className="font-display text-2xl text-ink">Integrations</h1>
-            <p className="mt-1 text-sm text-muted">
-              What your assistant can reach. Connect a service with a key; built-in abilities just
-              work.
-            </p>
-          </div>
+          <h1 className="font-display text-2xl text-ink">Integrations</h1>
           {!isLoading && !error && connectableCount > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">
               {connectedCount} of {connectableCount} connected
@@ -100,10 +94,7 @@ export function IntegrationsPage() {
           )}
 
           {!isLoading && !error && services.length > 0 && (
-            <Section
-              title="Services"
-              description="Tools your assistant uses on your behalf — most need a key to connect."
-            >
+            <Section title="Services" description="Most need a key to connect.">
               <div className="grid gap-3 pt-4 sm:grid-cols-2">
                 {services.map((plugin) => (
                   <IntegrationRow key={plugin.name} plugin={plugin} />
@@ -113,7 +104,7 @@ export function IntegrationsPage() {
           )}
 
           {!isLoading && !error && builtIn.length > 0 && (
-            <Section title="Built in" description="Always available — nothing to set up.">
+            <Section title="Built in">
               <div className="grid gap-3 pt-4 sm:grid-cols-2">
                 {builtIn.map((plugin) => (
                   <BuiltInRow key={plugin.name} plugin={plugin} />
