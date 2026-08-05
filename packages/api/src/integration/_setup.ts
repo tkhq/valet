@@ -120,13 +120,16 @@ export interface BootTestApiOpts {
   /** Forwarded to `EngineHostOpts.idleSweepTestHooks` — test-only race
    * injection for the idle sweep's re-check. */
   idleSweepTestHooks?: EngineHostOpts["idleSweepTestHooks"];
-  /** Forwarded to `EngineHostOpts.githubTokenDeps` — wires the session
-   * `credentialResolver` seam (GH-T10 fix) so a real `sessionFor(...)` build
-   * resolves `github` credentials through the token service instead of a raw
-   * store read. Unset by default, matching every other route test (no
-   * resolver at all) — only tests exercising the action-invoke-level
-   * session-credential seam (GitHub/repo integration plan, Task 12's e2e)
-   * need this wired through a full API boot. */
+  /** Overrides the GitHub token deps given to BOTH `EngineHost` (the
+   * session `credentialResolver` seam, GH-T10 fix) and the workflow action
+   * invoker — the same pair `providers/node.ts` derives from one key at real
+   * boot. Point `apiUrl`/`githubUrl` at `startGithubFixture()`'s `url` to
+   * keep resolution off the network.
+   *
+   * When unset, `EngineHost` gets no resolver (sessions read credentials
+   * straight from the store, matching every other route test) but the
+   * workflow invoker still gets the default test key, because production
+   * always wires it and a `github` tool node is otherwise untestable. */
   githubTokenDeps?: EngineHostOpts["githubTokenDeps"];
   /** Wires `Providers.prebuildService`'s `builder` — unset/`null` (the
    * default) means "prebuilds unavailable", same as a `local` sandbox
@@ -303,6 +306,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineStore,
     actionPluginByService,
     credentials: engineCredentials,
+    // Same key BOTH consumers get at real boot (`providers/node.ts` derives
+    // one key for `EngineHost` and the workflow action invoker). Without
+    // this, a `github` tool node inside a workflow threw a wiring error and
+    // the whole path was untestable.
+    githubTokenDeps: opts.githubTokenDeps ?? { key: deriveSecretKey("test-key") },
   });
   const realWorkflowRunHost = new LocalRunHost({
     store: workflowStore,
