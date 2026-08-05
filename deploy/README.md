@@ -144,6 +144,56 @@ CREATE TABLE "bakes" (
 CREATE INDEX "bakes_source_status_created" ON "bakes" ("source_id","status","created_at");
 ```
 
+## Pre-deploy DDL — cost attribution
+
+Run this DDL ONCE against the live database before you roll the api to the
+cost-attribution release. Fresh installs skip it — the boot migration creates
+the view and the index. It matters only for a live cluster whose migration
+tracker already recorded `0000_app.sql` and `0000_engine.sql`, because an
+in-place edit to a recorded pre-1.0 migration never re-applies. Apply it with
+`psql "$DATABASE_URL" -f -` while the old api is still running; then roll the
+api. `CONCURRENTLY` keeps the index build off the write path. The view body
+below is a copy of the one in `packages/api/migrations/pg/0000_app.sql`. If you
+edit the view, edit both.
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "engine_entries_usage_window"
+	ON "engine_entries" ("created_at") WHERE "usage" IS NOT NULL;
+
+CREATE OR REPLACE VIEW "cost_entries" AS
+SELECT
+	e."id"                                                     AS "entry_id",
+	e."session_id"                                             AS "session_id",
+	e."created_at"                                             AS "created_at",
+	e."model"                                                  AS "model",
+	COALESCE(s."org_id", d."org_id")                           AS "org_id",
+	CASE
+		WHEN s."id" IS NOT NULL THEN s."user_id"
+		WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '')
+	END                                                        AS "user_id",
+	COALESCE(s."owner_type", r."owner_type")                   AS "owner_type",
+	NULLIF(COALESCE(s."owner_id", r."owner_id"), '')           AS "owner_id",
+	r."workflow_id"                                            AS "workflow_id",
+	r."id"                                                     AS "workflow_run_id",
+	COALESCE((e."usage"::jsonb->>'input')::bigint, 0)          AS "input_tokens",
+	COALESCE((e."usage"::jsonb->>'output')::bigint, 0)         AS "output_tokens",
+	COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0)      AS "cache_read_tokens",
+	COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
+	COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
+	(e."cost"::jsonb->>'total')::float8                        AS "cost_total",
+	((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced"
+FROM "engine_entries" e
+LEFT JOIN "agent_sessions" s
+	ON s."id" = e."session_id"
+LEFT JOIN "workflow_runs" r
+	ON e."session_id" LIKE 'wf:%'
+	AND r."id" = split_part(e."session_id", ':', 2)
+LEFT JOIN "workflow_definitions" d
+	ON d."id" = r."workflow_id"
+WHERE e."usage" IS NOT NULL
+	AND COALESCE(s."org_id", d."org_id") IS NOT NULL;
+```
+
 ## Reach the api
 
 Port-forward is the simplest option, and the one CI and scripted
