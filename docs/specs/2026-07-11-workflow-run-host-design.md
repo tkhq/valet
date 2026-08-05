@@ -206,7 +206,7 @@ Workflow nodes consume the engine exclusively through the Workflow Caller Contra
 
 | Node need | Engine primitive |
 |---|---|
-| Spawn a session | `engine.createSession({ id: presetSessionId, purpose: 'workflow' })` — idempotent by id |
+| Spawn a session | `engine.createSession({ id: presetSessionId, purpose: 'workflow' })` — idempotent by id. The preset id is `wf:{runId}:{nodeId}[:{iteration}]`, which follows the same suffix rule as the dispatchId below: a `session` node used as a `foreach` body gets one session per item. Everything that resolves run context from a session id must accept both the 3-part and the 4-part form. |
 | Prompt a session/orchestrator | `thread.prompt(content, { dispatchId: 'workflow:{runId}:{nodeId}[:{iteration}]' })` — idempotent by dispatchId |
 | Await the result | `thread.awaitResult(queueItemId, { resultSchema })` — resumable; replaces poll-until-idle |
 | Observe progress | engine EventStream (settled/`turn_end`/`queue_state` events) |

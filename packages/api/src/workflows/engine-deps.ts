@@ -12,8 +12,8 @@
  * interface (which would ripple into the already-shipped `session` node
  * executor and its tests), this builder resolves the missing context itself
  * by parsing the session id: every workflow session id is
- * `wf:{runId}:{nodeId}` (see `nodes/session.ts`), so `runId` is always
- * recoverable. From `runId` it loads the `WorkflowRun` row (for
+ * `wf:{runId}:{nodeId}[:{iteration}]` (see `nodes/session.ts`), so `runId`
+ * is always recoverable. From `runId` it loads the `WorkflowRun` row (for
  * `owner`/`params.workflowId`) and then the parent `workflow_definitions`
  * row (for `orgId` — `workflow_runs` doesn't carry its own `orgId` column,
  * decision 17). `actorUserId` has no natural value for a team/org-owned
@@ -91,12 +91,39 @@ export interface WorkflowEngineDepsOpts {
   githubTokenDeps?: ActionInvokerOpts["githubTokenDeps"];
 }
 
-function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: string } {
+/**
+ * Inverse of the `session` node's id convention: `wf:{runId}:{nodeId}` at
+ * iteration 0, `wf:{runId}:{nodeId}:{iteration}` after it. A `SessionNode`
+ * is a legal `foreach` body, and a body runs at one iteration per item, so
+ * the 4-part form is as ordinary as the 3-part one — see `iterationSuffix`
+ * in `@valet/workflow`'s `nodes/index.ts`. Run ids and node ids are
+ * colon-free (the definition validator's `NODE_ID_PATTERN`), so the part
+ * count identifies the form without ambiguity.
+ *
+ * No method on this port reads `iteration` today: run context comes from
+ * `runId` alone, and `workspaceFor` keeps two iterations on different
+ * paths because it maps the whole id. The parser still returns the value
+ * and checks its format, so a malformed suffix fails here instead of
+ * resolving to the wrong run.
+ */
+function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: string; iteration?: number } {
   const parts = sessionId.split(":");
-  if (parts.length !== 3 || parts[0] !== "wf") {
-    throw new Error(`workflow engine-deps: not a workflow session id: ${sessionId}`);
+  if (parts[0] !== "wf" || (parts.length !== 3 && parts.length !== 4)) {
+    throw new Error(
+      `workflow engine-deps: not a workflow session id: ${sessionId}. ` +
+        `Use the wf:{runId}:{nodeId}[:{iteration}] form that the session node mints.`,
+    );
   }
-  return { runId: parts[1], nodeId: parts[2] };
+  if (parts.length === 3) return { runId: parts[1], nodeId: parts[2] };
+
+  const iteration = Number(parts[3]);
+  if (!Number.isInteger(iteration) || iteration < 1) {
+    throw new Error(
+      `workflow engine-deps: workflow session id ${sessionId} has an invalid iteration suffix. ` +
+        `Use a whole number of 1 or more, or remove the suffix for iteration 0.`,
+    );
+  }
+  return { runId: parts[1], nodeId: parts[2], iteration };
 }
 
 interface RunContext {
@@ -145,7 +172,9 @@ function actorUserIdFor(principal: Principal): string {
 
 function workspaceFor(sessionId: string): string {
   // Colons are valid path-segment characters on POSIX, but avoided here for
-  // portability/readability — `wf:{runId}:{nodeId}` -> `wf_{runId}_{nodeId}`.
+  // portability/readability — `wf:{runId}:{nodeId}[:{iteration}]` ->
+  // `wf_{runId}_{nodeId}[_{iteration}]`. Every part of the id is kept, so
+  // two iterations of one `foreach` body never share a workspace.
   return join(homedir(), ".valet", "workflows", sessionId.replace(/:/g, "_"));
 }
 
@@ -167,8 +196,9 @@ export async function ensureWorkflowSession(
 }
 
 async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, title?: string) {
-  // Two session kinds reach this seam: `wf:{runId}:{nodeId}` sessions the
-  // `session` node spawns, and the owner's ORCHESTRATOR session that the
+  // Two session kinds reach this seam: `wf:{runId}:{nodeId}[:{iteration}]`
+  // sessions the `session` node spawns, and the owner's ORCHESTRATOR
+  // session that the
   // `orchestrator` node's receipt points back at (its wake path calls
   // `awaitResult`/`abort` with `receipt.sessionId`). Each must wake through
   // its own chokepoint — an orchestrator id fed to `workflowSessionFor`
