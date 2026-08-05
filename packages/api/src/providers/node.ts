@@ -15,6 +15,7 @@ import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { routeAttention } from "../orchestrator/attention.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
+import { skillsActionPlugin } from "../services/skills-actions.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
@@ -244,6 +245,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       }),
     ],
   };
+  // Skills are the other host-defined action surface. They need only the
+  // app Drizzle handle, which already exists here, so they take no deferred
+  // getter. This is the in-product authoring path for a skill; the web tab
+  // reads only (docs/specs/2026-08-05-agent-skills-design.md).
+  const skillsActions: ValetPlugin = {
+    name: "skills-actions",
+    version: "0.1.0",
+    description: "Agent-facing skill authoring actions.",
+    actions: [skillsActionPlugin(db)],
+  };
   const { allowlist, denylist } = parseValetPluginsEnv(process.env.VALET_PLUGINS);
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
@@ -256,7 +267,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
             denylist,
           })
         ).plugins,
-        [workflowsActions],
+        [workflowsActions, skillsActions],
       ]);
 
   // Refresh-on-read decorator (integration-OAuth design): wraps the raw
