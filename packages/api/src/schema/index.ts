@@ -630,6 +630,57 @@ export const memoryFiles = pgTable(
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
 );
 
+// ─── Skills ─────────────────────────────────────────────────────────────────
+//
+// Stored skills — the markdown playbooks a person writes in the product, and
+// (later) the ones a repository supplies. Plugin skills are NOT here: they
+// ship inside plugin packages and are assembled from the manifest, so the
+// two sets meet only at delivery time (`plugins/assemble.ts`).
+//
+// `content` holds the BODY, with the frontmatter already removed, and
+// `frontmatter` holds the parsed frontmatter map. The split is what keeps a
+// bad row from breaking a session build: delivery reads `name`,
+// `description`, and `content` straight from these columns, so it never
+// parses and never throws. Every frontmatter rule is checked once, on write
+// (`services/skills.ts`).
+//
+// `content_sha` is the SHA-256 of `content`. The repo importer will compare
+// it to decide whether an upstream body changed.
+//
+// `source_id` will point at a `skill_sources` row once repository sync
+// exists. It carries no foreign key yet, because that table is not built.
+//
+// Ownership columns and the owner index mirror `workflow_definitions` below,
+// because skill access follows the same rule: your own rows plus the rows of
+// every team you belong to. The UNIQUE index is the backstop for the one
+// collision the delivery seam must never see twice — two stored skills with
+// one name inside a single owner scope.
+export const skills = pgTable(
+  "skills",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** `local` = authored in the product. `repo` = synced from a repository. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull(),
+    sourceId: text("source_id"),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    content: text("content").notNull(),
+    frontmatter: jsonb("frontmatter").notNull().default({}),
+    contentSha: text("content_sha").notNull(),
+    /** Path of the `SKILL.md` inside its repository. Null for a local skill. */
+    upstreamPath: text("upstream_path"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("skills_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("skills_owner_name").on(t.orgId, t.ownerType, t.ownerId, t.name),
+  ],
+);
+
 // ─── Workflows (engine v2 Phase 5) ──────────────────────────────────────────
 //
 // App-side persistence for the `@valet/workflow` run host (plan decision
@@ -1171,6 +1222,7 @@ export type ChannelBindingRow = typeof channelBindings.$inferSelect;
 export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
+export type SkillRow = typeof skills.$inferSelect;
 export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
 export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
 export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
