@@ -11,6 +11,7 @@
   "exports": {
     "./actions": "./src/actions/index.ts",
     "./repo": "./src/repo.ts",
+    "./repo-contents": "./src/actions/repo-directory.ts",
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"
