@@ -8,8 +8,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
-import { addMember, createTeam } from "./teams.js";
+import { orgMembers, orgs, skills, users } from "../schema/index.js";
+import { addMember, createTeam, deleteTeam } from "./teams.js";
 import {
   createSkill,
   deleteSkill,
@@ -170,6 +170,23 @@ describe("stored skills service", () => {
       SkillNotLocalError,
     );
     expect(await deleteSkill(db, owner("u1"), created.id)).toBe("not_local");
+  });
+
+  it("removes a team's skills when the team is deleted", async () => {
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+    await createSkill(db, owner("u1"), {
+      name: "ours",
+      description: "Shared.",
+      content: BODY,
+      teamId: team.id,
+    });
+
+    // Asserted against the table, not against `listSkills`: dropping the
+    // memberships already makes the row unreachable, so a list-based check
+    // would pass while the row sat there forever with no owner who can ever
+    // reach it again.
+    await deleteTeam(db, { teamId: team.id });
+    expect(await db.select().from(skills)).toEqual([]);
   });
 
   it("deletes a local skill", async () => {
