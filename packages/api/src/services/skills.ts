@@ -23,10 +23,9 @@ import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { skills, type SkillRow } from "../schema/index.js";
-import { isTeamMember, listTeamsForUser } from "./teams.js";
+import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 
 export type SkillOrigin = "local" | "repo";
-export type SkillOwnerType = "user" | "team" | "org";
 
 /** The caller acting on stored skills. Same shape as `WorkflowOwner`. */
 export interface SkillOwner {
@@ -173,27 +172,16 @@ export async function createSkill(
 ): Promise<SkillRow> {
   assertValidFrontmatter(input.name, input.description);
 
-  let ownerType: SkillOwnerType = "user";
-  let ownerId = owner.userId;
   // `typeof === "string"`, not `!== undefined`: the route casts an unchecked
   // JSON body, so an explicit `teamId: null` from a client that always sends
   // the field must fall through to a personal skill.
-  if (typeof input.teamId === "string") {
-    // A non-member and an unknown team look identical here, so a team's
-    // existence never leaks to a probe.
-    if (!(await isTeamMember(db, input.teamId, owner.userId))) {
-      throw new NotFoundError("team", input.teamId);
-    }
-    ownerType = "team";
-    ownerId = input.teamId;
-  }
-
+  const teamId = typeof input.teamId === "string" ? input.teamId : undefined;
   const now = Date.now();
   const row: SkillRow = {
     id: newSkillId(),
     orgId: owner.orgId,
-    ownerType,
-    ownerId,
+    ownerType: teamId ? "team" : "user",
+    ownerId: teamId ?? owner.userId,
     origin: input.origin ?? "local",
     sourceId: input.sourceId ?? null,
     name: input.name,
@@ -207,7 +195,25 @@ export async function createSkill(
   };
 
   try {
-    await db.insert(skills).values(row);
+    if (teamId === undefined) {
+      await db.insert(skills).values(row);
+    } else {
+      // The membership check and the insert run inside one transaction
+      // holding `lockTeamForOwnership`'s advisory lock, so this cannot race
+      // `deleteTeam` — without it, a skill could be inserted for a team
+      // whose rows are deleted in the gap between the check and the insert,
+      // stranding it permanently. `db.transaction` alone is not enough; see
+      // that lock's own doc comment.
+      await db.transaction(async (tx) => {
+        await lockTeamForOwnership(tx, teamId);
+        // A non-member and an unknown team look identical here, so a team's
+        // existence never leaks to a probe.
+        if (!(await isTeamMember(tx, teamId, owner.userId))) {
+          throw new NotFoundError("team", teamId);
+        }
+        await tx.insert(skills).values(row);
+      });
+    }
   } catch (err) {
     // The only unique index on this table is `skills_owner_name` (ids are
     // freshly minted UUIDs), so a unique violation is always a name clash.

@@ -11,7 +11,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { orgMembers, teamMembers, teams, workflowDefinitions, type TeamRow } from "../schema/index.js";
+import { orgMembers, skills, teamMembers, teams, workflowDefinitions, type TeamRow } from "../schema/index.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -306,16 +306,15 @@ async function assertNoTeamOwnedWorkflows(db: AppQueryable, teamId: string): Pro
 
 /**
  * `pg_advisory_xact_lock` keyed by team id, released automatically at
- * transaction end. `assertNoTeamOwnedWorkflows`'s SELECT and
- * `createWorkflowDefinition`'s team-owned INSERT (`workflows/service.ts`)
- * target the same table with no FK between them (`workflow_definitions`'s
- * polymorphic `owner_id` can't carry one), so under plain MVCC a SELECT
- * here never blocks a concurrent INSERT there — this lock is what actually
- * serializes "is the team still valid to own a workflow" against "delete
- * the team," not the surrounding `db.transaction` on its own. Both sides
- * must take this same lock for it to do anything.
+ * transaction end. `deleteTeam`'s checks and the team-owned INSERTs in
+ * `workflows/service.ts` and `services/skills.ts` target tables with no FK
+ * between them (a polymorphic `owner_id` can't carry one), so under plain
+ * MVCC a SELECT here never blocks a concurrent INSERT there — this lock is
+ * what actually serializes "is the team still valid to own this" against
+ * "delete the team," not the surrounding `db.transaction` on its own. Every
+ * side must take this same lock for it to do anything.
  */
-export async function lockTeamForWorkflowOwnership(tx: AppQueryable, teamId: string): Promise<void> {
+export async function lockTeamForOwnership(tx: AppQueryable, teamId: string): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${teamId}))`);
 }
 
@@ -323,14 +322,27 @@ export interface DeleteTeamOptions {
   teamId: string;
 }
 
-/** Deletes a team and its memberships. Rejects while the team owns any workflow. */
+/**
+ * Deletes a team, its memberships, and the skills it owns. Rejects while the
+ * team owns any workflow.
+ *
+ * Skills are removed rather than blocking, because a skill is a document,
+ * not a running thing — there is nothing to cancel first. They must go
+ * somewhere: every read path for a team-owned skill goes through
+ * `isTeamMember`, so a surviving row would sit in the table forever with no
+ * owner who can ever reach it, the same orphan `deleteWorkflowDefinition`
+ * closes for `workflow_webhooks`.
+ */
 export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<void> {
   const teamRows = await db.select().from(teams).where(eq(teams.id, opts.teamId)).limit(1);
   if (!teamRows[0]) throw new NotFoundError("team", opts.teamId);
 
   await db.transaction(async (tx) => {
-    await lockTeamForWorkflowOwnership(tx, opts.teamId);
+    await lockTeamForOwnership(tx, opts.teamId);
     await assertNoTeamOwnedWorkflows(tx, opts.teamId);
+    await tx
+      .delete(skills)
+      .where(and(eq(skills.ownerType, "team"), eq(skills.ownerId, opts.teamId)));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });
