@@ -6,19 +6,18 @@
  *
  * A plugin skill's monogram takes the OWNING PLUGIN's brand color and the
  * skill's own initial, so skills from one plugin read as a family in a mixed
- * grid. A stored skill takes the moss accent instead — the colour is what
- * separates "installed" from "written here" at a glance, and the origin
- * badge says it in words.
+ * grid. A stored skill takes the moss accent instead — the colour separates
+ * a skill a plugin ships from a skill stored for the caller at a glance, and
+ * the origin badge says it in words.
  *
  * The mono footer carries the skill's ID — the string an agent references,
  * which the title's display name hides. The owning plugin is appended only
  * when it differs from the skill name: most plugins ship one skill of the
  * same name, so printing it always would repeat the title.
  *
- * A plugin skill opens its read-only detail page. A stored skill opens the
- * editor on this page instead, because it is addressed by row id: a shadowed
- * skill shares its name with the skill shadowing it, so the name route
- * cannot reach it.
+ * Every card opens a read-only page. A plugin skill goes to the name route.
+ * A stored skill goes to the row-id route instead: a shadowed skill shares
+ * its name with the skill shadowing it, so the name route cannot reach it.
  */
 import { Link } from "@tanstack/react-router";
 import type { SkillSummary, StoredSkillSummary } from "@valet/api/wire";
@@ -27,6 +26,19 @@ import { brandHex } from "~/components/integrations/integration-row";
 import { displayName } from "~/components/integrations/display-name";
 import { cn } from "~/lib/cn";
 
+/**
+ * What to do about a skill another skill of the same name keeps out of every
+ * session. The fix follows where the skill is authored: nobody renames a
+ * stored skill in this page any more.
+ */
+export function shadowNote(skill: StoredSkillSummary): string {
+  const fix =
+    skill.origin === "repo"
+      ? "Rename it in the repository it came from."
+      : "Ask the assistant to rename it.";
+  return `Shadowed by another skill of the same name. ${fix}`;
+}
+
 /** Where the markdown lives, in the words a reader needs. */
 export function originLabel(skill: SkillSummary): string {
   if (skill.origin === "plugin") return "Plugin";
@@ -34,17 +46,10 @@ export function originLabel(skill: SkillSummary): string {
   return skill.ownerType === "team" ? "Team" : "Yours";
 }
 
-export function SkillCard({
-  skill,
-  onEdit,
-}: {
-  skill: SkillSummary;
-  onEdit?: (skill: StoredSkillSummary) => void;
-}) {
+export function SkillCard({ skill }: { skill: SkillSummary }) {
   const title = displayName(skill.name);
   const plugin = skill.origin === "plugin" ? displayName(skill.plugin) : undefined;
   const showPlugin = plugin !== undefined && plugin !== title;
-  const shadowed = skill.origin !== "plugin" && skill.shadowed;
 
   const body = (
     <>
@@ -71,10 +76,8 @@ export function SkillCard({
               {skill.description}
             </p>
           )}
-          {shadowed && (
-            <p className="mt-1 text-xs leading-relaxed text-danger-500">
-              Shadowed by another skill of the same name. Rename this one to make the agent read it.
-            </p>
+          {skill.origin !== "plugin" && skill.shadowed && (
+            <p className="mt-1 text-xs leading-relaxed text-danger-500">{shadowNote(skill)}</p>
           )}
         </div>
       </div>
@@ -86,7 +89,7 @@ export function SkillCard({
           {skill.takesArgs && " · takes arguments"}
         </span>
         <span className="shrink-0 text-xs text-moss underline-offset-2 group-hover:underline">
-          {skill.origin === "plugin" ? "Read" : "Edit"}
+          Read
         </span>
       </div>
     </>
@@ -103,8 +106,8 @@ export function SkillCard({
   }
 
   return (
-    <button type="button" onClick={() => onEdit?.(skill)} className={shell}>
+    <Link to="/skills/stored/$skillId" params={{ skillId: skill.id }} className={shell}>
       {body}
-    </button>
+    </Link>
   );
 }

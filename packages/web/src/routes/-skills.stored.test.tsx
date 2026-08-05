@@ -1,14 +1,17 @@
 // @vitest-environment jsdom
 /**
  * `/skills` — what a stored skill adds to the catalog page: an origin badge,
- * a shadow warning, and the form that writes one. Mocks `~/api/skills` the
- * same way `-skills.index.test.tsx` does, so the assertions stay on the
- * rendering, not on TanStack Query.
+ * a shadow warning, and a link to the row-id page that reads its body. The
+ * page writes nothing: a skill is authored in its repository or by an agent
+ * (docs/specs/2026-08-05-agent-skills-design.md).
+ *
+ * Mocks `~/api/skills` the same way `-skills.index.test.tsx` does, so the
+ * assertions stay on the rendering, not on TanStack Query.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { ListSkillsResponse } from "@valet/api/wire";
+import type { ListSkillsResponse, SkillResponse } from "@valet/api/wire";
 
 const data: ListSkillsResponse = {
   skills: [
@@ -44,55 +47,47 @@ const data: ListSkillsResponse = {
   ],
 };
 
+const stored: SkillResponse = {
+  name: "deploy",
+  description: "How to deploy the service.",
+  origin: "local",
+  id: "skill_1",
+  ownerType: "user",
+  ownerId: "u1",
+  shadowed: false,
+  takesArgs: false,
+  updatedAt: 1_700_000_000_000,
+  content: "Ship the service from main.\n",
+};
+
 let currentData: ListSkillsResponse = data;
 let currentState = { isLoading: false, error: null as Error | null };
-const createMutate = vi.fn();
+let currentStored: SkillResponse = stored;
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
   ),
-  createFileRoute: () => (config: unknown) => config,
+  // The real `createFileRoute` returns a route object; the detail page reads
+  // its params off it, so the stub supplies those too.
+  createFileRoute: () => (config: object) => ({
+    ...config,
+    useParams: () => ({ skillId: "skill_1" }),
+  }),
 }));
-
-const updateMutate = vi.fn();
-const deleteMutate = vi.fn();
 
 vi.mock("~/api/skills", () => ({
   useSkills: () => ({ data: currentData, ...currentState }),
-  useStoredSkill: (id: string | null) => ({
-    data:
-      id === "skill_1"
-        ? {
-            name: "deploy",
-            description: "How to deploy the service.",
-            origin: "local" as const,
-            id: "skill_1",
-            ownerType: "user" as const,
-            ownerId: "u1",
-            shadowed: false,
-            takesArgs: false,
-            updatedAt: 1_700_000_000_000,
-            content: "# Deploy\n",
-          }
-        : undefined,
-    isLoading: false,
-    error: null,
-  }),
-  useCreateSkill: () => ({ mutate: createMutate, isPending: false, error: null }),
-  useUpdateSkill: () => ({ mutate: updateMutate, isPending: false, error: null }),
-  useDeleteSkill: () => ({ mutate: deleteMutate, isPending: false, error: null }),
+  useStoredSkill: () => ({ data: currentStored, isLoading: false, error: null }),
 }));
 
 import { SkillsIndexPage } from "./skills.index";
+import { StoredSkillPage } from "./skills.stored.$skillId";
 
 describe("SkillsIndexPage with stored skills", () => {
   beforeEach(() => {
     currentData = data;
     currentState = { isLoading: false, error: null };
-    createMutate.mockReset();
-    updateMutate.mockReset();
-    deleteMutate.mockReset();
   });
 
   it("badges each skill with where it came from", () => {
@@ -101,62 +96,46 @@ describe("SkillsIndexPage with stored skills", () => {
     expect(screen.getAllByText("Yours").length).toBe(2);
   });
 
-  it("says why a shadowed skill never reaches a session", () => {
+  it("says why a shadowed skill never reaches a session, and who can rename it", () => {
     render(<SkillsIndexPage />);
     expect(screen.getByText(/Shadowed by another skill of the same name/)).toBeTruthy();
+    expect(screen.getByText(/Ask the assistant to rename it/)).toBeTruthy();
   });
 
-  it("opens a form and writes a new skill", () => {
+  it("links a stored skill to its row-id page, not to the name route", () => {
     render(<SkillsIndexPage />);
-
-    fireEvent.click(screen.getByRole("button", { name: /New skill/ }));
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "release" } });
-    fireEvent.change(screen.getByLabelText("Description"), {
-      target: { value: "How to cut a release." },
-    });
-    fireEvent.change(screen.getByLabelText("Playbook"), { target: { value: "# Release\n" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create skill" }));
-
-    expect(createMutate).toHaveBeenCalledTimes(1);
-    expect(createMutate.mock.calls[0]?.[0]).toMatchObject({
-      name: "release",
-      description: "How to cut a release.",
-      content: "# Release\n",
-    });
+    const link = screen.getByText("Deploy").closest("a");
+    expect(link?.getAttribute("to")).toBe("/skills/stored/$skillId");
   });
 
-  it("opens a stored skill in the editor and saves an edit", () => {
+  it("offers no way to write a skill from the page", () => {
     render(<SkillsIndexPage />);
-
-    // A stored card opens the editor by row id; only a plugin card links to
-    // the read-only detail page.
-    fireEvent.click(screen.getByText("Deploy"));
-    const content = screen.getByLabelText("Playbook");
-    expect((content as HTMLTextAreaElement).value).toBe("# Deploy\n");
-
-    fireEvent.change(content, { target: { value: "# Deploy\n\nRun `make deploy`.\n" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save skill" }));
-
-    expect(updateMutate).toHaveBeenCalledTimes(1);
-    expect(updateMutate.mock.calls[0]?.[0]).toMatchObject({
-      id: "skill_1",
-      body: { name: "deploy", content: "# Deploy\n\nRun `make deploy`.\n" },
-    });
+    expect(screen.queryByRole("button", { name: /New skill/ })).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
   });
 
-  it("deletes a stored skill from the editor", () => {
-    render(<SkillsIndexPage />);
-
-    fireEvent.click(screen.getByText("Deploy"));
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-
-    expect(deleteMutate).toHaveBeenCalledTimes(1);
-    expect(deleteMutate.mock.calls[0]?.[0]).toBe("skill_1");
-  });
-
-  it("offers the form when nothing is installed", () => {
+  it("points at the assistant when nothing is installed", () => {
     currentData = { skills: [] };
     render(<SkillsIndexPage />);
-    expect(screen.getByRole("button", { name: /New skill/ })).toBeTruthy();
+    expect(screen.getByText(/ask your assistant to write one/i)).toBeTruthy();
+  });
+});
+
+describe("StoredSkillPage", () => {
+  beforeEach(() => {
+    currentStored = stored;
+  });
+
+  it("reads the body of the skill the row id names, with no field to edit it", () => {
+    render(<StoredSkillPage />);
+    expect(screen.getByRole("heading", { name: "Deploy", level: 1 })).toBeTruthy();
+    expect(screen.getByText("Ship the service from main.")).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("repeats the shadow warning on the skill that is kept out", () => {
+    currentStored = { ...stored, shadowed: true };
+    render(<StoredSkillPage />);
+    expect(screen.getByText(/Shadowed by another skill of the same name/)).toBeTruthy();
   });
 });
