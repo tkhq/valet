@@ -4,11 +4,13 @@ import { Spinner } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 import { Section } from "~/components/settings/section";
 import { displayName } from "~/components/integrations/display-name";
+import { originLabel } from "~/components/skills/skill-card";
 
 /**
  * `/skills/$skillName` — one skill's markdown body, in the same centered
- * document shell as the catalog. Read-only, like the catalog: the body
- * ships inside a plugin package.
+ * document shell as the catalog. Read-only: a plugin skill's body ships
+ * inside a plugin package, and a stored skill is edited on the catalog page,
+ * where the row id can reach a shadowed skill that this name route cannot.
  *
  * Placeholders stay as authored. The server does not fill them here,
  * because reading a skill is not invoking it — the agent's `skill` tool
@@ -36,7 +38,7 @@ export function SkillDetailPage() {
           </div>
           {skill && (
             <span className="shrink-0 font-mono text-xs text-muted">
-              from {skill.plugin}
+              {skill.origin === "plugin" ? `from ${skill.plugin}` : originLabel(skill)}
               {skill.takesArgs && " · takes arguments"}
             </span>
           )}
