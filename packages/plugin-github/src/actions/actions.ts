@@ -670,11 +670,14 @@ const inspectPullRequest = action(Type.Object({
  * The tag this action writes into every review body it creates. HTML comments
  * do not render on GitHub, so it is invisible to a human reader.
  *
- * It is also the identity `updateExisting` matches on. Matching by author login
- * would need `GET /user`, which answers 403 for a GitHub App installation token
- * — the credential tier an automated reviewer usually runs under. The tag needs
- * no identity call, and `updateKey` keeps two review streams on one pull
- * request apart.
+ * It is also the identity `updateExisting` matches on. The legacy action
+ * matched `review.user.login` against a `botLogin` that the host put on the
+ * action context, derived from the GitHub App slug as `{slug}[bot]`. V2's
+ * PluginActionContext carries no such field, and that identity exists only for
+ * an App installation credential: under a user OAuth token the legacy action
+ * found no login and quietly created a second review instead of updating.
+ * The tag needs no host identity, works under both credential tiers, and
+ * `updateKey` keeps two review workflows on one pull request apart.
  */
 function reviewMarker(updateKey: string): string {
   return `<!-- valet-review:${updateKey} -->`;
@@ -682,32 +685,87 @@ function reviewMarker(updateKey: string): string {
 
 const REVIEW_COMMENT_SIDE = Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]);
 
+interface ReviewCommentInput {
+  path: string;
+  body: string;
+  line?: number;
+  side?: "LEFT" | "RIGHT";
+  startLine?: number;
+  startSide?: "LEFT" | "RIGHT";
+  position?: number;
+}
+
+/**
+ * Rejects the anchor combinations GitHub answers with a 422. A review comment
+ * uses either the legacy `position` (an offset from the first @@ hunk header)
+ * or the line anchor (`line`, plus `side`/`startLine`/`startSide`), never both.
+ * Returns an error message, or null when every comment is valid.
+ */
+function validateReviewComments(comments: ReviewCommentInput[]): string | null {
+  for (const [index, comment] of comments.entries()) {
+    const at = `comments[${index}] on "${comment.path}"`;
+    const hasPosition = comment.position !== undefined;
+    const hasLineAnchor =
+      comment.line !== undefined ||
+      comment.side !== undefined ||
+      comment.startLine !== undefined ||
+      comment.startSide !== undefined;
+
+    if (hasPosition && hasLineAnchor) {
+      return `Create review: ${at} sets both position and a line anchor. GitHub accepts one or the other. Remove position, or remove line/side/startLine/startSide.`;
+    }
+    if ((comment.startLine !== undefined || comment.startSide !== undefined) && comment.line === undefined) {
+      return `Create review: ${at} sets startLine or startSide without line. Set line to the last line of the range.`;
+    }
+    if (!hasPosition && comment.line === undefined) {
+      return `Create review: ${at} has no anchor. Set line to a line of the diff, or set position.`;
+    }
+  }
+  return null;
+}
+
 const createReview = action(Type.Object({
     owner: Type.String({ description: "Repository owner" }),
     repo: Type.String({ description: "Repository name" }),
     pullNumber: Type.Integer({ description: "Pull request number" }),
-    body: Type.String({
-      description:
-        "Review summary in markdown. GitHub requires it for both COMMENT and REQUEST_CHANGES reviews.",
-    }),
+    body: Type.Optional(
+      Type.String({
+        description:
+          "Review summary in markdown. GitHub requires it when event is COMMENT or REQUEST_CHANGES.",
+      }),
+    ),
+    // Deliberate divergence: the legacy action accepted APPROVE as a third
+    // event. An approving review can satisfy a branch-protection rule and let a
+    // merge through, so it decides authorization rather than reporting a review
+    // finding. Add it back only with an explicit decision on who may approve.
     event: Type.Optional(
       Type.Union([Type.Literal("COMMENT"), Type.Literal("REQUEST_CHANGES")], {
         description:
-          'Review verdict (default: COMMENT). APPROVE is not available here: an approving ' +
-          'review can satisfy branch protection, which is a merge authorization and not a ' +
-          'review remark.',
+          "Review verdict. Omit it to leave the review PENDING, which stages the comments " +
+          "until someone submits them. APPROVE is not available here: an approving review " +
+          "can satisfy branch protection, which is a merge authorization and not a review remark.",
+      }),
+    ),
+    commitId: Type.Optional(
+      Type.String({
+        description:
+          "SHA the review applies to (defaults to the head commit at post time). Pass the SHA " +
+          "the diff was read at — on a busy pull request a new push can land between the two " +
+          "calls, which moves the line anchors.",
       }),
     ),
     comments: Type.Optional(
       Type.Array(
         Type.Object({
           path: Type.String({ description: "File path, relative to the repository root" }),
-          line: Type.Integer({
-            description:
-              "Line number in the file, as it appears in the pull request diff. " +
-              "A line that is not in the diff makes GitHub reject the whole review.",
-          }),
           body: Type.String({ description: "Comment text in markdown" }),
+          line: Type.Optional(
+            Type.Integer({
+              description:
+                "Line number in the file, as it appears in the pull request diff. " +
+                "A line that is not in the diff makes GitHub reject the whole review.",
+            }),
+          ),
           side: Type.Optional(
             Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")], {
               description: 'LEFT for a removed line, RIGHT for an added or unchanged line (default: RIGHT)',
@@ -717,6 +775,13 @@ const createReview = action(Type.Object({
             Type.Integer({ description: "First line of a multi-line comment. `line` is the last." }),
           ),
           startSide: Type.Optional(REVIEW_COMMENT_SIDE),
+          position: Type.Optional(
+            Type.Integer({
+              description:
+                "Legacy anchor: offset from the first @@ hunk header. Prefer line. " +
+                "It cannot be combined with line, side, startLine, or startSide.",
+            }),
+          ),
         }),
         { description: "Inline comments, anchored to a file and a line of the diff" },
       ),
@@ -741,23 +806,41 @@ const createReview = action(Type.Object({
   id: "github.create_review",
   name: "Create Pull Request Review",
   description:
-    "Post a review on a pull request, with an optional set of inline comments anchored to " +
-    "diff lines. Set updateExisting to replace this action's previous review instead of " +
-    "adding another one.",
+    "Submit a review on a pull request, with an optional set of inline comments anchored to " +
+    "diff lines. Omit event to leave the review pending. Set updateExisting to replace this " +
+    "action's previous review instead of adding another one.",
   riskLevel: "medium",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     const marker = reviewMarker(args.updateKey ?? "default");
-    const body = `${args.body}\n\n${marker}`;
-    const comments = (args.comments ?? []).map((comment) => ({
+    // A review with no body stays untouched: GitHub allows a bodyless PENDING
+    // review, and a marker-only body would turn it into a visible remark.
+    const body = args.body === undefined ? undefined : `${args.body}\n\n${marker}`;
+    const inputComments: ReviewCommentInput[] = args.comments ?? [];
+    const comments = inputComments.map((comment) => ({
       path: comment.path,
-      line: comment.line,
       body: comment.body,
+      ...(comment.line === undefined ? {} : { line: comment.line }),
       ...(comment.side === undefined ? {} : { side: comment.side }),
       ...(comment.startLine === undefined ? {} : { start_line: comment.startLine }),
       ...(comment.startSide === undefined ? {} : { start_side: comment.startSide }),
+      ...(comment.position === undefined ? {} : { position: comment.position }),
     }));
 
+    if ((args.event === "COMMENT" || args.event === "REQUEST_CHANGES") && !args.body?.trim()) {
+      return {
+        success: false,
+        error: `Create review: a ${args.event} review needs a body. Set body, or omit event to leave the review pending.`,
+      };
+    }
+    if (args.updateExisting && args.body === undefined) {
+      return {
+        success: false,
+        error:
+          "Create review: updateExisting needs a body — it replaces the body of the previous " +
+          "review, so there is nothing to write. Set body, or set updateExisting to false.",
+      };
+    }
     if (args.updateExisting && comments.length > 0) {
       return {
         success: false,
@@ -767,9 +850,14 @@ const createReview = action(Type.Object({
           "Set updateExisting to false, or move the findings into the body.",
       };
     }
+    const commentError = validateReviewComments(inputComments);
+    if (commentError) return { success: false, error: commentError };
 
     try {
-      if (args.updateExisting) {
+      // The guard above already returned when a body is missing. Testing `body`
+      // again is what narrows it to a string for the update endpoint, which
+      // has no bodyless form.
+      if (args.updateExisting && body !== undefined) {
         const { data: priorReviews } = await octokit.request(
           "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
           { owner: args.owner, repo: args.repo, pull_number: args.pullNumber, per_page: 100 },
@@ -809,8 +897,11 @@ const createReview = action(Type.Object({
           owner: args.owner,
           repo: args.repo,
           pull_number: args.pullNumber,
-          body,
-          event: args.event ?? "COMMENT",
+          ...(body === undefined ? {} : { body }),
+          // No event means GitHub keeps the review PENDING. Sending a default
+          // would submit a review the caller never asked to publish.
+          ...(args.event === undefined ? {} : { event: args.event }),
+          ...(args.commitId === undefined ? {} : { commit_id: args.commitId }),
           ...(comments.length > 0 ? { comments } : {}),
         },
       );

@@ -352,14 +352,14 @@ function reviewWrites(server: GithubFixture): GithubFixtureCall[] {
 }
 
 describe("github.create_review", () => {
-  it("posts a COMMENT review by default", async () => {
+  it("posts the review with the event it is given", async () => {
     const server = useFixture({
       createReview: () => ({
         body: { id: 900, state: "COMMENTED", html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-900" },
       }),
     });
 
-    const result = await createReview({ body: "Looks reasonable." });
+    const result = await createReview({ body: "Looks reasonable.", event: "COMMENT" });
 
     expect(result.success).toBe(true);
     const writes = reviewWrites(server);
@@ -368,6 +368,113 @@ describe("github.create_review", () => {
     expect(writes[0].path).toBe("/repos/acme/widgets/pulls/7/reviews");
     expect(isRecord(writes[0].body) && writes[0].body.event).toBe("COMMENT");
     expect(isRecord(writes[0].body) && String(writes[0].body.body)).toContain("Looks reasonable.");
+  });
+
+  it("leaves the review pending when no event is given", async () => {
+    const server = useFixture({
+      createReview: () => ({ body: { id: 901, state: "PENDING", html_url: "https://github.com/acme/widgets/pull/7" } }),
+    });
+
+    const result = await createReview({ body: "Draft notes." });
+
+    expect(result.success).toBe(true);
+    const write = reviewWrites(server)[0];
+    if (!isRecord(write.body)) throw new Error("no request body recorded");
+    // Omitted, not defaulted: GitHub keeps a review with no event PENDING,
+    // which is how a reviewer stages comments before submitting them.
+    expect("event" in write.body).toBe(false);
+    if (!isRecord(result.data)) throw new Error("no data");
+    expect(result.data.state).toBe("PENDING");
+  });
+
+  it("pins the review to commitId so a later push cannot re-anchor it", async () => {
+    const server = useFixture();
+
+    await createReview({ body: "Reviewed at the fetched head.", event: "COMMENT", commitId: "abc123def" });
+
+    const write = reviewWrites(server)[0];
+    expect(isRecord(write.body) && write.body.commit_id).toBe("abc123def");
+  });
+
+  it("forwards a legacy position anchor without a line anchor", async () => {
+    const server = useFixture();
+
+    await createReview({
+      body: "One finding.",
+      event: "COMMENT",
+      comments: [{ path: "source/rest/handler.go", position: 5, body: "Leaked handle." }],
+    });
+
+    const write = reviewWrites(server)[0];
+    if (!isRecord(write.body)) throw new Error("no request body recorded");
+    expect(write.body.comments).toEqual([
+      { path: "source/rest/handler.go", position: 5, body: "Leaked handle." },
+    ]);
+  });
+
+  it("requires a body for COMMENT and for REQUEST_CHANGES, and names the fix", async () => {
+    const server = useFixture();
+
+    for (const event of ["COMMENT", "REQUEST_CHANGES"]) {
+      const result = await createReview({ event });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("body");
+      expect(result.error).toContain(event);
+    }
+    expect(reviewWrites(server)).toHaveLength(0);
+  });
+
+  it("rejects a comment that mixes position with a line anchor", async () => {
+    const server = useFixture();
+
+    const result = await createReview({
+      body: "Findings.",
+      event: "COMMENT",
+      comments: [{ path: "a.go", position: 5, line: 12, body: "nit" }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("position");
+    expect(result.error).toContain("line");
+    expect(reviewWrites(server)).toHaveLength(0);
+  });
+
+  it("rejects a range comment with no end line", async () => {
+    const server = useFixture();
+
+    const result = await createReview({
+      body: "Findings.",
+      event: "COMMENT",
+      comments: [{ path: "a.go", startLine: 10, body: "nit" }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("startLine");
+    expect(reviewWrites(server)).toHaveLength(0);
+  });
+
+  it("rejects a comment with no anchor at all", async () => {
+    const server = useFixture();
+
+    const result = await createReview({
+      body: "Findings.",
+      event: "COMMENT",
+      comments: [{ path: "a.go", body: "nit" }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("line");
+    expect(reviewWrites(server)).toHaveLength(0);
+  });
+
+  it("rejects updateExisting with no body, since there is nothing to replace", async () => {
+    const server = useFixture();
+
+    const result = await createReview({ updateExisting: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("body");
+    expect(reviewWrites(server)).toHaveLength(0);
   });
 
   it("passes REQUEST_CHANGES through when asked", async () => {
