@@ -266,6 +266,19 @@ export async function deleteSkillSource(
   return true;
 }
 
+/**
+ * Makes a source due now. "Sync now" calls this and then the SAME
+ * `syncOnce` the sweep calls, so a manual sync is the scheduled sync brought
+ * forward, not a second implementation of syncing.
+ */
+export async function markSkillSourceDue(db: AppDb, id: string): Promise<void> {
+  const now = Date.now();
+  await db
+    .update(skillSources)
+    .set({ nextAttemptAt: now, updatedAt: now })
+    .where(eq(skillSources.id, id));
+}
+
 /** How many skills each of `sourceIds` currently mirrors. */
 export async function countSkillsPerSource(
   db: AppDb,
