@@ -469,6 +469,27 @@ describe('validateWorkflowDefinition', () => {
       }
     });
 
+    // A body id reaches the runtime as a session-id part and as a workspace
+    // path segment (`wf:{runId}:{nodeId}[:{iteration}]` ->
+    // `~/.valet/workflows/{runId}/{nodeId}/{iteration}`). The per-node loop
+    // in `validateWorkflowDefinition` only sees `definition.nodes`, so a body
+    // id gets no id-pattern check unless `validateForeachNode` applies one.
+    it.each(['bad:id', 'bad/id', '..', 'bad id'])('rejects a foreach body id %s', (bodyId) => {
+      const result = validateWorkflowDefinition(foreachDefinition({ body: { id: bodyId, type: 'set', values: {} } }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.body id') && e.includes('must match'))).toBe(true);
+      }
+    });
+
+    it('rejects a foreach body with no id', () => {
+      const result = validateWorkflowDefinition(foreachDefinition({ body: { type: 'set', values: {} } }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.includes('foreach.body is missing its "id"'))).toBe(true);
+      }
+    });
+
     it('rejects a body id that collides with a definition node id', () => {
       const result = validateWorkflowDefinition(foreachDefinition({ body: { id: 'stop', type: 'set', values: {} } }));
       expect(result.ok).toBe(false);
