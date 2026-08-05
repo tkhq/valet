@@ -343,6 +343,40 @@ describe("GET /api/usage/summary", () => {
     }
   });
 
+  it("keeps a team-owned run's spend out of the per-user surfaces", async () => {
+    const api = await bootTestApi();
+    try {
+      const now = Date.now();
+      const { db } = api.providers;
+      await db
+        .update(orgs)
+        .set({ features: { organizations: true } })
+        .where(eq(orgs.id, "local-org"));
+      await seedWorkflowRun(api, {
+        workflowId: "wf-team",
+        runId: "run-team",
+        orgId: "local-org",
+        ownerType: "team",
+        ownerId: "team-eng",
+      });
+      await seedTurn(api, {
+        id: "turn-team-wf",
+        sessionId: "wf:run-team:node-a",
+        tokens: { input: 30, output: 10, cacheRead: 0, cacheWrite: 0 },
+        costTotal: 3,
+        createdAt: now - HOUR_MS,
+      });
+
+      // A team-owned run has no acting user, so it belongs to no per-user
+      // window and must not appear as a member row with an empty identity.
+      const body = await getSummary(api);
+      expect(body.me.day.turns).toBe(0);
+      expect(body.org?.members).toEqual([]);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
   it("excludes turns older than the window", async () => {
     const api = await bootTestApi();
     try {
