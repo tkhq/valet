@@ -100,13 +100,28 @@ export interface WorkflowEngineDepsOpts {
  * colon-free (the definition validator's `NODE_ID_PATTERN`), so the part
  * count identifies the form without ambiguity.
  *
- * No method on this port reads `iteration` today: run context comes from
- * `runId` alone, and `workspaceFor` keeps two iterations on different
- * paths because it maps the whole id. The parser still returns the value
- * and checks its format, so a malformed suffix fails here instead of
- * resolving to the wrong run.
+ * `resolveRunContext` reads `runId` alone. `workspaceFor` reads all three
+ * parts — each one becomes a separate segment of the session's workspace
+ * path — so the parser checks the format of each part. A malformed id fails
+ * here instead of resolving to the wrong run, or to a path outside the
+ * workflows root.
  */
-function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: string; iteration?: number } {
+interface WorkflowSessionIdParts {
+  runId: string;
+  nodeId: string;
+  iteration?: number;
+}
+
+/**
+ * Both id parts that `workspaceFor` turns into a path segment must be a
+ * plain name. Every minted run id is already one (`wfrun_{base36}`,
+ * `wfrun_sch_{hex}_{ms}`, `wfrun_hook_{hex}`, `wfrun_evt_{uuid}`), and so is
+ * every node id the definition validator admits (`NODE_ID_PATTERN`). The
+ * check is the barrier against a `.`, a `..`, or a `/` reaching `join`.
+ */
+const ID_PART_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdParts {
   const parts = sessionId.split(":");
   if (parts[0] !== "wf" || (parts.length !== 3 && parts.length !== 4)) {
     throw new Error(
@@ -114,7 +129,15 @@ function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: str
         `Use the wf:{runId}:{nodeId}[:{iteration}] form that the session node mints.`,
     );
   }
-  if (parts.length === 3) return { runId: parts[1], nodeId: parts[2] };
+  const runId = parts[1];
+  const nodeId = parts[2];
+  if (!ID_PART_PATTERN.test(runId) || !ID_PART_PATTERN.test(nodeId)) {
+    throw new Error(
+      `workflow engine-deps: workflow session id ${sessionId} has an unusable run id or node id. ` +
+        `Use letters, digits, "-", and "_" only — each part becomes one workspace path segment.`,
+    );
+  }
+  if (parts.length === 3) return { runId, nodeId };
 
   const iteration = Number(parts[3]);
   if (!Number.isInteger(iteration) || iteration < 1) {
@@ -123,7 +146,7 @@ function parseWorkflowSessionId(sessionId: string): { runId: string; nodeId: str
         `Use a whole number of 1 or more, or remove the suffix for iteration 0.`,
     );
   }
-  return { runId: parts[1], nodeId: parts[2], iteration };
+  return { runId, nodeId, iteration };
 }
 
 interface RunContext {
@@ -170,18 +193,28 @@ function actorUserIdFor(principal: Principal): string {
   return principal.type === "user" ? principal.id : `${principal.type}:${principal.id}`;
 }
 
-function workspaceFor(sessionId: string): string {
-  // Colons are valid path-segment characters on POSIX, but avoided here for
-  // portability/readability — `wf:{runId}:{nodeId}[:{iteration}]` ->
-  // `wf_{runId}_{nodeId}[_{iteration}]`. Every part of the id is kept, so
-  // two iterations of one `foreach` body never share a workspace.
-  //
-  // Known limit: node ids can contain `_`, so this map is not one-to-one.
-  // Body `x` at iteration 1 and a sibling node `x_1` in the same run give
-  // the same directory. Both are same-run, same-owner workflow sessions,
-  // and the two ids must occur together in one definition, so this is
-  // recorded rather than fixed here.
-  return join(homedir(), ".valet", "workflows", sessionId.replace(/:/g, "_"));
+/**
+ * The host directory one workflow session works in:
+ * `~/.valet/workflows/{runId}/{nodeId}/{iteration}`, built from the PARSED
+ * id parts.
+ *
+ * The invariant is that two different session ids never give one directory.
+ * A separate path segment for each part is what holds it: no part can run
+ * into the next one, because none of them accepts `/` (`ID_PART_PATTERN`).
+ * A flat name built by substitution cannot hold it — node ids accept `_`,
+ * so `wf:{runId}:x:1` (foreach body `x`, iteration 1) and `wf:{runId}:x_1`
+ * (a sibling node) both map to `wf_{runId}_x_1`.
+ *
+ * Iteration 0 writes an explicit `0` segment. Without it, iteration 1 is a
+ * child of iteration 0's own directory.
+ *
+ * The shape of this path changed with the collision fix. A run that is
+ * in-flight across the deploy gets a new, empty directory for each of its
+ * sessions. A workflow session lives for one run, so no long-lived work
+ * moves.
+ */
+function workspaceFor(parts: WorkflowSessionIdParts): string {
+  return join(homedir(), ".valet", "workflows", parts.runId, parts.nodeId, String(parts.iteration ?? 0));
 }
 
 /**
@@ -213,9 +246,9 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   if (principal) {
     return ensureOrchestratorSession(opts, sessionId, principal);
   }
-  const { runId } = parseWorkflowSessionId(sessionId);
-  const ctx = await resolveRunContext(opts, runId);
-  const workspace = workspaceFor(sessionId);
+  const parts = parseWorkflowSessionId(sessionId);
+  const ctx = await resolveRunContext(opts, parts.runId);
+  const workspace = workspaceFor(parts);
   await mkdir(workspace, { recursive: true });
   return opts.host.workflowSessionFor(sessionId, {
     actorUserId: ctx.actorUserId,

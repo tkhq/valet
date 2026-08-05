@@ -15,6 +15,8 @@
  * plus prompt submission), which is where the ids are parsed. No model turn
  * has to settle, so these tests need no API key.
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
 import { createDefaultNodeExecutors, driveUntilPark, type RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "./_setup.js";
@@ -47,28 +49,37 @@ function inertRunHost(): RunHost {
 
 const ITEMS = ["alpha", "beta"];
 
-function foreachDefinition(body: Record<string, unknown>): unknown {
+/**
+ * `trigger -> foreach -> ...tail -> stop`. `tail` holds the top-level nodes
+ * that must run after the fan-out, in order; it is empty for the plain
+ * foreach cases.
+ */
+function foreachDefinition(body: Record<string, unknown>, tail: Record<string, unknown>[] = []): unknown {
+  const chain = ["t", "fan", ...tail.map((node) => String(node.id)), "e"];
   return {
     version: "dag/v1",
     nodes: [
       { id: "t", type: "trigger" },
       { id: "fan", type: "foreach", items: "{{trigger.data.targets}}", body },
+      ...tail,
       { id: "e", type: "stop", outcome: "success" },
     ],
-    edges: [
-      { from: "t", to: "fan" },
-      { from: "fan", to: "e" },
-    ],
+    edges: chain.slice(0, -1).map((from, i) => ({ from, to: chain[i + 1] })),
   };
 }
 
 /** Boots the api, seeds one definition plus one run against it, and drives that run to a park. */
-async function driveForeachRun(opts: { workflowId: string; runId: string; body: Record<string, unknown> }) {
+async function driveForeachRun(opts: {
+  workflowId: string;
+  runId: string;
+  body: Record<string, unknown>;
+  tail?: Record<string, unknown>[];
+}) {
   api = await bootTestApi({ workflowRunHost: inertRunHost() });
   const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
 
   const now = Date.now();
-  const definition = foreachDefinition(opts.body);
+  const definition = foreachDefinition(opts.body, opts.tail);
 
   await db.insert(workflowDefinitions).values({
     id: opts.workflowId,
@@ -181,6 +192,45 @@ describe("api integration: foreach with a session body", () => {
       const restored = await ensureWorkflowSession(engineDepsOpts, sessionId);
       expect(restored.id).toBe(sessionId);
     }
+  }, 60_000);
+});
+
+describe("api integration: workflow session workspaces", () => {
+  it("keeps a foreach iteration apart from a like-named sibling node", async () => {
+    // One run holds two different sessions whose ids differ only in the
+    // separator: foreach body `x` at iteration 1 is `wf:{runId}:x:1`, and the
+    // top-level node `x_1` is `wf:{runId}:x_1`. A workspace path that maps
+    // every colon to an underscore sends both to `wf_{runId}_x_1`, so the
+    // second session opens the first session's files.
+    const runId = "wfrun_foreach_workspace";
+    const { park, engineStore } = await driveForeachRun({
+      workflowId: "wf_foreach_workspace",
+      runId,
+      body: { id: "x", type: "session", mode: "start", prompt: "Handle {{item}}.", wait: { mode: "none" } },
+      tail: [{ id: "x_1", type: "session", mode: "start", prompt: "Summarize the fan-out.", wait: { mode: "none" } }],
+    });
+
+    expect(park.status).toBe("settled");
+    expect(park.outcome).toBe("completed");
+
+    const firstIteration = await engineStore.getSession(`wf:${runId}:x`);
+    const secondIteration = await engineStore.getSession(`wf:${runId}:x:1`);
+    const sibling = await engineStore.getSession(`wf:${runId}:x_1`);
+    expect(firstIteration, `engine session row missing for wf:${runId}:x`).toBeTruthy();
+    expect(secondIteration, `engine session row missing for wf:${runId}:x:1`).toBeTruthy();
+    expect(sibling, `engine session row missing for wf:${runId}:x_1`).toBeTruthy();
+
+    const workspaces = [firstIteration?.workspace, secondIteration?.workspace, sibling?.workspace];
+    expect(new Set(workspaces).size).toBe(3);
+
+    // One segment for each id part. Iteration 0 must write an explicit `0`,
+    // or every later iteration lands inside iteration 0's own directory.
+    const root = join(homedir(), ".valet", "workflows");
+    expect(workspaces).toEqual([
+      join(root, runId, "x", "0"),
+      join(root, runId, "x", "1"),
+      join(root, runId, "x_1", "0"),
+    ]);
   }, 60_000);
 });
 
