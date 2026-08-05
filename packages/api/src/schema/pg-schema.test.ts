@@ -122,6 +122,19 @@ describe("pg app schema + migrations", () => {
     }
   });
 
+  // The `cost_entries` view joins `engine_entries` (engine schema) to
+  // `agent_sessions`/`workflow_runs`/`workflow_definitions` (app schema), so
+  // the app migration only applies after the engine migration.
+  // `applyAppMigrations` owns that ordering — this caller never applies the
+  // engine schema itself. See `cost-entries-view.test.ts` for the view's
+  // owner-resolution behavior.
+  it("creates the cross-schema cost_entries view without a separate engine-migration call", async () => {
+    const result = await db.query(
+      "SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'cost_entries'",
+    );
+    expect(result.rows).toHaveLength(1);
+  });
+
   it("workflow_signals.id is a generated-always identity column", async () => {
     const col = await db.query(
       "SELECT is_identity, identity_generation FROM information_schema.columns " +
