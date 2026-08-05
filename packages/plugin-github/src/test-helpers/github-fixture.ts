@@ -214,6 +214,12 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
   return {
     url: `http://127.0.0.1:${listenPort(server)}`,
     calls,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        // `close()` alone waits for every idle keep-alive socket to time out,
+        // and fetch pools them between requests.
+        if ("closeAllConnections" in server) server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }

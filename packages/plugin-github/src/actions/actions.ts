@@ -40,6 +40,7 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.create_issue": "issues:write",
   "github.update_issue": "issues:write",
   "github.create_comment": "issues:write",
+  "github.create_review": "pull_requests:write",
   "github.create_pull_request": "pull_requests:write",
   "github.update_pull_request": "pull_requests:write",
   "github.merge_pull_request": "pull_requests:write + contents:write",
@@ -661,6 +662,181 @@ const inspectPullRequest = action(Type.Object({
       };
     } catch (err) {
       return handleOctokitError(err, "github.inspect_pull_request", "Inspect pull request");
+    }
+  },
+});
+
+/**
+ * The tag this action writes into every review body it creates. HTML comments
+ * do not render on GitHub, so it is invisible to a human reader.
+ *
+ * It is also the identity `updateExisting` matches on. Matching by author login
+ * would need `GET /user`, which answers 403 for a GitHub App installation token
+ * — the credential tier an automated reviewer usually runs under. The tag needs
+ * no identity call, and `updateKey` keeps two review streams on one pull
+ * request apart.
+ */
+function reviewMarker(updateKey: string): string {
+  return `<!-- valet-review:${updateKey} -->`;
+}
+
+const REVIEW_COMMENT_SIDE = Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]);
+
+const createReview = action(Type.Object({
+    owner: Type.String({ description: "Repository owner" }),
+    repo: Type.String({ description: "Repository name" }),
+    pullNumber: Type.Integer({ description: "Pull request number" }),
+    body: Type.String({
+      description:
+        "Review summary in markdown. GitHub requires it for both COMMENT and REQUEST_CHANGES reviews.",
+    }),
+    event: Type.Optional(
+      Type.Union([Type.Literal("COMMENT"), Type.Literal("REQUEST_CHANGES")], {
+        description:
+          'Review verdict (default: COMMENT). APPROVE is not available here: an approving ' +
+          'review can satisfy branch protection, which is a merge authorization and not a ' +
+          'review remark.',
+      }),
+    ),
+    comments: Type.Optional(
+      Type.Array(
+        Type.Object({
+          path: Type.String({ description: "File path, relative to the repository root" }),
+          line: Type.Integer({
+            description:
+              "Line number in the file, as it appears in the pull request diff. " +
+              "A line that is not in the diff makes GitHub reject the whole review.",
+          }),
+          body: Type.String({ description: "Comment text in markdown" }),
+          side: Type.Optional(
+            Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")], {
+              description: 'LEFT for a removed line, RIGHT for an added or unchanged line (default: RIGHT)',
+            }),
+          ),
+          startLine: Type.Optional(
+            Type.Integer({ description: "First line of a multi-line comment. `line` is the last." }),
+          ),
+          startSide: Type.Optional(REVIEW_COMMENT_SIDE),
+        }),
+        { description: "Inline comments, anchored to a file and a line of the diff" },
+      ),
+    ),
+    updateExisting: Type.Optional(
+      Type.Boolean({
+        description:
+          "Replace the body of this action's previous review on the pull request instead of " +
+          "adding another one (default: false). Use it for a re-review, so repeated runs do " +
+          "not stack duplicates. It cannot carry inline comments — GitHub's review-update " +
+          "endpoint changes the summary body only.",
+      }),
+    ),
+    updateKey: Type.Optional(
+      Type.String({
+        description:
+          'Names the review stream `updateExisting` replaces (default: "default"). Give two ' +
+          "review workflows on one repository different keys, so each updates only its own review.",
+      }),
+    ),
+  }))({
+  id: "github.create_review",
+  name: "Create Pull Request Review",
+  description:
+    "Post a review on a pull request, with an optional set of inline comments anchored to " +
+    "diff lines. Set updateExisting to replace this action's previous review instead of " +
+    "adding another one.",
+  riskLevel: "medium",
+  execute: async (args, ctx) => {
+    const octokit = await getOctokit(ctx);
+    const marker = reviewMarker(args.updateKey ?? "default");
+    const body = `${args.body}\n\n${marker}`;
+    const comments = (args.comments ?? []).map((comment) => ({
+      path: comment.path,
+      line: comment.line,
+      body: comment.body,
+      ...(comment.side === undefined ? {} : { side: comment.side }),
+      ...(comment.startLine === undefined ? {} : { start_line: comment.startLine }),
+      ...(comment.startSide === undefined ? {} : { start_side: comment.startSide }),
+    }));
+
+    if (args.updateExisting && comments.length > 0) {
+      return {
+        success: false,
+        error:
+          "Create review: updateExisting cannot carry comments. GitHub's review-update " +
+          "endpoint changes the summary body only, so the inline comments would be lost. " +
+          "Set updateExisting to false, or move the findings into the body.",
+      };
+    }
+
+    try {
+      if (args.updateExisting) {
+        const { data: priorReviews } = await octokit.request(
+          "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+          { owner: args.owner, repo: args.repo, pull_number: args.pullNumber, per_page: 100 },
+        );
+        // Newest first: a re-review updates the latest of our reviews, not the
+        // first one we ever left on this pull request.
+        const previous = [...priorReviews]
+          .reverse()
+          .find((review) => typeof review.body === "string" && review.body.includes(marker));
+        if (previous) {
+          const { data: updated } = await octokit.request(
+            "PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}",
+            {
+              owner: args.owner,
+              repo: args.repo,
+              pull_number: args.pullNumber,
+              review_id: previous.id,
+              body,
+            },
+          );
+          return {
+            success: true,
+            data: {
+              review_id: updated.id,
+              state: updated.state,
+              url: updated.html_url,
+              updated: true,
+              inline_comments: 0,
+            },
+          };
+        }
+      }
+
+      const { data: review } = await octokit.request(
+        "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+        {
+          owner: args.owner,
+          repo: args.repo,
+          pull_number: args.pullNumber,
+          body,
+          event: args.event ?? "COMMENT",
+          ...(comments.length > 0 ? { comments } : {}),
+        },
+      );
+      return {
+        success: true,
+        data: {
+          review_id: review.id,
+          state: review.state,
+          url: review.html_url,
+          updated: false,
+          inline_comments: comments.length,
+        },
+      };
+    } catch (err) {
+      const e = err as { status?: number };
+      if (e.status === 422 && comments.length > 0) {
+        return {
+          success: false,
+          error:
+            "Create review: GitHub rejected the review (422). Every inline comment must point " +
+            'at a line that appears in the pull request diff for its "path". Run ' +
+            "github.inspect_pull_request with includePatch, read the diff, and take the line " +
+            "numbers from it.",
+        };
+      }
+      return handleOctokitError(err, "github.create_review", "Create review");
     }
   },
 });
@@ -1875,6 +2051,7 @@ export const githubPlugin: ActionPlugin = {
     createComment,
     listPullRequests,
     inspectPullRequest,
+    createReview,
     updatePullRequest,
     createPullRequest,
     mergePullRequest,

@@ -11,7 +11,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { PluginAction } from "@valet/engine";
 import { githubPlugin } from "./actions.js";
 import { fakeActionContext } from "../test-helpers/action-context.js";
-import { startGithubFixture, type GithubFixture, type GithubFixtureHandlers } from "../test-helpers/github-fixture.js";
+import {
+  startGithubFixture,
+  type GithubFixture,
+  type GithubFixtureCall,
+  type GithubFixtureHandlers,
+} from "../test-helpers/github-fixture.js";
 
 const prevGithubApiUrl = process.env.GITHUB_API_URL;
 let fixture: GithubFixture | undefined;
@@ -321,5 +326,180 @@ describe("github.inspect_pull_request file pagination", () => {
 
     expect(data.matched_file_count).toBe(100);
     expect(data.files_complete).toBe(false);
+  });
+});
+
+// ─── create_review ──────────────────────────────────────────────────────────
+//
+// Each test here that posts a review takes about 3 seconds. This is not a hang.
+// `POST /pulls/{n}/reviews` is on Octokit's "notifications" throttle group,
+// which holds successive calls 3000 ms apart to stay under GitHub's secondary
+// rate limit. The Bottleneck group is module state, so the pacing carries
+// across Octokit instances and across tests. Turning it off would stop testing
+// the client the action really uses.
+
+const MARKER = "<!-- valet-review:default -->";
+
+async function createReview(args: Record<string, unknown>) {
+  return findAction("github.create_review").execute(
+    { owner: "acme", repo: "widgets", pullNumber: 7, ...args },
+    fakeActionContext("test-token"),
+  );
+}
+
+function reviewWrites(server: GithubFixture): GithubFixtureCall[] {
+  return server.calls.filter((c) => c.method === "POST" || c.method === "PUT");
+}
+
+describe("github.create_review", () => {
+  it("posts a COMMENT review by default", async () => {
+    const server = useFixture({
+      createReview: () => ({
+        body: { id: 900, state: "COMMENTED", html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-900" },
+      }),
+    });
+
+    const result = await createReview({ body: "Looks reasonable." });
+
+    expect(result.success).toBe(true);
+    const writes = reviewWrites(server);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].method).toBe("POST");
+    expect(writes[0].path).toBe("/repos/acme/widgets/pulls/7/reviews");
+    expect(isRecord(writes[0].body) && writes[0].body.event).toBe("COMMENT");
+    expect(isRecord(writes[0].body) && String(writes[0].body.body)).toContain("Looks reasonable.");
+  });
+
+  it("passes REQUEST_CHANGES through when asked", async () => {
+    const server = useFixture();
+
+    await createReview({ body: "Please fix the leak.", event: "REQUEST_CHANGES" });
+
+    const write = reviewWrites(server)[0];
+    expect(isRecord(write.body) && write.body.event).toBe("REQUEST_CHANGES");
+  });
+
+  it("sends inline comments in GitHub's snake_case shape", async () => {
+    const server = useFixture();
+
+    await createReview({
+      body: "Two findings.",
+      comments: [
+        { path: "source/rest/handler.go", line: 42, body: "Close the response body." },
+        { path: "source/rest/router.go", line: 18, side: "LEFT", startLine: 15, startSide: "LEFT", body: "Dead route." },
+      ],
+    });
+
+    const write = reviewWrites(server)[0];
+    if (!isRecord(write.body)) throw new Error("no request body recorded");
+    expect(write.body.comments).toEqual([
+      { path: "source/rest/handler.go", line: 42, body: "Close the response body." },
+      { path: "source/rest/router.go", line: 18, side: "LEFT", start_line: 15, start_side: "LEFT", body: "Dead route." },
+    ]);
+  });
+
+  it("marks its own reviews so a later run can find them", async () => {
+    const server = useFixture();
+
+    await createReview({ body: "First pass." });
+
+    const write = reviewWrites(server)[0];
+    expect(isRecord(write.body) && String(write.body.body)).toContain(MARKER);
+  });
+
+  it("updateExisting posts a new review when the pull request has none of ours", async () => {
+    const server = useFixture({
+      listReviews: () => ({ body: [{ id: 1, state: "COMMENTED", body: "a human review", user: { login: "conner" } }] }),
+    });
+
+    const result = await createReview({ body: "First automated pass.", updateExisting: true });
+
+    expect(result.success).toBe(true);
+    const writes = reviewWrites(server);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].method).toBe("POST");
+  });
+
+  it("updateExisting replaces the body of our previous review in place", async () => {
+    const server = useFixture({
+      listReviews: () => ({
+        body: [
+          { id: 1, state: "COMMENTED", body: "a human review", user: { login: "conner" } },
+          { id: 42, state: "COMMENTED", body: `Stale findings.\n\n${MARKER}`, user: { login: "valet[bot]" } },
+        ],
+      }),
+    });
+
+    const result = await createReview({ body: "Fresh findings.", updateExisting: true });
+
+    expect(result.success).toBe(true);
+    const writes = reviewWrites(server);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].method).toBe("PUT");
+    expect(writes[0].path).toBe("/repos/acme/widgets/pulls/7/reviews/42");
+    expect(isRecord(writes[0].body) && String(writes[0].body.body)).toContain("Fresh findings.");
+    expect(isRecord(writes[0].body) && String(writes[0].body.body)).toContain(MARKER);
+  });
+
+  it("keeps review streams apart by updateKey", async () => {
+    const server = useFixture({
+      listReviews: () => ({
+        body: [{ id: 42, state: "COMMENTED", body: `Style pass.\n\n<!-- valet-review:style -->`, user: { login: "valet[bot]" } }],
+      }),
+    });
+
+    await createReview({ body: "Security pass.", updateExisting: true, updateKey: "security" });
+
+    expect(reviewWrites(server)[0].method).toBe("POST");
+  });
+
+  it("refuses to combine updateExisting with inline comments, and names the fix", async () => {
+    const server = useFixture();
+
+    const result = await createReview({
+      body: "Findings.",
+      updateExisting: true,
+      comments: [{ path: "a.go", line: 1, body: "nit" }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("updateExisting");
+    expect(result.error).toContain("comments");
+    expect(reviewWrites(server)).toHaveLength(0);
+  });
+
+  it("explains a 422 on inline comments instead of relaying GitHub's wording", async () => {
+    useFixture({
+      createReview: () => ({
+        status: 422,
+        body: { message: "Validation Failed", errors: [{ resource: "PullRequestReviewComment", field: "line" }] },
+      }),
+    });
+
+    const result = await createReview({
+      body: "Findings.",
+      comments: [{ path: "source/rest/handler.go", line: 9999, body: "nit" }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("inspect_pull_request");
+    expect(result.error).toContain("includePatch");
+  });
+
+  it("reports the review id, url, and whether it updated in place", async () => {
+    useFixture({
+      createReview: () => ({
+        body: { id: 900, state: "COMMENTED", html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-900" },
+      }),
+    });
+
+    const result = await createReview({ body: "Looks reasonable.", comments: [{ path: "a.go", line: 1, body: "nit" }] });
+
+    expect(result.success).toBe(true);
+    if (!isRecord(result.data)) throw new Error("no data");
+    expect(result.data.review_id).toBe(900);
+    expect(result.data.url).toBe("https://github.com/acme/widgets/pull/7#pullrequestreview-900");
+    expect(result.data.updated).toBe(false);
+    expect(result.data.inline_comments).toBe(1);
   });
 });
