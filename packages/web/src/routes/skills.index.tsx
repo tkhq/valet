@@ -6,10 +6,10 @@ import { SkillCard } from "~/components/skills/skill-card";
 import { displayName } from "~/components/integrations/display-name";
 
 /**
- * `/skills` — the markdown playbooks the assistant can pull into a turn.
- * Two kinds sit in one grid: the skills the installed plugins ship, and the
- * skills stored for the caller. Each card carries an origin badge and opens
- * a read-only page.
+ * `/skills` — markdown documents the assistant can pull into a turn. One
+ * grid holds both kinds: skills the installed plugins ship, and skills
+ * stored for the caller. Each card carries an origin badge and opens a
+ * read-only page.
  *
  * Browsing only. A skill is authored in the repository it comes from, or by
  * the assistant through the `skills` actions — a form here would be a second
@@ -44,13 +44,7 @@ export function SkillsIndexPage() {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl px-6 py-10">
         <div className="flex items-end justify-between gap-4">
-          <div>
-            <h1 className="font-display text-2xl text-ink">Skills</h1>
-            <p className="mt-1 text-sm text-muted">
-              Playbooks your assistant reads on demand. Plugins bring their own; ask your assistant
-              to write you one.
-            </p>
-          </div>
+          <h1 className="font-display text-2xl text-ink">Skills</h1>
           {!isLoading && !error && skills.length > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">
               {skills.length} skill{skills.length === 1 ? "" : "s"} · {pluginCount} plugin
