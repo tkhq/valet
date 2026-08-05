@@ -35,10 +35,6 @@ export function SkillsIndexPage() {
   const { data, isLoading, error } = useSkills();
   const skills = data?.skills ?? [];
   const sorted = sortByName(skills);
-  const pluginCount = new Set(
-    skills.flatMap((s) => (s.origin === "plugin" ? [s.plugin] : [])),
-  ).size;
-  const storedCount = skills.filter((s) => s.origin !== "plugin").length;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -47,8 +43,7 @@ export function SkillsIndexPage() {
           <h1 className="font-display text-2xl text-ink">Skills</h1>
           {!isLoading && !error && skills.length > 0 && (
             <span className="shrink-0 font-mono text-xs text-muted">
-              {skills.length} skill{skills.length === 1 ? "" : "s"} · {pluginCount} plugin
-              {pluginCount === 1 ? "" : "s"} · {storedCount} yours
+              {skills.length} skill{skills.length === 1 ? "" : "s"}
             </span>
           )}
         </div>
@@ -65,10 +60,7 @@ export function SkillsIndexPage() {
             </div>
           )}
           {!isLoading && !error && skills.length === 0 && (
-            <div className="text-sm text-muted">
-              No skills yet. Plugins bring their own — see Integrations — or ask your assistant to
-              write one for you.
-            </div>
+            <div className="text-sm text-muted">No skills yet.</div>
           )}
 
           {!isLoading && !error && sorted.length > 0 && (

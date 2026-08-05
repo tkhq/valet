@@ -114,10 +114,10 @@ describe("SkillsIndexPage with stored skills", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 
-  it("points at the assistant when nothing is installed", () => {
+  it("says so when the owner has no skills", () => {
     currentData = { skills: [] };
     render(<SkillsIndexPage />);
-    expect(screen.getByText(/ask your assistant to write one/i)).toBeTruthy();
+    expect(screen.getByText("No skills yet.")).toBeTruthy();
   });
 });
 
