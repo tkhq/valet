@@ -444,6 +444,32 @@ CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
 --> statement-breakpoint
+CREATE TABLE "skill_sources" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"repo_full_name" text NOT NULL,
+	"ref" text DEFAULT '' NOT NULL,
+	"subpath" text DEFAULT '' NOT NULL,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"next_attempt_at" bigint NOT NULL,
+	"last_sha" text,
+	"last_manifest_hash" text,
+	"last_synced_at" bigint,
+	"last_error" text,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "skill_sources_owner" ON "skill_sources" ("org_id","owner_type","owner_id");
+--> statement-breakpoint
+CREATE INDEX "skill_sources_due" ON "skill_sources" ("enabled","next_attempt_at");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "skill_sources_repo" ON "skill_sources" ("org_id","owner_type","owner_id","repo_full_name","subpath");
+--> statement-breakpoint
 CREATE TABLE "workflow_definitions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,

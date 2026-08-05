@@ -88,10 +88,26 @@ function assertValidFrontmatter(name: string, description: string): void {
   }
 }
 
-/** True when `owner` may act on a row: its direct user owner, or a live
+/** The ownership columns every skill-shaped row carries. */
+export interface OwnerScope {
+  orgId: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+}
+
+/**
+ * True when `owner` may act on a row: its direct user owner, or a live
  * member of its owning team. Org-owned rows are readable by nobody yet —
- * nothing creates one, and an org-wide skill needs its own admin gate. */
-async function isAuthorizedFor(db: AppDb, owner: SkillOwner, row: SkillRow): Promise<boolean> {
+ * nothing creates one, and an org-wide skill needs its own admin gate.
+ *
+ * Exported because `services/skill-sources.ts` scopes tracked repositories
+ * by exactly this rule. One implementation, so the two tables cannot drift.
+ */
+export async function isAuthorizedFor(
+  db: AppDb,
+  owner: SkillOwner,
+  row: OwnerScope,
+): Promise<boolean> {
   if (row.orgId !== owner.orgId) return false;
   if (row.ownerType === "user") return row.ownerId === owner.userId;
   if (row.ownerType === "team") return isTeamMember(db, row.ownerId, owner.userId);

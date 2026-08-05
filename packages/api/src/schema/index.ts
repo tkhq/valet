@@ -681,6 +681,70 @@ export const skills = pgTable(
   ],
 );
 
+// One tracked skill repository. A `repo`-origin row in `skills` above is a
+// MIRROR of a `SKILL.md` in one of these repositories, and sync is the only
+// thing that writes those rows, so a source and the skills it carries are
+// created and destroyed together.
+//
+// Do not confuse this row with the engine's `SkillSource` type, which is one
+// assembled skill on its way into a session. In prose here, "skill source"
+// always means the tracked repository.
+//
+// `ref` empty means the repository's default branch. `subpath` empty means
+// the repository root. Both are part of the UNIQUE key, so one repository can
+// be tracked twice from two different subdirectories.
+//
+// The last four sync columns are the whole change-detection state:
+// `last_sha` is the commit the last sync read, and `last_manifest_hash` is a
+// hash over the skill files that commit held. A poll that finds the same
+// commit stops after one API call; a poll that finds a moved commit with the
+// same manifest records the commit and writes no skill rows.
+//
+// `status`/`attempts`/`next_attempt_at`/`last_error` are the sweep's claim
+// and retry state, shaped like `event_deliveries` — see
+// `services/skill-sync.ts` for the claim statement and the backoff ladder.
+// `last_error` carries whatever the last sync needs to tell the reader:
+// the failure for `status='error'`, and the per-skill warnings for
+// `status='warning'` (a sync that succeeded but skipped a malformed file).
+export const skillSources = pgTable(
+  "skill_sources",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** `owner/repo`. */
+    repoFullName: text("repo_full_name").notNull(),
+    /** Branch, tag, or commit. Empty means the default branch. */
+    ref: text("ref").notNull().default(""),
+    /** Directory that holds the skill directories. Empty means the root. */
+    subpath: text("subpath").notNull().default(""),
+    enabled: boolean("enabled").notNull().default(true),
+    status: text("status", { enum: ["pending", "ok", "warning", "error"] })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+    lastSha: text("last_sha"),
+    lastManifestHash: text("last_manifest_hash"),
+    lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
+    lastError: text("last_error"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("skill_sources_owner").on(t.orgId, t.ownerType, t.ownerId),
+    index("skill_sources_due").on(t.enabled, t.nextAttemptAt),
+    uniqueIndex("skill_sources_repo").on(
+      t.orgId,
+      t.ownerType,
+      t.ownerId,
+      t.repoFullName,
+      t.subpath,
+    ),
+  ],
+);
+
 // ─── Workflows (engine v2 Phase 5) ──────────────────────────────────────────
 //
 // App-side persistence for the `@valet/workflow` run host (plan decision
@@ -1223,6 +1287,8 @@ export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
+/** One tracked skill repository. Not the engine's `SkillSource`. */
+export type SkillSourceRow = typeof skillSources.$inferSelect;
 export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
 export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
 export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
