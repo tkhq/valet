@@ -349,6 +349,56 @@ describe('validateDefinition', () => {
     ]));
   });
 
+  it('allows foreach concurrency up to the default ceiling', () => {
+    const def = definition({
+      nodes: [
+        // Declared so trigger.data.items is a typed array — otherwise
+        // the foreach items rule would error first and mask the
+        // concurrency policy check this test cares about.
+        { id: 'trigger', type: 'trigger', dataSchema: { items: { type: 'array' } } },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{trigger.data.items}}',
+          concurrency: 20,
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'loop', to: 'finish' }],
+    });
+
+    expect(blockingErrors(validateDefinition(def))).toEqual([]);
+  });
+
+  it('still rejects foreach concurrency above a policy that lowers the ceiling', () => {
+    // The default now equals the schema's own cap (20), so no valid node can
+    // exceed it. The ceiling still has to bite when a definition lowers it.
+    const def = definition({
+      policy: { maxForeachConcurrency: 2 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', dataSchema: { items: { type: 'array' } } },
+        {
+          id: 'loop',
+          type: 'foreach',
+          items: '{{trigger.data.items}}',
+          concurrency: 5,
+          body: { id: 'inner', type: 'set', values: {} },
+        },
+        { id: 'finish', type: 'stop' },
+      ],
+      edges: [{ from: 'loop', to: 'finish' }],
+    });
+
+    const errs = blockingErrors(validateDefinition(def));
+    expect(errs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'foreach_concurrency_exceeds_policy',
+        message: expect.stringContaining('2'),
+      }),
+    ]));
+  });
+
   it('rejects foreach items that reference a trigger field with no declared dataSchema', () => {
     // Programmatic authors call workflows.validate / workflows.save_draft
     // and only honor errors — a "warning" on this case is invisible to
