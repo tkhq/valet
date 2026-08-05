@@ -423,6 +423,27 @@ ALTER TABLE "memory_files" ADD COLUMN "search_vector" tsvector GENERATED ALWAYS 
 --> statement-breakpoint
 CREATE INDEX "memory_files_search_vector_idx" ON "memory_files" USING gin ("search_vector");
 --> statement-breakpoint
+CREATE TABLE "skills" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"origin" text NOT NULL,
+	"source_id" text,
+	"name" text NOT NULL,
+	"description" text NOT NULL,
+	"content" text NOT NULL,
+	"frontmatter" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"content_sha" text NOT NULL,
+	"upstream_path" text,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
+--> statement-breakpoint
 CREATE TABLE "workflow_definitions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
