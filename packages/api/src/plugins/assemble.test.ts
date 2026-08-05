@@ -68,9 +68,16 @@ describe("assemblePlugins", () => {
 });
 
 describe("pluginSessionExtras", () => {
-  it("returns no tools when there are zero action plugins", () => {
+  it("returns no catalog tools when there are zero action plugins", () => {
     const plugins = [makePlugin("skills-only", { skills: [{ name: "s", content: "c" }] })];
     const { tools } = pluginSessionExtras(plugins);
+    // The `skill` tool still ships — a skills-only plugin set has something
+    // to reach — but neither catalog tool does.
+    expect(tools.map((t) => t.name)).toEqual(["skill"]);
+  });
+
+  it("returns no tools at all for a plugin set with neither actions nor skills", () => {
+    const { tools } = pluginSessionExtras([makePlugin("inert")]);
     expect(tools).toEqual([]);
   });
 
@@ -94,6 +101,52 @@ describe("pluginSessionExtras", () => {
     const { skills, roles } = pluginSessionExtras(plugins);
     expect(skills.map((s) => s.name)).toEqual(["skill-a", "skill-b"]);
     expect(roles.map((r) => r.name)).toEqual(["role-a", "role-b"]);
+  });
+
+  it("throws when two plugins ship a skill with the same name", () => {
+    const plugins = [
+      makePlugin("plugin-a", { skills: [{ name: "github", content: "a" }] }),
+      makePlugin("plugin-b", { skills: [{ name: "github", content: "b" }] }),
+    ];
+
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/plugin-a/);
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/plugin-b/);
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/github/);
+  });
+
+  it("throws when one plugin ships two skills with the same name", () => {
+    const plugins = [
+      makePlugin("plugin-a", {
+        skills: [
+          { name: "github", content: "a" },
+          { name: "github", content: "b" },
+        ],
+      }),
+    ];
+
+    expect(() => pluginSessionExtras(plugins)).toThrowError(/github/);
+  });
+
+  it("adds a protected `skill` tool naming every skill the plugin set ships", () => {
+    const plugins = [
+      makePlugin("plugin-a", { skills: [{ name: "github", description: "Use GitHub.", content: "a" }] }),
+      makePlugin("plugin-b", { skills: [{ name: "workflows", content: "b" }] }),
+    ];
+
+    const { tools } = pluginSessionExtras(plugins);
+    const skillTool = tools.find((t) => t.name === "skill");
+
+    expect(skillTool).toBeDefined();
+    expect(skillTool?.protectedFromPruning).toBe(true);
+    expect(skillTool?.description).toContain("github");
+    expect(skillTool?.description).toContain("Use GitHub.");
+    expect(skillTool?.description).toContain("workflows");
+  });
+
+  it("adds no `skill` tool when no plugin ships a skill", () => {
+    const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
+    const { tools } = pluginSessionExtras(plugins);
+    expect(tools.map((t) => t.name)).not.toContain("skill");
   });
 
   it("builds a fresh tools array on every call (no module-scope caching)", () => {
