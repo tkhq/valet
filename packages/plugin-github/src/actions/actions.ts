@@ -14,6 +14,7 @@ import {
   wrongPathKindError,
   MAX_DIRECTORY_ENTRIES,
 } from "./repo-directory.js";
+import { resolveGithubApiUrl } from "./api.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -25,7 +26,7 @@ async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
       "Missing GitHub access token. Connect the GitHub integration in Settings.",
     );
   }
-  return new Octokit({ auth: token });
+  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
 }
 
 const PERMISSION_HINTS: Record<string, string> = {
@@ -1374,7 +1375,7 @@ const getJobLogs = action(Type.Object({
       if (!token) {
         return { success: false, error: "Missing GitHub access token" };
       }
-      const logsApiUrl = `https://api.github.com/repos/${args.owner}/${args.repo}/actions/jobs/${args.job_id}/logs`;
+      const logsApiUrl = `${resolveGithubApiUrl()}/repos/${args.owner}/${args.repo}/actions/jobs/${args.job_id}/logs`;
       const redirectResp = await fetch(logsApiUrl, {
         headers: {
           Authorization: `token ${token}`,
