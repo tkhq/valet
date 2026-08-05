@@ -347,6 +347,151 @@ const listPullRequests = action(Type.Object({
   },
 });
 
+/** GitHub caps `per_page` at 100 on every list endpoint. A larger value is
+ * silently clamped, so a single request can never return more than 100 files. */
+const GITHUB_MAX_PER_PAGE = 100;
+
+/** Default byte budget for the patches of one inspect call. 64 KiB is a few
+ * thousand diff lines — large enough for a normal review, small enough to
+ * leave room in an LLM prompt for the instructions and the reply. */
+const PATCH_BYTES_DEFAULT = 65536;
+
+const textEncoder = new TextEncoder();
+
+function byteLength(text: string): number {
+  return textEncoder.encode(text).length;
+}
+
+/** One entry of `GET /pulls/{n}/files`. `patch` is absent for binary files and
+ * for files whose diff GitHub considers too large. */
+interface PullRequestFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+}
+
+/**
+ * Reads up to `limit` files, in pages of at most 100. The old single request
+ * asked for `per_page: filesLimit`, so any limit above 100 returned 100 files
+ * and the caller could not tell. A short file list makes `matched_file_count`
+ * too low, which makes a workflow gate skip a pull request it should review.
+ */
+async function fetchPullRequestFiles(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  limit: number,
+): Promise<PullRequestFile[]> {
+  const files: PullRequestFile[] = [];
+  for (let page = 1; files.length < limit; page++) {
+    const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit - files.length);
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+      { owner, repo, pull_number: pullNumber, per_page: perPage, page },
+    );
+    for (const file of data) {
+      files.push({
+        filename: file.filename,
+        status: file.status,
+        additions: file.additions,
+        deletions: file.deletions,
+        patch: file.patch,
+      });
+    }
+    if (data.length < perPage) break;
+  }
+  return files;
+}
+
+/** Cuts a patch at the last whole line that fits in `budgetBytes`. Cutting on a
+ * line boundary keeps every retained diff line readable and cannot split a
+ * multi-byte character. */
+function truncatePatch(patch: string, budgetBytes: number): { text: string; bytes: number } {
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of patch.split("\n")) {
+    const cost = byteLength(line) + 1;
+    if (used + cost > budgetBytes) break;
+    kept.push(line);
+    used += cost;
+  }
+  if (kept.length === 0) return { text: "", bytes: 0 };
+  return { text: kept.join("\n") + "\n", bytes: used };
+}
+
+interface InspectedFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+  /** The patch is a prefix of the real diff. */
+  patch_truncated?: true;
+  /** Why this file has no patch. */
+  patch_omitted?: "byte_budget" | "not_provided_by_github";
+}
+
+interface PatchSummary {
+  limit_bytes: number;
+  included_bytes: number;
+  truncated_files: number;
+  omitted_files: number;
+}
+
+/** Spends `limitBytes` on patches in file order and records every cut, so a
+ * reader never mistakes a shortened diff for the whole one. */
+function attachPatches(
+  files: PullRequestFile[],
+  limitBytes: number,
+): { files: InspectedFile[]; summary: PatchSummary } {
+  let remaining = limitBytes;
+  let truncatedFiles = 0;
+  let omittedFiles = 0;
+
+  const withPatches = files.map((file): InspectedFile => {
+    const base = {
+      filename: file.filename,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions,
+    };
+    if (file.patch === undefined) {
+      omittedFiles++;
+      return { ...base, patch_omitted: "not_provided_by_github" };
+    }
+    const size = byteLength(file.patch);
+    if (size <= remaining) {
+      remaining -= size;
+      return { ...base, patch: file.patch };
+    }
+    const { text, bytes } = truncatePatch(file.patch, remaining);
+    if (bytes === 0) {
+      omittedFiles++;
+      return { ...base, patch_omitted: "byte_budget" };
+    }
+    remaining -= bytes;
+    truncatedFiles++;
+    return {
+      ...base,
+      patch: `${text}[... patch truncated at the ${limitBytes}-byte budget: ${size - bytes} of ${size} bytes omitted. Raise patchBytesLimit or narrow pathPrefixes to see the rest ...]`,
+      patch_truncated: true,
+    };
+  });
+
+  return {
+    files: withPatches,
+    summary: {
+      limit_bytes: limitBytes,
+      included_bytes: limitBytes - remaining,
+      truncated_files: truncatedFiles,
+      omitted_files: omittedFiles,
+    },
+  };
+}
+
 const inspectPullRequest = action(Type.Object({
     owner: Type.String({ description: "Repository owner" }),
     repo: Type.String({ description: "Repository name" }),
@@ -357,30 +502,57 @@ const inspectPullRequest = action(Type.Object({
     commentsLimit: Type.Optional(
       Type.Integer({ minimum: 1, maximum: 300, description: "Max review comments (default: 100)" }),
     ),
+    includePatch: Type.Optional(
+      Type.Boolean({
+        description:
+          "Include each file's unified diff in the `patch` field (default: false). " +
+          "Needed to review the code itself; costs prompt space.",
+      }),
+    ),
+    patchBytesLimit: Type.Optional(
+      Type.Integer({
+        minimum: 1024,
+        maximum: 1048576,
+        description:
+          "Total byte budget for all patches (default: 65536). Files are filled in order. " +
+          "Every cut is reported in `patch_truncated`, `patch_omitted`, and `patch_summary`.",
+      }),
+    ),
+    pathPrefixes: Type.Optional(
+      Type.Array(Type.String(), {
+        description:
+          "Keep only files whose path starts with one of these prefixes. " +
+          'End a prefix with "/" to scope to a folder exactly — "source/rest" also matches ' +
+          '"source/restore.go". The count of kept files is returned as `matched_file_count`.',
+      }),
+    ),
   }))({
   id: "github.inspect_pull_request",
   name: "Inspect Pull Request",
-  description: "Get detailed PR info including files changed, review comments, and check status",
+  description:
+    "Get detailed PR info including files changed, review comments, and check status. " +
+    "Set includePatch to read the diff, and pathPrefixes to scope to a folder; " +
+    "`matched_file_count` is a scalar a workflow if-node can compare against a number.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     const filesLimit = Math.min(Math.max(args.filesLimit ?? 100, 1), 300);
     const commentsLimit = Math.min(Math.max(args.commentsLimit ?? 100, 1), 300);
+    const patchBytesLimit = Math.min(
+      Math.max(args.patchBytesLimit ?? PATCH_BYTES_DEFAULT, 1024),
+      1048576,
+    );
     try {
-      const [prResp, filesResp, reviewsResp, commentsResp] = await Promise.all([
+      const [prResp, allFiles, reviewsResp, commentsResp] = await Promise.all([
         octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
           owner: args.owner,
           repo: args.repo,
           pull_number: args.pullNumber,
         }),
-        octokit
-          .request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", {
-            owner: args.owner,
-            repo: args.repo,
-            pull_number: args.pullNumber,
-            per_page: filesLimit,
-          })
-          .catch(() => ({ data: [] as unknown[] })),
+        // Not wrapped in a catch, unlike the enrichment calls below: the file
+        // list drives `matched_file_count`, and an empty list on failure reads
+        // as "this pull request touches nothing I care about".
+        fetchPullRequestFiles(octokit, args.owner, args.repo, args.pullNumber, filesLimit),
         octokit
           .request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
             owner: args.owner,
@@ -399,12 +571,23 @@ const inspectPullRequest = action(Type.Object({
       ]);
 
       const pr = prResp.data;
-      const files = filesResp.data as Array<{
-        filename: string;
-        status: string;
-        additions: number;
-        deletions: number;
-      }>;
+      const prefixes = args.pathPrefixes ?? [];
+      const matched =
+        prefixes.length === 0
+          ? allFiles
+          : allFiles.filter((f) => prefixes.some((prefix) => f.filename.startsWith(prefix)));
+      const patched = args.includePatch ? attachPatches(matched, patchBytesLimit) : undefined;
+      const files: InspectedFile[] = patched?.files ?? matched.map((f) => ({
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+      }));
+      // `changed_files` is the repository's own count. A smaller fetched count
+      // means `filesLimit` cut the list, so `matched_file_count` is a floor.
+      const filesComplete =
+        typeof pr.changed_files === "number" ? allFiles.length >= pr.changed_files : true;
+
       const reviews = reviewsResp.data as Array<{
         user?: { login: string };
         state: string;
@@ -453,12 +636,17 @@ const inspectPullRequest = action(Type.Object({
           additions: pr.additions,
           deletions: pr.deletions,
           changed_files: pr.changed_files,
-          files: files.map((f) => ({
-            filename: f.filename,
-            status: f.status,
-            additions: f.additions,
-            deletions: f.deletions,
-          })),
+          files,
+          /** Files kept by `pathPrefixes`, or every fetched file when no prefix
+           * was given. A scalar, so a workflow if-node can compare it with the
+           * number operators — the GitHub pull_request webhook carries no
+           * changed-file list, so folder scoping cannot happen at the
+           * subscription filter. */
+          matched_file_count: files.length,
+          /** False when `filesLimit` cut the list short, which makes
+           * `matched_file_count` a lower bound. */
+          files_complete: filesComplete,
+          ...(patched ? { patch_summary: patched.summary } : {}),
           reviews: reviews
             .filter((r) => r.state !== "DISMISSED")
             .map((r) => ({ user: r.user?.login, state: r.state, body: r.body })),
