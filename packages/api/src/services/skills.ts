@@ -339,7 +339,7 @@ async function rowsForPrincipal(db: AppDb, principal: Principal, orgId: string):
       and(
         eq(skills.orgId, orgId),
         eq(skills.ownerType, principal.type),
-        eq(skills.ownerId, principal.type === "org" ? orgId : principal.id),
+        eq(skills.ownerId, principal.id),
       ),
     )
     .orderBy(asc(skills.name));
