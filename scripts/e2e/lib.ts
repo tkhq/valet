@@ -88,6 +88,7 @@ const INTEGRATION_AGENT_FILES = [
   "src/integration/cross-thread.test.ts",
   "src/integration/plugins.e2e.test.ts",
   "src/integration/workflow-run.e2e.test.ts",
+  "src/integration/workflow-foreach-session.test.ts",
 ];
 
 /** Integration files owned by dedicated rows (see lists above). */
