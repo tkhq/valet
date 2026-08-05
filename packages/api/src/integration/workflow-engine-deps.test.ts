@@ -156,11 +156,20 @@ describeIfKey("api integration: workflow engine-deps", () => {
 
         const llmCheckpoint = detail?.checkpoints.find((cp) => cp.nodeId === "llm1");
         expect(llmCheckpoint?.status).toBe("completed");
-        const result = llmCheckpoint?.result as { text: string; output?: { greeting: string } } | undefined;
+        const result = llmCheckpoint?.result as
+          | { text: string; output?: { greeting: string }; usage?: { totalTokens: number; costUsd: number } }
+          | undefined;
         expect(typeof result?.text).toBe("string");
         expect(result?.text.length).toBeGreaterThan(0);
         expect(typeof result?.output?.greeting).toBe("string");
         expect(result?.output?.greeting.length).toBeGreaterThan(0);
+        // Exercises the REAL llmComplete -> mapPiAiUsage wiring against a
+        // live completion (the unit tests for mapPiAiUsage itself only
+        // call it directly with hand-built fixtures) — a wrong field
+        // reference in the wiring (e.g. passing the whole result instead
+        // of result.usage) would pass every other assertion in this file.
+        expect(result?.usage?.totalTokens).toBeGreaterThan(0);
+        expect(result?.usage?.costUsd).toBeGreaterThan(0);
       } finally {
         await api.cleanup();
       }

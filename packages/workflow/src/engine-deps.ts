@@ -44,8 +44,28 @@ export interface WorkflowLlmCompleteRequest {
   maxOutputTokens?: number;
 }
 
+/**
+ * Portable, provider-agnostic shape — deliberately not pi-ai's own `Usage`
+ * type (this package depends only on `@valet/engine` and `@sinclair/
+ * typebox`; the API-side implementation maps whatever the real provider
+ * SDK returns into this). Required, not optional, on the result it lives
+ * in: an `llmComplete` implementation that can't fill this in is a real
+ * gap, and making it required means the type system catches a silently-
+ * dropped-usage regression at compile time instead of an unnoticed cost
+ * dimension that goes missing until someone asks where the money went.
+ */
+export interface WorkflowLlmUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
 export interface WorkflowLlmCompleteResult {
   text: string;
+  usage: WorkflowLlmUsage;
 }
 
 export interface WorkflowPromptOrchestratorOptions {

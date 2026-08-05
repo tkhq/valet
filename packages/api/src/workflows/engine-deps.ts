@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { completeSimple, getModel } from "@mariozechner/pi-ai";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model, Usage } from "@mariozechner/pi-ai";
 import {
   parseOrchestratorSessionId,
   parsePrincipal,
@@ -54,6 +54,7 @@ import type {
   WorkflowInvokeActionResult,
   WorkflowLlmCompleteRequest,
   WorkflowLlmCompleteResult,
+  WorkflowLlmUsage,
   WorkflowPromptOptions,
   WorkflowPromptOrchestratorOptions,
   WorkflowPromptOrchestratorResult,
@@ -292,7 +293,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         .filter((b): b is { type: "text"; text: string } => b.type === "text")
         .map((b) => b.text)
         .join("");
-      return { text };
+      return { text, usage: mapPiAiUsage(result.usage) };
     },
 
     /**
@@ -375,6 +376,21 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
  * from `llmComplete` as a node failure, so an unknown model surfaces as a
  * readable per-node error instead of a generic crash.
  */
+
+/** Pure so it's unit-testable without a live completion — the network
+ * boundary this maps across (pi-ai's `completeSimple`) isn't itself worth
+ * mocking, but the mapping logic is. Exported for that test. */
+export function mapPiAiUsage(usage: Usage): WorkflowLlmUsage {
+  return {
+    inputTokens: usage.input,
+    outputTokens: usage.output,
+    cacheReadTokens: usage.cacheRead,
+    cacheWriteTokens: usage.cacheWrite,
+    totalTokens: usage.totalTokens,
+    costUsd: usage.cost.total,
+  };
+}
+
 function resolveWorkflowModel(spec: string): PiModel {
   const slash = spec.indexOf("/");
   if (slash > 0) {

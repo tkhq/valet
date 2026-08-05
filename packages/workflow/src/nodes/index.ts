@@ -108,7 +108,7 @@ export { executeStop } from './stop.js';
 export { executeWait } from './wait.js';
 export { executeApproval } from './approval.js';
 export { executeSession } from './session.js';
-export { executeLlm } from './llm.js';
+export { executeLlm, llmUsageSpanAttributes } from './llm.js';
 export { executeTool } from './tool.js';
 export { executeOrchestrator } from './orchestrator.js';
 export { executeForeach } from './foreach.js';
