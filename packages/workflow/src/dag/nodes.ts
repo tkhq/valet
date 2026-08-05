@@ -115,6 +115,22 @@ export interface OrchestratorNode {
   };
 }
 
+/**
+ * Which identity a `tool` node acts as:
+ *
+ *   - `app`  — the integration's own installed-application identity (the
+ *     GitHub App installation, a Slack bot token). The host MUST fail the
+ *     node when it cannot resolve that identity. It must never fall back to
+ *     a person's credential.
+ *   - `user` — the credential of the user who owns the workflow.
+ *   - `auto` — the host's default precedence. Same as omitting the field.
+ *
+ * The vocabulary is portable, but the resolution is not: each host decides
+ * what `app` means for a given service. `@valet/workflow` only carries the
+ * selection.
+ */
+export type ToolCredentialMode = 'auto' | 'app' | 'user';
+
 // Tool node — trimmed per decision 1: drops onPolicyDeny/retries (Phase 6
 // re-adds these with policy).
 export interface ToolNode {
@@ -124,6 +140,12 @@ export interface ToolNode {
   action: string;
   params: Record<string, unknown>;
   summary?: string;
+  /**
+   * Identity the action acts as. Omit it to keep the host's default
+   * precedence — every definition written before this field existed reads
+   * as `auto`.
+   */
+  credential?: ToolCredentialMode;
 }
 
 /**

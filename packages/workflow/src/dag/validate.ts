@@ -99,9 +99,14 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
-  tool: ['id', 'type', 'service', 'action', 'params', 'summary'],
+  tool: ['id', 'type', 'service', 'action', 'params', 'summary', 'credential'],
   foreach: ['id', 'type', 'items', 'body', 'maxItems', 'concurrency', 'itemAlias', 'indexAlias', 'onItemError'],
 };
+
+/** Typed as `ReadonlySet<string>` on purpose: the runtime input is
+ * LLM-authored JSON, so the guard must reject values `ToolCredentialMode`
+ * cannot hold. */
+const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
 
 const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
 const IF_CONDITION_KEYS: readonly string[] = ['left', 'dataType', 'operation', 'right'];
@@ -429,6 +434,12 @@ function validateNodeFields(
       }
       if (node.summary !== undefined && typeof node.summary === 'string') {
         checkTemplate(label, 'summary', node.summary, refCtx, errors);
+      }
+      if (node.credential !== undefined && !TOOL_CREDENTIAL_MODES.has(node.credential)) {
+        errors.push(
+          `${label}: tool.credential must be "auto", "app" or "user", got ${JSON.stringify(node.credential)} — ` +
+            `"app" makes the action run as the installed application, "user" as the workflow owner`,
+        );
       }
       break;
     case 'foreach':

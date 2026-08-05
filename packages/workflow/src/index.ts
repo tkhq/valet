@@ -22,6 +22,7 @@ export type {
   LlmNode,
   OrchestratorNode,
   ToolNode,
+  ToolCredentialMode,
 } from './dag/nodes.js';
 
 export {
