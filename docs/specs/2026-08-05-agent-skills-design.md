@@ -1,7 +1,7 @@
 # Agent Skills Design — the skill format V2 targets
 
 **Date:** 2026-08-05
-**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, and authoring. The repository importer is not built.
+**Status:** Implemented for the format, layout, validation, the `skill` tool, storage, and agent authoring. The repository importer is not built.
 **Scope:** Records which skill format Valet V2 uses, where a skill is stored, how a skill reaches the model, and which parts of the format are not implemented yet.
 
 ## Context
@@ -101,13 +101,22 @@ A skill name is a lookup key, so only one skill can hold a name. A repeated name
 - Two PLUGINS shipping one skill name THROWS. We ship the plugins, so a repeated name is a build-time bug and must be loud.
 - A STORED skill that repeats a name is SHADOWED. The row stays, and it drops out of the assembled set. It never throws: no session builder has a try/catch, so a throw would stop that person from starting any session at all.
 
-Precedence: a plugin skill wins over a stored skill, and a personal skill wins over a team skill. `partitionByName` (`packages/api/src/plugins/assemble.ts`) applies the rule, and `/api/skills` calls the same function, so the rows the page marks `shadowed` are the rows a session drops. The Skills tab shows the warning on the card and tells the author to rename the skill.
+Precedence: a plugin skill wins over a stored skill, and a personal skill wins over a team skill. `partitionByName` (`packages/api/src/plugins/assemble.ts`) applies the rule, and `/api/skills` calls the same function, so the rows the page marks `shadowed` are the rows a session drops. The Skills tab shows the warning on the card and on the skill's own page, and names the fix: ask the assistant to rename a `local` skill, and rename a `repo` skill where it came from.
 
 ## Authoring
 
-`POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one. The routes take a row id, not a name: a shadowed skill shares its name with the skill that shadows it, so only the id can reach it.
+Authoring is repository-first. A skill that a team maintains belongs in a repository, where it has review and version history, and Valet mirrors it. The importer that does the mirroring is not built yet (see Not implemented), so today the in-product path is an AGENT: you tell the orchestrator what you learned, and it stores the skill for you.
 
-The Skills tab holds the form. It has three fields — name, description, and the playbook body — because those are the whole skill. The server checks the name and the description against the spec, and the form shows the server's message.
+The web Skills tab reads and never writes. A form there would be a second authoring path with no history behind it, and it would compete with the repository that is meant to be authoritative. The tab lists the catalog, badges where each skill comes from, and opens one to read its body: `/skills/$skillName` for a skill addressed by name, and `/skills/stored/$skillId` for a stored skill addressed by row id, which is the only way to reach a shadowed skill.
+
+Two write surfaces exist, and they share one implementation:
+
+- **HTTP.** `POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one. The routes take a row id, not a name, for the shadowing reason above. This is what the importer will use.
+- **Agent actions.** `packages/api/src/services/skills-actions.ts` exposes `skills.list_skills`, `skills.create_skill`, `skills.update_skill`, and `skills.delete_skill` through the plugin catalog, registered in `providers/node.ts` beside the workflow actions.
+
+Both call `services/skills.ts`, so ownership, team membership, and `validateSkillFrontmatter` are applied once, in one place. An agent can write a skill only for the user in its tool context, or for a team that user belongs to; a team the user is not on is reported as not found.
+
+Every write action is `riskLevel: high`, which the plugin catalog's default policy turns into an approval gate. A stored skill is standing instruction text that every later session of that owner can pull into a turn, so a silent create or update would let anything the agent read steer its own future turns; the delete is a hard delete with no restore path. Only `skills.list_skills` is `low`.
 
 ## Valet extensions
 
