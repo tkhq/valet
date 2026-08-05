@@ -44,7 +44,14 @@ const DEFAULT_MAX_NODES = 200;
 const DEFAULT_MAX_CONCURRENT_NODES = 20;
 const DEFAULT_MAX_WAIT_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const DEFAULT_MAX_FOREACH_ITEMS = 5000;
-const DEFAULT_MAX_FOREACH_CONCURRENCY = 5;
+// Matches the schema's own cap on `foreach.concurrency` (schema.ts: max 20),
+// so the policy ceiling is not a second, lower limit that a definition has to
+// raise by hand before it can ask for the parallelism the schema already
+// allows. A definition may still LOWER it. This changes no execution
+// behaviour: the ceiling is read only by this validator, and the runtime
+// default stays 1 (workflows/nodes/foreach.ts), so a foreach that does not
+// set `concurrency` remains sequential.
+const DEFAULT_MAX_FOREACH_CONCURRENCY = 20;
 const RESERVED_CONTEXT_NAMES = new Set(['trigger', 'nodes']);
 
 // Allowed foreach body types — narrower than top-level nodes.
