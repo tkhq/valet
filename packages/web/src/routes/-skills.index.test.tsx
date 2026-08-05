@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * `/skills` — the skill catalog, grouped by the plugin that ships each
- * skill. Mocks `~/api/skills` the same way `-integrations.test.tsx` mocks
- * its api module: this suite cares that the page renders from query data
- * and links to the right detail route, not that TanStack Query works.
+ * `/skills` — the skill catalog in one grid. Mocks `~/api/skills` the same
+ * way `-integrations.test.tsx` mocks its api module: this suite cares that
+ * the page renders from query data and links to the right detail route, not
+ * that TanStack Query works.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -47,14 +47,8 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
-const idle = { mutate: vi.fn(), isPending: false, error: null };
-
 vi.mock("~/api/skills", () => ({
   useSkills: () => ({ data: currentData, ...currentState }),
-  useStoredSkill: () => ({ data: undefined, isLoading: false, error: null }),
-  useCreateSkill: () => idle,
-  useUpdateSkill: () => idle,
-  useDeleteSkill: () => idle,
 }));
 
 import { SkillsIndexPage } from "./skills.index";
