@@ -886,9 +886,9 @@ export class EngineHost {
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an orchestrator session belongs to
     // the principal and is shared by everyone who can reach it, exactly like
-    // the memory snapshot two lines above (`scope.owner`). Scoping to the
-    // actor instead would put whoever woke a team orchestrator's personal
-    // skills in front of every other member of that team.
+    // the memory snapshot this method assembles from `scope.owner`. Scoping
+    // to the actor instead would put whoever woke a team orchestrator's
+    // personal skills in front of every other member of that team.
     const extras = await this.sessionExtras(principal, meta.orgId);
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
@@ -1407,10 +1407,10 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
-    // `opts.owner` is the child's own principal, copied from the parent by
-    // `buildChildSpawner` and passed straight to `createSession` below. A
-    // child of a team-owned session gets that team's skills, not the
-    // spawning user's.
+    // `opts.owner` is the child's own principal: the `task` tool reads the
+    // parent session's principal and hands it to the spawner, which passes
+    // it here and on to `createSession` below. A child of a team-owned
+    // session gets that team's skills, not the spawning user's.
     const extras = await this.sessionExtras(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
