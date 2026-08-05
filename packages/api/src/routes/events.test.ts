@@ -43,10 +43,11 @@ const VALID_BODY: CreateEventSubscriptionRequest = {
 async function postSubscription(
   baseUrl: string,
   body: unknown,
+  headers: Record<string, string> = {},
 ): Promise<Response> {
   return fetch(`${baseUrl}/api/event-subscriptions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -169,6 +170,39 @@ describe("POST /api/event-subscriptions", () => {
       target: { kind: "workflow", workflowId: wf.id },
     });
     expect(res.status).toBe(201);
+  });
+
+  it("rejects a workflow target owned by a DIFFERENT user in the same org — this route must not bypass createWorkflowTrigger's ownership check", async () => {
+    const a = await boot();
+    const wfRes = await fetch(`${a.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "someone-elses-workflow",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "stop", type: "stop" },
+          ],
+          edges: [{ from: "trigger", to: "stop" }],
+        },
+      }),
+    });
+    expect(wfRes.status).toBe(201);
+    const wf = (await wfRes.json()) as { id: string; ownerId: string };
+    // The workflow is created with no auth header, so it's owned by the
+    // default stub identity ("local-user"), not "test-member" — pin that
+    // here so the 400 below is provably a cross-user rejection, not a
+    // vacuous pass from the two identities accidentally coinciding.
+    expect(wf.ownerId).toBe("local-user");
+
+    const res = await postSubscription(
+      a.baseUrl,
+      { ...VALID_BODY, target: { kind: "workflow", workflowId: wf.id } },
+      { "x-valet-test-user-id": "test-member" },
+    );
+    expect(res.status).toBe(400);
   });
 
   it("400s an empty eventKeys array", async () => {

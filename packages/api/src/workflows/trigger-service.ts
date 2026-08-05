@@ -12,9 +12,10 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventSubscriptions, workflowDefinitions } from "../schema/index.js";
+import { eventSubscriptions } from "../schema/index.js";
 import { validateSubscription } from "../routes/events.js";
 import { catalogForService } from "../events/ingest.js";
+import { ownedDefinitionRow } from "./service.js";
 
 export interface WorkflowTriggerSummary {
   triggerId: string;
@@ -71,12 +72,13 @@ export async function createWorkflowTrigger(
   });
   if (error) return { ok: false, error };
 
-  const wfRows = await db
-    .select({ id: workflowDefinitions.id })
-    .from(workflowDefinitions)
-    .where(and(eq(workflowDefinitions.id, input.workflowId), eq(workflowDefinitions.orgId, user.orgId)))
-    .limit(1);
-  if (wfRows.length === 0) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+  // Owner-scoped, not just org-scoped: checking only `orgId` let any org
+  // member wire event-driven automation onto a workflow they don't own.
+  // Unlike the schedule path, run ownership at fire time was already
+  // correct here (`events/dispatcher.ts` bills the workflow definition's
+  // own owner) — only this creation-time check needed the fix.
+  const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId);
+  if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
 
   const now = Date.now();
   const inserted = await db
