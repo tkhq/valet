@@ -113,12 +113,14 @@ skillsRouter.get("/", async (c) => {
   );
   const shadowedIds = new Set(shadowed.map((row) => row.id));
 
+  // Plugin skills are deliberately absent: a plugin's skills are part of that
+  // integration, and Integrations already lists every installed plugin. This
+  // route answers "which skills has this owner added". Plugin names are still
+  // read above, because a stored skill that collides with one is shadowed and
+  // has to say so.
   const resp: ListSkillsResponse = {
-    skills: [
-      ...pluginSkills.map(toPluginSummary),
-      // Listing order matches delivery order, so the `kept` rows come first.
-      ...[...kept, ...shadowed].map((row) => toStoredSummary(row, shadowedIds.has(row.id))),
-    ],
+    // Listing order matches delivery order, so the `kept` rows come first.
+    skills: [...kept, ...shadowed].map((row) => toStoredSummary(row, shadowedIds.has(row.id))),
   };
   return c.json(resp);
 });
