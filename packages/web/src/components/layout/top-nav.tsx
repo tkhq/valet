@@ -63,6 +63,7 @@ export function TopNav() {
       <NavLink to="/memory">Memory</NavLink>
       <NavLink to="/sessions">Sessions</NavLink>
       <NavLink to="/workflows">Workflows</NavLink>
+      <NavLink to="/skills">Skills</NavLink>
       <NavLink to="/integrations">Integrations</NavLink>
 
       <NotificationsBell />

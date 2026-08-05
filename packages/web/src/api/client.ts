@@ -34,6 +34,7 @@ import type {
   GetPrebuildForRepoResponse,
   GetReposResponse,
   GetSessionResponse,
+  GetSkillResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
   ListCredentialsResponse,
@@ -50,6 +51,7 @@ import type {
   ListModelsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
+  ListSkillsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
@@ -462,6 +464,12 @@ export const api = {
       "DELETE",
       `/credentials/${encodeURIComponent(service)}`,
     ),
+
+  // skills — the markdown playbooks the installed plugins ship. Read-only:
+  // there is no skills table, so there is nothing to create or delete.
+  listSkills: () => request<ListSkillsResponse>("GET", "/skills"),
+  getSkill: (name: string) =>
+    request<GetSkillResponse>("GET", `/skills/${encodeURIComponent(name)}`),
 
   // repos (GitHub/repo integration plan, Task 7): union of every RepoHost
   // the caller has access to — only `github` today.
