@@ -15,12 +15,25 @@ const skillsData: ListSkillsResponse = {
     {
       name: "github",
       description: "How to use the GitHub tools.",
+      origin: "plugin",
       plugin: "github",
       takesArgs: false,
     },
-    { name: "google-docs", description: "Edit a document.", plugin: "google-workspace", takesArgs: false },
-    { name: "google-sheets", plugin: "google-workspace", takesArgs: true },
-    { name: "slack-tools", description: "Read and post in Slack.", plugin: "slack", takesArgs: false },
+    {
+      name: "google-docs",
+      description: "Edit a document.",
+      origin: "plugin",
+      plugin: "google-workspace",
+      takesArgs: false,
+    },
+    { name: "google-sheets", origin: "plugin", plugin: "google-workspace", takesArgs: true },
+    {
+      name: "slack-tools",
+      description: "Read and post in Slack.",
+      origin: "plugin",
+      plugin: "slack",
+      takesArgs: false,
+    },
   ],
 };
 
@@ -34,8 +47,14 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
+const idle = { mutate: vi.fn(), isPending: false, error: null };
+
 vi.mock("~/api/skills", () => ({
   useSkills: () => ({ data: currentData, ...currentState }),
+  useStoredSkill: () => ({ data: undefined, isLoading: false, error: null }),
+  useCreateSkill: () => idle,
+  useUpdateSkill: () => idle,
+  useDeleteSkill: () => idle,
 }));
 
 import { SkillsIndexPage } from "./skills.index";
@@ -73,9 +92,9 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText("github")).toBeTruthy();
   });
 
-  it("counts the skills and the plugins that ship them", () => {
+  it("counts the skills, the plugins that ship them, and the caller's own", () => {
     render(<SkillsIndexPage />);
-    expect(screen.getByText("4 skills in 3 plugins")).toBeTruthy();
+    expect(screen.getByText("4 skills · 3 plugins · 0 yours")).toBeTruthy();
   });
 
   it("links each card to its detail route", () => {
@@ -89,12 +108,12 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText(/takes arguments/)).toBeTruthy();
   });
 
-  it("shows an empty state when no plugin ships a skill", () => {
+  it("shows an empty state when nothing is installed and nothing is stored", () => {
     currentData = { skills: [] };
     render(<SkillsIndexPage />);
-    expect(screen.getByText(/No skills installed/)).toBeTruthy();
+    expect(screen.getByText(/No skills yet/)).toBeTruthy();
     // No counter when there is nothing to count.
-    expect(screen.queryByText(/\d+ skills? in \d+ plugins?/)).toBeNull();
+    expect(screen.queryByText(/\d+ skills? · \d+ plugins?/)).toBeNull();
   });
 
   it("reports a load failure with a corrective action", () => {
