@@ -46,12 +46,14 @@ describe("SkillsIndexPage", () => {
     currentState = { isLoading: false, error: null };
   });
 
-  it("groups skills under a section per owning plugin", () => {
+  it("lists every skill in one grid, with no per-plugin sections", () => {
     render(<SkillsIndexPage />);
 
-    expect(screen.getByRole("heading", { name: "GitHub" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Google Workspace" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Slack" })).toBeTruthy();
+    // Most plugins ship exactly one skill, so a section per plugin left a
+    // lone card under each heading. The plugin moved onto the card instead.
+    expect(screen.queryByRole("heading", { name: "Google Workspace" })).toBeNull();
+    // Router `Link`s render `to`, not `href`, so they carry no link role.
+    expect(document.querySelectorAll("a").length).toBe(4);
   });
 
   it("shows a friendly name, the description, and the raw skill id on each card", () => {
@@ -59,8 +61,16 @@ describe("SkillsIndexPage", () => {
 
     expect(screen.getByText("Google docs")).toBeTruthy();
     expect(screen.getByText("Edit a document.")).toBeTruthy();
-    // The exact id the agent passes to the skill tool.
-    expect(screen.getByText("google-docs")).toBeTruthy();
+    // The exact id the agent passes to the skill tool, plus the owning
+    // plugin — shown because "Google Workspace" differs from the skill name.
+    expect(screen.getByText("google-docs · Google Workspace")).toBeTruthy();
+  });
+
+  it("omits the plugin when it repeats the skill name", () => {
+    render(<SkillsIndexPage />);
+    // The GitHub plugin ships one skill also called `github`, so printing
+    // the plugin would just repeat the card title.
+    expect(screen.getByText("github")).toBeTruthy();
   });
 
   it("counts the skills and the plugins that ship them", () => {

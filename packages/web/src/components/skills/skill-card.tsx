@@ -5,8 +5,13 @@
  * action on the right.
  *
  * The monogram takes the OWNING PLUGIN's brand color and the skill's own
- * initial, so every card in a plugin's section reads as one family while
- * each card stays distinguishable.
+ * initial, so skills from one plugin read as a family in a mixed grid.
+ *
+ * The mono footer carries the skill's ID — the string an agent references,
+ * which the title's display name hides. The owning plugin is appended only
+ * when it differs from the skill name: most plugins ship one skill of the
+ * same name, so printing it always would repeat the title, and the monogram
+ * colour already groups a plugin's skills by eye.
  */
 import { Link } from "@tanstack/react-router";
 import type { SkillSummary } from "@valet/api/wire";
@@ -15,6 +20,8 @@ import { displayName } from "~/components/integrations/display-name";
 
 export function SkillCard({ skill }: { skill: SkillSummary }) {
   const title = displayName(skill.name);
+  const plugin = displayName(skill.plugin);
+  const showPlugin = plugin !== title;
 
   return (
     <Link
@@ -43,6 +50,7 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
       <div className="mt-auto flex items-center justify-between gap-3 pt-4">
         <span className="truncate font-mono text-xs text-muted">
           {skill.name}
+          {showPlugin && ` · ${plugin}`}
           {skill.takesArgs && " · takes arguments"}
         </span>
         <span className="shrink-0 text-xs text-moss underline-offset-2 group-hover:underline">
