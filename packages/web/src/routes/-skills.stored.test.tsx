@@ -91,6 +91,14 @@ vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teams, isLoading: false, error: null }),
 }));
 
+// The repositories panel has its own suite; here it only has to render.
+vi.mock("~/api/skill-sources", () => ({
+  useSkillSources: () => ({ data: { sources: [] }, isLoading: false, error: null }),
+  useAddSkillSource: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
 import { SkillsIndexPage } from "./skills.index";
 import { SkillDoc } from "~/components/skills/skill-doc";
 

@@ -3,6 +3,7 @@ import type { SkillSummary } from "@valet/api/wire";
 import { useSkills } from "~/api/skills";
 import { Button, Spinner } from "~/components/primitives";
 import { SkillCard } from "~/components/skills/skill-card";
+import { SkillSourcesPanel } from "~/components/skills/skill-sources-panel";
 import { displayName } from "~/components/integrations/display-name";
 
 /**
@@ -14,6 +15,9 @@ import { displayName } from "~/components/integrations/display-name";
  * A skill is written here, or by the assistant through the `skills` actions,
  * or synced from a repository. All three land in the same table and reach a
  * session the same way. See docs/specs/2026-08-05-agent-skills-design.md.
+ *
+ * The repositories panel above the grid is the other half of that rule: it
+ * points Valet at a repository to mirror, and never edits a skill.
  *
  * One grid, sorted by name. Grouping into a section per plugin was tried and
  * reverted: 8 of the 9 plugins ship exactly one skill, so it produced 8
@@ -57,7 +61,11 @@ export function SkillsIndexPage() {
           </div>
         </div>
 
-        <div className="mt-10 space-y-12">
+        <div className="mt-8">
+          <SkillSourcesPanel />
+        </div>
+
+        <div className="mt-8 space-y-12">
           {isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading skills…
