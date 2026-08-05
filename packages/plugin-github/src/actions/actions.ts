@@ -8,6 +8,12 @@ import type {
 } from "@valet/engine";
 import { Octokit } from "octokit";
 import { parseJobLog } from "./parse-job-log.js";
+import {
+  collectDirectoryEntries,
+  contentsKind,
+  wrongPathKindError,
+  MAX_DIRECTORY_ENTRIES,
+} from "./repo-directory.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -41,6 +47,8 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.create_release": "contents:write",
   "github.inspect_pull_request": "pull_requests:read (+ checks:read for check runs)",
   "github.fork_repository": "contents:write",
+  "github.read_repo_file": "contents:read",
+  "github.list_repo_directory": "contents:read",
 };
 
 function handleOctokitError(
@@ -1588,8 +1596,7 @@ const readRepoFile = action(Type.Object({
         { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref },
       );
       if (Array.isArray(data) || data.type !== "file") {
-        const kind = Array.isArray(data) ? "directory" : data.type;
-        return { success: false, error: `Path is a ${kind}, not a file` };
+        return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
       }
       const raw = data.content ?? "";
       const content =
@@ -1610,6 +1617,51 @@ const readRepoFile = action(Type.Object({
       };
     } catch (err) {
       return handleOctokitError(err, "github.read_repo_file", "Read repo file");
+    }
+  },
+});
+
+const listRepoDirectory = action(Type.Object({
+    owner: Type.String({ description: "Repository owner" }),
+    repo: Type.String({ description: "Repository name" }),
+    path: Type.String({
+      description: 'Directory path in the repository. Use "" for the repository root.',
+    }),
+    ref: Type.Optional(
+      Type.String({ description: "Git ref (branch, tag, or commit SHA)" }),
+    ),
+  }))({
+  id: "github.list_repo_directory",
+  name: "List Repository Directory",
+  description:
+    "List one level of a directory in a GitHub repository without cloning it. Each entry reports its type, so a caller can tell a subdirectory from a file. This does not recurse — call it again with a subdirectory path.",
+  riskLevel: "low",
+  execute: async (args, ctx) => {
+    const octokit = await getOctokit(ctx);
+    try {
+      const listing = await collectDirectoryEntries(
+        (params) => octokit.request("GET /repos/{owner}/{repo}/contents/{path}", params),
+        { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref },
+        MAX_DIRECTORY_ENTRIES,
+      );
+      if (listing.kind === "not_directory") {
+        return { success: false, error: wrongPathKindError(listing.type, "directory") };
+      }
+      return {
+        success: true,
+        data: {
+          repo: `${args.owner}/${args.repo}`,
+          path: args.path,
+          ref: args.ref,
+          entries: listing.entries,
+          entry_count: listing.entries.length,
+          // False when the cap truncated the listing — there are more
+          // entries in this directory than were returned.
+          entries_complete: listing.complete,
+        },
+      };
+    } catch (err) {
+      return handleOctokitError(err, "github.list_repo_directory", "List repo directory");
     }
   },
 });
@@ -1653,5 +1705,6 @@ export const githubPlugin: ActionPlugin = {
     listWorkflows,
     triggerWorkflow,
     readRepoFile,
+    listRepoDirectory,
   ],
 };
