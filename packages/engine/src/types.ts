@@ -1280,12 +1280,33 @@ export interface RoleSpec {
   source?: "session" | "thread" | "prompt" | "plugin" | "sandbox";
 }
 
+/**
+ * One skill, in the Agent Skills format
+ * (https://agentskills.io/specification). `name`, `description`, and the
+ * markdown body come from a `SKILL.md`; `license`, `compatibility`,
+ * `metadata`, and `allowedTools` are the spec's optional fields.
+ *
+ * `argsSchema` and the `{{placeholder}}` rendering it validates are a
+ * Valet extension, NOT part of the spec. An imported skill will not use
+ * them. See `docs/specs/2026-08-05-agent-skills-design.md`.
+ */
 export interface SkillSource {
   name: string;
   description?: string;
   content: string;
   argsSchema?: TSchema;
   source?: "plugin" | "sandbox" | "repo" | "user";
+  /** Spec field. License name, or the name of a bundled license file. */
+  license?: string;
+  /** Spec field. Environment requirements, at most 500 characters. */
+  compatibility?: string;
+  /** Spec field. A map of text keys to text values, for properties the
+   * spec itself does not define. */
+  metadata?: Record<string, string>;
+  /** Spec field `allowed-tools`, in camelCase: a space-separated list of
+   * pre-approved tools. Experimental in the spec, and Valet does not act
+   * on it yet. */
+  allowedTools?: string;
 }
 
 export interface SkillInvokeOptions {

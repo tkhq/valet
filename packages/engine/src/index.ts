@@ -19,6 +19,7 @@ export {
   loadRoleFromMarkdown,
   loadSkillFromMarkdown,
   validateSkillFrontmatter,
+  type FrontmatterValue,
   type ParsedArtifact,
   type SkillSpecField,
   type SkillSpecOptions,
