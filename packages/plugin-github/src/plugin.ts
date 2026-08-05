@@ -4,7 +4,7 @@ import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { githubPlugin } from "./actions/actions.js";
 import { githubTriggerDefs } from "./triggers.js";
 
-const skillMd = readFileSync(fileURLToPath(new URL("../skills/github.md", import.meta.url)), "utf8");
+const skillMd = readFileSync(fileURLToPath(new URL("../skills/github/SKILL.md", import.meta.url)), "utf8");
 
 const plugin: ValetPlugin = {
   name: "github",
