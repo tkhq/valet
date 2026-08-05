@@ -11,14 +11,15 @@
  * one for a dashboard card would bloat a deliberately small port.
  *
  * Turns owned by a team or an org have no acting user (`user_id` is NULL in
- * the view), so they count toward org totals and are absent from every
- * per-user window here.
+ * the view), so this route omits them entirely — every window and the member
+ * list are per-user. The view still carries those rows, so an org-wide total
+ * can read them; this route does not compute one.
  *
  * `org.members` is included ONLY when the org's `features.organizations`
  * flag is on — single-user mode never sees comparative usage.
  */
 import { Hono } from "hono";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { orgs, users } from "../schema/index.js";
 import type { UsageSummaryResponse, UsageWindow } from "../wire/types.js";
@@ -101,9 +102,19 @@ usageRouter.get("/summary", async (c) => {
   const features = (orgRows[0]?.features ?? {}) as { organizations?: boolean };
   if (features.organizations === true) {
     const memberAgg = await aggregate(now - 30 * DAY_MS);
-    const userRows = await db
-      .select({ id: users.id, name: users.name, email: users.email })
-      .from(users);
+    // Look up exactly the ids the aggregate returned. An unscoped
+    // `from(users)` would load every user in the deployment on each
+    // dashboard load; scoping by org membership instead would drop the name
+    // of someone who has since left the org but whose spend is still in the
+    // window. Keying on the aggregate's own ids is bounded AND complete.
+    const spenderIds = memberAgg.map((row) => row.user_id);
+    const userRows =
+      spenderIds.length === 0
+        ? []
+        : await db
+            .select({ id: users.id, name: users.name, email: users.email })
+            .from(users)
+            .where(inArray(users.id, spenderIds));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
     body.org = {
       windowDays: 30,
