@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChildSpawner, Principal, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
-import { tracedSessionStore } from "../observability/traced-store.js";
+import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalPending } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
@@ -321,7 +321,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
   // the routes both read/write through — one instance per process, backed
   // by the same connection source as everything else.
-  const workflowStore = new PgWorkflowStore(pgdb);
+  // Traced under the same condition as the engine store: `workflow-store.*`
+  // spans nest inside the interpreter's `workflow.drive`/`workflow.node.*`.
+  const rawWorkflowStore = new PgWorkflowStore(pgdb);
+  const workflowStore = telemetryEnabled ? tracedWorkflowStore(rawWorkflowStore) : rawWorkflowStore;
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,
