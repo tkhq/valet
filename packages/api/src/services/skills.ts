@@ -261,7 +261,7 @@ export async function updateSkill(
   };
 
   try {
-    await db
+    const written = await db
       .update(skills)
       .set({
         name: updated.name,
@@ -271,12 +271,36 @@ export async function updateSkill(
         contentSha: updated.contentSha,
         updatedAt: updated.updatedAt,
       })
-      .where(eq(skills.id, id));
+      .where(writeScope(row))
+      .returning({ id: skills.id });
+    // The scope above re-states in the database what `ownedSkillRow` read a
+    // moment ago. Nothing matched means the row stopped being this caller's
+    // local skill in between, and the caller must not be told the edit
+    // landed.
+    if (written.length === 0) return null;
   } catch (err) {
     if (isPgUniqueViolation(err)) throw new SkillNameConflictError(name);
     throw err;
   }
   return updated;
+}
+
+/**
+ * The predicate a write must carry to be safe on its own.
+ *
+ * `ownedSkillRow` answers "may this caller write this row" with a SELECT,
+ * and a write that then filters on `id` alone trusts an answer the database
+ * is no longer being asked. Membership of the owning team can be revoked in
+ * that gap. Repeating the owner and the origin on the write closes it, so
+ * authority is checked where the row is changed.
+ */
+function writeScope(row: SkillRow) {
+  return and(
+    eq(skills.id, row.id),
+    eq(skills.ownerType, row.ownerType),
+    eq(skills.ownerId, row.ownerId),
+    eq(skills.origin, row.origin),
+  );
 }
 
 export type DeleteSkillResult = "deleted" | "not_found" | "not_local";
@@ -291,8 +315,10 @@ export async function deleteSkill(
   const row = await ownedSkillRow(db, owner, id);
   if (!row) return "not_found";
   if (row.origin !== "local") return "not_local";
-  await db.delete(skills).where(eq(skills.id, id));
-  return "deleted";
+  const removed = await db.delete(skills).where(writeScope(row)).returning({ id: skills.id });
+  // Same reasoning as `updateSkill`: the write carries its own authority
+  // check, and a row that stopped matching reports not found.
+  return removed.length > 0 ? "deleted" : "not_found";
 }
 
 /**
