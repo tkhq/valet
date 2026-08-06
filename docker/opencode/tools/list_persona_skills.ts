@@ -12,7 +12,7 @@ export default tool({
 
     try {
       const res = await fetch(
-        `http://localhost:9000/api/personas/${args.personaId}/skills`,
+        `http://127.0.0.1:9001/api/personas/${args.personaId}/skills`,
         { headers: { "Content-Type": "application/json" } }
       )
 

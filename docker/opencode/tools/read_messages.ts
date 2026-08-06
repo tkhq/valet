@@ -26,7 +26,7 @@ export default tool({
       if (args.after) params.set("after", args.after)
 
       const res = await fetch(
-        `http://localhost:9000/api/session-messages?${params}`,
+        `http://127.0.0.1:9001/api/session-messages?${params}`,
       )
 
       if (!res.ok) {

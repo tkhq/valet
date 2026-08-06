@@ -89,6 +89,7 @@ WORKDIR /workspace
 #   6080  noVNC (websockify → x11vnc)
 #   7681  TTYD (web terminal)
 #   9000  Auth gateway proxy
+#   9001  Gateway internal API — loopback-only, intentionally NOT exposed
 EXPOSE 4096 8765 6080 7681 9000
 
 CMD ["/bin/bash", "/start.sh"]

@@ -12,7 +12,7 @@ export default tool({
   },
   async execute() {
     try {
-      const res = await fetch("http://localhost:9000/api/identity")
+      const res = await fetch("http://127.0.0.1:9001/api/identity")
 
       if (!res.ok) {
         const errText = await res.text()

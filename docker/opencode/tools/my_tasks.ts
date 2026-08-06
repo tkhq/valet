@@ -18,7 +18,7 @@ export default tool({
       if (args.status) params.set("status", args.status)
       const qs = params.toString()
 
-      const res = await fetch(`http://localhost:9000/api/my-tasks${qs ? `?${qs}` : ""}`)
+      const res = await fetch(`http://127.0.0.1:9001/api/my-tasks${qs ? `?${qs}` : ""}`)
 
       if (!res.ok) {
         const errText = await res.text()

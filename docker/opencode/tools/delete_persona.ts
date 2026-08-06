@@ -16,7 +16,7 @@ export default tool({
 
       // Resolve name to ID if needed
       if (!personaId && args.name) {
-        const listRes = await fetch("http://localhost:9000/api/personas")
+        const listRes = await fetch("http://127.0.0.1:9001/api/personas")
         if (!listRes.ok) {
           return `Failed to list personas: ${await listRes.text()}`
         }
@@ -33,7 +33,7 @@ export default tool({
       }
 
       const res = await fetch(
-        `http://localhost:9000/api/personas/${personaId}`,
+        `http://127.0.0.1:9001/api/personas/${personaId}`,
         {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },

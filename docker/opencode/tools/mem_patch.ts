@@ -68,7 +68,7 @@ export default tool({
       if (ctx?.sessionID) {
         headers["x-valet-thread-id"] = ctx.sessionID
       }
-      const res = await fetch("http://localhost:9000/api/memory", {
+      const res = await fetch("http://127.0.0.1:9001/api/memory", {
         method: "PATCH",
         headers,
         body: JSON.stringify({

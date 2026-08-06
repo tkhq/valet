@@ -41,7 +41,7 @@ export default tool({
       })
       if (args.include_journal) params.set("includeJournal", "true")
 
-      const res = await fetch(`http://localhost:9000/api/memory/links?${params.toString()}`)
+      const res = await fetch(`http://127.0.0.1:9001/api/memory/links?${params.toString()}`)
       if (!res.ok) {
         const errText = await res.text()
         return `Failed to fetch links: ${errText}`

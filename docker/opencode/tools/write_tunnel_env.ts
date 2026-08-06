@@ -117,7 +117,7 @@ export default tool({
       const shouldAppendToken = args.include_token === true && !!tokenValue
 
       const params = new URLSearchParams({ sessionId })
-      const res = await fetch(`http://localhost:9000/api/session-status?${params}`)
+      const res = await fetch(`http://127.0.0.1:9001/api/session-status?${params}`)
       if (!res.ok) {
         const errText = await res.text()
         return `Failed to get session status: ${errText}`

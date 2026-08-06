@@ -29,7 +29,7 @@ export default tool({
 
     try {
       // Check if a persona with this name already exists
-      const listRes = await fetch("http://localhost:9000/api/personas")
+      const listRes = await fetch("http://127.0.0.1:9001/api/personas")
       if (!listRes.ok) {
         return `Failed to list personas: ${await listRes.text()}`
       }
@@ -48,7 +48,7 @@ export default tool({
         if (args.visibility) meta.visibility = args.visibility
 
         const updateRes = await fetch(
-          `http://localhost:9000/api/personas/${existing.id}`,
+          `http://127.0.0.1:9001/api/personas/${existing.id}`,
           {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
@@ -62,7 +62,7 @@ export default tool({
         // Upsert instructions file if provided
         if (args.instructions) {
           const fileRes = await fetch(
-            `http://localhost:9000/api/personas/${existing.id}/files`,
+            `http://127.0.0.1:9001/api/personas/${existing.id}/files`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -94,7 +94,7 @@ export default tool({
         ]
       }
 
-      const createRes = await fetch("http://localhost:9000/api/personas", {
+      const createRes = await fetch("http://127.0.0.1:9001/api/personas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

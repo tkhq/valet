@@ -162,6 +162,55 @@ export interface RunWithSecretsResult {
   timedOut: boolean;
 }
 
+/**
+ * Ambient environment variables a command is allowed to inherit.
+ *
+ * Deliberately minimal: enough for a working shell, a resolvable toolchain and
+ * correct text handling, and nothing else. The runner's own process env holds
+ * credentials (runner/DO tokens, the sandbox JWT secret, git and provider
+ * keys); inheriting it wholesale would hand every one of them to any command
+ * routed through here.
+ */
+export const SECRET_RUN_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "PWD",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "TERM",
+  "TMPDIR",
+  "TZ",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+] as const;
+
+/**
+ * Build the environment for a `runWithSecrets` command: the allowlisted ambient
+ * variables, overlaid with the caller's own (already resolved) variables.
+ *
+ * Pure so it can be tested without spawning a process.
+ */
+export function buildSecretRunEnv(
+  ambient: Record<string, string | undefined>,
+  callerEnv: Record<string, string>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  for (const key of SECRET_RUN_ENV_ALLOWLIST) {
+    const value = ambient[key];
+    if (value !== undefined) env[key] = value;
+  }
+
+  // Caller-supplied values win — that is the whole point of the endpoint.
+  for (const [key, value] of Object.entries(callerEnv)) {
+    env[key] = value;
+  }
+
+  return env;
+}
+
 export async function runWithSecrets(
   command: string,
   envMap: Record<string, string>,
@@ -177,19 +226,22 @@ export async function runWithSecrets(
 
   const resolved = refs.length > 0 ? await resolveSecrets(refs) : new Map<string, string>();
 
-  // Build env with resolved secrets
-  const env: Record<string, string> = { ...process.env as Record<string, string> };
+  // Build the caller's env with resolved secrets substituted in
+  const callerEnv: Record<string, string> = {};
   const secretValues: string[] = [];
 
   for (const [key, value] of Object.entries(envMap)) {
     const resolvedValue = resolved.get(value);
     if (resolvedValue && !resolvedValue.startsWith("[RESOLUTION_FAILED:")) {
-      env[key] = resolvedValue;
+      callerEnv[key] = resolvedValue;
       secretValues.push(resolvedValue);
     } else {
-      env[key] = value;
+      callerEnv[key] = value;
     }
   }
+
+  // Ambient env is filtered rather than inherited — see SECRET_RUN_ENV_ALLOWLIST.
+  const env = buildSecretRunEnv(process.env, callerEnv);
 
   // Spawn the command
   let timedOut = false;

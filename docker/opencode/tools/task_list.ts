@@ -23,7 +23,7 @@ export default tool({
       if (args.limit) params.set("limit", String(args.limit))
       const qs = params.toString()
 
-      const res = await fetch(`http://localhost:9000/api/tasks${qs ? `?${qs}` : ""}`)
+      const res = await fetch(`http://127.0.0.1:9001/api/tasks${qs ? `?${qs}` : ""}`)
 
       if (!res.ok) {
         const errText = await res.text()

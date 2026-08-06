@@ -97,7 +97,7 @@ export default tool({
 
       const qs = params.toString()
       const res = await fetch(
-        `http://localhost:9000/api/memory${qs ? `?${qs}` : ""}`,
+        `http://127.0.0.1:9001/api/memory${qs ? `?${qs}` : ""}`,
       )
 
       if (!res.ok) {

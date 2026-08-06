@@ -18,7 +18,7 @@ export default tool({
     try {
       const params = new URLSearchParams({ path: args.path })
       const res = await fetch(
-        `http://localhost:9000/api/memory?${params.toString()}`,
+        `http://127.0.0.1:9001/api/memory?${params.toString()}`,
         { method: "DELETE" },
       )
 

@@ -24,7 +24,7 @@ export default tool({
       if (args.after) params.set("after", args.after)
       const qs = params.toString()
 
-      const res = await fetch(`http://localhost:9000/api/notifications${qs ? `?${qs}` : ""}`)
+      const res = await fetch(`http://127.0.0.1:9001/api/notifications${qs ? `?${qs}` : ""}`)
 
       if (!res.ok) {
         const errText = await res.text()

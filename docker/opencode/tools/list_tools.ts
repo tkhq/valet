@@ -22,7 +22,7 @@ export default tool({
       if (args.service) params.set("service", args.service)
       if (args.query) params.set("query", args.query)
       const qs = params.toString()
-      const url = `http://localhost:9000/api/tools${qs ? `?${qs}` : ""}`
+      const url = `http://127.0.0.1:9001/api/tools${qs ? `?${qs}` : ""}`
 
       const res = await fetch(url)
       if (!res.ok) {

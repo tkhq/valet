@@ -27,7 +27,7 @@ export default tool({
   },
   async execute(args) {
     try {
-      const res = await fetch("http://localhost:9000/api/channels")
+      const res = await fetch("http://127.0.0.1:9001/api/channels")
       if (!res.ok) {
         const errText = await res.text()
         return `Failed to list channels: ${errText}`

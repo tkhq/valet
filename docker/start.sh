@@ -16,6 +16,8 @@ VSCODE_PORT=8765
 VNC_PORT=6080
 TTYD_PORT=7681
 GATEWAY_PORT=9000
+# Loopback-only control-plane API. Never added to Modal encrypted_ports.
+GATEWAY_INTERNAL_PORT=9001
 OPENCODE_RUNTIME_DIR="${OPENCODE_RUNTIME_DIR:-/tmp/valet-opencode}"
 VALET_PERSONA_DIR="${VALET_PERSONA_DIR:-${OPENCODE_RUNTIME_DIR}/persona}"
 export OPENCODE_RUNTIME_DIR
@@ -115,7 +117,7 @@ echo "[start.sh] TTYD started in background"
 export WORK_DIR="${WORK_DIR}"
 
 echo "[start.sh] Starting Runner (manages OpenCode lifecycle)"
-echo "[start.sh] Ports: OpenCode=${OPENCODE_PORT} VSCode=${VSCODE_PORT} VNC=${VNC_PORT} TTYD=${TTYD_PORT} Gateway=${GATEWAY_PORT}"
+echo "[start.sh] Ports: OpenCode=${OPENCODE_PORT} VSCode=${VSCODE_PORT} VNC=${VNC_PORT} TTYD=${TTYD_PORT} Gateway=${GATEWAY_PORT} GatewayInternal=${GATEWAY_INTERNAL_PORT}"
 
 cd /runner
 exec bun run src/bin.ts \
@@ -123,4 +125,5 @@ exec bun run src/bin.ts \
   --do-url "${DO_WS_URL}" \
   --runner-token "${RUNNER_TOKEN}" \
   --session-id "${SESSION_ID}" \
-  --gateway-port "${GATEWAY_PORT}"
+  --gateway-port "${GATEWAY_PORT}" \
+  --gateway-internal-port "${GATEWAY_INTERNAL_PORT}"

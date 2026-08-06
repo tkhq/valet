@@ -54,7 +54,7 @@ export default tool({
       if (args.include_expired) params.set("include_expired", "true")
 
       const res = await fetch(
-        `http://localhost:9000/api/memory/search?${params.toString()}`,
+        `http://127.0.0.1:9001/api/memory/search?${params.toString()}`,
       )
       if (!res.ok) {
         const errText = await res.text()

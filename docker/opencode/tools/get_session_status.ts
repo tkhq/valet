@@ -16,7 +16,7 @@ export default tool({
     try {
       const params = new URLSearchParams({ sessionId: args.session_id })
       const res = await fetch(
-        `http://localhost:9000/api/session-status?${params}`,
+        `http://127.0.0.1:9001/api/session-status?${params}`,
       )
 
       if (!res.ok) {

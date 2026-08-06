@@ -96,7 +96,7 @@ export default tool({
         const buffer = await res.arrayBuffer()
         const base64 = Buffer.from(buffer).toString("base64")
 
-        const gatewayRes = await fetch("http://localhost:9000/api/image", {
+        const gatewayRes = await fetch("http://127.0.0.1:9001/api/image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -130,7 +130,7 @@ export default tool({
       const mime = decoded?.mimeType || getMimeType(resolvedSource)
       const base64 = payload.toString("base64")
 
-      const gatewayRes = await fetch("http://localhost:9000/api/image", {
+      const gatewayRes = await fetch("http://127.0.0.1:9001/api/image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
