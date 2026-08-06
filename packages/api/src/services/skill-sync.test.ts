@@ -489,13 +489,17 @@ Read the reference.
       const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
       const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
 
+      // Read the clock before the sync, not after. The sync schedules from
+      // its own `Date.now()`, which is at or after this one, so the bound
+      // holds however long the assertions below take to run.
+      const beforeSync = Date.now();
       await serviceFor(f).pollOnce();
 
       expect((await db.select().from(skills)).map((r) => r.name)).toEqual(["deploy"]);
       const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
       expect(row?.status).toBe("ok");
       // The sync's own schedule replaces the claim lease.
-      expect(row?.nextAttemptAt).toBeGreaterThan(Date.now() + SYNC_INTERVAL_MS - 5_000);
+      expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + SYNC_INTERVAL_MS);
     });
   });
 });
