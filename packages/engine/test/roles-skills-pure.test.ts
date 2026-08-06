@@ -101,6 +101,171 @@ no closing fence here
   });
 });
 
+/**
+ * Real `SKILL.md` files write long descriptions as YAML block scalars. The
+ * description is the field the model reads to decide whether a skill is
+ * relevant, so a parser that keeps the `|-` indicator and drops the text
+ * makes the skill undiscoverable.
+ */
+describe("parseMarkdownArtifact: block scalars", () => {
+  // The frontmatter of `skills/claude-api/SKILL.md` in anthropics/skills,
+  // the file that exposed the bug.
+  const CLAUDE_API = `---
+name: claude-api
+description: |-
+  Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use...
+  TRIGGER — read BEFORE opening the target file; ...
+  SKIP only when another provider is being worked on ...
+license: Complete terms in LICENSE.txt
+---
+
+# Claude API
+`;
+
+  it("reads a real skill's multi-line description instead of the indicator", () => {
+    const r = parseMarkdownArtifact(CLAUDE_API);
+    expect(r.frontmatter.description).toBe(
+      "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use...\n" +
+        "TRIGGER — read BEFORE opening the target file; ...\n" +
+        "SKIP only when another provider is being worked on ...",
+    );
+  });
+
+  it("reads the key that follows the block at the parent indentation", () => {
+    const r = parseMarkdownArtifact(CLAUDE_API);
+    expect(r.frontmatter.name).toBe("claude-api");
+    expect(r.frontmatter.license).toBe("Complete terms in LICENSE.txt");
+    expect(r.body).toBe("# Claude API\n");
+  });
+
+  it("keeps the line breaks of a literal block, and clips to one trailing newline", () => {
+    const r = parseMarkdownArtifact(`---
+text: |
+  first
+  second
+next: after
+---
+b
+`);
+    expect(r.frontmatter.text).toBe("first\nsecond\n");
+    expect(r.frontmatter.next).toBe("after");
+  });
+
+  it("joins the lines of a folded block with spaces", () => {
+    const r = parseMarkdownArtifact(`---
+text: >
+  first
+  second
+next: after
+---
+b
+`);
+    expect(r.frontmatter.text).toBe("first second\n");
+    expect(r.frontmatter.next).toBe("after");
+  });
+
+  it("folds a blank line inside a folded block into a line break", () => {
+    const r = parseMarkdownArtifact(`---
+text: >-
+  first
+  still first
+
+  second
+---
+b
+`);
+    expect(r.frontmatter.text).toBe("first still first\nsecond");
+  });
+
+  it("keeps the blank line inside a literal block", () => {
+    const r = parseMarkdownArtifact(`---
+text: |-
+  first
+
+  second
+---
+b
+`);
+    expect(r.frontmatter.text).toBe("first\n\nsecond");
+  });
+
+  it("applies the chomping indicator to the trailing newline only", () => {
+    const block = (indicator: string) => `---
+text: ${indicator}
+  first
+  second
+
+next: after
+---
+b
+`;
+    // strip: no trailing newline. clip: exactly one. keep: one per trailing line.
+    expect(parseMarkdownArtifact(block("|-")).frontmatter.text).toBe("first\nsecond");
+    expect(parseMarkdownArtifact(block("|")).frontmatter.text).toBe("first\nsecond\n");
+    expect(parseMarkdownArtifact(block("|+")).frontmatter.text).toBe("first\nsecond\n\n");
+    // Chomping never changes how the interior lines join.
+    expect(parseMarkdownArtifact(block(">-")).frontmatter.text).toBe("first second");
+    expect(parseMarkdownArtifact(block(">")).frontmatter.text).toBe("first second\n");
+    expect(parseMarkdownArtifact(block(">+")).frontmatter.text).toBe("first second\n\n");
+    for (const indicator of ["|-", "|", "|+", ">-", ">", ">+"]) {
+      expect(parseMarkdownArtifact(block(indicator)).frontmatter.next).toBe("after");
+    }
+  });
+
+  it("dedents by the block's own indentation, not a fixed two spaces", () => {
+    const r = parseMarkdownArtifact(`---
+text: |-
+      first
+        deeper
+      last
+---
+b
+`);
+    expect(r.frontmatter.text).toBe("first\n  deeper\nlast");
+  });
+
+  it("reads an empty block as an empty string", () => {
+    const r = parseMarkdownArtifact(`---
+text: |-
+next: after
+other: >
+---
+b
+`);
+    expect(r.frontmatter.text).toBe("");
+    expect(r.frontmatter.next).toBe("after");
+    expect(r.frontmatter.other).toBe("");
+  });
+
+  it("drops the carriage return of a file written on Windows", () => {
+    const r = parseMarkdownArtifact(
+      "---\r\ndescription: |-\r\n  first\r\n  second\r\nlicense: MIT\r\n---\r\nb\r\n",
+    );
+    expect(r.frontmatter.description).toBe("first\nsecond");
+    expect(r.frontmatter.license).toBe("MIT");
+  });
+
+  it("reads a block scalar nested in a one-level map", () => {
+    const r = parseMarkdownArtifact(`---
+metadata:
+  author: example-org
+  notes: |-
+    first
+    second
+  version: "1.0"
+license: Apache-2.0
+---
+b
+`);
+    expect(r.frontmatter.metadata).toEqual({
+      author: "example-org",
+      notes: "first\nsecond",
+      version: "1.0",
+    });
+    expect(r.frontmatter.license).toBe("Apache-2.0");
+  });
+});
+
 describe("renderTemplate", () => {
   it("substitutes simple {{name}} placeholders", () => {
     expect(renderTemplate("Hello {{name}}", { name: "world" })).toBe("Hello world");
@@ -232,6 +397,27 @@ body
         "slack-tools",
       ),
     ).toThrow(/slack-tools/);
+  });
+
+  it("carries a block scalar description through to the SkillSource", () => {
+    const skill = loadSkillFromMarkdown(
+      `---
+name: claude-api
+description: |-
+  Reference for the Claude API — model ids, pricing, params.
+  TRIGGER — read before you open the target file.
+license: Complete terms in LICENSE.txt
+---
+body
+`,
+      "plugin",
+      "claude-api",
+    );
+    expect(skill.description).toBe(
+      "Reference for the Claude API — model ids, pricing, params.\n" +
+        "TRIGGER — read before you open the target file.",
+    );
+    expect(skill.license).toBe("Complete terms in LICENSE.txt");
   });
 
   it("uses the directory name when the frontmatter omits name", () => {

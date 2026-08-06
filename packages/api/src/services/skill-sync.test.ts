@@ -155,6 +155,35 @@ describe("skill sync", () => {
     expect(row?.upstreamPath).toBe("agent/skills/deploy/SKILL.md");
   });
 
+  it("imports the whole description when upstream writes it as a block scalar", async () => {
+    // The frontmatter of `skills/claude-api/SKILL.md` in anthropics/skills.
+    const claudeApi = `---
+name: claude-api
+description: |-
+  Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use...
+  TRIGGER — read BEFORE opening the target file; ...
+  SKIP only when another provider is being worked on ...
+license: Complete terms in LICENSE.txt
+---
+
+Read the reference.
+`;
+    const f = serve({ sha: "commit-1", skills: { "claude-api": claudeApi } });
+    const source = await createSkillSource(db, owner("u1"), { repo: "anthropics/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    expect(outcome?.warnings).toEqual([]);
+    expect(outcome?.imported).toBe(1);
+    const [row] = await db.select().from(skills);
+    expect(row?.description).toBe(
+      "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use...\n" +
+        "TRIGGER — read BEFORE opening the target file; ...\n" +
+        "SKIP only when another provider is being worked on ...",
+    );
+    expect(row?.content).toBe("Read the reference.\n");
+  });
+
   it("costs exactly one call when the head commit has not moved", async () => {
     const repo: FakeRepo = { sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } };
     const f = serve(repo);
