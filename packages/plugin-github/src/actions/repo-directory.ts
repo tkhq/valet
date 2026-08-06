@@ -118,6 +118,15 @@ export async function collectDirectoryEntries(
   for (let page = 1; ; page += 1) {
     const { data } = await request({ ...params, per_page: PER_PAGE, page });
     if (!Array.isArray(data)) {
+      // Only the first page answers "is this path a directory". Once it
+      // said yes, a later page that is not a list is a broken response.
+      // Reporting it as `not_directory` would drop the entries already
+      // read and tell the caller the directory is not there.
+      if (page > 1) {
+        throw new Error(
+          `GitHub sent ${contentsKind(data)} instead of a list for page ${page} of "${params.path}". Try the action again.`,
+        );
+      }
       return { kind: "not_directory", type: contentsKind(data) };
     }
 

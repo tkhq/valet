@@ -95,13 +95,24 @@ export function renderSkill(
  * Returns `null` when the set ships no skills — a tool that can list
  * nothing is worse than no tool.
  *
- * Callers must index the skills by name BEFORE this point, so a duplicate
- * name is a hard error rather than a silent last-write-wins (see
- * `pluginSessionExtras`).
+ * Callers must resolve duplicate names BEFORE this point: `collectSkills`
+ * rejects two plugins that claim one name, and `pluginSessionExtras` drops
+ * a stored skill that shadows a plugin's. A duplicate that reaches here
+ * means one of those guards was bypassed, and the name index below would
+ * quietly keep the last one — serving one skill's body under another's
+ * name. It throws instead.
  */
 export function buildSkillTool(skills: SkillSource[]): ToolDef | null {
   if (skills.length === 0) return null;
-  const byName = new Map(skills.map((skill) => [skill.name, skill]));
+  const byName = new Map<string, SkillSource>();
+  for (const skill of skills) {
+    if (byName.has(skill.name)) {
+      throw new Error(
+        `Two skills are named "${skill.name}". Deduplicate the skills before you build the skill tool.`,
+      );
+    }
+    byName.set(skill.name, skill);
+  }
 
   return defineTool({
     name: SKILL_TOOL_NAME,

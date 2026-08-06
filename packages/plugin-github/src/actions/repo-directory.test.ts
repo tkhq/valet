@@ -112,6 +112,21 @@ describe("collectDirectoryEntries", () => {
     expect(listing).toEqual({ kind: "not_directory", type: "file" });
   });
 
+  // Only the FIRST page can say what the path is. A later page that comes
+  // back as something other than a list is a broken response, and reading it
+  // as "this path is a file" would throw away the entries already collected
+  // and tell the importer the directory does not exist.
+  it("fails loudly when a later page is not a list, instead of discarding the pages read", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => dirEntry(`skill-${i}`, "dir"));
+    const request = await requestAgainst(({ query }) => ({
+      body: query.page === "2" ? { name: "x", path: "x", type: "file", size: 0, sha: "s" } : page1,
+    }));
+
+    await expect(
+      collectDirectoryEntries(request, PARAMS, MAX_DIRECTORY_ENTRIES),
+    ).rejects.toThrow(/page 2/);
+  });
+
   it("reports a submodule as its own kind, not as a file", async () => {
     const request = await requestAgainst(() => ({
       body: { name: "vendor", path: "vendor", type: "submodule", size: 0, sha: "s" },
