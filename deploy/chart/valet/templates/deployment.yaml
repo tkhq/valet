@@ -15,6 +15,21 @@ spec:
       app.kubernetes.io/component: api
   template:
     metadata:
+      annotations:
+        # The api reads its config and secrets through envFrom/secretKeyRef,
+        # and Kubernetes injects those once, at pod start. Without these two
+        # digests in the pod template, an upgrade that only rotates a key
+        # leaves the template byte-identical, the pod is never replaced, and
+        # the old key stays live while `helm upgrade --wait` reports success.
+        #
+        # checksum/secret hashes the supplied values, not the rendered Secret
+        # — see `valet.apiSecretChecksum` in _helpers.tpl for why.
+        #
+        # Limitation: api.extraEnvFrom points at Secrets/ConfigMaps this chart
+        # does not render. To rotate one of those, run
+        # `kubectl rollout restart deployment/<release>-api`.
+        checksum/secret: {{ include "valet.apiSecretChecksum" . }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "valet.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
