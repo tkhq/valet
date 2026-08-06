@@ -61,17 +61,30 @@ export async function primaryRepoBinding(
  * `resolveGitHubToken` with the binding's `repo`/`auth`, falling back to
  * repo-less `auto` resolution otherwise. A `GitHubAuthError` from
  * `resolveGitHubToken` propagates to the caller unchanged.
+ *
+ * `auth` and `repo` are caller-supplied overrides that OUTRANK the binding.
+ * A workflow `tool` node with `credential: "app"` uses them: it has no
+ * session binding to read a selection from, and the repository comes from
+ * the action's own parameters. Omit both to keep the binding-derived
+ * behavior.
  */
 export async function resolveSessionGitHubToken(
   deps: GitHubTokenDeps,
-  args: { orgId: string; userId?: string; sessionId?: string; purpose: "git" | "api" },
+  args: {
+    orgId: string;
+    userId?: string;
+    sessionId?: string;
+    purpose: "git" | "api";
+    auth?: GitHubAuthMode;
+    repo?: { owner: string; name: string };
+  },
 ): Promise<ResolvedGitHubToken> {
   const binding = args.sessionId ? await primaryRepoBinding(deps.db, args.sessionId) : undefined;
   return resolveGitHubToken(deps, {
     orgId: args.orgId,
     userId: args.userId,
     purpose: args.purpose,
-    repo: binding?.repo,
-    auth: binding?.auth ?? "auto",
+    repo: args.repo ?? binding?.repo,
+    auth: args.auth ?? binding?.auth ?? "auto",
   });
 }

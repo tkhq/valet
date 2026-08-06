@@ -174,9 +174,21 @@ async function computeResult(
     };
   }
   const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
+  // `github` is the only service that resolves a credential identity today.
+  // Any other service would IGNORE the selection, and a node that asked to
+  // act as the application would silently act as the workflow owner —
+  // exactly the failure `credential` exists to prevent. Refuse instead.
+  if (req.credential !== undefined && req.credential !== "auto" && credentialService !== "github") {
+    return {
+      ok: false,
+      error:
+        `the ${req.service} service cannot select a "${req.credential}" credential. ` +
+        `Remove the credential field from this tool node.`,
+    };
+  }
   const credentials =
     credentialService === "github"
-      ? buildGithubCredentialProvider(opts, ctx, owner)
+      ? buildGithubCredentialProvider(opts, req, ctx, owner)
       : buildCredentialProvider(opts.credentials, owner, credentialService);
 
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
@@ -263,9 +275,22 @@ function buildCredentialProvider(store: CredentialStore, owner: CredentialOwner,
  * `{ ok: false, error: err.message }` the same way any other thrown error
  * becomes the action's error result (the message already names the gap and
  * carries the connect hint, per `github-tokens.ts`'s doc comment).
+ *
+ * ── Credential selection (`ToolNode.credential`) ────────────────────────
+ * `req.credential` picks the identity the action acts as:
+ *
+ *   - `"app"`  → `auth: "app"` with the repository taken from the action's
+ *     own `owner`/`repo` parameters. `resolveGitHubToken` mints the
+ *     installation token for that owner or THROWS. There is no fallback:
+ *     an automated review that cannot reach the App must fail visibly
+ *     rather than post under the workflow owner's personal account.
+ *   - `"user"` → `auth: "user"`, equally strict in the other direction.
+ *   - `"auto"` or absent → the pre-existing precedence, binding included.
+ *     Every definition written before this field existed lands here.
  */
 function buildGithubCredentialProvider(
   opts: ActionInvokerOpts,
+  req: WorkflowInvokeActionRequest,
   ctx: ActionInvocationContext,
   owner: CredentialOwner,
 ): CredentialProvider {
@@ -292,11 +317,28 @@ function buildGithubCredentialProvider(
         fetchImpl: tokenDeps.fetchImpl,
         now: tokenDeps.now,
       };
+      const selection = req.credential ?? "auto";
+      // `params` are template-rendered, so a webhook payload can choose this
+      // repo. That is safe only because `mintInstallationToken` looks an
+      // installation up by `(orgId, accountLogin)` — the reachable set is
+      // the caller's own org. Keep that scoping: a global installation
+      // lookup would turn this node into cross-tenant access.
+      const repo = selection === "app" ? repoFromParams(req.params) : undefined;
+      if (selection === "app" && !repo) {
+        throw new Error(
+          `${req.service}.${req.action} cannot use the "app" credential: the repository owner is unknown. ` +
+            `Add "owner" and "repo" parameters to this tool node.`,
+        );
+      }
       const resolved = await resolveSessionGitHubToken(deps, {
         orgId: ctx.orgId,
         userId: ctx.userId,
         sessionId: ctx.sessionId,
         purpose: "api",
+        // `auto` means "keep the default precedence", so it must NOT
+        // override a session binding's own selection.
+        ...(selection === "auto" ? {} : { auth: selection }),
+        ...(repo ? { repo } : {}),
       });
       // `purpose: "api"` never returns `{ source: "none" }` (it throws
       // instead) — `token` is non-null whenever resolution didn't throw.
@@ -307,6 +349,21 @@ function buildGithubCredentialProvider(
       return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));
     },
   };
+}
+
+/**
+ * The repository an `app`-credential invocation resolves its installation
+ * against, read from the action's own parameters. Every repo-scoped
+ * plugin-github action declares `owner` and `repo` as required strings, so
+ * both must be present — `resolveGitHubToken` only reads `owner`, but
+ * inventing a `name` for a security decision is worse than refusing.
+ */
+function repoFromParams(params: Record<string, unknown>): { owner: string; name: string } | undefined {
+  const owner = params.owner;
+  const name = params.repo;
+  if (typeof owner !== "string" || owner.length === 0) return undefined;
+  if (typeof name !== "string" || name.length === 0) return undefined;
+  return { owner, name };
 }
 
 function buildActionContext(

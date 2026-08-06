@@ -1,8 +1,11 @@
 /**
- * Event system end-to-end (event-system plan, Task 10): a signed Linear
- * webhook travels the full pipeline over real HTTP — ingress verification →
- * event row → subscription match → delivery row → dispatcher → workflow run
- * on the real `LocalRunHost`.
+ * Event system end-to-end (event-system plan, Task 10): a signed webhook
+ * travels the full pipeline over real HTTP — ingress verification → event
+ * row → subscription match → delivery row → dispatcher → workflow run on
+ * the real `LocalRunHost`. One case per ingress, because the two ingresses
+ * differ: Linear arrives on the generic `/webhooks/events/:service` route,
+ * GitHub on the App's own `/webhooks/github-app` route, which forwards
+ * every non-installation event family into the same pipeline.
  *
  * The ingest path nudges the dispatcher in-process (fire-and-forget), so the
  * delivery may already be resolved by the time the webhook POST returns. The
@@ -12,19 +15,30 @@
  * without sleeps.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { createHmac } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { eventDeliveries, events, linearInstallations, workflowRuns } from "../schema/index.js";
-import type { CreateEventSubscriptionResponse, CreateWorkflowResponse } from "../wire/types.js";
+import type {
+  CreateEventSubscriptionResponse,
+  CreateWorkflowResponse,
+  PostGithubAppManifestResponse,
+} from "../wire/types.js";
 
 let api: TestApi | undefined;
+let githubFixture: GithubFixture | undefined;
+const prevGithubApiUrl = process.env.GITHUB_API_URL;
 
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  await githubFixture?.close();
+  githubFixture = undefined;
+  if (prevGithubApiUrl === undefined) delete process.env.GITHUB_API_URL;
+  else process.env.GITHUB_API_URL = prevGithubApiUrl;
 });
 
 const WEBHOOK_SECRET = "s1";
@@ -180,6 +194,189 @@ describe("event system e2e: signed webhook → subscription match → workflow r
     expect(negDeliveries).toHaveLength(0);
 
     // The run count is unchanged — the filtered event started nothing.
+    const runsAfter = await api.providers.db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.workflowId, workflow.id));
+    expect(runsAfter).toHaveLength(1);
+  }, 30_000);
+});
+
+// ── GitHub ingress ────────────────────────────────────────────────────────
+//
+// GitHub deliveries do NOT arrive on `/webhooks/events/:service` — that
+// route only resolves an org for `linear`. They arrive on the GitHub App's
+// own `/webhooks/github-app` route, which verifies the App signature and
+// then forwards the event into the same ingest pipeline. The helpers below
+// are local to this file for the same reason the Linear ones are: the
+// route-level suites own their own seeding.
+
+const { privateKey: GITHUB_APP_PEM } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+});
+
+const GITHUB_WEBHOOK_SECRET = "gh-webhook-secret";
+
+/** Drives the real manifest → setup exchange against the fake GitHub API so
+ * the deployment has a `github_app` credential to verify signatures with.
+ * A REAL PEM, because any discovery along the way mints an App JWT. */
+async function configureGithubApp(baseUrl: string): Promise<void> {
+  githubFixture = startGithubFixture({
+    listInstallations: () => ({ body: [] }),
+    convertManifest: () => ({
+      body: {
+        id: 42,
+        slug: "valet-acme",
+        name: "Valet Acme",
+        client_id: "Iv1.client",
+        client_secret: "oauth-client-secret",
+        webhook_secret: GITHUB_WEBHOOK_SECRET,
+        pem: GITHUB_APP_PEM,
+        html_url: "https://github.com/apps/valet-acme",
+      },
+    }),
+  });
+  process.env.GITHUB_API_URL = githubFixture.url;
+
+  const manifestRes = await fetch(`${baseUrl}/api/org/github-app/manifest`, {
+    method: "POST",
+    headers: HEADERS,
+    body: "{}",
+  });
+  expect(manifestRes.status).toBe(200);
+  const { state } = (await manifestRes.json()) as PostGithubAppManifestResponse;
+
+  const setupRes = await fetch(
+    `${baseUrl}/api/org/github-app/setup?code=some-code&state=${encodeURIComponent(state)}`,
+    { redirect: "manual" },
+  );
+  expect(setupRes.status).toBe(302);
+}
+
+function prOpenedBody(repoFullName: string, prNumber: number): string {
+  return JSON.stringify({
+    action: "opened",
+    number: prNumber,
+    pull_request: {
+      number: prNumber,
+      title: "Add the thing",
+      html_url: `https://github.com/${repoFullName}/pull/${prNumber}`,
+      updated_at: new Date().toISOString(),
+    },
+    repository: { full_name: repoFullName },
+    sender: { id: 4321, login: "octocat" },
+  });
+}
+
+async function postGithubDelivery(baseUrl: string, body: string, deliveryId: string): Promise<Response> {
+  const signature = `sha256=${createHmac("sha256", GITHUB_WEBHOOK_SECRET).update(body).digest("hex")}`;
+  return fetch(`${baseUrl}/webhooks/github-app`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-github-event": "pull_request",
+      "x-github-delivery": deliveryId,
+      "x-hub-signature-256": signature,
+    },
+    body,
+  });
+}
+
+describe("event system e2e: signed GitHub webhook → subscription match → workflow run", () => {
+  it("starts a workflow run from a pull_request delivery; a filtered-out repo starts nothing", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    await configureGithubApp(api.baseUrl);
+
+    // ── Workflow definition via the API ─────────────────────────────────
+    const wfRes = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ name: "review-on-pr", definition: VALID_DEFINITION }),
+    });
+    expect(wfRes.status).toBe(201);
+    const workflow = (await wfRes.json()) as CreateWorkflowResponse;
+
+    // ── Subscription targeting it, filtered to one repo ─────────────────
+    const subRes = await fetch(`${api.baseUrl}/api/event-subscriptions`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        name: "acme/widgets PRs",
+        eventKeys: ["github.pull_request.opened"],
+        filters: [{ field: "repo", op: "eq", value: "acme/widgets" }],
+        target: { kind: "workflow", workflowId: workflow.id },
+      }),
+    });
+    expect(subRes.status).toBe(201);
+    const sub = (await subRes.json()) as CreateEventSubscriptionResponse;
+
+    // ── Signed delivery for the matching repo → 204 ─────────────────────
+    const res = await postGithubDelivery(api.baseUrl, prOpenedBody("acme/widgets", 7), "gh-del-1");
+    expect(res.status).toBe(204);
+
+    await api.providers.eventDispatcher.pollOnce();
+
+    const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0].service).toBe("github");
+    expect(eventRows[0].eventKey).toBe("github.pull_request.opened");
+    expect(eventRows[0].dedupeKey).toBe("gh-del-1");
+
+    await expect
+      .poll(
+        async () => {
+          const rows = await api!.providers.db
+            .select()
+            .from(eventDeliveries)
+            .where(eq(eventDeliveries.eventId, eventRows[0].id));
+          return rows.map((r) => ({ status: r.status, subscriptionId: r.subscriptionId }));
+        },
+        { timeout: 5_000 },
+      )
+      .toEqual([{ status: "delivered", subscriptionId: sub.id }]);
+
+    // The run must actually RUN, not just exist as a `pending` row — the
+    // real `LocalRunHost` drives this trigger → stop definition to settled.
+    await expect
+      .poll(
+        async () => {
+          const rows = await api!.providers.db
+            .select()
+            .from(workflowRuns)
+            .where(eq(workflowRuns.workflowId, workflow.id));
+          return rows.map((r) => ({ status: r.status, outcome: r.outcome }));
+        },
+        { timeout: 10_000 },
+      )
+      .toEqual([{ status: "settled", outcome: "completed" }]);
+
+    const runRows = await api.providers.db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.workflowId, workflow.id));
+    const params = runRows[0].params as RunParamsShape;
+    expect(params.workflowId).toBe(workflow.id);
+    expect(params.input.type).toBe("event");
+    expect(params.input.data.key).toBe("github.pull_request.opened");
+
+    // ── Negative: another repo fails the filter — event row, no delivery ─
+    const negRes = await postGithubDelivery(api.baseUrl, prOpenedBody("acme/other", 8), "gh-del-2");
+    expect(negRes.status).toBe(204);
+
+    const allEvents = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(allEvents).toHaveLength(2);
+    const negEvent = allEvents.find((e) => e.id !== eventRows[0].id);
+    expect(negEvent).toBeDefined();
+
+    await api.providers.eventDispatcher.pollOnce();
+    const negDeliveries = await api.providers.db
+      .select()
+      .from(eventDeliveries)
+      .where(eq(eventDeliveries.eventId, negEvent!.id));
+    expect(negDeliveries).toHaveLength(0);
+
     const runsAfter = await api.providers.db
       .select()
       .from(workflowRuns)

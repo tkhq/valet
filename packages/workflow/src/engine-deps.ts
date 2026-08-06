@@ -13,6 +13,7 @@
 
 import type { QueueMode, SessionPurpose, SubmissionResult } from '@valet/engine';
 import type { TSchema } from 'typebox';
+import type { ToolCredentialMode } from './dag/nodes.js';
 
 export interface WorkflowCreateSessionOptions {
   id: string;
@@ -93,6 +94,14 @@ export interface WorkflowInvokeActionRequest {
   params: Record<string, unknown>;
   /** Idempotency key. Deterministic per the tool executor's dispatch (decision 6: `workflow:{runId}:{nodeId}[:{iteration}]`). */
   invocationId: string;
+  /**
+   * `ToolNode.credential`, forwarded unchanged. Absent means the node
+   * selected no identity, and the implementation keeps its default
+   * precedence. An implementation that receives `'app'` MUST resolve the
+   * installed application's identity or fail the invocation — a fallback to
+   * a person's credential would make the action act as that person.
+   */
+  credential?: ToolCredentialMode;
 }
 
 export type WorkflowInvokeActionResult = { ok: true; result: unknown } | { ok: false; error: string };

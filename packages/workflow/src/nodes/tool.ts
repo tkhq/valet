@@ -27,8 +27,12 @@
  *      is statically a `Record<string, unknown>`, so this only guards
  *      against a `renderJsonTemplates` bug), fail the node defensively
  *      without calling `invokeAction`.
- *   4. Call `engine.invokeAction`. A thrown error fails the node with the
- *      thrown message (not a drive-level throw). `{ ok: true, result }` →
+ *   4. Call `engine.invokeAction`, forwarding `node.credential` when the
+ *      node selects an identity (see `ToolNode.credential`). The executor
+ *      does not interpret the selection — the host's `invokeAction`
+ *      implementation resolves it per service. A thrown error fails the
+ *      node with the thrown message (not a drive-level throw).
+ *      `{ ok: true, result }` →
  *      node `completed` with `result` stored verbatim as the checkpoint
  *      result (no wrapper). `{ ok: false, error }` → node `failed` with
  *      `error`.
@@ -75,6 +79,10 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
       action: node.action,
       params: renderedParams,
       invocationId,
+      // Only send the key when the node selects an identity. A definition
+      // written before `credential` existed must produce the same request
+      // it produced before.
+      ...(node.credential !== undefined ? { credential: node.credential } : {}),
     });
   } catch (err) {
     return await fail(args, invocationId, errorMessage(err));
