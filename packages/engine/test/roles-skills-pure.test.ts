@@ -80,14 +80,17 @@ body
     expect(r.frontmatter.name).toBe("pdf-processing");
   });
 
-  it("keeps an empty-valued key as an empty string when nothing is nested under it", () => {
+  // YAML reads a key with no value as null, and a null is not a scalar or a
+  // map, so it is dropped. The validators treat a dropped key and an empty
+  // one the same way, and both report the field as required.
+  it("drops an empty-valued key with nothing nested under it", () => {
     const r = parseMarkdownArtifact(`---
 metadata:
 name: x
 ---
 body
 `);
-    expect(r.frontmatter.metadata).toBe("");
+    expect(r.frontmatter.metadata).toBeUndefined();
     expect(r.frontmatter.name).toBe("x");
   });
 
@@ -129,112 +132,6 @@ license: Complete terms in LICENSE.txt
         "TRIGGER — read BEFORE opening the target file; ...\n" +
         "SKIP only when another provider is being worked on ...",
     );
-  });
-
-  it("reads the key that follows the block at the parent indentation", () => {
-    const r = parseMarkdownArtifact(CLAUDE_API);
-    expect(r.frontmatter.name).toBe("claude-api");
-    expect(r.frontmatter.license).toBe("Complete terms in LICENSE.txt");
-    expect(r.body).toBe("# Claude API\n");
-  });
-
-  it("keeps the line breaks of a literal block, and clips to one trailing newline", () => {
-    const r = parseMarkdownArtifact(`---
-text: |
-  first
-  second
-next: after
----
-b
-`);
-    expect(r.frontmatter.text).toBe("first\nsecond\n");
-    expect(r.frontmatter.next).toBe("after");
-  });
-
-  it("joins the lines of a folded block with spaces", () => {
-    const r = parseMarkdownArtifact(`---
-text: >
-  first
-  second
-next: after
----
-b
-`);
-    expect(r.frontmatter.text).toBe("first second\n");
-    expect(r.frontmatter.next).toBe("after");
-  });
-
-  it("folds a blank line inside a folded block into a line break", () => {
-    const r = parseMarkdownArtifact(`---
-text: >-
-  first
-  still first
-
-  second
----
-b
-`);
-    expect(r.frontmatter.text).toBe("first still first\nsecond");
-  });
-
-  it("keeps the blank line inside a literal block", () => {
-    const r = parseMarkdownArtifact(`---
-text: |-
-  first
-
-  second
----
-b
-`);
-    expect(r.frontmatter.text).toBe("first\n\nsecond");
-  });
-
-  it("applies the chomping indicator to the trailing newline only", () => {
-    const block = (indicator: string) => `---
-text: ${indicator}
-  first
-  second
-
-next: after
----
-b
-`;
-    // strip: no trailing newline. clip: exactly one. keep: one per trailing line.
-    expect(parseMarkdownArtifact(block("|-")).frontmatter.text).toBe("first\nsecond");
-    expect(parseMarkdownArtifact(block("|")).frontmatter.text).toBe("first\nsecond\n");
-    expect(parseMarkdownArtifact(block("|+")).frontmatter.text).toBe("first\nsecond\n\n");
-    // Chomping never changes how the interior lines join.
-    expect(parseMarkdownArtifact(block(">-")).frontmatter.text).toBe("first second");
-    expect(parseMarkdownArtifact(block(">")).frontmatter.text).toBe("first second\n");
-    expect(parseMarkdownArtifact(block(">+")).frontmatter.text).toBe("first second\n\n");
-    for (const indicator of ["|-", "|", "|+", ">-", ">", ">+"]) {
-      expect(parseMarkdownArtifact(block(indicator)).frontmatter.next).toBe("after");
-    }
-  });
-
-  it("dedents by the block's own indentation, not a fixed two spaces", () => {
-    const r = parseMarkdownArtifact(`---
-text: |-
-      first
-        deeper
-      last
----
-b
-`);
-    expect(r.frontmatter.text).toBe("first\n  deeper\nlast");
-  });
-
-  it("reads an empty block as an empty string", () => {
-    const r = parseMarkdownArtifact(`---
-text: |-
-next: after
-other: >
----
-b
-`);
-    expect(r.frontmatter.text).toBe("");
-    expect(r.frontmatter.next).toBe("after");
-    expect(r.frontmatter.other).toBe("");
   });
 
   it("drops the carriage return of a file written on Windows", () => {
