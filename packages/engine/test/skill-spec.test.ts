@@ -92,6 +92,31 @@ describe("validateSkillFrontmatter: description", () => {
     expect(violations[0]?.message).toMatch(/1024/);
   });
 
+  // Length is the one rule a skill can break while staying usable: the text
+  // is all there, it is just long. `anthropics/skills` — the reference
+  // repository — ships one. An importer that refuses it is more wrong than
+  // one that mirrors it and says so, and no author can fix another org's
+  // repository. Every other rule means the skill is broken or unfindable.
+  it("marks an over-long description advisory, not an error", () => {
+    const violations = validateSkillFrontmatter({ ...VALID, description: "a".repeat(1025) });
+    expect(violations[0]?.severity).toBe("advisory");
+  });
+
+  it("marks a missing description an error", () => {
+    const violations = validateSkillFrontmatter({ ...VALID, description: "   " });
+    expect(violations[0]?.severity).toBe("error");
+  });
+
+  it("marks a block-scalar-only description an error, not advisory", () => {
+    const violations = validateSkillFrontmatter({ ...VALID, description: "|-" });
+    expect(violations[0]?.severity).toBe("error");
+  });
+
+  it("marks a name violation an error", () => {
+    const violations = validateSkillFrontmatter({ ...VALID, name: "Has Capitals" });
+    expect(violations[0]?.severity).toBe("error");
+  });
+
   it("accepts exactly 1024 characters", () => {
     expect(validateSkillFrontmatter({ ...VALID, description: "a".repeat(1024) })).toEqual([]);
   });

@@ -5,10 +5,12 @@
  * violations it found. The name-matches-directory rule needs the directory
  * name as an input, because this module never touches the file system.
  *
- * It RETURNS violations rather than throwing. Callers decide how loud a
- * violation is: `loadSkillFromMarkdown` throws for the skills we ship (a
- * build-time bug), while an importer reading a third-party repository can
- * report the violations and skip that one skill.
+ * It RETURNS violations rather than throwing, and grades each one. Callers
+ * set the policy: `loadSkillFromMarkdown` and the authoring API refuse a
+ * skill with any violation, because the author can fix it. An importer
+ * mirroring somebody else's repository refuses only `error` violations and
+ * reports the rest, because the author cannot fix that repository — see
+ * `SkillSpecSeverity`.
  */
 
 export type SkillSpecField =
@@ -19,10 +21,31 @@ export type SkillSpecField =
   | "metadata"
   | "allowed-tools";
 
+/**
+ * How much a violation matters.
+ *
+ * `error` — the skill is broken or the model cannot find it. Nothing should
+ * load it.
+ *
+ * `advisory` — the skill works, but it breaks a limit the spec sets. Only
+ * length overruns land here: the text is all present, there is just more of
+ * it than the spec allows. A caller that mirrors somebody else's repository
+ * should report an advisory and take the skill anyway, because the author
+ * cannot edit that repository. A caller that accepts text from its own user
+ * should refuse it, because the author can.
+ */
+export type SkillSpecSeverity = "error" | "advisory";
+
 export interface SkillSpecViolation {
   field: SkillSpecField;
+  severity: SkillSpecSeverity;
   /** States what is wrong, then what to do about it. */
   message: string;
+}
+
+/** True when nothing in `violations` blocks loading the skill. */
+export function isLoadable(violations: SkillSpecViolation[]): boolean {
+  return violations.every((v) => v.severity === "advisory");
 }
 
 export interface SkillSpecOptions {
@@ -60,14 +83,15 @@ export function validateSkillFrontmatter(
   const violations: SkillSpecViolation[] = [];
 
   const nameViolation = checkName(frontmatter.name, opts.directoryName);
-  if (nameViolation) violations.push({ field: "name", message: nameViolation });
+  if (nameViolation) violations.push({ field: "name", severity: "error", message: nameViolation });
 
-  const descriptionViolation = checkDescription(frontmatter.description);
-  if (descriptionViolation) violations.push({ field: "description", message: descriptionViolation });
+  const descriptionFinding = checkDescription(frontmatter.description);
+  if (descriptionFinding) violations.push({ field: "description", ...descriptionFinding });
 
   if (frontmatter.license !== undefined && typeof frontmatter.license !== "string") {
     violations.push({
       field: "license",
+      severity: "error",
       message: 'license is not text. Write a license name, or the name of a bundled license file.',
     });
   }
@@ -77,11 +101,13 @@ export function validateSkillFrontmatter(
     if (typeof compatibility !== "string") {
       violations.push({
         field: "compatibility",
+        severity: "error",
         message: "compatibility is not text. Write the environment requirements as one line of text.",
       });
     } else if (compatibility.length > COMPATIBILITY_MAX) {
       violations.push({
         field: "compatibility",
+        severity: "advisory",
         message: `compatibility is longer than ${COMPATIBILITY_MAX} characters. Shorten it to ${COMPATIBILITY_MAX} characters or fewer.`,
       });
     }
@@ -90,6 +116,7 @@ export function validateSkillFrontmatter(
   if (frontmatter.metadata !== undefined && !isStringMap(frontmatter.metadata)) {
     violations.push({
       field: "metadata",
+      severity: "error",
       message:
         "metadata is not a map of text values. Quote every value so each key maps to text.",
     });
@@ -99,6 +126,7 @@ export function validateSkillFrontmatter(
   if (allowedTools !== undefined && typeof allowedTools !== "string") {
     violations.push({
       field: "allowed-tools",
+      severity: "error",
       message:
         "allowed-tools is not text. Write the tool names as one space-separated line of text.",
     });
@@ -129,15 +157,27 @@ function checkName(value: unknown, directoryName?: string): string | null {
   return null;
 }
 
-function checkDescription(value: unknown): string | null {
+type Finding = Omit<SkillSpecViolation, "field">;
+
+function checkDescription(value: unknown): Finding | null {
   if (typeof value !== "string" || value.trim().length === 0) {
-    return "description is required. Write what the skill does and when to use it.";
+    return {
+      severity: "error",
+      message: "description is required. Write what the skill does and when to use it.",
+    };
   }
   if (BLOCK_SCALAR_ONLY.test(value.trim())) {
-    return "description is only a YAML block scalar header, so the text under it was not read. Indent every line of the description under the header by the same amount.";
+    return {
+      severity: "error",
+      message:
+        "description is only a YAML block scalar header, so the text under it was not read. Indent every line of the description under the header by the same amount.",
+    };
   }
   if (value.length > DESCRIPTION_MAX) {
-    return `description is longer than ${DESCRIPTION_MAX} characters. Shorten it to ${DESCRIPTION_MAX} characters or fewer, and move the detail into the body.`;
+    return {
+      severity: "advisory",
+      message: `description is longer than ${DESCRIPTION_MAX} characters. Shorten it to ${DESCRIPTION_MAX} characters or fewer, and move the detail into the body.`,
+    };
   }
   return null;
 }

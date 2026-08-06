@@ -55,7 +55,12 @@
  */
 import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, lte } from "drizzle-orm";
-import { parseMarkdownArtifact, validateSkillFrontmatter } from "@valet/engine";
+import {
+  isLoadable,
+  parseMarkdownArtifact,
+  validateSkillFrontmatter,
+  type SkillSpecViolation,
+} from "@valet/engine";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { skills, skillSources, type SkillRow, type SkillSourceRow } from "../schema/index.js";
@@ -310,8 +315,12 @@ export class SkillSyncService {
       if (raw === undefined) continue;
       const parsed = parseSkillFile(raw, entry.name);
       if (parsed.violations.length > 0) {
-        warnings.push(`${entry.name}: ${parsed.violations.join(" ")}`);
-        continue;
+        warnings.push(`${entry.name}: ${parsed.violations.map((v) => v.message).join(" ")}`);
+        // An advisory violation is reported but does not stop the mirror.
+        // Nobody here can edit the upstream repository, so refusing the
+        // skill would only make the corpus incomplete. An error means the
+        // skill is broken or unfindable, and that one is skipped.
+        if (!isLoadable(parsed.violations)) continue;
       }
       const row = byName.get(entry.name);
       if (row === undefined) {
@@ -484,7 +493,7 @@ interface ParsedSkillFile {
   description: string;
   body: string;
   frontmatter: Record<string, unknown>;
-  violations: string[];
+  violations: SkillSpecViolation[];
 }
 
 /**
@@ -499,7 +508,7 @@ function parseSkillFile(raw: string, directoryName: string): ParsedSkillFile {
     ...parsed.frontmatter,
     name: parsed.frontmatter.name ?? directoryName,
   };
-  const violations = validateSkillFrontmatter(frontmatter, { directoryName }).map((v) => v.message);
+  const violations = validateSkillFrontmatter(frontmatter, { directoryName });
   return {
     name: typeof frontmatter.name === "string" ? frontmatter.name : directoryName,
     description: typeof frontmatter.description === "string" ? frontmatter.description : "",

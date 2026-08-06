@@ -328,6 +328,47 @@ Read the reference.
     expect(f.calls).toHaveLength(1);
   });
 
+  // `anthropics/skills` — the repository the spec points at — ships a skill
+  // whose description runs past the spec's own 1024-character limit. Nobody
+  // here can edit that repository, so refusing the skill would leave the
+  // reference corpus half-importable. Mirror it, and say so.
+  it("mirrors a skill whose description is over-long, and warns", async () => {
+    const long = `Use this when ${"x".repeat(1100)}`;
+    const f = serve({
+      sha: "commit-1",
+      skills: { deploy: skillMd("deploy", "Deploy it."), verbose: skillMd("verbose", long) },
+    });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    expect(outcome?.imported).toBe(2);
+    expect(outcome?.warnings.join(" ")).toContain("1024");
+    const rows = await db.select().from(skills).where(eq(skills.sourceId, source.id));
+    const stored = rows.find((r) => r.name === "verbose");
+    expect(stored?.description).toBe(long);
+  });
+
+  // The other half of the split: an over-long description is survivable, a
+  // description the reader never recovered is not. This one must still skip.
+  it("refuses a skill whose description is only a block-scalar header", async () => {
+    const f = serve({
+      sha: "commit-1",
+      skills: {
+        deploy: skillMd("deploy", "Deploy it."),
+        lost: "---\nname: lost\ndescription: |-\nNot indented under the header.\n---\n\nBody.\n",
+      },
+    });
+    const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+
+    const outcome = await serviceFor(f).syncOnce(source.id);
+
+    expect(outcome?.imported).toBe(1);
+    expect(outcome?.warnings.join(" ")).toContain("lost");
+    const rows = await db.select().from(skills).where(eq(skills.sourceId, source.id));
+    expect(rows.map((r) => r.name)).toEqual(["deploy"]);
+  });
+
   it("skips a directory that holds no SKILL.md without warning", async () => {
     const f = serve({
       sha: "commit-1",
