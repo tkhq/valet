@@ -6,9 +6,9 @@ import { googleWorkspacePlugin } from "./actions/actions.js";
 // Static string literals (not a `${file}` template) so the single-binary
 // esbuild bundle's inline-assets plugin can statically resolve and inline
 // each skill's bytes at build time — see packages/api/build/inline-assets.mjs.
-const driveMd = readFileSync(fileURLToPath(new URL("../skills/google-drive.md", import.meta.url)), "utf8");
-const docsMd = readFileSync(fileURLToPath(new URL("../skills/google-docs.md", import.meta.url)), "utf8");
-const sheetsMd = readFileSync(fileURLToPath(new URL("../skills/google-sheets.md", import.meta.url)), "utf8");
+const driveMd = readFileSync(fileURLToPath(new URL("../skills/google-drive/SKILL.md", import.meta.url)), "utf8");
+const docsMd = readFileSync(fileURLToPath(new URL("../skills/google-docs/SKILL.md", import.meta.url)), "utf8");
+const sheetsMd = readFileSync(fileURLToPath(new URL("../skills/google-sheets/SKILL.md", import.meta.url)), "utf8");
 
 const plugin: ValetPlugin = {
   name: "google-workspace",

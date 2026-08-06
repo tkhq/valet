@@ -12,10 +12,13 @@
  *
  * `pluginSessionExtras` turns an assembled plugin set into the pieces a
  * session needs (tools/skills/roles) — see its own doc comment for the
- * per-call cache-freshness constraint.
+ * per-call cache-freshness constraint. It also builds the `skill` tool
+ * (`plugins/skill-tool.ts`) so the assembled skills reach the model, and
+ * it rejects two plugins that ship the same skill name.
  */
 import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
 import type { RoleSpec, SkillSource, ToolDef } from "@valet/engine";
+import { buildSkillTool } from "./skill-tool.js";
 
 export interface AssembledPlugins {
   plugins: ValetPlugin[];
@@ -98,9 +101,45 @@ export interface PluginSessionExtras {
 export function pluginSessionExtras(plugins: ValetPlugin[]): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
   const tools = actionPlugins.length > 0 ? pluginCatalogTools({ plugins: actionPlugins }) : [];
-  const skills = plugins.flatMap((p) => p.skills ?? []);
+  const skills = collectSkills(plugins);
   const roles = plugins.flatMap((p) => p.roles ?? []);
+
+  // The `skill` tool is what makes these skills reachable — without it the
+  // markdown is inert. Appended after the catalog tools so `list_tools`/
+  // `call_tool` keep their positions.
+  const skillTool = buildSkillTool(skills);
+  if (skillTool) tools.push(skillTool);
+
   return { tools, skills, roles };
+}
+
+/**
+ * Concatenates every plugin's skills, and rejects a duplicate name.
+ *
+ * A skill name is a lookup key: `Session.skills` indexes by it and the
+ * `skill` tool resolves by it. Two skills with one name means one of them
+ * is unreachable, which is a configuration error of the same kind as the
+ * action-service collision above — so it throws, naming both plugins.
+ */
+function collectSkills(plugins: ValetPlugin[]): SkillSource[] {
+  const skills: SkillSource[] = [];
+  const ownerByName = new Map<string, string>();
+
+  for (const plugin of plugins) {
+    for (const skill of plugin.skills ?? []) {
+      const owner = ownerByName.get(skill.name);
+      if (owner !== undefined) {
+        throw new Error(
+          `plugin skill collision: "${skill.name}" is shipped by both ` +
+            `"${owner}" and "${plugin.name}". Rename one of them.`,
+        );
+      }
+      ownerByName.set(skill.name, plugin.name);
+      skills.push(skill);
+    }
+  }
+
+  return skills;
 }
 
 /**

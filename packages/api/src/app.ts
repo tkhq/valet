@@ -29,6 +29,7 @@ import { orchestratorRouter } from "./routes/orchestrator.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
 import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
@@ -212,6 +213,7 @@ export function createApp(
   app.route("/api/notifications", notificationsRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/plugins", pluginsRouter);
+  app.route("/api/skills", skillsRouter);
   app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);
   // Mounted BEFORE /api/me — defensive ordering only: meRouter today

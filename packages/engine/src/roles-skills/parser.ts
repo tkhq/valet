@@ -1,14 +1,19 @@
 /**
  * Minimal markdown + YAML-frontmatter parser for role and skill artifacts.
  *
- * The frontmatter we care about is shallow `key: value` pairs. We do NOT
- * support nested objects, multi-line strings, or YAML anchors — if a
- * future role/skill needs them, swap in `gray-matter` and tighten this
+ * The frontmatter we care about is `key: value` pairs, plus ONE level of
+ * nesting — that is the depth the Agent Skills spec needs for its
+ * `metadata` map (https://agentskills.io/specification). We do NOT support
+ * deeper nesting, lists, multi-line strings, or YAML anchors. If a future
+ * role or skill needs them, swap in a real YAML parser and tighten this
  * module's API.
  */
 
+/** A frontmatter value: a scalar, or a one-level map of scalars. */
+export type FrontmatterValue = string | boolean | number | Record<string, string | boolean | number>;
+
 export interface ParsedArtifact {
-  frontmatter: Record<string, string | boolean | number>;
+  frontmatter: Record<string, FrontmatterValue>;
   body: string;
 }
 
@@ -30,8 +35,12 @@ export function parseMarkdownArtifact(content: string): ParsedArtifact {
   return { frontmatter: parseFrontmatter(fmText), body };
 }
 
-function parseFrontmatter(text: string): Record<string, string | boolean | number> {
-  const out: Record<string, string | boolean | number> = {};
+function parseFrontmatter(text: string): Record<string, FrontmatterValue> {
+  const out: Record<string, FrontmatterValue> = {};
+  // The most recent key that had no value on its own line. An indented
+  // `key: value` line after it belongs to that key's nested map.
+  let openKey: string | null = null;
+
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
@@ -39,9 +48,26 @@ function parseFrontmatter(text: string): Record<string, string | boolean | numbe
     if (colon < 0) continue;
     const key = line.slice(0, colon).trim();
     const valueRaw = line.slice(colon + 1).trim();
+    const indented = /^[ \t]/.test(rawLine);
+
+    if (indented && openKey !== null) {
+      const existing = out[openKey];
+      const map = isScalarMap(existing) ? existing : {};
+      map[key] = parseValue(valueRaw);
+      out[openKey] = map;
+      continue;
+    }
+
     out[key] = parseValue(valueRaw);
+    // A key with no value may open a nested map. It stays an empty string
+    // when nothing is indented under it.
+    openKey = valueRaw === "" ? key : null;
   }
   return out;
+}
+
+function isScalarMap(value: FrontmatterValue | undefined): value is Record<string, string | boolean | number> {
+  return typeof value === "object" && value !== null;
 }
 
 function parseValue(raw: string): string | boolean | number {

@@ -46,8 +46,13 @@ function renderNav() {
     path: "/sessions",
     component: () => null,
   });
+  const skillsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/skills",
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([indexRoute, sessionsRoute]),
+    routeTree: rootRoute.addChildren([indexRoute, sessionsRoute, skillsRoute]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
   const queryClient = new QueryClient();
@@ -70,6 +75,16 @@ describe("TopNav", () => {
     renderNav();
     const link = await screen.findByRole("link", { name: "Sessions" });
     expect(link.getAttribute("href")).toBe("/sessions");
+  });
+
+  it("renders a Skills link between Workflows and Integrations", async () => {
+    renderNav();
+    const link = await screen.findByRole("link", { name: "Skills" });
+    expect(link.getAttribute("href")).toBe("/skills");
+
+    const labels = screen.getAllByRole("link").map((el) => el.textContent);
+    expect(labels.indexOf("Skills")).toBeGreaterThan(labels.indexOf("Workflows"));
+    expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
   });
 
   it("does not render a New session button", async () => {

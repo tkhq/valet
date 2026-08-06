@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { gmailPlugin } from "./actions/actions.js";
 
-const skillMd = readFileSync(fileURLToPath(new URL("../skills/gmail.md", import.meta.url)), "utf8");
+const skillMd = readFileSync(fileURLToPath(new URL("../skills/gmail/SKILL.md", import.meta.url)), "utf8");
 
 const plugin: ValetPlugin = {
   name: "gmail",

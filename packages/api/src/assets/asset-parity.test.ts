@@ -15,10 +15,10 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
  */
 const CASES = [
   {
-    name: "plugin-github skill (.md)",
+    name: "plugin-github SKILL.md",
     sourceFile: resolve(repoRoot, "packages/plugin-github/src/plugin.ts"),
-    literal: "../skills/github.md",
-    assetFile: resolve(repoRoot, "packages/plugin-github/skills/github.md"),
+    literal: "../skills/github/SKILL.md",
+    assetFile: resolve(repoRoot, "packages/plugin-github/skills/github/SKILL.md"),
   },
   {
     name: "store-postgres engine migration (.sql)",
@@ -58,12 +58,14 @@ describe("inline-assets parity", () => {
 
   it("throws (fail-loud) when a static literal resolves to a missing file", () => {
     const src = resolve(repoRoot, "packages/plugin-github/src/plugin.ts");
-    expect(() => inlineAssetContent(src, "../skills/does-not-exist.md")).toThrow(/does not exist/);
+    expect(() => inlineAssetContent(src, "../skills/does-not-exist/SKILL.md")).toThrow(
+      /does not exist/,
+    );
   });
 
   it("throws (fail-loud) on a dynamic template-literal asset read", () => {
     const dynamic =
-      'const x = readFileSync(fileURLToPath(new URL(`../skills/${file}.md`, import.meta.url)), "utf8");';
+      'const x = readFileSync(fileURLToPath(new URL(`../skills/${file}/SKILL.md`, import.meta.url)), "utf8");';
     expect(() => transformSource("/fake/plugin.ts", dynamic)).toThrow(/dynamic/i);
   });
 });

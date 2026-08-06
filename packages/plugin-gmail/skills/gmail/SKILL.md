@@ -1,3 +1,8 @@
+---
+name: gmail
+description: How to use the Gmail tools — read, search, compose, send, reply, and manage messages, drafts, threads, and labels. Use when the task involves email.
+---
+
 # Gmail Skill
 
 Use these actions to read, compose, and manage Gmail messages and drafts on behalf of the authenticated user.
