@@ -167,7 +167,7 @@ slackUserOAuthRouter.post('/oauth/start', async (c) => {
   let team: string | undefined;
   try {
     const install = await db.getOrgSlackInstallAny(c.get('db'), c.env.ENCRYPTION_KEY);
-    team = install?.teamId || undefined;
+    team = install?.teamId;
   } catch {
     team = undefined;
   }
