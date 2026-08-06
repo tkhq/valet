@@ -95,6 +95,23 @@ describe("validateSkillFrontmatter: description", () => {
   it("accepts exactly 1024 characters", () => {
     expect(validateSkillFrontmatter({ ...VALID, description: "a".repeat(1024) })).toEqual([]);
   });
+
+  // A description that is only a block scalar header means the reader kept
+  // the indicator and dropped the text under it. The skill would load, and
+  // the model would never find it.
+  for (const indicator of ["|", "|-", "|+", ">", ">-", ">+", "|2", ">2-"]) {
+    it(`rejects a description that is only "${indicator}"`, () => {
+      const violations = validateSkillFrontmatter({ ...VALID, description: indicator });
+      expect(fields(violations)).toEqual(["description"]);
+      expect(violations[0]?.message).toMatch(/block scalar/);
+    });
+  }
+
+  it("accepts a description that only contains a block scalar character", () => {
+    expect(
+      validateSkillFrontmatter({ ...VALID, description: "Use > to send output to a file." }),
+    ).toEqual([]);
+  });
 });
 
 describe("validateSkillFrontmatter: optional fields", () => {

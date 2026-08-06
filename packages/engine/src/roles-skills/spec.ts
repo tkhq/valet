@@ -39,6 +39,16 @@ const COMPATIBILITY_MAX = 500;
 const NAME_CHARSET = /^[a-z0-9-]+$/;
 
 /**
+ * A description that is nothing but a YAML block scalar header (`|-`, `>`,
+ * `|2`, …). The reader kept the header and dropped the lines under it, so
+ * the description is gone. Every turn pays for the description and the
+ * model uses it to choose a skill, so this must be loud rather than a
+ * skill nobody can find. It cannot reject a real description: a header is
+ * at most three characters and carries no information.
+ */
+const BLOCK_SCALAR_ONLY = /^[|>][0-9+-]{0,2}$/;
+
+/**
  * Checks parsed skill frontmatter against the spec. An empty array means
  * the frontmatter conforms. At most one violation is reported per field —
  * the first rule that field breaks.
@@ -122,6 +132,9 @@ function checkName(value: unknown, directoryName?: string): string | null {
 function checkDescription(value: unknown): string | null {
   if (typeof value !== "string" || value.trim().length === 0) {
     return "description is required. Write what the skill does and when to use it.";
+  }
+  if (BLOCK_SCALAR_ONLY.test(value.trim())) {
+    return "description is only a YAML block scalar header, so the text under it was not read. Indent every line of the description under the header by the same amount.";
   }
   if (value.length > DESCRIPTION_MAX) {
     return `description is longer than ${DESCRIPTION_MAX} characters. Shorten it to ${DESCRIPTION_MAX} characters or fewer, and move the detail into the body.`;
