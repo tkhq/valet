@@ -107,14 +107,20 @@ export const slackUserProvider: IntegrationProvider = {
    * (user scopes that produce the xoxp token returned under `authed_user`).
    * Because slack-user requests user scopes only, we set user_scope and leave
    * the bot `scope` parameter empty.
+   *
+   * `extraParams` carries the optional `team` pin: without it, Slack's
+   * consent page defaults to the browser's most-recently-active workspace,
+   * which for multi-workspace users is often NOT the workspace where the
+   * Valet app is installed.
    */
-  getOAuthUrl(oauth: OAuthConfig, redirectUri: string, state: string): string {
+  getOAuthUrl(oauth: OAuthConfig, redirectUri: string, state: string, extraParams?: Record<string, string>): string {
     const params = new URLSearchParams({
       client_id: oauth.clientId,
       redirect_uri: redirectUri,
       state,
       scope: '',
       user_scope: SLACK_USER_SCOPES.join(','),
+      ...extraParams,
     });
     return `${SLACK_AUTHORIZE}?${params}`;
   },

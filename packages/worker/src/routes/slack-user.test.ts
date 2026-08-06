@@ -9,7 +9,7 @@ import { encryptStringPBKDF2, decryptStringPBKDF2 } from '../lib/crypto.js';
 import { signOAuthState, verifyOAuthState } from '../lib/oauth-state.js';
 import { slackUserOAuthRouter, slackUserCallbackRouter } from './slack-user.js';
 import { SLACK_USER_SCOPES } from '@valet/plugin-slack-user/actions';
-import { getUserIntegrations } from '../lib/db.js';
+import { getUserIntegrations, saveOrgSlackInstall } from '../lib/db.js';
 import type { AppDb } from '../lib/drizzle.js';
 
 const holder = vi.hoisted(() => ({
@@ -155,6 +155,36 @@ describe('POST /oauth/start', () => {
     // No cookie in this design: the account binding happens at the
     // authenticated /oauth/claim step, not via a browser-bound nonce.
     expect(res.headers.get('set-cookie')).toBeNull();
+
+    // No org install seeded → no team pin; Slack falls back to its own
+    // workspace picker.
+    expect(url.searchParams.get('team')).toBeNull();
+  });
+
+  it('pins the authorize URL to the org install workspace via the team param', async () => {
+    await db.insert(users).values({
+      id: USER_ID,
+      email: `${USER_ID}@example.com`,
+      name: 'User One',
+    });
+    await saveOrgSlackInstall(db, ENCRYPTION_KEY, {
+      teamId: 'T-ORG',
+      teamName: 'Org Workspace',
+      botUserId: 'B1',
+      botToken: 'xoxb-test',
+      installedBy: USER_ID,
+    });
+
+    const app = buildApp(db);
+    const res = await app.request(
+      'https://api.example.com/oauth/start',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { authorizeUrl: string };
+    const url = new URL(body.authorizeUrl);
+    expect(url.searchParams.get('team')).toBe('T-ORG');
   });
 });
 
