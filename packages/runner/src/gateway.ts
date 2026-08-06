@@ -247,6 +247,25 @@ function jwtSecret(): string {
   return process.env.JWT_SECRET || "";
 }
 
+const BEARER_PREFIX = "Bearer ";
+
+/**
+ * Anchored parse of an `Authorization: Bearer <token>` header.
+ *
+ * `authHeader.replace("Bearer ", "")` is unanchored and only strips the first
+ * occurrence, so a header with a different scheme that happens to contain the
+ * substring (`"Basic Bearer x"`) yields a token-shaped string, and a header
+ * with no scheme at all is passed through verbatim as if it were a token.
+ * Requiring the prefix keeps every malformed header on the same clean 401 path.
+ *
+ * Returns `undefined` (not `""`) for a prefix-only header so callers relying on
+ * `||` fallbacks to a `?token=` query param keep working unchanged.
+ */
+function parseBearerToken(authHeader: string | null | undefined): string | undefined {
+  if (!authHeader?.startsWith(BEARER_PREFIX)) return undefined;
+  return authHeader.slice(BEARER_PREFIX.length) || undefined;
+}
+
 // Track if we need to set a session cookie on this request
 let pendingSessionCookie: string | null = null;
 
@@ -266,7 +285,7 @@ async function authMiddleware(c: any, next: () => Promise<void>) {
   // No valid session cookie - need JWT token
   const tokenParam = c.req.query("token");
   const authHeader = c.req.header("Authorization");
-  const token = tokenParam || authHeader?.replace("Bearer ", "");
+  const token = tokenParam || parseBearerToken(authHeader);
 
   if (!token) {
     return new Response(JSON.stringify({ error: "Missing token" }), {
@@ -297,7 +316,7 @@ async function authMiddleware(c: any, next: () => Promise<void>) {
  */
 async function serverAuthMiddleware(c: any, next: () => Promise<void>) {
   const authHeader = c.req.header("Authorization");
-  const token = authHeader?.replace("Bearer ", "") || c.req.query("token");
+  const token = parseBearerToken(authHeader) || c.req.query("token");
 
   if (!token) {
     return new Response(JSON.stringify({ error: "Missing token" }), {
@@ -1802,7 +1821,7 @@ export function startGateway(
         }
 
         // No valid session - need JWT token
-        const token = url.searchParams.get("token") || req.headers.get("authorization")?.replace("Bearer ", "");
+        const token = url.searchParams.get("token") || parseBearerToken(req.headers.get("authorization"));
         if (!token) {
           return new Response(JSON.stringify({ error: "Missing token" }), {
             status: 401,
