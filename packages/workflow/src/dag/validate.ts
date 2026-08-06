@@ -536,7 +536,23 @@ function validateForeachNode(
     validateNodeFields(node.body, bodyLabel, refCtx, env, errors);
   }
 
-  if (typeof node.body.id === 'string' && nodesById.has(node.body.id)) {
+  // A body node is not in `definition.nodes`, so the per-node loop in
+  // `validateWorkflowDefinition` never applies `NODE_ID_PATTERN` to its id.
+  // Apply it here. At runtime the body id becomes one part of the session id
+  // `wf:{runId}:{nodeId}[:{iteration}]` and one segment of that session's
+  // workspace path, so an id with a colon makes an unparseable session id,
+  // and an id with a slash or a dot segment escapes the workspace root.
+  if (typeof node.body.id !== 'string' || node.body.id.length === 0) {
+    errors.push(
+      `${label}: foreach.body is missing its "id" — give the body an id, ` +
+        `because its checkpoints and session ids are keyed by it`,
+    );
+  } else if (!NODE_ID_PATTERN.test(node.body.id)) {
+    errors.push(
+      `${label}: foreach.body id ${JSON.stringify(node.body.id)} must match ${NODE_ID_PATTERN} — ` +
+        `start it with a letter or a digit, then use only letters, digits, "-", and "_"`,
+    );
+  } else if (nodesById.has(node.body.id)) {
     errors.push(`${label}: foreach.body id ${JSON.stringify(node.body.id)} collides with a definition node id`);
   }
 
