@@ -158,6 +158,20 @@ slackUserOAuthRouter.post('/oauth/start', async (c) => {
     OAUTH_STATE_TTL_SECONDS,
   );
   const redirectUri = workerCallbackUrl(c.env, c.req.raw);
+
+  // Pin the consent page to the workspace where the Valet app is installed.
+  // Without `team`, Slack defaults to the browser's most-recently-active
+  // workspace — wrong for users signed into multiple workspaces. If there is
+  // no org install (or the lookup fails), omit the pin and let Slack show
+  // its workspace picker.
+  let team: string | undefined;
+  try {
+    const install = await db.getOrgSlackInstallAny(c.get('db'), c.env.ENCRYPTION_KEY);
+    team = install?.teamId;
+  } catch {
+    team = undefined;
+  }
+
   // Delegate URL construction to the provider so `plugin-slack-user` owns
   // the shape of the authorize URL (scope split, user_scope bundling) —
   // this route stays a thin transport wrapper. getOAuthUrl is declared
@@ -166,6 +180,7 @@ slackUserOAuthRouter.post('/oauth/start', async (c) => {
     { clientId: c.env.SLACK_CLIENT_ID, clientSecret: c.env.SLACK_CLIENT_SECRET },
     redirectUri,
     state,
+    team ? { team } : undefined,
   );
   return c.json({ authorizeUrl });
 });

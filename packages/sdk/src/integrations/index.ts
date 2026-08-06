@@ -129,7 +129,9 @@ export interface IntegrationProvider {
   testConnection(credentials: IntegrationCredentials): Promise<boolean>;
 
   // OAuth methods (optional — only for oauth2 auth type)
-  getOAuthUrl?(oauth: OAuthConfig, redirectUri: string, state: string): string;
+  /** `extraParams` are appended to the authorize URL query string. Providers
+   *  use them for optional pins like Slack's `team` (workspace) parameter. */
+  getOAuthUrl?(oauth: OAuthConfig, redirectUri: string, state: string, extraParams?: Record<string, string>): string;
   exchangeOAuthCode?(oauth: OAuthConfig, code: string, redirectUri: string): Promise<IntegrationCredentials>;
   refreshOAuthTokens?(oauth: OAuthConfig, refreshToken: string): Promise<IntegrationCredentials>;
 }
