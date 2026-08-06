@@ -21,7 +21,7 @@ export default tool({
       if (args.sortOrder !== undefined) body.sortOrder = args.sortOrder
 
       const res = await fetch(
-        `http://localhost:9000/api/personas/${args.personaId}/skills`,
+        `http://127.0.0.1:9001/api/personas/${args.personaId}/skills`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

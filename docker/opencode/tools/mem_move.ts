@@ -18,7 +18,7 @@ export default tool({
       if (ctx?.sessionID) {
         headers["x-valet-thread-id"] = ctx.sessionID
       }
-      const res = await fetch("http://localhost:9000/api/memory/move", {
+      const res = await fetch("http://127.0.0.1:9001/api/memory/move", {
         method: "POST",
         headers,
         body: JSON.stringify({ from: args.from, to: args.to }),

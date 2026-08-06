@@ -21,7 +21,7 @@ export default tool({
 
     try {
       const identifier = args.id || args.slug
-      const res = await fetch(`http://localhost:9000/api/skills/${identifier}`, {
+      const res = await fetch(`http://127.0.0.1:9001/api/skills/${identifier}`, {
         headers: { "Content-Type": "application/json" },
       })
 

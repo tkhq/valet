@@ -48,6 +48,7 @@ const { values } = parseArgs({
     "runner-token": { type: "string" },
     "session-id": { type: "string" },
     "gateway-port": { type: "string", default: "9000" },
+    "gateway-internal-port": { type: "string", default: "9001" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -63,7 +64,9 @@ Options:
   --do-url         WebSocket URL of the SessionAgent DO
   --runner-token   Authentication token for the DO WebSocket
   --session-id     Session identifier
-  --gateway-port   Auth gateway port (default: 9000)
+  --gateway-port   Public auth gateway port (default: 9000)
+  --gateway-internal-port
+                   Loopback-only control-plane API port (default: 9001)
   -h, --help       Show this help message
 `);
   process.exit(0);
@@ -74,6 +77,7 @@ const doUrl = values["do-url"];
 const runnerToken = values["runner-token"];
 const sessionId = values["session-id"];
 const gatewayPort = parseInt(values["gateway-port"] || "9000", 10);
+const gatewayInternalPort = parseInt(values["gateway-internal-port"] || "9001", 10);
 const INITIAL_CONNECT_MAX_DELAY_MS = 30_000;
 const INITIAL_CONNECT_MAX_ATTEMPTS = 30;
 
@@ -323,7 +327,7 @@ async function main() {
     onIdentityApi: async (action, payload) => {
       return await agentClient.requestIdentityApi(action, payload);
     },
-  });
+  }, gatewayInternalPort);
   promptHandler = new PromptHandler(opencodeUrl!, agentClient, sessionId!);
 
   agentClient.onReconnect(() => {
@@ -392,7 +396,7 @@ async function main() {
   agentClient.onTunnelDelete(async (name, actor) => {
     console.log(`[Runner] Received tunnel delete: ${name} (actor=${actor?.name || actor?.email || actor?.id || "unknown"})`);
     try {
-      const resp = await fetch(`http://localhost:${gatewayPort}/api/tunnels/${encodeURIComponent(name)}`, {
+      const resp = await fetch(`http://127.0.0.1:${gatewayInternalPort}/api/tunnels/${encodeURIComponent(name)}`, {
         method: "DELETE",
       });
       if (!resp.ok) {

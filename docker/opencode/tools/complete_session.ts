@@ -11,7 +11,7 @@ export default tool({
   },
   async execute() {
     try {
-      const res = await fetch("http://localhost:9000/api/complete-session", {
+      const res = await fetch("http://127.0.0.1:9001/api/complete-session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       })

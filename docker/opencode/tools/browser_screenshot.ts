@@ -39,7 +39,7 @@ export default tool({
       const data = readFileSync(filepath)
       const base64 = data.toString("base64")
 
-      await fetch("http://localhost:9000/api/image", {
+      await fetch("http://127.0.0.1:9001/api/image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

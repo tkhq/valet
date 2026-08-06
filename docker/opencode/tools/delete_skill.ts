@@ -11,7 +11,7 @@ export default tool({
     if (!args.id) return "Error: id is required"
 
     try {
-      const res = await fetch(`http://localhost:9000/api/skills/${args.id}`, {
+      const res = await fetch(`http://127.0.0.1:9001/api/skills/${args.id}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
       })

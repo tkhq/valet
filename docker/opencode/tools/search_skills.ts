@@ -23,7 +23,7 @@ export default tool({
       const params = new URLSearchParams({ q: args.query })
       if (args.source) params.set("source", args.source)
 
-      const res = await fetch(`http://localhost:9000/api/skills?${params}`, {
+      const res = await fetch(`http://127.0.0.1:9001/api/skills?${params}`, {
         headers: { "Content-Type": "application/json" },
       })
 

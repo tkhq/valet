@@ -22,7 +22,7 @@ export default tool({
     }
 
     try {
-      const res = await fetch("http://localhost:9000/api/session-message", {
+      const res = await fetch("http://127.0.0.1:9001/api/session-message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

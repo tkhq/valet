@@ -32,7 +32,7 @@ export default tool({
     }
 
     try {
-      const res = await fetch("http://localhost:9000/api/tasks", {
+      const res = await fetch("http://127.0.0.1:9001/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

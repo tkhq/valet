@@ -94,7 +94,7 @@ These are decided and locked in. Do not revisit:
 3. **Single Modal App** for the Python backend (structured for future split).
 4. **Repo-specific images** from day one. Base image fallback for unconfigured repos.
 5. **iframes** for VNC (websockify noVNC web UI) and Terminal (TTYD web UI). No embedded JS clients.
-6. **Single auth gateway proxy** on port 9000 in sandbox. Routes `/vscode/*`, `/vnc/*`, `/ttyd/*` to internal services. JWT validation.
+6. **Auth gateway proxy** on port 9000 in sandbox. Routes `/vscode/*`, `/vnc/*`, `/ttyd/*`, `/opencode/*` to internal services, all JWT-validated. The unauthenticated control-plane API is served on a separate loopback-bound listener (port 9001) that is never tunnelled.
 7. **Unified plugin system** — all extensions (actions, channels, skills, personas, tools) live in `packages/plugin-*/`. Code plugins (actions/channels) are compiled into the worker via generated registries (`make generate-registries`). Content plugins (skills/personas/tools) are synced to D1 at startup and delivered to sandboxes via the Runner WebSocket.
 8. **User orchestrator is a full agent session** — SessionAgent DO + sandbox + Runner + OpenCode with orchestrator persona and tools. Uses well-known session ID `orchestrator:{userId}`.
 9. **Org orchestrator is also a full agent session** — org's "chief of staff", admin-configured identity/handle, handles unattributed events + automation rules. Uses well-known session ID `orchestrator:org:{orgId}`.
@@ -239,6 +239,7 @@ The sandbox comes with a full dev environment already running:
 | **noVNC** | 6080 | Virtual display GUI (Xvfb on :99) |
 | **TTYD** | 7681 | Web terminal |
 | **Auth gateway** | 9000 | JWT proxy that routes to all services above |
+| **Gateway internal API** | 9001 | Control-plane API for OpenCode tools; bound to 127.0.0.1 |
 | **Runner** | — | Bridges OpenCode ↔ SessionAgent DO via WebSocket |
 
 ```bash
@@ -451,7 +452,7 @@ Auto-discovered by `make generate-registries` which scans `packages/plugin-*/` a
 - WebSocket to DO: `packages/runner/src/agent-client.ts`
 - OpenCode interaction: `packages/runner/src/prompt.ts`
 - OpenCode lifecycle: `packages/runner/src/opencode-manager.ts`
-- Auth gateway: `packages/runner/src/gateway.ts` (Hono on port 9000)
+- Auth gateway: `packages/runner/src/gateway.ts` (Hono on port 9000 public, 9001 loopback-only)
 - Secrets: `packages/runner/src/secrets.ts`, `onepassword-provider.ts`
 
 ### Backend

@@ -1,13 +1,24 @@
 /**
- * Auth gateway proxy on port 9000 inside the sandbox.
+ * Sandbox HTTP gateways.
  *
- * Routes:
- *   /vscode/*  → localhost:8765 (code-server)
- *   /vnc/*     → localhost:6080 (noVNC via websockify)
- *   /ttyd/*    → localhost:7681 (TTYD web terminal)
- *   /health    → 200 OK (no auth)
+ * Two listeners with different exposure and different trust assumptions:
  *
- * Authentication:
+ * 1. Public gateway (port 9000, bound 0.0.0.0) — reachable through the Modal
+ *    tunnel. Every route on it requires a valid JWT:
+ *      /vscode/*    → localhost:8765 (code-server)
+ *      /vnc/*       → localhost:6080 (noVNC via websockify)
+ *      /ttyd/*      → localhost:7681 (TTYD web terminal)
+ *      /t/*         → user-registered sandbox tunnels
+ *      /opencode/*  → localhost:4096 (OpenCode; called server-to-server by the DO)
+ *      /health      → 200 OK (no auth — liveness only, discloses nothing)
+ *
+ * 2. Internal gateway (port 9001, bound 127.0.0.1) — the control-plane API
+ *    (`/api/*`) plus the git credential helper. These endpoints are
+ *    unauthenticated by design: they are only reachable from inside the
+ *    sandbox, so the loopback bind *is* the access control. This listener must
+ *    never be added to Modal's `encrypted_ports`.
+ *
+ * Authentication (public listener):
  *   - Initial requests use JWT token via ?token= query param or Authorization header
  *   - After JWT validation, a session cookie is set for subsequent requests
  *   - This allows code-server/ttyd/novnc to load assets without token in URL
@@ -19,7 +30,20 @@ import { gitCredentials } from "./git-credentials.js";
 import { SANDBOX_GATEWAY_IDLE_TIMEOUT_MS } from "./timeouts.js";
 import type { MemoryWriteMeta } from "./types.js";
 
+/** Externally reachable listener. Everything here is JWT-gated. */
 const app = new Hono();
+
+/** Exported under a clearer name so tests can assert what each listener serves. */
+export { app as publicApp };
+
+/**
+ * Loopback-only listener carrying the control-plane API. Exported for tests so
+ * they can assert which routes each app does and does not serve.
+ */
+export const internalApp = new Hono();
+
+/** Default port for the loopback-only control-plane listener. */
+export const DEFAULT_GATEWAY_INTERNAL_PORT = 9001;
 
 type TunnelProtocol = "http" | "ws" | "auto";
 
@@ -265,6 +289,34 @@ async function authMiddleware(c: any, next: () => Promise<void>) {
   await next();
 }
 
+/**
+ * JWT check for server-to-server callers (currently the SessionAgent DO hitting
+ * `/opencode/*`). Unlike `authMiddleware` this issues no session cookie: the
+ * caller is not a browser, so minting cookie state for it would be pointless
+ * and would churn the shared `pendingSessionCookie` slot.
+ */
+async function serverAuthMiddleware(c: any, next: () => Promise<void>) {
+  const authHeader = c.req.header("Authorization");
+  const token = authHeader?.replace("Bearer ", "") || c.req.query("token");
+
+  if (!token) {
+    return new Response(JSON.stringify({ error: "Missing token" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const payload = await verifyJWT(token, jwtSecret());
+  if (!payload) {
+    return new Response(JSON.stringify({ error: "Invalid or expired token" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  await next();
+}
+
 // ─── Helper: Strip compression headers for clean proxying ────────────────
 
 function createProxyHeaders(rawHeaders: Headers): Headers {
@@ -312,7 +364,10 @@ function addSessionCookie(response: Response): Response {
 
 app.get("/health", (c) => c.json({ status: "ok", service: "gateway" }));
 
-// OpenCode proxy — no auth (accessed server-to-server from the DO, which has already authenticated)
+// OpenCode proxy — reached server-to-server from the SessionAgent DO over the
+// public tunnel, so it carries a sandbox JWT like any other externally
+// reachable route.
+app.use("/opencode/*", serverAuthMiddleware);
 app.all("/opencode/*", async (c) => {
   const path = c.req.path.replace(/^\/opencode/, "") || "/";
   const url = new URL(c.req.url);
@@ -342,8 +397,9 @@ app.all("/opencode/*", async (c) => {
   }
 });
 
-// Git credential helper endpoint — secured by per-session secret
-app.post("/git/credentials", async (c) => {
+// Git credential helper endpoint — sandbox-local, and additionally secured by
+// a per-session secret as defence in depth.
+internalApp.post("/git/credentials", async (c) => {
   // Verify per-session secret to prevent credential leakage
   const { getCredentialSecret } = await import("./git-setup.js");
   const expectedSecret = getCredentialSecret();
@@ -518,7 +574,11 @@ function getWSTarget(pathname: string): WSTarget | null {
 
 // ─── Server ──────────────────────────────────────────────────────────────
 
-// ─── Internal API (localhost-only, no auth) ──────────────────────────────
+// ─── Internal API (127.0.0.1-only, no auth) ──────────────────────────────
+//
+// Registered on `internalApp`, which is served on a loopback-bound listener and
+// is not part of Modal's tunnelled port set. The loopback bind is the access
+// control for these routes — do not move them onto `app`.
 
 export interface SpawnChildParams {
   task: string;
@@ -636,8 +696,13 @@ export interface GatewayCallbacks {
   onIdentityApi?: (action: string, payload?: Record<string, unknown>) => Promise<{ data?: unknown; error?: string; statusCode?: number }>;
 }
 
-export function startGateway(port: number, callbacks: GatewayCallbacks): void {
+export function startGateway(
+  port: number,
+  callbacks: GatewayCallbacks,
+  internalPort: number = DEFAULT_GATEWAY_INTERNAL_PORT,
+): void {
   console.log(`[Gateway] Starting auth gateway on port ${port}`);
+  console.log(`[Gateway] Starting internal API on 127.0.0.1:${internalPort}`);
   // Kill any leftover cloudflared processes
   for (const name of cloudflaredProcesses.keys()) {
     killCloudflared(name);
@@ -657,7 +722,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
   }
 
   // Image upload route (unauthenticated — only reachable from within the sandbox)
-  app.post("/api/image", async (c) => {
+  internalApp.post("/api/image", async (c) => {
     if (!callbacks.onImage) {
       return c.json({ error: "Image handler not configured" }, 500);
     }
@@ -678,11 +743,11 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Tunnel Registry (sandbox-local) ───────────────────────────────
 
-  app.get("/api/tunnels", async (c) => {
+  internalApp.get("/api/tunnels", async (c) => {
     return c.json({ tunnels: serializeTunnels() });
   });
 
-  app.post("/api/tunnels", async (c) => {
+  internalApp.post("/api/tunnels", async (c) => {
     try {
       const body = await c.req.json() as { name?: string; port?: number; protocol?: TunnelProtocol };
       const name = (body.name || "").trim();
@@ -717,7 +782,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.delete("/api/tunnels/:name", async (c) => {
+  internalApp.delete("/api/tunnels/:name", async (c) => {
     const name = (c.req.param("name") || "").trim();
     if (!name) return c.json({ error: "Missing tunnel name" }, 400);
 
@@ -733,7 +798,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Cross-Session API ─────────────────────────────────────────────
 
-  app.post("/api/spawn-child", async (c) => {
+  internalApp.post("/api/spawn-child", async (c) => {
     if (!callbacks.onSpawnChild) {
       return c.json({ error: "Spawn child handler not configured" }, 500);
     }
@@ -763,7 +828,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/terminate-child", async (c) => {
+  internalApp.post("/api/terminate-child", async (c) => {
     if (!callbacks.onTerminateChild) {
       return c.json({ error: "Terminate child handler not configured" }, 500);
     }
@@ -780,7 +845,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/complete-session", async (c) => {
+  internalApp.post("/api/complete-session", async (c) => {
     if (!callbacks.onSelfTerminate) {
       return c.json({ error: "Self-terminate handler not configured" }, 500);
     }
@@ -793,7 +858,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/session-message", async (c) => {
+  internalApp.post("/api/session-message", async (c) => {
     if (!callbacks.onSendMessage) {
       return c.json({ error: "Send message handler not configured" }, 500);
     }
@@ -810,7 +875,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/session-messages", async (c) => {
+  internalApp.get("/api/session-messages", async (c) => {
     if (!callbacks.onReadMessages) {
       return c.json({ error: "Read messages handler not configured" }, 500);
     }
@@ -829,7 +894,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/git-state", async (c) => {
+  internalApp.post("/api/git-state", async (c) => {
     if (!callbacks.onReportGitState) {
       return c.json({ error: "Report git state handler not configured" }, 500);
     }
@@ -849,7 +914,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Orchestrator API ─────────────────────────────────────────────
 
-  app.get("/api/memory", async (c) => {
+  internalApp.get("/api/memory", async (c) => {
     if (!callbacks.onMemRead) {
       return c.json({ error: "Memory read handler not configured" }, 500);
     }
@@ -863,7 +928,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.put("/api/memory", async (c) => {
+  internalApp.put("/api/memory", async (c) => {
     if (!callbacks.onMemWrite) {
       return c.json({ error: "Memory write handler not configured" }, 500);
     }
@@ -904,7 +969,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/memory/move", async (c) => {
+  internalApp.post("/api/memory/move", async (c) => {
     if (!callbacks.onMemMove) {
       return c.json({ error: "Memory move handler not configured" }, 500);
     }
@@ -922,7 +987,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/memory/links", async (c) => {
+  internalApp.get("/api/memory/links", async (c) => {
     if (!callbacks.onMemLinks) {
       return c.json({ error: "Memory links handler not configured" }, 500);
     }
@@ -945,7 +1010,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.patch("/api/memory", async (c) => {
+  internalApp.patch("/api/memory", async (c) => {
     if (!callbacks.onMemPatch) {
       return c.json({ error: "Memory patch handler not configured" }, 500);
     }
@@ -963,7 +1028,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.delete("/api/memory", async (c) => {
+  internalApp.delete("/api/memory", async (c) => {
     if (!callbacks.onMemRm) {
       return c.json({ error: "Memory delete handler not configured" }, 500);
     }
@@ -980,7 +1045,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/memory/search", async (c) => {
+  internalApp.get("/api/memory/search", async (c) => {
     if (!callbacks.onMemSearch) {
       return c.json({ error: "Memory search handler not configured" }, 500);
     }
@@ -1001,7 +1066,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/personas", async (c) => {
+  internalApp.get("/api/personas", async (c) => {
     if (!callbacks.onListPersonas) {
       return c.json({ error: "List personas handler not configured" }, 500);
     }
@@ -1014,7 +1079,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/personas/:id", async (c) => {
+  internalApp.get("/api/personas/:id", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1030,7 +1095,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/personas", async (c) => {
+  internalApp.post("/api/personas", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1048,7 +1113,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.put("/api/personas/:id", async (c) => {
+  internalApp.put("/api/personas/:id", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1064,7 +1129,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.delete("/api/personas/:id", async (c) => {
+  internalApp.delete("/api/personas/:id", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1079,7 +1144,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/personas/:id/files", async (c) => {
+  internalApp.post("/api/personas/:id/files", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1100,7 +1165,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Persona-Skill Attachments ─────────────────────────────────────────
 
-  app.get("/api/personas/:id/skills", async (c) => {
+  internalApp.get("/api/personas/:id/skills", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1115,7 +1180,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/personas/:id/skills", async (c) => {
+  internalApp.post("/api/personas/:id/skills", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1134,7 +1199,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.delete("/api/personas/:id/skills/:skillId", async (c) => {
+  internalApp.delete("/api/personas/:id/skills/:skillId", async (c) => {
     if (!callbacks.onPersonaApi) {
       return c.json({ error: "Persona API handler not configured" }, 500);
     }
@@ -1152,7 +1217,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Identity API (orchestrator self-edit) ──────────────────────────
 
-  app.get("/api/identity", async (c) => {
+  internalApp.get("/api/identity", async (c) => {
     if (!callbacks.onIdentityApi) {
       return c.json({ error: "Identity API handler not configured" }, 500);
     }
@@ -1166,7 +1231,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.put("/api/identity/instructions", async (c) => {
+  internalApp.put("/api/identity/instructions", async (c) => {
     if (!callbacks.onIdentityApi) {
       return c.json({ error: "Identity API handler not configured" }, 500);
     }
@@ -1181,7 +1246,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/channels", async (c) => {
+  internalApp.get("/api/channels", async (c) => {
     if (!callbacks.onListChannels) {
       return c.json({ error: "List channels handler not configured" }, 500);
     }
@@ -1194,7 +1259,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/session-status", async (c) => {
+  internalApp.get("/api/session-status", async (c) => {
     if (!callbacks.onGetSessionStatus) {
       return c.json({ error: "Get session status handler not configured" }, 500);
     }
@@ -1211,7 +1276,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/child-sessions", async (c) => {
+  internalApp.get("/api/child-sessions", async (c) => {
     if (!callbacks.onListChildSessions) {
       return c.json({ error: "List child sessions handler not configured" }, 500);
     }
@@ -1224,7 +1289,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/forward-messages", async (c) => {
+  internalApp.post("/api/forward-messages", async (c) => {
     if (!callbacks.onForwardMessages) {
       return c.json({ error: "Forward messages handler not configured" }, 500);
     }
@@ -1247,7 +1312,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Phase C: Notification Queue API ───────────────────────────────
 
-  app.post("/api/notifications/emit", async (c) => {
+  internalApp.post("/api/notifications/emit", async (c) => {
     if (!callbacks.onMailboxSend) {
       return c.json({ error: "Notification emit handler not configured" }, 500);
     }
@@ -1285,7 +1350,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/notifications", async (c) => {
+  internalApp.get("/api/notifications", async (c) => {
     if (!callbacks.onMailboxCheck) {
       return c.json({ error: "Notification queue handler not configured" }, 500);
     }
@@ -1303,7 +1368,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Phase C: Task Board API ─────────────────────────────────────
 
-  app.post("/api/tasks", async (c) => {
+  internalApp.post("/api/tasks", async (c) => {
     if (!callbacks.onTaskCreate) {
       return c.json({ error: "Task create handler not configured" }, 500);
     }
@@ -1332,7 +1397,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/tasks", async (c) => {
+  internalApp.get("/api/tasks", async (c) => {
     if (!callbacks.onTaskList) {
       return c.json({ error: "Task list handler not configured" }, 500);
     }
@@ -1348,7 +1413,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.put("/api/tasks/:id", async (c) => {
+  internalApp.put("/api/tasks/:id", async (c) => {
     if (!callbacks.onTaskUpdate) {
       return c.json({ error: "Task update handler not configured" }, 500);
     }
@@ -1376,7 +1441,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/my-tasks", async (c) => {
+  internalApp.get("/api/my-tasks", async (c) => {
     if (!callbacks.onMyTasks) {
       return c.json({ error: "My tasks handler not configured" }, 500);
     }
@@ -1392,7 +1457,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Phase D: Channel Reply API ────────────────────────────────────
 
-  app.post("/api/channel-reply", async (c) => {
+  internalApp.post("/api/channel-reply", async (c) => {
     if (!callbacks.onChannelReply) {
       return c.json({ error: "Channel reply handler not configured" }, 501);
     }
@@ -1411,7 +1476,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Tool Discovery & Invocation API ─────────────────────────────────
 
-  app.get("/api/tools", async (c) => {
+  internalApp.get("/api/tools", async (c) => {
     if (!callbacks.onListTools) {
       return c.json({ error: "List tools handler not configured" }, 500);
     }
@@ -1426,7 +1491,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/tools/call", async (c) => {
+  internalApp.post("/api/tools/call", async (c) => {
     if (!callbacks.onCallTool) {
       return c.json({ error: "Call tool handler not configured" }, 500);
     }
@@ -1446,7 +1511,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Skill API ─────────────────────────────────────────────────────────
 
-  app.get("/api/skills", async (c) => {
+  internalApp.get("/api/skills", async (c) => {
     if (!callbacks.onSkillApi) {
       return c.json({ error: "Skill API handler not configured" }, 500);
     }
@@ -1463,7 +1528,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.get("/api/skills/:id", async (c) => {
+  internalApp.get("/api/skills/:id", async (c) => {
     if (!callbacks.onSkillApi) {
       return c.json({ error: "Skill API handler not configured" }, 500);
     }
@@ -1479,7 +1544,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/skills", async (c) => {
+  internalApp.post("/api/skills", async (c) => {
     if (!callbacks.onSkillApi) {
       return c.json({ error: "Skill API handler not configured" }, 500);
     }
@@ -1497,7 +1562,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.put("/api/skills/:id", async (c) => {
+  internalApp.put("/api/skills/:id", async (c) => {
     if (!callbacks.onSkillApi) {
       return c.json({ error: "Skill API handler not configured" }, 500);
     }
@@ -1514,7 +1579,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.delete("/api/skills/:id", async (c) => {
+  internalApp.delete("/api/skills/:id", async (c) => {
     if (!callbacks.onSkillApi) {
       return c.json({ error: "Skill API handler not configured" }, 500);
     }
@@ -1531,7 +1596,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
 
   // ─── Secrets API (provider-agnostic) ─────────────────────────────────
 
-  app.get("/api/secrets/list", async (c) => {
+  internalApp.get("/api/secrets/list", async (c) => {
     try {
       const secrets = await import("./secrets.js");
       if (!(await secrets.isConfigured())) {
@@ -1546,7 +1611,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/secrets/inject", async (c) => {
+  internalApp.post("/api/secrets/inject", async (c) => {
     try {
       const secrets = await import("./secrets.js");
       if (!(await secrets.isConfigured())) {
@@ -1564,7 +1629,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/secrets/run", async (c) => {
+  internalApp.post("/api/secrets/run", async (c) => {
     try {
       const secrets = await import("./secrets.js");
       if (!(await secrets.isConfigured())) {
@@ -1590,7 +1655,7 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
-  app.post("/api/secrets/fill", async (c) => {
+  internalApp.post("/api/secrets/fill", async (c) => {
     try {
       const secrets = await import("./secrets.js");
       if (!(await secrets.isConfigured())) {
@@ -1692,11 +1757,24 @@ export function startGateway(port: number, callbacks: GatewayCallbacks): void {
     }
   });
 
+  // Control-plane API. `hostname` is load-bearing: without it Bun binds
+  // 0.0.0.0, which would put these unauthenticated routes back on every
+  // interface the sandbox exposes.
   Bun.serve({
-    port,
-    // Gateway proxies tool calls and approval gates. Keep approval waits below
+    hostname: "127.0.0.1",
+    port: internalPort,
+    // Tool calls and approval gates run through here. Keep approval waits below
     // this Bun idle ceiling so the sandbox HTTP call cannot time out before the
     // human approval prompt expires.
+    idleTimeout: SANDBOX_GATEWAY_IDLE_TIMEOUT_MS / 1000,
+    fetch(req: Request): Promise<Response> | Response {
+      return internalApp.fetch(req);
+    },
+  });
+
+  Bun.serve({
+    port,
+    // The public listener also proxies long-lived interactive traffic.
     idleTimeout: SANDBOX_GATEWAY_IDLE_TIMEOUT_MS / 1000,
 
     async fetch(req: Request, server: any): Promise<Response> {

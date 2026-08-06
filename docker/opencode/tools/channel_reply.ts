@@ -98,7 +98,7 @@ export default tool({
         payload.fileName = args.file_name || path.basename(args.file_path)
       }
 
-      const res = await fetch("http://localhost:9000/api/channel-reply", {
+      const res = await fetch("http://127.0.0.1:9001/api/channel-reply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

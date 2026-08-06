@@ -6,6 +6,7 @@ import { activeTraceparent } from '../lib/tracing.js';
 import type { Context } from '@opentelemetry/api';
 import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, getOrchestratorIdentity, getUserSlackIdentityLink, getWorkflowNameByExecutionId } from '../lib/db.js';
 import { getCredential, type CredentialResult } from '../services/credentials.js';
+import { deriveSandboxJwtSecret, signJWT } from '../lib/jwt.js';
 import { memRead, memWrite, memMove, memLinks, memPatch, memRm, memSearch, toPatchOperations } from '../services/session-memory.js';
 import { getSlackBotToken } from '../services/slack.js';
 import { buildOrchestratorPersonaFiles } from '../lib/orchestrator-persona.js';
@@ -5556,6 +5557,30 @@ export class SessionAgentDO {
     return Response.json({ success: true });
   }
 
+  /**
+   * Mint a short-lived sandbox JWT for server-to-server calls into the
+   * gateway's public listener. Uses the same per-session derived key the
+   * sandbox verifies against, so the raw encryption key never leaves the
+   * worker.
+   */
+  private async mintSandboxToken(): Promise<string | null> {
+    const sessionId = this.sessionState.sessionId;
+    const userId = this.sessionState.userId;
+    if (!sessionId || !this.env.ENCRYPTION_KEY) return null;
+
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const secret = await deriveSandboxJwtSecret(this.env.ENCRYPTION_KEY, sessionId);
+      return await signJWT(
+        { sub: userId, sid: sessionId, iat: now, exp: now + 5 * 60 },
+        secret,
+      );
+    } catch (error) {
+      console.error('[SessionAgentDO] Failed to mint sandbox token:', error);
+      return null;
+    }
+  }
+
   private async handleProxy(request: Request, url: URL): Promise<Response> {
     const tunnelUrls = this.sessionState.tunnelUrls;
     if (!tunnelUrls) {
@@ -5574,10 +5599,22 @@ export class SessionAgentDO {
     const proxyPath = url.pathname.replace(/^\/proxy/, '') + url.search;
     const proxyUrl = baseUrl + proxyPath;
 
+    const headers = new Headers();
+    if (gatewayUrl) {
+      // The gateway route is publicly reachable, so it requires a sandbox JWT.
+      // Sandboxes running an older image ignore this header.
+      const token = await this.mintSandboxToken();
+      if (!token) {
+        return Response.json({ error: 'Unable to authenticate to sandbox' }, { status: 503 });
+      }
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
     try {
       const resp = await fetch(proxyUrl, {
         method: request.method,
         body: request.body,
+        headers,
       });
       return resp;
     } catch (error) {

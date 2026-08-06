@@ -10,7 +10,7 @@ export default tool({
   },
   async execute(args) {
     try {
-      const res = await fetch(`http://localhost:9000/api/tunnels/${encodeURIComponent(args.name)}`, {
+      const res = await fetch(`http://127.0.0.1:9001/api/tunnels/${encodeURIComponent(args.name)}`, {
         method: "DELETE",
       })
 

@@ -46,7 +46,7 @@ export default tool({
         headers["x-opencode-session-id"] = ctx.sessionID
       }
 
-      const res = await fetch("http://localhost:9000/api/tools/call", {
+      const res = await fetch("http://127.0.0.1:9001/api/tools/call", {
         method: "POST",
         headers,
         body: JSON.stringify({ toolId: args.tool_id, params, summary: args.summary }),

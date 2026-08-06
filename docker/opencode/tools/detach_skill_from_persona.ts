@@ -14,7 +14,7 @@ export default tool({
 
     try {
       const res = await fetch(
-        `http://localhost:9000/api/personas/${args.personaId}/skills/${args.skillId}`,
+        `http://127.0.0.1:9001/api/personas/${args.personaId}/skills/${args.skillId}`,
         { method: "DELETE", headers: { "Content-Type": "application/json" } }
       )
 

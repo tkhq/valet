@@ -35,7 +35,7 @@ export default tool({
     }
 
     try {
-      const res = await fetch(`http://localhost:9000/api/tasks/${encodeURIComponent(args.task_id)}`, {
+      const res = await fetch(`http://127.0.0.1:9001/api/tasks/${encodeURIComponent(args.task_id)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

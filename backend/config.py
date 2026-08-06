@@ -10,6 +10,10 @@ MAX_TIMEOUT_SECONDS = 24 * 60 * 60  # 24 hours
 OPENCODE_PORT = 4096
 GATEWAY_PORT = 9000
 
+# Control-plane API listener. Bound to 127.0.0.1 inside the sandbox and
+# deliberately absent from `encrypted_ports` so it is never tunnelled.
+GATEWAY_INTERNAL_PORT = 9001
+
 # Whisper (speech-to-text)
 WHISPER_MODELS_VOLUME = "whisper-models"
 WHISPER_MODELS_MOUNT = "/models/whisper"

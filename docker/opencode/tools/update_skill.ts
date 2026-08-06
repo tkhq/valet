@@ -27,7 +27,7 @@ export default tool({
       if (args.content) body.content = args.content
       if (args.visibility) body.visibility = args.visibility
 
-      const res = await fetch(`http://localhost:9000/api/skills/${args.id}`, {
+      const res = await fetch(`http://127.0.0.1:9001/api/skills/${args.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

@@ -51,6 +51,7 @@ DEFAULT_IDLE_TIMEOUT_SECONDS = 15 * 60   # 15 minutes
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60  # 24 hours
 OPENCODE_PORT = 4096
 GATEWAY_PORT = 9000
+GATEWAY_INTERNAL_PORT = 9001  # loopback-only; never tunnelled
 NODE_VERSION = "22"
 OPENCODE_VERSION = "1.1.52"
 ```
@@ -63,12 +64,15 @@ OPENCODE_VERSION = "1.1.52"
 |------|---------|---------|--------|
 | 4096 | OpenCode server | 0.0.0.0 | Modal encrypted tunnel |
 | 9000 | Auth gateway (Hono/Bun) | 0.0.0.0 | Modal encrypted tunnel |
+| 9001 | Gateway internal API (Hono/Bun) | 127.0.0.1 | Sandbox-local only |
 | 8765 | code-server (VS Code) | 127.0.0.1 | Gateway only |
 | 6080 | noVNC (websockify) | 0.0.0.0 | Gateway only |
 | 7681 | TTYD (web terminal) | 0.0.0.0 | Gateway only |
 | 5900 | x11vnc (raw VNC) | localhost | Internal only |
 
 Modal creates encrypted tunnels for ports 4096 and 9000. All other services are accessed through the gateway on port 9000.
+
+Port 9001 carries the control-plane API and is bound to `127.0.0.1`. It is deliberately excluded from `encrypted_ports`: the routes it serves are unauthenticated, and the loopback bind is what keeps them unreachable from outside the sandbox. Do not add it to the tunnelled port set.
 
 ### Architecture Layers
 
@@ -178,7 +182,8 @@ exec bun run src/bin.ts \
   --do-url "${DO_WS_URL}" \
   --runner-token "${RUNNER_TOKEN}" \
   --session-id "${SESSION_ID}" \
-  --gateway-port "9000"
+  --gateway-port "9000" \
+  --gateway-internal-port "9001"
 ```
 
 ### Required Environment Variables
@@ -205,7 +210,12 @@ exec bun run src/bin.ts \
 
 ## Auth Gateway
 
-The gateway is a Hono HTTP server on Bun (port 9000) providing JWT-authenticated proxying and an internal API for OpenCode tools.
+The gateway runs two Hono servers on Bun:
+
+- **Public listener** (port 9000, bound `0.0.0.0`, tunnelled) — JWT-authenticated proxying for the interactive services, dynamic tunnels, and the OpenCode server-to-server proxy.
+- **Internal listener** (port 9001, bound `127.0.0.1`, not tunnelled) — the unauthenticated control-plane API used by OpenCode tools, plus the git credential helper.
+
+The split exists so that reachability and authentication cannot drift apart: anything served on the tunnelled port requires a JWT, and anything unauthenticated is only bound to loopback.
 
 ### Authentication Flow
 
@@ -222,20 +232,23 @@ The gateway is a Hono HTTP server on Bun (port 9000) providing JWT-authenticated
 | `/vnc/*` | noVNC/websockify | 6080 |
 | `/ttyd/*` | TTYD | 7681 |
 | `/t/:name/*` | Dynamic tunnel | Registry |
+| `/opencode/*` | OpenCode (server-to-server, called by the DO) | 4096 |
 
 WebSocket connections are also proxied (detected via `upgrade: websocket` header). TTYD WebSocket requires `"tty"` subprotocol. Messages are buffered until backend connection opens.
 
+`/opencode/*` uses a JWT check without session-cookie issuance — the caller is the SessionAgent DO, not a browser. The DO mints a short-lived sandbox JWT with the per-session derived key (`deriveSandboxJwtSecret`) and sends it as a bearer token.
+
 ### Unauthenticated Routes
 
-| Route | Purpose |
-|-------|---------|
-| `/health` | Health check |
-| `/opencode/*` | Proxy to OpenCode (server-to-server) |
-| `/api/*` | Internal API (called by OpenCode tools) |
+| Route | Listener | Purpose |
+|-------|----------|---------|
+| `/health` | 9000 (public) | Health check; returns no session data |
+| `/api/*` | 9001 (loopback) | Control-plane API (called by OpenCode tools) |
+| `/git/credentials` | 9001 (loopback) | Git credential helper; additionally gated by a per-session secret |
 
 ### Internal API Endpoints
 
-These are called by OpenCode custom tools at `http://localhost:9000/api/*`. Each endpoint routes through `GatewayCallbacks` which delegates to `AgentClient` WebSocket messages to the DO.
+These are called by OpenCode custom tools at `http://127.0.0.1:9001/api/*`. Each endpoint routes through `GatewayCallbacks` which delegates to `AgentClient` WebSocket messages to the DO.
 
 **Cross-Session:**
 - `POST /api/spawn-child` — Spawn child session
@@ -492,7 +505,7 @@ Base config at `docker/opencode/opencode.json`. The Runner merges this with runt
 
 ### Custom Tools (68 tools)
 
-All tools communicate through the gateway at `http://localhost:9000/api/*`:
+All tools communicate through the gateway's internal listener at `http://127.0.0.1:9001/api/*`:
 
 ```
 OpenCode tool -> HTTP -> Gateway (/api/*) -> GatewayCallbacks -> AgentClient -> WebSocket -> DO

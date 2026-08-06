@@ -30,7 +30,7 @@ export default tool({
     if (!args.content?.trim()) return "Error: content is required"
 
     try {
-      const res = await fetch("http://localhost:9000/api/skills", {
+      const res = await fetch("http://127.0.0.1:9001/api/skills", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

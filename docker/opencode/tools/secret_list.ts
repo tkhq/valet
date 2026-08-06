@@ -19,7 +19,7 @@ export default tool({
 
       const qs = params.toString()
       const res = await fetch(
-        `http://localhost:9000/api/secrets/list${qs ? `?${qs}` : ""}`,
+        `http://127.0.0.1:9001/api/secrets/list${qs ? `?${qs}` : ""}`,
       )
 
       if (res.status === 501) {

@@ -11,7 +11,7 @@ export default tool({
   },
   async execute() {
     try {
-      const res = await fetch("http://localhost:9000/api/personas")
+      const res = await fetch("http://127.0.0.1:9001/api/personas")
 
       if (!res.ok) {
         const errText = await res.text()
