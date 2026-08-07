@@ -7,7 +7,7 @@
  * /sessions stub page — see routes/sessions.tsx).
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   RouterProvider,
@@ -85,6 +85,32 @@ describe("TopNav", () => {
     const labels = screen.getAllByRole("link").map((el) => el.textContent);
     expect(labels.indexOf("Skills")).toBeGreaterThan(labels.indexOf("Workflows"));
     expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
+  });
+
+  // The six labelled links do not fit beside the logo and the icons on a
+  // phone. They live in one scrollable landmark so the row can slide
+  // sideways instead of pushing the settings icon off-screen; jsdom has no
+  // layout, so this guards the STRUCTURE that makes the CSS fix possible.
+  it("keeps every destination inside one scrollable primary nav", async () => {
+    renderNav();
+    await screen.findByText("Valet");
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    const labels = within(nav)
+      .getAllByRole("link")
+      .map((el) => el.textContent);
+    expect(labels).toEqual(["Chat", "Memory", "Sessions", "Workflows", "Skills", "Integrations"]);
+  });
+
+  // The logo and the two icons sit OUTSIDE that scroller, so they stay put
+  // while the links scroll. Regression guard: moving either inside the nav
+  // would scroll them out of reach on a phone.
+  it("keeps the logo and the settings icon outside the scrolling nav", async () => {
+    renderNav();
+    await screen.findByText("Valet");
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(within(nav).queryByLabelText("Valet — dashboard")).toBeNull();
+    expect(within(nav).queryByLabelText("Settings")).toBeNull();
+    expect(screen.getByLabelText("Settings")).toBeTruthy();
   });
 
   it("does not render a New session button", async () => {
