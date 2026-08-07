@@ -15,7 +15,7 @@
  * when it differs from the skill name: most plugins ship one skill of the
  * same name, so printing it always would repeat the title.
  *
- * Every card opens a read-only page. A plugin skill goes to the name route.
+ * Every card opens the skill's page. A plugin skill goes to the name route.
  * A stored skill goes to the row-id route instead: a shadowed skill shares
  * its name with the skill shadowing it, so the name route cannot reach it.
  */
@@ -28,14 +28,15 @@ import { cn } from "~/lib/cn";
 
 /**
  * What to do about a skill another skill of the same name keeps out of every
- * session. The fix follows where the skill is authored: nobody renames a
- * stored skill in this page any more.
+ * session. The fix follows where the skill is authored: a `local` skill is
+ * renamed on its own page, and a `repo` skill in the repository that owns
+ * it, because the next sync overwrites anything changed here.
  */
 export function shadowNote(skill: StoredSkillSummary): string {
   const fix =
     skill.origin === "repo"
       ? "Rename it in the repository it came from."
-      : "Ask the assistant to rename it.";
+      : "Rename this one to make the assistant read it.";
   return `Shadowed by another skill of the same name. ${fix}`;
 }
 

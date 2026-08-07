@@ -1,12 +1,15 @@
 /**
- * One skill's markdown body in a centered document shell, shared by the two
- * detail routes: `/skills/$skillName` for a skill addressed by name, and
- * `/skills/stored/$skillId` for a stored skill addressed by row id.
+ * One skill's page shell — the header every skill page carries, and the
+ * markdown body under it. Shared by the two detail routes:
+ * `/skills/$skillName` for a skill addressed by name,
+ * `/skills/stored/$skillId` for a stored skill addressed by row id, and by
+ * `/skills/new` while a skill is being written.
  *
- * Read-only, both times. A plugin skill's body ships inside a plugin
- * package, and a stored skill is authored either in the repository it came
- * from or through the assistant — see
- * docs/specs/2026-08-05-agent-skills-design.md.
+ * The body is read-only. Where a page offers Edit or Delete, it passes them
+ * in `actions` and swaps the body for the editor through `children` — the
+ * same shape the memory explorer's document uses. A plugin skill's body
+ * ships inside a plugin package and has no editor; a `repo` skill mirrors a
+ * file in the repository it was synced from, so it has none either.
  *
  * Placeholders stay as authored. The server does not fill them here, because
  * reading a skill is not invoking it — the agent's `skill` tool fills them
@@ -23,10 +26,12 @@ export function SkillDocument({
   description,
   meta,
   notice,
+  actions,
   content,
   isLoading,
   error,
   skillName,
+  children,
 }: {
   title: string;
   description?: string;
@@ -34,11 +39,15 @@ export function SkillDocument({
   meta?: ReactNode;
   /** Shown under the header, e.g. the shadowing warning. */
   notice?: ReactNode;
+  /** Edit / Delete controls, on the right of the header under `meta`. */
+  actions?: ReactNode;
   content?: string;
-  isLoading: boolean;
-  error: unknown;
+  isLoading?: boolean;
+  error?: unknown;
   /** The name the `skill` tool asks for. Absent while the body loads. */
   skillName?: string;
+  /** Replaces the rendered body — the editor, when a page is editing. */
+  children?: ReactNode;
 }) {
   return (
     <div className="flex-1 overflow-y-auto">
@@ -52,31 +61,38 @@ export function SkillDocument({
             <h1 className="font-display text-2xl text-ink">{title}</h1>
             {description && <p className="mt-1 text-sm text-muted">{description}</p>}
           </div>
-          {meta && <span className="shrink-0 font-mono text-xs text-muted">{meta}</span>}
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            {meta && <span className="font-mono text-xs text-muted">{meta}</span>}
+            {actions}
+          </div>
         </div>
 
         {notice && <div className="mt-4 text-sm text-danger-500">{notice}</div>}
 
         <div className="mt-10">
-          {isLoading && (
-            <div className="flex items-center gap-2 text-sm text-muted">
-              <Spinner size={14} /> Loading skill…
-            </div>
-          )}
-          {!isLoading && !!error && (
-            <div className="text-sm text-danger-500">
-              Could not load this skill. Open /skills to see the installed skills.
-            </div>
-          )}
-          {!isLoading && !error && content !== undefined && (
-            <Section
-              title="Playbook"
-              description={`The assistant reads this text when it calls the skill tool with name "${skillName ?? title}".`}
-            >
-              <div className="pt-4">
-                <Markdown>{content}</Markdown>
-              </div>
-            </Section>
+          {children ?? (
+            <>
+              {isLoading && (
+                <div className="flex items-center gap-2 text-sm text-muted">
+                  <Spinner size={14} /> Loading skill…
+                </div>
+              )}
+              {!isLoading && !!error && (
+                <div className="text-sm text-danger-500">
+                  Could not load this skill. Open /skills to see the installed skills.
+                </div>
+              )}
+              {!isLoading && !error && content !== undefined && (
+                <Section
+                  title="Playbook"
+                  description={`The assistant reads this text when it calls the skill tool with name "${skillName ?? title}".`}
+                >
+                  <div className="pt-4">
+                    <Markdown>{content}</Markdown>
+                  </div>
+                </Section>
+              )}
+            </>
           )}
         </div>
       </div>

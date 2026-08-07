@@ -52,7 +52,10 @@ import type {
   ListPluginsResponse,
   ListSessionsResponse,
   ListSkillsResponse,
+  CreateSkillRequest,
+  UpdateSkillRequest,
   SkillResponse,
+  DeleteSkillResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
@@ -467,16 +470,21 @@ export const api = {
     ),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
-  // plugin-supplied ones with the stored ones the caller owns. Reads only:
-  // the API still writes stored skills (POST/PATCH/DELETE), but the writers
-  // are agents and importers, not this client. A stored skill is fetched by
-  // row id because a shadowed skill shares its name with the skill that
-  // shadows it.
+  // plugin-supplied ones with the stored ones the caller owns. Only a
+  // `local` skill is writable: a `repo` skill mirrors a file in the
+  // repository it was synced from, and the next sync would overwrite an
+  // edit made here. A stored skill is addressed by row id because a
+  // shadowed skill shares its name with the skill that shadows it.
   listSkills: () => request<ListSkillsResponse>("GET", "/skills"),
   getSkill: (name: string) =>
     request<GetSkillResponse>("GET", `/skills/${encodeURIComponent(name)}`),
   getStoredSkill: (id: string) =>
     request<SkillResponse>("GET", `/skills/stored/${encodeURIComponent(id)}`),
+  createSkill: (body: CreateSkillRequest) => request<SkillResponse>("POST", "/skills", body),
+  updateSkill: (id: string, body: UpdateSkillRequest) =>
+    request<SkillResponse>("PATCH", `/skills/stored/${encodeURIComponent(id)}`, body),
+  deleteSkill: (id: string) =>
+    request<DeleteSkillResponse>("DELETE", `/skills/stored/${encodeURIComponent(id)}`),
 
   // repos (GitHub/repo integration plan, Task 7): union of every RepoHost
   // the caller has access to — only `github` today.

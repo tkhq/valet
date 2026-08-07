@@ -60,13 +60,20 @@ describe("SkillsIndexPage", () => {
   });
 
   it("lists every skill in one grid, with no per-plugin sections", () => {
-    render(<SkillsIndexPage />);
+    const { container } = render(<SkillsIndexPage />);
 
     // Most plugins ship exactly one skill, so a section per plugin left a
     // lone card under each heading. The plugin moved onto the card instead.
     expect(screen.queryByRole("heading", { name: "Google Workspace" })).toBeNull();
     // Router `Link`s render `to`, not `href`, so they carry no link role.
-    expect(document.querySelectorAll("a").length).toBe(4);
+    // Counted inside the grid: the header carries links of its own.
+    expect(container.querySelectorAll(".grid a").length).toBe(4);
+  });
+
+  it("offers a New skill action", () => {
+    render(<SkillsIndexPage />);
+    const link = screen.getByText("New skill").closest("a");
+    expect(link?.getAttribute("to")).toBe("/skills/new");
   });
 
   it("shows a friendly name, the description, and the raw skill id on each card", () => {
@@ -86,9 +93,9 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText("github")).toBeTruthy();
   });
 
-  it("counts the skills", () => {
+  it("counts the skills, the plugins that ship them, and the caller's own", () => {
     render(<SkillsIndexPage />);
-    expect(screen.getByText("4 skills")).toBeTruthy();
+    expect(screen.getByText("4 skills · 3 plugins · 0 yours")).toBeTruthy();
   });
 
   it("links each card to its detail route", () => {

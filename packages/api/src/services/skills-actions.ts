@@ -4,11 +4,11 @@
  * catalog (`list_tools`/`call_tool`), so an orchestrator can turn what it
  * just learned in a conversation into a stored skill.
  *
- * This is the in-product authoring path. The web Skills tab only reads, and
- * a skill that belongs in a repository is authored in that repository. An
- * agent and the HTTP routes share `services/skills.ts`, so ownership,
- * team membership, and the frontmatter rules are checked in ONE place: this
- * module adds no rule of its own and skips none.
+ * One of two in-product authoring paths: a person writes a skill on the
+ * Skills tab, and an agent writes one here. Both reach the same service —
+ * `services/skills.ts` — so ownership, team membership, and the frontmatter
+ * rules are checked in ONE place: this module adds no rule of its own and
+ * skips none.
  *
  * Risk levels are deliberately higher than the workflow actions'. A stored
  * skill is standing instruction text that every later session of that owner
