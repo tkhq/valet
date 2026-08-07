@@ -59,17 +59,20 @@ describe("GET /api/skills", () => {
       {
         name: "github",
         description: "How to use the GitHub tools.",
+        origin: "plugin",
         plugin: "fixture-github",
         takesArgs: false,
       },
       {
         name: "google-docs",
         description: "Edit a document.",
+        origin: "plugin",
         plugin: "fixture-workspace",
         takesArgs: false,
       },
       {
         name: "google-sheets",
+        origin: "plugin",
         plugin: "fixture-workspace",
         takesArgs: true,
       },
@@ -116,6 +119,7 @@ describe("GET /api/skills/:name", () => {
     expect(skill).toEqual({
       name: "github",
       description: "How to use the GitHub tools.",
+      origin: "plugin",
       plugin: "fixture-github",
       takesArgs: false,
       content: "# GitHub\n\nOpen a pull request with `github.create_pull_request`.\n",

@@ -50,7 +50,8 @@ import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
-import { pluginSessionExtras } from "../plugins/assemble.js";
+import { listSkillSourcesFor } from "../services/skills.js";
+import { pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
 
 /** Personality is capped at injection time (assistant-centered web UI
  * decision 5), independent of any cap the memory service itself applies. */
@@ -109,8 +110,9 @@ export interface EngineHostOpts {
   childSpawner?: ChildSpawner;
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
-   * output). Every session builder calls `pluginSessionExtras(plugins)`
-   * FRESH — see the call sites below — never cached on the host instance.
+   * output). Every session builder goes through `sessionExtras`, which
+   * builds the extras FRESH per build and never caches them on the host
+   * instance.
    */
   plugins?: ValetPlugin[];
   /**
@@ -460,12 +462,12 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
-    // Built FRESH per session build, never cached on the host: the plugin
-    // catalog's dynamic-action-resolution cache lives on the `Catalog`
-    // instance `pluginCatalogTools` returns, so it must stay scoped to this
-    // one session's credential context — a shared/cached catalog would leak
-    // one user's resolved tool list into every other session.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `SessionMeta` carries no principal, and this builder passes no `owner`
+    // to the engine either — `Session`'s constructor then defaults the
+    // principal to `{ type: "user", id: options.userId }`. So the acting
+    // user IS this session's owner, and the same `{ user, meta.userId }`
+    // scope the session's credentials already use is the honest one here.
+    const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId);
 
     const engine = new Engine({
       providers: {
@@ -568,6 +570,31 @@ export class EngineHost {
     // window. Fire-and-forget — never block or fail the restore.
     if (existing) this.pruneExpiredEvents(sessionId);
     return session;
+  }
+
+  /**
+   * The tools/skills/roles a session build gets: the plugin set, plus the
+   * stored skills the session's `owner` can reach (`skills` table).
+   *
+   * Built FRESH per session build, never cached on the host: the plugin
+   * catalog's dynamic-action-resolution cache lives on the `Catalog`
+   * instance `pluginCatalogTools` returns, so it must stay scoped to this
+   * one session's credential context — a shared/cached catalog would leak
+   * one user's resolved tool list into every other session. The skill read
+   * is per-build for the same reason a session's memory snapshot is: an
+   * edit reaches a session at its next build, not mid-run.
+   *
+   * `opts.db` is optional (tests that wire no db), so an absent db means
+   * "plugin skills only" — the same graceful degradation `mintSandboxEnv`
+   * applies. A stored skill whose name a plugin skill already holds is
+   * shadowed inside `pluginSessionExtras`, never thrown: none of the four
+   * callers has a try/catch, and a throw here would stop this owner from
+   * starting any session.
+   */
+  private async sessionExtras(owner: Principal, orgId: string): Promise<PluginSessionExtras> {
+    const plugins = this.opts.plugins ?? [];
+    if (!this.opts.db) return pluginSessionExtras(plugins);
+    return pluginSessionExtras(plugins, await listSkillSourcesFor(this.opts.db, owner, orgId));
   }
 
   /**
@@ -857,9 +884,12 @@ export class EngineHost {
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
-    // Built FRESH per session build, never cached on the host — see the
-    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `principal`, not `meta.actorUserId`: an orchestrator session belongs to
+    // the principal and is shared by everyone who can reach it, exactly like
+    // the memory snapshot this method assembles from `scope.owner`. Scoping
+    // to the actor instead would put whoever woke a team orchestrator's
+    // personal skills in front of every other member of that team.
+    const extras = await this.sessionExtras(principal, meta.orgId);
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
@@ -1377,9 +1407,11 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
-    // Built FRESH per session build, never cached on the host — see the
-    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `opts.owner` is the child's own principal: the `task` tool reads the
+    // parent session's principal and hands it to the spawner, which passes
+    // it here and on to `createSession` below. A child of a team-owned
+    // session gets that team's skills, not the spawning user's.
+    const extras = await this.sessionExtras(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
@@ -1475,9 +1507,11 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
-    // Built FRESH per session build, never cached on the host — see the
-    // comment on `EngineHostOpts.plugins` and `buildSession`'s call site.
-    const extras = pluginSessionExtras(this.opts.plugins ?? []);
+    // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
+    // the scheduler and the event dispatcher copy from the definition row).
+    // A run started from a team-owned workflow therefore reads the team's
+    // skills, not those of whoever last edited the workflow.
+    const extras = await this.sessionExtras(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);

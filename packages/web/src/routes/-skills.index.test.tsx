@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * `/skills` — the skill catalog, grouped by the plugin that ships each
- * skill. Mocks `~/api/skills` the same way `-integrations.test.tsx` mocks
- * its api module: this suite cares that the page renders from query data
- * and links to the right detail route, not that TanStack Query works.
+ * `/skills` — the skill catalog in one grid. Mocks `~/api/skills` the same
+ * way `-integrations.test.tsx` mocks its api module: this suite cares that
+ * the page renders from query data and links to the right detail route, not
+ * that TanStack Query works.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -15,12 +15,25 @@ const skillsData: ListSkillsResponse = {
     {
       name: "github",
       description: "How to use the GitHub tools.",
+      origin: "plugin",
       plugin: "github",
       takesArgs: false,
     },
-    { name: "google-docs", description: "Edit a document.", plugin: "google-workspace", takesArgs: false },
-    { name: "google-sheets", plugin: "google-workspace", takesArgs: true },
-    { name: "slack-tools", description: "Read and post in Slack.", plugin: "slack", takesArgs: false },
+    {
+      name: "google-docs",
+      description: "Edit a document.",
+      origin: "plugin",
+      plugin: "google-workspace",
+      takesArgs: false,
+    },
+    { name: "google-sheets", origin: "plugin", plugin: "google-workspace", takesArgs: true },
+    {
+      name: "slack-tools",
+      description: "Read and post in Slack.",
+      origin: "plugin",
+      plugin: "slack",
+      takesArgs: false,
+    },
   ],
 };
 
@@ -47,13 +60,20 @@ describe("SkillsIndexPage", () => {
   });
 
   it("lists every skill in one grid, with no per-plugin sections", () => {
-    render(<SkillsIndexPage />);
+    const { container } = render(<SkillsIndexPage />);
 
     // Most plugins ship exactly one skill, so a section per plugin left a
     // lone card under each heading. The plugin moved onto the card instead.
     expect(screen.queryByRole("heading", { name: "Google Workspace" })).toBeNull();
     // Router `Link`s render `to`, not `href`, so they carry no link role.
-    expect(document.querySelectorAll("a").length).toBe(4);
+    // Counted inside the grid: the header carries links of its own.
+    expect(container.querySelectorAll(".grid a").length).toBe(4);
+  });
+
+  it("offers a New skill action", () => {
+    render(<SkillsIndexPage />);
+    const link = screen.getByText("New skill").closest("a");
+    expect(link?.getAttribute("to")).toBe("/skills/new");
   });
 
   it("shows a friendly name, the description, and the raw skill id on each card", () => {
@@ -73,9 +93,9 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText("github")).toBeTruthy();
   });
 
-  it("counts the skills and the plugins that ship them", () => {
+  it("counts the skills, the plugins that ship them, and the caller's own", () => {
     render(<SkillsIndexPage />);
-    expect(screen.getByText("4 skills in 3 plugins")).toBeTruthy();
+    expect(screen.getByText("4 skills · 3 plugins · 0 yours")).toBeTruthy();
   });
 
   it("links each card to its detail route", () => {
@@ -89,12 +109,12 @@ describe("SkillsIndexPage", () => {
     expect(screen.getByText(/takes arguments/)).toBeTruthy();
   });
 
-  it("shows an empty state when no plugin ships a skill", () => {
+  it("shows an empty state when nothing is installed and nothing is stored", () => {
     currentData = { skills: [] };
     render(<SkillsIndexPage />);
-    expect(screen.getByText(/No skills installed/)).toBeTruthy();
+    expect(screen.getByText(/No skills yet/)).toBeTruthy();
     // No counter when there is nothing to count.
-    expect(screen.queryByText(/\d+ skills? in \d+ plugins?/)).toBeNull();
+    expect(screen.queryByText(/\d+ skills? · \d+ plugins?/)).toBeNull();
   });
 
   it("reports a load failure with a corrective action", () => {

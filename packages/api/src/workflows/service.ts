@@ -19,7 +19,7 @@ import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowVersions, workflowWebhooks } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
-import { isTeamMember, listTeamsForUser, lockTeamForWorkflowOwnership } from "../services/teams.js";
+import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import type {
   GetWorkflowRunResponse,
   WorkflowDefinitionSummary,
@@ -184,14 +184,14 @@ export async function createWorkflowDefinition(
   if (typeof input.teamId === "string") {
     const teamId = input.teamId;
     // The membership check and the insert happen inside one transaction
-    // holding `lockTeamForWorkflowOwnership`'s advisory lock, so this
+    // holding `lockTeamForOwnership`'s advisory lock, so this
     // can't race `deleteTeam` (`services/teams.ts`) — without it, a
     // workflow could be inserted for a team whose membership/team rows
     // are deleted in the gap between this check and the insert, stranding
     // it permanently (see that lock's own doc comment for why
     // `db.transaction` alone isn't enough here).
     await deps.db.transaction(async (tx) => {
-      await lockTeamForWorkflowOwnership(tx, teamId);
+      await lockTeamForOwnership(tx, teamId);
       // Non-member and unknown-team look identical here (both a plain
       // `false`) — same "cross-owner access 404s, never 403s" convention
       // as the rest of this file, so a team's existence is never leaked

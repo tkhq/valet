@@ -10,11 +10,23 @@
  * service; that's a real configuration error and throws loudly with both
  * plugin names named.
  *
- * `pluginSessionExtras` turns an assembled plugin set into the pieces a
- * session needs (tools/skills/roles) — see its own doc comment for the
- * per-call cache-freshness constraint. It also builds the `skill` tool
- * (`plugins/skill-tool.ts`) so the assembled skills reach the model, and
- * it rejects two plugins that ship the same skill name.
+ * `pluginSessionExtras` turns an assembled plugin set — plus the caller's
+ * stored skills — into the pieces a session needs (tools/skills/roles). See
+ * its own doc comment for the per-call cache-freshness constraint. It also
+ * builds the `skill` tool (`plugins/skill-tool.ts`) so the assembled skills
+ * reach the model.
+ *
+ * One skill name reaches the model, so a repeated name needs a rule. There
+ * are two, and they differ on purpose:
+ *
+ *   - Two PLUGINS shipping one skill name THROWS. We ship the plugins, so a
+ *     repeated name is a build-time bug and must be loud.
+ *   - A STORED skill that repeats a name is SHADOWED, never thrown. Stored
+ *     skills are user-supplied, and every session builder in
+ *     `engine/host.ts` calls this function with no try/catch, so a throw
+ *     would stop that person from starting any session at all. The shadowed
+ *     entries come back in `shadowedSkills` so `/api/skills` can say what
+ *     happened instead of dropping them in silence.
  */
 import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
 import type { RoleSpec, SkillSource, ToolDef } from "@valet/engine";
@@ -84,6 +96,36 @@ export interface PluginSessionExtras {
   tools: ToolDef[];
   skills: SkillSource[];
   roles: RoleSpec[];
+  /** The `extraSkills` entries a name already in the set kept out. Empty for
+   * a plugin-only call. `/api/skills` reports these rows as shadowed, so a
+   * person can see why a skill they wrote never reaches a session. */
+  shadowedSkills: SkillSource[];
+}
+
+/**
+ * Splits `candidates` into the ones that keep their name and the ones a
+ * name already in use shadows. `taken` holds the names that win; within
+ * `candidates`, the first of a repeated name wins.
+ *
+ * Generic over anything with a `name` so the `/api/skills` listing marks
+ * exactly the rows a session build drops, from one definition of the rule.
+ */
+export function partitionByName<T extends { name: string }>(
+  taken: Iterable<string>,
+  candidates: T[],
+): { kept: T[]; shadowed: T[] } {
+  const seen = new Set(taken);
+  const kept: T[] = [];
+  const shadowed: T[] = [];
+  for (const candidate of candidates) {
+    if (seen.has(candidate.name)) {
+      shadowed.push(candidate);
+      continue;
+    }
+    seen.add(candidate.name);
+    kept.push(candidate);
+  }
+  return { kept, shadowed };
 }
 
 /**
@@ -98,10 +140,18 @@ export interface PluginSessionExtras {
  * leak one session's dynamically-resolved actions (and their TTL clock)
  * into every other session sharing the plugin set.
  */
-export function pluginSessionExtras(plugins: ValetPlugin[]): PluginSessionExtras {
+export function pluginSessionExtras(
+  plugins: ValetPlugin[],
+  extraSkills: SkillSource[] = [],
+): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
   const tools = actionPlugins.length > 0 ? pluginCatalogTools({ plugins: actionPlugins }) : [];
-  const skills = collectSkills(plugins);
+  const pluginSkills = collectSkills(plugins);
+  const { kept, shadowed } = partitionByName(
+    pluginSkills.map((s) => s.name),
+    extraSkills,
+  );
+  const skills = [...pluginSkills, ...kept];
   const roles = plugins.flatMap((p) => p.roles ?? []);
 
   // The `skill` tool is what makes these skills reachable — without it the
@@ -110,7 +160,7 @@ export function pluginSessionExtras(plugins: ValetPlugin[]): PluginSessionExtras
   const skillTool = buildSkillTool(skills);
   if (skillTool) tools.push(skillTool);
 
-  return { tools, skills, roles };
+  return { tools, skills, roles, shadowedSkills: shadowed };
 }
 
 /**

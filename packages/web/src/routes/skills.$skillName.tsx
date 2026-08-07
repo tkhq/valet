@@ -1,18 +1,17 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useSkill } from "~/api/skills";
-import { Spinner } from "~/components/primitives";
-import { Markdown } from "~/components/markdown";
-import { Section } from "~/components/settings/section";
 import { displayName } from "~/components/integrations/display-name";
+import { originLabel } from "~/components/skills/skill-card";
+import { SkillDocument } from "~/components/skills/skill-document";
 
 /**
- * `/skills/$skillName` — one skill's markdown body, in the same centered
- * document shell as the catalog. Read-only, like the catalog: the body
- * ships inside a plugin package.
+ * `/skills/$skillName` — one skill's body, addressed by the name the agent
+ * asks for. A plugin skill wins a repeated name here exactly as it wins at
+ * session build, so this route always shows the skill a session would get.
  *
- * Placeholders stay as authored. The server does not fill them here,
- * because reading a skill is not invoking it — the agent's `skill` tool
- * fills them at invoke time.
+ * A stored skill that another skill shadows shares its name with the winner,
+ * so this route cannot reach it. `/skills/stored/$skillId` addresses those
+ * by row id.
  */
 export const Route = createFileRoute("/skills/$skillName")({
   component: SkillDetailPage,
@@ -23,48 +22,21 @@ export function SkillDetailPage() {
   const { data: skill, isLoading, error } = useSkill(skillName);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10">
-        <Link to="/skills" className="text-xs text-muted underline-offset-2 hover:underline">
-          ← Skills
-        </Link>
-
-        <div className="mt-4 flex items-end justify-between gap-4">
-          <div>
-            <h1 className="font-display text-2xl text-ink">{displayName(skillName)}</h1>
-            {skill?.description && <p className="mt-1 text-sm text-muted">{skill.description}</p>}
-          </div>
-          {skill && (
-            <span className="shrink-0 font-mono text-xs text-muted">
-              from {skill.plugin}
-              {skill.takesArgs && " · takes arguments"}
-            </span>
-          )}
-        </div>
-
-        <div className="mt-10">
-          {isLoading && (
-            <div className="flex items-center gap-2 text-sm text-muted">
-              <Spinner size={14} /> Loading skill…
-            </div>
-          )}
-          {!isLoading && error && (
-            <div className="text-sm text-danger-500">
-              Could not load this skill. Open /skills to see the installed skills.
-            </div>
-          )}
-          {!isLoading && !error && skill && (
-            <Section
-              title="Playbook"
-              description={`The assistant reads this text when it calls the skill tool with name "${skill.name}".`}
-            >
-              <div className="pt-4">
-                <Markdown>{skill.content}</Markdown>
-              </div>
-            </Section>
-          )}
-        </div>
-      </div>
-    </div>
+    <SkillDocument
+      title={displayName(skillName)}
+      description={skill?.description}
+      meta={
+        skill && (
+          <>
+            {skill.origin === "plugin" ? `from ${skill.plugin}` : originLabel(skill)}
+            {skill.takesArgs && " · takes arguments"}
+          </>
+        )
+      }
+      content={skill?.content}
+      skillName={skill?.name}
+      isLoading={isLoading}
+      error={error}
+    />
   );
 }

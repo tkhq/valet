@@ -860,32 +860,80 @@ export interface ListPluginsResponse {
 // ── REST: skills ─────────────────────────────────────────────────────────
 
 /**
- * One plugin-supplied skill — a markdown playbook the agent can pull into a
- * turn through the `skill` tool. Skills have no database table: the list is
- * whatever the assembled plugin set declares, so it changes only when the
- * plugin set changes.
+ * A skill — a markdown playbook the agent can pull into a turn through the
+ * `skill` tool. Skills come from two places, and `origin` says which:
+ *
+ *   - `plugin` — shipped inside a plugin package. Everyone sees the same set.
+ *   - `local`  — written in the product, stored in the `skills` table.
+ *   - `repo`   — synced from a repository into the same table.
+ *
+ * The two stored origins carry a row id and owner; a plugin skill carries
+ * its plugin's name. Narrow on `origin` to read either group.
  */
-export interface SkillSummary {
-  /** The identifier the agent passes to the `skill` tool. Unique across the
-   * whole plugin set — `pluginSessionExtras` rejects a duplicate. */
+interface SkillSummaryBase {
+  /** The identifier the agent passes to the `skill` tool. */
   name: string;
   description?: string;
-  /** Name of the plugin that ships this skill. */
-  plugin: string;
   /** True when the skill declares an `argsSchema`, so the caller must supply
-   * values for the `{{placeholder}}` names in its body. */
+   * values for the `{{placeholder}}` names in its body. Plugin skills only —
+   * a stored skill takes no arguments. */
   takesArgs: boolean;
 }
+
+export interface PluginSkillSummary extends SkillSummaryBase {
+  origin: "plugin";
+  /** Name of the plugin that ships this skill. */
+  plugin: string;
+}
+
+export interface StoredSkillSummary extends SkillSummaryBase {
+  origin: "local" | "repo";
+  /** Row id. The `/api/skills/stored/:id` routes take this. */
+  id: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+  /**
+   * True when another skill already holds this name, so this one never
+   * reaches a session. A plugin skill always wins, and between two stored
+   * skills the personal one wins over the team one. Rename this skill to
+   * make it reachable.
+   */
+  shadowed: boolean;
+  updatedAt: number;
+}
+
+export type SkillSummary = PluginSkillSummary | StoredSkillSummary;
 
 export interface ListSkillsResponse {
   skills: SkillSummary[];
 }
 
-/** A skill plus its markdown body (frontmatter already removed by the
- * plugin's `loadSkillFromMarkdown`). Placeholders stay unfilled — this
- * route reads the skill, it does not invoke it. */
-export interface GetSkillResponse extends SkillSummary {
+/** A skill plus its markdown body, with the frontmatter already removed.
+ * Placeholders stay unfilled — this route reads the skill, it does not
+ * invoke it. */
+export type GetSkillResponse = SkillSummary & { content: string };
+
+/** One stored skill, body included — what the create/read/update routes
+ * return. */
+export type SkillResponse = StoredSkillSummary & { content: string };
+
+export interface CreateSkillRequest {
+  name: string;
+  description: string;
+  /** The markdown body. Write it without frontmatter: `name` and
+   * `description` above are the frontmatter. */
   content: string;
+  /** Create the skill for a team the caller belongs to instead of for the
+   * caller. A non-member or unknown id 404s, same as any other cross-owner
+   * access. */
+  teamId?: string;
+}
+
+/** Every field is optional; an absent field keeps its stored value. */
+export type UpdateSkillRequest = Partial<Omit<CreateSkillRequest, "teamId">>;
+
+export interface DeleteSkillResponse {
+  ok: true;
 }
 
 export interface CredentialSummary {
