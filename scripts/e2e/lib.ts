@@ -79,6 +79,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/orchestrator-info.test.ts",
   "src/integration/github-repo.e2e.test.ts",
   "src/integration/workflow-github-credential.e2e.test.ts",
+  "src/integration/usage-summary.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [

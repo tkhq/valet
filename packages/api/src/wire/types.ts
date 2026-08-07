@@ -986,11 +986,20 @@ export interface ListModelsResponse {
 export interface UsageWindow {
   inputTokens: number;
   outputTokens: number;
-  /** Estimated USD from the engine's per-turn cost records; 0 when the
-   * model was unpriced. */
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Every token the window billed: input + output + cache read + cache
+   * write. On a cache-heavy model, input + output is a small part of this. */
+  totalTokens: number;
+  /** Estimated USD, summed over PRICED turns only. Turns on an unpriced
+   * model (custom/OpenRouter providers, dev fakes) contribute nothing — read
+   * `unpricedTurns` before you present this as the full spend. */
   costUsd: number;
   /** Assistant turns that reported usage in the window. */
   turns: number;
+  /** Turns of `turns` whose model reported no price. `costUsd` excludes
+   * them; it is a floor, not a total, whenever this is above 0. */
+  unpricedTurns: number;
 }
 
 export interface UsageMemberSummary extends UsageWindow {

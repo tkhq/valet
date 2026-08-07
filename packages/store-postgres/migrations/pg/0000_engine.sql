@@ -71,6 +71,13 @@ CREATE INDEX "engine_entries_gate" ON "engine_entries" ("gate_id");
 --> statement-breakpoint
 CREATE INDEX "engine_entries_queue_item" ON "engine_entries" ("queue_item_id");
 --> statement-breakpoint
+-- Cost attribution reads entries by time window across ALL sessions. The
+-- three indexes above cannot serve that predicate: two lead with a column
+-- the window query does not constrain, and the third leads with session_id.
+-- The partial predicate keeps the index to the small minority of entries
+-- that carry usage (one per assistant turn, never a user/tool entry).
+CREATE INDEX "engine_entries_usage_window" ON "engine_entries" ("created_at") WHERE "usage" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE "engine_queue_items" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
